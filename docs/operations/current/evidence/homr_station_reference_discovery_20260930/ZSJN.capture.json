@@ -1,0 +1,75 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZSJN.b7d432820e11e203bd0719bad9929bfa274cb77c2aacecf273ff96f8da75929d.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53498,
+  "captured_at": "2026-09-30T14:57:49.263832+00:00",
+  "city": "Jinan",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "76",
+    "elevation_m": "23.2",
+    "ground": [
+      {
+        "elevationFeet": "76",
+        "elevationMeters": "23.2",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "ZSJN",
+        "idType": "ICAO"
+      },
+      {
+        "id": "30137818",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "CHI0000ZSJN",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "36.856561",
+        "latitude_dms": "36,51,24,N",
+        "latitude_rptd": "36.856561",
+        "longitude_dec": "117.215994",
+        "longitude_dms": "117,12,58,E",
+        "longitude_rptd": "117.215994"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30137818",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "2005-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:49.003468+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZSJN&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "b7d432820e11e203bd0719bad9929bfa274cb77c2aacecf273ff96f8da75929d",
+  "station_id": "ZSJN"
+}

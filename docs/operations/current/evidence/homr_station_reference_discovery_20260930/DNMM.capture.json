@@ -1,0 +1,79 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/DNMM.004f692e0947bae5079cdb2871e4221ef760b4e23575b8d7d0d620bc32949fc5.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53537,
+  "captured_at": "2026-09-30T14:57:49.588917+00:00",
+  "city": "Lagos",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "135",
+    "elevation_m": "41.1",
+    "ground": [
+      {
+        "elevationFeet": "135",
+        "elevationMeters": "41.1",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "DNMM",
+        "idType": "ICAO"
+      },
+      {
+        "id": "65201",
+        "idType": "WMO"
+      },
+      {
+        "id": "30152035",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "NII0000DNMM",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "6.577369",
+        "latitude_dms": "06,34,39,N",
+        "latitude_rptd": "6.577369",
+        "longitude_dec": "3.321156",
+        "longitude_dms": "003,19,16,E",
+        "longitude_rptd": "3.321156"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30152035",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "1949-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:49.294023+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ADNMM&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "004f692e0947bae5079cdb2871e4221ef760b4e23575b8d7d0d620bc32949fc5",
+  "station_id": "DNMM"
+}

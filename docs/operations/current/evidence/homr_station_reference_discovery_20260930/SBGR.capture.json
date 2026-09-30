@@ -1,0 +1,79 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/SBGR.0fb3da415b2b21e00fe7849f3f35bd82ae8e70066a94f8ca8a0a8f41a00138f9.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53589,
+  "captured_at": "2026-09-30T14:57:50.081668+00:00",
+  "city": "Sao Paulo",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "2459",
+    "elevation_m": "749.5",
+    "ground": [
+      {
+        "elevationFeet": "2459",
+        "elevationMeters": "749.5",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "SBGR",
+        "idType": "ICAO"
+      },
+      {
+        "id": "83075",
+        "idType": "WMO"
+      },
+      {
+        "id": "30134434",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "BRI0000SBGR",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "-23.432075",
+        "latitude_dms": "23,25,55,S",
+        "latitude_rptd": "-23.432075",
+        "longitude_dec": "-46.469511",
+        "longitude_dms": "046,28,10,W",
+        "longitude_rptd": "-46.469511"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30134434",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "1988-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:49.813480+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ASBGR&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "0fb3da415b2b21e00fe7849f3f35bd82ae8e70066a94f8ca8a0a8f41a00138f9",
+  "station_id": "SBGR"
+}

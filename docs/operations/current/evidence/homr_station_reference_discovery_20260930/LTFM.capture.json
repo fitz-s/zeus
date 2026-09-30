@@ -1,0 +1,75 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/LTFM.170a429f0cc76ce748f5b4f157db4d494132dd6386912213348615431af10677.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53513,
+  "captured_at": "2026-09-30T14:57:49.248261+00:00",
+  "city": "Istanbul",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "325",
+    "elevation_m": "99",
+    "ground": [
+      {
+        "elevationFeet": "325",
+        "elevationMeters": "99",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "LTFM",
+        "idType": "ICAO"
+      },
+      {
+        "id": "30146057",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "TUI0000LTFM",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "41.275278",
+        "latitude_dms": "41,16,31,N",
+        "latitude_rptd": "41.275278",
+        "longitude_dec": "28.751944",
+        "longitude_dms": "028,45,07,E",
+        "longitude_rptd": "28.751944"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30146057",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "2018-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:48.981381+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ALTFM&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "170a429f0cc76ce748f5b4f157db4d494132dd6386912213348615431af10677",
+  "station_id": "LTFM"
+}

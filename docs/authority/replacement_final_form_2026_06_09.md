@@ -377,50 +377,72 @@ confidence sampling retains its existing law. Monte Carlo sample count must
 not change this point expectation or erase representable Gaussian tail mass
 merely because no sample reached it. Full-day forecast distributions are unchanged.
 
-The remaining-hourly member centers of the shared carrier take one
-settlement-graded additive shift `b(h)`, a continuous function of local hour per
-metric (`scripts/fit_day0_remaining_center_bias.py`, served by
-`src/calibration/day0_remaining_bias.py`). Evidence pools per (metric, 2-hour
-local band): the band's MLE comes from the terminal-bin likelihood of this same
-operator on posteriors whose served q is the carrier itself
-(fast-residual-transported rows excluded), with a variance clustered by
-city-day. The band's node is the posterior mean under a N(0, tau2) prior, with
-tau2 the Paule-Mandel spread of the metric's band MLEs. A station's node
-adds its own shrunk deviation. `b(h)` interpolates linearly between nodes at the
-band centres and is flat past the end nodes. There is no activation gate and no
-step. The same evidence on either side of a band edge serves the same q up to
-the curve's continuous drift. A refit moves `b` by the change in evidence, never
-by a binary flip. The shift enters before the max/min and the settlement
-integration, identically in the point q and the confidence draws. It never moves
-the observed extreme or the typed final-daily provider centers. When the
-artifact is absent, stale, malformed or of an older schema, the unshifted
-carrier serves and provenance names the reason. The refit job refits at boot
-whenever the incumbent's schema is not current. This change is Day0 survival revision
-`day0_settlement_channel_revision_model_v28_smooth_center_bias_v1` and resolver
-revision `day0_resolver_terminal_composition_v27_smooth_center_bias_v1`.
+Historical terminal-bin fitted center shifts `b_fit(h)`, including their MLE,
+shrinkage and interpolation, are **offline diagnostics only**. The existing
+`scripts/fit_day0_remaining_center_bias.py` fitter and
+`src/calibration/day0_remaining_bias.py` artifact loader may support offline
+attribution and comparison. Evidence may pool per (metric, 2-hour local band),
+excluding fast-residual-transported rows; city-day-clustered uncertainty,
+N(0, tau2) shrinkage, Paule-Mandel spread and station deviations remain offline
+model evidence. Daily or boot refits do not promote an artifact to live authority.
 
-#### Day0 diurnal-residual mixture (2026-09-29)
+Live remaining members receive no fitted historical additive/affine center
+shift: `m'_j = m_j`. Live materialization, reactor rebuilding, public probability
+consumption and JIT must not read or apply the fitted artifact. The current
+carrier policy is `day0_remaining_center_policy='unshifted_live_v1'`, with
+explicit finite numeric zero bias (not bool/string; signed zero is canonicalized
+to `0.0` by the writer). A declared carrier with absent policy/bias,
+a nonnumeric/nonfinite bias or a nonzero bias is not current authority; normal
+seed/materialization must rebuild it. Ordinary non-carriers do not acquire a
+new carrier-only gate. Old certificates retain their original attribution:
+no restamping, source-age renewal or fallback fitted probability regime.
 
-`H = max(H_confirmed, H_remaining)`. Conditional on the observed boundary surviving,
-the remaining extreme is the mixture `(1 - w) provider path + w (A + D)`: A is the
-running extreme on the city's settlement grid (`SettlementSemantics.round_single`;
-Hong Kong truncates) and D is the station's empirical residual at k = hours to the
-city's median extreme hour, pooled per (metric, settlement unit, k) and shrunk
-toward the city's own cell. Bins the boundary has already passed keep their q; per
-simplex row r, with dead mass m, `r'[live] = (1 - w) r[live] + w (1 - m) pi[live]`.
-One pure operator (`src/calibration/day0_diurnal_residual.py`) transforms the point
-row and every draw row at every Day0 producer: the materializer's final simplex,
-after every Day0 route and before bounds are derived, and the reactor's
-`_market_analysis_from_event_snapshot` (point q and bootstrap sampler). Replay
-reproduces origin through the archived operator. The weight w per (metric, k
-bucket) is fitted daily by settled likelihood of this operator on the persisted base
-q (`day0_diurnal_base_q`), from posteriors dated [T-31, T-2] scored against residual
-counts that predate them; a cell with fewer than 200 rows serves w = 0. A missing,
-stale or malformed artifact serves the carrier q unchanged, and provenance names the
-status. The residual is evidence inside q; it never rejects, shrinks or vetoes a
-selected order. This change is Day0 survival revision
-`day0_settlement_channel_revision_model_v27_diurnal_mixture_v1` and resolver revision
-`day0_resolver_terminal_composition_v26_diurnal_mixture_v1`.
+This prohibition does not remove lawful instantaneous current-state
+conditioning: compare the current temperature with the same issued member at
+the same observation time and decay that current innovation into future hours.
+It is not a historical terminal-bin fit and does not substitute a running
+extreme for current temperature. Physical observed boundaries, typed final-daily
+provider centers, current-sigma/city-instrument ownership, and the same-station
+native settlement-product-minus-FAST measurement likelihood remain unchanged.
+
+The unshifted policy is retained in the current joint identity defined below.
+New current certificates are produced by the ordinary rebuild loop; an identity
+change does not rewrite immutable historical evidence or authorize deployment.
+
+#### Historical Day0 diurnal-residual mixture: offline only
+
+Historical station/city residual distributions `pi` and fitted mixture weights
+`w`, including likelihood fits, shrinkage, local-hour pooling and refit artifacts,
+are offline attribution and comparison evidence only. The pure operator in
+`src/calibration/day0_diurnal_residual.py` may reproduce an immutable historical
+certificate's original transformation; replay does not promote that certificate
+or its fitted artifact to current live authority.
+
+Live materialization, reactor rebuilding, public probability consumption and JIT
+must not read fitted `pi`/`w` or mix them into either the point simplex or any
+confidence draw. The historical transformation
+`r'[live] = (1 - w) r[live] + w (1 - dead_mass) pi[live]` is not a live probability
+regime, even when causal, fresh, trained only on settled outcomes, or fitted with
+`w = 0`. Missing an artifact is not the policy: live does not consult it.
+Known declarations of the retired fitted-mixture mechanism require ordinary
+seed/materialization rebuilding under the current no-mixture policy. Preserve
+the old certificate and its attribution; do not restamp it or renew source age.
+
+This prohibition leaves the source-clock current-evidence Gaussian/ENS spread,
+legal same-instant current-temperature conditioning, observed-boundary max/min
+and native settlement preimages, typed final centers, city instrument variance,
+and same-station native settlement-product-minus-FAST measurement likelihood
+unchanged. A current physical observation is not a historical fitted city mixture.
+The current additional policy is
+`day0_probability_mixture_policy='unmixed_live_v1'` (with the same prefixed EDLI
+field); it does not replace `day0_remaining_center_policy='unshifted_live_v1'`
+or its explicit numeric zero bias. Construction, replay, coverage and normal
+queue RESET bind both policies. The current joint identity is survival
+`day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1`
+and resolver
+`day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1`.
+Old zero-weight declarations are not silently given the new policy. A docs
+change alone is not implementation or deployment evidence.
 
 The shared-carrier V1 is retained only for explicit, immutable historical replay. Current ENTRY and
 held-position belief require a complete V2 or typed V3 carrier declaration; ordinary
@@ -712,7 +734,7 @@ EB bias correction and the bias_treatment_v2 branches are deleted with their cod
 
 **Generalized current-value serving rule (K2; GEM was the first instance):** the single serving builder admits only the same model/product, city, metric, and target date.  A carrier-bound read prefers selected-cycle `single_runs`, then selected-cycle `previous_runs`, then the newest eligible prior-cycle row no later than the carrier.  A source-clock live read instead serves each provider's newest row possessed by decision time; the ECMWF ENS cycle remains the shape carrier, not a ceiling on deterministic provider values.  Missing, future, over-age, or product-mismatched rows stay dropped; in particular, ECMWF `ifs025` history cannot stand in for the 9 km live center.  Every admitted row preserves its real `served_via` and `served_cycle`, so substitution is explicit rather than silent.
 
-**Supersession is by evidence, not by cycle label (2026-09-30).** The raw-input HWM marks a served posterior superseded when a used provider's current row differs from the consumed row. For every source, a newer-cycle row that carries the consumed `(forecast_value_c, lead_days)` is a relabel: every input the posterior consumed is still current, and the posterior stays servable. Hourly providers (NBM, ICON, UKMO) republish unchanged values every cycle. On 2026-09-30, 141 of 377 NBM and 91 of 454 `icon_global` supersession blocks were exact relabels, and each one turned an hourly arrival into a family outage. A consumed row that cannot be read never matches, so the check fails closed. A changed value or lead bucket still supersedes, for ENTRY exactly as before. A relabel does not change the posterior. It can, however, change its persisted `served_cycle`, which the materializer uses for cycle-lag staleness variance and for the 3 h BETWEEN cohort. That relabel residual was measured over 255 same-carrier rebuild pairs from 2026-09-29 to 09-30: 217 were exactly zero, p90 max|Δq| was 3e-5, and the maximum was 0.0105. Real value changes gave p50 0.018 and max 0.279. The persisted older `served_cycle` prices the larger cycle lag, which is the conservative side.
+**Supersession follows the complete consumed evidence, not numeric equality (2026-09-30).** Equality of `(forecast_value_c, lead_days)` does not prove that a new provider row is a harmless cycle relabel. Provider cohort, source/possession clocks, native geometry, physical proof dependencies and carrier identity can change the current center/spread or its authority even when those two scalars agree. Missing consumed evidence or missing proof cannot establish equivalence. The existing scoped raw-input HWM therefore preserves its complete source/proof/cohort checks; a new unconsumed row triggers normal seed/materialization redecision rather than borrowing the old certificate. A repeat of the same exact current evidence remains zero-cost and does not renew source clocks. Historical rebuild-pair statistics do not authorize a numeric-only alias or establish that an older cycle is always conservative. SCOPE is the used provider and its exact city/day/metric family; DRAIN is the existing input-HWM and seed/materialization loop; RESET is a newly consumed, currently valid certificate, with original rows and capture clocks preserved.
 
 **K3 provider completeness:** 5 declared providers — NOAA/gfs|nbm, DWD-ICON one-of-{d2,eu,global}, CMC/gem, JMA/jma_seamless, UKMO one-of-{global,uk2km}. Family-aware check; ≥ 4/5 required or WARNING emitted. Commit 2b6936d3b5 surfaces subprocess WARNINGs to daemon log.
 
@@ -797,8 +819,8 @@ n, and p-values in
 
 ```
 GREEN   age ≤ 18h : full trading, UNCHANGED.
-AMBER   18h < age ≤ 24h : trading continues; predictive sigma widened by a
-        settlement-FITTED age-band variance v (degC²): σ' = sqrt(σ² + v).
+AMBER   18h < age ≤ 24h : trading continues with the qualified current-evidence
+        predictive width unchanged; no historical fitted age variance is added.
 RED     24h < age < 30h, OR a newer live-eligible cycle detected-not-active :
         NO new entries for the family; resting makers cancel; held-position
         monitor/exit lanes stay FULLY ACTIVE (isolation of ENTRY, never monitoring).
@@ -814,37 +836,40 @@ so `GREEN ≤ 18h` covers a genuinely-fresh cycle with margin. The paired
 center-error variance increment is significant from one cycle-generation of
 staleness onward — fitted AMBER-band inflation **high v = 0.362 degC² (p=6.3e-8,
 n=1009), low v = 0.244 degC² (n=156)**, 13–19% of the base predictive variance
-(p50 1.86 degC²), spread-dominated so a symmetric widening prices it honestly.
+(p50 1.86 degC²). These historical increments are offline diagnostic evidence,
+not a live predictive-variance component or permission to modify current q/draws.
 Past 24h the systematic center BIAS (|drift| ≥ 0.47°C) becomes a large,
 UNCORRECTABLE-by-variance fraction of the error and only ~6h remain to the
 EXPIRED wall — hence RED stops entry rather than pretending to price it.
 
-**Mechanism (minimal machinery, additive, fail-open).**
+**Mechanism (current width, independent age eligibility).**
 - Classification: `src/data/staleness_degrade_ladder.classify_posterior_staleness`
   (pure; reads the EXPIRED horizon from `replacement_forecast_cycle_policy` so the
   two can never drift on that one number). Boundaries are module constants, not
   new config knobs.
-- AMBER inflation artifact: `scripts/fit_posterior_age_inflation.py` (walk-forward,
+- Offline age-inflation artifact: `scripts/fit_posterior_age_inflation.py` (walk-forward,
   deterministic, RO over the forecasts DB) → `state/posterior_age_inflation/`
-  ACTIVE.json + sha256, loaded by `src/forecast/posterior_age_inflation.v_for`
-  (lru_cache, fail-open 0.0, env-dir override) — mirrors `staleness_variance.py`.
-  Applied at the admission directional-sigma seam
-  (`event_reactor_adapter._amber_inflated_predictive_sigma_c`), never by mutating
-  the materialized q-vector or any posterior-identity hash.
+  ACTIVE.json + sha256, inspectable by `src/forecast/posterior_age_inflation.v_for`
+  only for offline diagnostics. Live consumers do not read this fitted artifact
+  or add v: both ordinary NOAA and shared-carrier paths preserve canonical current
+  predictive width. Presence or absence of an age-fit artifact cannot change the
+  same current consumer's point vector or coherent draw matrix; full-prior and
+  remaining-window consumers retain their distinct legal physical quantities.
+  Consumer-route
+  cache identities force normal re-preparation instead of reusing an older
+  polluted witness. JIT independently rejects that stale witness and a normally
+  prepared current witness restores authority; source rows/clocks are not restamped.
 - RED entry isolation: `read_replacement_forecast_bundle` returns BLOCKED
   `REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED` (entry-decision authority). The
   held-position monitor/exit read paths (`position_belief`, `portfolio.Position`)
   are independent and untouched — same isolation-of-entry contract as
   `FAMILY_ENTRY_BLOCKED`.
 
-**SEAM DISTINCTION (no double-counting with `staleness_variance.py`).** That term
-prices per-model INSTRUMENT cycle-lag inside the fused center at materialization;
-THIS term prices the whole POSTERIOR's age at admission. Different history slices,
-different times — they do not overlap.
-
-**Until the orchestrator activates a fitted artifact post-merge, `v_for` returns
-0.0 everywhere**, so the ladder ships INERT on the AMBER-inflation axis (the RED
-entry-isolation axis is independent of the artifact).
+**Role distinction.** The per-model explicitly declared precision/center operator
+is a separate source role and is not changed by this consumer repair. Historical
+posterior-age v is not a live variance input, whether an offline artifact exists
+or not. The 18/24/30-hour eligibility boundaries, newer-cycle isolation and all
+source completeness/native/ground gates remain unchanged.
 
 **DEVIATION from the consult (d) sketch:** the "two-provider requirement relaxes
 to 1 provider + ENS on AMBER" clause is NOT implemented. Relaxing the source-clock
@@ -874,8 +899,8 @@ provider-completeness requirement.
 | `tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py` | Dead-but-advertised evidence gate misleads operator (54a53334a9) |
 | `tests/test_bayes_precision_fusion_candidate_accrual_models.py` | Family coexistence impossibilities; lead fallback; single-fetch-per-target (a70436d478) |
 | `tests/test_bayes_precision_fusion_port_fidelity.py` | T2 math port reproduces proof engine (Paris/high/L1 2025-12-26 → μ*=4.3137, sd=0.7259) |
-| `tests/test_staleness_degrade_ladder.py` | §4a ladder band edges (18/24/30h), newer-cycle→RED, UNKNOWN keeps binary law, AMBER sigma inflation seam, monitor/exit lane untouched (2026-07-17) |
-| `tests/test_fit_posterior_age_inflation.py` | §4a AMBER inflation fitter: positive v in the aged band, walk-forward exclusion, monotone-in-age, byte-determinism (2026-07-17) |
+| `tests/test_staleness_degrade_ladder.py` | §4a unchanged band edges (18/24/30h), newer-cycle→RED, UNKNOWN binary law; live current sigma ignores fitted age variance and missing current proof is not supplied by fit; monitor/exit isolation preserved |
+| `tests/test_fit_posterior_age_inflation.py` | §4a offline-only age diagnostic fitter: positive v, walk-forward exclusion, monotone-in-age and byte-determinism; no live promotion |
 | `tests/test_replacement_forecast_bundle_reader_staleness.py` | §4a RED entry-isolation BLOCKED + AMBER-still-binds at the single bundle-reader gate (2026-07-17) |
 
 27/27 materializer+fusion+wiring green at ship. 61/61 green post-promotion (a70436d478).

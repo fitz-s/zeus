@@ -1,0 +1,79 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZGSZ.bad37dc5b9e611b34822901f7d22aa7c9f5512a79dff64716d219f457c5e628c.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53529,
+  "captured_at": "2026-09-30T14:57:50.328371+00:00",
+  "city": "Shenzhen",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "13",
+    "elevation_m": "4",
+    "ground": [
+      {
+        "elevationFeet": "13",
+        "elevationMeters": "4",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "ZGSZ",
+        "idType": "ICAO"
+      },
+      {
+        "id": "59493",
+        "idType": "WMO"
+      },
+      {
+        "id": "30137800",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "CHI0000ZGSZ",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "22.639258",
+        "latitude_dms": "22,38,21,N",
+        "latitude_rptd": "22.639258",
+        "longitude_dec": "113.810664",
+        "longitude_dms": "113,48,38,E",
+        "longitude_rptd": "113.810664"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30137800",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "1957-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:50.064850+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZGSZ&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "bad37dc5b9e611b34822901f7d22aa7c9f5512a79dff64716d219f457c5e628c",
+  "station_id": "ZGSZ"
+}

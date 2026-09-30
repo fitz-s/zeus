@@ -1,0 +1,79 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/MMMX.3323847fe9ab8f782655420985ff51cd499235233871931fb11170cc72dd0951.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53614,
+  "captured_at": "2026-09-30T14:57:49.587261+00:00",
+  "city": "Mexico City",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "7316",
+    "elevation_m": "2229.9",
+    "ground": [
+      {
+        "elevationFeet": "7316",
+        "elevationMeters": "2229.9",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "MMMX",
+        "idType": "ICAO"
+      },
+      {
+        "id": "76679",
+        "idType": "WMO"
+      },
+      {
+        "id": "30149753",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "MXI0000MMMX",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "19.436303",
+        "latitude_dms": "19,26,11,N",
+        "latitude_rptd": "19.436303",
+        "longitude_dec": "-99.072097",
+        "longitude_dms": "099,04,20,W",
+        "longitude_rptd": "-99.072097"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30149753",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "1973-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:49.294885+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AMMMX&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "3323847fe9ab8f782655420985ff51cd499235233871931fb11170cc72dd0951",
+  "station_id": "MMMX"
+}

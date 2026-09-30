@@ -1,0 +1,79 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZHCC.b1947ff61d8cd45aedf7bef2bd735f82d7a70a7839f36b46a0a94f8e250b4f72.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53530,
+  "captured_at": "2026-09-30T14:57:50.594442+00:00",
+  "city": "Zhengzhou",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "495",
+    "elevation_m": "150.9",
+    "ground": [
+      {
+        "elevationFeet": "495",
+        "elevationMeters": "150.9",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "ZHCC",
+        "idType": "ICAO"
+      },
+      {
+        "id": "57083",
+        "idType": "WMO"
+      },
+      {
+        "id": "30137802",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "CHI0000ZHCC",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "34.519672",
+        "latitude_dms": "34,31,11,N",
+        "latitude_rptd": "34.519672",
+        "longitude_dec": "113.840889",
+        "longitude_dms": "113,50,27,E",
+        "longitude_rptd": "113.840889"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30137802",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "1957-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:50.329806+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZHCC&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "b1947ff61d8cd45aedf7bef2bd735f82d7a70a7839f36b46a0a94f8e250b4f72",
+  "station_id": "ZHCC"
+}

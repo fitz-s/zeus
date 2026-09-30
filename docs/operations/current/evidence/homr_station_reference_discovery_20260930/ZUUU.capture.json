@@ -1,0 +1,79 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZUUU.bc82750e0f117fad3fc651e55953610caf17b28a58d41fd8abdd22b9ae6651e4.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53533,
+  "captured_at": "2026-09-30T14:57:48.957947+00:00",
+  "city": "Chengdu",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "1625",
+    "elevation_m": "495.3",
+    "ground": [
+      {
+        "elevationFeet": "1625",
+        "elevationMeters": "495.3",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "ZUUU",
+        "idType": "ICAO"
+      },
+      {
+        "id": "56294",
+        "idType": "WMO"
+      },
+      {
+        "id": "30137836",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "CHI0000ZUUU",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "30.578528",
+        "latitude_dms": "30,34,43,N",
+        "latitude_rptd": "30.578528",
+        "longitude_dec": "103.947086",
+        "longitude_dms": "103,56,50,E",
+        "longitude_rptd": "103.947086"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30137836",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "1956-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:48.663784+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZUUU&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:48 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "bc82750e0f117fad3fc651e55953610caf17b28a58d41fd8abdd22b9ae6651e4",
+  "station_id": "ZUUU"
+}

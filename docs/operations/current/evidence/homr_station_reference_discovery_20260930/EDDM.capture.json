@@ -1,0 +1,76 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/EDDM.5b1a5c1ad390f1425938ee667c2d90164872fd06b7bdacdf4ead6f6d1c1d6971.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53555,
+  "captured_at": "2026-09-30T14:57:49.854424+00:00",
+  "city": "Munich",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "1487",
+    "elevation_m": "453.2",
+    "ground": [
+      {
+        "elevationFeet": "1487",
+        "elevationMeters": "453.2",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "EDDM",
+        "idType": "ICAO"
+      },
+      {
+        "id": "10866",
+        "idType": "WMO"
+      },
+      {
+        "id": "30103328",
+        "idType": "NCDCSTNID"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "48.35378",
+        "latitude_dms": "48,21,14,N",
+        "latitude_rptd": "48.35378",
+        "longitude_dec": "11.78608",
+        "longitude_dms": "011,47,10,E",
+        "longitude_rptd": "11.78608",
+        "precision": "DDddddd"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30103328",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "Unknown",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:49.588630+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AEDDM&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "5b1a5c1ad390f1425938ee667c2d90164872fd06b7bdacdf4ead6f6d1c1d6971",
+  "station_id": "EDDM"
+}

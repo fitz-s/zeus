@@ -4,6 +4,2930 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+Latest complete live stored-row audit is loss's existing
+`/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
+SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.
+Its original bytes, plus the earlier14:09 artifact SHA`bb6413254306a1eefa03ef630026c8ec86983b6ff4f12b042bf350efe6e388c3`,
+are also preserved under this parent packet's existing evidence directory and
+registered in scope; the immutable copy is not a new audit or renewed clock.
+Corrected read-only cut16:15:39.402935–.971471 has96/96 detailed stored rows
+for50 observed current/future market-root cities, not venue-active permission.
+65 declare applied fitted diurnal weights with actual base-q differences;31
+do not record that declaration. Max absolute deltas include London LOW710769
+.40905232, Tokyo LOW710842 .2223724, Paris LOW710782 .17141826 and Shanghai
+LOW710939 .14940505. These establish current calibration-law evidence, not
+order-loss attribution or public authority. Stored READY is not a public-reader
+result;96 old-schema native/run-quantity and typed-ground field gaps do not
+establish wrong physics or absent sources. Earlier14:09 evidence keeps its own
+window/transport limits. Erroneous16:14 outcome-NULL scope is explicitly
+INVALID_NOT_COVERAGE and never enters the coverage denominator.
+
+Latest bounded Hong Kong order-chain RO audit uses cut19:34:10.154579Z and
+since14:01Z, not the earlier no-held snapshot. One new BUY ENTRY command
+`d482398888d641eb` / position `8d50203e-662` holds Oct1 LOW28°C NO:
+posted15:31:34 at0.25, two attributed wallet prints1.333332+3.66 and canonical
+execution_fact partial4.993332 shares at0.25. Command projection is FILLED;
+there is no new HK SELL command/economic exit fill in this bounded scope.
+Current one nonterminal is day0_window. Immutable monitor event407 at
+19:33:50.539307 has evaluated exit_available=true, should_exit=false, HOLD,
+NO-side probability.5262496925293 and current top bid.19/ask.21. NULL
+position.exit_reason is not evidence that exit was never evaluated.
+Monitor pinned posterior712212 still uses smooth revision28, fitted diurnal
+weight.342666 and center bias1.09226; entry710278's immutable ForecastAuthority
+certificate gives NO.8512746381788449 (same-bin YES.14872536182115514), cycle06Z,
+source_available13:24:50.458637, forecast_fetch14:31:18.287929, decision15:31:21.
+The source_issue_time field equals that availability in the old certificate;
+it is preserved, not promoted into a new issued-time claim.
+
+Exact source2rows/entry certificates/monitor407 and command-fill linkage are
+retained under existing evidence `hko_order_d482398888d641eb_{source,entry,monitor}_20260930.json`.
+File SHAs are respectively54c4ab3af1e8237d8587bd9f4b14cca14523d8ee2316e0b083d75613ffa76dfd,
+2972149cb6e8a563eefa2dd1711e85ac1fc7cdb020fdea6062faacf6b65142b9,
+a04cc12d76d1bdbe1ce3f9e6eda85dd26d841b9a27e8c47f70bc8e6eaa37f4fe.
+Their zlib/base64 payload SHA/byte counts independently re-decode exactly;
+original SQLite JSON strings, including full current point/draw/vector/state,
+are retained. No signed submission envelope or credential is included.
+HK owns candidate same-cut counterfactual from these artifacts; current
+full-depth book/wealth is not synthesized from an entry snapshot. Monitor
+full_depth_action_authority=true but reauction book/epoch lineage is empty,
+so that economic-input gap must remain explicit. This new held position is
+not the old876312 evidence set and no candidate profitability is asserted.
+
+The single public book response is retained unchanged as existing evidence
+`hko_order_d482398888d641eb_current_book_20260930.json` (SHAa7d83405335ec1898363cfb7d7dd9d3cd53f5f788fa30df75df946d7c0e01d26)
+and its original headers (SHAba613c57b1d66482fd8566f244217bcc04e39de1c12ed1c0a9ab6eb3bc974dd6;
+public response cookie is not displayed). Capture completion20:49:37.312212Z
+and body timestamp20:48:47.678Z name a different cut: bid.12/ask.21/minimum5.
+Minimum5 is the resting maker floor, not a blanket prohibition on lawful TAKER
+FAK/FOK4.99. Fresh quote/depth/wealth/fees/action law still apply and.003332
+dust is not full closure. The entry5 minus confirmed4.993332 cause and original
+FILLED/PARTIAL projection folding are unproved, not attributed to fee.
+
+HK's exact archived-input pure replay independently recovers both saved base
+and fitted-mixture point vectors with zero error. NO-side variants are saved
+.5262496925293, no-mixture.5041136620, no-center-fit.6240549890 and both current
+repairs.6546720336. At the actual top bid.19, the mean cash-EV necessary SELL
+gate is negative even under a no-fee upper bound; for all4.993332 shares the
+both-repairs bound is−2.3202617. Thus these defects are real but do not prove
+that a lawful profitable exit was blocked in this exact monitor cut. This is
+not a newly source-qualified certificate, executable-depth/wealth proof or
+venue redecision. Full-depth boolean was initially misreported false in a
+progress note; the preserved original event and corrected value true govern.
+
+Same RO process facts: main93206 started15:16:23Z/heartbeat19:30:43, loaded_sha
+receipt49ac at15:16:24; forecast48664 started18:31:11Z/heartbeat19:31:12 names
+60c38c2eb. Both cwd are live; checkout and localorigin/live are fixed
+`60c38c2ebed288035f37f478de0f1c21cfa7dc72`. This mismatch is not this task's
+deployment and no receipt establishes per-module import/PID binding.
+49→60 is5 commits/18 paths986+/313−: rolling-now hourly anchor requests,
+market-authority-superseded cut requeue, busy entry lease retry, content-hashed
+Day0 receipt persistence/DB ownership and selection compute logging. No config,
+coordinate-manifest/native collector hash changed. Parent49 checks are not
+inherited as60 behavior; no automatic rebase, load or restart was done.
+
+The subsequent single bounded runtime RO cut21:45:10–21:46:05Z supersedes
+that older process snapshot, not its order/monitor evidence. Main70131 starts
+20:21:02Z with cwd `/Users/leofitz/zeus`, heartbeat21:45:18.985832Z;
+`state/loaded_sha.json` names external ea35b1c484be1ef9cef6608f44ceef545e099243
+with generated_at20:21:03.198908Z. It has no PID/per-module-byte binding.
+Forecast58292 starts20:16:52Z, same cwd, heartbeat21:45:23.848444Z alive with
+git_head ea35b1c48. Checkout and local origin/live both equal that external
+fixed tip. Main's actual open handles name canonical WORLD, FORECAST and
+TRADES under `/Users/leofitz/zeus/state/`; no matching forecast main-file
+handle was caught in this sample, which does not prove absence of DB use.
+These external process changes are not this task's deployment. The task has
+never pushed, loaded or restarted; source at external ea35 still has the live
+diurnal-mixture lookup/apply path. Thus candidate repairs must not be claimed
+effective in the user's running system. Continued loss is not, by itself,
+proof of each trade's cause or of a profitable repair counterfactual; the exact
+d482 monitor cut already has negative cash EV even with both repairs. No new
+trade/book/DB sampling or repeated polling follows this runtime-only audit.
+
+## 2026-09-30 source/physical integration checkpoint
+
+The concentrated final batch starts at `b4478e45e30729275e44f0be3ebb1147d79b9439`,
+committed tree `a6d7aa2702bb898da735996d49a26a77e867d3e2`, on fixed external
+`ea35b1c484be1ef9cef6608f44ceef545e099243`. All independently approved native
+compatibility b0/827/3af/9f896, HKO160/c432, reader f815/e440/3ac, missing-ground
+anti-fanout18d, seed four deltas and cycle540 are integrated as own deltas.
+The 232-commit private rebase has zero conflicts and its pre-receipt tree equals
+the read-only projection `18aff24839d4c00989cf44f2705adfbfcd121bf0`; receiptdda
+then adds exact encoding/raw-content-hash validation without schema/writer changes.
+All six governance files restore byte-identically via stash apply, not pop.
+This is not a live deployment; earlier fixed49 results below keep their own scope.
+
+Subsequent test-only796 maker-limit and a3c explicit future-target fixes yielded
+the then-current HEAD `5ce787c8aded23fb97371d85d424254718daafb1`, tree
+`3671a95e4313e5badacc51b9d1f2102e7b6e796c`. The actual quote-interface whole
+file13/13 passes1.91s (`/tmp/zeus-final-ea-maker-interface-five.xml`, filename
+is not its count), and native identity whole file30/30 passes6.85s in one
+process (`/tmp/zeus-final-ea-native30-explicit-target.xml`). Production is
+unchanged by these two own deltas; earlier failed batch XML remains retained.
+
+Final bounded actual-tree checks retain failures, not an acceptance total:
+normal KORD/HK kernel/money/maker/anti-fanout/global-batch35/35 pass42.65s,
+resting-law/facts/receipt136/136 pass6.32s, and causal-hourly/runtime/executor
+rollback/maker33/33 pass7.17s. Native/HKO combined132 has131 pass and one
+test-helper interface failure: native recovery expects Oct2 but the new shared
+factory defaults to Oct1. Source owns the explicit target-date test followup;
+this failure is not evidence of a production/source-clock regression.
+Full reader/staleness196 finishes191 pass/5 fail196.79s
+(`/tmp/zeus-final-ea-reader196.xml`); four probability suites304 finish213 pass/
+91 fail221.44s (`/tmp/zeus-final-ea-four-probability.xml`).84 failures share
+CAPTURE:CURRENT_EVIDENCE_NOT_LIVE, with82 materializer and9 sigma-equivalence
+failures in total. Defect/source own the common capture first-gate diagnosis;
+HK owns five reader/native-coordinate/provenance test interfaces. These are
+real integrated failures, not automatically waived as pre-existing fixtures.
+The reader failures are one retired-coordinate case now accepted by strict
+semantic compatibility, one extra provenance parse, and three snapshot cases
+whose coordinate identity gate precedes their intended coverage assertion.
+No individual failure is disposed until normal positive-first behavior is proved.
+After approved4b reader faults are integrated with the canonical-shape helper,
+the retained next reader196 run has139 pass/3 fail/54 setup errors174.52s
+(`/tmp/zeus-final-ea-reader-staleness-final196.xml`). All three failures and51
+setup errors share a second normal collector returning INSERT0 after the
+shared frame already produced canonical evidence; the reader helper wrongly
+requires INSERT1. This is under one coordinated helper repair with exact
+returned snapshot/run/coverage/bytes/clocks, not a blind0-or1 assertion waiver.
+The other three setup errors are KORD station-reference resolution returning
+no ground in the combined context; their normal namespace/asset precondition
+must be proved, not replaced with a fabricated height. The single first-gate
+reproduction is `/tmp/zeus-final-ea-reader-shared-firstgate-one.xml`.
+The two unchanged station native-grid setup failures from the earlier92-node
+baseline are not silently passed: the current combined source check excludes
+only those two and records that scope explicitly.
+
+HKO160/c432 has independent26/26 acceptance plus the real authorized HTTP200:
+issuer20:50Z, read-complete20:52:31.680268Z, canonical INSERT20:52:31.682705Z,
+bodySHA85c5cbbbb21ff32eaaf35d81a5a40cbeb6e88db5e617b776ced38ca300dcfb99.
+That4501-byte original body is preserved byte-identically under existing evidence
+`hko_fnd_same_issue_normal_capture_20260930.body`; canonical timestamp proof is
+the original artifact1 in private `/tmp/zeus-normal-physical-source-drain.9JO6rd/real200/zeus-forecasts.db`,
+not the archival copy's later mtime or a live database write.
+Actual private RO restores original Oct1 HIGH34/LOW29 from raw2521372/2521381;
+old whole tuples and literal SQLite second clocks remain unchanged and old cuts
+are rejected. Retained-file mtime is only possession bound, never exact HTTP fetch.
+This closes normal provider-serving recovery, not all-city ENS/public qualification.
+
+The earlier finite list (common84 capture first gate, other seven four-suite
+failures, and five reader native/provenance cases) is retained as diagnostic
+history, not the current frontier. The integrated outcomes below supersede it.
+Already green money35, facts/receipt136 and runtime33 are not rerun absent an affected join.
+All earlier tail own deltas are integrated; no old pending tail is a new blocker.
+Actual native ingest35 has33 pass/2 fail3.96s
+(`/tmp/zeus-final-ea-native-ingest35.xml`): the H/L retired-elevation mutation
+expectation is under source's active-coordinate/typed-role review, not a waiver
+of native or typed station proof. The earlier unbound "ENS52" plan count is
+withdrawn; only precise35/hourly7/native-public3/native-identity30 scopes count.
+
+Eight official ground inputs remain hard blockers to the user's all-city loading
+condition: ZBAA, UUWW, MPMG, ZSQD, LLBG, ZHHH, RCSS and KBKF.46 ground roles
+are not46 fully qualified real forecast/ENS families. The18:55:29Z local projection
+has five held positions over UUWW, ZSQD, LLBG H/L and ZHHH; DATA_DEGRADED is
+not an achieved exit. The approved anti-fanout test proves scoped batch isolation,
+qualified KORD taker rank/JIT and normal proof-arrival RESET, not eight new proofs.
+No further broad search, push, load or restart is authorized by this checkpoint.
+They are not the only outstanding production-readiness proof. The existing
+normal DRAIN evidence covers representative native queue/public recovery,
+real HKO FND serving and one real deterministic IFS recovery. It is not a
+city-by-city real-provider entity/receipt plus current ENS plus newly rebuilt
+posterior/public-consumption matrix for all46 ground-capable cities. No full
+new HKO posterior is licensed merely by the FND serving recovery. Loading and
+post-load certificate consumption/monitor/legal-exit verification have not
+been performed. Those are explicit deployment prerequisites, not additional
+source searches or claims that eight files alone make the candidate ready.
+
+### Final evidence matrix (candidate software checks closed; loading blocked)
+
+Verified software head is `b08dfd7314ea5c441f8592064c766e3b907121be`, tree
+`4bb2e7b79fe867062539ee798462c4352728a570`, on fixed external ea35.
+The21:45 runtime audit names the external running plane, not this candidate.
+No known software finding remains open in the agreed bounded repair/test scope.
+This is not all-city production qualification or loading approval.
+Approved a8 shared-lawful-frame and716 canonical-reuse interfaces are now
+integrated; same-process shared representatives12/12 pass26.89s
+(`/tmp/zeus-final-ea-shared-native-reader-joint.xml`). At pre-f603 head32217/tree21a9,
+the complete four-suite run finished303 pass/1 fail264.93s
+(`/tmp/zeus-final-ea-four-probability-locked.xml`). Its sole stale-ensemble
+failure was the final all-readiness count: normal producer readiness existed,
+while stale rejection/no posterior assertions already passed. Approved ownf603
+preserves the producer whole tuple and requires zero execution readiness;
+the actual current parent targeted3/3 passes8.218s
+(`/tmp/zeus-final-ea-stale-role-three.xml`). This closes the original304's sole
+failure with303 original passes plus changed targeted evidence, not a claimed
+same-run304/304 result. No production changed in that followup.
+The pre-order-fix reader/staleness run had198 distinct nodes,195 pass/3 setup errors
+207.81s (`/tmp/zeus-final-ea-reader-staleness-locked196.xml`; filename196 is not
+the count). All three are `_native_low_coverage` KORD fixture construction:
+runtime station geometry returns no legacy ground scalar where the helper
+expects204.8. The shorter same-process representatives passed; HK owns a minimal
+full-order reproducer and normal typed-GROUND correction, not a fabricated
+height or weakened source gate. Approved own2e283 changes only fixture scope
+from module to function: each HKO consumer still owns its real context, then
+teardown restores CONFIG_DIR before unrelated KORD cases. The actual parent
+original HKO2→KORD3 order passes5/5 in30.51s
+(`/tmp/zeus-final-ea-reader-order-five.xml`). The final complete reader/staleness
+198/198 passes219.29s with zero failures/errors/skips
+(`/tmp/zeus-final-ea-reader-staleness-order-final.xml`) at the verified head/tree
+above. All original source/consumer assertions and production gates remain;
+there are no running tests or further software fixes at this checkpoint.
+
+| Surface | Candidate code / actual evidence | Running plane | Remaining boundary |
+| --- | --- | --- | --- |
+| ENS cell / LSM | Float328d keeps native index/body and neighbor/SEA rejection; native b0/827/3af/9f verifies original semantic coordinates plus actual LSM before normal queue rebuild. Native identity30 and active-field ingest35 pass; integrated reader/staleness198 pass | External ea35; candidate not loaded | Controlled extraction is not field GRIB collection. Representative normal DRAIN is not a46-city actual-source/ENS/new-certificate matrix |
+| Provider location / typed GROUND | Query, native cell and station reference remain distinct. HOMR18 plus prior roles have scoped archive/new-metadata H/L/changedfacts evidence292. Private real IFS200 recovers old raw2516785 without rewriting it | Live old config/certificates are a different plane |46 ground roles are not46 executable forecast/ENS families. Eight official GROUND inputs are missing; five projected held positions are not proven exited |
+| issued / fetched / written | HKO160/c432 exact context and precision rules; true200 issue20:50, read20:52:31.680268, canonical20:52:31.682705 restores old H/L.26 clock/context and native30 proofs accepted | No candidate capture repair loaded by this task | Old clocks immutable; archival mtime is not fetch time. Serving recovery alone is not full new ENS/posterior qualification |
+| Current q / nomix | Unshifted/bias0 and unmixed v34/v33 retain current physics/FAST residuals. True old32/old33 seed→queue→newcert RESET accepted; current KORD/HK kernel and money checks pass. Original four304 sole failure closed as303 prior passes plus targeted3; final reader198 passes |21:45 external ea35 source still calls fitted diurnal lookup/apply; this candidate never pushed/loaded | All46 real-source/ENS/new-certificate consumption and post-load verification remain unproved. No candidate effect on live loss or historical q restamp is claimed |
+| Held SELL / JIT | Normal money35, facts/receipt136 and runtime/maker33 pass. Maker-witness absence excludes only maker, not lawful ranked/JIT taker; missing-ground anti-fanout plus proof-arrival RESET are scoped batch evidence | Main70131/forecast58292 external ea35; module import bytes unknown | Controlled book/wealth is not a fill or guaranteed exit. Maker statistics remain incomplete; no invented authority for eight unqualified ground families |
+| Latest HK d482 | Archived11-bin point replay exactly recovers saved vectors. NO.5262496925→unshifted/unmixed.6546720336; at monitor407 bid.19 both have negative cash EV before fees | Entry and monitor407 are actual preserved events, not candidate reruns | No proof this cut should SELL/become profitable. Full same-cut book/wealth/epoch and partial-fill difference cause are missing; old876312 kernel remains an attribution limit |
+
+Final governance preservation checks: all four changed YAML surfaces parse;
+duplicate-key paths are unchanged (test topology's four pre-existing paths,
+zero new paths). The six authored governance surfaces pass diff whitespace
+checks. All94 newly registered original evidence files have staged blob hashes
+identical to their actual unfiltered bytes. Whole-diff whitespace checking
+reports upstream raw CRLF/trailing spaces in captured source bodies; those are
+not normalized or declared clean, because immutable byte preservation is the
+evidence contract. Raw headers are retained without displaying public cookies.
+Original stashes, task/child branches and ignored captures remain preserved.
+
+Earlier fixed49 candidate HEAD was `48aeec6f02ffa9eb8d5bad44f841b0d8975ef56f`
+on fixed external `49acb2fbe643fc20decbdad8fea3d284e2ee1da7`; committed tree is
+`f8c88e72c1d6282f818bd6fede2f4c77248d010b`. The actual180-commit private rebase
+preserves the reviewed script/guard union and two RMF hunks; pre-own tree
+`ce16cabf27d49c3b0bd55327a581ab440887e7f4` equals the fixed projection. Only
+approved own Float328d and HWMcb0 follow it, then the approved nomix,
+HOMR16, RMF B, reader and staleness batches; latest ownc8/236 AMBER,
+reader12c and schemeb4 all apply cleanly and equal the fixed preview tree.
+Actual current AMBER69 plus KORD public2 and HK kernel/money10 pass81/81
+40.32s (`/tmp/zeus-parent-49-amber69-kord-public-hko-money81.xml`);
+reader native8 plus external scheme19 pass27/27 27.71s
+(`/tmp/zeus-parent-49-reader-native8-and-scheme19.xml`). Two JUnit property
+warnings are reported in the81-node run, not failures. Current runtime
+facts/exact debt/capital timeout/JIT/current wealth/deadline63/63 pass11.12s
+(`/tmp/zeus-parent-49-nomix-amber-facts-money-runtime-current.xml`). The first
+runtime invocation selected two retired cf-era test names and ran no tests
+(collection exit4); current49 atomic-exact/publish-failure plus facts-only
+antibodies replace that invocation, without restoring deleted APIs.
+Own a911 historical-mixture prohibition and b349 full-prior/remaining-role
+tests apply cleanly and equal the preview tree; affected B/D2 combined exact
+case union29/29 passes45.48s (`/tmp/zeus-parent-49-nomix-shanghai-B-d2-concentrated.xml`).
+Latest owned239 reauthentication and cb1 independent ground-possession fixture
+apply cleanly and equal preview; their affected five-case check passes5/5
+20.42s (`/tmp/zeus-parent-49-reauth-ground-clock-five.xml`). Own EGLC regional
+test281968 is independently approved and admitted; current London4/Milan2/LA8
+affected check passes14/14 30.46s
+(`/tmp/zeus-parent-49-eglc-regional-horizon-fourteen.xml`). It uses new lawful station-reference evidence,
+not a retrospective license or field forecast authority.
+Owned historical WU first-method096 is admitted; its five affected component
+checks pass5/5 20.37s (`/tmp/zeus-parent-49-historical-wu-component-five.xml`).
+The synthetic historical external conditions are explicit TEST_ONLY, not a
+retrospective official capture or Shanghai current public permission.
+No new wide pass is claimed.
+The reviewed reader neighbor
+union preserves external49 assertions and c19's consistent fault view.
+Original6 governance drafts, all stashes,18 original captures and
+53 discovery files remain preserved; the restoration is apply, not pop.
+No-mixture21bd/01e04/6ce/f38 is admitted. Independent true old33 applied-fit
+to normal queue/new34 RESET preserves old rows/bytes and repeats with no new
+request; this does not prove this task is loaded live.
+
+Actual concentrated candidate checks: nomix/pricing/events/calibration and cycle
+742/742 (`/tmp/zeus-parent-49-approved-nomix-core-and-cycle.xml`); scoped HOMR18
+config/archive/normal H/L public292/292
+(`/tmp/zeus-parent-49-homr18-scoped-metadata-public.xml`); changed reader19 and
+complete staleness17 give36/36
+(`/tmp/zeus-parent-49-nomix-reader-affected-and-staleness.xml`); KORD native
+prior/public/JIT3 and HK kernel/fixed SELL10 pass across
+`/tmp/zeus-parent-49-nomix-native-public-money-cross.xml` (one actual JIT node)
+and `/tmp/zeus-parent-49-nomix-kord-public2-hko-money-kernel10.xml` (12 nodes).
+These are exact candidate checks, not full-reader/four-suite or venue evidence.
+
+Actual first post-rebase checks are native/API Float323/3
+(`/tmp/zeus-parent-49-float32-normal3.xml`) and HWM6/6
+(`/tmp/zeus-parent-49-hwm-normal-six.xml`). Source-selection plus LA26 is15 pass,
+11 fail (`/tmp/zeus-parent-49-source-selection-and-la26.xml`): all original LA8
+pass; all11 first fail at TARGET_STATION_GROUND_EVIDENCE_INVALID before the
+scheme assertion. Eight configured-scheme Chicago H/L cases, one LA pinned
+replay, one Chicago pinned-once and one old Shanghai unreadable-scheme fixture
+lack the current normal canonical ground prerequisites. These are unresolved
+test-input obligations, not established production regressions or waivers.
+The authority §2a correction now explicitly requires source/proof/cohort/clock
+equivalence rather than numeric value/lead equality; critic narrowly reviewed
+that paragraph NoHIGH. Loss's scheme b4 test-only repair is independently
+approved19/19 and admitted; current-parent affected verification also passes19
+within the27-node combined run.
+No new wide or full-reader pass is claimed.
+
+Deployment preflight on actual canonical RO state at18:40–19:03Z is a separate
+critical blocker:54 configured ground roles parse46 VERIFIED/8 UNPROVEN, and
+251 current/future market-root target keys over50 cities produce0 normal plan
+rows. Existing high/low v3 coverage each has4328 rows/54 cities bound to
+`a9779c458866184e45f049cf7ae14d554b3981a65963f7b26792e63752231d0f`, but candidate
+expects `1932d03ce9a52198743d46cb073221776bb35ac6a8d95627142db248fdb4e54f`.
+The original hash-named manifest at `/Users/leofitz/zeus/51 source data/docs/`
+has54 identical cities, query/station coordinates, timezone and unit; exact
+JSON diff108 is only54 removed legacy elevation_m and54 station_surface.
+Extractor consumption must be proved before any semantic compatibility:
+do not restamp coverage, change old clocks or waive native/LSM/ground gates.
+Source owns that bounded normal DRAIN. Independent normal60-second OpenData
+poll does not depend on targetplan: actual RO identity at19:03:12 selects12Z
+FETCH_ALLOWED for both tracks with new hash/NO_JOB_RUN. This proves an entry
+path, not successful collection or current executable qualification.
+
+The subsequent pending source candidate b0→827 restored249 target rows, but
+the author's can_seed0 probe had unset ZEUS_PRIMARY_ROOT and did not seal an
+exact cut. Do not label that probe alone a live physical-source failure.
+An independent bounded RO cut20:22:25.961291Z used actual PRIMARY_ROOT
+`/Users/leofitz/zeus`, actual static root and FORECAST mode=ro/query_only=1.
+Hong Kong, Chicago and Shanghai Oct1 H/L still served no current providers:
+250 deterministic candidates lacked canonical physical artifacts, and104 HKO
+FND candidates lacked station-response artifacts. These are the first gates,
+before native surface, sea, height or foreign-namespace checks. Fixed60's old
+producers do not write the candidate's new entity/HTTP-receipt relations; no
+new kind or matching body is present in the checked canonical artifact store.
+Parsed-only response-cache JSON cannot be relabeled original HTTP bytes.
+
+Actual private normal DRAIN acquired one deterministic HTTP200 under the
+existing typed-cost/quota/frozen-run path: original IFS raw2516785 remains
+whole-tuple equal, raw INSERT0, new entity2af538a1… and receiptbd71711e… make
+normal serving recover at20:37:49.467633Z. Local static snapshot has its own
+new possession, and original source issue12Z is unchanged. This is one real
+input-path proof, not every city/ENS/public certificate. One real HKO200
+first exposed a same-issued request-context conflict (old metric-local
+context versus new response-SHA-as-request). Integrator owns the bounded
+HKO-only repair1607759fd; shared BPF conflict guards remain unchanged.
+Retained-byte replay uses only the completed-file possession bound, not an
+invented exact HTTP fetch timestamp. An additional authorized real HKO200
+has issuer20:50Z, read completion20:52:31.680268Z and canonical INSERT
+20:52:31.682705Z; old H/L rows remain unchanged. New Oct2 H/L31/27 serve,
+while a legacy HIGH row with SQLite second-precision recorded_at exposes
+an additional candidate precision-order rejection under review. No global
+asset qualification or final normal RESET is inferred from these components.
+
+Earlier fixedc3 candidate `6fd7960cd71a27e022871980b835aab5d03e356c`, tree
+`5a69ad8cf4d555f0f306f910711dcb44aa08cc60`, added approved W3 native-fixture
+fdd3, C11/E1 test-only deltas and
+FAST consumer routeab4, permanent bd2 actual FAST/JIT tests, the four-component
+international HOMR parser series, and headeraf15/reader0c59 test-only deltas
+to candidate565. Actual nofast/FAST public2 pass10.88s at parent582286
+(`/tmp/zeus-parent-c3-kord-legal-native-fdd-public2.xml`); the native collector
+captures full00Z at08:05, uses prior08:15/FAST08:20/cut08:25, and rejects
+06:40 partial-safe/08:05-minus-one-microsecond as full native possession.
+External download/extraction is controlled JSON, not field GRIB; served2/4
+partial and original OM00:10 clock remain explicit. Earlier mini021b/d9 at
+05:55/06:05 proved quantity/controlled shape/public, not native execution.
+C11/E1 actual changed12 pass19.69s (`/tmp/zeus-parent-c3-c11-e1-changed12.xml`);
+no new wide result
+is inferred from these fixture repairs. Actual candidate565 component/HKO,
+facts-runtime and controlled quantity-public smoke142 passes; legal native
+JIT is now independently accepted through permanent bd2 actual canonical
+ENTRY/HELD/REDUCE/JIT3; parent5696 config/ground plus bd2 combination263/263
+passes30.39s (`/tmp/zeus-parent-c3-bd2-homr-components263.xml`). True old32→new33
+normal queue RESET is separately critic-approved below. Earlier actual SQL-frontier/current-caller50
+and cf424 runtime31/money25 are preserved at their exact prior fixed trees,
+not relabeled newc3 results. These are not deployment or all-city acceptance. Earlier5eac
+rebase checkpoint: parent
+`8c9977ff5ce8d7e7c47aac30b1eecabc4da8028e` rebased 74 task commits onto
+fixed `5eac1c2cee88ed1218c4bd95aff70bb2250e2502`. Only the reviewed event
+revision and materializer-test conflicts were resolved: joint survival29 /
+resolver28 `smooth_center_bias_observation_clock_v1`; old clock/smooth28/27,
+diurnal27/26 and land26/25 attribution is parsed and bound without relabeling.
+The actual tree differs from the unresolved merge projection only at those
+two approved hunks. Source preservation is not approval of external fitted
+`b(h)`; its conflict with the operator's probability law still blocks deployment.
+
+### Current unclosed acceptance ledger and responsibility
+
+Source FAST routeab4 is now parent-admitted; actual component32 pass2.75s
+(`/tmp/zeus-parent-c3-fast-route-ab4-component32.xml`) and legal native public2
+pass11.68s (`/tmp/zeus-parent-c3-fast-route-ab4-public2.xml`). Qualified current
+FAST carries its own likelihood and returns typed NOT_REQUIRED for generic
+AWC/Ogimet/revision-survival conditioning; ordinary missing-history behavior
+is unchanged. Both process caches include the narrow consumer-route namespace,
+with joint33/32 unchanged. Independent bd2 permanent actual ENTRY/HELD/REDUCE/JIT
+tests are parent-admitted and actually checked. Old32→normal queue→new
+certificate RESET is critic-approved: old post2 remains policy-invalid, normal
+queue succeeds with new post3/current33/unshifted policy, two-purpose repeated
+public/HWM and processed-seed coverage restore. Original9 immutable-table
+prefixes/25 owned files/source00Z/capture08:05/expiry10:15 are unchanged.
+FAST-filtered cohort SQL is only[3]; bare same-family SQL legitimately includes
+ordinary noncarrier1 plus new3, [1,3]. This proves zero-bias/no-policy old-cert
+recovery, not a nonzero historical-loss reconstruction. Source-route acceptance
+does not make the three known neighboring old pricing fixtures pass.
+
+Headeraf15 and reader0c59 are admitted only as their own deltas at290db22da.
+Actual FAST6 passes8.95s (`/tmp/zeus-parent-c3-reader-fast-six-layered.xml`):
+index16 has two normal V2 public/HWM positives;15/17 retain four format cases
+and stricter held-pin single-fault component negatives, not full-wrapper
+negatives. The header's ordinary extractor equals the original anchor exactly;
+missing/zero-offset negatives still reject. This does not restore Shanghai59.
+The six governance files are byte-equal across this integration, with empty index.
+Approved A2 own80bbe is subsequently admitted at8873853fc, preserving af15
+and every original owner assertion. Actual two owner cases pass5.99s
+(`/tmp/zeus-parent-c3-shanghai-owner-a2.xml`); the separately reviewed three
+normal neighbors are not unnecessarily rerun. The fixture uses new Sep30 HOMR
+capture and actual canonical23:00 possession with Oct1 forecast inputs/Oct2
+target, not a retroactive June source claim. No new wide count is inferred.
+
+Subsequent approved own-delta checkpoints: 2a52 data/normal binding atf212949
+passes new4 (`/tmp/zeus-parent-c3-international-homr-binding-public-reset4.xml`);
+3eb→dda7→fa7→645 at70f584 passes600 pricing/events6.30s,32 queue/policy40.45s
+and10 target-date1.55s (`/tmp/zeus-parent-c3-fast-target-policy-pricing-events.xml`,
+`/tmp/zeus-parent-c3-fast-target-queue32.xml`,
+`/tmp/zeus-parent-c3-fast-target-date10.xml`). A25 generic clock/owner/ledger/lock
+fixtures, including own dd6f2761d793f1254ee3ce2dae715428c03c2d55→2fbed10,
+pass exact28 with normal3 neighbors36.96s
+(`/tmp/zeus-parent-c3-shanghai-A25-normal3.xml`). Every original case/assertion
+is retained; B24 source/current-state/math, C8 historical WU/dual-source and
+D2 elapsed-role obligations are not covered by this generic migration.
+
+Own ef9 observed-extreme prerequisite is admitted and actual1 passes4.16s;
+own f7f71c conditional/no-swallow B9 is admitted and actual9 plus observed1
+and normal3 passes13/13 29.76s (`/tmp/zeus-parent-c3-shanghai-B9-normal4.xml`).
+No HOLD80fc fitted-mixture expectation is copied. Remaining B13/C8/D2 and
+the no-live-diurnal HIGH stay open. Own59d6 reader clock6 and f347 W3 money10
+are admitted and actual16 passes33.62s
+(`/tmp/zeus-parent-c3-hko-clock6-money10.xml`). The money comparison uses normal
+current kernels and explicitly synthetic quote/holding/wealth twins, not old
+876312 economics; instrument-only rounding-safe examples remain HOLD on both
+sides. New no-mixture34 will require this money relation checked again.
+Own c0bcf98 normal native/public reader4 is admitted and actual4 passes7.53s
+(`/tmp/zeus-parent-c3-shanghai-reader-normal-native4.xml`); collector/native
+structure eligibility alone is not execution authority, while actual public
+and HWM are separately checked. Remaining reader/seed/staleness cases stay open.
+
+Float32 native-cell integration own8d645a9b58a35877ac5d22d864c4868affb41aed
+is approved with the exact615d/aa7 script/guard union as a dependency: original
+three real native/API producer counters fail, corrected composed304 pass89.52s
+(`/tmp/zeus-critic-float32-exact-composed98.xml`; despite its filename, actual304).
+Only API representation equality uses1e-4/mod360; native index/claimed fields,
+own bytes, source clocks, height/SEA/ground/as-of gates remain. Own cb0b2 HWM
+repair is also approved: retract only external39-line numeric new-cycle alias,
+restoring the parent production blob and normal scoped rebuilding. These are
+now parent-admitted after the reviewed fixed49ac private rebase; actual normal
+Float323 and HWM6 pass above. An isolated8d cherry-pick onto c3 still lacks its
+union dependency. This is private composition proof, not live deployment.
+
+The operator explicitly chose to keep the system running and load only after
+all repairs are complete. No new-entry pause, early load/restart, live authority
+change, venue action or deployment is authorized by this private candidate.
+
+Official26 discovery originals are now retained under the existing evidence
+directory `docs/operations/current/evidence/homr_station_reference_discovery_20260930/`:
+23 body/receipt pairs, original summary and three reused body/receipt pairs,
+53 files copied byte-for-byte without rewriting original URLs, capture clocks
+or the summary's private source paths. Summary SHA256 is
+`0cc70362c814542acd84aec32393fd974a8e590d450a466ec1c9cc96d86ca7c1`.
+The original directory is `/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon`;
+preserved filenames map directly to those originals. Eighteen schema candidates
+include the two already-bound stations; seven empty responses and KBKF missing
+typed GROUND remain UNPROVEN. Critic's18/18 pure-schema review does not register
+or grant public-q authority. The approved next bounded plan is explicit16
+ICAO/NCDC/raw-hash/capture binding, exact international URL query-order equivalence
+with duplicate-key rejection, independent parser/data review, then every city's
+normal H/L metadata/archive/new-seed/public and changed-facts RESET. Existing US
+primary-DCP/HKO/WMD rules and the two earlier capture clocks stay unchanged.
+Query/reference/native-cell identities remain distinct; distances below the
+existing screen do not prove temperature-sensor colocation. Actual source/ENS
+or target-role insufficiency remains typed, not forced READY.
+
+Authorized explicit16 component is fixed separately as own
+`6b100557e833c506fcee26401437df229f85f9ed` on approved parentcfe5af4:
+new sixteen unsupported-entity positives are16 RED on the original route,
+corrected complete config369 passes5.14s
+(`/tmp/zeus-homr-explicit16-config-component-full.xml`). Original body hashes
+match the retained captures; US/HKO/WMD parser ASTs are unchanged. The component
+adds only explicit ICAO/NCDC bindings and exact acquired URL-order forms, not
+arbitrary station registration or a temperature-DCP role. Critic review is
+pending. Separate own data `1b3d6e48ed924354605fbf28413c02d4f19b1ce4`
+and private normal canonical archive16 pass3.94s
+(`/tmp/zeus-homr-explicit16-data-normal-archive-first.xml`); full metadata
+regression458/458 passes20.62s
+(`/tmp/zeus-homr-explicit16-data-component-regression.xml`). Each original14:57
+capture is insufficient until the
+normal private first INSERT15:10. New ground facts preserve frozen old-cut
+and original tuples. Per-city H/L public/actual source-admission proofs are
+still open and no new16 data claim is parent-admitted.
+
+The new sixteen-city normal test slice is separately fixed as own
+`28675a25c261290f14b2944a8d88de42de9ad104` on the two component/data commits.
+Actual32 new H/L cases plus original Shanghai/London4 pass36/36 in69.36s
+(`/tmp/zeus-homr-explicit16-normal-public-hl-fixed36.xml`). The first new32
+run was22 pass/10 fail: the shared HK toy32m terrain caused height rejection
+for Chengdu/Chongqing/Munich, and negative-longitude representation rejected
+Mexico City/Sao Paulo before precision admission. The test-only correction
+uses normally captured/decoded whole-OM same-height controlled terrain and
+the actual API longitude range; no source gate changes. Every new case keeps
+its retained14:57 capture, real private canonical15:10 first INSERT, controlled
+12Z forecast/ENS inputs possessed20:05 and decision20:30, then normal seed,
+materializer, ENTRY/HELD public reads, changed-facts refusal and new-certificate
+RESET while old tuples remain immutable. This is pending independent review,
+not field GRIB, temperature-sensor colocation, parent registration or live-q
+permission. Query/reference offsets and actual field-native representativeness
+remain separate obligations; the two original cities are not given new clocks.
+
+Read-only external checkout/local origin moved beyond the earlier fixeddf
+projection to `49acb2fbe643fc20decbdad8fea3d284e2ee1da7`; this task did not load it.
+df→49ac is12 commits/19 paths2082+/58−, including new minimum-lot sizing and
+source-selection/replay behavior. The bounded source review's18 tests pass3.03s
+(`/tmp/zeus-49ac-source-selection-review.xml`) in a fixed Git private archive:
+selection keeps physically eligible configured scheme members, one posterior
+pins one scheme, partial replay uses that pinned basket rather than the latest
+active artifact, and unreadable scheme failure is named per family. This diff
+does not repair fitted diurnal mixing or alter native B/city sigma/typed-ground
+authority. Money/runtime review is loss-owned. Read-only merge projection of
+parenta9c5 onto49ac has script/guard conflicts matching the revieweddf union
+plus a new materializer-test conflict; source auto-merging is not behavior
+approval. The subsequent authorized fixed49ac private rebase is recorded above;
+there is no fetch, deployment or inherited newer-tip acceptance.
+
+This ledger supersedes earlier pending labels only where the later fixed
+acceptance above is explicit; it does not rewrite historical evidence.
+
+| Item | Responsibility / next evidence | Delivery boundary |
+| --- | --- | --- |
+| Four probability suites: retained f07 exact278,172/106; candidate565 diagnostic284,202/82; first final-ea304,213/91 | Approved shared4a942/831f/a8 lawful canonical inputs and all original82 dispositions are integrated; final complete304 has303 pass/1 stale-readiness-role count failure, now closed by only-ownf603 and actual parent targeted3 green | Report303 original passes plus changed targeted3, not a nonexistent same-run304 all-green. Original duties/case mapping and actual producer readiness tuples remain; RCSS full-q expectation is refuted without weakening actual reader/mean/typed-ground responsibilities. No skip/xfail or unsupported-city substitution |
+| Reader / seed test prerequisites | Approved reader tails, ef0 parse reuse,716 canonical first/repeat,2e per-consumer context and seed17 are admitted | Final complete reader/staleness198/198 and original-order5 pass. Earlier195/198 and196 results remain diagnostic history, not erased. No invented204.8 or relaxed native gates. Matching-final FAST V3 real-public source qualification remains a separate evidence boundary |
+| KORD likelihood-v2 / unshifted current33 normal recovery |449＋ab4＋fdd/bd2 current native/public/JIT are admitted; critic independently verified true old32→normal queue→new33 RESET and immutable original evidence | Scoped zero-bias/no-policy recovery is closed; controlled native/ENS inputs are not field GRIB. Retained five source-test failures and full-reader obligations remain |
+| External fitted b(hour) law conflict |e914→8c＋e4 and owning offline-only draft have independent acceptance; true old32 normal queue RESET is accepted | Source repair is not live-loaded by this task. Live still needs scoped certificate/rejection/DRAIN evidence and separate deployment authorization, not PID-only proof |
+| Historical fitted diurnal city-mixture in current probability |source21bd/01e04/6ce/f38 and true old33→normal queue/new34 RESET are independently approved and admitted | Current live stored violation remains separate from candidate:65/96 applied-fit rows at16:15. No task deployment; old immutable evidence preserved; lawful physical conditioning not removed and no order-profit effect inferred |
+| AMBER old/missing fusion consumer | source ownc8→236 independently approved69 and old polluted JIT rejection/fresh RESET; admitted at current fixed candidate with actual AMBER/KORD/HK81 green | Source posterior identity is unchanged; dual consumer cache route changes. This is candidate consumer acceptance, not live loading or a venue-action claim |
+| Current asset normal DRAIN | source native b0/827/3af/9f and integrator HKO160/c432 are independently approved and parent-admitted | Original0target serialization blocker has normal scoped queue/public/repeat recovery proof, not a relabeled coverage version. Six actual-root representative families first lacked entity/receipt relations; real deterministic typed-cost200 and HKO exact-clock200 restore old rows through new proof without renewing their clocks. This closes those producer/recovery mechanisms, not all-city current assets or a newly qualified full HKO ENS/posterior from those two captures |
+| Wrong target-specific FAST channel remains covered after public rejection |paired3eb→dda7→fa7 is independently approved and parent-admitted;645 repairs only original pricing prerequisites | The same-input active RESET HIGH is closed in scoped normal tests. Actual parent600 pricing/events,32 queue/policy,10 target-date tests pass. No claim of all-city source authority or live-loaded repair |
+| International HOMR18 source/data binding |2a52 plus6b100→1b3d→286 are independently approved and admitted; actual scoped config/archive/public292 green | Usability is max(real capture bound, canonical INSERT); old cuts/clocks and original2 are retained. This gives46/54 ground roles, not46 qualified actual forecast/ENS paths, thermal-DCP proof or live loading |
+| SELL-maker statistical witness / lane isolation | HK own e440 antibody is independently approved and parent-admitted; actual final35 includes lawful held taker ranking/JIT plus missing-maker isolation | Current statistical witness data/validation remain incomplete, not declared impossible to repair. Maker live rejection stays; no probe trade, fake sample, relaxed gate or invented witness. Lawful taker eligibility is independently proved with controlled book/wealth, not a field fill or family-wide block |
+| Eight ground UNPROVEN cities | loss's bounded official research found no promotable current body; city owner preserves exact identity/quantity and normal archive→metadata/HWM→seed DRAIN | ZBAA/UUWW/MPMG/ZSQD/LLBG/ZHHH exact HOMR empty; RCSS needs current same-entity CWA/ANWS GROUND bridge; KBKF needs explicit GROUND under unchanged US strong gates. No ARP/BAROMETRIC/nearby/old-airport substitution. Affected held families include UUWW high, ZSQD high, LLBG high/low, ZHHH high; DATA_DEGRADED is not solved exit protection or global freeze |
+| Old HK876312 full kernel /10 scalar raw bodies and historical SF cancel lineage absent | hk_current_causal owns retained kernel comparisons; city_source_contracts retains exact decision/cut evidence; critic separates inference from replay | Historical attribution limit, not a new software gate. Cannot establish a repair→old action/profit counterfactual or reconstruct old NULL fields from newer traces |
+| EV/action law | root/user owns any policy change; critic verifies independent mean EV and mean log-growth/fees/depth/Kelly/mode symmetry; implementations retain current law | Current independent positive-EV requirement is not waived. A negative-EV rejection is not a missing wake; changing this rule requires explicit owning-law authority, not a fixture fix |
+
+Software integration and the final reader order run are closed. Four304's
+unique failure is closed by targeted evidence; unchanged money/source groups
+are not repeated. Preserve the verified HEAD/tree and actual XML scope/counts.
+Current real-source qualification and eight held/source ground
+gaps prevent a complete all-city loading claim. Maker causal witness has a
+bounded product collection/validation gap, not merely an authority question;
+public ingestor normalization/book-predecessor/uncertainty validation can be
+prepared offline without probe trades, fake fills or lower sample gates.
+Historical absent kernels/NULL lineage end as attribution limits. User explicitly
+keeps the live system running and permits loading only after all repairs and
+acceptance, not an early restart justified as prevention.
+
+### Historical-to-current defect correspondence (not causal substitution)
+
+### Stage disposition and code-versus-live boundary
+
+| Stage | Verified defect / own fix / behavioral evidence | Remaining boundary / owner |
+| --- | --- | --- |
+| Current source | Native/ground possession and foreign scope repairs; f458/6b/238/15ad actual USED/anchor twins; HOMR18 typed reference/archive/newmetadata/public H/L and changedfacts RESET; b0/827/3af/9f representative actual semantic native queue/public/repeat DRAIN accepted | Former0targetplan mechanism is repaired, but not all46 real-provider/ENS/new-certificate/public scopes are verified. Eight official ground gaps remain; no temperature-sensor/all-city claim |
+| Forecast calibration | Current shape floor/tau/bias neutrality; aca/62 kernel;449 product residual; e914/8c unshifted and21bd unmixed policies; old33 fitted certificate normal queue RESET accepted | Candidate core742 and consumer81 pass, not live-loaded. Offline fit retained; old876312 kernel unavailable |
+| Admission |12d/35f/6b4/7bdf normal held/empty ordinary/extreme H/L and71/309/17; fixed49 Float32/HWM own repairs and normal6; semantic native DRAIN accepted at fixedea | No live action or full actual46-city forecast eligibility by this task; real entity/receipt/current ENS/new-certificate coverage still needs deployment qualification |
+| Held redecision | ab4 removes wrongly added generic survival/history from strictly qualified FAST; bd2 actual ENTRY/HELD/REDUCE and original witness; AMBER ownc8/236 accepted old polluted witness supersession/new fresh recovery | Remaining reader mapping and current real-source qualification are separate; HK owns reader, source owns asset DRAIN. Eight ground-affected held families cannot be called protected simply because they fail closed |
+| JIT | bd2 actual canonical three-purpose/JIT; full kernel/transport/RNG/YES-NO preserved | Not a venue fill or all-city executable native capture |
+| Queue rebuild | True old32→new33 and fitted old33→unmixed new34 normal queue RESET critic-approved; paired3eb/fa7 wrong-channel same-input active RESET closed; actual native actor/new public/repeat and FP/tamper30 accepted; clocks/immutable evidence retained | Representative normal DRAIN is proved, not every real family ready/newly consumed. Full live source/ENS/certificate matrix and post-load verification remain unperformed |
+| Order execution | Existing price-band/fees/depth/positive mean EV/log-growth/Kelly remain; canonical runtime cancellation/timeout controls | Maker causal-witness bootstrap is unfixed; no fake samples/probe or EV waiver. Old SF cancellation cause remains unknown |
+| Settlement diagnostic | Quote and canonical terminal evidence distinguished;13 terminal versus19 entry sets retained separately | UI7/8 identity unresolved; bounded diagnostics cannot substitute for profitable execution |
+
+Latest live audit is a separate old plane, not this candidate's source proof:
+checked=2026-W40; basis=bounded RO capture14:09:33–34Z and immutable artifact;
+until=recheck-on-use. Loss-child artifact
+`docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930.json`
+has SHA256 `bb6413254306a1eefa03ef630026c8ec86983b6ff4f12b042bf350efe6e388c3`
+(127844 bytes). It records54 configured/50 market-root-active cities,96 latest
+H/L rows allv5 (FAST65/normal29/HKshared2), no missing latest row, but no new
+typed-ground role in those96 config/posterior certificates. Last400 money
+certificates cover64/96;32 is a bounded-window proof gap, not no certificate.
+Only37 detail rows transmitted fully,59 report-detail gaps remain. No current
+public/native authority replay was run; latest READY and current producer BLOCKED
+are not the same evidence. External checkout/bootdfccc is not PID/module-import
+binding or a deployment by this task. Post-deployment same-scope typed proof,
+refusal and normal DRAIN must be demonstrated, not inferred from PIDs.
+
+External c3→dfccc contains two commits and physical/HWM semantic intersections:
+same-grid tolerance1e-4, sea HSURF→0/coastal gate removal, and same-value/lead
+cycle relabel suppression. Clean integration alone cannot approve native-ground/
+LSM/product identity or proof-only/age changes; loss/critic own bounded semantic
+review. No fetch/rebase/live operation is authorized by this checkpoint.
+Latest loss-owned bounded review has9 new baseline controls green and5
+counters yielding2 RED/3 GREEN, not a blanket compatibility pass. Same-value/
+lead NBM04 new simultaneous cohort can be selected while old-cohort shape
+rejects and df HWM returns no supersession (c3 does); H/L follow-up and exact
+own repair remain pending, without venue evidence. External Float32 same-cell
+acceptance versus frozen O1280 capture tolerance is an integration inconsistency
+requiring a producer-to-proof precision antibody; neighbor rejection remains.
+The actual sea-native counter still fails frozen authority, so sea authorization
+bypass is presently refuted, not an established HIGH. These are external
+integration findings, not causes assigned to old HK/SF losses.
+
+Root-authorized Float32 integration repair is owned by city_source_contracts,
+only bucket_transport/BPF downloader/current-target script/precision guard and
+the two existing bucket/product-identity tests. Same native index992022 has
+coordinates40.80843585237258,-73.89204545454544, while the retained API-shaped
+coordinates40.808434,-73.89206 differ1.4545e-5 degrees in longitude. External
+same_grid_cell accepts and neighbor992023/-73.76420454545456 rejects; normal
+frozen capture still rejects at1e-5. Loss's real full O1280 OM counter is retained
+in `/tmp/zeus-dfccc-review.aDV2aY/tests/test_dfccc_bounded_counter.py`, not a
+mocked geometry authority. SCOPE exact IFS9 request/body/native cell. DRAIN
+normal producer capture/metadata; RESET requires actual Float32 producer→capture→
+guard→frozen replay with neighbor/index/request/hash/clock/sea/ground negatives
+retained. No arbitrary tolerance beyond external1e-4/mod360, rounding of claimed
+native facts, fresh reader-created proof, or new coast/ground permission.
+Private city branch `fix/all-city-ifs9-native-coordinate-proof` starts from290db
+with fixed externaldfccc only for development. Two script/guard conflicts have
+a staged union at tree615d3decd2ed0c160730c4d48382bb9eb967650d pending critic:
+normal capture/validate and actual=own frozen proof remain, alongside the external
+coordinate helper. This development baseline is not parent rebasing or repair
+admission; source implementation awaits that union review. Saved HOMR branch
+2a52, all captures and parent six governance paths remain intact. Loss separately
+owns HWM semantic-alias source and its dedicated staleness tests; source_physics
+owns FAST queue/cycle/targetplan coverage, with no writer overlap.
+
+### Candidate565 diagnostic first-cause disposition and new HOMR plan
+
+The completed, non-final diagnostic is284 distinct cases,202 pass/82 fail,
+0 errors/skip,150.63s at565c91. XML:
+`/tmp/zeus-parent-c3-unshifted-diagnostic-four-suite284.xml`. Original f07
+278 cases are all retained; its172 passes have no new failure,24 old failures
+restore, and only role4/policy2 are new. This does not prove that no uncovered
+production defect exists. Remaining82 disposition is8 city-specific RCSS/EGLC
+ground/full-q prerequisite gaps,59 shared Shanghai-input cases,11 HKO legacy
+conn=None/canonical-proof fixtures,3 missing explicit decision cuts, and1 old
+revision enumeration. C11/E1 repairs are independently approved, but no later
+wide pass/fail count is estimated. For59, the independently corrected first
+cause is synthetic precision missing `station_ground_proof` (KeyError swallowed
+by the wrapper into source-invalid), not a demonstrated universal offset failure.
+Missing original integral `utc_offset_seconds` is another real fixture input
+gap; fixing either first gate alone proves neither all59 nor Shanghai authority.
+
+New official evidence opens a bounded, executable candidate route for ZSPD/EGLC,
+not a present VERIFIED designation. Original bodies and capture receipts are
+retained in the loss child under `docs/operations/current/evidence/`:
+`noaa_homr_zspd_station_20260930.json` (+`.capture.json`),53491 bytes,
+SHA256 `9e31964f1cbe8c32561621b9ac4ece77cbe7c700d93ebdca12fdb1e1cfcad5ec`;
+`noaa_homr_eglc_station_20260930.json` (+`.capture.json`),53511 bytes,
+SHA256 `bdb7bbff89109cc591e50421006fa9c1c818d8960eaba497ec309be32f52f31f`.
+Both hashes and receipt fields were independently read locally. HTTP200,
+Date12:52:00Z, bounded GET observation12:51:59–12:52:01Z; file mtimes
+12:52:00.345270/12:52:00.748515 are research-file possession, not canonical
+recording or source-issued clocks. Direct ICAO plus same NCDC entity/location
+and uniquely defined `GROUND` support4m/5.8m respectively. There is no WMO,
+ASOS CM, primary DCP, individual location period or temperature-sensor assertion.
+
+| City | Forecast query / configured settlement reference | HOMR current station location | Query-to-HOMR |
+| --- | --- | --- | --- |
+| Shanghai | ZSPD;31.1433,121.8053; WRH siteZSPD | NCDC30137822;31.143378,121.805214 |11.925m |
+| London | EGLC;51.505299,0.055278; WRH siteEGLC | NCDC30146303;51.505278,0.055278 |2.335m |
+
+`cities.json` and `station_precise_coords.json` query/reference coordinates
+agree for these two rows. Script precision metadata uses City query coordinates
+for grid selection (`download_replacement_forecast_current_targets.py:525`),
+keeps requested/grid/reference roles separate, and the guard independently
+checks reference identity and native-grid-minus-ground height. No city-center
+or wrong-airport displacement is evidenced; small separation is not proof of
+an exact temperature sensor. Existing generic OurAirports3.96/5.8 values are
+not retroactively upgraded by numerical agreement.
+
+Root-authorized implementation plan (source components require independent
+review before normal public acceptance):
+
+1. Add a separate, initial-two-station kind
+   `noaa_homr_international_station_ground_snapshot_v1` and station-ground-reference
+   role in `src/config.py` plus existing config tests. Preserve the US
+   primary-DCP four-ID/ASOS/ASOS-CM/DCP-remark branch byte-for-behavior; do not
+   add fake WMO/WBAN, temperature_station=True, DCP/AGL or verified-sensor labels.
+   Validate one current official station, exact ICAO and NCDC identity across
+   station/location/geoInfo/nwsInfo, unique finite header-matching coordinates,
+   unique official GROUND definition/quantity and compatible displayed feet/metre
+   intervals. Known individual periods, ambiguity or multiple locations not
+   supported by this parser must reject, not silently become undated.
+2. Promote only the two original byte assets into registered config paths,
+   add their typed proofs to existing station registry and config router;
+   preserve all query/reference coordinates and generic elevation fields.
+   Bind approved official GET URL/current=true/exact ICAO/date/qidMod=is,
+   raw SHA and pure facts. Metadata query date equals capture UTC date,
+   not subsequent decision or forecast target date. POR Present is a current
+   station filter, never location `valid_from` or historic ground authority.
+3. Reuse single-body canonical archive/current/frozen/target-coverage APIs;
+   extend only a demonstrated kind-specific seam. No new DB/schema/daemon,
+   endpoint, daily expiry constant or invented auto-GET cadence. As with existing
+   US/HKO undated reference metadata, the snapshot is decision-known reference
+   information and may support a future target, without asserting perpetual
+   physical validity. `12:52:01Z` may be an explicitly conservative GET-after
+   possession bound from the receipt, not an accurate issue/write timestamp.
+   First canonical possession must be the normal archive's actual INSERT now;
+   neither12:48 research reads, POR nor file mtime grants an earlier decision.
+4. SCOPE ZSPD/EGLC city/date/provider ground proof only. DRAIN is existing
+   approved metadata acquisition/promotion plus the normal producer's archive
+   before seeds (`replacement_forecast_production.py:5027–5036`), not automatic
+   network refreshing by `archive_station_ground_evidence`. Newly acquired
+   changed facts drive current/HWM/seed re-evaluation; own frozen old cuts replay
+   their original facts. RESET requires actual normal archive→new metadata→seed/
+   materializer→public ENTRY/HELD positives, missing/foreign/role/unit/clock/
+   query-date/old-cut negatives, and unchanged US tests. If a new freshness or
+   period rule is needed later it must come with an evidenced acquisition owner,
+   not permanent manual blockage or an invented daily law.
+
+Critic's time/role plan is NoHIGH with these conditions; source implementation,
+new config registration and normal public DRAIN still need bounded assignment
+and independent acceptance. Existing source-specific tests cannot borrow this
+Sep30 acquisition at their old cuts: any controlled-cut migration must preserve
+each original obligation. This is not82-suite green, all-city ready or deployment.
+
+Root subsequently authorized this bounded implementation. First source component
+`b9dcfe41f826f62dfd9fd487d4fbf6895974e06c` is fixed on existing city child
+`fix/all-city-international-homr-ground`, based on parentb1e5448f, pending critic.
+Only config parser/config tests/config router and the two exact original assets
+are committed; actual city proof rows remain absent. Pure parser/capture-query
+checks plus unchanged US/HKO checks pass86; complete config module175/175 in4.11s
+(`/tmp/zeus-international-homr-config-full.xml`). US primary-DCP function AST is
+identical to the base. Normal private archive follow-up proves new actual INSERT,
+old-cut/foreign-namespace refusal, no POR backdating and repeat-tuple equality;
+the whole ground module69/69 passes9.56s
+(`/tmp/zeus-international-homr-normal-ground-full69.xml`). These are not H/L
+posterior twins: ground identity is metric-independent. City-specific H/L normal
+metadata→newseed→materializer/public probabilities remain the next acceptance
+stage; no new proof is parent-integrated or called live-ready from these checks.
+
+HOMR candidate self-audit014dc additionally closes six controlled multi-location/
+latitude/longitude representation acceptance counterexamples. Critic then found
+a HIGH in this new parser: official documented missing sentinel-99999 feet and
+its finite compatible converted metres were being accepted as terrain. This is
+not an error in the retained4m/5.8m bodies. Root-authorized follow-up
+`64c5a46a936f4f78daeb66bfc18f2932dee270d4` rejects that numeric string/int/float
+sentinel before adopting ground, while genuine zero/negative elevations remain
+valid. NCEI [DSI9767B section2aa](https://www.ncei.noaa.gov/access/homr/file/td9767b.pdf)
+defines the missing value separately from legitimate signed terrain. Actual
+six RED/four valid positives are preserved in
+`/tmp/zeus-international-homr-missing-sentinel-original-red10.xml`; final complete
+config191+ground69=260/260 pass11.48s at64c
+(`/tmp/zeus-international-homr-missing-sentinel-final260.xml`). US/HKO/WMD original
+parser ASTs remain identical to parentb1. Entire own four-commit component series
+is now critic-approved260/260 and parent-admitted at5696; actual parent
+config/ground plus bd2 combination263 passes. This supersedes the earlier
+pending component labels, not the separate data/public obligation. Own
+`2a52bfe1bcf9a4e370e538e0fea96bfe7549f058`, only station_precise_coords two
+proof rows and existing ground tests, is fixed on64c with final264/264 pass18.19s
+(`/tmp/zeus-international-homr-data-and-normal-public-reset264.xml`) and awaits
+critic review before parent admission. Actual registry-derived claims equal
+the private test claims; original assets retain both exact hashes. Normal
+capture bound12:52:01→actual canonical firstINSERT13:00→cut13:05 yields H/L
+public ENTRY/HELD plus independent Gaussian CDF for both cities. Synthetic
+later ground facts capture13:06/INSERT13:06:30 preserve old-cut13:05 replay,
+reject old certificates at13:07, then normal provider recapture13:08→seed/queue/
+materializer13:10 restores new public certificates. Old posterior/anchor/ground
+tuples and repeat-archive clocks remain unchanged. Weather/static/ENS inputs are
+controlled fixtures, not field GRIB or all-city/live acceptance.
+
+### Historical-to-current correspondence table
+
+| Defect / nearest retained evidence | Current reproduction and twins | Fix / behavioral antibody / normal RESET | Residual inference limit |
+| --- | --- | --- | --- |
+| HK measurement boundary/variance mismatch: original entry698766/699271 kernels replay11 dimensions; current source699798 raw32.9 | Normal same-cut boundary32→32.9 and generic.28→city.1 explain the separately measured point-q differences; H/L,C/F,YES/NO,ENTRY/HELD/shuffled preimages | aca019＋62cab＋cfbd/ef0＋584/d447; actual parent105/public3 and later normal source/money cross-checks; joint31/30 old-cert cache refusal/rebuild | Old876312 kernel missing, so modern same-cut repair is not proof of its historical q difference or profitable exit |
+| Current product residual collapsed to FAST itself: KORD WRH57.2F versus physical T14.4C | Original WRH/AWC writers show signed native-product-minus-FAST residual; F/C,H/L,causal/source/unit/invalid-value twins |449 component45＋joint32/31 old identity refusal; normal KORD public/JIT/newseed/cache RESET is pending HK fixed tests | Modern confirmed defect, not established cause of the three old HK losses; component evidence is not public q |
+| ENS success TTL hides a new usable run: Milan12→18 pin; Moscow stale51 is a distinct observed lane | Real private writer→canonical HWM→normal refresh; incomplete/over3h old evidence, H/L,future/unusable/no-oldidentity/retry/quota/DET0-cost twins |1b08→8a→2c＋7742; actual52 strict new51/readback/conditional-shape RESET | No historical per-city fetch cause was persisted for the original Milan/Moscow window; do not assign every old miss to TTL |
+| Native/ground identity or possession borrowed from latest/foreign evidence | Own-byte O1280 mutations, foreign same-ID DB/scope, ground A→B→A, old-cut/new-cut and H/L tests | f458/4d8＋single-ground7047＋fd8/1169/91bc＋6b/15ad; normal USED/anchor public2 and actual YES/NO; typed official HKO/HOMR/WMD assets | Some missing-proof cities remain genuinely unsupported; controlled weather/ENS bytes are not field GRIB or all-city authority |
+| Knowledge cut confused with known physical target interval | WMD dual-body late bridge/known future period, compatible versus target-crossing H/L/applicability twins |8c/8b＋814/26b＋389/83; normal archive→seed/queue→LOW public/new-CDF RESET without renewing source clocks | LOW controlled-input chain proves its scope, not HIGH whole-q/现场 GRIB; no retroactive source possession |
+| Proof recovery/current request blocked by absent mutable transport or unheld admission | Precision/manifest loss and before-capture H/L; held/empty×ordinary/extreme×H/L exact debt | manifest1031/670/cd2＋1b0/cc44＋12d/35f/6b4/7bdf＋extreme114; actual71/309/17 source→durable/HWM/newseed/public RESET | Repairs were not live-loaded by this task; no claim old HK action changes |
+| TotalLoss quote evidence stayed queued/blind: original five incidents, later three canonical settled terminals | DEGRADED diagnostic/stop/worker-identity/cfg-path counterexamples; no quote episode relabeled settlement |9fb/6c40; actual248 bounded diagnostic/control tests | No service recovery or runtime loading by this task;13 terminal and19 entry sets are distinct, UI7/8 mapping unresolved |
+| Old SF completion/cancel attribution gap; current test controls lack canonical prerequisites | Old Sep28 cuts2596–2614 missing source/stage; current ff090 attribution7 pass. cf424 merged3 tests initially red from stale fixtures, not a new production defect |1472 test-only real lineage/deadline/count/scope; actual31 cancellation/timeout/finally/scoped controls. Current attribution omission is refuted | Historical cancel source/generation/imported SHA remains unknown; tests do not prove old scheduler cause or rewrite economic receipts |
+
+Point/draw exact-once, target-day/postmidnight geometry, current-sigma/floor
+neutrality and no-cap SQL selection retain their earlier per-commit evidence
+in the parallel recurrence table below. Their historical matched cards or
+none-observed status do not authorize attributing each old HK terminal to a
+modern reproducer. Maker/taker economic proposal coverage is separate from
+YES/NO point complementarity and remains subject to the bootstrap/EV rows above.
+
+Actual new-base checks: 84 joint-revision/trace nodes, 9 selector/economics
+nodes and 17 real HELD/SELL/normal-writer relationships pass (110 scoped,
+not a full suite). JUnit: `/tmp/zeus-parent-5eac-joint-trace83.xml`
+(actual count84), `/tmp/zeus-parent-5eac-selected-economics9.xml`, and
+`/tmp/zeus-parent-5eac-actual-relations.xml`. Stash `3e588c9423c27dbbce14a288e56a8c2a9dc70a54`
+was applied, never popped; older75c/506 stashes and all18 original captures
+remain. PLAN/scope retain exact pre-rebase dirty bytes; registries retain the
+automatic distinct-key union with upstream. No live checkout or service action.
+
+The independently approved source bundle is being integrated, not silently
+inherited from its old tests: e02's exact test insertion preserves the existing
+fingerprint38 and stream59 lines; 2d is already present and is not duplicated.
+The22 clean subsequent deltas end at parent `edeec7a3114088e7def4de3a5583eb84ebaf4086`,
+tree `922386dd5cef08752d7ed6a053fe11bdd0b5336d`, equal to sequential exact-base
+preview. Final b998's owned test hunks and required minimal test prerequisites
+are fixed at `15ad00fc59b840d899cc13a3908312f4567f845f`: critic mechanical/
+outside-AST review and actual new-base USED/anchor-only public2 pass. Six approved
+WMD module/caller/warm/relationship deltas end at parent
+`9a229904d0f2dec0f1872a45ca2f04fced54ed58`; actual USED/anchor/WMD public3 pass
+21.29s (`/tmp/zeus-parent-5eac-ifs-wmd-public-combined3.xml`). LOW known-period
+RESET is covered with controlled forecast/51-member inputs, not HIGH or field GRIB.
+Parent `8eb034dae31b7269db4077c0b91f47736b993975` additionally contains only
+approved e749 imports and HK aca019→62cab→cfbd→ef0 deltas; joint31/30 retains
+all smooth/source-clock/instrument/native-boundary suffixes. Public3 still pass
+21.71s (`/tmp/zeus-parent-hk-math-ifs-wmd-public.xml`); HK full-kernel/context
+tests initially needed the owner's fixture migration. Independently approved
+W3-only `58470aa82685e539b0434698bd1969ee03e50b3a` was exact-preview/picked at
+parent `faa7ad5ad3ae6a21351af9aeb16fa06c299078a2`, tree
+`699c9f2c9b71c430190d1019c152b3dfc08d8df2` equal to projection. Actual same-parent
+full HK105 plus USED/anchor/WMD public3 now pass108/108 in66.16s
+(`/tmp/zeus-parent-full-kernel105-and-public3.xml`): full kernel kwargs/point/draws,
+source/native/ground/namespace, family-scoped context refusal and actual trace
+relationships are composed, not inherited from author-only results. Forecast/
+ensemble weather inputs remain controlled, not field GRIB or live deployment.
+
+The one fixed9a four-suite frontier is127 pass/118 fail/33 setup errors, not a
+whole-suite pass (`/tmp/all-city-mixture-evidence.3jbVLa/approved-5eac-bundle-four-suite-frontier.xml`).
+Two import-only lines in approved e749 remove the33 transitive-fixture errors;
+the author's rerun is18 pass/15 substantive fail. Approved0e559 no-cap winner
+case was never integrated (new-name parent history has no insertion/revert),
+not intentionally retired; its exact case identity/necessary hunks are being
+restored by the fixture owner. Counts alone cannot establish the same case set.
+Approved baa55→7adad (lawful no-cap identity) and generic reader8f75 are now
+integrated at `2fb6b022dca21ceae95fbba98600a31dca59801c`. Actual matching set is
+22 distinct pass: sigma10/RMF6/reader2 in29.16s plus endpoint controls2 and
+normal public2 in17.97s. JUnit `/tmp/zeus-parent-fixture-no-cap-and-reader22.xml`
+contains18 (filename is not evidence of count); the remaining4 are in
+`/tmp/zeus-parent-fixture-no-cap-remaining4.xml`. Existing520 invented providers
+are replaced by legal winners below diagnostic noise and a real LIMIT512 mutant,
+not renamed into verified providers. No Shanghai/NOAA/WU reader purpose is waived.
+
+Approved extreme b04→66a→114 is integrated independently; its three files exactly
+match fixed114, but actual parent305 is301 pass/4 fail38.72s
+(`/tmp/zeus-parent-extreme-owned305.xml`). All four first causes are the test
+external-static HTTP fence rejecting new approved projected HRRR/NBM domains;
+no request left the fence. Author114 had the older regular-only native profile
+module. The owner independently reproduces4 RED and is supplying actual controlled
+OM bytes/normal decoder for the approved domains, not removing the fence or
+claiming author305 as parent proof. Cycle-only0949 follows at parent
+`7421cedd9e1cd4d398e0412359040c1d6fa147ae`; actual original3 identity controls
+pass6.65s (`/tmp/zeus-parent-cycle-identity-controls3.xml`).
+Local-proof normal producer/public closure1b0b02600f545d590ca3f009068f6ae0fcd6e73e
+initially failed independent HIGH precision/manifest-loss and MEDIUM preflight-
+as-of H/L counterexamples (six RED). Follow-up
+cc44abe30f8f7c9125a6d9708b50dbf6823d060c closes all six and is independently
+admitted with59/59. Only these two own deltas were integrated at parent
+`094f8501dc0a35c1dcf14c42bd286ddda97ba3a7`, tree
+`afae44c14e652d9c91c35b6b9099dd0a65e4e5e7` equal to the exact preview.
+Actual parent59/59 pass38.42s (`/tmp/zeus-parent-local-proof-59.xml`), followed
+by actual HK full-kernel/context8 plus USED/anchor/WMD public3,11/11 pass35.05s
+(`/tmp/zeus-parent-localproof-hk-public11.xml`). Four governance dirty hashes
+are unchanged by the pick. Missing owned transport is
+restored from causally possessed canonical local proof without rewriting the
+original source tuple or age. These newly caught recovery/cut defects are not
+evidence of old HK loss cause; unheld-provider production admission remains
+independent. Module139 and extreme305 were not substitutes for this check.
+Approved projected-fence test2a3005 is now integrated at parent0794b7919;
+actual extreme305/305 pass29.96s (`/tmp/zeus-parent-extreme-qualified-owned305.xml`).
+Registered projected domains use real controlled OM bytes/normal decoder;
+unknown URLs/nonGET still fail before transport. This closes the four fixture
+failures, not normal local-proof consumer recovery. Generic materializer six
+controls a5a0 were independently admitted and exact-preview/picked at parent
+`8e894d51c339bd807fad87998b6cbefdd120c69c`; their own actual check is separate.
+Those six exact controls pass6/6 in10.37s
+(`/tmp/zeus-parent-generic-physical-controls6.xml`). Latest approved test baseline
+is parent `f07ee206da4d11304cc4f5516e8c9a37cb8a472a`, tree
+`a2eebdbaa85aafcfb0a682f64555c2c488276e46`, after only queue5fae and
+normal-single-ENS/V2-reader d447 exact deltas. Actual original queue set7 passes
+as six14.39s plus the one typed-V2 structural control3.60s
+(`/tmp/zeus-parent-normal-queue7.xml`, actual6; `/tmp/zeus-parent-normal-queue-v2-control1.xml`).
+The independently approved109 set is actual parent105 kernel/default plus
+newV2-reader2=107 pass51.20s and original missing-grid reader2 pass8.46s
+(`/tmp/zeus-parent-single-ens-kernel-and-reader109.xml`, actual107;
+`/tmp/zeus-parent-single-ens-reader-grid2.xml`, actual2). This includes final
+readiness baseline/source-run/raw FK assertions; filenames never replace the
+case set. Default V3 and normal hourly V2 share one normal51-member capture,
+controlled weather/native inputs and actual namespace/public purposes. No
+real GRIB, field/weather truth, all-reader or live deployment claim follows.
+LA/Milan/clock test-only eb7c0188→0f38a01a→528ebecc→23a1cda9 is admitted and
+integrated at parent `f70447884635416607b8cb3d93b029e1ca68030b`, tree
+`f6c22850e9371f5b0e0bcf22995537641cc70d49` equal to preview. Actual14/14 pass
+26.64s (`/tmp/zeus-parent-la-milan-clock14.xml`): LA eight original controls,
+Milan two exact regional-horizon cases, normal USED/anchor public two and endpoint
+controls two. The review-caught HRRR horizon MEDIUM is closed by lawful Oct1
+13..36h conditions within48h, not widening model support. Later-stage canonical
+INSERT clocks advance normally without updating old raw clocks. e2f SQL-frontier
+restoration remains the fixture owner's separate reviewed-delta lane.
+The fixture owner's one fixed f07 frontier is278 exact cases:172 pass/106 fail,
+zero setup errors/skips in127.33s. Collection has missing0/extra0; original276
+identities retain the approved no-cap replacement and add only anchor/WMD2.
+Cycle/sigma/Kelly modules pass; all106 failures are in materializer. JUnit
+`/tmp/all-city-mixture-evidence.3jbVLa/approved-parent-f07-four-suite-frontier.xml`
+and `approved-parent-f07-collected-nodeids.json` retain the exact set. Initial
+first-cause groups include44 source-response refusal and18 absent override
+(RCSS4/London4 actual ground gaps, Milan2/LA8 fixture prerequisites), not a
+blanket baseline exemption. The owner is classifying the remaining causal
+assertions from this fixed result without another broad rerun. Unapproved
+local-proof source1b0 is not included or required for classification.
+
+Reader-only bc9cad39abf6432ebc8111b1b8962c071af67200 initially missed the original
+bare-label refusal purpose: removing content alone retained the operator. The
+one-line987ec10ae1bf0ff0e3b35a49e59a9243baed0ca8 removes both markers; independent
+six normal GREEN and matching six mutant RED close this test-purpose MEDIUM.
+Only these two own deltas are integrated at parent
+`034a55c5a2109bd8c699f4aa613a294b6c412f7e`, tree
+`187957a2b62da92e730ba3476fcaad6a2dd804a0` equal to exact preview. Actual affected
+58/58 pass74.01s (`/tmp/zeus-parent-reader-generic-purpose58.xml`). The original
+carrier case-table expression AST is identical; WU six and ordinary non-carrier
+two remain explicit pending obligations, not skipped or replaced by HKO.
+
+Normal-unheld-third-provider test6b4ab804 originally had four RED after healthy
+native/operator prerequisites. Scoped35f11336 admission now has independent
+four GREEN, but its exact parent preview exposes missing prerequisite12d7378a:
+the current parent archive candidate remains a two-tuple whereas35f's base
+already has classifier reason/raw-ID, exact tranche and network-capture args.
+No take-theirs or developer ancestor is integrated. Independent review then
+admits12d's two own paths plus normal-consumer7bdf760c: actualheld/empty,
+ordinary/extreme and H/L eight normal-public relationships and old four controls
+pass. Exact12d→35f→6b4ab804→7bdf760c deltas end at parent
+`8941dcdb2336fbc0070ddcf23d911f0a69d5411a`, tree
+`5f956358830802974c3d361d116a8a03f2b1d745` equal to preview (three paths only).
+Actual network combination309/309 passes31.98s
+(`/tmp/zeus-parent-normal-unheld-network309.xml`). Actual same-parent normal71
+passes78.07s (`/tmp/zeus-parent-normal-http-localproof71.xml`), then HK kernel/
+context8, normal H/L Position/EXIT4, venue/runner-up2 and original public3 pass
+17/17 in50.35s (`/tmp/zeus-parent-http-drain-hk-exit-money17.xml`). These are
+normal producer→source/HWM/seed/queue→new certificate/public and selected money
+relationships, not inherited module admission. Controlled weather/ENS/native
+conditions, missing city-source data and external runtime/strategy authorization
+are not thereby promoted to all-city or live authority.
+
+Independent manifest-module series1031→67061→cd2df was exact-base previewed
+and integrated at `24d3be3e00b0e58f58afe62b6817b61c78753f9e`, tree
+`5cd8c9186479eb51c68269cbd06b5d4bcd32dd8a` equal to preview. Only the
+two existing module/test files changed. Actual new-base139/139 pass2.36s,
+`/tmp/zeus-parent-5eac-local-manifest-module139.xml`; default writer/source
+clock unchanged. This closes module admission, not the normal caller/HWM/seed/
+public RESET. New-base native/ground/frozen/capture-debt primitive107/107 pass
+9.34s, `/tmp/zeus-parent-5eac-native-ground-primitive.xml`, also not full q.
+
+ENS release fix is separately fixed at1b08→8a968 (source/cost hint) and
+test-only `2c5484638deb07e28cf7126f93e123d25da58ca2`. The critic's actual
+old-member-loss RED is reproduced against1b08; repaired8-node normal
+writer/HWM/refresh/shape checks pass. All46 quota-module nodes now pass using
+actual private parser/writer/RO readiness, including four prior fixture failures
+and HIGH51-positive before LOW faults. `/tmp/zeus-ens-quota-complete-fixture-final.xml`.
+Critic approved this46-node source/fixture scope. Actual new-parent combination
+was45 pass/1 fail: an untouched shared-cache fixture lacked the required72-axis,
+28800 offset and actual body/network callbacks. The same original test also fails
+on the exact pre-ENS source; qualified test-only0b9 preserves the original4+1
+HTTP assertions and is independently approved (1pass1.32s, egress fenced).
+Only that cache test delta was integrated at parent
+`08af582bd4cbf3f927b9113f11238feabf6f97c3`; exact new-parent quota combination
+now passes46/46 in3.00s (`/tmp/zeus-parent-approved-ens-quota-cache46.xml`).
+A separate genuine MEDIUM was found in the first cost hint: old51 crossing3h
+loses its causal run identity and successTTL hides the known newer run. Original
+source normal-entry RED is retained at `/tmp/zeus-ens-overage-original-source-red.xml`;
+child fixed `7742ba7efae029510582c8d4a985975fc4166495` reads exact-scope causal
+identity without old q freshness/window permission, keeps new51/readback/backoff/
+quota, and passes52 whole-module nodes (`/tmp/zeus-ens-overage-cost-module52.xml`).
+Critic independently approved normal14 and whole52; exact preview/pick ends at
+parent `8105365ffe1296ffdbad0b1743cc0d156a374788`, tree
+`5deb94aae285bd373a731700ab72bfd31c72251c` equal to projection. Actual new-parent
+whole52 pass4.90s (`/tmp/zeus-parent-ens-overage-fixed52.xml`), closing the
+overage cost-hint MEDIUM without weakening final51 q permission.
+Cost permission is not probability permission or
+proof of Milan/Moscow's historical order counterfactual. No source capture or
+old row clock is renewed.
+
+One bounded current runtime/HK refresh, checked07:35–07:38Z Sep30: main81575
+and forecast46552 have cwd `/Users/leofitz/zeus`, canonical DB handles and
+heartbeat07:34:55.730611 /07:35:20.922735. Actual checkout/local origin ref is
+5eac1c2cee88ed1218c4bd95aff70bb2250e2502; loaded_sha generated05:08:39 labels
+git_head only and has no PID/import binding. Canonical city `Hong Kong` is
+verified by the three known position PKs. Indexed after04:27:18.181314 ENTRY
+fills0, current nonterminal HK0; the old3 remain settled, not current held.
+Sep28–Oct2's15 HK position IDs also have no new EXIT_ORDER_FILLED after that cut.
+Latest unfinished global6791@07:26:46 is DEFERRED_PREEMPTED. Latest finished
+NO_TRADE6789 / decision880578@07:25:01 has a real fresh book and five HK family
+snapshots (Sep30 H/L, Oct1 H, Oct2 H/L), each complete probability witness and
+no probability-ineligible HK entry. Sep30 H/L receipt q_version is still
+v28_smooth_center_bias_v1, not task joint31/30. NO_CURRENT_EXECUTABLE_POSITIVE_ORDER
+does not prove HK no-bid/bad-q; detailed BUY economics were not further decoded.
+This snapshot does not overwrite original entry/held/terminal causal evidence.
+
+New external-runtime-only refresh, checked09:21–09:23Z Sep30: actual live cwd
+`/Users/leofitz/zeus` and checkout/local origin ref are now
+cf424e239e106d476cc533e7526ef2acfb436127 (no fetch). From fixed5eac there are only
+ddaa41c5ed0c040e82ffe728b66eed5df5a6db94 and cf424's test follow-up: eleven paths,
+production changes only reactor/main/exit-lifecycle monitor handoff and cut
+cancellation coordination. Probability/math/source production paths are
+unchanged. Exact task-file intersections are test_topology and W3, while
+reactor/monitor/exit/wake have semantic integration exposure. This does not
+attribute the original SF delay to the new implementation.
+Main53073/forecast51874 have live cwd and canonical DB handles; matching
+heartbeats are09:21:33.237572Z/09:21:36.648404Z. Loaded-sha cf424 generated
+08:09:16.317285Z identifies git_head, not PID/import-bound code. The current
+settings file SHA is d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae,
+also not a loaded-config assertion. Completed global decision880933 at
+09:22:04.511772Z and monitor880934 at09:23:03.574989Z have no explicit q-version,
+semrev, PID or loaded-SHA fields in their retained artifacts; that binding stays
+unknown. Current cut6966/6965 are incomplete at scope_scan with
+generic_completion_fence, not evidence about old SF causes. No live mutation,
+rebase or task deployment follows this audit; external fitted-b policy conflict
+and maker-bootstrap authorization remain separate operator blockers.
+
+Read-only fixed-cf424 rebase preparation from parentf704: all141 task commits
+replay cleanly in a temporary index, projected tree
+`dd0e0e2be0e3bb8ce0d22b7472b15dfff55c7fde` equals the clean merge-tree projection.
+No code conflict or actual branch rebase occurred. Exact four dirty governance
+hashes and18 original untracked captures remain unchanged during preview;
+capture-list/body aggregate SHA is44098d92018218f54c69b72b2f9735e86c95cd8fa9527a650c7833897cede8d4.
+After critic COMMENT/no design HIGH and explicit worktree-only authorization,
+actual rebase ends at1ee0eb11 with that exact projected tree. New stash
+73c86766661dcea6296b1188559f4d3f7995da45 contains only four governance paths and
+is applied, not popped; original506/75c/3e588 stashes remain. source_rationale/
+PLAN/scope bytes match the stash; test_topology's dirty delta is identical apart
+from hunk positions and keeps the external monitor-cut row. Projection diff-check reports only preserved
+raw HTML trailing whitespace in config/hko_station_metadata.html and its exact
+evidence copy; code/non-raw paths pass. New monitor/cut/capital/HOLD/SELL/trace
+behavior is actually checked on the new base: exact runtime30 yields27 pass/
+3 fail7.21s (`/tmp/zeus-parent-cf424-runtime-cancel-capital30.xml`); money17 plus
+the specified additional current-wealth/deadline/preflight parameter cases is
+25/25 pass51.00s (`/tmp/zeus-parent-cf424-hk-exit-current-wealth22.xml`, actual25).
+The three failures are not waived: fake exact publisher lacks canonical V4
+lineage, and two capital tests supply a FakeConn incompatible with current RO
+deadline protocol. Purpose review requires actual private canonical position/
+lineage and pending-command count/scope, retaining timeout-zero-apply and
+lock/handoff/reset assertions. No production fix or restored retired monitor
+API is inferred. Source/BPF/math production is byte-identical to fixedf704;
+71/309 remain prior-fixed-tree checks, not falsely relabeled new-base runs.
+Reader b04f81e437f242ab02071c42ef923e2dad581cf9 is admitted at parent991677:
+actual generic/public/grid58 and normal-noncarrier2 pass in two separate runs
+(`/tmp/zeus-parent-cf424-reader-noncarrier-generic60.xml`, actual58, and
+`/tmp/zeus-parent-cf424-reader-noncarrier2.xml`, actual2). WU fast6 remains pending.
+SQL-frontier593→d5 is independently approved after its optional-request
+compatibility fix; only the two own test deltas are admitted at5cfccbbc.
+Actual50/50 pass56.56s (`/tmp/zeus-parent-cf424-frontier593-current50.xml`)
+uses the critic's exact distinct node set, including normal W3 kernel4 and
+noncarrier2. No developer ancestors or governance changes are committed.
+CLI b5a78b62b5fa9ed99d33cb2a9557f2cb5a77e84a is admitted as its single
+own RMF test delta at88be1584. Actual2 CLI controls plus2 shared normal source
+controls pass4/4 in19.16s (`/tmp/zeus-parent-cf424-cli-b5-actual4.xml`),
+preserving artifact sealing and missing-metadata refusal. This is generic
+CLI admission coverage, not a Shanghai or all-city probability license.
+
+Runtime fixture repair is fixed separately at1472b773fe4e39219ab4569d4354970c9e271f11
+in the authorized child, only tests/events/test_reactor.py and
+tests/test_run_mode_failure_surfaces.py. Real private canonical monitor/debt
+lineage supplies the normal V4 publisher; private canonical pending commands
+supply consistent count/scope through the deadline-aware RO factory. Ordinary
+versus exact-turn cancellation, lock/handoff/apply/finally-reset, timeout0apply
+and scoped-market controls remain. Exact repaired5 passes3.28s; full distinct31
+passes7.16s (`/tmp/zeus-cf424-runtime-canonical-full.xml`). Independent31/31
+review approves the two own deltas at1472; parent e149f266 admits the single
+commit and actual31/31 passes7.11s
+(`/tmp/zeus-parent-cf424-runtime1472-actual31.xml`). It is not a production
+bug fix. A clean projection is not deployment acceptance.
+
+Final coverage-frontier plan (prepared, not executed):
+
+1. Wait for the independently reviewed fast-source likelihood-v2/joint32-31
+   source and its normal consumer/test deltas. Preview only those own deltas,
+   preserve external smooth-bias fields and existing source/physical authority,
+   then lock one parent HEAD/tree before collection or execution. Missing review
+   blocks that integration, not the already completed scoped checks.
+2. Collect the four existing probability suites once on that fixed tree:
+   replacement_forecast_materializer, its cycle_policy test, sigma_tau serving
+   equivalence, and representativeness_no_kelly_variance_double_count. Compare
+   exact IDs against the retained f07 set278 (original276, approved no-cap
+   replacement, plus anchor/WMD2); additions from new approved work must be
+   separately attributed, never hidden by equal totals. Run once and classify
+   every failure by first cause: genuine source/contract gap, fixture prerequisite,
+   or new regression. Preserve unresolved RCSS/EGLC/ZSPD source obligations.
+3. Run the full replacement_forecast_bundle_reader module once on the same
+   tree, retaining original carrier-case mapping, generic/noncarrier controls
+   and all six source-specific fast cases. Likelihood component evidence is
+   not normal materializer/public authority. Report exact pass/fail/error/skip
+   IDs and component versus public coverage; no skip/xfail or gate weakening.
+4. Report this new locked frontier separately from prior f07 172/106 and
+   current scoped31/50/4/71/309 evidence. Do not project a wide pass count from
+   narrow restorations. New source or runtime failures expand only their
+   affected scope. Deployment remains blocked by unresolved strategy authority;
+   no push, live checkout action or restart is part of this plan.
+
+Fast-product component checkpoint:44957664c4d97141ff033a6ed2df5cb05a59ada6
+is independently approved only for its four own files (day0_fast_obs,
+day0_authority, and their two existing tests). Exact parent e149 temporary-index
+preview is clean, treecf3a9354b4f9d835fa16dea7c843ca79be3d1a57; no branch
+admission has occurred. The residual quantity is native settlement product
+minus FAST physical measurement, retaining signed F/C/H/L roles and causal
+same-station pair requirements. Joint survival32/resolver31 retains the full
+smooth-center/observation-clock/city-instrument/native-boundary suffix and
+requires normal rebuilding, never relabeling old prepared identities/certificates.
+Independent focused45 passes (`/tmp/zeus-critic-fast449-focused45.xml`);
+normal KORD public/JIT/newseed/cache RESET remains a separate pending obligation.
+After its test delta is independently approved, the actual parent combination
+must run focused45, the normal product→pair/likelihood→seed/public/JIT RESET,
+old-revision refusal/cache rebuilding, and existing HK kernel/context/trace
+plus USED/anchor/WMD public cross-relations before the final wide frontier.
+
+Author full fast/events220 is215 pass/5 fail, not green
+(`/tmp/zeus-native-product-fast-events.xml`). The five exact failed IDs match
+the separately pinned original5cf five-case baseline
+(`/tmp/zeus-product-residual-5cf-baseline.xml`):
+TestEmitterMonotone::test_noaa_print_advances_before_slower_ogimet_mirror
+(emit0 versus2), and TestMutexNoHttpSplit's
+test_hourly_refresh_keeps_held_day0_truth_fresh_while_trading,
+test_hourly_refresh_reserves_strict_bundle_priority_slot_while_trading,
+test_hourly_refresh_priority_probe_failure_preserves_maintenance_sweep
+[runtime_cities_by_name]/[priority_families]
+(three missing day0_hourly_vectors tables, one missing Tokyo priority key).
+These are retained explicit obligations with first-cause evidence, not a
+baseline waiver or proof of new production regression. Required changed-test
+freshness metadata follows scoped tests AGENTS/naming rules through the source
+owner's minimal follow-up; physical source and fixture clocks must not change.
+
+Later fast-component/public-mini admission: root and critic approve449＋3be
+and only HK W3 deltas021b0c39c63b85edae69fc5fcc4981bd0b836642→
+d9ca017a71712ca0d333abe4a3758d7169888980. Parent97590fd3/tree
+599786bb36b44befedc34380e822ba99e5535c7e equals sequential own-delta preview.
+Exact critic component45 plus normal-mini2 is47 distinct cases, actual47/47
+pass10.19s (`/tmp/zeus-parent-fast449-normal-component47.xml`). Real20 parsed
+same-report pairs→native settlement-product-minus-FAST likelihood→ordinary
+remaining/51-member capture→normal materialization selects FAST→public
+ENTRY/HELD/rawHWM with original source/expiry clocks; old rows stay immutable.
+Controlled forecast/ENS schema, selected2 of4 providers and partial coverage
+remain explicit; no field GRIB or all-reader acceptance. JIT/old-revision
+RESET/cache rebuilding/fast6 and no-affine implementation remain open.
+
+Before admission, only the six dirty governance paths were saved in new stash
+e20164d742a75d16d773f91734427276a513879f and applied, not popped. All six restored
+working files equal their stash bytes before these subsequent packet updates;
+all older stashes remain. The18 untracked captures have the same pre/post
+ordered path-NUL/body-NUL SHA4ef948cc926bf194e2749d2499d28292d2370d65a952d303e9c51515b1f94745
+under that explicit serialization. No governance staging/commit or live action.
+
+KORD ENS-role test-helper correction4eec8a6d12cd657406ac61923f5f70751f150752
+is independently approved and admitted only as its own RMF delta atfa2c4cb6;
+tree226e5de202bca827352cce1aef53a61c9c883881 matches preview. Requested forecast
+coordinates use actual City query, while official HOMR station/native-cell
+coordinates and all heights/clocks retain their separate roles. Actual new4
+passes3.44s (`/tmp/zeus-parent-kord-query-role-four.xml`); the independently
+reviewed shared17 is not unnecessarily rerun. Four new role antibodies are
+additions, not replacement passes hidden in the old278 frontier count.
+
+No-affine governance draft is prepared, not committed or runtime-effective:
+only the remaining-path paragraph of
+docs/authority/replacement_final_form_2026_06_09.md is replaced by offline-only
+historical b_fit(h)/MLE/shrinkage/interpolation/refit diagnostics. Live members
+stay unshifted, do not read the artifact, and declare
+day0_remaining_center_policy=unshifted_live_v1 plus finite nonbool/nonstring
+numeric zero; absent/invalid declared-carrier policy/bias triggers ordinary
+rebuild rather than old-certificate restamping. The separate lawful current
+temperature innovation, physical boundary, city instrument/sigma and449 product
+likelihood remain. Source owner/critic supplied exact joint33/32 names with
+unshifted_remaining_observation_clock_city_instrument_native_boundary_v1.
+The existing source_rationale loader row, test_topology characterization note
+and script_manifest fitter row now have proposed offline-only roles; pure fit/
+refit code is untouched. Source behavior, normal DRAIN and this draft require
+joint review before any governance admission or live claim.
+
+Protection scope for a subsequent integration now includes six dirty governance
+paths: the original source_rationale/test_topology/PLAN/scope plus the existing
+script_manifest and owning authority file. No index staging. YAML parse passes
+for all three changed registries; source_rationale/script_manifest have no
+duplicate keys. Test_topology's four duplicate-key locations have exactly the
+same two repeated path names as fixede149 (only line offsets change), an
+unrelated pre-existing global drift not repaired here. The changed offline row
+introduces no duplicate key; diff-check is clean. Existing stashes/captures are
+untouched, and their prior protection evidence is not mislabeled a six-path
+stash snapshot.
+
+SF attribution disposition: current-write omission is independently refuted.
+ff090c7f5a19f0ef919b9661ad7239b11e5d143c introduced source/stage attribution
+Sep29 17:05:33Z, after the original Sep28 21:59–22:02 incomplete cuts2596–2614.
+The old WorkDeferred/corpus schema did not carry those fields; later ALTER ADD
+defaultNULL did not rewrite incidents. Current latch→queue→corpus/schema is
+verified by7/7 existing attribution tests. Old19 NULLs establish missing history,
+not a known cancellation cause; an incomplete cut's NULL economic decision ID
+is intentional. Historical source/debt-generation/actual-loaded identity remain
+gaps. No new scheduler fix or further old-log scan is implied.
+
+Terminal13 bounded-cause addendum: `fresh_prob` in the screened original
+monitor events is held-side, not unconverted YES probability. SFNO6 and
+LondonNO28 explicitly bind `held_direction=buy_no` and
+`held_side_probability=last_monitor_prob`; the reader independently applies
+NO=`1-YES` (monitor_refresh:1676,3736,3938,3982,5269). SFNO .0048510444
+and LondonNO .0179591680 therefore are not complement mistakes.
+London's real early local window is Sep29 01:25:22Z: NO bid.07/q.0179591680,
+YES bid.05/q.0091257778, with fresh local evidence. Actual completed global
+875387 selects at01:25:40.247954 and records at01:25:50.790079 (not SF's
+three-minute slow DRAIN);875390 repeats at01:27:07.943834. Original component
+hashes were reverified. NO is EVALUATED with global pointq.119615935965,
+EV−.00052870936/dlog−.00001053821686 and
+`NON_POSITIVE_EXPECTED_OBJECTIVE`; YES is EXCLUDED with
+`SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE`. Local/global content identities differ;
+their old complete probability kernels remain unavailable, so neither the
+HK sigma/boundary repair nor a new normal chain establishes this old cause.
+Helsinki/Warsaw/SFYES/Amsterdam bounded exact-index screening found no earlier
+fresh in-band bid>held-q window; late SFYES/Amsterdam hard-dead proposals had
+bid0 and proper no-executable-bid refusal. Original entry-certificate/kernel
+source attribution for non-HK terminals remains a specific gap, not a pass.
+The existing bounded command-PK→world-aggregate-PK audit links Atlanta ef0dd
+to posterior696898, SFYES107a→696923, SFNO0342→697426, Taipei6e50→698113,
+Chengdu7bba→699139, Helsinki e01→699507, Warsaw34e→697001,
+Amsterdam9f4→701515, and both London e693/804→698231. Nine original
+projections name `day0_remaining_day_global_probability_v1` / v26_land_grid_v3;
+Warsaw names `replacement_0_1`. These pointers establish association only,
+not original full-kernel storage, authority correctness or complete replay.
+The13 terminal set and19 Chicago-day entry set remain different populations;
+later cuts are not substitutes for missing original kernel evidence.
+
+Maker capital-protection finding (independent of the new5eac integration):
+critic verified the SELL bootstrap gate at global_batch_runtime:510/1906–2160
+uses only30-day terminal own post-only GTC orders and requires≥30 plus a
+positive fill per action. TAKER observations do not qualify; zero SELL samples
+mean no typed maker candidate, hence no path to collect those SELL samples.
+This is an INV-47 missing normal DRAIN, not permission to lower the count or
+invent samples. Current-law A8/D5 addendum108–120/196–201 permits own-exposure
+or tape-through priors;164–165 requires decision-scale evidence, not n≥30.
+Current producer2239+ has only the empirical route and no ready A8/D5 model.
+The876312 exact-token prints are delivery-only/unsequenced, SELL0, with no
+pre-execution queue/book; BUY785 or a public30-row count cannot resolve it.
+SCOPE: exact statistical SELL-maker proposal. DRAIN: currently missing;
+bounded public-market RO, causal queue/exposure/tape design and offline
+lambda-e/markout posterior tests are within the existing repair authorization;
+a new resident production collector or live-law change requires separate
+adjudication. RESET: genuine current0/partial/full
+fill distribution bound to book, limit and rest deadline, decision-scale
+permission, then independent maker/taker proposals on the same growth axis.
+No price-band/EV exception, probe trade, sample substitution or live action
+is authorized. This remains an unfixed capital-protection gap; the absence
+of an old maker is not evidence that the present patch would avert a loss.
+
+Maker offline causal-witness feasibility (RO existing code, fixed e149; no
+collector/model implementation or new file):
+
+- Evidence: `src/events/triggers/market_channel_ingestor.py:326–336,2430–2490`
+  already receives public last_trade_price deliveries alongside subscribed
+  books and drains a bounded FIFO through the TRADE owner lease/commit/ack.
+  `src/events/public_trade_observations.py:56–166` records connection/open/closed
+  and overflow GAP identities plus original delivery/body hash and metadata.
+  It explicitly declares book_at_delivery is not a proven pre-execution book.
+  The existing schema fixes truth_status=PUBLIC_DELIVERY_ONLY and
+  coverage_status=SOURCE_UNSEQUENCED. These records cannot be relabeled own
+  fills, complete tape cohorts, executable quotes or current maker authority.
+- Evidence: the current global producer at1906–2160 joins own command/envelope/
+  original executable snapshot/venue order facts, respecting cut and actual
+  rest policy, but only terminal own post-only samples feed its empirical
+  route. Binding at2239–2370 already seals action/family/token/position/shares,
+  current asset/book epoch, exact limit/deadline, model/sample/source IDs and
+  training/issued/expiry clocks into `CurrentMakerFillWitness`.
+  `src/solve/solver.py:409–558` validates a normalized0/partial/full distribution,
+  temporal order, positive supported-fill component and current candidate
+  identity. This interface can be reused; no new trade-submit path is needed.
+- Inference: a new external long-running service is not established as
+  necessary. Existing market-channel acquisition, immutable executable book
+  captures, command/order facts and normal cycle/JIT binding are reusable
+  surfaces. Missing information is causal cohort alignment, pre-execution
+  depth/queue/exposure and validated edge-decay/markout uncertainty, not absence
+  of every input stream. Extending the existing owner may suffice after review;
+  missing historical sequence/queue facts cannot be recovered by declaring
+  locally gapless deliveries complete or copying current cache back in time.
+- Minimum offline validation: use bounded exact-token/action episodes in a
+  private fixture/DB only. Freeze original source/received/recorded timestamps,
+  connection and gap markers, immutable pre-decision books and actual own-order
+  exposure/fill/cancel facts. Reject wrong token, post-cut facts, missing causal
+  book, reconnect/gap uncertainty or mutable-latest substitution. Actual early
+  cancel remains the executed-policy zero/partial outcome, not favorable
+  censoring. Public tape may inform a prior only with its provenance and
+  coverage uncertainty retained; it is never an own-order fill sample.
+- Minimum model experiment under existing A8/D5: evaluate Gamma/Lomax fill
+  hazards with book/queue buckets and exposure, Erlang/queue-depth sensitivity,
+  tape-through queue-discount sensitivity and pessimistic markout; estimate
+  lambda-e from causal gap/edge decay without changing weather q, sigma or
+  center. Walk forward by actual cutoff/available facts and report uncertainty
+  on the decision axis, not a lowered count threshold. The addendum's priors
+  are design constraints, not automatic live permission or an assertion that
+  today's retained tape qualifies.
+- Antibody/RESET experiment: replay0/partial/full, BUY/SELL, YES/NO, current versus
+  expired/future, malformed/foreign source and gap twins through the existing
+  candidate-bound witness interface in private tests; independently compare
+  maker/taker on the same expected-growth/EV/fee/depth/Kelly law. A failed model
+  or unsupported exact episode produces no witness, never a probe order. A
+  genuine newly qualified frozen input/model cut must rebuild via the ordinary
+  cycle/JIT route without renewing old clocks. Live producer selection remains
+  unchanged and fail-closed until separate normal-chain review/authorization.
+
+Unknowns requiring a discriminating bounded RO check rather than a daemon:
+whether retained book/own-exposure episodes provide enough causal alignment
+for any offline SELL bucket, and whether delivery uncertainty admits a useful
+conservative prior after gap/queue/markout sensitivity. This task has not made
+new external requests or queried another historical cohort for this design.
+CodeGraph was unavailable in the task tree (not initialized); exact code and
+the local A8/D5 authority were inspected without initializing new tooling.
+
+Maker bounded offline follow-up (defect_recurrence's accepted consuming handoff,
+not a city-owner re-scan or implementation): current zeroSELL evidence blocks
+the maker sibling only, not every SELL; the taker independently competes.
+The historical seven cuts' negative-EV taker rejections therefore are not
+causally assigned to the maker bootstrap gap.
+
+The actual PublicTradeBuffer/private-SQLite demonstration retains two identical
+payload hashes as different local delivery IDs with PUBLIC_DELIVERY_ONLY/
+SOURCE_UNSEQUENCED status: local IDs do not identify unique executions. An
+observed aggregate queue Q0=100, BUY tape60, Q1=40 admits different hidden
+cancel/replace/order histories: one leaves a hypothetical SELL10 behind the
+old queue unfilled, another removes the old queue before replacements/trades
+and fills it. Aggregate book/tape projection alone cannot declare deterministic
+FIFO/own-fill outcomes. Likewise e_r=.05,lambda_f=.2,D=3 gives maker values
+.02256/.00454 for lambda_e=0/2 against taker .02, so missing causal edge-decay
+evidence can reverse the mode without changing the retained current inputs.
+Gamma4/20,H=3 gives Lomax .4282467544; quadrature agrees within1.1e-16, but
+queue discount c=.3/.7 yields .16144/.32927 and a broad95% interval
+.15082..73155. A positive prior is not a decision-scale license.
+Two existing private maker controls pass (`/tmp/all-city-mixture-evidence.3jbVLa/maker-offline-current-controls.xml`,2/2,1.26s).
+
+The owner's bounded latest12 canonical delivery records already retain raw
+side/size/price/timestamp/transaction_hash, but no match/order ID, log index or
+source sequence; all remain public/unsequenced. Primary documentation inspected
+by that owner: Polymarket asyncapi.json LastTradePriceEvent732–781 defines side
+from the taker's view, size as trade quantity and millisecond clock/tx hash;
+aggregate Book/PriceChange gives no L3/FIFO/source-order/cohort guarantee.
+Authenticated realtime-order-updates exposes own trade/order identifiers and
+maker orders, not the public market-wide cohort; BUY records do not manufacture
+own SELL exposure. Existing fill_cash_proof canonical/finalized/log-index
+validation applies to actual acquired receipts and cannot make a late copied
+receipt available to an old cut. No additional live capture was performed by
+the integrator for this handoff.
+
+Required next bounded design evidence is actual upstream uniqueness/failure
+correction or a proved conservative unique-group lower bound, decision-visible
+book predecessor audit, queue/markout uncertainty and out-of-sample decision-
+scale confidence. Exact full L3/FIFO or guaranteed fills are not categorical
+requirements: A8/D5 permits validated uncertain queue/tape priors. Incomplete
+but duplicate-free observations can provide a conservative hazard lower bound
+under an explicitly validated observation model; unknown duplication and
+unknown ordering cannot silently be assumed away. The demonstrated Poisson
+Nobs6/Ntrue15/T120 lower-bound comparison is only a conditional counterexample,
+not new live law or proof today's tape satisfies its assumptions.
+
+Thus the missing DRAIN is an identifiable data/model/architecture task, not
+passive waiting for offline authorization. Reuse the existing passive ingestor
+to design raw-field normalization, qualified predecessor/cohort/reconciliation
+evidence and offline validation before deciding an implementation slice. If
+upstream lacks causal identity/order information, merely adding storage columns
+does not fix it. Keep immutable public deliveries at their original truth role;
+do not lower30, fabricate own samples, make probe trades or add a daemon here.
+The eventual RESET is a qualified artifact→normal current candidate binding,
+not requiring own SELL sample n>0 before collecting lawful passive evidence.
+
+External c3 strict-cache defect is independently confirmed by loss_pipeline_repair:
+a warm strict exact-ID cache ignores subsequent legacy chmod/readability loss,
+returning an empty set while a cold probe/oldcf correctly raises
+exact_held_sell_queue_unreadable. Ordinary selection/final closures therefore
+may fail open for that warm case despite14 facts/70 strict-scope tests passing.
+The owner has only src/runtime/reactor_wake.py and the existing
+tests/engine/test_completion_cut_facts_only.py on fixedc3; its candidate
+865ae87830428a40957a0b0130e485ad3cef12c3 is REQUEST_CHANGES/HIGH, not
+parent-admitted. Its first repair caches queued IDs only, freshly unions legacy
+strict reads and checks real directory access/revision; next readable probe is
+the normal DRAIN/RESET. No old timer/API restoration. Original permission-risk
+RED plus restoreFalse and performance twins are required before the final
+c3-base integration; current facts-only green cannot waive this finding.
+
+New normal-mutator counterexample against865: a V4 deterministic same-scope
+slot is atomically replaced by another Python process through the normal
+publisher. Warm `_queued_wakes` Path cache still reports the old identity,
+whereas clearing/cold reading reports the new identity. Thus queued children
+are not categorically immutable merely because their directory/name is stable;
+cross-process normal publication is a real invalidation event, not permission
+to ignore the new wake. loss owns the bounded follow-up: freshly read mutable
+V4 slots, retain caching only for genuinely unique immutable IDs and preserve
+the warm O(1) property. The required antibody is actual normal separate-process
+old→new publication with warm/cold agreement, not manual cache mutation or a
+new timer. This recurrent mechanism is stable-path identity mistaken for stable
+content, alongside native/ground ABA cases; no code is admitted until its own
+review and normal RESET close it. Parent97590's scoped47 remains valid within
+its unchanged source tree and is not a newc3 runtime acceptance claim.
+
+Later independent wake-series acceptance:865→68e5bddeceb4a8ade5ccd691ebb7d4b702568434
+is approved only for reactor_wake.py and completion_cut_facts_only.py. Independent
+26/26 and exact148/148 pass, including the actual separate-process normal V4
+replacement, ACL/directory/legacy restore, actual selection/final veto, ACK
+RESET and800-checkpoint one-walk performance. This closes the original permission
+and mutable-slot HIGH findings within that fixed series; no bare865 admission.
+Actual current-parent/newc3 combination remains a separate verification step.
+
+Only-read fixed preview from parent97590 plus externalc3 yields clean tree
+8fd96ec995548f05c8f286b9c0c363578162ca46. Applying only own865→68 deltas to a
+temporary index yields clean tree836e76769aa5bb2933afef2c71f1d03789ca628b;
+both resulting own-file blobs exactly equal fixed68. No conflict, actual rebase,
+cherry-pick or new test run occurred. Head97590, ordinary index and all six
+governance working bytes/18 captures/stashes are unchanged by preview; no
+deleted timer/API is restored. Final rebase waits for the remaining reviewed
+source/normal-consumer bundle, not for another unauthorised bare865 pick.
+
+No-affine candidatee9147ea4b51896555a93a5d0fd354ed983cbc892 remains
+REQUEST_CHANGES/HIGH and is not admitted. Its discriminator treats the ordinary
+nonshared DAY0_REMAINING_ANALYTIC_OPERATOR telemetry as a shared carrier, so
+real Helsinki same-input first computation is normal but the second is wrongly
+rejected. Source owns the strict typed-discriminator follow-up; ordinary results
+must not be repaired by fabricating shared policy/zero fields. The owning
+authority/registry text is still a prepared draft, not evidence the new33/32
+code or ordinary/shared normal DRAIN is accepted. New source and HK JIT/RESET
+antibodies require joint review before admission or the final wide run.
+
+Later scoped no-affine acceptance and private candidate integration supersedes
+the baree914 RC label only for the reviewed whole series: e914→
+8c096b42dbdfd1b600126b02598cd7d5cc77d94c fixes the strict shared discriminator,
+with independent140＋7 component checks; e4cceeb002ad83c301ee25da3e4f9cb452a02f4f
+restores the existing HKO LOW native-CSV/causal-writer/reader fixture, independent
+core115. The approved owning-authority/registry text remains uncommitted draft.
+Normal native public/JIT/old-certificate RESET is not substituted by these
+component or controlled-quantity checks.
+
+Under root's revised private integration plan,151 commits rebased cleanly onto
+fixedc3 with HEAD38ffdfa78eb78fb192e6581d83abc51066c2f9e1/tree8fd96ec995548f05c8f286b9c0c363578162ca46.
+Then only own e914→8c→e4 and865→68 deltas were admitted at candidate565c91/tree
+ac2cf1e20d0c1cdd508809a47f73040b747b6db3, exactly matching preview. New stash
+ea069d8a09cd21ffe348b1171bad78692f9e4fc4 contains only six governance paths,
+applied not popped. Five working files equal stash bytes; topology's exact
+added/deleted dirty delta and the external facts-only row are both preserved.
+The18 original captures retain the explicit pre/post path-NUL/body-NUL aggregate;
+older stashes remain. No live checkout/push/restart or restoredc3 deleted API.
+
+Actual candidate smoke requests115 core＋25 committed facts tests＋2 old
+controlled-quantity public tests:142 distinct pass13.03s
+(`/tmp/zeus-parent-c3-unshifted-wake-component-smoke142.xml`). The initial143
+request collected zero because the critic XML additionally names its uncommitted
+inline test_critic_cross_process_normal_v4_replacement_is_seen; it is an evidence-
+selector mismatch, not a production RED. Committed same/other-process×H/L V4
+replacement/reset tests remain in the25 and were run. Original05:55/06:05 mini
+cuts are earlier than the legal full-ENS safe-fetch08:05; accepted scope is only
+quantity plus controlled51 shape/public transport, never executable native JIT.
+HK owns a separate legally timed normal-ingester/native/F2-degree fixture delta.
+
+One diagnostic four-suite run is authorized before that final JIT fixture,
+not a final acceptance rerun. Fixed565c91 collects284 distinct: all original
+f07 exact278 remain (missing0), plus approved query/station coordinate-role4
+and strict-policy SQL/fingerprint2. Collection SHA is
+d4a984f9cb21f379dfaa5091d0c2a7ec737725439a209245226268a0fdbb9627.
+The once-only diagnostic XML is /tmp/zeus-parent-c3-unshifted-diagnostic-four-suite284.xml;
+actual284 is202 pass/82 fail,0 error/skip in150.63s. Exact old278 identities are
+all retained: old172 pass have no regression,24 of106 old failures restore and
+the6 added antibodies pass. All82 failures are in materializer (161/82); cycle25,
+sigma10 and Kelly/representativeness6 pass. Mechanical set comparison is not
+root-cause attribution: failure disposition is delegated to defect_recurrence
+without another run or count projection. Full reader waits for the reviewed legally timed native
+fixture/JIT/RESET; final whole-bundle approval remains open.
+
+Later bounded external drift, checked2026-09-30T10:55:23–53Z: live physical cwd
+/Users/leofitz/zeus checkout and local origin/live ref both name
+c3fa4d2d83f51e9481a633d92aa89de06fdb6873; no fetch. From fixedcf424 there is
+one commit/eight paths. Task changed-path overlap is test_topology,
+event_reactor_adapter and tests/events/test_reactor; external reactor.py and
+reactor_wake.py also alter cancellation/wake semantics. Data/config/solver/
+day0-authority probability production has no external diff. c3 removes generic
+completion latch/absolute-deadline/final-fence APIs and adds facts-only completion
+tests plus revision-cached exact-debt probes. The prior cf42431 green does not
+establish this new runtime's behavior, and retired APIs must not be restored.
+
+Main93649 starts10:02:04Z and forecast92841 starts10:00:22Z; lsof cwd for both
+is the live tree. Main heartbeat10:55:20.276789Z names93649; forecast heartbeat
+10:55:53.522058Z names92841 and c3fa4d2d8. loaded_sha.json generated10:02:05.035909Z
+names fullc3fa with identity_source=git_head, but its three-field writer/file
+has no PID/import binding. This is not evidence the task's corrections were
+deployed, nor a reconstruction of the old SF cause.
+
+Read-only merge-tree preview e149→fixedc3fa is conflict-free with projected tree
+1fee622cd2cf4d2d63df45eccd208507733197b0. Its diff frome149 is exactly the
+eight external paths; core source/math remains unchanged and deleted runtime
+helpers/kwargs stay absent. No actual rebase/merge or branch-head movement;
+parent remains e149. loss_pipeline_repair owns the external facts-only risk/
+required-test review; city_source_contracts is preview/integration only. Finish
+the normal449 and no-affine fixes before one separately authorized final
+fixed-base integration and new runtime/money behavior checks. Governance dirty,
+stashes and captures remain independently preserved.
+
+checked=2026-W40; basis=fixed source/data commits, original HTTP entities,
+independent critic reviews and isolated task-tree tests; until=recheck-on-use.
+This checkpoint supersedes implementation/ground-coverage status in older
+snapshots below, without changing their dated market-description evidence.
+
+- Latest bounded integration: parent `d27bf3eeb9327c7ddc65c45aac2d731623877307`
+  rebased onto fixed `31b086c2a15e660131681580c7fe8f638ea16518`; original
+  governance stashes and untracked captures remain preserved. Trace/wire
+  combination recovered the recorded 10 fixture failures (10/10), then passed
+  the same complete 82 trace nodes and 9 selected/selector controls. Independent
+  O1280 module-only `4683ee0b7 -> 23c6742e1 -> d60e3a3fa` is now integrated,
+  tree `e2313433620db237ce1154f809f8cbef5022e451` equals exact preview,
+  and 59/59 existing module nodes pass in 3.13s
+  (`/tmp/zeus-parent-o1280-frozen-module-fixed.xml`). This adds no consumer
+  permission. Classifier `507 -> 16d -> 4f`, KORD `17c -> 906`, single/dual-body
+  archive and full e02 consumers remain dependency-gated; public USED-provider
+  O1280 admission is not inferred from the module pass. No push, live checkout
+  mutation, restart or venue action occurred.
+- Independently admitted, not integrated: public O1280 consumer closure
+  `fd8be3b7 -> 1169a8e6 -> 91bc8c0d` and normal LOW test
+  `4d3e395d -> dacaf544` close the two-field/re-signed and deleted-USED-provider
+  attacks in their fixed scope. The e02 anchor-only producer/public route still
+  needs whole original response, original request and frozen O1280 replay.
+  Dual-body WMD archive `8c155f50 -> 8b2f87c592f718283cbf28b3df526f93dec52423`
+  is independently admitted at 67 module nodes after the foreign source-URL
+  binding regression was caught and fixed. Earlier 65/158 author counts are
+  intermediate, not its final acceptance evidence.
+  It owns only station_ground_evidence source/test and includes pure
+  `station_ground_target_coverage`; normal caller HWM, seed and public chains
+  remain open. Neither author report grants e02 or 17-city runtime readiness.
+- Network-owned four-file series `a87cde4ef5be910a4092ade443948d179d55de35`
+  -> `23ef09900bf83397a0db13d96e2144b98eb88bf5` is independently APPROVED
+  at 257/257 (13.30s critic; 8.51s author,
+  `/tmp/zeus-network-slice-257-offline.xml`), but not integrated because its
+  exact classifier/ground/native consumer dependencies remain pending. This
+  approves scoped downstream force-network acquisition and paired IFS9 capture,
+  not normal producer/HWM/new-seed/public-q RESET or all lost-body cases.
+- Read-only pending-bundle preview stops at e02's adjacent test insertion:
+  virtual tree `b1249e4c8888804627af5da0b88da60d42a46a63` preserves the
+  conflict for review. Existing fingerprint and two stream tests must survive
+  union with the e02 model-surface recovery test; production hunks merge cleanly.
+  No resolution or cherry-pick was performed, and preview is not source approval.
+- HKO full-prior/exit relationship tests `3b34297ec ->
+  75049bf0d26d9d6aac41a9ef3080679eb6e2f63a` are independently admitted
+  (four normal cases) and are now integrated as `cfe63acc2 -> d27bf3eeb`:
+  final author four normal cases pass in 7.80s
+  (`/tmp/zeus-hko-fastcsv-evidence.2yugBR/fullprior-point-law-fixed.xml`).
+  The correction uses actual family payoff point-q and receipt point with an
+  independent EV check; draw means are not substituted for single-q action law.
+  Actual parent tree `41245aad28b8f0091c108f3ed8003c7929447c2d` equals both
+  exact-delta previews; the four normal nodes pass in 13.77s, 908 deselected
+  (`/tmp/zeus-parent-31b-fullprior-point-fixed4.xml`). This is not a pass for
+  the still-unintegrated native/ground archive source bundle.
+  The affected two 31b adapter relationships and post-local consumer remain
+  3/3 passing after these picks (11.46s,
+  `/tmp/zeus-parent-31b-fullprior-dependent3.xml`).
+  New-base adapter SELL-survival/runner-up test-only `01a37c93` and post-local
+  consumer test-only `1c962760` were independently admitted and cleanly picked
+  as `58fd2d56e -> 7c56bb335`; actual tree
+  `6819dacbd9e072180a031e82e9518c2a1a6be868` equals the exact-delta preview.
+  Actual parent combination passes the same 16 trace/normal relationships plus
+  the post-local consumer node: 17/17 in 29.90s, 895 deselected
+  (`/tmp/zeus-parent-31b-01a-1c-fixed17.xml`). This remains controlled-source
+  consumer proof, not the final native/archive/physical-source combination.
+
+### Bounded three-BUY causal audit (original cuts, not current books)
+
+The read-only queries used canonical trade/world ownership, mode=ro/query_only,
+three exact command IDs and only their hash-linked receipts. Original zlib
+entities, delta bases and reconstructed candidate/holding hashes were verified.
+No later forecast, ground evidence or current NO_BID book was substituted.
+
+| BUY command / original global decision | HK contingent maker-rest expected delta-log wealth | Actual runner-up / same-cut growth | Same-family exposure at admission |
+| --- | --- | --- | --- |
+| `db574f90728f45b8` / `875751`, Sep29 03:21:47.624555Z | NO33: `.0275893700`, q `.8193047338`, maker `.27`, 11.05 shares | Chengdu HIGH YES28: `.0223722357` | No held sibling; prior `a1ca10b3637c4b15` expired/no venue exposure at 03:17:24.617975Z |
+| `b900b7b501484b3c` / `876043`, Sep29 04:44:18.786571Z | YES32: `.0166394323`, q `.6739225105`, maker `.20`, 9.43 shares | Zhengzhou HIGH YES: `.0155813017` | NO33 11.05 shares in the same-cut holding coverage and ledger; no unresolved sibling entry commitment |
+| `d25ee81b7e854d00` / `873228`, Sep28 15:16:13.058163Z | LOW YES27: `.0186224048`, q `.3106640132`, maker `.07`, target 11.28 shares | Madrid HIGH YES: `.0038151967` | No held sibling; prior `4cfedff9350f40da` cancel acknowledged 14:47:58.078368Z |
+
+Thus these three HK admissions actually won cross-city rankings; the hypothesis
+that all other cities were unavailable is refuted for these cuts. Their eligible
+family/date/metric counts were 124/161/207 out of 203/196/260 respectively, not
+city counts. This does not prove that the source q or maker-fill model was correct.
+
+All three were GTC/post-only. HIGH orders filled after 150.024/126.788 seconds,
+without repricing or cancel events. LOW partially filled at 15:32:17Z and
+15:39:58Z; its remaining .12 shares were cancelled at 15:41:25.218020Z.
+Its 20-minute deadline was 15:36:59.516404Z: logs show C3 at 15:36:25Z with
+cancel_set=0, then the next five-minute scan at 15:41:25Z with one acknowledged
+cancel, matching the canonical event. Nine persisted priority books during the
+rest all had bid .07/ask .08. This explains the TTL delay without proving a missed
+cancel or adverse selection. No new HK posterior was persisted in any of these
+three wait windows; source cadence/staleness is not inferred merely from that
+absence. HIGH rest-screen logs only prove aggregate rest_pulls=0, not complete
+per-order screen audit.
+
+Sep29 06:21–06:36Z contains 12 global delta projections but only seven completed
+cuts after candidate/holding-hash deduplication: `876312/320/323/330/332/340/346`.
+Their exact decision_at clocks match historical live.log maker-fill sample lines
+`130128/130344/130434/130619/130654/130988/131180` within one millisecond. Every
+line reports buy_n=785/sell_n=0. Each HIGH holding therefore has one TAKER_LIMIT
+candidate and no CurrentMakerFillWitness/maker sibling; all 14 taker candidates
+are rejected NON_POSITIVE_EXPECTED_OBJECTIVE. LOW is excluded for no executable
+unit price in every cut. At 876312, YES32 bid .57/q .5754097057 gives fee-net
+proceeds 5.25953535 for 9.43 shares, EV -.1665781747 despite positive delta-log
+wealth .0290330524. This is not a missing wake or a maker veto inferred from ask.
+Native-book hash/epoch identities replay, but no matching complete HIGH snapshot
+was found among the bounded 20 historical rows per exact token/cut: exact HIGH
+tick/ask/fill-model counterfactual remains a gap. The last two LOW raw hashes do
+match bid .005/ask .02/tick .001, whose hypothetical maker .006 is also out of band.
+These results do not reconstruct the missing old local/global q kernel or prove
+any repair would have changed the historical action or profit.
+
+### Current terminal cut and bounded cross-city triage
+
+The loss lane's fixed event cut is Sep30 04:27:18.181314Z, with consistent trade
+read 04:29:48.880598Z. Chicago Sep29 has 19 economically filled entry commands
+(12 full/7 partial; 9 literal `venue_status=filled`). The earlier 04:23 cut had
+18/8 and remains historical. The same-day terminal qualification set has 13
+complete-basis, >=95%-loss positions, not 13 of those 19 entries: its intersection
+with the entry set is only Helsinki `11602498-247` and Amsterdam `c45bef79-316`.
+No unique mapping to the user's UI 7/8 has been proved. Original consuming
+handoff pointers are loss_pipeline_repair tool chunks `464997`/`c6cbd8`, not an
+invented raw file or a live-loaded source SHA.
+
+HK3 are now canonically settled at zero with no prior filled EXIT: LOW27 at
+02:49:07.350485Z (settled:3169), NO33 at 02:54:02.146899Z (settled:1883), YES32
+at 02:54:02.235983Z (settled:1753). The old 01:29/01:43 unsettled sample is
+historical. The existing five queued/blind incidents remain quote episodes,
+not captured settlement-full-loss evidence; no task service has been loaded.
+
+Cross-city checks use exact position/type/sequence or timestamp indexes and
+three-second query deadlines. Large all-monitor JSON projections for four
+positions timed out: they are coverage gaps, not empty results; bounded first/
+last records were subsequently read successfully. No later facts were used to
+authorize an earlier action.
+
+| Position / target | Established original monitor-to-terminal boundary | Disposition |
+| --- | --- | --- |
+| SF YES `cff8e4ed-0e9`, Sep28 | First fresh context 20:20:20Z q .236174/bid .07 HOLD; first should-exit Sep29 08:05:39Z was hard-fact dead with bid 0/ask .001, then canonical exit rejection 1120 no executable bid | An intent existed but no lawful terminal price. Earlier statistical global proposal proof still required |
+| Amsterdam YES `c45bef79-316`, Sep29 | First context 13:29:08Z q .277431/bid .053 HOLD; hard-fact should-exit 23:05:06Z bid 0/ask .001, rejection 849, then closed hold | Same terminal no-bid boundary; do not label no wake |
+| SF NO `f998dd27-730`, Sep28 | First fresh context 21:59:25.295523Z q .004851/bid .09 had local sell_reversal but empty selection/book lineage and full-family preparation PUBLISHED. First subsequent complete global 874603 cut22:02:47.757683/decision22:02:55.323087 included 5.239378 shares but excluded it for no executable unit price; 874606/610 repeated that result | Prioritized unresolved completion-latency seam, not grouped with late hard-dead/no-bid |
+| Atlanta NO `6440250b-1dc`, Sep28; Taipei YES `e86c6c64-542`, Sep29; Chengdu YES `491408f2-5cc`, Sep29 | First fresh contexts HOLD; late zero-probability/zero-bid or closed-market boundary; no should-exit in the bounded full monitor records inspected | Global original proposal/rejection and entry certificate linkage remain required; HOLD count is not causal proof |
+| Helsinki NO `11602498-247`; Warsaw YES `a9d5c57e-5ca`; London LOW NO/YES `5f18d66c-f89`/`d10e8245-bba`, Sep29 | Bounded first/last events obtained; late POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE, closed hold or missing fresh probability/quote. Helsinki first q .837897/bid .37, London NO first q .335130/bid .10 | Missing full intermediate source/action proof remains a gap, not a pass or a source-coordinate diagnosis |
+| Still-open Milan `b9cbbb85-ae2`, Moscow `c4670a6b-1e5`, Atlanta `730f1b7e-d9b`, Sep30 | At fixed cut latest Milan400 cites GLOBAL_DAY0_METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE; Moscow516 DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE/75 stale cycles; Atlanta775 lacks current quote/CI/bid. All had earlier complete fresh HOLD contexts | Distinct current dependency gaps; no claim the task's unlanded source bundle already fixes runtime |
+
+For SF NO, the exact original token snapshot `ems2-d363f93fa0163542946c14f828e61c98627c7f12`
+at21:58:53.097541Z had bid .09/11.11 shares, ask .16, tick .01, minimum five
+shares and deadline22:01:53.097541Z. At22:01:41.910610Z the same token was already
+bid .03/ask .09; subsequent .03/.04 bids were outside the submit band. The first
+global completion was 3m22.462s after the local pending record, so its DRAIN did
+reach a complete cut, but after the observed band-valid window disappeared.
+Short-window logs show repeated DEFERRED_PREEMPTED at prepare/wealth/book-fetch
+stages. The generic family-preparation wake's generation is not persisted in the
+monitor record, so those generic preemptions have not been uniquely bound to this
+position. An independent critic is reviewing the completion/monitor-priority seam;
+depth and scalar q alone are not a reproduced correlated action-law certificate.
+The original monitor did retain probability_content_identity `32feac0fc65e...`
+and probability_witness_identity `d348bc7be878...`; its declared reason was
+coverage_requires_full_family, not scalar_requires_full_family. The two absent
+identities were selection_epoch and sell_book_witness. The persisted monitor
+receipt has held-side summary plus original carrier-source references, not an
+embedded full MECE payoff array. Thus simple loss of the scalar's identity is
+refuted, while a complete original correlated action-law replay remains missing.
+Canonical tier0 cut sequences 2596–2614 in21:59:25–22:02:55Z contain 19 INCOMPLETE
+attempts (16 DEFERRED_PREEMPTED, three GLOBAL_SELECTION_CANCELLED); every
+cancel_source, cancel_stage and decision_log_id is SQL NULL. Their precise
+preemption source/debt generation is therefore not recoverable from those rows.
+Short-window log anchors are88642 completion reserve,88677 monitor handoff,
+88681 yielded once/completion debt armed,88691 capital recovery of three venue
+side effects, and88833 later monitor handoff. They do not prove a repetitive
+new-generation bug: the present generic queued-family coalescing was independently
+confirmed by the critic. This gap must not be silently replaced by current state.
+
+Anchor-only implementation ownership is temporarily transferred to source_physics
+for current-target `_precision_metadata`/two guard calls, live-materialize's
+independent computed cut, precision guard authenticity/evaluate, request-builder
+`_precision_ready`/two calls, and its owned materializer/cycle-policy consumers.
+The config parser remains city-source-owned. Original request/selected cell,
+target DEM/native height, immutable body and possession/computed cut must remain
+distinct; no old manifest backfill or synthetic source capture is permitted.
+
+- Earlier checkpoint `bf22cfe154e4d8bccaf6cec232608ba26783b907` contained the
+  approved regional-native module, qualified W3 source facts, HKO current-only
+  minute mean, US ground relations, WMD parser/data and explicit decision-cut
+  interface. No push, rebase, live checkout change, restart, canonical feed
+  write or venue action had been performed by this integration lane at that
+  checkpoint; the explicitly authorized 31b rebase is recorded above.
+- Narrow combination evidence: native 98 pass
+  (`/tmp/zeus-parent-native-regional-fixed.xml`), qualified W3 23 pass
+  (`/tmp/zeus-parent-w3-exact-qualified-fixed.xml`), HKO fast feed 38 pass
+  (`/tmp/zeus-parent-hko-fastcsv-fixed.xml`), US relationships 13 pass
+  (`/tmp/zeus-parent-us9-relationships-fixed.xml`), WMD source/data 173 pass
+  (`/tmp/zeus-parent-wmd-source-data-combined.xml`), and actual decision-cut
+  WMD 41 pass (`/tmp/zeus-parent-wmd-decision-cut-fixed.xml`). These are distinct
+  slice checks, not a full materializer/public-held/deployment pass.
+- WMD source `d45b872ff` plus CRS quantity fix `b567dec5a`, fixture migration
+  `7eea8112b -> 6c708541c -> 4f3a4a90c`, data
+  `d21032bd4ef5352213b5963e81448782591ff7e7`, and decision-cut API
+  `4dc486e77` each have independent scoped approval. Two new combined fixture
+  failures assumed Manila remained forever UNPROVEN; their private registries
+  now explicitly remove ground proof to preserve the intended negative law.
+  The first fixture migration missed private cities.json (1 fail/1 pass),
+  fixed before acceptance. No production gate was relaxed.
+- Data binds 17 original per-station WMDR XML entities and one shared original
+  AWC stationinfo entity. Working bytes, Git blob and normal checkout match
+  every entity hash. Exactly 17 registry rows gained optional proof; all 37
+  other complete rows and all reference/query coordinate/elevation fields are
+  preserved. Source roles remain distinct: HKO Observatory ground, NOAA
+  primary-temperature-DCP ground, and WIGOS fixed-land station-ground
+  reference. WMDR station reference is not a verified sensing-element point.
+- The current loader proves ground roles for 28/54 configured cities: HKO,
+  ten US stations, and Amsterdam, Ankara, Buenos Aires, Cape Town, Helsinki,
+  Jeddah, Karachi, Kuala Lumpur, Lucknow, Madrid, Manila, Milan, Paris,
+  Singapore, Tokyo, Toronto and Warsaw. The remaining 26 are UNPROVEN, not
+  physically-zero or wrong-temperature declarations. Four are not applicable
+  to the retained current market receipt (Auckland/Jakarta/Lagos have no
+  current event; Jinan has only a closed dated event). Ground coverage alone
+  does not prove raw-provider geometry, current center/ENS, posterior or held
+  authority; deployment remains held.
+- Genuine LFPB/EFHK recapture receipts are 2026-09-30T00:54:57.194219Z and
+  00:54:59.964846Z, respectively; body hashes are
+  `c09e6bdb0264a44557cb0151f6fc852ddac77626b195b2f98f9163519dffefc1` and
+  `0f38efb32e22d3dcd7203fdb35c3c26d39aa8f73b44c181a4fd8ceae443ae179`.
+  Local file re-hash was rejected as a source-clock renewal. Earlier bodies
+  remain historical evidence. AWC original bridge possession is
+  2026-09-29T23:47:57Z; dual proof possession takes the maximum actual capture.
+- Official WMDR GeospatialLocationType permits from-date records with implicit
+  exclusive end at the next version begin. CYYZ/RPLL therefore use their
+  latest effective intervals, not arbitrary first-row selection. Tied begins,
+  explicit overlaps, indeterminate boundaries and unsupported explicit CRS,
+  dimension, axis or unit changes are rejected. A future version does not
+  poison the current interval. Explicit actual effective_at replays facts at
+  decision time without changing original source capture/recorded clocks;
+  default runtime output is capture-time diagnostic metadata, not posterior
+  authority. Frozen dual archive, current-geometry/HWM and normal seed RESET
+  must pass actual computed cutoffs and prove clock-only interval transitions.
+- The last bounded 14 WMD GETs added no ground proof: six current entities
+  (ZBAA/ZGGG/ZGSZ/ZHCC/ZSQD/ZUCK) contain only 2D root and temperature
+  deployment coordinates, so AGL alone cannot supply MSL ground; four exact
+  AWC-WMO URLs (EDDM/NZAA93119/RCSS/ZUUU) return 404; four current documents
+  (LLBG/NZWN/RKPK/SBGR) still lack operational status. DNMM and ZHHH remain
+  explicit different-site conflicts, not proximity-based ground permission.
+- RCSS follow-up used one authenticated read-only existing-client GET of
+  CWA C-B0074-001, HTTP200 at 2026-09-30T01:15:03.002332Z. Its 41 station rows
+  contain no 46696/466960 prefix or Songshan name. Do not substitute Taipei
+  466920, airport reference, another WIGOS station, historical generic 12m
+  altitude or AGL. EGLC/RCSS/KBKF remain external station-ground evidence gaps.
+  No credential or authenticated URL was retained in the receipt.
+- SCOPE: missing or invalid ground affects only dependent city/date/metric
+  current posterior/held authority, not unrelated cities or the ENS-only
+  ground-free source obligation. DRAIN: obtain exact official role/identity
+  entities through the existing normal capture/archive/seed chain; unavailable
+  evidence is DATA_DEGRADED, never an invented RED or synthetic authority.
+  RESET: lawful proof possession, actual analysis interval, native/LSM/ENS
+  evidence and normal recomputation restore that family. Neither fresh local
+  hash checks nor later proof retro-authorize an older decision.
+
+### Milan / Moscow / London — bounded remaining-authority audit
+
+Checked=2026-W40; basis=original monitor/log/vector rows at the fixed
+2026-09-30T04:27:18.181314Z event cut plus bounded read-only SQL replay;
+until=recheck-on-use. No production writes or provider GETs were performed.
+
+- Moscow `c4670a6b-1e5` monitor516 at 04:26:54.540543Z reports
+  `DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE`; original stderr129370–129373
+  identifies `DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE`. Its latest complete
+  51-member API carrier was captured 00:39:09.082166Z, run Sep29 12Z,
+  available00:24:31Z, request
+  `sha256:e6103a5fc7e848e818911b5a44bffad842b5cbbcbd1bcdaf8892fd1cbca2b042`.
+  At the monitor cutoff its capture age exceeds the reader's three-hour limit;
+  deterministic provider vectors were nevertheless updated03:37:36.551930Z.
+- Milan `b9cbbb85-ae2` monitor400 at04:26:58.498428Z has a fresh executable
+  bid.08/ask.10 but no fresh probability. Its latest51 capture03:36:06.554696Z
+  still names12Z, request
+  `sha256:632b319ef18965bbed6fd9c772c534361fbea4cde2418971388156cf971e0f9c`.
+  Original stderr129374 names `DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED`;
+  the durable ensemble pin names18Z, available03:34:50Z and recorded03:47:23Z.
+  A fresh capture of the old run is not fresh-run authority.
+- In04:20–04:27 original forecast-live log89186–89708, Moscow16 and Milan11
+  seed files were processed. The immutable processed seed bodies carry18Z
+  anchor and COMPLETE/LIVE_ELIGIBLE baseline, while subsequent original
+  reports name REQUEST_UNCHANGED_BLOCKED_INPUT and commit no posterior for
+  those requests. This is not an absent wake or absent anchor; it does not
+  produce the separate `ecmwf_ifs025_member00..50` API carrier. Mutable
+  blocked_latest files read after this cutoff are not historical receipts.
+- The original main log228150–228933 contains ten hourly producer cycles in
+  that seven-minute window: six report attempts0/throttle3; no quota
+  exhaustion. Original stderr129224/225 and129319/320 records interrupted
+  strict-readiness scans and degraded causal-boundary connection probes.
+  No per-city offered/skip/request identity was retained, so these aggregate
+  counts do not establish which cycle attempted Moscow or Milan. Source
+  `maybe_refresh_day0_hourly_vectors` applies the one-hour process throttle
+  before ensemble HWM probing; deterministic-only release_due bypass cannot
+  by itself prove an ensemble-run DRAIN. Milan's03:36 old-run capture followed
+  by03:47 new HWM is a bounded throttle counterexample hypothesis for critic
+  testing, not a proved historical scheduler failure. Moscow's precise
+  no-new51 producer cause remains unrecorded. Neither gap is automatically
+  covered by the BPF raw-debt/modern network-receipt repair.
+- Milan's other original error is
+  GLOBAL_DAY0_METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE. The helper's
+  NOAA_PRELIMINARY_SURVIVAL_EVIDENCE_UNAVAILABLE path catches sqlite.Error,
+  not insufficient historical pairs. The exact seven-day SQL and
+  04:26:57.200Z parameters were replayed against canonical WORLD directly
+  and FORECAST with WORLD attached, mode=ro/query_only/three-second progress
+  budgets: both returned822 rows (IDs40133055..41196323) in0.005/0.004s.
+  Actual monitor source uses the attached schema and a shared prepare
+  deadline. The original SQLite cause/extended code was not persisted;
+  lock/interrupt/expired-budget attribution cannot be recovered by this
+  successful current replay. Keep this typed-cause observability gap separate
+  from missing51 and do not label it missing history.
+- London LOW targetSep29 ended23:00Z. Original NO event1782 at23:00:18.502Z
+  and YES1800 at23:00:20.092Z first report
+  POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE. The current official WRH
+  row125756 records correct EGLC final low16/high23 with source fetch00:05:04Z,
+  later than the original last23:48 missing-truth monitors. This supports
+  lawful final-source DRAIN rather than borrowing Ogimet finality; the
+  mutable daily row cannot prove earlier source availability or absence.
+  Earlier intermittent preliminary carrier/revision mismatches remain
+  separately bounded, not automatically explained by the final-source delay.
+- A bounded London sequence1400–1810 check isolates NO1496 and YES1510 at
+  Sep29 19:24:18Z: DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH, the second
+  reusing the same family error cache. NO1497 and YES1511 at19:25:07Z return
+  fresh authority with common witness64b3a3b9ea29834f828f4174a53016564363cd9bb69b27e5537e107fa5b676b0.
+  ERA's consuming-unit current-members versus persisted future/final vector
+  check differs from Milan's SQLite-revision-likelihood error. Bids.002/.001
+  at the mismatch were already outside the lawful unit band; the retained
+  member/certificate detail does not establish a missed legal SELL, while
+  the next-cut probability DRAIN is directly recorded.
+- For non-HK terminal Atlanta6440250b-1dc, Taipei e86c6c64-542 and Chengdu
+  491408f2-5cc, indexed exact-position MONITOR_REFRESHED rows through the
+  fixed event cutoff returned no event with an in-band bid greater than its
+  retained held-side q. All three queries completed within their independent
+  three-second budgets. This refutes that narrow early scalar-reversal
+  hypothesis, not all global modes, executable depths, admission quality or
+  terminal causality. Their late q0/bid0 is not substituted for an early cut.
+
+### Finding disposition ledger — bounded historical comparison
+
+Approved ENS acquisition repair scope: citychild branch
+`fix/all-city-day0-ensemble-release`, base4dc486e77; owns only
+src/data/day0_hourly_vectors.py and existing
+tests/test_day0_hourly_vectors_quota_root_cause.py. Critic reproduced one
+normal-entry RED on exact parentd27: private SQLite writer completed12Z51,
+normal composite dedup established its3600-second TTL, official metadata
+boundary then advanced the real canonical pin to usable18Z with strict51
+missing, but normal refresh attempted0/throttled1/fetched0. This proves a
+reachable new-run DRAIN defect, not that the missing original per-city
+attempt logs attribute Moscow or Milan's historical failure to it. SCOPE is
+one city/local-date ensemble namespace with a genuinely newer usable run;
+DRAIN uses existing bounded refresh/quota/deadline and real51 writer;
+RESET is strict persisted new-run readback, normal recomputation and held
+authority. Failed retry-not-before remains binding, unchanged/future/unusable
+pins cannot force a fetch, and a healthy deterministic sibling is not fetched
+again. Source modules and normal held-q relationship acceptance remain pending.
+
+These independent defects share semantic paths, not a proven common HK-loss
+cause. Each row keeps fixed code, replay coverage and live deployment separate.
+
+HK causal acceptance boundary: there is still no replayable evidence that these
+repairs would have changed the three historical HK actions or realized returns.
+The ten extra raw inputs lack their original bodies, and the 06:21 global kernel
+was not retained. Actual fitted floor entering the LOW posterior is a proven law
+breach, but removing it may increase YES27 q; the HIGH record-clock error entered
+the held chain, but does not prove that an earlier SELL would have occurred.
+Standard full-day/offset/missing-slot and nearest-rounding hypotheses were
+refuted against the actual retained anchors/resolver. Trace, fastCSV and
+TotalLoss repair do not close the old-loss causal gap.
+
+| Finding / category | Fixed or refuted evidence | Acceptance still required / disposition |
+|---|---|---|
+| HKO source record clock / recent production causal defect | `12d5`/`045`: raw recordTime is not publication updateTime; normal HIGH/LOW writer-reader relations pass | Fast minute-mean does not become a fake daily extreme; latest native/archive/local-day normal4 combination remains mandatory |
+| Fitted floor/tau/HIGH affine contamination / production path defect | physics `55a/d5/f2/c0` and independent current-CDF/v5-v6 twins close the alternate live regime | Normal current-source/vector/public-q chain is separately admitted; no single-trade counterfactual profit claim |
+| Global point .575 versus local .523 / refuted MC-mean hypothesis, historical input gap | Both retained fields are point probabilities. The retained two HIGH entry kernels replay all 11 dimensions with zero point-q error; their final=[33] component was HKO FND forecast, not a measured daily33 | Old global876312 kernel is hash-only and cannot be reconstructed by a new trace. Current normal same-cut raw32.9 versus ERA rounded boundary32 changes q32 by −.0555678068; the remaining −.00501955 is ERA subtracting generic instrument variance.28 versus producer HKO city override.1. HK owns the admitted two-slice plan over four existing paths, semrev and normal-seed RESET; it changes neither configured sigma values nor EV law. Implementation/independent combination acceptance remains pending, and neither split proves the old global difference or counterfactual profit |
+| HKO nearest-integer hypothesis / refuted on retained resolved markets | Official daily values and resolved brackets match floor 6/6; nearest fails three examples | Current-description explicit rounding/first-publication archive remain missing; no settlement-law rewrite from generic WU rules |
+| WU/Ogimet foreign or missing identity / general reachable ingestion defect | `e34211b90`/`49ab320c7`: actual schemas, C/F HIGH/LOW, empty versus malformed and foreign-to-matching append RESET | Focused post151 has same seven baseline failures; R11 remains bounded legacy offline backfill lacking GEM, not the live normal drain |
+| Provider DEM mislabeled native and airport reference mislabeled ground / general physical authority defect | Typed grid `a49/b965`, typed role `d4`, real HKO/HOMR/WMD source facts; no verified-zero penalty or synthetic station LAND | 28 source ground roles are verified; 22 current cities still lack ground, four non-current contracts N/A. Exact native/ENS and all current consumers remain separate |
+| US query/reference coordinate drift / refuted automatic config-error hypothesis | Official current AWC and primary-DCP show query and ARP are different roles; KORD query-to-DCP2.48m and Austin71m retained | No bulk coordinate replacement; distances remain real, reference point is not sensor location or zero horizontal error |
+| Exact-once diurnal mixture / general reachable semantic defect | `e717` (parent `ae92`) explicit provenance; finalizer-to-witness/held YES/NO, HIGH/LOW C/F, shuffled topology; independent39 pass | Equal raw versus point values do not prove already mixed. No attribution to a historical loss with different source cut |
+| Post-target-midnight geometry / general reachable semantic defect | `60fc`, independent36 boundary twins: only open target-day geometry mixes; past target is not_applicable | Statistical redecision does not stop after target midnight; not a proved historical loss cause |
+| Native same-byte TOCTOU and bad cache drain / general defect plus repair closure | module `f458` and `4d8`, eight exact profiles, 98 parent pass; zero/orphan/oversize cache normal full-GET recovery | Profile capability is not city LAND, valid quantity, current posterior or entry authority; mixed/seamless/GFS-global remain UNPROVEN |
+| Frozen IFS9 native proof / repair-time HIGH caught before release | Unadmitted e02 USED-reader accepted only revision plus sea=False; positive-first LOW mutation reproduces missing own O1280 index/height/surface/coordinate replay | Source minimal closure is pending independent review; this is not a parent/live or historical-HK-loss finding |
+| Current-target evaluation cutoff NameError / repair-time interface regression | `7fa35539292eb34468d668690085c300781cb346` fixes e02's new undefined decision_time call and has two admitted seconds/microseconds SQLite relations | Current parent has neither the e02 argument nor the failure. Pending the full interface prerequisite; do not import unadmitted fixture/source context or count it as historical HK cause |
+| Ground mutable-latest and canonical possession / general reachable authority defect | source `3e5/688` frozen body and canonical first-possession design; same-facts unrelated body change must not revoke old cert. Critic admits fixed `7047bcbecc97c3f3949ce1595296abf79b6cd64b` single-body combination39 and `3e7b8cc29e172ce7c79247c91442550ede8fbc94` normal LOW A-B-A relation1 | Integrate only the full approved predecessor chain, not the final patch alone. WMD dual-body/public-q remains unclosed; known future-period transition is not a new HTTP capture |
+| No-cap selection / old fixture not a normal-authority reproducer | `0e559` lawful ICON/UKMO winner with ≥520 unsupported diagnostic SQL rows; real LIMIT512 mutant red, normal RESET; independent15 pass | Does not claim 520 lawful providers; exact IDs, cutoff/frontier and weights preserved |
+| Authority fixture drift / repair-related fixture migration | qualified W3 `d451/64` parent23 pass; raw provisional source is not absorbing, bare READY is not typed authority | Nine forecast-dependent W3 plus two postday/one alpha remain pending actual physical dependencies; London/Taipei ground is not borrowed from HKO |
+| LA partial/JIT8 / approved tests with unintegrated source dependencies | test-only `1d19272e8cc66376f34d5a92380bc4d9478b90e5`, own KLAX29.7 ground and loopback whole-native bytes | Exact preview clean; do not run/pick as ready until `e02` normal network receipt/native hooks and `3e5/688` archive API are present |
+| TotalLoss diagnostic starvation/stop/worker identity / independent production path defect | source `9fb/6c40`, parent `b15/c04`, actual parent248 pass `/tmp/zeus-parent-total-loss-final.xml`; fresh DEGRADED diagnosis without new repair permission | No service restart or runtime recovery performed. Explicit stop remains; current open quote episodes are not settled losses |
+| Old raw forecasts absent or beyond30h / evidence not recoverable | A new receipt cannot refresh old source bytes or recreate different past values | Scoped DATA_DEGRADED, preserve historical unknown; future lawful full capture and normal seed are RESET, not retrospective authority |
+
+Latest independent integration after the source/physical checkpoint is
+`c04f5551e4438e327db61a5a5362b0e78a7913b5` (TotalLoss only). RO remote and live
+checkout still match `d9dd60470bdfc651f6e52d8470965302cf363e8c`; source checkout
+was not rebased. At 01:27Z the external main/forecast heartbeats named PIDs
+3539/97726. loaded_sha.json is git-head-derived and does not bind those PIDs,
+so current main imported SHA remains unknown; their restart is not this task's
+deployment proof. Ground/public-q combination and final rebase/QA remain held.
+
+### HK3 / TotalLoss current qualification — owner RO handoff only
+
+Checked `2026-09-30T01:29:38.496311Z` by `loss_pipeline_repair`; the original
+results remain in that child task's tool output and consuming handoff messages,
+not a newly retained raw evidence file. Reader source was child
+`6c40b99353bc4bd5874a92846e3550efba90c571`; live checkout SHA was not captured
+in this sample and must not be filled with the reader-source SHA. Read-only,
+query_only canonical sources were `/Users/leofitz/zeus/state/zeus_trades.db`
+and `/Users/leofitz/zeus/.total_loss/memory.db`, with per-ID 3s SQLite progress
+budgets and no detect/evidence/status writes.
+
+- Hong Kong target `2026-09-29` positions `0b5fa42c-64f` (HIGH NO33),
+  `2c9ffd23-d04` (HIGH YES32), and `7da0ece2-33d` (LOW YES27) all remained
+  `day0_window`; realized PnL, settled_at and settlement_price were NULL.
+  No canonical SETTLED or EXIT_ORDER_FILLED event was found for any of the
+  three; all were false actual settlement-loss candidates at this cutoff.
+- Corrected private-root basis check `01:30:57.746049Z` retained complete
+  command-deduplicated entry identities: NO33 command `db574f90728f45b8`,
+  YES32 `b900b7b501484b3c`, LOW YES27 `d25ee81b7e854d00`; all
+  `entry_fill_command_identity_complete=true`. The first private-root argument
+  error was corrected and was not a live qualification failure.
+- Five quote incidents were all queued/blind, with no incident directory or
+  CURRENT pointer and no settlement_basis/evidence_snapshot controller debt:
+  NO33 `bf6e603a281e58c15cf6daf6` below_floor (bid .04) and
+  `4f46d63b1cc74cae15ce6eca` no_bid; YES32
+  `3b91930c0bb5aa9622c22508` below_floor (bid .03) and
+  `6405633c5810f66493615f18` no_bid; LOW YES27
+  `b84cfd8ed150884e7e747f63` below_floor (bid .04). These are five quote
+  episodes, not five settlement losses, orders or exit fills.
+- The integrated TotalLoss repair can collect lawful quote evidence, but no
+  service was started and runtime effectiveness has not been demonstrated.
+  A later terminal-loss classification must freshly join canonical settlement,
+  prior filled exits and at least 95% complete command-deduplicated basis.
+
+Ground-gate scope adjudication: no evidence shows that a ground-height gate was
+mistakenly added to ENS. ENS still requires station ID/reference coordinates
+and actual native LSM, not ground height. The complete-posterior dependency is
+the existing OM9 anchor precision production route; honest typed proof replaces
+its former false ground PASS. The owning law's USED-provider ground obligation
+has no default-DEM exemption. Twenty-six rows remain without ground proof
+(22 active cities / 43 city×metric families; four current-contract N/A), so
+neither all-city readiness nor a green-test bypass is claimed. Any independent
+source-route redesign needs owning-law evidence, not another broad metadata
+query or a silent gate waiver.
+
+Pending integration dependency boundary at parent `c04f5551e`: critic confirms
+the narrow single-body ground scopes `3e5daa432af315631855f981afc3488db01eb3bf`
+→ `6888bf7287f15c8952d2b5b76a9170fd82045859`
+→ `97b63b469c2e62a5740fa7d0099a936f15cca020`
+→ `99ebe8f05abaed12d6d951f232d3eb20c7556688`
+→ `f6a646b77485641e2dbc84e5089e90154aaa4e21`
+→ `7047bcbecc97c3f3949ce1595296abf79b6cd64b`, plus test-only
+`3e7b8cc29e172ce7c79247c91442550ede8fbc94`. However, the eight-file `6888`
+consumer wiring depends on `e02e26354b9cc862711535d432803488cef7ff42` interfaces;
+that complete native-consumer slice has not received overall approval. Do not
+pick the last patch alone, run missing-interface failures as new regressions,
+or merge a WIP branch to obtain those prerequisites. The always-latest-wholepage
+SHA finding is closed within the admitted immutable single-body/facts-only-HWM
+scope, not the still-pending WMD dual-body/current-effective-period or full-q
+route. LA `1d19272e` remains similarly dependency-held.
+
+Critic's concrete `e02` prerequisite finding is HIGH, not a generic missing-test
+objection: the `cycle_policy` ECMWF IFS branch can grant authority from only
+revision plus `sea=False`. In an otherwise lawful normal LOW relation,
+substituting that two-field source_cellproof and recomputing the geometry hash
+still gave entryauthority=True. The frozen evidence must revalidate its own
+O1280 selected-cell fields; await the source owner's minimal fixed closure
+before integrating `6888` consumer dependencies. The single-body ground
+always-latest-SHA closure does not discharge this native selected-cell finding.
+
+HK trace `21b992dc219986a6e897ba89aecf55e2e3fb4ddd` had a repair-time MEDIUM:
+retained full witness arrays were not fully charged to its diagnostic budget.
+The fixed companion `c9f55f3c6f2c9304855fa50595464ec6b6992744` closes it;
+critic admits that combination on its original base87. The original trace
+alone was never admitted, and the new31b combination result below is separate.
+Separate W3 fixture-only `77f5da6731b5d25e603271f075ee5eeaacd0b2dc` is
+independently critic-approved and integrated as parent
+`a580c9c5615d934440623de4acb59262e3478990`. Exact-base preview was clean and
+the actual commit tree equals projected `7e1a1810594395a995c68c948696b528d2724633`;
+all four dirty governance files stayed byte-identical during the pick.
+Its 17 affected parameter nodes pass on actual parent in3.12s,
+`/tmp/zeus-parent-hk-fixture-eight-fixed.xml` (879 deselected). It needs only
+already-admitted Day0 actuation/current/JIT/wake interfaces, not unadmitted
+trace21b/e02/archive. It does not include the remaining HK post-local node or
+waive reader40/defect29; no all-W3 green or production-effect claim.
+
+Later bounded HK owner handoff (`2026-09-30T01:43:20.402275Z`, Chicago Sep29
+20:43 / Hong Kong Sep30 09:43): main PID3539/cwd live and three canonical DB
+handles were observed; git-head-derived loaded_sha still does not prove PID
+imported code identity. Old three positions still target Sep29/day0_window,
+unsettled, with current bid0/ask.001; monitor reported HOLD/should_exit=false.
+The latest inspected auction was compact_delta cut6178/decision879371 at
+01:44:07, with six verified body-hash coverage layers through decision879353,
+not an older global_single_order_auction-only selection. All three were
+EXCLUDED/SELL_BOOK_NO_BID/candidate=None; Hong Kong was not in
+probability_ineligible. BUY rejection was
+POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE; stale observation diagnostics
+alone do not prove statistical SELL forbidden. Book capture was
+01:44:02.052104Z, deadline01:47:02.052104Z; subsequent cut6179 at01:44:30 was
+INCOMPLETE_SELECTION_CANCELLED. No latest lawful executable SELL price was
+shown. The 24h five HK BUY rows include only the two old HIGH fills; three
+EXPIRED/CANCELLED+VOIDED rows have zero shares and no fill authority. No new HK
+fill was found in the owner-defined Hong Kong Sep30 window. The user's eight
+orders/seven-total-loss UI count is still not uniquely matched to canonical
+facts. This is an owner tool-output handoff, not a new raw-file capture or a
+claim that the repairs were running.
+
+Independent RO tip refresh at `2026-09-30T01:55:58Z`: remote/live checkout remain
+`d9dd60470bdfc651f6e52d8470965302cf363e8c`; main heartbeat PID3539 alive at
+01:55:17.847377Z and forecast PID97726 at01:55:39.269824Z (git_head=d9dd60470).
+No external new commit or task deployment was observed; main imported SHA
+remains unknown.
+
+### Remaining active ground gaps — bounded disposition, not source substitution
+
+At parent `c04f5551e`, literal current registry proof absence is 26/54 rows.
+The retained Gamma receipt makes four current-contract N/A (Auckland, Jakarta,
+Lagos, Jinan closed dated only), leaving **22 active cities / 43 city×metric
+families** below. This reconciles the 28 proved ground roles with the original
+50 active city / 96 family inventory; it does not turn role coverage into q
+readiness. No new API requests or city/source/coordinate changes were made for
+this disposition.
+
+| Active city / source ID | Families | Actual evidence gap or conflict | Minimum honest disposition |
+|---|---:|---|---|
+| Beijing / ZBAA | 2 | Exact operational WMD root geospatial position is 2D, no ground elevation | Ground quantity UNPROVEN; temperature deployment AGL2 without MSL Z cannot reconstruct ground |
+| Guangzhou / ZGGG | 2 | Same exact operational root-height absence | Ground quantity UNPROVEN, not a proved wrong settlement station |
+| Shenzhen / ZGSZ | 2 | Same exact operational root-height absence | Ground quantity UNPROVEN; no airport height substitution |
+| Zhengzhou / ZHCC | 2 | Same exact operational root-height absence | Ground quantity UNPROVEN; no AGL-only derivation |
+| Chongqing / ZUCK | 2 | Same exact operational root-height absence | Ground quantity UNPROVEN; current contract ID remains matched |
+| Qingdao / ZSQD | 2 | Root-height absent; separately WRH header points to old Liuting36.2661/120.374 while current AWC/Gamma point to Jiaodong36.362/120.087 | Real provider-header/site geometry contradiction, not only absent metadata. Reject stale geometry authority; no proof that returned temperature or current contract source ID itself is wrong |
+| Busan / RKPK | 2 | Exact current WMD still declares closed | Reject that historical/candidate facility for current ground; current AWC ICAO METAR match is not disproved by a closed WIGOS entity |
+| Sao Paulo / SBGR | 2 | Exact current WMD still declares closed | Same candidate-period conflict; do not replace source or borrow an airport reference |
+| Tel Aviv / LLBG | 2 | Exact current WMD still declares closed | Same candidate-period conflict; current source observations need their own identity, not the rejected station-ground record |
+| Wellington / NZWN | 2 | Exact current WMD still declares closed | Same candidate-period conflict; current market noaa/NZWN remains contract-matched |
+| Chengdu / ZUUU | 2 | Current AWC WMO56294 exists, exact WMD URL404/catalog no row | Official ground route lacks an entity; 404 is not proof the observation station is closed or wrong |
+| Munich / EDDM | 2 | Current AWC WMO10866 exists, exact WMD URL404/catalog no row | Same exact-ground entity gap, no adjacent-site substitution |
+| Taipei / RCSS | 2 | Current AWC WMO46696 exists, exact WMD404; CWA station metadata41 rows has no46696/Songshan. Yearbook12m and AIP temperature sensor locations do not establish groundMSL | Preserve WU/RCSS current contract and CWA township role separately; ground remains UNPROVEN, not HKO/Taipei-neighbor proof |
+| Istanbul / LTFM | 2 | No AWC WMO bridge; WRH header566m vs AWC/DHMI airport99m | Real metadata height contradiction, but neither generic value proves sensor/site ground. Ground UNPROVEN; do not infer wrong temperature or silently replace coordinates |
+| London / EGLC | 2 | No AWC WMO bridge/exact OSCAR London City row; ISD generic ELEV only | External exact ground-role gap; St James/closed Weather Centre cannot stand in for EGLC |
+| Mexico City / MMMX | 2 | No current AWC WMO bridge | Identity bridge/ground source gap, not a proved settlement-source conflict |
+| Moscow / UUWW | 2 | No current AWC WMO bridge | Same exact proof gap; nearby WIGOS record would not suffice |
+| Panama City / MPMG | 1 HIGH | No current AWC WMO bridge | Same exact proof gap; no invented LOW family |
+| Seoul / RKSI | 2 | No current AWC WMO bridge | Same exact proof gap; no airport elevation authority |
+| Shanghai / ZSPD | 2 | No current AWC WMO bridge | Same exact ground proof gap; retain already pinned current ZSPD identity, not previous alternate station |
+| Denver / KBKF | 2 | Current HOMR has AIRPORT only, no temperature primaryDCP/GROUND; no AWC WMO bridge | Quantity and temperature-location proof absent. AIRPORT/Stapleton/ISD generic ELEV cannot repair it |
+| Wuhan / ZHHH | 2 | Exact AWC57494→OSCAR WUHAN24m at30.6/114.05 lies25.17km from current AWC Tianhe METAR site | Actual candidate physical-site binding conflict. Reject the candidate ground record; same WMO ID alone is insufficient. No single-station WMD runtime proof was captured for this rejected candidate |
+
+Four N/A rows stay explicit: Auckland/NZAA has AWC93119 but exact WMD404
+(different Auckland Aero93110 is not the proved bridge); Jakarta/WIHH has no
+bridge/exact Halim ground record; Lagos/DNMM has an exact WMO65201 OSCAR
+LAGOS/IKEJA candidate13.44km from the current METAR site and must not be bound;
+Jinan/ZSJN has no bridge, and the nearest JINAN54823 is32.20km away with no
+ground height. N/A contracts do not convert these physical gaps into evidence.
+
+Source-route disposition is four-layered: contract source/ID/unit matching and
+normal raw storage may remain valid subject to their actual ingestion gates;
+provider means/agency forecasts are not station daily observations and carry
+their existing roles. Under the present production law, required OM9 anchor
+ground precision still blocks a new complete posterior for these dependent
+families; partial/station augmentation is not a bypass. Frozen public-held q
+also needs its own admitted proof/revision/cutoff replay. Qualified absorbing
+observation truth is a separate lawful route only when its existing identity,
+time/finality and exact-bin obligations pass; this table does not declare
+those per-city tests complete. Closed/displaced candidates are rejected proof
+routes, not a license to change the current settlement source. A new official
+exact-site ground entity and normal after-possession producer/archive/seed
+recompute are the restoration path; remaining external evidence gaps are
+deferred explicitly, not hidden as all-city completion.
+
+Independent configuration/caller discrimination for the three conflict cases
+used parent `c04f5551e` plus read-only live `d9dd60470` configuration (same
+coordinates, all three `noaa=null`). `src/config.py:328–349` therefore selects
+top-level City coordinates. Normal anchor requests at
+`scripts/download_replacement_forecast_current_targets.py:2021` / `:2183`
+and native selected-cell construction at `:518` consume that City point;
+`src/data/bayes_precision_fusion_download.py:206–207` sends its target
+latitude/longitude. The task CodeGraph is uninitialized, so the already-indexed
+live graph was used only for navigation and the task source was checked exactly;
+no index was initialized or rewritten.
+
+| City | Current forecast query / reference point | Current official AWC METAR point / distance from query | Rejected/conflicting metadata point | Inference boundary |
+|---|---|---|---|---|
+| Qingdao | 36.361953,120.088171 | ZSQD Qingdao/Jiaodong36.362,120.087 /0.104986km | WRH old Liuting36.2661,120.374 is27.739357km away | Forecast query is already at the Jiaodong-side reference, not old Liuting. Old airport_name text and WRH header are not query authority; no proof of old-airport forecast sampling |
+| Istanbul | 41.274874,28.732136 | LTFM Istanbul Arpt41.262,28.74 /1.575195km | WRH566.3184m differs from AWC/DHMI99m; no verified ground value is granted | Generic airport heights do not establish real ground. Neither WRH566 nor an OSCAR point replaces the actual request point; exact temperature-site offset remains unproved |
+| Wuhan | 30.774798,114.213723 | ZHHH Wuhan/Tianhe30.783,114.205 /1.235406km | Rejected OSCAR WUHAN30.6,114.05 is24.957704km from query (25.17km from AWC) | Current request is Tianhe-side, not the displaced city WIGOS entity. Same WMO bridge cannot grant candidate ground authority |
+
+The actual AWC entity is the shared11008-byte original body (SHA8eff09f...),
+and retained Gamma source/ID/unit receipt matches Qingdao events
+1101833/1101724, Istanbul1101825/1101717 and Wuhan1101821/1101711. Market
+station identity is not a precise sensor-coordinate measurement. These facts
+refute adoption of the old/displaced metadata as the current forecast query
+on the inspected route, but **do not** certify the airport reference as a
+temperature sensor point, turn the1.575/1.235km offsets into zero, or prove a
+wrong-temperature historical response. No coordinate/source/height change is
+justified by the existing evidence alone; exact-site physical proof remains
+the separately scoped restoration obligation.
+
+Network repair ownership: `loss_pipeline_repair` owns only existing
+`src/data/bayes_precision_fusion_download.py`, `src/data/openmeteo_client.py`,
+`tests/test_bayes_precision_fusion_download.py` and
+`tests/data/test_openmeteo_refetch_guard.py`. New optional reason/raw-ID debt
+input is scoped to exact model/run/request/target tranches; the shared RO
+classifier must reject unknown/mixed healthy reasons rather than fall back to
+generic all-fetch. SCOPE is the exact raw-ID/request debt. DRAIN is the normal
+bounded producer/lease/deadline cadence with both caches bypassed only for the
+proved debt. RESET requires an actual200 original-body receipt and durable
+served authority; raw clocks are not renewed and cleared debt causes zero
+repeat HTTP. SEA/unsupported/groundmissing/inherent suffix gaps are not force
+network reasons. These four paths are already in scope/registries; development
+baseline `b78f3008900ab10c9789787a680c8e6af8c00b19` includes unadmitted ancestor
+interfaces and is not a parent landing or complete RESET verdict.
+
+Approved e02 HIGH closure implementation scope (not fixed-source acceptance):
+physics owns existing
+`src/data/openmeteo_ecmwf_ifs9_bucket_transport.py::{capture_source_cell_geometry_proof,validate_source_cell_geometry_proof}`,
+`src/data/replacement_current_value_serving.py::_current_model_surface_witness`,
+`src/data/replacement_forecast_cycle_policy.py::_current_evidence_shape_has_probability_authority`,
+and `src/data/replacement_forecast_materializer.py::_bind_provider_geometry_identity`
+plus its physical proof dependency. Existing tests are
+`tests/test_openmeteo_cell_selection_and_elevation_are_product_identity.py`
+and confirmed `tests/test_openmeteo_ecmwf_ifs9_bucket_transport.py`; both have
+existing source/test registry rows. Only the bucket source/test paths needed
+addition to this packet scope, not a new file/registry system.
+
+The implementation must seal/replay the actual O1280 static entity and its
+own selected-cell index/coordinate/height/surface using existing state/static
+content addressing and local-possession audit; no network/schema/service is
+added. Whole asset SHA remains an audit dependency, not stable selected-cell
+geometry identity. This is not a fresh HTTP capture and cannot authorize an
+older cutoff. SCOPE is one USED IFS9 native proof dependency. DRAIN/RESET is the
+normal producer acquiring lawful frozen evidence and computing a successor
+certificate before entry/held reuse, not granting revision/sea-only legacy
+proofs authority. BPF is exclusively owned by the network lane, which calls
+the new capture function; physics must not concurrently edit that file.
+Positive-first own-body/index/coords/height/sea and audit-SHA-stability twins
+are required before critic closure and dependent archive integration.
+
+Independent local-day/client parser integration is now fixed on parent:
+`34eb94b0c687160e020a66de79f8d1f4584d6656`→`fdae6f6e4`,
+`4dacb70d20e4d44cbe98b334c7e2a429c7386447`→`3ed1b95b6`,
+`b78f3008900ab10c9789787a680c8e6af8c00b19`→`558ac8b77`.
+Actual tree equals exact sequential preview915add5a13e289ceb1d328f274e7a81931946af2;
+the four original dirty governance files stayed byte-identical during picks.
+Parent134 BPF +11 anchor +35 client tests all pass180/180 in2.20s,
+`/tmp/zeus-parent-localday-client-fixed.xml`. The only absent baseline e02 BPF
+code was its twelve-line native-prefetch/status addition, not required by these
+parser/interface deltas. No e02 or archive ancestor was implicitly merged.
+
+The parser now rejects missing/duplicate/unordered hourly slots, bool/nonfinite
+values and headerless naive API timestamps; exact23/24/25-hour DST and original
+fractional-offset phase define this hourly-sampled proxy. A pinned intrinsic
+left prefix may be raw-cache-reused but cannot become a full-day scalar or new
+capture receipt. Typed client force-capture requires exact allowed debt plus
+both callbacks and an actual200, retaining quota/leases/terminal refusals.
+This is not yet producer classifier→both-cache bypass→durable current
+authority RESET or full Day0/public-held acceptance. Existing anchor source
+and test registration gaps were repaired only for these touched paths; no
+unrelated repo-wide drift was cleaned. Actual reuse evidence is kept in this
+packet and the required registry fields, without a date-only test-header edit.
+
+Current parent `b6bfc89cb00616c688e92de93efd06aa512d2368` also admits standalone
+test-only `bb5c8e16b1952e550269190e988582bfc10c5a22`. Its v28/v27 bind/parser
+interfaces were already present, exact-base preview was clean and actual tree
+equals af6a64352dcf912bd774a4f69a41ba10bec1f876. One actual parent node passes
+in3.08s (`/tmp/zeus-parent-semantic-cohort-fixed.xml`): four historical cohorts
+retain their old mechanism stamps and cannot be relabeled current without
+recomputation. This grants no q/source authority. Pending e02 HIGH/archive,
+trace21b+c9 repair, WMD dual-body and full current/held combinations remain
+separate acceptance gates.
+
+### Fixed31b rebase / actual trace combination checkpoint
+
+The parent branch was rebased, not pushed or deployed, onto fixed
+`31b086c2a15e660131681580c7fe8f638ea16518`. Its common base was
+`761c62b1106feb6df1fece82ce56c0b2fc0a272d`; all64 task commits were first
+simulated against their exact original parents, then actually rebased clean.
+Result `e50ba334cf76c9b6c73eafdd91c30f797b34ff95` had committed source tree
+`623b3b83077fa622c0a4b937c6673e496e4e34f4`, equal to both sequential and net
+preview. Four tracked governance paths were saved in new stash
+`75c9764033702a007e1d037e8a2b09c018c45ae5`, applied without pop; original
+`50697d5e516cb40a31184a0dee3bfdde5c9e5e4a` remains intact. Untracked original
+capture SHA inventories stayed identical. PLAN/scope restored exact before
+bytes. One source-rationale adjacency conflict was critic-approved mechanical
+union of four distinct keys, preserving upstream family_reachability and
+trade_retention plus our model_surface and station_ground_evidence. Index is
+empty; governance remains dirty, not mixed into source commits. Ordinary YAML
+parse/diffcheck pass; strict duplicate-key scan finds no new duplicate.
+Four pre-existing topology duplicates for two raw_model_forecasts test keys
+match committed HEAD and were not repaired as unrelated drift.
+
+External d9dd→31b six commits are
+`cd7521039af4d7cd86aa05bb612b7ce4cc81d524`,
+`c104b35e4517fdc167c1c84f12f199a78e3e67ff`,
+`82f88fa9dd6afc85105f81fdfe767a4250f1bd28`,
+`3474d9984bad40875ec789ff4f5f547022adfe98`,
+`e0e9fdf1006b5186ea53ce7e9a535314bff292db`,
+`31b086c2a15e660131681580c7fe8f638ea16518`. Changed17 paths:
+architecture/source_rationale.yaml; architecture/test_topology.yaml;
+src/contracts/rejection_reasons.py; src/control/venue_access.py;
+src/engine/cycle_runtime.py; src/engine/event_reactor_adapter.py;
+src/engine/global_batch_runtime.py; src/engine/global_single_order_auction.py;
+src/events/reactor.py; src/execution/executor.py;
+src/observability/status_summary.py; src/solve/solver.py;
+tests/solve/test_solver_properties.py; tests/test_dedup_gate_token.py;
+tests/test_executor_command_split.py; tests/test_runtime_guards.py;
+tests/test_venue_access.py. The full selected-outcome prerequisite
+`21ea8c372525c8c3146f1743a8f3f9371408f687` is a31b ancestor. Its schema
+fingerprint/corpus/schema/tests are byte-equal; global_batch adds nine lines
+for the selected-order resolver signature and three forwards. That is not
+equivalence of all current execution economics, and its dependency was not
+cherry-picked again.
+
+Only trace21b→c9 own deltas were previewed/picked on this base, producing
+`e1afc3fcf`→current parent `e4429474f71241a58fd30eb5db98f8fb9089c3f8`, committed
+tree `2a07a7563d076ebe7014734be26b0befb652bac1` equals the projection. Actual
+new-base trace82 is **72 passed /10 failed**,9.91s,
+`/tmp/zeus-parent-31b-trace-combined.xml`; all ten first failures are the shared
+`_station_grid_cohort` fixture's missing original utc_offset_seconds for naive
+hourly times, so the strict34 parser writes0 rather than four. The stub also
+lacks its real network-response callback. Exact failed IDs are two
+`test_held_point_trace_observes_normal_hko_consumer_without_changing_witness`
+HIGH/LOW plus eight
+`test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding`
+none/freeze/overflow/off×HIGH/LOW. HK is the authorized sole helper/test owner;
+do not weaken the production gate, call these historical baseline, or infer
+a31b trace-code cause from this first fixture failure.
+
+Actual newbase selected5+three selector/repost nodes+BUY-pause SELL-control
+pass9/9 both before trace4.51s and after trace4.33s:
+`/tmp/zeus-parent-31b-selected-economics-pretrace.xml` and
+`/tmp/zeus-parent-31b-trace-selected-economics.xml`. Those checks do not replace
+the pending actual adapter host-BUY-suppression/held-SELL-trace relation or the
+ten blocked trace nodes. Full trace/source/public-held acceptance stays held.
+
+Subsequent wire-fixture repair is independently admitted test-only
+`e0d34a79ecb0272c5b5c3e1004bb66f0599ce159`, two existing test files only,
+integrated as parent `e8bfb5b057198086a831ee527db0d3fd67f2ee73` with exact
+projected committed tree `623ec7ddfbe1cf3e7411c8722ffc5399fc971e40`. It supplies
+the original28800 offset and both capture callbacks, retaining legal12Z
+ENTRY/06Z HELD prior ages and12Z after-possession normal RESET, all before the
+target local day. No READY/q mock or production gate was loosened.
+
+- The original ten failed IDs now pass10/10,15.92s,
+  `/tmp/zeus-parent-31b-trace-wire-original10-fixed.xml`.
+- The full same82-node newbase trace set passes82/82,19.05s,
+  `/tmp/zeus-parent-31b-trace-wire-combined82-fixed.xml`.
+- The same selected5+three selector/repost nodes+BUY-pause SELL-control passes
+  9/9,4.31s, `/tmp/zeus-parent-31b-trace-wire-selected-economics-fixed.xml`.
+
+Thus91 narrow newbase nodes are proved after the recorded72/10 failure, not
+retroactively green. Actual adapter host-BUY-suppression with held-SELL/trace
+survival and same-held-family runner-up trace relations remain separately
+pending HK tests on this fixed source. Full W3/reader40/postlocal/source
+ground/native/archive acceptance is not conferred by these91 results.
+
+Test-isolation correction: the network lane's earlier child baseline had
+unadmitted e02 static-surface prefetch and no static HTTP fence in the BPF test
+module. Two earlier180 runs had no request trace, so neither zero public
+static HTTP nor actual external requests can be inferred retroactively.
+No venue/production DB/control action was evidenced. Its owner is adding a
+transport fence and normal decoder before rerunning. The parent180 snapshot
+did not contain that e02 prefetch; the child gap is not automatically a parent
+failure, and neither run is relabeled a proven zero-external-network test.
+
+Pending WMD archive extension is exclusively owned by defect_recurrence in
+existing `src/data/station_ground_evidence.py` and
+`tests/test_station_ground_evidence.py`. It preserves archive/current/frozen
+APIs and stores two original immutable INPUT_KIND entities (full WMD XML and
+whole shared AWC JSON), with canonical MANIFEST_KIND dependencies on both;
+actual source capture is max of both and first canonical possession remains
+separate. Facts are selected at the real archive/analysis cutoff. A
+known_effective_period_transition does not issue HTTP or renew either original
+clock. Frozen own-cut and current actual-cut replay remain distinct. Author
+reports57 pass6.63s (39 existing preserved+18 new), but fixed SHA/critic review
+and public-q/producer combination are pending; this is not an admitted module
+or live-city readiness verdict.
+
+New bounded physical-applicability boundary: knowledge/possession cutoff and
+the forecast's target local-calendar weather day are separate obligations.
+If an already-known official future interval means the selected station facts
+cannot cover the whole target day, only that city/date/provider dependency
+fails closed. It must not inject future coordinates or q authority, prohibit
+normal undated-snapshot forecasting, or stop unrelated cities. Ground owner
+will expose a pure interval/coverage helper; source consumers must pass the
+SettlementSemantics target local day and its timezone, not assume analysis day
+is the forecast target. All17 actual admitted WMD records have no such target
+conflict in this packet; synthetic interval-boundary twins are required.
+This is an implementation plan, not new physics truth. If config parsing needs
+an additional validity field, both owners must first agree the minimal API and
+obtain exact ownership; no config parser expansion has been made here.
+
+## 2026-09-29 integration checkpoint — snapshot 21:10Z; evidence additions through 21:33Z
+
+This checkpoint updates the original 19:49Z snapshot below. Historical statements remain time-bounded.
+
+### Addendum — evidence/integration state through 2026-09-29T22:04Z
+
+- Parent worktree HEAD is `dfecab4056ad74217b663d310b54949dc946826c`; the HKO static-data slice is committed as `1c741bbe1` plus exact-entity-body EOL protection `dfecab405`. `architecture/test_topology.yaml` and this PLAN remain dirty existing work; preserve both. Cross-branch source integration is now owned by `city_source_contracts`; no additional source cherry-pick, rebase, merge, or commit was performed by this agent.
+- The approved city physical-ground commit `d4e472f17` is **not** in the parent tree. The corrected effect comparison `git diff d4e472f17 HEAD -- <its 11 owned paths>` shows 90 insertions / 505 deletions, while `git merge-tree --trivial-merge b96562cf1 HEAD d4e472f17` reports all 11 paths merged with no conflict. Comparing only `b965..HEAD` was insufficient: it showed the old base-equivalent tree, not the d4 effect. The no-conflict preview is not an integration or test result.
+- One bounded official NOAA HOMR response was captured at `2026-09-29T21:50:23Z` from `GET https://www.ncei.noaa.gov/access/homr/services/station/search?qid=ICAO%3AKORD&date=2026-09-29&phrData=false`, HTTP 200, 57,828 raw JSON entity-body bytes, SHA-256 `3c95677db4c091cb4c01a027b7276b7053dbe945c764803f1cd166c7e5a25aac`. The body is retained at `docs/operations/current/evidence/noaa_homr_kord_station_20260929.json`. It identifies NCDC `10003214`, KORD/WMO `72530`/WBAN `94846`, primary DCP/ASOS-CM location `41.96017,-87.93164`, GROUND `672 ft / 204.8 m`, AIRPORT `667 ft / 203.3 m`, and BAROMETRIC `658 ft / 200.6 m`. Independent critic adjudication accepts the captured GROUND value as a current ground-MSL proof; no extra NAD/EGM datum or installation-period gate is added. Runtime/config binding to the existing Chicago reference and query coordinates is still pending; the Chicago config row and coordinates remain unchanged. Keep proof/capture age separate: the 21:50:23Z capture cannot be used to retro-authorize an earlier materialization whose decision cutoff preceded possession.
+- Open-Meteo explicit-model surface work is newly authorized but not implemented: `src/data/openmeteo_model_surface.py` and `tests/test_openmeteo_model_surface.py` are owned by defect recurrence; only the already-sanctioned `state/static` content-addressed `.om` + immutable manifest pattern may be used, and only for explicitly evidenced ICON global/EU/D2 and UKMO global profiles. Do not fetch/populate live caches. Its exact source-rationale and test-trust registration remains pending the owner's interface/capability details. The approved `src/data/replacement_input_hwm.py::_rich_current_value_serving_lag_consumed_raw` addition compares body-artifact and capture-receipt identities for same-raw current-value inputs and routes exact-family late proof through the existing seed; geometry, schema, raw clock, and scalar fallback are unchanged.
+- Follow-on cutoff integration is approved but pending source implementation: `src/engine/position_belief.py` passes the existing posterior row `computed_at`; `src/engine/global_batch_runtime.py` adds it to the existing SELECT projection and passes it; `src/data/replacement_forecast_production.py` does the same, with materializer request `computed_at` as the consumer cutoff. Shared authority must reject missing cutoffs and must not trust evidence receipt self-time, so a body/capture proof acquired after an old materialization cannot retroactively authorize that old q. The materializer helper and producer request need the same cutoff dependency. No K0, probability math, geometry, DB schema, raw clock, or fallback changes are authorized.
+- Normal raw-artifact manifest persistence is separately approved but pending fixed/critic evidence: `src/data/raw_forecast_artifact_manifest.py::write_manifest_to_db` and `tests/test_raw_forecast_artifact_manifest.py` must preserve immutable captures on ON CONFLICT/no-op; only a genuinely new normal capture may mint a receipt. The current 5-file typed-ground last-mile WIP reports 63 focused passes but is not integrated or a complete public/held coverage result; new manifest/cutoff dependencies must be validated together, including all current/previous data-version immutability and proof-possession cutoffs.
+- The source stack, typed city binding, and the KORD/other-station public-to-held consumer path are still unintegrated/unverified. A separate HKO 04:00-seed / 21:23 proof possession cutoff finding remains open; approved metadata evidence alone does not close that last-mile causality defect. No partial load, live edit, DB write, restart, or venue action is authorized here.
+
+- The parent task worktree is /Users/leofitz/.codex/worktrees/all-city-source-root-repair/zeus, branch fix/all-city-source-root-repair, now at 38aca1c07. It contains the previously accepted WU, Ogimet, mixture, post-midnight and fixture-only slices plus the approved grid commits a49ef99c→872f532a3 and b96562cf→38aca1c07. Both grid commits were previewed against their real parents; b965's true parent a49 has an identical tree on its touched paths before the second pick. An automatic-base preview from the older shared ancestor was not the correct comparison and reported conflicts; the explicit true-base preview was clean. No parent-tree test was run on an incomplete or complete grid pair, no push/rebase/fast-forward/live edit/restart/database write was done. The grid pair's cited 47-pass critic run does not mean the physics/HKO consumers or combined suite are accepted.
+- Read-only origin/live comparison, without fetch: origin/live is 7e5869935, three commits beyond the original 761c62b. Exact path intersection with the owned forecast/ENS/HKO/grid/source tests is empty. The three commits touch AGENTS.md, scripts/deploy_live.py, src/execution/command_recovery.py, tests/test_command_recovery.py, and tests/test_ops_scripts_smoke.py. The operationally adjacent semantic change is one shared venue-terminal-fill predicate for restart admission and command review; do not expand this source repair into command_recovery, but re-read the new restart predicate before any separately authorized restart. AGENTS.md now makes independent critic review conditional on unresolved semantic risk; this task's explicit owner/root critic requirements remain in force.
+- Current live-risk read-only sample at 20:50:26Z: effective entries_paused=false, while entry availability is reduce-only / unavailable and global_allow_submit=false under DATA_DEGRADED. The later entry record is REVIEW_REQUIRED for a partial remainder without a full trade fact; the most recent submit rejection is earlier and says geoblock 403. This is not a pause or RED proof. No pause, RED, cancel, or restart was issued. Main PID 35286 had a fresh 20:45:30Z heartbeat and loaded 64e64935; live checkout/origin was 7e586993 with a 20:49:48Z status projection. Recheck before relying on this snapshot.
+- Canonical forecasts DB read-only DDL check at 21:10Z used /Users/leofitz/zeus/state/zeus-forecasts.db; sqlite_master and PRAGMA table_xinfo show forecast_posteriors has no trade_authority_status column. Its current runtime_layer check allows NULL or live. The owner-provided historical published DDL at 8ab08b792/cdc3f47dc^ has DEFAULT DIAGNOSTIC_ONLY and CHECK permitting DIAGNOSTIC_ONLY or LIVE_AUTHORITY; omitting the field therefore uses the diagnostic default, not an IntegrityError. The LIVE_AUTHORITY-only/BLOCKED-default schema is present only in a hostile test with no v2 release record. fe5afb2d2 explicitly removes the old label/automatic-upgrade behavior. The proposed production IntegrityError is refuted for both the verified current DB and verified published historical DDL; retain fail-closed handling and repair the fixture to the real historical DDL only. No rows were queried and no schema was modified.
+- Market receipt: bounded read-only Gamma evidence at 2026-09-29T20:47:16.757577Z is summarized below and in /tmp/zeus-city-source-audit-20260929.json (SHA256 2e0bba4891d0485faab4b732ab86f651b92c628efcda4d76973c0eb26d9fc553). The temporary JSON is not tracked; this plan retains the full city matrix and query response hashes. Three paged /events requests used tag_id=103040, active=true, closed=false, limit=100, offsets 0/100/200, order=id descending, end_date_min=2026-09-28T00:00:00Z; counts were 100/100/57, with response hashes bbb2c4346559252a4b40cd1e19b5f8ce691907bf2869bebaae061f65ef68d992, 3188f90635a5d46c7c22de917a81e048a1bbac9940c2a9a915f9c63ae0c75ec9, and 4bc439569a8fe58a362dd2783846800010e99cdec2e081e27a7ee2dbcad79dc3. Exact Sep29 high-temperature slug lookups for Auckland/Jinan/Jakarta/Lagos returned 0/1/0/0 with response hashes 37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570, 55ef063c723776c6176e1efe620512b1b4da4e3dcf4e7f57920abd8d789a6133, then the same empty-response hash for Jakarta and Lagos. All 257 paged active event descriptions matched their explicit configured source and unit; unmatched_event_ids is empty. The configured 54 are inventory, not 54 current markets: 50 have active contracts; 51 have dated evidence only because Jinan's Sep29 WU market is closed; Auckland, Jakarta and Lagos have no current contract. Four active markets are high-only (Kuala Lumpur, Manila, Panama City, Singapore); the other 46 have both metrics. ACTIVE_MATCH below means source/unit market-contract match only, not physical representativeness proof.
+- Hong Kong YES32's current description does not explicitly state its rounding/preimage rule, but the bounded cross-date evidence strongly supports floor rather than nearest rounding. Current active Gamma market `5012435` / condition `0xddbe5be30034dde4c911fde3bedc31d210eb5a464bf79a4a519cc0a986782641` was recaptured once at `2026-09-29T22:11:29Z` from `https://gamma-api.polymarket.com/markets?condition_ids=0xddbe5be30034dde4c911fde3bedc31d210eb5a464bf79a4a519cc0a986782641`, HTTP 200 `application/json`, 9,164 raw response-body bytes, SHA-256 `0ca0103544b0d14a8d9b9fee917f20cfb444bd003aed3d3ffee436ee5bf72935`; description-only SHA-256 `ab570e344f812f6b34e075f4ba5dbaf4c07e884fc2bc89f3c73ba621514ac5e3`. Exact bytes are at `docs/operations/current/evidence/gamma_hko_yes32_market_5012435_20260929.body`. It identifies the HKO “Absolute Daily Max” from “Daily Extract”, one decimal place and an initial-publication revision cutoff, but does not spell out floor/nearest rounding or the settlement-bin preimage. An owner-reported comparison checked at `2026-09-29T22:11:40.403886Z` used the official monthly extract and six closed/UMA-resolved Gamma events: the one-decimal HKO (HIGH, LOW) pairs were Sep26 `(32.1,26.5)`, Sep27 `(32.7,27.1)`, Sep28 `(32.5,28.3)`, with resolved winning brackets `(32,26,32,27,32,28)`. Thus floor matches 6/6 while nearest rounding fails on Sep26 LOW 26.5→26, Sep27 HIGH 32.7→32, and Sep28 HIGH 32.5→32. The old 22:11 source/Gamma responses were stdout-only and their bodies are not replayable; root then explicitly authorized one fresh capture of these seven public endpoints. The byte-preserved 22:17 captures, response hashes, sizes, and verified resolved market IDs are recorded in the table below; all six new Gamma body hashes differ from their old owner-reported hashes while the winner brackets agree. This is strong empirical support for floor, not explicit current-description wording. The first-publication revision archive remains a separate evidence gap. The earlier 22:07 current-market response was not saved as raw bytes and its body size/status cannot be reconstructed; the 22:11 capture is not represented as that earlier response. Do not infer a contractual rule from a derived settlement table alone.
+
+| Target | Resolved Gamma event / winning bracket | Capture window UTC | Raw body bytes / SHA-256 | Preserved response body |
+|---|---|---|---|---|
+| HKO daily extract Sep26–28 | Source HIGH/LOW tuples: 32.1/26.5; 32.7/27.1; 32.5/28.3 | 22:17:52–22:17:53 | 1,950 / `070a24ab1a96793ce897dc5a04c5f09d0eba960cb0048f5f426305868a3928f5` | `docs/operations/current/evidence/hko_daily_extract_20260929.body` |
+| Sep26 HIGH | event 1072653; 32°C | 22:17:53 | 58,562 / `62cd02278fb40f61c8ed4c5073fe81bc8fbe2bc47ae23a056b7cf82c143b3260` | `docs/operations/current/evidence/gamma_hko_20260926_high.body` |
+| Sep26 LOW | event 1072559; 26°C | 22:17:53 | 58,738 / `38b7f31aec0369bd555c1fd1dbddc139fc421485dcd45a9b08fcbc7e7950fccd` | `docs/operations/current/evidence/gamma_hko_20260926_low.body` |
+| Sep27 HIGH | event 1078298; 32°C | 22:17:53 | 58,281 / `119cf8ac59d95b69837d91f13412b985e1f515330ecbd7f5c2892de5ea65e023` | `docs/operations/current/evidence/gamma_hko_20260927_high.body` |
+| Sep27 LOW | event 1078162; 27°C | 22:17:53 | 58,495 / `34f2fef7940c95a2cd81b68116ce03592316bf63ff5417beff0153581998f3bd` | `docs/operations/current/evidence/gamma_hko_20260927_low.body` |
+| Sep28 HIGH | event 1083938; 32°C | 22:17:53 | 58,667 / `3000289d650415dba1053e0e6d785ec529bee4b1ae7b0e84ec9677bac7861408` | `docs/operations/current/evidence/gamma_hko_20260928_high.body` |
+| Sep28 LOW | event 1083831; 28°C | 22:17:53–22:17:54 | 59,109 / `5630f1b8ef192d962ce2e0a9caa203124dfbb89d0de693dc9efcf1008f02f5b9` | `docs/operations/current/evidence/gamma_hko_20260928_low.body` |
+
+| City | configured source/station | unit / timezone / view | active/dated events | latest HIGH id@date | latest LOW id@date | contract evidence | ground role proof status |
+|---|---|---|---:|---|---|---|---|
+| Amsterdam | noaa/EHAM | C / Europe/Amsterdam / all | 6/6 | 1101827@2026-10-01 | 1101719@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Ankara | noaa/LTAC | C / Europe/Istanbul / all | 6/6 | 1101798@2026-10-01 | 1101697@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Atlanta | noaa/KATL | F / America/New_York / hourly | 6/6 | 1102393@2026-10-01 | 1102309@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Auckland | wu_icao/NZAA | C / Pacific/Auckland / provider_daily | 0/0 | — | — | NO_CURRENT_CONTRACT | UNPROVEN_AIRPORT_REFERENCE |
+| Austin | noaa/KAUS | F / America/Chicago / hourly | 6/6 | 1102396@2026-10-01 | 1102312@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Beijing | noaa/ZBAA | C / Asia/Shanghai / all | 4/4 | 1101820@2026-10-01 | 1101710@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Buenos Aires | noaa/SAEZ | C / America/Argentina/Buenos_Aires / all | 6/6 | 1103347@2026-10-01 | 1103267@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Busan | noaa/RKPK | C / Asia/Seoul / all | 4/4 | 1101826@2026-10-01 | 1101718@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Cape Town | noaa/FACT | C / Africa/Johannesburg / all | 6/6 | 1101831@2026-10-01 | 1101722@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Chengdu | noaa/ZUUU | C / Asia/Shanghai / all | 5/5 | 1101822@2026-10-01 | 1101712@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Chicago | noaa/KORD | F / America/Chicago / hourly | 6/6 | 1102395@2026-10-01 | 1102311@2026-10-01 | ACTIVE_MATCH | OFFICIAL_HOMR_GROUND_MSL_PROOF_PENDING_CONFIG_BINDING |
+| Chongqing | noaa/ZUCK | C / Asia/Shanghai / all | 4/4 | 1101819@2026-10-01 | 1101709@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Dallas | noaa/KDAL | F / America/Chicago / hourly | 6/6 | 1102392@2026-10-01 | 1102308@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Denver | noaa/KBKF | F / America/Denver / hourly | 6/6 | 1102397@2026-10-01 | 1102313@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Guangzhou | noaa/ZGGG | C / Asia/Shanghai / all | 4/4 | 1101832@2026-10-01 | 1101723@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Helsinki | noaa/EFHK | C / Europe/Helsinki / all | 6/6 | 1101828@2026-10-01 | 1101720@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Hong Kong | hko/HKO | C / Asia/Hong_Kong / provider_daily | 6/6 | 1101804@2026-10-01 | 1101703@2026-10-01 | ACTIVE_MATCH | OFFICIAL_SITE_GROUND_MSL_PROVED_PENDING_NORMAL_BINDING |
+| Houston | noaa/KHOU | F / America/Chicago / hourly | 6/6 | 1102398@2026-10-01 | 1102314@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Istanbul | noaa/LTFM | C / Europe/Istanbul / all | 6/6 | 1101825@2026-10-01 | 1101717@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Jinan | wu_icao/ZSJN | C / Asia/Shanghai / provider_daily | 0/1 | 1096063@2026-09-29 | — | CLOSED_DATED_ONLY | UNPROVEN_AIRPORT_REFERENCE |
+| Jakarta | wu_icao/WIHH | C / Asia/Jakarta / provider_daily | 0/0 | — | — | NO_CURRENT_CONTRACT | UNPROVEN_AIRPORT_REFERENCE |
+| Jeddah | noaa/OEJN | C / Asia/Riyadh / all | 6/6 | 1101830@2026-10-01 | 1101721@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Karachi | noaa/OPKC | C / Asia/Karachi / all | 6/6 | 1101834@2026-10-01 | 1101725@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Kuala Lumpur | noaa/WMKK | C / Asia/Kuala_Lumpur / all | 2/2 | 1101829@2026-10-01 | — | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Lagos | wu_icao/DNMM | C / Africa/Lagos / provider_daily | 0/0 | — | — | NO_CURRENT_CONTRACT | UNPROVEN_AIRPORT_REFERENCE |
+| London | noaa/EGLC | C / Europe/London / all | 6/6 | 1101795@2026-10-01 | 1101694@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Los Angeles | noaa/KLAX | F / America/Los_Angeles / hourly | 6/6 | 1103108@2026-10-01 | 1103036@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Lucknow | noaa/VILK | C / Asia/Kolkata / all | 6/6 | 1101800@2026-10-01 | 1101699@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Madrid | noaa/LEMD | C / Europe/Madrid / all | 6/6 | 1101816@2026-10-01 | 1101706@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Manila | noaa/RPLL | C / Asia/Manila / all | 2/2 | 1101835@2026-10-01 | — | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Mexico City | noaa/MMMX | C / America/Mexico_City / all | 6/6 | 1103349@2026-10-01 | 1103269@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Miami | noaa/KMIA | F / America/New_York / hourly | 6/6 | 1102394@2026-10-01 | 1102310@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Milan | noaa/LIMC | C / Europe/Rome / all | 6/6 | 1101815@2026-10-01 | 1101705@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Moscow | noaa/UUWW | C / Europe/Moscow / all | 6/6 | 1101824@2026-10-01 | 1101716@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Munich | noaa/EDDM | C / Europe/Berlin / all | 6/6 | 1101801@2026-10-01 | 1101700@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| NYC | noaa/KLGA | F / America/New_York / hourly | 6/6 | 1102391@2026-10-01 | 1102307@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Panama City | noaa/MPMG | C / America/Panama / all | 3/3 | 1103350@2026-10-01 | — | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Paris | noaa/LFPB | C / Europe/Paris / all | 6/6 | 1101796@2026-10-01 | 1101695@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Qingdao | noaa/ZSQD | C / Asia/Shanghai / all | 4/4 | 1101833@2026-10-01 | 1101724@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| San Francisco | noaa/KSFO | F / America/Los_Angeles / hourly | 6/6 | 1103109@2026-10-01 | 1103037@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Sao Paulo | noaa/SBGR | C / America/Sao_Paulo / all | 6/6 | 1103346@2026-10-01 | 1103266@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Seattle | noaa/KSEA | F / America/Los_Angeles / hourly | 6/6 | 1103107@2026-10-01 | 1103035@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Seoul | noaa/RKSI | C / Asia/Seoul / all | 4/4 | 1101797@2026-10-01 | 1101696@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Shanghai | noaa/ZSPD | C / Asia/Shanghai / all | 5/5 | 1101805@2026-10-01 | 1101704@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Shenzhen | noaa/ZGSZ | C / Asia/Shanghai / all | 4/4 | 1101823@2026-10-01 | 1101715@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Singapore | noaa/WSSS | C / Asia/Singapore / all | 2/2 | 1101814@2026-10-01 | — | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Taipei | wu_icao/RCSS | C / Asia/Taipei / provider_daily | 4/4 | 1101818@2026-10-01 | 1101708@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Tel Aviv | noaa/LLBG | C / Asia/Jerusalem / all | 6/6 | 1101802@2026-10-01 | 1101701@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Tokyo | noaa/RJTT | C / Asia/Tokyo / all | 4/4 | 1101803@2026-10-01 | 1101702@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Toronto | noaa/CYYZ | C / America/Toronto / all | 6/6 | 1103348@2026-10-01 | 1103268@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Warsaw | noaa/EPWA | C / Europe/Warsaw / all | 6/6 | 1101817@2026-10-01 | 1101707@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Wellington | noaa/NZWN | C / Pacific/Auckland / provider_daily | 4/4 | 1101799@2026-10-01 | 1101698@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Wuhan | noaa/ZHHH | C / Asia/Shanghai / all | 4/4 | 1101821@2026-10-01 | 1101711@2026-10-01 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+| Zhengzhou | noaa/ZHCC | C / Asia/Shanghai / all | 2/2 | 1101793@2026-09-30 | 1101693@2026-09-30 | ACTIVE_MATCH | UNPROVEN_AIRPORT_REFERENCE |
+- Geometry is not settled by this market matrix. Eleven checked US AWC observation stations match the configured NOAA station coordinates; that does not justify replacing them with airport ARP/TOP. Qingdao WRH ZSQD still points to old Liuting (36.2661, 120.374), while current AWC/METAR and Gamma identify Jiaodong (36.362, 120.087, 2m). Istanbul WRH LTFM says 566.3184m versus AWC/DHMI 99m; field elevation is not sensor AGL. All 48 WRH STIDs/timezones were checked but do not prove sensor ground height; five WU identities have no same-product sensor coordinates. A separate RO finding shows airport/reference evidence was incorrectly typed operator_verified_station/precision PASS; it does not establish that the lapse value itself is numerically wrong. Current law does not permit ARP/reference elevation alone to grant station-ground precision PASS; this is a proof-role defect, not proof that the lapse value itself is numerically wrong. Do not claim all 54 physically representative VERIFIED, swap feeds, or edit city coordinates.
+- HKO's official station table, checked=2026-W40; basis=HKO Information of Weather Station lists Hong Kong Observatory (HKO), 22°18'07"N/114°10'27"E, 32 in the column “Elevation of ground above mean sea-level (metres),” with temperature observed; until=recheck-on-use: https://www.hko.gov.hk/en/cis/stn.htm. This explicitly means HKO site-ground altitude above MSL, not temperature sensor height above local ground, a platform height, or Hong Kong Airport's separately listed 6m. It supplies HKO-site ground elevation only; it does not establish instrument mounting height or independently bind a response to the HKO station. No second WMO OSCAR lookup was needed.
+- Exact HKO source-body capture, checked=2026-09-29T21:23:56Z; basis=one unauthenticated HTTP 200 GET of the official page, final URL `https://www.hko.gov.hk/en/cis/stn.htm`, content-type `text/html; charset=utf-8`, 66,376 response-body bytes; SHA-256 `88e4e04edb57201646035558898ea1a4f235189d634a4cc7c059131483a4af1b`; until=recheck-on-use. The unmodified HTTP entity body is retained at `docs/operations/current/evidence/hko_station_metadata_20260929.html`. This was packet-only evidence at capture time; there was no runtime asset route or precise provenance schema. Root and independent critic subsequently approved one static runtime input: the exact bytes are now copied to `config/hko_station_metadata.html` and protected from EOL conversion by the single `.gitattributes` rule `config/hko_station_metadata.html -text`. The existing HKO row in `config/station_precise_coords.json` now has optional `station_ground_proof` revision `station_ground_roles_v1`, binding source kind/id, exact field label, 32m site-ground-MSL fact, official DMS site coordinates, source URL, artifact path/body SHA, and checked time. Existing settlement reference coordinates remain unchanged at 22.3022/114.1742; official site coordinates are separately recorded as 22.301944444444445/114.17416666666666. Config registry and existing src rationale entries are updated. The data slice has since been committed as `1c741bbe1` plus EOL-protection commit `dfecab405`; source parser/reload validation and city d4e472f17 remain separate and not integrated, so this does not prove a loaded runtime consumer or authorize deployment. No other city receives height proof; HKO site ground MSL is not sensor AGL.
+- KORD HOMR bounded evidence is a one-station fact only, not an airport-elevation substitution rule. The precise captured body/hash and field distinctions above remain the source evidence; the existing Chicago station/reference coordinates (41.9786,-87.9048) are not overwritten by the HOMR DCP coordinates. The DCP-to-current query-coordinate separation must be resolved by the owner's typed binding contract before the proof enters the normal precision reader. No other NOAA station is upgraded by this capture.
+- NOAA AWC's stationinfo evidence, checked=2026-W40; basis=official /api/data/stationinfo endpoint plus public OpenAPI StationInfoJSON; until=recheck-on-use: https://aviationweather.gov/data/api/, https://aviationweather.gov/data/schema/openapi.yaml, and the bounded KORD response at https://aviationweather.gov/api/data/stationinfo?ids=KORD&format=json. KORD returned site=Chicago/O'Hare Intl, WMO 72530 and elev=202; the StationInfoJSON schema describes elev only as “Elevation,” with no unit/datum or normal-ground, airport-field, barometer/platform or sensor-AGL qualifier. A nearby airport/METAR schema says “Elevation of site in meters” with example 202, but it does not define the StationInfoJSON field's physical reference. The NWSI 10-924 phrase “Elevation of the normal ground surface” applies to IHFS river-gage location records, not this aviation station endpoint, and is not transferable. So AWC stationinfo alone is not a verified ground-elevation/sensor-height proof for all 48 NOAA stations; preserve typed UNPROVEN rather than upgrading precision. The 202 value is an example, not evidence to replace a configured station or infer sensor AGL.
+- Bounded NOAA ISD/WMO metadata check, checked=2026-09-29; basis=the official August 2025 ISD station-history text labels ELEV only “Elevation in meters”; its KORD row is USAF 725300 / WBAN 94846 / ICAO KORD / “CHICAGO O'HARE INTERNATIONAL AIRPORT” / 204.8m, period 1946-10-01–2025-08-25 (https://www.ncei.noaa.gov/pub/data/noaa/isd-history.txt). The official WMO Technical Regulations, WMO-No.49 Vol.I, define “Elevation” generically as the vertical distance of a point or level on or affixed to the Earth's surface from mean sea level; they do not say this particular ISD station-history field is normal station ground or sensor mounting level (https://etrp.wmo.int/pluginfile.php/17441/mod_resource/content/0/49_I-2015-2017_en.pdf). This KORD metadata row is an example only; 204.8m differs from the bounded AWC 202m value, and neither source establishes a temperature sensor's AGL. Thus the exact official field meaning still does not prove station-ground or sensor-height semantics for the 48 NOAA-configured products; do not use it to grant ground PASS, substitute airport reference geometry, or infer AGL. No other-city fetch was performed.
+- Slice status: WU e34211b90 is independently approved (49 focused pass; owner three-file run 123 pass with seven reproduced baseline failures explicitly deselected); Ogimet 49ab320c7 is also an independently approved parent slice. Mixture e7174f19f is integrated as ae92caedc and approved; post-midnight 61d7a1e80 is integrated as 60fc25a2f and approved (37 boundary/same-day cases). Test-only 2b95ba34c is integrated as 1f3502d41 and approved: exact XML comparison preserves all 537 original passing nodes, changes the 26 baseline failures into 21 same-identity passes plus 8 two-source and 3 three-debt twins, and finishes 569 passed / 0 failed / 0 skipped. These test-seam results do not prove real 51-member provider collection.
+- Test-only Kelly-law slice f706f95ec is independently critic-approved (20 critic checks) but is deliberately not yet integrated ahead of the complete physics/source stack. Owner's original three-file baseline had 263 nodes (148 pass, 115 fail); the fourth Kelly test file had six cases on the earlier tree (five pass, one stale structural assertion). The owner's final four-file comparison reports 274 pass / 0 fail. Interpret its count as five genuinely new cases plus six Kelly cases newly included in the comparison, not eleven new tests; the 148 baseline passes and five Kelly passes remain, while 110 old failure node IDs stay exact and five law-corrected nodes are renamed. Controlled Shanghai C/F fixture evidence is not 54-city source-contract acceptance.
+- Grid typed-proof/fitter pair a49ef99c + b96562cf1 is critic-approved, 47 independent tests pass, and the canonical raw_model_forecasts.raw_sha256 SQL regression is closed. The parent now contains equivalent picks 872f532a3 + 38aca1c07. This does not close the fitter/consumer integration with current source-physics artifacts.
+- Source physics latest owner WIP f2ef672ce reports 182 focused passes, not final critic or combined acceptance. Current-shape live constraints remain k_tau=1, w0/weight offset=0, steps=0, no fitted settlement sigma floor, HIGH historical center_debias=None; keep lawful partial/station-augmented centers and existing precision mean weights. The approved past-held archive-derived proof is narrowly limited to normal producer _download_bayes_precision_fusion_extra_raw_inputs_if_needed for a held revision missing/old proof and a qualifying archive cycle: replayed captured body must reproduce the old value and exactly bind source/product/issued time/request parameters/city/timezone/units/HIGH-LOW/value, all proof clocks <= decision, and never extend original expiry. A newer same-family mismatch cannot be hidden by old proof; other cities in the same batch must not poison the held identity. Expired, value-mismatching or absent archive evidence is DATA_DEGRADED. No live recapture/reseed, schema, old raw-row rewrite or certificate mutation; only later normal producer capture may create new proof. Historical cutoff is a required negative antibody. Current-target/queue SQL remains coarse screening; exact selected identities must be revalidated through the shared Python current-shape predicate before covered/skip.
+- HKO clock commit 12d5d00ae is not integrated; bundle-reader proof and physics materializer clock_evidence propagation must travel together, and the real W3 producer→legal pin→held/global same-cut proof remains pending. Separate exact HKO/CWA body commit delta587a8dd52 (three files) is ready but awaits critic and is not integrated with the full branch. Its 64 tests pass against the complete f2ef physics snapshot: transport/clock are substituted, while the normal raw/artifact writer and current/cohort/frontier remain real. This is not yet independent station-slice approval or whole-source acceptance. Readerv6's four-suite run was 191 pass/44 fail because older-shape fixtures lack provider_geometry_evidence/hash; owner must refresh those fixtures with authentic producer proof, not weaken the gate. CWA IssueTime can validly be later than UpdateTime; do not impose a false ordering. The earlier HTTP→writer run with zero raw_forecast_artifacts preceded the shared_persist_rows stack and is superseded by these later 64 cases; W3 fresh-pin proof remains open.
+- HKO/CWA adapter sibling fix c46c4cf6c is parent-approved after stacking on station-body delta587a8dd52; the combined focused check reports 76 passing checks, including typed-row skips for bad booleans/nonfinite/unknown units and preservation of valid metric siblings when one row is malformed. The station-body commit still awaits its independent critic; neither commit is integrated here. Reader-v6 improved from 44 stale-shape failures to 11 old manual raw/provider artifact fixtures without authentic producer proof; do not mock authority or relax the read gate. Actual W3 fresh pin → held/global same-cut evidence remains pending.
+- Typed physical-ground implementation is approved as a separate owner slice on `src/config.py`, `scripts/download_replacement_forecast_current_targets.py`, `src/data/openmeteo_ecmwf_ifs9_precision_guard.py`, `scripts/extract_open_ens_localday.py`, `src/data/executable_forecast_reader.py`, and the exact existing tests now listed in `scope.yaml`. The HKO static runtime input and its optional proof reference are committed at `1c741bbe1` + `dfecab405`, but the city's `d4e472f17` loader/guard consumer slice is not yet integrated into this parent tree; city reports only a geometry-loader seam result of HKO VERIFIED / 53 UNPROVEN. This does not prove consumer-to-held coverage or any live-loaded posture. NOAA AWC StationInfo `elev` remains untyped beyond “Elevation”; the separately captured KORD HOMR GROUND value is only KORD evidence and is still pending ordinary config/geometry binding. Do not extrapolate it to the other NOAA stations.
+- Additional exact scope in scope.yaml: src/data/replacement_forecast_live_materialization_queue.py, tests/test_station_forecast_live_ingest_wiring.py, and tests/probability/test_representativeness_no_kelly_variance_double_count.py. The last test must preserve mean-only/raw-weight/capture-default-off intent while verifying current-shape within-spread + absolute ENS-center delta + between-spread and no extra representativeness covariance/width.
+- All slices remain unlanded/unloaded. Final integration requires current origin/live rebase/re-proof, physics + grid + HKO clock/body + v28 proof propagation + queue/archive proof stacked and independently reviewed; no partial load. The parent is not authorized to push, restart, write live state, or run venue actions in this checkpoint.
+
+## 2026-09-29 — all-city source physics and current Hong Kong causal repair
+
+Status: investigation open; no new repair or runtime acceptance claimed.
+
+### Current evidence and repair acceptance (recheck before cutover)
+
+- At 19:49Z, current main PID 35286 loaded `64e64935a482`, while checkout and
+  origin/live are `761c62b1106f`; runtime-code difference is real. Three open HK
+  September 29 holdings (`0b5fa42c-64f` HIGH NO33, `2c9ffd23-d04` HIGH YES32,
+  `7da0ece2-33d` LOW YES27) have zero bids. The earlier September 28 pair has
+  settled: HIGH NO33 won, LOW YES27 lost. Neither stale September 27 monitoring
+  nor a zero current bid proves a valid exit was available at decision time.
+- YES32's 06:21–06:25Z window ran `dd8012bd`, not the current main. Local
+  monitor consumed immutable posterior 699798 q=.5235191279; actual global
+  receipts 876312/876320/876323 evaluated SELL with q=.5754097057 and rejected
+  non-positive EV. For 876312, fee-net proceeds 5.25953535 versus held modeled
+  payoff 5.42611352 produce EV=-.16657817. The SELL did reach the comparison;
+  the pending reason alone is not a lost-wake cause. Remaining investigation
+  must explain source/cut or probability-law divergence, not override economic
+  law based on the monitor's different q. Historical global inputs remain a
+  stated reconstruction gap until proven.
+- Current configured universe is 54 cities: 48 NOAA, five WU and HKO Hong Kong.
+  This is inventory, not 54 validated current market contracts. The dated
+  current-data document is expired. Current market-description and source-epoch
+  evidence is being collected separately. Real bounded WU history GETs for all
+  five current WU cities confirm station IDs in metadata.location_id and each
+  row's obs_id/key, with friendly names separately in obs_name; no credentials
+  or raw authenticated URLs are recorded.
+  The market-contract sample is now bounded: active Gamma events cover 50/54
+  configured cities with explicit unit matches; Sep29's closed Jinan WU ZSJN
+  market adds dated evidence for 51/54. Auckland, Jakarta and Lagos have no
+  current Gamma events in this sample. Recent canonical observations for all
+  54 cities do not prove current market contracts for those three absent
+  slugs. Station metadata also has counterexamples to blanket substitution:
+  Qingdao WRH/ZSQD still identifies old Liuting while current AWC METAR and
+  Gamma identify Jiaodong; Istanbul WRH/LTFM says 566m while current AWC and
+  Turkey AIP say 99m. Conversely, all 11 checked US NOAA stations' AWC
+  observation coordinates match configured NOAA stations, so replacing them
+  with airport TOP/ARP coordinates is not justified. These are physical/source
+  identity warnings, not permission to edit city coordinates or bulk-swap feeds.
+- WU repair `e34211b90` is committed locally and independently APPROVED.
+  Critic focused run: 49 pass. Owner affected three-file run: 123 pass,
+  seven explicitly baseline-reproduced failures deselected. This is not a
+  globally green suite. No source misdelivery or Hong Kong causal attribution
+  is claimed from the synthetic wrong-station antibody.
+- Mixture repair `e7174f19f` is integrated as `ae92caedc`; post-midnight repair
+  `61d7a1e80` was cleanly three-way-previewed against its true parent and
+  integrated as `60fc25a2f`. The latter is critic-approved. It limits the
+  diurnal fitter to the target-day-open domain and reports `NOT_APPLICABLE`
+  outside it, without suppressing held-position statistics or redecision. The
+  separate test-only current-proof fixture repair `2b95ba34c` was critic-
+  approved and cherry-picked as `1f3502d41` after exact-parent file equivalence
+  and clean true-base merge preview. Machine comparison of the recorded JUnit
+  XML shows the original 537 passing node IDs all remain passing; the original
+  26 failed nodes become 21 same-identity passing nodes plus four two-source
+  test pairs (8 nodes) and one three-debt parameterized test (3 nodes). The
+  final artifact has 569 passed, 0 failed, 0 skipped; no old passing node was
+  dropped. This is offline fixture/reader-seam evidence only: fixture-shaped
+  51-member ENS and proof joins do not establish real current provider
+  collection, runtime readiness, or trading profitability. The detailed
+  case-by-case disposition remains in the test diff; the comparison used the
+  recorded baseline-failed node list and the two JUnit XML snapshots. The separate
+  mixture defect was reviewed: original sampler failed scalar/matrix collision
+  antibodies; 34 shuffled source/track/unit relationships pass through the
+  real served finalizer before witness/held-side consumers. Its production
+  rollout remains unaccepted.
+
+#### Total Loss detection and repair-loop boundary — read-only, 20:01Z
+
+- The current live checkout's `total_loss_loop` LaunchAgent is loaded but idle:
+  `launchctl print gui/501/com.zeus.total-loss-loop` reports `state=not running`,
+  active count 0, 5,735 runs and last exit code 0; `launchctl list` has PID `-`,
+  and no matching disabled override was present. `.total_loss/status.json` is a
+  final `alive=false` record for PID 27889 at 11:32:40Z, not a live PID proof;
+  that process is absent. No `.total_loss/HALT` exists now. The installed plist
+  resolves to this checkout and matches the tracked template: `RunAtLoad=true`,
+  `KeepAlive.SuccessfulExit=false`, `ThrottleInterval=1`, and no interval timer.
+  The process polls every 250 ms while alive. `daemon()` handles SIGTERM/HALT
+  through its normal cleanup path, writes `alive=false`, then returns 0, so the
+  configured successful-exit rule leaves it idle until another explicit load or
+  start. A narrow unified-log query around 11:32Z returned no matching event;
+  whether the final clean stop came from SIGTERM, a then-present HALT, or another
+  system signal is unknown. Do not label it an operator stop or a crash without
+  that evidence.
+- Earlier `controller.err` tracebacks do prove abnormal ENOSPC failures while
+  `atomic_json()` wrote or renamed `.total_loss/status.json` and
+  `cycle-latency.json` (including repeated PIDs); those writes are outside the
+  detector's local exception handler and can terminate that run. Current
+  `df` reports 71 GiB available, so ENOSPC is not proven ongoing and does not
+  explain the later exit code 0. The evidence worker's status is itself stale
+  (`running`, PID 91757, timestamp 2026-09-03); the Sep29 hard incidents have no
+  published evidence generation. Evidence capture is a separate worker gated
+  on fresh main heartbeat and `live_health_composite`; no retained historical
+  gate result identifies why it did not publish those generations. The parent
+  19:49Z snapshot's latest evidence timestamp remains 2026-09-27 21:51Z.
+- Read-only canonical checks at 20:01Z find the three Sep29 HK positions still
+  in `day0_window`, with `settled_at`, `realized_pnl_usd` and
+  `settlement_price` all NULL. They therefore are not eligible for
+  `settlement_full_loss`: the scanner selects settled rows and requires a
+  canonical `SETTLED` event, settlement price at or below zero, complete
+  command-deduped entry-fill basis, no earlier filled exit, and realized loss
+  of at least 95% of that basis. The loop ledger does already contain Sep29
+  `below_floor` and `no_bid` incidents for HIGH NO33 and HIGH YES32, plus a
+  Sep28 `below_floor` incident for LOW YES27. Those are quote-boundary incidents,
+  not realized settlement losses; the open zero-bid episode is not a new
+  settlement fact. Thus “no new full-loss incident” is correct for today's
+  canonical phase, while the stopped daemon cannot observe later crossings or
+  settlements. Its seven-day settled-position backfill can recover a later
+  canonical settlement after an authorized restart.
+- Bounded successor check at 2026-09-30T00:42Z (task-tree HEAD
+  `28362bde567f375151d5af948f6289ede127e0f1`; live checkout HEAD
+  `d9dd60470bdfc651f6e52d8470965302cf363e8c`) confirms the Total Loss LaunchAgent
+  remains loaded but idle: PID `-`, `state=not running`, last exit 0, 5,735 runs.
+  Its final canonical `status.json` record is `alive=false`, PID 27889,
+  `at=2026-09-29T11:32:40.183710Z`, `terminated_runs=[]`; that list is only
+  child repair-run cleanup accounting, not a stop actor/reason. The installed
+  plist at `~/Library/LaunchAgents/total_loss_loop.plist` has `RunAtLoad=true`,
+  `KeepAlive.SuccessfulExit=false`, throttle 1s, and no interval timer. In
+  `total_loss_loop.py:8653-8658,8708,8910-8927`, SIGTERM/SIGINT or `HALT` ends
+  the loop through cleanup and `return 0`; the clean-exit policy therefore
+  leaves a still-loaded job idle. This is compatible with a deliberate clean
+  stop, but there is no durable stop intent or supervisor distinguishing it
+  from an unexpected graceful termination. The narrow 11:30–11:35Z unified-log
+  query had no matching launchd event; `HALT` is absent now but its historical
+  presence is not recoverable. The exit initiator remains UNKNOWN; do not call
+  this a crash, operator stop, or proven launchd action. No restart/control
+  change was made.
+- The no-evidence path is separate from the stop path. The daemon calls
+  `detect(..., capture_evidence=False, run_maintenance=...)`; `detect()` commits
+  quote-trigger incidents before the `run_maintenance` gate
+  (`total_loss_loop.py:2728-2750`). The evidence subprocess is independently
+  spawned only after fresh main heartbeat and healthy `live_health_composite`
+  (`8570-8606,8836-8855`); `evidence_once()` records worker status only after
+  it actually starts (`8609-8642`). At this check, `evidence-worker-status.json`
+  still says `running`/PID 91757 from Sep3 10:23Z, and the five newest
+  `evidence-*.log` spawn artifacts inspected are also from Sep3 05:22–05:23Z.
+  On Sep29, the five current-HK incident rows below were therefore committed
+  without a published evidence generation. The latest sampled main heartbeat
+  (00:30:45Z, PID 3068) was alive, but `live_health_composite` was
+  `healthy=false/status=DEGRADED` at 00:30:30Z; that would suppress both current
+  evidence spawning and broad maintenance. It does not establish the historic
+  Sep29 gate value. `controller.err` is only 36 KiB and its last modification
+  predates the 11:32Z clean exit; its timestamp-less older ENOSPC/budget entries
+  do not identify the current gate failure or clean-exit initiator. The exact
+  historical reason the worker failed to spawn/publish remains UNKNOWN.
+- The three current Sep29 HK positions are distinct from the older seven-position
+  cohort: `0b5fa42c-64f` HIGH NO33, `2c9ffd23-d04` HIGH YES32, and
+  `7da0ece2-33d` LOW YES27 are still `day0_window` with NULL `settled_at` and
+  `settlement_price`. The main position projection's latest monitor events at
+  00:31:58–00:31:59Z show bid 0 for all three, but are already older than the
+  00:42Z audit cut; Total Loss quote-state itself stopped updating at 11:30Z.
+  Its canonical memory ledger has five queued/blind incidents: NO33 and YES32
+  each have `below_floor` plus `no_bid`; LOW YES27 has one `below_floor` row.
+  None of those five incident directories or CURRENT evidence pointers exists.
+  Thus the detector did record these crossings before stopping; evidence/repair
+  did not drain them. No later missed crossing is proven without a same-time
+  quote/trigger row, although the stopped detector cannot observe one.
+- The seven Sep27 target-date hard-position IDs already in the packet
+  (`993cdf9b-9e7`, `c157346c-310`, `90e6d93e-2a3`, `7828bcd6-c3b`,
+  `ca833ac0-a00`, `25e8406d-77c`, `edli87b89d45ce7c0206a12f2cbe200ae912fe1a40fe136e089b7e49fd869b5cad8e`)
+  all map to canonical settled positions. Their 13 Total Loss ledger rows are
+  quote crossings (7 `below_floor`, 6 `no_bid`), not 13 orders or settlement
+  losses. Five have negative realized P&L and two do not; no amounts are restated
+  here. No `settlement_full_loss` incident or `settlement_backfill_state` row
+  exists for those seven. Eligibility is stricter than negative P&L: source
+  requires SETTLED, nonpositive settlement, no earlier filled exit, complete
+  command-deduped entry basis, and realized loss of at least 95% of basis
+  (`total_loss_loop.py:1758-1805`). Therefore “seven settled positions” does not
+  establish seven missed full-loss incidents; exact per-position basis replay
+  would be required to prove one.
+- The packet's “eight Sep27 HKT first-entry orders” is not uniquely the full-day
+  market set. A bounded canonical `ENTRY_ORDER_FILLED` event query for the exact
+  HKT day `[2026-09-26T16:00Z, 2026-09-27T16:00Z)` returned 16 filled-position
+  events across 16 position IDs (two rows have null `command_id`). The packet's
+  named target-date subset can be mapped to eight filled positions inside that
+  window—Manila `7828bcd6-c3b`, Hong Kong HIGH `c157346c-310`, Taipei HIGH YES
+  `ca833ac0-a00`, Guangzhou `90e6d93e-2a3`, Shanghai `9cb4942c-6ca`, Taipei
+  HIGH NO `864f9695-e2f`, Seoul LOW `25e8406d-77c`, and Lucknow
+  `edli87b89d45ce7c0206a12f2cbe200ae912fe1a40fe136e089b7e49fd869b5cad8e`.
+  They all have canonical `ENTRY_ORDER_FILLED` events and are now settled;
+  some command projections end `CANCELLED`/`PARTIAL`, which does not erase the
+  fill event. The seventh hard position Hong Kong LOW `993cdf9b-9e7` filled at
+  15:47Z, before that HKT day began. Other cities/targets also contribute the
+  remaining same-window events. Without the user's eight market/order IDs or a
+  narrower market filter, do not claim those eight are the entire order set or
+  silently substitute the current HK3 positions.
+- `scripts/deploy_live.py:132-142` has no Total Loss daemon in its restart-label
+  map, and the bounded search of `src/control/heartbeat_supervisor.py` and
+  `deploy/launchd` found no Total Loss desired-state/health recovery path. The
+  minimal safe repair is a separately authorized desired-running/explicit-stop
+  contract plus stale-heartbeat/evidence-worker alerting; preserve `HALT` and
+  deliberate stop behavior, and do not blindly enable `KeepAlive.SuccessfulExit`
+  or restart it. SCOPE is only this service's desired-running state and the
+  exact queued incident/settled-position debt; DRAIN is bounded evidence and
+  settlement-backfill completion after authorized recovery; RESET requires a
+  real authorized start and healthy worker completion. This is a recommendation,
+  not implemented or authorized here.
+- No restart, scan, evidence build, or Codex dispatch was performed. Active
+  config has `delivery.enabled=true`; starting this daemon can launch queued
+  Codex diagnosis/repair work. Any restart therefore needs explicit operator
+  authorization that includes this dispatch side effect. Do not broaden
+  `KeepAlive` blindly: preserve the intentional HALT/clean-stop semantics.
+  Before any implementation, add a relationship antibody for (a) a non-settled
+  Day0 position producing no `settlement_full_loss`, (b) a qualifying canonical
+  settlement producing one idempotent incident after a subsequent scan, and
+  (c) the distinction between clean HALT/SIGTERM exit and nonzero ENOSPC exit
+  under the current plist policy.
+
+#### Current source-contract baseline disposition
+
+- Existing JUnit XML comparison only; tests were not rerun. Baseline has 107
+  cases (100 pass, 7 fail); post-change has 158 (151 pass, 7 fail), with the
+  exact same seven failing node IDs. R11 is a real, narrowly deferred legacy
+  coverage difference: `scripts/backfill_openmeteo_previous_runs.py:47-54`
+  lists five models and omits GEM, while the live `forecasts_append.py` path
+  uses the source registry that includes GEM. This CLI is a manual historical
+  backfill, not the live replacement raw-model/source-clock admission path; the
+  ordinary WU/Ogimet catch-up drain calls the two city appenders, not that CLI.
+  The station-identity repair's tested HTTP→validator→append→HIGH/LOW/coverage
+  path is unaffected. The historical model-coverage gap remains real and
+  deferred; it is not resolved by this disposition.
+- The other six failures are unchanged stale fixtures/contracts: R2's fixed
+  2026-08-21 data is outside the current 30-day backfill cutoff; R5 asserts
+  changed-payload overwrite despite the writer's revision-preserving behavior;
+  R13's two hand-built atoms omit `payload_hash`; and R12's two scheduler tests
+  still expect the former `main.py` route/job IDs after migration to
+  `ingest_main`/`ingest_*` IDs. No new failure was added by the WU/Ogimet slice.
+
+#### Approved HKO observation-clock repair — implementation not yet verified
+
+- A bounded real HKO raw print (`41051575`) has temperature `recordTime=06:00`,
+  publication/update time `06:02`, and availability after publication. The
+  current reader uses publication time as `observed_at`; the relationship
+  assertion reproduces the mismatch (`06:02 != 06:00`). The approved change
+  separates source observation, publication/update and local-availability
+  clocks. `day0_observation_reader.py` owns pure HKO `recordTime`/three-clock
+  parsing; `daily_obs_append.py` assigns day/hour from observed `recordTime`
+  while retaining publication, fetched and raw fields; `day0_hourly_vectors.py`
+  reads HKO `observed_at` from `recordTime`. Missing, naive, malformed or
+  future `recordTime` is source-unavailable / `DATA_DEGRADED`, never a fallback
+  to publish/update time. Do not change integer-value/noise semantics: no
+  official integer rounding rule is established, so no ±0.5 interval is
+  inferred.
+- Owner `hk_current_causal` controls `events/day0_authority.py` and bumps the
+  Day0 semantic revision so old q/pins are rejected and regenerated by normal
+  materialization. SCOPE is the HKO current-temperature family/input clock;
+  DRAIN is the next source fetch plus seed/held direct rebuild; RESET requires
+  valid recordTime and all three clocks plus post-bump posterior identity.
+  Preserve historical prints, certificates and settlement rows. This is a
+  source-clock failure, not a computational RED condition. The owner also
+  requires a genuine existing W3 producer → legal pin → held/global same-cut
+  relationship test; it must not mock authority/pin. That test is pending
+  coordination with the physical producer fixture; no W3 result is claimed.
+- A Day0 event cache at v28 is not sufficient to re-certify an old posterior.
+  The reader must verify possession-bound clock proof: raw temperature report
+  and hash, ledger publish/fetch clocks, HKO station/source, and a reconstructible
+  raw `recordTime` matching the consumed `Day0CurrentTemperatureState` clock
+  and value. `replacement_forecast_materializer.py` (physical owner) propagates
+  proof from the actual shared state to
+  `provenance.day0_current_temperature_clock_evidence`; the HKO owner adds the
+  fail-closed consumer gate in `replacement_forecast_bundle_reader.py` and
+  existing bundle-reader tests. An old/missing/mismatched HKO clock basis is
+  typed `UNAVAILABLE` and follows ordinary materialization; non-HKO sources get
+  no new gate. A valid fresh proof plus new semantic identity resets this
+  scoped block. This reader/materializer relationship is approved but not yet
+  implemented or verified.
+- After the clock-reader slice, the next approved HK-only adapter work captures
+  exact HKO JSON and CWA XML response-body artifacts through the existing
+  `station_forecast_adapter.py` and its existing source/current-value tests.
+  Shared serving validates station, city, metric, source/product and body proof;
+  the adapter owns response-body capture, physical owner owns shared serving
+  and materializer propagation, and HKO owner owns adapter/tests. This preserves
+  legitimate HKO/CWA paths; no blanket source disable or substitution is
+  allowed. Exact test files are pending owner report before expanding beyond
+  those already listed in `scope.yaml`.
+- Four existing source-shaped fixtures in `tests/data/test_daily_obs_routing.py`
+  omit `temperature.recordTime`; they must receive authentic record-time fields
+  while preserving their routing assertions, or the new valid fail-closed
+  behavior would only be tested against stale fixtures. Parent approved this
+  test-only fixture repair. The minimum trust/source-under-test registration
+  for the touched existing tests in `architecture/test_topology.yaml` is also
+  approved; unrelated registry drift remains out of scope. The existing
+  `tests/events/test_redemption_forecast_day0_authority.py` is the planned
+  semantic-revision/cohort-boundary relationship surface; preserve old-cohort
+  rejection and new-cohort acceptance, validating the current symbol names in
+  source rather than assuming them.
+
+#### Approved grid-representativeness proof boundary — implementation not yet verified
+
+- City source identity evidence supports a narrow physical proof, not a city
+  coordinate rewrite. The approved typed reader states are
+  `APPLICABLE_NATIVE`, `NOT_APPLICABLE_DOWNSCALED` and `UNPROVEN`; the latter two
+  carry `variance=None`. Only native proof bound to exact station, product,
+  model, request policy and response hash may impose native representativeness
+  variance. Legacy artifacts cannot be backfilled with fabricated proof.
+  `NOT_APPLICABLE_DOWNSCALED` means no native penalty is applied; it is not
+  proof of zero physical error. `UNPROVEN` must never collapse to verified zero.
+  Offline fitting/validation is fixture-only; do not run a real fit or write a
+  live asset. No city-coordinate edits are authorized.
+- `city_source_contracts` owns builder/loader/config/fitter/validator and the
+  `_spine_multimodel_members_for_event::_repr_native_for` consumer boundary,
+  with focused fusion-sigma and materializer-center tests. The method-unify
+  parity test is only in scope if the final implementation slice needs it. The
+  exact planned file list is tracked in `scope.yaml`; this design is not yet
+  evidence of a completed fix.
+
+#### Approved source-physics artifact/capture repair — implementation not yet verified
+
+- Open-Meteo's official `JsonWriter.swift:69-80` chooses `results.first` for a
+  multi-model JSON response. The native OM9 source-cell proof anchors OM9 only,
+  not a BPF center; BPF currently reuses a shared header and lacks a per-model
+  raw artifact. The approved design is one model per request with same-location
+  batching and persisted actual returned model geometry in the existing
+  raw-manifest artifact plus existing `raw_forecast_artifacts` /
+  `raw_model_forecasts` `artifact_id` and `raw_sha256` identities—no schema.
+  Validate header→hash→reader join→posterior provenance→v6 consumer end to end.
+  Keep missing native height/surface unknown; never substitute target DEM as
+  provider-native geometry. Preserve the current precision-fusion center,
+  including partial/station-augmented centers permitted by authority; historical
+  mean-precision weights do not authorize substituting historical sigma.
+  Correct target-DEM-as-native penalty and any real σ-floor defect without
+  adding weights or dropping HKO/CWA. Capture exact pre-parse HTTP entity
+  bytes/hash with the existing store and optional callback. Existing
+  canonical-JSON caches are not exact-body proof; cache writes cannot freshen
+  source capture/issued clocks. No live backfill, old-row rewrite or freshness
+  relaxation.
+- Keep current-evidence shape in the root law: `k_tau=1`, `w0`/weight offset
+  zero, steps zero, no fitted settlement sigma floor, and HIGH historical
+  `center_debias=None`. Preserve legitimate partial/station-augmented current
+  centers and their existing precision-mean weights; do not use historical
+  sigma or a fitted alternate shape as a second live probability regime.
+  Defect-recurrence owns the existing materializer, cycle-policy and
+  `test_sigma_tau_calibration_serving_equivalence.py` test slice; physical
+  source ownership remains with `source_physics`. The hostile valid-artifact
+  twins must exercise independent HIGH/LOW q integration, not only metadata.
+- For grid-representativeness carry-through, the approved ERA change is limited
+  to `_spine_multimodel_members_for_event` plus its two direct callsites,
+  `_forecast_authority_payload_from_posterior` and `_generate_candidate_proofs`,
+  passing fresh `geometry_out`/`payload_out` dicts while preserving the existing
+  four-tuple return and center formula. Carry `status`, `reason` and
+  `native_penalty_not_applied` by deepcopy through existing payload diagnostics
+  and the `decision_receipt_spine_inputs` whitelist; do not erase typed state
+  into verified-zero/default or alias it across families. The three existing
+  C/F/authority/candidate-receipt relationships are in
+  `tests/test_grid_representativeness_fusion_sigma.py`; owner-local partial
+  results are not final acceptance.
+
+- User expands the existing Hong Kong loss task to every enabled city and asks
+  for historical defect comparison, first-principles repairs and prevention of
+  recurrence. Current orders and current runtime must be re-read; the September
+  27 delivery below is historical evidence, not current acceptance.
+- Baseline checkout and origin/live at initial inspection: `761c62b1106f`.
+  Implementation stays in the task worktree `all-city-source-root-repair`;
+  live checkout, canonical data and other tasks' work remain untouched.
+- Four independent read-only lanes: current Hong Kong order-to-source-to-exit
+  causality; all-city settlement/observation contracts; forecast provider/ENS
+  physical geometry and update propagation; historical defect recurrence and
+  producer-to-held-consumer relationship antibodies. Main integrates findings,
+  assigns disjoint repair ownership and accepts evidence. Additional review is
+  bounded to demonstrated cross-lane risk, not another duplicate investigation.
+- Acceptance: enumerate the current enabled universe and date-specific source
+  epochs; compare actual source station/product, native physical quantity,
+  grid/coordinates/elevation/surface, units, local-day coverage and source clocks
+  against each city's settlement contract. Trace each actionable exception to
+  the actual posterior and entry/held consumer. Distinguish missing evidence,
+  incorrect identity/physics, genuine model error and lawful economic HOLD.
+- Historical defects must be classified fix/refute/defer-with-evidence against
+  the new mainline and tested across HIGH/LOW, YES/NO, C/F, source families and
+  producer/rebuilder/consumer branches affected by the defect. A selected
+  regression must fail before its minimal fix and pass after; compare failing
+  test node sets with baseline. Current-evidence probability law, exact identity,
+  price band, source finality and scoped fail-closed recovery stay intact.
+- No hindsight fit, arbitrary city offset, blanket source substitution, stale
+  evidence relabeling, canonical DB rewrite, manual trade/cancel or unrequested
+  pause is authorized. Better source fidelity is not proof of forecast skill or
+  profitability. Market outcomes and available liquidity cannot be guaranteed.
+- Before loading: finish the demonstrated repair set and relevant relational
+  tests, independent critical review, rebase/re-prove against origin/live and
+  land through the fast-forward lane. Then use the guarded restart and verify
+  actual loaded code, config, canonical DB paths and repeated normal entry/held
+  receipts for repaired scopes; deploy success alone is not acceptance.
+- First verified repair slice: WU historical daily/hourly response station
+  binding. These producers currently attribute returned temperatures to the
+  request ICAO without validating returned identity; the existing Day0 checker
+  and September 27 NOAA STID repair do not protect these paths. This is a
+  reproduced code-boundary defect, not evidence of an actual wrong-station
+  delivery or a demonstrated cause of Hong Kong losses.
+  `city_source_contracts` owns `src/data/daily_obs_append.py`,
+  `src/data/wu_hourly_client.py`, `tests/test_hourly_clients_parse.py` and
+  `tests/test_k2_live_ingestion_relationships.py`. Require a real/official WU
+  response-schema check before imposing identity fields; never guess friendly
+  names are ICAO identifiers. Reject foreign/ambiguous supplied identity before
+  aggregation/writes; preserve genuine empty no-rows behavior. SCOPE is the
+  requested station response; DRAIN is normal source retry; RESET is a valid
+  matching response. Use in-memory HTTP-to-writer relationship antibodies, both
+  extrema and legitimate source epochs. No historical data rewrite.
+  Independent review additionally identifies the direct Fahrenheit aggregation
+  fixture in `tests/data/test_ingest_unit_types.py`: add authentic KORD identity
+  to that existing fixture and preserve its unit assertions, rather than relax
+  the new gate. Prove HTTP failure then matching-response retry reaches actual
+  HIGH/LOW append and success coverage, not only a mocked fetch positive case.
+  Same owner then covers the demonstrated Ogimet twin in
+  `src/data/ogimet_hourly_client.py` and the existing daily producer and tests:
+  returned CSV station and METAR-body identity are discarded before attribution
+  to the requested station. This is reachable in current NOAA mirror/Day0
+  paths, not merely dead history code; actual wrong-station deliveries remain
+  unproven. First verify real/official CSV and METAR identity syntax, preserve
+  legitimate COR/SPECI/empty behavior, then reject inconsistent response identity
+  before aggregation/writes and prove scoped retry recovery for both extrema.
+  WU and Ogimet commits remain separately reviewable; no settlement source-role
+  promotion or fallback broadening is part of this repair.
+- Next: receive remaining current evidence and freeze further repair ownership.
+  Second demonstrated defect: the current Day0 diurnal mixed sampler treats
+  numerical equality with the mixed point as proof a raw draw was already
+  transformed. For weight .5, diurnal mass (1,0), raw point (0,1), a raw draw
+  (.5,.5) wrongly bypasses transformation instead of becoming (.75,.25).
+  Preserve explicit provenance/order of the raw fallback and perform exactly
+  one identical transformation for point and every draw; merely deleting the
+  equality check would double-transform a bootstrap fallback based on mixed
+  analysis.p_cal. `defect_recurrence` owns a separate child worktree for
+  `src/engine/event_reactor_adapter.py` and the existing relevant Day0 pricing
+  tests, then merges into this task. Require real served-finalizer through
+  witness/held YES/NO tests across affected shuffled HKO/NOAA variants, not a
+  manually constructed witness bypassing the new finalizer. Historical actual
+  occurrence is not yet proven. No economic action law or mixture weight change.
+  Third demonstrated boundary defect: Open-Meteo requests use the provider's
+  default DEM/elevation-adjusted temperature product but raw provenance labels
+  downscaling as `none`; additionally current/source-clock raw-value serving
+  does not check physical product identity. An isolated in-memory counterexample
+  with wrong coordinates, model name and physical domain is accepted as CURRENT.
+  `source_physics` owns a separate child worktree for the download/provenance,
+  current-value serving and history-provider identity validation paths plus
+  existing matching tests. Fix the truthfulness/validation of the existing
+  requested product, not switch to elevation=nan or fit arbitrary station
+  corrections. Identify all frontier/cohort/current readers, preserve the
+  canonical settlement-station target, and revise current-evidence identity so
+  old mislabeled rows/certificates cannot silently acquire new authority.
+  SCOPE is exact city/model/cycle/metric physical identity; DRAIN is normal
+  collection and materialization of authentic current product evidence; RESET
+  is a matching new source/shape/posterior revision. Prove both HIGH/LOW and
+  present/missing/mismatched evidence plus ordinary redecision propagation.
+  No live backfill trigger, old-row rewrite or freshness relaxation.
+  Rollback is a reviewed revert of this task's landed commits through the same
+  lane; no destructive reset or historical data manipulation.
+- Additional source-physics proof and design, pending in the owner's child
+  worktree: official Open-Meteo `JsonWriter.swift:69-80` selects
+  `results.first` for multi-model JSON. BPF reuses the shared response header,
+  but its per-model raw artifact is absent; the earlier exact OM9 precision
+  proof establishes the anchor only, not BPF's center. The approved bounded
+  design is one model per request with same-location batching, persisting the
+  actual returned model geometry in the existing
+  `state/replacement_forecast_live/raw_manifests/<cycle>/bayes_precision_fusion_<single_model>_<city>.json`
+  artifact and existing `raw_forecast_artifacts` / `raw_model_forecasts`
+  identities (`artifact_id`, `raw_sha256`), then validating the full header→hash→reader
+  join→posterior provenance→v6-consumer chain. No schema is proposed. Reuse the
+  existing OM9 source-cell proof. When native height or surface is unavailable,
+  preserve it as unknown; do not substitute target DEM as provider-native
+  geometry or invent a universal native-height ban. Repair an existing gate if
+  it currently consumes fabricated geometry. Exact files and tests already
+  reported by the owner are present in `scope.yaml`.
+- Separate recurrence finding, integrated in `60fc25a2f`: red evidence showed
+  the post-target-midnight diurnal path still used today's peak `k`. The fitter
+  is scoped to the diurnal model and `targetdayopen`; outside that domain it
+  reports `NOT_APPLICABLE`. This does not suppress held-position statistics or
+  their continuous redecision. The later `1f3502d41` fixture-only continuation
+  restores current-law schema, witness, source-pair and authority-debt test
+  fixtures without production gate edits or assertion suppression. The exact
+  26-node disposition, preserved assertions and limits are in the adjacent
+  `/tmp/all-city-mixture-evidence.3jbVLa/fixture-disposition.md`; XML comparison
+  was independently machine-checked as recorded above.
+
+### Addendum — bounded Hong Kong temperature clock and source-quantity audit, 2026-09-29T22:52Z
+
+- Parent integration snapshot at this check: HEAD `59e48a58b0582ad5f639606c6c8480d6193ab6e4`; cross-branch Git integration remains owned by `city_source_contracts`. This addendum records evidence and source semantics only; it does not certify a deployed/current source stack or authorize live changes.
+- One read-only GET of HKO's official `latest_1min_temperature.csv` completed at 22:42:45.981–22:42:58.138Z, HTTP 200, 1,257 bytes, SHA-256 `3d958dfa0ae6b8b1ba8263bda5aff0b4c4f38c528e208cc6ca3eb40105e5f53b`; original CSV bytes are retained at `docs/operations/current/evidence/hko_latest_1min_temperature_20260929.csv`. The `HK Observatory` row is `202609300630,28.8` (28.8°C, 2026-09-29 22:30Z). Response headers report `Last-Modified: 22:38:57Z`, `Date: 22:42:51Z`, and `ETag: "6abc3e01-4e9"`; observed-row time ≤ Last-Modified ≤ response Date/fetch is true for this capture. Last-Modified is only evidenced as HTTP representation metadata here, not a documented independent provider-issue clock. HKO's official Open Data page labels the feed the latest 1-minute mean air temperature, updated every 10 minutes, provisional: https://www.weather.gov.hk/en/abouthko/opendata_intro.htm. The CSV exposes a named station row, not a daily extreme; no producer integration or source-authority change is established by this capture.
+- Current quantity-role audit (source code/config plus the cited provider contracts; no other-city API fetches):
+
+  | Source family | Actual field and aggregation | Spatial / temporal meaning | Finding |
+  |---|---|---|---|
+  | Open-Meteo BPF, 18 configured model IDs | Requests `hourly=temperature_2m`, Celsius, city timezone; derives HIGH=max and LOW=min of values in the target local-date slice. Raw provenance explicitly says `provider_api_2m_temperature`, hourly series may be interpolated, `max_min_of_local_day_hourly_samples`, and native file variable/surface UNKNOWN (`bayes_precision_fusion_download.py:1834-1850, 1912-1921, 2570-2678`; 18-ID union at 292-333). Fixed-lead previous-runs similarly uses `temperature_2m_previous_dayN` (or `temperature_2m`) and max/mins numeric values (`1571-1630`). | Model/grid-cell forecast, not station observation. Open-Meteo documents `temperature_2m` as Instant and ECMWF API series as hourly-interpolated even when native output later switches to 3/6-hour data; BPF does not request ECMWF's distinct preceding-3-hour `temperature_2m_min/max` products: https://open-meteo.com/en/docs/ecmwf-api. The live parser proves a target-day time span (≤03:00 through ≥20:00) but calls `require_full_localday=False`; its internal-axis check rejects interior non-finite values, not missing hourly timestamps. Previous-runs extremum helper has no full-day axis/cardinality check. | **No direct native-interval or station-daily claim found in these BPF provenance fields**: they correctly name sampled local-day extrema. They remain a sampled approximation to the settlement-day extreme; actual per-city value error is not proven. Treat incomplete sampling as a source-coverage contract gap, not a demonstrated historical-loss cause. |
+  | HKO `fnd` | Daily `forecastMaxtemp.value` / `forecastMintemp.value`, °C, keyed by `forecastDate`; proof calls it `agency_daily_forecast_{high|low}` (`station_forecast_adapter.py:121-199, 283-295`). | Official 9-day forecast of Hong Kong; payload selection contains no HKO_HQ station, coordinates, or measurement site. HKO publishes this as a 9-day forecast of Hong Kong, not a station observation: https://www.weather.gov.hk/en/abouthko/opendata_intro.htm. | Valid agency/city forecast augmentation may be distinct from a single-station fact. Config currently says `settlement_aligned=true` and the adapter assigns `station_id=HKO` from the city map; those labels do not make the FND payload station-specific. Do not disable or upgrade its authority without the existing §1d/critic boundary decision. |
+  | HKO latest CSV | Exact body has `Air Temperature(degree Celsius)` and station row `HK Observatory,28.8` at 06:30 HKT; this is a 1-minute mean observation, not a forecast/day max. | Named HKO station observation inside HKO's regional feed, sampled every 10 minutes; the row timestamp is the observed-time field. The single response's HTTP Last-Modified gives an ordered representation timestamp, but semantics as publisher issue time remain unproven. | Useful current-observation/clock evidence, not yet wired to the normal writer→seed→posterior→public/held chain. It cannot alone settle the daily HIGH/LOW or explain the old entry-q divergence. |
+  | CWA F-D0047-061 | Selects exactly `松山區` / geocode `63000010` and requires 24 unique whole-hour `溫度` values for D+1; computes max/min (`station_forecast_adapter.py:918-1017`). | CWA describes this family as township forecasts; the selected point `(25.051608,121.568983)` is the township representative, not RCSS settlement coordinates. Official catalog/API docs: https://opendata.cwa.gov.tw/dist/opendata-swagger.html and https://opendata.cwa.gov.tw/opendatadoc/Forecast/F-D0047-001_093.pdf. | Config correctly has `settlement_aligned=false`. Adapter proof's `station_id=RCSS` is a city/settlement association, not site identity stated by this township product. Retain as township/city forecast augmentation if authorized; do not describe as RCSS station data. No authenticated XML body was fetched in this audit. |
+  | CWA F-D0047-063 (legacy) | Retired 06:00–18:00 `MaxT` product, high-only; not a 24-hour local-calendar-day extreme. | Township representative forecast, not RCSS sensor. | Config disables it and marks retired; it is not an active HIGH/LOW source. |
+
+- Finding classes for handoff: **(1) Original/current behavior proven:** the Total Loss daemon had clean-exit code 0, `KeepAlive.SuccessfulExit=false` and no timer, so it is idle after clean exit; its 11:32Z `alive=false` status is stale state, and the clean-exit initiator remains unknown. Sep29 positions were not canonically settled, so no `settlement_full_loss` was due; existing `below_floor`/`no_bid` events are not realized losses. The earlier HKO source-clock defect was independently reproduced with `recordTime=06:00` versus `updateTime=06:02`; the source-clock repair remains a separate not-yet-deployed chain. **(2) Repair-time critic findings, never deployed and not attributable to historical HK losses:** the current BPF cache/replay path can still mint a fake network-capture receipt from cached payload (MEDIUM, open); any associated gate must remain fail-closed. **(3) Refuted hypotheses:** floor matches all six Sep26–28 resolved winners while nearest fails three; YES32 `q=.5754097` is a held-payoff counterfactual, not an MC-vs-plugin mean split; the 17:03 403 is not proof of a permanent current venue block; the alleged production `forecast_posteriors.trade_authority_status` CHECK failure is contradicted by live DDL and published historical DDL; comparing only the d4 base tree did not prove its fix was in HEAD. **(4) Unresolved inputs:** exact source/witness artifacts for the 06:21 `.523519`/`.575410` historical point inputs were not retained, so their difference's cause is unlocated; the Total Loss clean-exit initiator and HKO first-publication revision archive are also unknown. Do not convert these gaps into a reconstructed cause.
+- Superseding venue/status boundary: parent-reported later read-only projection was GREEN with effective `entries_paused=false`; BUY/SELL ACKs are not fills and the ACKed city was not identified as Hong Kong in the available handoff. This supersedes the older 20:50Z `DATA_DEGRADED` / historical-403 snapshot for present-tense claims; the 17:03 403 is not a current permanent-block finding. No pause, route change, cancel, order, restart, or live write was made.
+- KORD proof asset/config data slice is now locally committed as `59e48a58b0582ad5f639606c6c8480d6193ab6e4`: exact HOMR entity-body asset and Chicago `station_ground_proof` row bind KORD primary-DCP GROUND 204.8m, while existing reference coordinates/elevation remain unchanged. This is a one-city data binding only; the captured proof does not retro-authorize earlier computations and does not mark other 52 cities proven. The public/held `computed_at` cutoff chain remains required before calling the value actionable.
+- The HKO fast-feed ingest proposal and held-SELL replay-descriptor proposal are design-only follow-ups from the source owner; neither expands `scope.yaml` or authorizes source edits at this checkpoint. Fast-feed would need current observation→normal seed/materializer→certificate→public/held relationship evidence and explicit stale/missing-clock behavior; replay descriptors remain held-SELL-only and require bounded aggregate memory/disk policy. No new feed was implemented or fetched beyond the single CSV capture above.
+
+### Addendum — official fixed-station identity and ground-role evidence, 2026-09-29T23:48Z
+
+- This evidence was captured against task-tree HEAD `afae551f7db70a2dc05f445d4aef81ddf6853589` at 2026-09-29T23:48Z; the parent tree has since advanced to `28362bde567f375151d5af948f6289ede127e0f1` as of the 2026-09-30T00:42Z recheck. The capture SHA is historical basis, not current HEAD. The current process/config/live tree is not changed by this document. `config/station_precise_coords.json` now contains 11 captured `station_ground_proof` rows (Hong Kong plus ten US cities), but this is data presence, not proof that a source reader, materializer, public ENTRY/HELD path, or live process consumed the evidence. The remaining 43 configured cities are still unproven at this snapshot; the owner’s exact route accounting is 39 active-market cities/74 city-metric families plus four cities without a current active market. Keep late proof possession separate from the posterior’s `computed_at` cutoff.
+- Official role law: WMO-No.1192, §3-07 defines a fixed terrestrial station’s elevation as the height above sea level of the ground on which the station stands. §§5-05 and 5-12 separately describe sensor-to-reference distance and sensor geospatial location. This makes an OSCAR `Land (fixed)` elevation a ground-MSL candidate when the station identity and actual source site bind; it does not turn the value into sensor AGL. Source: https://library.wmo.int/viewer/55626/download?file=1192_en.pdf&type=pdf&navigator=1. The official NCEI ISD-history field `ELEV` is only labelled “Elevation in meters”; do not borrow the WMO definition for that separate field.
+- Exact official ISD history body is preserved at `docs/operations/current/evidence/noaa_isd_history_20260929.txt`: GET `https://www.ncei.noaa.gov/pub/data/noaa/isd-history.txt`, HTTP 200, capture 2026-09-29T23:33:42.151488Z–23:33:43.060706Z, 2,967,101 bytes, SHA-256 `3998ba15c66ddcc81b3d9c38cb8ab89136ade955c0d241a26d274fc9c3e7fa7f`, response Date 23:33:42Z, Last-Modified 2025-08-30T00:02:02Z, ETag `"2d463d-63d89d920a7da"`. The file itself identifies as “Integrated Surface Database Station History, August 2025”. Exact ICAO call-sign rows exist for 41 of the 42 configured non-US station codes; LTFM is absent. MPMG’s only row ended 1997-12-31; OEJN and NZWN have duplicate historical station rows. Those rows provide a bounded ICAO/USAF/WBAN/name/coordinate crosswalk as of the file vintage, not a current Sep29 station validity proof or a ground-role definition; the file has no WMO-ID field.
+- Full official OSCAR/Surface `landFixed` search was captured once in six paginated raw response bodies, each preserved in `docs/operations/current/evidence/oscar_nonus_fixed_land_20260929*.json`, with per-page `.capture.json` and available `.headers.txt` receipts. The query returned `totalCount=27250`, `pageCount=6`, 27,250 unique internal record IDs, 29,547 WIGOS identifier links with no duplicate identifiers; the JSON rows expose WIGOS IDs, station type, declared status, coordinates, elevation, and established/closed dates, but no ICAO alias or last-updated timestamp.
+
+  | Page | Capture window UTC | Bytes | SHA-256 | Response-header coverage |
+  |---:|---|---:|---|---|
+  | 1 | 23:24:56.551971–23:25:02.834055 | 3,941,049 | `869931180c67309bfd6b7a1561aaf350ef6e01ddaafec49cac96fe9c0b3410f1` | HTTP 200/MIME/size/effective URL from curl writeout; HTTP Date header was not retained |
+  | 2 | 23:27:20.280202–23:27:27.057110 | 4,215,683 | `2fffc8f67c3fbb4d0f9a24b494716eddd5a777256bae1d4375a64315409762f9` | HTTP 200 only; other response headers were not retained |
+  | 3 | 23:28:22.829836–23:28:29.473570 | 3,852,556 | `b615119a8264086aab6a3c4d743f7598c2615083c3d3e534ec8ec8e7a51507d6` | HTTP 200, Date, Content-Type |
+  | 4 | 23:28:57.195865–23:29:03.197943 | 4,184,228 | `80b62d1896160e6001b78f3dca924f3f10df8c358890cbece0cba5a9000cf224` | HTTP 200, Date, Content-Type, chunked transfer |
+  | 5 | 23:29:15.745261–23:29:21.279577 | 4,145,329 | `424ac030136e909a9d8551820d2e835a285c69d2297444128ec2a106f256f707` | HTTP 200, Date, Content-Type, chunked transfer |
+  | 6 | 23:29:31.436474–23:29:36.536617 | 1,850,305 | `a56127c4582de6b338cc9bb211b91aaa21e69d6497a53ec599130e9c75797d7b` | HTTP 200, Date, Content-Type, chunked transfer |
+
+- A single current AWC StationInfo request, explicitly bounded to the 53 non-empty configured ICAO IDs, was captured at `docs/operations/current/evidence/awc_stationinfo_53_station_20260929.json`: HTTP 200, 11,008 bytes, SHA-256 `8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1`, Date 2026-09-29T23:47:57Z, ETag `W/"2b00-vDivOSfwV72jxSoGz69f3o8AXoM"`, `Cache-Control: max-age=300`. It returned 53 unique `icaoId` records. The API identifies station/site metadata worldwide and each row can carry `icaoId`, `wmoId`, `site`, `lat`, `lon`, `elev`, `country`, and `siteType`; it has no per-row update/effective timestamp, temperature-sensor position, ground-role declaration, or typed elevation reference. The 42 non-US IDs have 33 WMO IDs and nine missing; a preceding malformed request with one empty ID returned HTTP 400 and is not station evidence.
+- Exact-identifier-only local joining of those current AWC WMO IDs to the captured OSCAR identifier lists finds 29 of 42 non-US sources; 25 rows are declared operational, four are closed, six of the operational rows have null elevation, and 19 have numeric fixed-land elevation. Seventeen of the 19 are within 5 km of the AWC stationinfo point and fifteen within 2 km, but distance is diagnostic only and is not a same-sensor/precision threshold. Two exact-ID joins are clearly displaced and rejected for source-site binding: DNMM → LAGOS/IKEJA is 13.44 km from AWC Lagos/Muhammed Intl; ZHHH → WUHAN is 25.17 km from AWC Wuhan/Tianhe Intl. Six other operational exact-ID rows have no elevation: ZBAA, ZGGG, ZGSZ, ZHCC, ZSQD, ZUCK. Four WMO IDs have no exact WIGOS ID in the complete catalog: EDDM/10866, NZAA/93119, RCSS/46696, ZUUU/56294. Nine non-US records have no AWC WMO ID: EGLC, LTFM, MMMX, MPMG, RKSI, UUWW, WIHH, ZSJN, ZSPD. For exact matches, the full search-body row retains primary/alternate WIGOS identifier flag, internal station ID, name, `Land (fixed)`, declared status, elevation, source coordinates, and any `dateEstablished`/`dateClosed`; no record-modification time is available. AWC elevation is listed for comparison only and is not promoted as ground.
+
+  | AWC ICAO/WMO; AWC site point (lat, lon, untyped elev m) | Exact OSCAR station row and WIGOS identity | OSCAR ground candidate (m; lat, lon) | Date established / closed; status | Distance |
+  |---|---|---|---|---:|
+  | CYYZ/71624; Toronto/Pearson (43.679, -79.629, 171) | ID 9998, TORONTO LESTER B. PEARSON INT'L A; primary `0-20000-0-71624` | 173.4; 43.67666667, -79.63055556 | 2016-04-28 / none; operational | 0.29 km |
+  | DNMM/65201; Lagos/Muhammed Intl (6.577, 3.321, 27) | ID 8820, LAGOS/IKEJA; primary `0-20000-0-65201` | 25; 6.59, 3.2 | 1951-01-01 / none; operational | 13.44 km — reject binding |
+  | EFHK/02974; Helsinki/Vantaa (60.327, 24.957, 56) | ID 1726, VANTAA HELSINKI-VANTAA AIRPORT; matched alias `0-20000-0-02974` is nonprimary; primary `0-246-0-100968` | 46.8; 60.3267, 24.95675 | 1952-11-01 / none; operational | 0.04 km |
+  | EHAM/06240; Amsterdam/Schiphol (52.315, 4.79, -2) | ID 2139, Schiphol Airport; primary `0-20000-0-06240` | -3.35; 52.3172222222, 4.7897222222 | 1990-07-01 / none; operational | 0.25 km |
+  | EPWA/12375; Warsaw/Chopin (52.163, 20.961, 107) | ID 3278, WARSZAWA-OKECIE; primary `0-20000-0-12375` | 106.51; 52.1627777778, 20.9611111111 | dates absent; operational | 0.03 km |
+  | FACT/68816; Cape Town Intl (-33.965, 18.602, 48) | ID 9323, CAPE TOWN INTNL. AIRPORT; primary `0-20000-0-68816` | 42; -33.9631, 18.6023 | 1945-01-01 / none; operational | 0.21 km |
+  | LEMD/08221; Madrid/Barajas (40.466, -3.555, 589) | ID 2645, MADRID/BARAJAS; primary `0-20000-0-08221` | 609; 40.4666666667, -3.5555555556 | dates absent; operational | 0.09 km |
+  | LFPB/07150; Paris/Le Bourget (48.967, 2.428, 50) | ID 2464, LE BOURGET; primary `0-20000-0-07150` | 67; 48.9675, 2.4275 | 1920-01-01 / none; operational | 0.07 km |
+  | LIMC/16066; Milan/Malpensa (45.631, 8.728, 221) | ID 3719, MILANO MALPENSA; primary `0-20000-0-16066` | 234; 45.63, 8.7230555556 | 1998-12-31 / none; operational | 0.40 km |
+  | LTAC/17128; Ankara/Esenboğa (40.128, 32.995, 952) | ID 3986, ANKARA ESENBOGA HAVALIMANI; primary `0-20000-0-17128` | 959; 40.115921, 32.986827 | 1956-01-01 / none; operational | 1.51 km |
+  | OEJN/41024; Jeddah/King Abdulaziz (21.685, 39.166, 8) | ID 6125, King AbdulAziz AirPort; primary `0-20000-0-41024` | 16.88; 21.657559, 39.185749 | 2010-03-10 / none; operational | 3.67 km |
+  | OPKC/41780; Karachi/Jinnah (24.902, 67.139, 20) | ID 6324, KARACHI AIRPORT; primary `0-20000-0-41780` | 21; 24.9, 67.1333333333 | 1931-01-01 / none; operational | 0.61 km |
+  | RJTT/47671; Tokyo/Haneda (35.553, 139.781, 5) | ID 7235, TOKYO INTERNATIONAL AIRPORT; primary `0-20000-0-47671` | 6.41; 35.5533333333, 139.7811111111 | dates absent; operational | 0.04 km |
+  | RPLL/98429; Manila/Aquino (14.507, 121.004, 15) | ID 13944, NINOY AQUINO INTERNATIONAL AIRPORT; primary `0-20000-0-98429` | 21.06; 14.5047, 121.004751 | 1949-01-01 / none; operational | 0.27 km |
+  | SAEZ/87576; Buenos Aires/Pistarini (-34.822, -58.536, 16) | ID 12431, EZEIZA AERO; primary `0-20000-0-87576` | 20; -34.81856, -58.54229 | 1946-04-01 / none; operational | 0.69 km |
+  | VILK/42369; Lucknow/Singh (26.761, 80.889, 121) | ID 6490, LUCKNOW/AMAUSI; primary `0-20000-0-42369` | 122; 26.75, 80.8833 | 1948-02-01 / none; operational | 1.35 km |
+  | WMKK/48650; Kuala Lumpur Intl (2.747, 101.714, 21) | ID 7599, KUALA LUMPUR INTERNATIONAL AIRPORT (KLIA); primary `0-20000-0-48650` | 16.11; 2.730833, 101.7031 | 1998-07-01 / none; operational | 2.17 km |
+  | WSSS/48698; Singapore/Changi (1.368, 103.982, 17) | ID 7610, SINGAPORE/CHANGI AIRPORT; primary `0-20000-0-48698` | 14; 1.3679, 103.9824 | 1981-07-01 / none; operational | 0.05 km |
+  | ZHHH/57494; Wuhan/Tianhe (30.783, 114.205, 33) | ID 7955, WUHAN; primary `0-20000-0-57494` | 24; 30.6, 114.05 | 1905-01-01 / none; operational | 25.17 km — reject binding |
+
+- Three high-priority identity gaps are not healed by near neighbors. EGLC has no WMO ID in the captured current AWC row and no London City/EGLC entry in the full OSCAR catalog; the nearest London Weather Centre row is 4.25 km away and closed since 2010, while St James Park is 5.27 km away and distinct. Met Office’s published WMO SYNOP list contains London St James Park 03770 and Heathrow 03772 but not EGLC; ISD has a London City/EGLC row in its August-2025 history with generic ELEV 5.8 m only. RCSS has current AWC `wmoId=46696` but no exact WIGOS `0-20000-0-46696` or Songshan-named row in the catalog; the Taiwan ANWS 2022 annual report reports Songshan WMO 46696 and 12 m, not ground role, while the current CAA AIP places temperature/humidity sensors at R10TDZ and R28TDZ. KBKF has no AWC WMO ID; AWC `elev=1703` is unqualified, ISD’s exact KBKF/Buckley history row has generic ELEV 1726.1 m, and the nearest OSCAR row is Stapleton 11.65 km away. City’s bounded current HOMR evidence for KBKF identifies no temperature primary DCP. None of these observations licenses airport ARP/field elevation as station ground.
+- Current production authority corrections: under this route, the materializer’s typed ground proof is a hard precondition for producing a posterior and cycle policy revalidates ground authority before public ENTRY/HELD use; a passing legacy basket path does not prove a new posterior can be produced. Thus the 43 unproven config rows are not a reason to call the new flow complete. A separately approved `src/data/station_ground_evidence.py` + `tests/test_station_ground_evidence.py` slice is still pending: it will replay only already-captured official bytes into existing `raw_forecast_artifacts`/`raw_manifests/station_ground` under fixed kind `station_ground_source_entity_body_v1`, without schema/table/store changes. SCOPE is one exact source/station/ground-proof identity; DRAIN is normal source archive before exact-family seeding plus the existing seed/materializer/public/held sequence; RESET requires proof possession by the actual posterior `computed_at`, with updated source/site/ground facts causing the ordinary exact-family reseed. Same stable facts with a different audit page/hash must not perturb HWM identity; late proof cannot bless an earlier q. Orphan/rollback or invalid body stays fail-closed. The real XML detail possession and final source→posterior→public/held relationship remain acceptance obligations.
+- A separately approved queue DRAIN repair is scoped to `replacement_forecast_live_materialization_queue.py::_blocked_attempt_fingerprint` and the existing `tests/test_openmeteo_cell_selection_and_elevation_are_product_identity.py`: actual source owner reports the same-raw old-cut fingerprint stays stable, while a new current proof-receipt possession changes only the current-cut fingerprint; current targeted checks are 2 pass. This proves selection/fingerprint invalidation only, not a new seed/materialization/public/held DRAIN. Seed-discovery’s actual source seam is `_manifest_cycle_has_fusion_current_values` (not the previously misnamed `_fusion_current_values_at_manifest_cycle`).
+- The single-run provider reader’s `_internal_axis_gap` rejects an interior non-finite value; the remaining bounded source-coverage defect is missing/duplicate/whole-hour/first-or-last-slot completeness: 18 samples from 03:00 through 20:00 can be treated as a complete-day proxy. The previous-runs parser is weaker, but the live current-value reader replays the single-run selected product, so do not claim all malformed previous-run axes already enter live q. Likewise, current `_bind` has `actualparams.models == ecmwf_ifs`; `ifs025` is not bound as the O1280 native surface. The separate actual-provider reader/selected-cell roundtrip still needs an antibody, and the repaired `e02` hook’s earlier wrong-domain finding is not evidence of an actual normal-producer authorization or historical live-loss cause.
+- Four more `openmeteo_model_surface` domains are authorized but pending implementation/review: AROME HD, UKMO 2 km, HRRR, and NBM. They require exact native output/projection and bounded resource proofs; they do not imply all 14 Open-Meteo models are supported or enable unproven models. Existing ICON and UKMO global profiles remain the only already-approved initial set until each new profile passes its separate proof.
+- HKO latest-CSV ingest has advanced beyond the 22:52 design-only note: owner reports code/test commit `015d50587` as an 8-file, four-source/four-existing-test slice with 38 focused checks and four W3 producer→seed/materializer→certificate→held-chain cases, but the full old-bundle positive suite has 40 failures under a temporary-source baseline investigation and final W3 proof still depends on the combined e02/ground/source stack and independent critic. This remains code/test evidence only, not parent-tree acceptance, live feed activation, or live database/source collection. The 1-minute CSV is not a day-extreme source, and its HTTP Last-Modified remains representation metadata rather than a documented provider issue clock.
+
 ## 2026-09-27 — current-day full causal repair acceptance
 
 ### Latest verified delivery boundary — 19:15 UTC

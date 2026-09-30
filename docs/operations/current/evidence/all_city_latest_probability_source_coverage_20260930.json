@@ -1,0 +1,3712 @@
+{
+  "schema": "active_city_latest_source_coverage_readonly_v1",
+  "captured_at": "2026-09-30T14:09:33.327005+00:00",
+  "finished_at": "2026-09-30T14:09:34.641929+00:00",
+  "db_mode": "URI mode=ro, PRAGMA query_only=ON; bounded 18s per DB; independent DB read transactions",
+  "canonical_paths": {
+    "forecasts": "/Users/leofitz/zeus/state/zeus-forecasts.db",
+    "world": "/Users/leofitz/zeus/state/zeus-world.db",
+    "trades": "/Users/leofitz/zeus/state/zeus_trades.db"
+  },
+  "config_sha256": "0415319997103e603f9a9a017902dd52300806907805024cf6f6e6e538ca3dfb",
+  "geometry_config_sha256": "55540e3ce5ae905621a77801a8bd941f4b05100b2a434973195720c2f3e0ec64",
+  "selection": "Each observed active city x metric: at most one newest computed live posterior across current not-ended market-root dates; otherwise earliest current target missing row. Readiness is same chosen target. Money certificate is separately bounded and never fills missing posterior fields.",
+  "limits": [
+    "No remote ACTIVE market attestation; market_events has no active flag",
+    "No probability math rerun/public-reader authority validation/body byte rehash",
+    "No FINAL forecast promoted to observation",
+    "No source-issued clock synthesized from fetched/DB/metadata",
+    "No checkout SHA used as import proof",
+    "Detailed JSON output was tool-truncated after the bounded query completed. Complete retained rows only are reproduced here; all-family counts came from the complete summary prefix. Missing detail is not pass.",
+    "Current live 96 missing typed ground roles are separate from parent staged 28 plus new two official sources; no parent proof is credited to live rows.",
+    "Raw recorded_at is exported literally; complete source body/HTTP receipt/native/ground first-possession authority was not replayed."
+  ],
+  "summary": {
+    "configured_cities": 54,
+    "active_cities": 50,
+    "active_city_metric_families": 96,
+    "posterior_present": 96,
+    "posterior_absent": 0,
+    "money_certificate_bounded_present": 64,
+    "shape_semantics_counts": {
+      "ensemble_center_scenarios_v5": 96
+    },
+    "q_shape_counts": {
+      "fused_day0_fast_residual_likelihood": 65,
+      "fused_normal_direct": 29,
+      "day0_remaining_shared_carrier_v3": 2
+    },
+    "flags": {
+      "CONFIG_TYPED_GROUND_PROOF_MISSING": 96,
+      "CERT_TYPED_GROUND_ROLE_NOT_RECORDED": 96
+    },
+    "inactive_configured_cities": [
+      "Auckland",
+      "Jinan",
+      "Jakarta",
+      "Lagos"
+    ],
+    "recent_money_certificates_scanned": 400,
+    "money_certificate_query_gap": null
+  },
+  "truth_plane": "CURRENT_LIVE_CANONICAL_SQL_SNAPSHOT_NOT_PARENT_APPROVED_OR_DEPLOYED_REPAIR",
+  "export_completeness": {
+    "query_families": 96,
+    "complete_detail_rows_retained": 37,
+    "detail_rows_unavailable_due_to_tool_output_cap": 59,
+    "no_further_DB_queries_per_parent": true
+  },
+  "runtime_sample": {
+    "cut_utc": "2026-09-30T14:01:28.562222+00:00",
+    "since_utc": "2026-09-30T12:16:57.243362+00:00",
+    "db": "/Users/leofitz/zeus/state/zeus_trades.db",
+    "query_only": true,
+    "sampling_atomicity": "one trade DB read transaction; runtime JSON files sampled subsequently",
+    "economic_fills": [],
+    "nonterminal": [],
+    "new_or_updated_commands": [],
+    "latest_global_cut": [
+      {
+        "id": 882039,
+        "mode": "global_single_order_auction_delta",
+        "started_at": "2026-09-30T14:00:44.748850+00:00",
+        "completed_at": "2026-09-30T14:00:58.484734+00:00",
+        "timestamp": "2026-09-30T14:01:04.618119+00:00",
+        "json_extract(artifact_json,'$.decision_time')": null,
+        "json_extract(artifact_json,'$.selection_epoch')": null,
+        "json_extract(artifact_json,'$.universe_size')": null
+      }
+    ],
+    "runtime": {
+      "daemon-heartbeat.json": {
+        "timestamp": "2026-09-30T14:01:19.345746+00:00",
+        "alive": true,
+        "pid": 47067
+      },
+      "forecast-live-heartbeat.json": {
+        "timestamp": "2026-09-30T14:01:18.210645+00:00",
+        "written_at": "2026-09-30T14:01:18.210645+00:00",
+        "pid": 25991,
+        "git_head": "dfccc8005",
+        "status": "alive"
+      },
+      "loaded_sha.json": {
+        "generated_at": "2026-09-30T12:30:03.135003+00:00",
+        "loaded_sha": "dfccc80054d6ac5018b0cdff6b0c64a0982cb91c",
+        "identity_source": "git_head"
+      },
+      "deployment_freshness.json": {
+        "status": "fresh",
+        "boot_sha": "dfccc80054d6ac5018b0cdff6b0c64a0982cb91c",
+        "current_sha": "dfccc80054d6ac5018b0cdff6b0c64a0982cb91c",
+        "detected_at": "2026-09-30T14:01:19.365021+00:00"
+      }
+    },
+    "runtime_sample_utc": "2026-09-30T14:01:28.598566+00:00"
+  },
+  "code_plane": {
+    "head": "dfccc80054d6ac5018b0cdff6b0c64a0982cb91c",
+    "origin": "dfccc80054d6ac5018b0cdff6b0c64a0982cb91c",
+    "mainPid": 47067,
+    "forecastPid": 25991,
+    "cwd": "/Users/leofitz/zeus",
+    "readUtc": "2026-09-30T14:01:28Z",
+    "commits": [
+      "bef8fb848",
+      "dfccc8005"
+    ],
+    "rangeBase": "c3fa4d2d83f51e9481a633d92aa89de06fdb6873",
+    "diffChunk": "50f621"
+  },
+  "rows": [
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Amsterdam",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 709995,
+      "posterior_computed_at": "2026-09-30T13:57:57.679016+00:00",
+      "posterior_recorded_at": "2026-09-30 13:59:52",
+      "posterior_source_cycle_time": "2026-09-29T18:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:41:28.613553+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "EHAM",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T13:57:18.965000+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2492407,
+          "icon_d2",
+          "icon_d2::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T10:29:11+00:00",
+          "2026-09-30T10:39:24.266435+00:00",
+          "2026-09-30 10:39:24",
+          null,
+          true
+        ],
+        [
+          2499316,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:01",
+          null,
+          true
+        ],
+        [
+          2500981,
+          "icon_d2",
+          "icon_d2::standard_api_meta_stamped::run=2026-09-30T12:00:00+00:00::modified=2026-09-30T13:23:36+00:00",
+          "2026-09-30T12:00:00+00:00",
+          "2026-09-30T13:24:09+00:00",
+          "2026-09-30T13:35:00.686762+00:00",
+          "2026-09-30 13:35:01",
+          null,
+          true
+        ],
+        [
+          2501801,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:29.538784+00:00",
+          "2026-09-30 13:51:31",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:491172b70a1068a6b47e2332",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:5e5c04c3f06929e0a46c",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:d93650b6b6fbf3b23d277bfd",
+      "money_certificate_cut": "2026-09-30T02:00:55.466241+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v27_diurnal_mixture_v1:24ff72250735b7fb720138cd8df8c75027e1f157e9e2f2b37233d89e3d9215c1",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Amsterdam",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 709996,
+      "posterior_computed_at": "2026-09-30T13:58:12.231543+00:00",
+      "posterior_recorded_at": "2026-09-30 14:00:00",
+      "posterior_source_cycle_time": "2026-09-29T18:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:41:28.613553+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "EHAM",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T13:57:18.965000+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2492408,
+          "icon_d2",
+          "icon_d2::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T10:29:11+00:00",
+          "2026-09-30T10:39:24.266435+00:00",
+          "2026-09-30 10:39:24",
+          null,
+          true
+        ],
+        [
+          2499317,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:01",
+          null,
+          true
+        ],
+        [
+          2500982,
+          "icon_d2",
+          "icon_d2::standard_api_meta_stamped::run=2026-09-30T12:00:00+00:00::modified=2026-09-30T13:23:36+00:00",
+          "2026-09-30T12:00:00+00:00",
+          "2026-09-30T13:24:09+00:00",
+          "2026-09-30T13:35:00.686762+00:00",
+          "2026-09-30 13:35:01",
+          null,
+          true
+        ],
+        [
+          2501802,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:29.538784+00:00",
+          "2026-09-30 13:51:31",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:4c59509fe98736df2ed9d3cd",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:324e366261d8b46520a9",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Ankara",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 709759,
+      "posterior_computed_at": "2026-09-30T13:25:28.790598+00:00",
+      "posterior_recorded_at": "2026-09-30 13:25:57",
+      "posterior_source_cycle_time": "2026-09-29T18:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:43:26.443426+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "LTAC",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T13:25:08+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2484310,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.419756+00:00",
+          "2026-09-30 08:03:23",
+          null,
+          true
+        ],
+        [
+          2489714,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.480039+00:00",
+          "2026-09-30 09:44:10",
+          null,
+          true
+        ],
+        [
+          2499322,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:01",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:08b27bd389016b4e82d2812b",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:f4e1407deed1023f967c",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:41df6ccd4130d47cc0d46d41",
+      "money_certificate_cut": "2026-09-29T12:21:16.777852+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "entry_primary",
+      "money_certificate_unit": "C",
+      "money_q_version": "70045ed4fde7a99d568c95e4c3e1cba1b9713e36ba83f708c58f2d3b958b4cd5",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Ankara",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 709762,
+      "posterior_computed_at": "2026-09-30T13:25:45.856857+00:00",
+      "posterior_recorded_at": "2026-09-30 13:26:07",
+      "posterior_source_cycle_time": "2026-09-29T18:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:43:26.443426+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "LTAC",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T13:25:08+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2499323,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:01",
+          null,
+          true
+        ],
+        [
+          2499536,
+          "icon_eu",
+          "icon_eu::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T12:01:48+00:00",
+          "2026-09-30T13:05:15.308645+00:00",
+          "2026-09-30 13:05:17",
+          null,
+          true
+        ],
+        [
+          2499539,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::previous_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:05:15.308645+00:00",
+          "2026-09-30T13:05:15.308645+00:00",
+          "2026-09-30 13:05:17",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:2861089849010e115967bdc7",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:8ed36c85b58ed542790e",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:5ea097b7b73a51d2fc88ef28",
+      "money_certificate_cut": "2026-09-29T12:48:14.325617+00:00",
+      "money_certificate_target": "2026-09-29",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v26_land_grid_v3:dba4981cc2bc829d30ac2972b83956204e1ca9fc63390a27ddc054fc950f29a4",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Atlanta",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 709975,
+      "posterior_computed_at": "2026-09-30T13:54:53.607071+00:00",
+      "posterior_recorded_at": "2026-09-30 13:55:06",
+      "posterior_source_cycle_time": "2026-09-30T00:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:35:17.640072+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "KATL",
+      "settlement_unit": "F",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "F",
+      "fast_observation_time": "2026-09-30T13:54:23+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2487493,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::previous_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T09:02:35.770299+00:00",
+          "2026-09-30T09:02:35.770299+00:00",
+          "2026-09-30 09:02:38",
+          null,
+          true
+        ],
+        [
+          2489624,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2490945,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T09:57:13+00:00",
+          "2026-09-30T10:07:30.649726+00:00",
+          "2026-09-30 10:07:31",
+          null,
+          true
+        ],
+        [
+          2499226,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ],
+        [
+          2500725,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::standard_api_meta_stamped::run=2026-09-30T12:00:00+00:00::modified=2026-09-30T13:15:07+00:00",
+          "2026-09-30T12:00:00+00:00",
+          "2026-09-30T13:20:23+00:00",
+          "2026-09-30T13:30:33.615437+00:00",
+          "2026-09-30 13:30:34",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:1564cc96b7f085ac02822a09",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:708502ac8063aefd715e",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:c884f46dbea911904f623484",
+      "money_certificate_cut": "2026-09-29T17:36:49.122373+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "entry_primary",
+      "money_certificate_unit": "F",
+      "money_q_version": "92f49fd6aaaee930be83d4660127d9d184aef6f2f86332f319e33f171f452a8d",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Atlanta",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 709974,
+      "posterior_computed_at": "2026-09-30T13:54:31.416377+00:00",
+      "posterior_recorded_at": "2026-09-30 13:55:01",
+      "posterior_source_cycle_time": "2026-09-30T00:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:35:17.640072+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "KATL",
+      "settlement_unit": "F",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "F",
+      "fast_observation_time": "2026-09-30T13:54:23+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2489625,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2490946,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T09:57:13+00:00",
+          "2026-09-30T10:07:30.649726+00:00",
+          "2026-09-30 10:07:32",
+          null,
+          true
+        ],
+        [
+          2493699,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::previous_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T11:04:24.683215+00:00",
+          "2026-09-30T11:04:24.683215+00:00",
+          "2026-09-30 11:04:25",
+          null,
+          true
+        ],
+        [
+          2499227,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ],
+        [
+          2500726,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::standard_api_meta_stamped::run=2026-09-30T12:00:00+00:00::modified=2026-09-30T13:15:07+00:00",
+          "2026-09-30T12:00:00+00:00",
+          "2026-09-30T13:20:23+00:00",
+          "2026-09-30T13:30:33.615437+00:00",
+          "2026-09-30 13:30:35",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:ab22e07112502bf402bb6fc0",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:e1e520646ba39e4dd209",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Austin",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 709982,
+      "posterior_computed_at": "2026-09-30T13:56:03.521263+00:00",
+      "posterior_recorded_at": "2026-09-30 13:56:17",
+      "posterior_source_cycle_time": "2026-09-30T00:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:35:17.710077+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "KAUS",
+      "settlement_unit": "F",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "F",
+      "fast_observation_time": "2026-09-30T13:55:42+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2486519,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T08:47:32.334488+00:00",
+          "2026-09-30 08:47:33",
+          null,
+          true
+        ],
+        [
+          2486521,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:47:32.334488+00:00",
+          "2026-09-30 08:47:33",
+          null,
+          true
+        ],
+        [
+          2489630,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2490951,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T09:57:13+00:00",
+          "2026-09-30T10:07:30.649726+00:00",
+          "2026-09-30 10:07:33",
+          null,
+          true
+        ],
+        [
+          2500731,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::standard_api_meta_stamped::run=2026-09-30T12:00:00+00:00::modified=2026-09-30T13:15:07+00:00",
+          "2026-09-30T12:00:00+00:00",
+          "2026-09-30T13:20:23+00:00",
+          "2026-09-30T13:30:33.615437+00:00",
+          "2026-09-30 13:30:36",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:2998b5a7570383703153e7e1",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:5fea1969044c364b85ee",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:d77ee51e84b3853d6be35d40",
+      "money_certificate_cut": "2026-09-30T01:06:01.895347+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "entry_primary",
+      "money_certificate_unit": "F",
+      "money_q_version": "1619fe4abfed447ea8879da26a8b9b12c7e7eaffc158987a0aa94e6d072b6aee",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Austin",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 709983,
+      "posterior_computed_at": "2026-09-30T13:55:48.055376+00:00",
+      "posterior_recorded_at": "2026-09-30 13:56:24",
+      "posterior_source_cycle_time": "2026-09-30T00:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:35:17.710077+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "KAUS",
+      "settlement_unit": "F",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "F",
+      "fast_observation_time": "2026-09-30T13:55:42+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2486520,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T08:47:32.334488+00:00",
+          "2026-09-30 08:47:33",
+          null,
+          true
+        ],
+        [
+          2486522,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:47:32.334488+00:00",
+          "2026-09-30 08:47:33",
+          null,
+          true
+        ],
+        [
+          2489631,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2490952,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T09:57:13+00:00",
+          "2026-09-30T10:07:30.649726+00:00",
+          "2026-09-30 10:07:34",
+          null,
+          true
+        ],
+        [
+          2500732,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::standard_api_meta_stamped::run=2026-09-30T12:00:00+00:00::modified=2026-09-30T13:15:07+00:00",
+          "2026-09-30T12:00:00+00:00",
+          "2026-09-30T13:20:23+00:00",
+          "2026-09-30T13:30:33.615437+00:00",
+          "2026-09-30 13:30:36",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:0a40568c9878a74bdf18ab49",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:8c62f5af350183cdc7a6",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Beijing",
+      "metric": "high",
+      "target_date": "2026-10-02",
+      "posterior_id": 709833,
+      "posterior_computed_at": "2026-09-30T13:29:16.848225+00:00",
+      "posterior_recorded_at": "2026-09-30 13:30:01",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:29:08.905467+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "ZBAA",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2474818,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T03:50:57+00:00",
+          "2026-09-30T05:01:56.239146+00:00",
+          "2026-09-30 05:02:00",
+          null,
+          true
+        ],
+        [
+          2484320,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.419756+00:00",
+          "2026-09-30 08:03:23",
+          null,
+          true
+        ],
+        [
+          2487243,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T08:57:32.479339+00:00",
+          "2026-09-30 08:57:37",
+          null,
+          true
+        ],
+        [
+          2489724,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.480039+00:00",
+          "2026-09-30 09:44:11",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:1615a04e03869bd8dc7d56f0",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:aa0a98c0faa23cedeefa",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:e719c14dacef3df835e49144",
+      "money_certificate_cut": "2026-09-26T20:42:42.792854+00:00",
+      "money_certificate_target": "2026-09-27",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v22:9344e9361678d8c30228f9149e5aee7b3906a5ecf4fea40b6a2f05025bfbc6c1",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Beijing",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 709890,
+      "posterior_computed_at": "2026-09-30T13:35:30.793382+00:00",
+      "posterior_recorded_at": "2026-09-30 13:36:15",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:43:26.470229+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "ZBAA",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T13:35:09+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2471459,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T03:42:57+00:00",
+          "2026-09-30T03:53:15.075163+00:00",
+          "2026-09-30 03:53:18",
+          null,
+          true
+        ],
+        [
+          2484317,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.419756+00:00",
+          "2026-09-30 08:03:23",
+          null,
+          true
+        ],
+        [
+          2487106,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T08:56:32.275610+00:00",
+          "2026-09-30 08:56:36",
+          null,
+          true
+        ],
+        [
+          2489721,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.480039+00:00",
+          "2026-09-30 09:44:11",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:8c524f32ac01f090829c48e2",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:6c90634fa5cec49b318c",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Buenos Aires",
+      "metric": "high",
+      "target_date": "2026-10-02",
+      "posterior_id": 710046,
+      "posterior_computed_at": "2026-09-30T14:05:31.252248+00:00",
+      "posterior_recorded_at": "2026-09-30 14:08:27",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:34:19.919282+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "SAEZ",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2499790,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:10:16.493170+00:00",
+          "2026-09-30 13:10:19",
+          null,
+          true
+        ],
+        [
+          2499791,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:28:50+00:00",
+          "2026-09-30T13:10:16.493170+00:00",
+          "2026-09-30 13:10:19",
+          null,
+          true
+        ],
+        [
+          2499794,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::previous_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:10:16.493170+00:00",
+          "2026-09-30T13:10:16.493170+00:00",
+          "2026-09-30 13:10:19",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:bfcde66853c19d1d9dd9bc12",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:4e896fc0844c1bd5de04",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:a0a6deb20cb49b96edb04f90",
+      "money_certificate_cut": "2026-09-29T15:03:30.037165+00:00",
+      "money_certificate_target": "2026-09-29",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v27_diurnal_mixture_v1:74d4295a8a3f3c43f137cde7868f9e2a3aaae7119a1485d3419b266990806608",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Buenos Aires",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 710033,
+      "posterior_computed_at": "2026-09-30T14:04:15.398541+00:00",
+      "posterior_recorded_at": "2026-09-30 14:06:45",
+      "posterior_source_cycle_time": "2026-09-30T00:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:43:26.471147+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "SAEZ",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:04:06+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2489727,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.480039+00:00",
+          "2026-09-30 09:44:11",
+          null,
+          true
+        ],
+        [
+          2499329,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:01",
+          null,
+          true
+        ],
+        [
+          2501816,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:29.538784+00:00",
+          "2026-09-30 13:51:31",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:522bd86670ac740b07352002",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:7f7c9384a6505ff99bc1",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Busan",
+      "metric": "high",
+      "target_date": "2026-10-02",
+      "posterior_id": 709835,
+      "posterior_computed_at": "2026-09-30T13:29:16.848225+00:00",
+      "posterior_recorded_at": "2026-09-30 13:30:09",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:29:08.905467+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "RKPK",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2476265,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T03:50:57+00:00",
+          "2026-09-30T05:28:02.263616+00:00",
+          "2026-09-30 05:28:03",
+          null,
+          true
+        ],
+        [
+          2482939,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T07:39:16.519037+00:00",
+          "2026-09-30 07:39:17",
+          null,
+          true
+        ],
+        [
+          2484330,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.419756+00:00",
+          "2026-09-30 08:03:23",
+          null,
+          true
+        ],
+        [
+          2499337,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:01",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:e623e3350b061ae3f873fee9",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:36489d0d94d6266cb33f",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:792012bd9a38d489ca45ed31",
+      "money_certificate_cut": "2026-09-29T22:20:08.867639+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v27_diurnal_mixture_v1:510a5e17cf6c5b400a7b9c67394c59cf88e48db51ab06040b27fa64571bd64cd",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Busan",
+      "metric": "low",
+      "target_date": "2026-10-02",
+      "posterior_id": 709930,
+      "posterior_computed_at": "2026-09-30T13:29:58.809267+00:00",
+      "posterior_recorded_at": "2026-09-30 13:46:05",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:29:53.425369+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "RKPK",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2474262,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T03:42:57+00:00",
+          "2026-09-30T04:49:53.763463+00:00",
+          "2026-09-30 04:49:57",
+          null,
+          true
+        ],
+        [
+          2482940,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T07:39:16.519037+00:00",
+          "2026-09-30 07:39:17",
+          null,
+          true
+        ],
+        [
+          2484331,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.419756+00:00",
+          "2026-09-30 08:03:23",
+          null,
+          true
+        ],
+        [
+          2499338,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:01",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:2144d7ece9c1675e4ace7212",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:847cbd7258c6fd0d1770",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Cape Town",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 710027,
+      "posterior_computed_at": "2026-09-30T14:05:22.888066+00:00",
+      "posterior_recorded_at": "2026-09-30 14:05:32",
+      "posterior_source_cycle_time": "2026-09-29T18:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:35:17.674351+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "FACT",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:05:15+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2489678,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2499232,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ],
+        [
+          2501735,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:17.253655+00:00",
+          "2026-09-30 13:51:20",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:8ac36f2ee50f2c58feff4bde",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:1cd97912bdf7f4be64af",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:e3a95986591a12a1e381c426",
+      "money_certificate_cut": "2026-09-30T11:59:15.156974+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v28_smooth_center_bias_v1:f5a9726183b8eec61a9911cdf4e1773630f74ff037a2f188d5a7ebd7d9394413",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Cape Town",
+      "metric": "low",
+      "target_date": "2026-10-01",
+      "posterior_id": 709765,
+      "posterior_computed_at": "2026-09-30T13:24:54.369955+00:00",
+      "posterior_recorded_at": "2026-09-30 13:26:24",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:24:50.458637+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "FACT",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2484289,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:07.237227+00:00",
+          "2026-09-30 08:03:21",
+          null,
+          true
+        ],
+        [
+          2489677,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2499235,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:7a0b16df241be6c21732df4b",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:9d8b03d8d353ff477cb8",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Chengdu",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 710034,
+      "posterior_computed_at": "2026-09-30T14:05:46.639217+00:00",
+      "posterior_recorded_at": "2026-09-30 14:06:56",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:35:17.986108+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "ZUUU",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:05:28+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2489636,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2499238,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ],
+        [
+          2501739,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:17.253655+00:00",
+          "2026-09-30 13:51:22",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:78b74995c9e6559c7b2b265d",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:538cf79bbb31447d5c98",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:fda0d2319eae8953470cfb5f",
+      "money_certificate_cut": "2026-09-30T06:42:39.066232+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v28_smooth_center_bias_v1:b00fab70a22a6d04c13ac047548e2a114427fd1e7374ae2bbf7cc29114df1ad1",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Chengdu",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 710038,
+      "posterior_computed_at": "2026-09-30T14:05:40.263563+00:00",
+      "posterior_recorded_at": "2026-09-30 14:07:52",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:35:17.986108+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "ZUUU",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:05:28+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2489637,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2499239,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ],
+        [
+          2501740,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:17.253655+00:00",
+          "2026-09-30 13:51:22",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:89dd3dfd5aad8cbfe1dff14a",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:1e1cd189548742b5288d",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Shenzhen",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 710028,
+      "posterior_computed_at": "2026-09-30T14:05:44.184414+00:00",
+      "posterior_recorded_at": "2026-09-30 14:05:54",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:37:14.515696+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "ZGSZ",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:05:28+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2482703,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T03:50:57+00:00",
+          "2026-09-30T07:36:53.094174+00:00",
+          "2026-09-30 07:36:54",
+          null,
+          true
+        ],
+        [
+          2499274,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ],
+        [
+          2501757,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:17.253655+00:00",
+          "2026-09-30 13:51:26",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:96641d92fe792105db2ae356",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:a2f019529e8a6c6ab955",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:3e06e0249ad632264bc686c2",
+      "money_certificate_cut": "2026-09-30T05:58:05.928151+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v28_smooth_center_bias_v1:2ad2afe00c4ebca8d51ce04707b709298bf7d39dbfaa38507e7b5129b72a9427",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Shenzhen",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 710039,
+      "posterior_computed_at": "2026-09-30T14:05:35.764660+00:00",
+      "posterior_recorded_at": "2026-09-30 14:08:04",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:37:14.515696+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "ZGSZ",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:05:28+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2482704,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T03:50:57+00:00",
+          "2026-09-30T07:36:53.094174+00:00",
+          "2026-09-30 07:36:54",
+          null,
+          true
+        ],
+        [
+          2499275,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ],
+        [
+          2501758,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:17.253655+00:00",
+          "2026-09-30 13:51:26",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:1a212d0f48a2adcd10c07f88",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:a4f0d20a5dce94657568",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Singapore",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 710007,
+      "posterior_computed_at": "2026-09-30T14:01:13.585497+00:00",
+      "posterior_recorded_at": "2026-09-30 14:01:45",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:39:19.018904+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "WSSS",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:01:05+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2489834,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.480039+00:00",
+          "2026-09-30 09:44:13",
+          null,
+          true
+        ],
+        [
+          2499432,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:12",
+          null,
+          true
+        ],
+        [
+          2501885,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:29.538784+00:00",
+          "2026-09-30 13:51:37",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:20d4d421cc1a2d630cfac3fb",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:840083c62f2843d4ab11",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:13862d2b9b62a70fb19c4758",
+      "money_certificate_cut": "2026-09-30T03:22:59.760314+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v27_diurnal_mixture_v1:ad4bf5fc7713de666f29588e48fee24cbe25490ac163368db34d0803d4f2fb06",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Taipei",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 709965,
+      "posterior_computed_at": "2026-09-30T13:51:37.883982+00:00",
+      "posterior_recorded_at": "2026-09-30 13:53:49",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:37:14.255714+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "wu_icao",
+      "settlement_source_switch_date": null,
+      "settlement_station": "RCSS",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "aviationweather_metar",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T13:39:09+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2440165,
+          "cwa_township_hourly_high",
+          "cwa_township_hourly_high::single_runs",
+          "2026-09-29T16:15:02+00:00",
+          "2026-09-29T16:18:22.435552+00:00",
+          "2026-09-29T16:18:22.435552+00:00",
+          "2026-09-29 16:18:22",
+          null,
+          true
+        ],
+        [
+          2489670,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2499280,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ],
+        [
+          2501763,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:17.253655+00:00",
+          "2026-09-30 13:51:27",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:6e17a9529a3a61ed015d90ab",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:d66d0b423a1fb732829c",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:ea6a7d7e96841030802f5dc6",
+      "money_certificate_cut": "2026-09-30T03:05:12.076560+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v27_diurnal_mixture_v1:5ed77a36422525e59b140255a103640609da11336c5dc6afe803c00f19073204",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Taipei",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 709911,
+      "posterior_computed_at": "2026-09-30T13:39:43.242065+00:00",
+      "posterior_recorded_at": "2026-09-30 13:42:50",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:37:14.255714+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "wu_icao",
+      "settlement_source_switch_date": null,
+      "settlement_station": "RCSS",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "aviationweather_metar",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T13:39:09+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2440166,
+          "cwa_township_hourly_low",
+          "cwa_township_hourly_low::single_runs",
+          "2026-09-29T16:15:02+00:00",
+          "2026-09-29T16:18:22.435552+00:00",
+          "2026-09-29T16:18:22.435552+00:00",
+          "2026-09-29 16:18:22",
+          null,
+          true
+        ],
+        [
+          2484277,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:07.237227+00:00",
+          "2026-09-30 08:03:21",
+          null,
+          true
+        ],
+        [
+          2489671,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:04.982589+00:00",
+          "2026-09-30 09:44:07",
+          null,
+          true
+        ],
+        [
+          2499281,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:db4f1e4378fe5ecf2c2ac365",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:01d37f00f26b970311fe",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "TARGET_LOCAL_DAY_BOUNDARY_AMBIGUOUS"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:d65822678f7fe1f7259e2a55",
+      "money_certificate_cut": "2026-09-28T15:21:22.680136+00:00",
+      "money_certificate_target": "2026-09-29",
+      "money_certificate_source_role": "entry_primary",
+      "money_certificate_unit": "C",
+      "money_q_version": "8b20e18297f0c41b7c29e59e427f1a8954c4dc05661f3b0727a1ccd980598320",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Tel Aviv",
+      "metric": "high",
+      "target_date": "2026-10-01",
+      "posterior_id": 709972,
+      "posterior_computed_at": "2026-09-30T13:51:37.883982+00:00",
+      "posterior_recorded_at": "2026-09-30 13:54:31",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:24:51.897646+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": null,
+      "settlement_station": "LLBG",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2487087,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T08:56:32.275610+00:00",
+          "2026-09-30 08:56:34",
+          null,
+          true
+        ],
+        [
+          2490287,
+          "icon_eu",
+          "icon_eu::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:38:46+00:00",
+          "2026-09-30T09:53:17.261190+00:00",
+          "2026-09-30 09:53:17",
+          null,
+          true
+        ],
+        [
+          2501771,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:17.253655+00:00",
+          "2026-09-30 13:51:27",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:a1aff17100dc4c1dc7a6664c",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:c8c4896275fefc8d460f",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:a82601efdd38b0e432f17af2",
+      "money_certificate_cut": "2026-09-30T06:59:00.895740+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v28_smooth_center_bias_v1:eb3442f99c0de13e4e67db68e635c54c6b70c7107091303a41141372a98eeeaf",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Tel Aviv",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 709964,
+      "posterior_computed_at": "2026-09-30T13:53:28.285183+00:00",
+      "posterior_recorded_at": "2026-09-30 13:53:42",
+      "posterior_source_cycle_time": "2026-09-29T18:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:36:14.893553+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": null,
+      "settlement_station": "LLBG",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T13:52:10+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2487067,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T08:56:32.275610+00:00",
+          "2026-09-30 08:56:33",
+          null,
+          true
+        ],
+        [
+          2496473,
+          "icon_eu",
+          "icon_eu::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T11:54:28+00:00",
+          "2026-09-30T12:05:23.819449+00:00",
+          "2026-09-30 12:05:24",
+          null,
+          true
+        ],
+        [
+          2501769,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:17.253655+00:00",
+          "2026-09-30 13:51:27",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:d0f40bec9947fa7de9490ac3",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:53a3f6ae5391db603583",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:23b2c9a891cb913fd25ee234",
+      "money_certificate_cut": "2026-09-28T20:45:28.195069+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "entry_primary",
+      "money_certificate_unit": "C",
+      "money_q_version": "a498fa9ef302580c7a9415ae02ed0517802965137997247ecad3be3ae7cb9f5e",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Tokyo",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 710055,
+      "posterior_computed_at": "2026-09-30T14:06:00.771465+00:00",
+      "posterior_recorded_at": "2026-09-30 14:09:15",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:39:19.379960+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "RJTT",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:05:51+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2487245,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T08:57:32.479339+00:00",
+          "2026-09-30 08:57:39",
+          null,
+          true
+        ],
+        [
+          2489837,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.480039+00:00",
+          "2026-09-30 09:44:13",
+          null,
+          true
+        ],
+        [
+          2501888,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:29.538784+00:00",
+          "2026-09-30 13:51:38",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:9340f0e9a0a8e3c94a474bf9",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:d1f1b5c496c37ad668b5",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Tokyo",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 710056,
+      "posterior_computed_at": "2026-09-30T14:06:01.011831+00:00",
+      "posterior_recorded_at": "2026-09-30 14:09:16",
+      "posterior_source_cycle_time": "2026-09-29T12:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:39:19.379960+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "RJTT",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:05:51+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2487246,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T08:57:32.479339+00:00",
+          "2026-09-30 08:57:39",
+          null,
+          true
+        ],
+        [
+          2489838,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.480039+00:00",
+          "2026-09-30 09:44:13",
+          null,
+          true
+        ],
+        [
+          2501889,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:29.538784+00:00",
+          "2026-09-30 13:51:38",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:7ba13869ec8cc8221c101a6c",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:e1952e3960b73c0e436c",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Toronto",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 710040,
+      "posterior_computed_at": "2026-09-30T14:07:50.242906+00:00",
+      "posterior_recorded_at": "2026-09-30 14:08:12",
+      "posterior_source_cycle_time": "2026-09-30T00:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:39:18.996962+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "CYYZ",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:07:32+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2489688,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.474582+00:00",
+          "2026-09-30 09:44:08",
+          null,
+          true
+        ],
+        [
+          2490993,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T09:57:13+00:00",
+          "2026-09-30T10:07:36.032063+00:00",
+          "2026-09-30 10:07:38",
+          null,
+          true
+        ],
+        [
+          2495696,
+          "gem_hrdps_continental",
+          "gem_hrdps_continental::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T11:48:36.772415+00:00",
+          "2026-09-30T11:48:36.772415+00:00",
+          "2026-09-30 11:48:42",
+          null,
+          true
+        ],
+        [
+          2499541,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:05:15.308645+00:00",
+          "2026-09-30 13:05:17",
+          null,
+          true
+        ],
+        [
+          2500779,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::standard_api_meta_stamped::run=2026-09-30T12:00:00+00:00::modified=2026-09-30T13:15:07+00:00",
+          "2026-09-30T12:00:00+00:00",
+          "2026-09-30T13:20:23+00:00",
+          "2026-09-30T13:30:39.569948+00:00",
+          "2026-09-30 13:30:47",
+          null,
+          true
+        ],
+        [
+          2501894,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:29.538784+00:00",
+          "2026-09-30 13:51:39",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:dc8eeaa0cf7cb018e10d1038",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:a0921c76f8505ff837bb",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:5a9e95e1c4c481d845d51b3c",
+      "money_certificate_cut": "2026-09-30T01:04:15.380030+00:00",
+      "money_certificate_target": "2026-10-01",
+      "money_certificate_source_role": "entry_primary",
+      "money_certificate_unit": "C",
+      "money_q_version": "ca20e0ac7775ed603a1a8cf04238f5f189f6f835873f46557c1160ea8d74583f",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Toronto",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 710052,
+      "posterior_computed_at": "2026-09-30T14:07:51.350111+00:00",
+      "posterior_recorded_at": "2026-09-30 14:08:58",
+      "posterior_source_cycle_time": "2026-09-30T00:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:39:18.996962+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "CYYZ",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:07:32+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2382490,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-28T12:00:00+00:00",
+          "2026-09-28T19:24:14.527560+00:00",
+          "2026-09-28T19:24:14.527560+00:00",
+          "2026-09-28 19:24:16",
+          null,
+          true
+        ],
+        [
+          2489689,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.474582+00:00",
+          "2026-09-30 09:44:08",
+          null,
+          true
+        ],
+        [
+          2490994,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T09:57:13+00:00",
+          "2026-09-30T10:07:36.032063+00:00",
+          "2026-09-30 10:07:38",
+          null,
+          true
+        ],
+        [
+          2500780,
+          "ncep_nbm_conus",
+          "ncep_nbm_conus::standard_api_meta_stamped::run=2026-09-30T12:00:00+00:00::modified=2026-09-30T13:15:07+00:00",
+          "2026-09-30T12:00:00+00:00",
+          "2026-09-30T13:20:23+00:00",
+          "2026-09-30T13:30:39.569948+00:00",
+          "2026-09-30 13:30:47",
+          null,
+          true
+        ],
+        [
+          2501895,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T13:35:34+00:00",
+          "2026-09-30T13:51:29.538784+00:00",
+          "2026-09-30 13:51:39",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:d2c99e6b9f36c194e269a670",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:441fc8aa2d7f193dd898",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Warsaw",
+      "metric": "high",
+      "target_date": "2026-09-30",
+      "posterior_id": 710012,
+      "posterior_computed_at": "2026-09-30T14:02:22.202237+00:00",
+      "posterior_recorded_at": "2026-09-30 14:02:47",
+      "posterior_source_cycle_time": "2026-09-29T18:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:37:14.876172+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "EPWA",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:02:16+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2462014,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::previous_runs",
+          "2026-09-29T18:00:00+00:00",
+          "2026-09-30T00:38:06.606893+00:00",
+          "2026-09-30T00:38:06.606893+00:00",
+          "2026-09-30 00:38:08",
+          null,
+          true
+        ],
+        [
+          2496475,
+          "icon_eu",
+          "icon_eu::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T11:54:28+00:00",
+          "2026-09-30T12:05:23.819449+00:00",
+          "2026-09-30 12:05:24",
+          null,
+          true
+        ],
+        [
+          2499286,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:09dcfb87813ee15b64314208",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:73c6ff588228b1217aaa",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:c67ea3e5a16d47eb19d2e2a5",
+      "money_certificate_cut": "2026-09-30T11:07:24.162407+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v28_smooth_center_bias_v1:9f174ddee54dc1cc18a7bc59ee8bf502a20892685eb68ca1b989e81963aad3ca",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Warsaw",
+      "metric": "low",
+      "target_date": "2026-09-30",
+      "posterior_id": 710016,
+      "posterior_computed_at": "2026-09-30T14:02:18.235327+00:00",
+      "posterior_recorded_at": "2026-09-30 14:03:26",
+      "posterior_source_cycle_time": "2026-09-29T18:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T12:37:14.876172+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_day0_fast_residual_likelihood",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "EPWA",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": "wu_api+same_station_fast_tail",
+      "fast_observation_unit": "C",
+      "fast_observation_time": "2026-09-30T14:02:16+00:00",
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2462015,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::previous_runs",
+          "2026-09-29T18:00:00+00:00",
+          "2026-09-30T00:38:06.606893+00:00",
+          "2026-09-30T00:38:06.606893+00:00",
+          "2026-09-30 00:38:08",
+          null,
+          true
+        ],
+        [
+          2496476,
+          "icon_eu",
+          "icon_eu::single_runs",
+          "2026-09-30T09:00:00+00:00",
+          "2026-09-30T11:54:28+00:00",
+          "2026-09-30T12:05:23.819449+00:00",
+          "2026-09-30 12:05:24",
+          null,
+          true
+        ],
+        [
+          2499287,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:02:58.741697+00:00",
+          "2026-09-30 13:03:00",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:e7f850092c05b35873cdaa8e",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:0b942efc25715e8d4e91",
+      "producer_status": "BLOCKED",
+      "producer_rejectcodes": [
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:a49ac564e416ea9d53b8f752",
+      "money_certificate_cut": "2026-09-27T22:14:28.005860+00:00",
+      "money_certificate_target": "2026-09-28",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v26_land_grid_v3:500cb4c2afc850d126f3fb6ea6dd93ee67fdd4e28fdd892dd4e8b6ee6d18b71a",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Wellington",
+      "metric": "high",
+      "target_date": "2026-10-02",
+      "posterior_id": 709924,
+      "posterior_computed_at": "2026-09-30T13:29:16.848225+00:00",
+      "posterior_recorded_at": "2026-09-30 13:45:15",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:29:08.905467+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "NZWN",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2474860,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T03:50:57+00:00",
+          "2026-09-30T05:01:56.239146+00:00",
+          "2026-09-30 05:02:19",
+          null,
+          true
+        ],
+        [
+          2484423,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.419756+00:00",
+          "2026-09-30 08:03:23",
+          null,
+          true
+        ],
+        [
+          2489702,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.474582+00:00",
+          "2026-09-30 09:44:10",
+          null,
+          true
+        ],
+        [
+          2499459,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:14",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:e4786253141b2e1da53f15b6",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:f7182356b156f1bd1290",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:90630f727b92712ec3ac979d",
+      "money_certificate_cut": "2026-09-30T08:54:17.430229+00:00",
+      "money_certificate_target": "2026-10-01",
+      "money_certificate_source_role": "entry_primary",
+      "money_certificate_unit": "C",
+      "money_q_version": "1fa2b1ed7d81b2f6f4bd6525601a465c809f145f8ba7d79961159db09308a062",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Wellington",
+      "metric": "low",
+      "target_date": "2026-10-02",
+      "posterior_id": 709952,
+      "posterior_computed_at": "2026-09-30T13:29:58.809267+00:00",
+      "posterior_recorded_at": "2026-09-30 13:49:24",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:29:53.425369+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "NZWN",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2482906,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T07:39:16.517616+00:00",
+          "2026-09-30 07:39:16",
+          null,
+          true
+        ],
+        [
+          2484424,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.419756+00:00",
+          "2026-09-30 08:03:23",
+          null,
+          true
+        ],
+        [
+          2489703,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.474582+00:00",
+          "2026-09-30 09:44:10",
+          null,
+          true
+        ],
+        [
+          2499460,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:14",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:f3261d0a23c4c1bafe0a3d4e",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:307b196c5282df5ae471",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Wuhan",
+      "metric": "high",
+      "target_date": "2026-10-02",
+      "posterior_id": 709928,
+      "posterior_computed_at": "2026-09-30T13:29:16.848225+00:00",
+      "posterior_recorded_at": "2026-09-30 13:45:56",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:29:08.905467+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "ZHHH",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2474815,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T03:50:57+00:00",
+          "2026-09-30T05:01:56.554640+00:00",
+          "2026-09-30 05:01:58",
+          null,
+          true
+        ],
+        [
+          2483105,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T07:40:52.670713+00:00",
+          "2026-09-30 07:40:59",
+          null,
+          true
+        ],
+        [
+          2484429,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.419756+00:00",
+          "2026-09-30 08:03:23",
+          null,
+          true
+        ],
+        [
+          2489708,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.474582+00:00",
+          "2026-09-30 09:44:10",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:abfa1eb619c416ab20a5265a",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:4471ece015a8316e9cb0",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:2482b5293b168056b3e162ac",
+      "money_certificate_cut": "2026-09-30T05:26:28.911514+00:00",
+      "money_certificate_target": "2026-09-30",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v28_smooth_center_bias_v1:b7148b429c4afee4001577cb9918754538b7a6c45248eb2090ba1c3bb0e498a8",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Wuhan",
+      "metric": "low",
+      "target_date": "2026-10-02",
+      "posterior_id": 709961,
+      "posterior_computed_at": "2026-09-30T13:29:58.809267+00:00",
+      "posterior_recorded_at": "2026-09-30 13:51:35",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:29:53.425369+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-24",
+      "settlement_station": "ZHHH",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2473418,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T03:50:57+00:00",
+          "2026-09-30T04:32:23.506441+00:00",
+          "2026-09-30 04:32:23",
+          null,
+          true
+        ],
+        [
+          2483106,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:29:00+00:00",
+          "2026-09-30T07:40:52.670713+00:00",
+          "2026-09-30 07:40:59",
+          null,
+          true
+        ],
+        [
+          2484430,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.419756+00:00",
+          "2026-09-30 08:03:23",
+          null,
+          true
+        ],
+        [
+          2489709,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.474582+00:00",
+          "2026-09-30 09:44:10",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:d896ee15ce4e4118c1ec03e6",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:5359ff70d3c4f8ed1691",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Zhengzhou",
+      "metric": "high",
+      "target_date": "2026-10-01",
+      "posterior_id": 709827,
+      "posterior_computed_at": "2026-09-30T13:24:56.858681+00:00",
+      "posterior_recorded_at": "2026-09-30 13:29:05",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:24:51.897646+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "ZHCC",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2484302,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.414986+00:00",
+          "2026-09-30 08:03:21",
+          null,
+          true
+        ],
+        [
+          2489712,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.474582+00:00",
+          "2026-09-30 09:44:10",
+          null,
+          true
+        ],
+        [
+          2499437,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:14",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:e58ed44559b9bb5cce2e7a27",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:d0b768a475db2540f227",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "money_certificate_id": "ForecastAuthorityCertificate:77895a31dc6f898542d4ca98",
+      "money_certificate_cut": "2026-09-29T04:46:16.252535+00:00",
+      "money_certificate_target": "2026-09-29",
+      "money_certificate_source_role": "day0_base_distribution",
+      "money_certificate_unit": "C",
+      "money_q_version": "day0-semrev:day0_settlement_channel_revision_model_v26_land_grid_v3:c2c6ccd6017aa19f73acf657e19718253932b1efaba8fbaf730102618f4c4fdd",
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    },
+    {
+      "truth_plane": "CURRENT_LIVE_DB_NOT_PARENT_REPAIR",
+      "cut_utc": "2026-09-30T14:09:33.327005+00:00",
+      "city": "Zhengzhou",
+      "metric": "low",
+      "target_date": "2026-10-01",
+      "posterior_id": 709793,
+      "posterior_computed_at": "2026-09-30T13:24:54.369955+00:00",
+      "posterior_recorded_at": "2026-09-30 13:27:33",
+      "posterior_source_cycle_time": "2026-09-30T06:00:00+00:00",
+      "posterior_source_available_at": "2026-09-30T13:24:50.458637+00:00",
+      "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+      "semantics_revision": "ensemble_center_scenarios_v5",
+      "q_shape": "fused_normal_direct",
+      "settlement_source_selector": "noaa",
+      "settlement_source_switch_date": "2026-08-23",
+      "settlement_station": "ZHCC",
+      "settlement_unit": "C",
+      "native_grid": "openmeteo_ecmwf_ifs_9km",
+      "ground_role": null,
+      "ground_proof_configured": false,
+      "stored_precision_status": "PASS",
+      "fast_observation_source": null,
+      "fast_observation_unit": null,
+      "fast_observation_time": null,
+      "source_clock_columns": [
+        "id",
+        "model",
+        "product",
+        "issued_cycle",
+        "available",
+        "captured",
+        "first_raw_recorded",
+        "artifact_id",
+        "same_family"
+      ],
+      "raw_input_clocks": [
+        [
+          2484303,
+          "ukmo_global_deterministic_10km",
+          "ukmo_global_deterministic_10km::single_runs",
+          "2026-09-30T00:00:00+00:00",
+          "2026-09-30T07:51:58+00:00",
+          "2026-09-30T08:03:21.414986+00:00",
+          "2026-09-30 08:03:21",
+          null,
+          true
+        ],
+        [
+          2489713,
+          "icon_global",
+          "icon_global::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T09:33:53+00:00",
+          "2026-09-30T09:44:07.474582+00:00",
+          "2026-09-30 09:44:10",
+          null,
+          true
+        ],
+        [
+          2499438,
+          "ecmwf_ifs",
+          "ecmwf_ifs::single_runs",
+          "2026-09-30T06:00:00+00:00",
+          "2026-09-30T12:50:15+00:00",
+          "2026-09-30T13:03:01.029423+00:00",
+          "2026-09-30 13:03:14",
+          null,
+          true
+        ]
+      ],
+      "readiness_id": "replacement_readiness:1e297f7469275c4b288e543d",
+      "readiness_status": "READY",
+      "readiness_rejectcodes": [
+        "REPLACEMENT_DEPENDENCIES_READY"
+      ],
+      "producer_readiness_id": "producer_readiness:source_run_coverage:b8b213718db62c4e0fa0",
+      "producer_status": "LIVE_ELIGIBLE",
+      "producer_rejectcodes": [
+        "PRODUCER_COVERAGE_READY"
+      ],
+      "flags": [
+        "CONFIG_TYPED_GROUND_PROOF_MISSING",
+        "CERT_TYPED_GROUND_ROLE_NOT_RECORDED"
+      ]
+    }
+  ]
+}

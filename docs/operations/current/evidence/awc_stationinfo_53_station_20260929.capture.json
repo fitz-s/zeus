@@ -1,0 +1,18 @@
+{
+  "capture_started_at": "2026-09-29T23:47:57Z",
+  "capture_finished_at": "2026-09-29T23:47:57Z",
+  "capture_clock_precision": "local timestamps recorded to whole seconds",
+  "http_status": 200,
+  "request_method": "GET",
+  "request_url": "https://aviationweather.gov/api/data/stationinfo?ids=EHAM,LTAC,KATL,NZAA,KAUS,ZBAA,SAEZ,RKPK,FACT,ZUUU,KORD,ZUCK,KDAL,KBKF,ZGGG,EFHK,KHOU,LTFM,ZSJN,WIHH,OEJN,OPKC,WMKK,DNMM,EGLC,KLAX,VILK,LEMD,RPLL,MMMX,KMIA,LIMC,UUWW,EDDM,KLGA,MPMG,LFPB,ZSQD,KSFO,SBGR,KSEA,RKSI,ZSPD,ZGSZ,WSSS,RCSS,LLBG,RJTT,CYYZ,EPWA,NZWN,ZHHH,ZHCC&format=json",
+  "request_user_agent": "Zeus read-only stationinfo verification/2026-09-29",
+  "content_type": "application/json; charset=utf-8",
+  "content_length": 11008,
+  "response_date": "Tue, 29 Sep 2026 23:47:57 GMT",
+  "cache_control": "max-age=300",
+  "etag": "W/\"2b00-vDivOSfwV72jxSoGz69f3o8AXoM\"",
+  "body_path": "docs/operations/current/evidence/awc_stationinfo_53_station_20260929.json",
+  "body_bytes": 11008,
+  "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+  "notes": "Exact response entity bytes retained. One preceding malformed request contained an empty ids item and returned HTTP 400; it is not represented as source metadata and was not retried. This successful request contains 53 unique ICAO stationinfo rows."
+}

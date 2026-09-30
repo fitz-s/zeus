@@ -1,0 +1,6 @@
+HTTP/2 200
+Date: Tue, 29 Sep 2026 23:47:57 GMT
+Content-Type: application/json; charset=utf-8
+Content-Length: 11008
+Cache-Control: max-age=300
+ETag: W/"2b00-vDivOSfwV72jxSoGz69f3o8AXoM"

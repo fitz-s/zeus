@@ -1,0 +1,80 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/NZWN.83913a065eac88e27f00ed2950dd541a956c6b4c51741f84a06cfc2eec53b243.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53667,
+  "captured_at": "2026-09-30T14:57:50.425452+00:00",
+  "city": "Wellington",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "23",
+    "elevation_m": "7",
+    "ground": [
+      {
+        "elevationFeet": "23",
+        "elevationMeters": "7",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "00488",
+        "idType": "WBAN"
+      },
+      {
+        "id": "NZWN",
+        "idType": "ICAO"
+      },
+      {
+        "id": "30083512",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "NZI0000NZWN",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "-41.3",
+        "latitude_dms": "41,18,00,S",
+        "latitude_rptd": "-41.3",
+        "longitude_dec": "174.8",
+        "longitude_dms": "174,48,00,E",
+        "longitude_rptd": "174.8",
+        "precision": "DDd"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30083512",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "2005-06-07T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:50.154845+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ANZWN&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "83913a065eac88e27f00ed2950dd541a956c6b4c51741f84a06cfc2eec53b243",
+  "station_id": "NZWN"
+}

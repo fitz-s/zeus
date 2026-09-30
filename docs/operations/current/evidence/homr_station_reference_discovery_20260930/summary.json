@@ -1,0 +1,1788 @@
+{
+  "authority": "DISCOVERY_ONLY_NOT_THERMAL_DCP_OR_PAST_POSSESSION",
+  "body_cap_bytes": 262144,
+  "concurrency": 3,
+  "new_requests": 23,
+  "query_utc_date": "2026-09-30",
+  "records": [
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/NZAA.83de8d4727b83e85b43ea40834e919a53588ea10fdbab8ee2da38ee8cbc0dd05.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53552,
+      "captured_at": "2026-09-30T14:57:48.667921+00:00",
+      "city": "Auckland",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "23",
+        "elevation_m": "7",
+        "ground": [
+          {
+            "elevationFeet": "23",
+            "elevationMeters": "7",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "NZAA",
+            "idType": "ICAO"
+          },
+          {
+            "id": "93119",
+            "idType": "WMO"
+          },
+          {
+            "id": "30151541",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "NZI0000NZAA",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "-37.008056",
+            "latitude_dms": "37,00,29,S",
+            "latitude_rptd": "-37.008056",
+            "longitude_dec": "174.791667",
+            "longitude_dms": "174,47,30,E",
+            "longitude_rptd": "174.791667"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30151541",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1965-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:48.372243+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ANZAA&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:48 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "83de8d4727b83e85b43ea40834e919a53588ea10fdbab8ee2da38ee8cbc0dd05",
+      "station_id": "NZAA"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZBAA.7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 52590,
+      "captured_at": "2026-09-30T14:57:48.693995+00:00",
+      "city": "Beijing",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "EMPTY_NO_ENTITY",
+        "ground": [],
+        "ids": [],
+        "locations": [],
+        "station_count": 0
+      },
+      "fetch_started_at": "2026-09-30T14:57:48.372352+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZBAA&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:48 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e",
+      "station_id": "ZBAA"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/RKPK.c9f445c707e4d4c14265da8e6541cf8c3511d9c4d18978a52e6a00ab10646e98.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53668,
+      "captured_at": "2026-09-30T14:57:48.659164+00:00",
+      "city": "Busan",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "6",
+        "elevation_m": "1.8",
+        "ground": [
+          {
+            "elevationFeet": "6",
+            "elevationMeters": "1.8",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "43267",
+            "idType": "WBAN"
+          },
+          {
+            "id": "RKPK",
+            "idType": "ICAO"
+          },
+          {
+            "id": "20029737",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "KSI0000RKPK",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "35.179528",
+            "latitude_dms": "35,10,46,N",
+            "latitude_rptd": "35.179528",
+            "longitude_dec": "128.938222",
+            "longitude_dms": "128,56,18,E",
+            "longitude_rptd": "128.938222",
+            "precision": "DDddddd"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "20029737",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1954-07-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:48.372433+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ARKPK&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:48 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "c9f445c707e4d4c14265da8e6541cf8c3511d9c4d18978a52e6a00ab10646e98",
+      "station_id": "RKPK"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZUUU.bc82750e0f117fad3fc651e55953610caf17b28a58d41fd8abdd22b9ae6651e4.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53533,
+      "captured_at": "2026-09-30T14:57:48.957947+00:00",
+      "city": "Chengdu",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "1625",
+        "elevation_m": "495.3",
+        "ground": [
+          {
+            "elevationFeet": "1625",
+            "elevationMeters": "495.3",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "ZUUU",
+            "idType": "ICAO"
+          },
+          {
+            "id": "56294",
+            "idType": "WMO"
+          },
+          {
+            "id": "30137836",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "CHI0000ZUUU",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "30.578528",
+            "latitude_dms": "30,34,43,N",
+            "latitude_rptd": "30.578528",
+            "longitude_dec": "103.947086",
+            "longitude_dms": "103,56,50,E",
+            "longitude_rptd": "103.947086"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30137836",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1956-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:48.663784+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZUUU&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:48 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "bc82750e0f117fad3fc651e55953610caf17b28a58d41fd8abdd22b9ae6651e4",
+      "station_id": "ZUUU"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZUCK.96c583e1ad102081501f006625d8f3d5f04fb222ea17cc8b2a87bec8d7f7e708.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53531,
+      "captured_at": "2026-09-30T14:57:49.001954+00:00",
+      "city": "Chongqing",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "1365",
+        "elevation_m": "416.1",
+        "ground": [
+          {
+            "elevationFeet": "1365",
+            "elevationMeters": "416.1",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "ZUCK",
+            "idType": "ICAO"
+          },
+          {
+            "id": "57516",
+            "idType": "WMO"
+          },
+          {
+            "id": "30137833",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "CHI0000ZUCK",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "29.719217",
+            "latitude_dms": "29,43,09,N",
+            "latitude_rptd": "29.719217",
+            "longitude_dec": "106.641678",
+            "longitude_dms": "106,38,30,E",
+            "longitude_rptd": "106.641678"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30137833",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1944-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:48.671725+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZUCK&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:48 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "96c583e1ad102081501f006625d8f3d5f04fb222ea17cc8b2a87bec8d7f7e708",
+      "station_id": "ZUCK"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/KBKF.e3e1a78dc1a6f477febe7cd6d56ee34510bcf2239fdfb7ec044472e9ccf29408.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 54117,
+      "captured_at": "2026-09-30T14:57:48.976787+00:00",
+      "city": "Denver",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "GROUND_MISSING_OR_AMBIGUOUS",
+        "ground": [],
+        "ids": [
+          {
+            "id": "USW00023036",
+            "idType": "GHCND"
+          },
+          {
+            "id": "USW00023036",
+            "idType": "GHCNMLT"
+          },
+          {
+            "id": "23036",
+            "idType": "WBAN"
+          },
+          {
+            "id": "BKF",
+            "idType": "FAA"
+          },
+          {
+            "id": "KBKF",
+            "idType": "ICAO"
+          },
+          {
+            "id": "20003754",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "USW00023036",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "39.71667",
+            "latitude_dms": "39,43,00,N",
+            "latitude_rptd": "39,43,,N",
+            "longitude_dec": "-104.75",
+            "longitude_dms": "104,45,00,W",
+            "longitude_rptd": "104,45,,W",
+            "precision": "DDMM"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "20003754",
+        "other_elevation_types": [
+          "AIRPORT"
+        ],
+        "por": {
+          "beginDate": "1943-12-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:48.698192+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AKBKF&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:48 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "e3e1a78dc1a6f477febe7cd6d56ee34510bcf2239fdfb7ec044472e9ccf29408",
+      "station_id": "KBKF"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZGGG.c51fbafb899ae8c701f35199985a4dad10c46ab71f38b4cd848b126e8b0fd52c.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53534,
+      "captured_at": "2026-09-30T14:57:49.252629+00:00",
+      "city": "Guangzhou",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "50",
+        "elevation_m": "15.2",
+        "ground": [
+          {
+            "elevationFeet": "50",
+            "elevationMeters": "15.2",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "ZGGG",
+            "idType": "ICAO"
+          },
+          {
+            "id": "59287",
+            "idType": "WMO"
+          },
+          {
+            "id": "30137796",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "CHI0000ZGGG",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "23.392436",
+            "latitude_dms": "23,23,33,N",
+            "latitude_rptd": "23.392436",
+            "longitude_dec": "113.298786",
+            "longitude_dms": "113,17,56,E",
+            "longitude_rptd": "113.298786"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30137796",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1945-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:48.962908+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZGGG&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "c51fbafb899ae8c701f35199985a4dad10c46ab71f38b4cd848b126e8b0fd52c",
+      "station_id": "ZGGG"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/LTFM.170a429f0cc76ce748f5b4f157db4d494132dd6386912213348615431af10677.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53513,
+      "captured_at": "2026-09-30T14:57:49.248261+00:00",
+      "city": "Istanbul",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "325",
+        "elevation_m": "99",
+        "ground": [
+          {
+            "elevationFeet": "325",
+            "elevationMeters": "99",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "LTFM",
+            "idType": "ICAO"
+          },
+          {
+            "id": "30146057",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "TUI0000LTFM",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "41.275278",
+            "latitude_dms": "41,16,31,N",
+            "latitude_rptd": "41.275278",
+            "longitude_dec": "28.751944",
+            "longitude_dms": "028,45,07,E",
+            "longitude_rptd": "28.751944"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30146057",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "2018-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:48.981381+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ALTFM&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "170a429f0cc76ce748f5b4f157db4d494132dd6386912213348615431af10677",
+      "station_id": "LTFM"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/WIHH.ca449d3a5ccc87b74787feadbf3e4e6f5bec8ade99e0372ce15ffebd49321f83.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53538,
+      "captured_at": "2026-09-30T14:57:49.580048+00:00",
+      "city": "Jakarta",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "84",
+        "elevation_m": "25.6",
+        "ground": [
+          {
+            "elevationFeet": "84",
+            "elevationMeters": "25.6",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "WIHH",
+            "idType": "ICAO"
+          },
+          {
+            "id": "30140750",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "IDI0000WIHH",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "-6.266608",
+            "latitude_dms": "06,16,00,S",
+            "latitude_rptd": "-6.266608",
+            "longitude_dec": "106.891117",
+            "longitude_dms": "106,53,28,E",
+            "longitude_rptd": "106.891117"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30140750",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "2005-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.291288+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AWIHH&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "ca449d3a5ccc87b74787feadbf3e4e6f5bec8ade99e0372ce15ffebd49321f83",
+      "station_id": "WIHH"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZSJN.b7d432820e11e203bd0719bad9929bfa274cb77c2aacecf273ff96f8da75929d.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53498,
+      "captured_at": "2026-09-30T14:57:49.263832+00:00",
+      "city": "Jinan",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "76",
+        "elevation_m": "23.2",
+        "ground": [
+          {
+            "elevationFeet": "76",
+            "elevationMeters": "23.2",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "ZSJN",
+            "idType": "ICAO"
+          },
+          {
+            "id": "30137818",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "CHI0000ZSJN",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "36.856561",
+            "latitude_dms": "36,51,24,N",
+            "latitude_rptd": "36.856561",
+            "longitude_dec": "117.215994",
+            "longitude_dms": "117,12,58,E",
+            "longitude_rptd": "117.215994"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30137818",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "2005-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.003468+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZSJN&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "b7d432820e11e203bd0719bad9929bfa274cb77c2aacecf273ff96f8da75929d",
+      "station_id": "ZSJN"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/DNMM.004f692e0947bae5079cdb2871e4221ef760b4e23575b8d7d0d620bc32949fc5.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53537,
+      "captured_at": "2026-09-30T14:57:49.588917+00:00",
+      "city": "Lagos",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "135",
+        "elevation_m": "41.1",
+        "ground": [
+          {
+            "elevationFeet": "135",
+            "elevationMeters": "41.1",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "DNMM",
+            "idType": "ICAO"
+          },
+          {
+            "id": "65201",
+            "idType": "WMO"
+          },
+          {
+            "id": "30152035",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "NII0000DNMM",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "6.577369",
+            "latitude_dms": "06,34,39,N",
+            "latitude_rptd": "6.577369",
+            "longitude_dec": "3.321156",
+            "longitude_dms": "003,19,16,E",
+            "longitude_rptd": "3.321156"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30152035",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1949-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.294023+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ADNMM&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "004f692e0947bae5079cdb2871e4221ef760b4e23575b8d7d0d620bc32949fc5",
+      "station_id": "DNMM"
+    },
+    {
+      "artifact_path": "/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/noaa_homr_eglc_station_20260930.json",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53511,
+      "city": "London",
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "19",
+        "elevation_m": "5.8",
+        "ground": [
+          {
+            "elevationFeet": "19",
+            "elevationMeters": "5.8",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "EGLC",
+            "idType": "ICAO"
+          },
+          {
+            "id": "30146303",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "UKI0000EGLC",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "51.505278",
+            "latitude_dms": "51,30,19,N",
+            "latitude_rptd": "51.505278",
+            "longitude_dec": "0.055278",
+            "longitude_dms": "000,03,19,E",
+            "longitude_rptd": ".055278"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30146303",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1988-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "original_receipt": {
+        "authority_disposition": "research evidence pending role adjudication; no VERIFIED/config/native/q permission and no retroactive possession",
+        "body_file_recorded_at_utc": "2026-09-30T12:52:00.748515Z",
+        "capture_kind": "official_source_research_only_v1",
+        "content_type": "application/json",
+        "effective_date_limitation": "date filters returned source values and current=true matches current identifiers; station POR is not an individual location/identifier/ground validity interval",
+        "etag": null,
+        "fetched_time_window_utc": {
+          "basis": "clock tool sampled immediately before and after bounded curl GET",
+          "before": "2026-09-30T12:52:01Z",
+          "clock_resolution_seconds": 1,
+          "not_before": "2026-09-30T12:52:00Z"
+        },
+        "http_date": "2026-09-30T12:52:00Z",
+        "http_status": 200,
+        "identity_location_namespace": "station.ncdcStnId == identifiers.NCDCSTNID == location.ncdcstnId == location.geoInfo.ncdcstnId == location.nwsInfo.ncdcstnId",
+        "individual_identifier_or_location_effective_dates": null,
+        "last_modified": null,
+        "primary_temperature_dcp_or_asos_cm_evidence_present": false,
+        "query_snapshot_date": "2026-09-30",
+        "raw_body_bytes": 53511,
+        "raw_body_has_trailing_newline": false,
+        "raw_body_ref": "docs/operations/current/evidence/noaa_homr_eglc_station_20260930.json",
+        "raw_body_sha256": "bdb7bbff89109cc591e50421006fa9c1c818d8960eaba497ec309be32f52f31f",
+        "recorded_clock_basis": "actual filesystem mtime after curl closed the original-byte body file; not a canonical DB receipt or source-issued clock",
+        "request_method": "GET",
+        "source_entity": {
+          "elevation_feet": "19",
+          "elevation_meters": "5.8",
+          "elevation_type": "GROUND",
+          "ghcnh_id": "UKI0000EGLC",
+          "header_and_location_latitude": "51.505278",
+          "header_and_location_longitude": "0.055278",
+          "icao_id": "EGLC",
+          "ncdc_station_id": "30146303",
+          "preferred_name": "LONDON CITY, UNITED KINGDOM",
+          "quantity_definition": "ELEVATION OF THE GROUND",
+          "quantity_path": "stationCollection.stations[0].location.elevations[0]",
+          "station_por_begin": "1988-01-01T00:00:00.000",
+          "station_por_end": "Present"
+        },
+        "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?qid=ICAO%3AEGLC&qidMod=is&current=true&date=2026-09-30&phrData=false",
+        "wmo_or_wigos_id_present": false
+      },
+      "reused_receipt_path": "/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/noaa_homr_eglc_station_20260930.capture.json",
+      "sha256": "bdb7bbff89109cc591e50421006fa9c1c818d8960eaba497ec309be32f52f31f",
+      "station_id": "EGLC"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/MMMX.3323847fe9ab8f782655420985ff51cd499235233871931fb11170cc72dd0951.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53614,
+      "captured_at": "2026-09-30T14:57:49.587261+00:00",
+      "city": "Mexico City",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "7316",
+        "elevation_m": "2229.9",
+        "ground": [
+          {
+            "elevationFeet": "7316",
+            "elevationMeters": "2229.9",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "MMMX",
+            "idType": "ICAO"
+          },
+          {
+            "id": "76679",
+            "idType": "WMO"
+          },
+          {
+            "id": "30149753",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "MXI0000MMMX",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "19.436303",
+            "latitude_dms": "19,26,11,N",
+            "latitude_rptd": "19.436303",
+            "longitude_dec": "-99.072097",
+            "longitude_dms": "099,04,20,W",
+            "longitude_rptd": "-99.072097"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30149753",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1973-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.294885+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AMMMX&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "3323847fe9ab8f782655420985ff51cd499235233871931fb11170cc72dd0951",
+      "station_id": "MMMX"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/UUWW.7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 52590,
+      "captured_at": "2026-09-30T14:57:49.800240+00:00",
+      "city": "Moscow",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "EMPTY_NO_ENTITY",
+        "ground": [],
+        "ids": [],
+        "locations": [],
+        "station_count": 0
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.582961+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AUUWW&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e",
+      "station_id": "UUWW"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/EDDM.5b1a5c1ad390f1425938ee667c2d90164872fd06b7bdacdf4ead6f6d1c1d6971.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53555,
+      "captured_at": "2026-09-30T14:57:49.854424+00:00",
+      "city": "Munich",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "1487",
+        "elevation_m": "453.2",
+        "ground": [
+          {
+            "elevationFeet": "1487",
+            "elevationMeters": "453.2",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "EDDM",
+            "idType": "ICAO"
+          },
+          {
+            "id": "10866",
+            "idType": "WMO"
+          },
+          {
+            "id": "30103328",
+            "idType": "NCDCSTNID"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "48.35378",
+            "latitude_dms": "48,21,14,N",
+            "latitude_rptd": "48.35378",
+            "longitude_dec": "11.78608",
+            "longitude_dms": "011,47,10,E",
+            "longitude_rptd": "11.78608",
+            "precision": "DDddddd"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30103328",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "Unknown",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.588630+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AEDDM&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "5b1a5c1ad390f1425938ee667c2d90164872fd06b7bdacdf4ead6f6d1c1d6971",
+      "station_id": "EDDM"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/MPMG.7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 52590,
+      "captured_at": "2026-09-30T14:57:49.812189+00:00",
+      "city": "Panama City",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "EMPTY_NO_ENTITY",
+        "ground": [],
+        "ids": [],
+        "locations": [],
+        "station_count": 0
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.590285+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AMPMG&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e",
+      "station_id": "MPMG"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZSQD.7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 52590,
+      "captured_at": "2026-09-30T14:57:50.041120+00:00",
+      "city": "Qingdao",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "EMPTY_NO_ENTITY",
+        "ground": [],
+        "ids": [],
+        "locations": [],
+        "station_count": 0
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.801506+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZSQD&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:49 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e",
+      "station_id": "ZSQD"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/SBGR.0fb3da415b2b21e00fe7849f3f35bd82ae8e70066a94f8ca8a0a8f41a00138f9.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53589,
+      "captured_at": "2026-09-30T14:57:50.081668+00:00",
+      "city": "Sao Paulo",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "2459",
+        "elevation_m": "749.5",
+        "ground": [
+          {
+            "elevationFeet": "2459",
+            "elevationMeters": "749.5",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "SBGR",
+            "idType": "ICAO"
+          },
+          {
+            "id": "83075",
+            "idType": "WMO"
+          },
+          {
+            "id": "30134434",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "BRI0000SBGR",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "-23.432075",
+            "latitude_dms": "23,25,55,S",
+            "latitude_rptd": "-23.432075",
+            "longitude_dec": "-46.469511",
+            "longitude_dms": "046,28,10,W",
+            "longitude_rptd": "-46.469511"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30134434",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1988-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.813480+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ASBGR&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "0fb3da415b2b21e00fe7849f3f35bd82ae8e70066a94f8ca8a0a8f41a00138f9",
+      "station_id": "SBGR"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/RKSI.97531f98c70c347b2843522b030c628272fc7888b0d457a4799f771804967441.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53517,
+      "captured_at": "2026-09-30T14:57:50.153178+00:00",
+      "city": "Seoul",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "23",
+        "elevation_m": "7",
+        "ground": [
+          {
+            "elevationFeet": "23",
+            "elevationMeters": "7",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "RKSI",
+            "idType": "ICAO"
+          },
+          {
+            "id": "30150507",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "KSI0000RKSI",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "37.469075",
+            "latitude_dms": "37,28,09,N",
+            "latitude_rptd": "37.469075",
+            "longitude_dec": "126.450517",
+            "longitude_dms": "126,27,02,E",
+            "longitude_rptd": "126.450517"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30150507",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "2004-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:49.885704+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ARKSI&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "97531f98c70c347b2843522b030c628272fc7888b0d457a4799f771804967441",
+      "station_id": "RKSI"
+    },
+    {
+      "artifact_path": "/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/noaa_homr_zspd_station_20260930.json",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53491,
+      "city": "Shanghai",
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "13",
+        "elevation_m": "4",
+        "ground": [
+          {
+            "elevationFeet": "13",
+            "elevationMeters": "4",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "ZSPD",
+            "idType": "ICAO"
+          },
+          {
+            "id": "30137822",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "CHI0000ZSPD",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "31.143378",
+            "latitude_dms": "31,08,36,N",
+            "latitude_rptd": "31.143378",
+            "longitude_dec": "121.805214",
+            "longitude_dms": "121,48,19,E",
+            "longitude_rptd": "121.805214"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30137822",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "2004-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "original_receipt": {
+        "authority_disposition": "research evidence pending role adjudication; no VERIFIED/config/native/q permission and no retroactive possession",
+        "body_file_recorded_at_utc": "2026-09-30T12:52:00.345270Z",
+        "capture_kind": "official_source_research_only_v1",
+        "content_type": "application/json",
+        "effective_date_limitation": "date filters returned source values and current=true matches current identifiers; station POR is not an individual location/identifier/ground validity interval",
+        "etag": null,
+        "fetched_time_window_utc": {
+          "basis": "clock tool sampled immediately before and after bounded curl GET",
+          "before": "2026-09-30T12:52:01Z",
+          "clock_resolution_seconds": 1,
+          "not_before": "2026-09-30T12:51:59Z"
+        },
+        "http_date": "2026-09-30T12:52:00Z",
+        "http_status": 200,
+        "identity_location_namespace": "station.ncdcStnId == identifiers.NCDCSTNID == location.ncdcstnId == location.geoInfo.ncdcstnId == location.nwsInfo.ncdcstnId",
+        "individual_identifier_or_location_effective_dates": null,
+        "last_modified": null,
+        "primary_temperature_dcp_or_asos_cm_evidence_present": false,
+        "query_snapshot_date": "2026-09-30",
+        "raw_body_bytes": 53491,
+        "raw_body_has_trailing_newline": false,
+        "raw_body_ref": "docs/operations/current/evidence/noaa_homr_zspd_station_20260930.json",
+        "raw_body_sha256": "9e31964f1cbe8c32561621b9ac4ece77cbe7c700d93ebdca12fdb1e1cfcad5ec",
+        "recorded_clock_basis": "actual filesystem mtime after curl closed the original-byte body file; not a canonical DB receipt or source-issued clock",
+        "request_method": "GET",
+        "source_entity": {
+          "elevation_feet": "13",
+          "elevation_meters": "4",
+          "elevation_type": "GROUND",
+          "ghcnh_id": "CHI0000ZSPD",
+          "header_and_location_latitude": "31.143378",
+          "header_and_location_longitude": "121.805214",
+          "icao_id": "ZSPD",
+          "ncdc_station_id": "30137822",
+          "preferred_name": "PUDONG, CHINA",
+          "quantity_definition": "ELEVATION OF THE GROUND",
+          "quantity_path": "stationCollection.stations[0].location.elevations[0]",
+          "station_por_begin": "2004-01-01T00:00:00.000",
+          "station_por_end": "Present"
+        },
+        "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?qid=ICAO%3AZSPD&qidMod=is&current=true&date=2026-09-30&phrData=false",
+        "wmo_or_wigos_id_present": false
+      },
+      "reused_receipt_path": "/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/noaa_homr_zspd_station_20260930.capture.json",
+      "sha256": "9e31964f1cbe8c32561621b9ac4ece77cbe7c700d93ebdca12fdb1e1cfcad5ec",
+      "station_id": "ZSPD"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZGSZ.bad37dc5b9e611b34822901f7d22aa7c9f5512a79dff64716d219f457c5e628c.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53529,
+      "captured_at": "2026-09-30T14:57:50.328371+00:00",
+      "city": "Shenzhen",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "13",
+        "elevation_m": "4",
+        "ground": [
+          {
+            "elevationFeet": "13",
+            "elevationMeters": "4",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "ZGSZ",
+            "idType": "ICAO"
+          },
+          {
+            "id": "59493",
+            "idType": "WMO"
+          },
+          {
+            "id": "30137800",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "CHI0000ZGSZ",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "22.639258",
+            "latitude_dms": "22,38,21,N",
+            "latitude_rptd": "22.639258",
+            "longitude_dec": "113.810664",
+            "longitude_dms": "113,48,38,E",
+            "longitude_rptd": "113.810664"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30137800",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1957-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:50.064850+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZGSZ&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "bad37dc5b9e611b34822901f7d22aa7c9f5512a79dff64716d219f457c5e628c",
+      "station_id": "ZGSZ"
+    },
+    {
+      "artifact_path": "/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-rcss-ground-proof.6m0hz3x5/homr-icao-rcss-7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e.json",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 52590,
+      "city": "Taipei",
+      "facts": {
+        "classification": "EMPTY_NO_ENTITY",
+        "ground": [],
+        "ids": [],
+        "locations": [],
+        "station_count": 0
+      },
+      "original_receipt": {
+        "artifact_path": "/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-rcss-ground-proof.6m0hz3x5/homr-icao-rcss-7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e.json",
+        "byte_size": 52590,
+        "captured_at": "2026-09-30T14:20:52.929002+00:00",
+        "fetch_started_at": "2026-09-30T14:20:52.662951+00:00",
+        "headers": {
+          "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+          "Access-Control-Allow-Methods": "GET, OPTIONS",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Max-Age": "3600",
+          "Connection": "close",
+          "Content-Type": "application/json",
+          "Date": "Wed, 30 Sep 2026 14:20:52 GMT",
+          "Server": "Apache",
+          "Strict-Transport-Security": "max-age=31536000",
+          "Transfer-Encoding": "chunked"
+        },
+        "quantity": "UNPROVEN",
+        "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?qid=ICAO%3ARCSS",
+        "sha256": "7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e",
+        "stations": [],
+        "status": 200
+      },
+      "reused_receipt_path": "/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-rcss-ground-proof.6m0hz3x5/homr-icao-rcss.capture.json",
+      "sha256": "7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e",
+      "station_id": "RCSS"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/LLBG.7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 52590,
+      "captured_at": "2026-09-30T14:57:50.317194+00:00",
+      "city": "Tel Aviv",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "EMPTY_NO_ENTITY",
+        "ground": [],
+        "ids": [],
+        "locations": [],
+        "station_count": 0
+      },
+      "fetch_started_at": "2026-09-30T14:57:50.083049+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ALLBG&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e",
+      "station_id": "LLBG"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/NZWN.83913a065eac88e27f00ed2950dd541a956c6b4c51741f84a06cfc2eec53b243.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53667,
+      "captured_at": "2026-09-30T14:57:50.425452+00:00",
+      "city": "Wellington",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "23",
+        "elevation_m": "7",
+        "ground": [
+          {
+            "elevationFeet": "23",
+            "elevationMeters": "7",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "00488",
+            "idType": "WBAN"
+          },
+          {
+            "id": "NZWN",
+            "idType": "ICAO"
+          },
+          {
+            "id": "30083512",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "NZI0000NZWN",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "-41.3",
+            "latitude_dms": "41,18,00,S",
+            "latitude_rptd": "-41.3",
+            "longitude_dec": "174.8",
+            "longitude_dms": "174,48,00,E",
+            "longitude_rptd": "174.8",
+            "precision": "DDd"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30083512",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "2005-06-07T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:50.154845+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ANZWN&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "83913a065eac88e27f00ed2950dd541a956c6b4c51741f84a06cfc2eec53b243",
+      "station_id": "NZWN"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZHHH.7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 52590,
+      "captured_at": "2026-09-30T14:57:50.554561+00:00",
+      "city": "Wuhan",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "EMPTY_NO_ENTITY",
+        "ground": [],
+        "ids": [],
+        "locations": [],
+        "station_count": 0
+      },
+      "fetch_started_at": "2026-09-30T14:57:50.318485+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZHHH&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e",
+      "station_id": "ZHHH"
+    },
+    {
+      "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZHCC.b1947ff61d8cd45aedf7bef2bd735f82d7a70a7839f36b46a0a94f8e250b4f72.body",
+      "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+      "byte_size_captured": 53530,
+      "captured_at": "2026-09-30T14:57:50.594442+00:00",
+      "city": "Zhengzhou",
+      "complete": true,
+      "error": null,
+      "facts": {
+        "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+        "elevation_ft": "495",
+        "elevation_m": "150.9",
+        "ground": [
+          {
+            "elevationFeet": "495",
+            "elevationMeters": "150.9",
+            "elevationType": "GROUND"
+          }
+        ],
+        "height_role": "typed_GROUND_reference_not_thermal_DCP",
+        "ids": [
+          {
+            "id": "ZHCC",
+            "idType": "ICAO"
+          },
+          {
+            "id": "57083",
+            "idType": "WMO"
+          },
+          {
+            "id": "30137802",
+            "idType": "NCDCSTNID"
+          },
+          {
+            "id": "CHI0000ZHCC",
+            "idType": "GHCNH"
+          }
+        ],
+        "individual_periods": false,
+        "locations": [
+          {
+            "latitude_dec": "34.519672",
+            "latitude_dms": "34,31,11,N",
+            "latitude_rptd": "34.519672",
+            "longitude_dec": "113.840889",
+            "longitude_dms": "113,50,27,E",
+            "longitude_rptd": "113.840889"
+          }
+        ],
+        "multiple_locations": false,
+        "ncdc_id": "30137802",
+        "other_elevation_types": [
+          "GROUND"
+        ],
+        "por": {
+          "beginDate": "1957-01-01T00:00:00.000",
+          "endDate": "Present"
+        },
+        "station_count": 1
+      },
+      "fetch_started_at": "2026-09-30T14:57:50.329806+00:00",
+      "http_status": 200,
+      "query_utc_date": "2026-09-30",
+      "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZHCC&qidMod=is&phrData=false",
+      "response_headers": {
+        "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Max-Age": "3600",
+        "Connection": "close",
+        "Content-Type": "application/json",
+        "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+        "Server": "Apache",
+        "Strict-Transport-Security": "max-age=31536000",
+        "Transfer-Encoding": "chunked"
+      },
+      "sha256": "b1947ff61d8cd45aedf7bef2bd735f82d7a70a7839f36b46a0a94f8e250b4f72",
+      "station_id": "ZHCC"
+    }
+  ],
+  "reused_captures": 3,
+  "revision": "homr_icao_ground_discovery_v1",
+  "scope_cut": "2026-09-30T14:57:48.275098+00:00",
+  "source_head": "290db22da6e7a8c7d367262e91567ed86c1d48aa"
+}

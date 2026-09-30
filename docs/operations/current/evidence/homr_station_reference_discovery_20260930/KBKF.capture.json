@@ -1,0 +1,83 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/KBKF.e3e1a78dc1a6f477febe7cd6d56ee34510bcf2239fdfb7ec044472e9ccf29408.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 54117,
+  "captured_at": "2026-09-30T14:57:48.976787+00:00",
+  "city": "Denver",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "GROUND_MISSING_OR_AMBIGUOUS",
+    "ground": [],
+    "ids": [
+      {
+        "id": "USW00023036",
+        "idType": "GHCND"
+      },
+      {
+        "id": "USW00023036",
+        "idType": "GHCNMLT"
+      },
+      {
+        "id": "23036",
+        "idType": "WBAN"
+      },
+      {
+        "id": "BKF",
+        "idType": "FAA"
+      },
+      {
+        "id": "KBKF",
+        "idType": "ICAO"
+      },
+      {
+        "id": "20003754",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "USW00023036",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "39.71667",
+        "latitude_dms": "39,43,00,N",
+        "latitude_rptd": "39,43,,N",
+        "longitude_dec": "-104.75",
+        "longitude_dms": "104,45,00,W",
+        "longitude_rptd": "104,45,,W",
+        "precision": "DDMM"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "20003754",
+    "other_elevation_types": [
+      "AIRPORT"
+    ],
+    "por": {
+      "beginDate": "1943-12-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:48.698192+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AKBKF&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:48 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "e3e1a78dc1a6f477febe7cd6d56ee34510bcf2239fdfb7ec044472e9ccf29408",
+  "station_id": "KBKF"
+}

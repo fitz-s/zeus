@@ -1,0 +1,75 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/RKSI.97531f98c70c347b2843522b030c628272fc7888b0d457a4799f771804967441.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53517,
+  "captured_at": "2026-09-30T14:57:50.153178+00:00",
+  "city": "Seoul",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "23",
+    "elevation_m": "7",
+    "ground": [
+      {
+        "elevationFeet": "23",
+        "elevationMeters": "7",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "RKSI",
+        "idType": "ICAO"
+      },
+      {
+        "id": "30150507",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "KSI0000RKSI",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "37.469075",
+        "latitude_dms": "37,28,09,N",
+        "latitude_rptd": "37.469075",
+        "longitude_dec": "126.450517",
+        "longitude_dms": "126,27,02,E",
+        "longitude_rptd": "126.450517"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30150507",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "2004-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:49.885704+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ARKSI&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:50 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "97531f98c70c347b2843522b030c628272fc7888b0d457a4799f771804967441",
+  "station_id": "RKSI"
+}

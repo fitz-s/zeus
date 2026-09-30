@@ -1,0 +1,16 @@
+HTTP/2 200 
+date: Tue, 29 Sep 2026 22:42:51 GMT
+content-type: application/octet-stream
+content-length: 1257
+last-modified: Tue, 29 Sep 2026 22:38:57 GMT
+etag: "6abc3e01-4e9"
+server: HKO
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+x-frame-options: SAMEORIGIN
+x-content-type-options: nosniff
+referrer-policy: no-referrer-when-downgrade
+content-security-policy: default-src 'self'; frame-ancestors 'self';
+referrer-policy: no-referrer-when-downgrade
+content-type: text/csv
+accept-ranges: bytes
+

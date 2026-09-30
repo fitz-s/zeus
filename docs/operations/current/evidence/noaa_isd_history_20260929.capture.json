@@ -1,0 +1,16 @@
+{
+  "capture_started_at": "2026-09-29T23:33:42.151488Z",
+  "capture_finished_at": "2026-09-29T23:33:43.060706Z",
+  "http_status": 200,
+  "request_method": "GET",
+  "request_url": "https://www.ncei.noaa.gov/pub/data/noaa/isd-history.txt",
+  "content_type": "text/plain",
+  "content_length": 2967101,
+  "response_date": "Tue, 29 Sep 2026 23:33:42 GMT",
+  "last_modified": "Sat, 30 Aug 2025 00:02:02 GMT",
+  "etag": "\"2d463d-63d89d920a7da\"",
+  "body_path": "docs/operations/current/evidence/noaa_isd_history_20260929.txt",
+  "body_bytes": 2967101,
+  "body_sha256": "3998ba15c66ddcc81b3d9c38cb8ab89136ade955c0d241a26d274fc9c3e7fa7f",
+  "notes": "Exact official ISD station-history entity body; the dataset identifies itself as August 2025. Its ELEV label is only 'Elevation in meters', so it is a station crosswalk source, not ground-role authority or Sep29 current status proof."
+}

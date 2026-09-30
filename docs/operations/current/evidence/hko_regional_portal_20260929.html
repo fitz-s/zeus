@@ -1,0 +1,1353 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <title>Hong Kong Regional Weather Information Portal｜Hong Kong Observatory(HKO)｜Local Weather</title>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="keywords" content="Weather, GIS, Regional Weather in Hong Kong, Geographic Information System">
+    <meta name="description" content="Hong Kong Regional Weather Information Portal">
+    <meta name="recordId" content="2025100814252628871">
+    <meta name="lang" content="en">
+	<meta property="fb:app_id" content="468280339992518" />
+	<meta property="og:type" content="website" />
+	<meta property="og:title" content="Hong Kong Regional Weather Information Portal" />
+	<meta property="og:description" content="Hong Kong Regional Weather Information Portal" />
+	<meta property="og:image" content="https://www.hko.gov.hk" />
+	<meta property="og:url" content="https://www.hko.gov.hk/en/wxinfo/awsgis/regional_portal.html" />
+	<meta property="og:image:width" content="600" />
+	<meta property="og:image:height" content="314" />
+    <!-- Bootstrap -->
+    <link id="styleSheet0" href="/css/bootstrap.css" rel="stylesheet" media="screen" type="text/css">
+    <link id="styleSheet1" href="/css/bsplus.css" rel="stylesheet" media="all" type="text/css">
+    <link id="styleSheet2" href="/css/default.css" rel="stylesheet" media="screen" type="text/css">
+    <link id="styleSheet3" href="/css/layout.css" rel="stylesheet" media="all" type="text/css">
+    <link href="/css/flexslider.css" rel="stylesheet" media="all" type="text/css">
+    <link href="/css/jquery-ui.min.css" rel="stylesheet" media="all" type="text/css">
+    <style type="text/css">
+.abc{
+display: none;
+}
+		
+    </style>
+    <!-- HTML5 Shim and Respond.js IE8 support of HTML5 elements and media queries -->
+    <!-- WARNING: Respond.js doesn't work if you view the page via file:/ -->
+    <!--[if lt IE 9]>
+    <script type="text/javascript" src="js/html5shiv.js"></script>
+    <script type="text/javascript" src="js/respond.min.js"></script>
+    <![endif]-->
+    <script type="text/javascript" src="/js/jquery.min.js"></script>
+    <script type="text/javascript" src="/js/jquery-ui.min.js"></script>
+    <script type="text/javascript" src="/js/jquery.cookie.js"></script>
+    <script type="text/javascript" src="/js/jquery.easing.js"></script>
+    <script type="text/javascript" src="/js/jquery.flexslider.js"></script>
+    <script type="text/javascript" src="/js/menu.js"></script>
+    <script type="text/javascript" src="/js/bootstrap.js"></script>
+
+	<script type="text/javascript" src="/js/moment.js"></script>
+	<script type="text/javascript" src="/js/vue.min.js"></script>
+	<script type="text/javascript" src="/js/vue-router.js"></script>
+	<script type="text/javascript" src="/js/vue-extend.js"></script>
+	<script type="text/javascript" src="/js/tmp.js"></script>
+	<script type="text/javascript" src="/js/jquery.rwdImageMaps.min.js"></script>
+
+
+    <script type="text/javascript">
+		
+var menu_id = '8';
+var section_id = '2020112715515493667';
+
+                                                              
+	</script>
+</head>
+<body id="page_bg">
+<div id="skipwrapper">
+    <a id="top" title="page top"></a>
+    <a id="skiptocontent" href="#mainContentSkip" class="access">Skip Content</a>
+</div>
+<div id="wrap">
+    <div id="header" class="headerArea">
+        <div class="container">
+            <div class="headerTool">
+				<script type="text/javascript">createHeader();</script>
+            </div>
+        </div>
+    </div>
+    <div class="bodyArea">
+        <div class="container">
+            <div class="contentArea">
+                <a id="mainContentSkip"></a>
+                <div class="mainHeader"></div>
+                <div class="breadcrumb"></div>
+				<script type="text/javascript">pageTop();</script>
+				<div id="mainContent" class="mainContent">
+                <!--Begin Content-->
+                <h1 class="no_h1">Hong Kong Regional Weather Information Portal</h1>
+                <div class="border_blank">
+                              <!-- Source - START -->
+          <div id="wxgisContainer">
+            <h1 style="display: none;">Hong Kong Regional Weather Information Portal</h1>
+
+            <link href="files/irwip-style_map.css" type="text/css" rel="stylesheet" />
+            <link href="files/irwip-gis.css" type="text/css" rel="stylesheet" />
+            <link href="files/irwip-ol.css" type="text/css" rel="stylesheet" />
+            <link rel="stylesheet" href="files/irwip-font-awesome-all.min.css">
+            <link rel="stylesheet" href="files/irwip-bootstrap-icons.min.css">
+
+            <!--Edit full width style-->
+            <link href="files/irwip-portal-concept.css" type="text/css" rel="stylesheet">
+            <div id="map" class="map">
+
+              <!-- wxGis START -->
+              <div class="wxgis" id="wxgis" style="pointer-events: none;">
+
+                <div id="mapController" class="c-map-controller">
+                  <div class="c-map-primary-controller">
+                    <label id="observationControllerLabel">Weather Elements:</label>
+
+                    <!--
+        <i class="fa-solid fa-circle-info" id="legend-icon" style="font-size: 14px; color: #004B87; cursor: pointer; float:right;"
+          onclick="updateLegendBox()"></i>
+        <div id="legend-box" style="display: none; z-index: 2; position: absolute; background: #fff; border: 1px solid #ccc; padding: 5px; border-radius: 4px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        </div>
+        -->
+                    <div id="menuCollapse" style="display: none;">
+                      <i class="bi bi-x-circle" id="mapControllerIcon" style="font-size: 14px; color: #004B87; cursor: pointer; float:right;"
+                         onclick="toggleMapController()"></i>
+                    </div>
+
+                    <br>
+                    <span class="c-map-controller-inputs">
+
+                      <!--//Multiple options div dropdown//-->
+                      <div class="select-menu active">
+                        <div class="select-btn" tabindex="0" role="combobox" aria-label="Weather Elements Selection" aria-expanded="false" aria-controls="observationController">
+                          <span class="sBtn-text"><img class="selectedIcon" src="files/icon-temperature.svg" alt="Temperature"><strong class="selectedItem">Temperature</strong>&nbsp;&nbsp;<i class="triggerIcon bi bi-chevron-double-up"></i></span>
+                        </div>
+
+                        <ul class="options" id="observationController" name="observationController">
+                          <div class="scroll-hint">
+                            <div class="arrow-up"></div>
+                            <div class="arrow-down"></div>
+                          </div>
+                          <li class="option" data-value="Temperature" tabindex="0">
+                            <img src="files/icon-temperature.svg" alt="Temperature">
+                            <span class="option-text">Temperature</span>
+                          </li>
+                          <li class="option" data-value="RH" tabindex="0">
+                            <img src="files/icon-waterdrop.svg" alt="Relative Humidity">
+                            <span class="option-text">Relative Humidity</span>
+                          </li>
+                          <li class="option" data-value="MaxTemperature" tabindex="0">
+                            <img src="files/icon-MaxTemperature.svg" alt="Max Temperature">
+                            <span class="option-text">Max Temperature</span>
+                          </li>
+                          <li class="option" data-value="MinTemperature" tabindex="0">
+                            <img src="files/icon-MinTemperature.svg" alt="Min Temperature">
+                            <span class="option-text">Min Temperature</span>
+                          </li>
+                          <li class="option" data-value="TemperatureChange" tabindex="0">
+                            <img src="files/icon-past24hr-temp.svg" alt="Past 24-hour Temperature Difference">
+                            <span class="option-text">Past 24-hour Temperature Difference</span>
+                          </li>
+                          <li class="option" data-value="Webcam" id="WebcamMenu" tabindex="0">
+                            <img src="files/icon-weatherphoto.svg" alt="Weather Photo">
+                            <span class="option-text">Weather Photo</span>
+                          </li>
+                          <li class="option" data-value="HKHI" tabindex="0">
+                            <img src="files/icon-heat-index.svg" alt="Hong Kong Heat Index">
+                            <span class="option-text">Hong Kong Heat Index</span>
+                          </li>
+                          <li class="option" data-value="GrassTemperature" tabindex="0">
+                            <img src="files/icon-grass-temp.svg" alt="Grass Temperature">
+                            <span class="option-text">Grass Temperature</span>
+                          </li>
+                          <li class="option" data-value="Wind" tabindex="0">
+                            <img src="files/icon-wind.svg" alt="Wind">
+                            <span class="option-text">Wind</span>
+                          </li>
+                          <li class="option" data-value="WindGust" tabindex="0">
+                            <img src="files/icon-MaxGust.svg" alt="Maximum Gust">
+                            <span class="option-text">Maximum Gust</span>
+                          </li>
+                          <li class="option" data-value="Visibility" tabindex="0">
+                            <img src="files/icon-visibility.svg" alt="Visibility">
+                            <span class="option-text">Visibility</span>
+                          </li>
+                          <li class="option" data-value="MSLP" tabindex="0">
+                            <img src="files/icon-mslp.svg" alt="Mean Sea Level Pressure">
+                            <span class="option-text">Mean Sea Level Pressure</span>
+                          </li>
+                          <li class="option" data-value="Rainfall" tabindex="0">
+                            <img src="files/icon-rain-blue.svg" alt="Rainfall">
+                            <span class="option-text">Rainfall</span>
+                          </li>
+                          <li class="option" data-value="PastMaxTemperature" tabindex="0">
+                            <!--<li class="option" data-value="PastMaxTemperature" tabindex = "0" style="display: none;">-->
+                            <img src="files/icon-MaxTemperature.svg" alt="Yesterday's Max Temperature">
+                            <span class="option-text">Yesterday's Max Temperature</span>
+                          </li>
+                          <li class="option" data-value="PastMinTemperature" tabindex="0">
+                            <!--<li class="option" data-value="PastMinTemperature" tabindex = "0" style="display: none;">-->
+                            <img src="files/icon-MinTemperature.svg" alt="Yesterday's Min Temperature">
+                            <span class="option-text">Yesterday's Min Temperature</span>
+                          </li>
+
+                          <!--<li class="option" data-value="PastTemperature" tabindex = "0">-->
+                          <li class="option" data-value="PastTemperature" tabindex="0" style="display: none;">
+                            <img src="files/icon-temperature.svg" alt="Past Temperature">
+                            <span class="option-text">Temperature</span>
+                          </li>
+                          <!--<li class="option" data-value="PastRH" tabindex = "0">-->
+                          <li class="option" data-value="PastRH" tabindex="0" style="display: none;">
+                            <img src="files/icon-waterdrop.svg" alt="Past Relative Humidity">
+                            <span class="option-text">Relative Humidity</span>
+                          </li>
+
+                          </li>
+                          <!--<li class="option" data-value="PastVisibility" tabindex = "0">-->
+                          <li class="option" data-value="PastVisibility" tabindex="0" style="display: none;">
+                            <img src="files/icon-visibility.svg" alt="Past Visibility">
+                            <span class="option-text">Visibility</span>
+                          </li>
+
+                          </li>
+                          <!--<li class="option" data-value="PastMSLP" tabindex = "0">-->
+                          <li class="option" data-value="PastMSLP" tabindex="0" style="display: none;">
+                            <img src="files/icon-mslp.svg" alt="Past Mean Sea Level Pressure">
+                            <span class="option-text">Mean Sea Level Pressure</span>
+                          </li>
+
+                          </li>
+                          <!--<li class="option" data-value="PastHKHI" tabindex = "0">-->
+                          <li class="option" data-value="PastHKHI" tabindex="0" style="display: none;">
+                            <img src="files/icon-heat-index.svg" alt="Past Hong Kong Heat Index">
+                            <span class="option-text">Hong Kong Heat Index</span>
+                          </li>
+
+                          <!--<li class="option" data-value="PastWind" tabindex = "0">-->
+                          <li class="option" data-value="PastWind" tabindex="0" style="display: none;">
+                            <img src="files/icon-wind.svg" alt="Past Wind">
+                            <span class="option-text">Wind</span>
+                          </li>
+
+                          <li class="option" data-value="PastWindGust" tabindex="0" style="display: none;">
+                            <img src="files/icon-MaxGust.svg" alt="Past Maximum Gust">
+                            <span class="option-text">Maximum Gust</span>
+                          </li>
+
+                        </ul>
+                      </div>
+
+                    </span>
+                  </div>
+
+                  <!--
+        <div class="c-map-secondary-controller">
+          <div id = "layerControllerDiv" style="display: inline-block;">
+          <label for="observationController">Layer:</label><br>
+          <button class="c-map-layer-trigger"  id="layeronoff" onclick="layeronoff()"><img src="files/icon-layer.svg" alt="Layer Menu On Off" id="layeronoffImage" style ="filter: brightness(0) saturate(100%) invert(76%) sepia(30%) saturate(7228%) hue-rotate(5deg) brightness(102%) contrast(100%);"></button>
+          <span id = "layerController">
+            <span id = "nowdataTrigger">
+          <span class="c-map-layer-trigger"  id="radarTrigger"><label for="radarController"><img src="files/icon-rain-radar-blue.svg"> Radar</label><input type="checkbox" id="radarController" name="radarController" /></span>
+          <span class="c-map-layer-trigger"  id="lightningTrigger"><label for="lightningController"><img src="files/icon-lightning-blue.svg"> Lightning</label><input type="checkbox" id="lightningController" name="lightningController"/></span>
+            </span>
+          <span class="c-map-layer-trigger" id="urbanstationTrigger"><label for="urbanstationController"><img src="files/icon-microclimate-v2.svg"> Urban stations</label><input type="checkbox" id="urbanstationController" name="urbanstationController" /></span>
+          <span class="c-map-layer-trigger" id="wxiconTrigger" style="display: none"><label for="wxiconController"><img src="files/icon-wxicon-blue.svg"> Weather</label><input type="checkbox" id="wxiconController" name="wxiconController" /></span>
+        </span>
+         </div>
+        </div>
+      -->
+                  <!-- layermenuedit -->
+                  <div class="c-map-secondary-controller">
+                    <div id="layerControllerDiv" style="display: inline-block;">
+                      <label id="observationLayerLabel">Layer:</label>
+
+                      <!--
+          <i class="fa-regular fa-circle-question" id="tooltip-icon" style="font-size: 14px; color: #004B87; cursor: pointer; float:right;"
+           onclick="var tooltips = document.getElementById('tooltips'); if (tooltips.style.display === 'block') { tooltips.style.display = 'none'; } else { tooltips.style.display = 'block'; }"></i>
+          <div id="tooltips" style="display: none; z-index: 2;position: absolute; background: #fff; border: 1px solid #ccc; padding: 5px; border-radius: 4px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);font-size:14px;">
+            <img src="files/icon-rain-radar-blue.svg" style="width: 16px; height: 16px;"  alt = "Radar"> Radar<br>
+            <img src="files/icon-lightning-blue.svg" style="width: 16px; height: 16px;"  alt = "Lightning"> Lightning<br>-->
+                      <!--<img src="files/icon-microclimate-v2.svg" style="width: 16px; height: 16px;"  alt = "Urban stations"> Urban stations<br>-->
+                      <!--<img src="files/icon-wxicon-blue.svg" style="width: 16px; height: 16px;"  alt = "Weather (Forecast Only)"> Weather (Forecast Only)
+          </div>
+          -->
+
+                      <i class="fa-regular fa-circle-question" id="tooltip-icon" style="font-size: 14px; color: #004B87; cursor: pointer; float:right;"
+                         onclick="updateLegendBox();var tooltips = document.getElementById('tooltips'); if (tooltips.style.display === 'block') { tooltips.style.display = 'none'; } else { tooltips.style.display = 'block'; }"></i>
+                      <div id="tooltips" style="display: none; z-index: 2;position: absolute; background: #fff; border: 1px solid #ccc; padding: 5px; border-radius: 4px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);font-size:12px;">
+                        <div style="z-index: 2;background: #fff; border: 1px solid #ccc; padding: 5px; border-radius: 4px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                          <img src="files/icon-rain-radar-blue.svg" style="width: 16px; height: 16px;" alt="Radar"> Radar<br>
+                          <img src="files/icon-lightning-blue.svg" style="width: 16px; height: 16px;" alt="Lightning"> Lightning<br>
+                          <!--<img src="files/icon-microclimate-v2.svg" style="width: 16px; height: 16px;"  alt = "Urban stations"> Urban stations<br>-->
+                          <img src="files/icon-wxicon-blue.svg" style="width: 16px; height: 16px;" alt="Weather (Forecast Only)"> Weather (Forecast Only)
+                        </div>
+                        <div id="legend-box" style="display: none; z-index: 2;background: #fff; border: 1px solid #ccc; padding: 5px; border-radius: 4px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                        </div>
+                      </div>
+
+                      <br>
+                      <div style="display:none">
+                        <button class="c-map-layer-trigger" id="layeronoff" onclick="layeronoff()">
+                          <img src="files/icon-layer.svg" alt="Layer Menu On Off" id="layeronoffImage" style="filter: brightness(0) saturate(100%) invert(100%) sepia(100%) saturate(100%) brightness(100%) contrast(100%);">
+                        </button>
+                      </div>
+
+
+                      <span id="layerController" role="tablist">
+                        <span id="nowdataTrigger">
+                          <span class="c-map-layer-trigger" id="radarTrigger" role="tab" aria-selected="false" alt="Radar" title="Radar" tabindex="0" onclick="this.querySelector('input[type=checkbox]').click();" onkeydown="if(event.key==='Enter'){
+                        event.preventDefault(); this.querySelector('input[type=checkbox]').click();}">
+                            <input type="checkbox" id="radarController" name="radarController" title="radarController" alt="radarController" />
+                            <label for="radarController" id="radarControllerLabel">
+                              <img src="files/icon-rain-radar-blue.svg" alt="Radar">
+                            </label>
+                          </span>
+                          <span class="c-map-layer-trigger" id="lightningTrigger" role="tab" aria-selected="false" alt="Lightning" title="Lightning" tabindex="0" onclick="this.querySelector('input[type=checkbox]').click();" onkeydown="if(event.key==='Enter'){
+                        event.preventDefault(); this.querySelector('input[type=checkbox]').click();}">
+                            <input type="checkbox" id="lightningController" name="lightningController" title="lightningController" alt="lightningController" />
+                            <label for="lightningController" id="lightningControllerLabel">
+                              <img src="files/icon-lightning-blue.svg" alt="Lightning">
+                            </label>
+                          </span>
+                        </span>
+                        <!--
+            <span class="c-map-layer-trigger" id="urbanstationTrigger" role="tab" aria-selected="false" alt="Urban stations" title="Urban stations" tabindex="0" onclick="this.querySelector('input[type=checkbox]').click();" onkeydown="if(event.key==='Enter'){
+                event.preventDefault(); this.querySelector('input[type=checkbox]').click();}">
+              <input type="checkbox" id="urbanstationController" name="urbanstationController" title="urbanstationController" alt="urbanstationController" />
+              <label for="urbanstationController" id = "urbanstationControllerLabel">
+                <img src="files/icon-microclimate-v2.svg" alt = "Urban stations">
+              </label>
+            </span>
+            -->
+                        <!-- show all sublayer icon -->
+                        <span class="c-map-layer-trigger" id="wxiconTrigger" role="tab" aria-selected="false" alt="Weather (Forecast Only)" title="Weather (Forecast Only)" tabindex="0" onclick="this.querySelector('input[type=checkbox]').click();" onkeydown="if(event.key==='Enter'){
+                        event.preventDefault(); this.querySelector('input[type=checkbox]').click();}">
+                          <!-- show all sublayer icon
+              <span class="c-map-layer-trigger" id="wxiconTrigger" role="tab" aria-selected="false" alt="Weather (Forecast Only)" title="Weather (Forecast Only)" style="display: none" tabindex="0" onclick="this.querySelector('input[type=checkbox]').click();" onkeydown="if(event.key==='Enter'){
+                  event.preventDefault(); this.querySelector('input[type=checkbox]').click();}">
+              -->
+                          <input type="checkbox" id="wxiconController" name="wxiconController" title="wxiconController" alt="wxiconController" />
+                          <label for="wxiconController" id="wxiconControllerLabel">
+                            <img src="files/icon-wxicon-blue.svg" alt="Weather (Forecast Only)">
+                          </label>
+                        </span>
+
+                        <!--
+              <span class="c-map-layer-trigger" id="mapTileTrigger" role="tab" aria-selected="false" alt="mapTile" title="mapTile" tabindex="0" onclick="this.querySelector('input[type=checkbox]').click();" onkeydown="if(event.key==='Enter'){
+                  event.preventDefault(); this.querySelector('input[type=checkbox]').click();}">
+                <input type="checkbox" id="mapTileController" name="mapTileController" title="mapTileController" alt="mapTileController" checked = "true"/>
+                <label for="mapTileController" id= "mapTileControllerLabel">
+                  <img src="files/icon-layer.svg" alt = "mapLayer">
+                </label>
+              </span>
+            -->
+
+                      </span>
+                    </div>
+                  </div>
+                  <!-- layermenuedit -->
+
+
+                </div>
+
+
+
+                <!-- station data time -->
+                <div class="c-map-datatime">
+                  <p>
+
+                    <div class="row" style="display: flex;">
+                      <div class="order-last" style="flex-shrink: 0 ; align-self: center;">
+
+                        <div id="datatimetrigger" style="display: none;">
+
+                          <button type="button" id="pastTrigger" class="btn btn-primary datatimetrigger" tabindex="0" onclick="switchLayer('Past'+selectedLayer)" alt="Past Data" title="Past Data">
+                            <!-- <i class="bi bi-unindent" id="yesterdayControllerIcon"></i> -->
+                            <img src="images/icon-past.png" id="yesterdayControllerIcon" style="width: 32px;filter: invert(19%) sepia(100%) saturate(1162%) hue-rotate(183deg) brightness(101%) contrast(104%);" alt="Past Data" title="Past Data">
+                          </button>
+
+                          <button type="button" id="todayTrigger" class="btn datatimetrigger" tabindex="0" onclick="switchLayer(selectedLayer.replace('Past',''))" alt="Present Data" title="Present Data" style="display: none;background-color:#004B87!important;border:2px dotted #ffffff;">
+                            <!--<i class="bi bi-indent" id="todayControllerIcon" style="margin-left: -2px;"></i>-->
+                            <img src="images/icon-obs.png" id="todayControllerIcon" style="width: 35px;filter:invert(1);" alt="Present Data" title="Present Data">
+                          </button>
+                          &nbsp;
+                        </div>
+                      </div>
+
+                      <div style="flex-grow: 1;">
+
+                        <div style="display: flex;">
+                          <span id="legendDataStatus" class="c-map-legendDataStatus"></span>
+
+                          <!--remove yesterday button on temperature layer
+              <button type="button" id="yesterdayCollapse" class ="btn btn-primary" style="margin-left: auto; display:inline-block;" onclick="toggleYesterdayController()" title = "Yesterday Info">
+                <i class="bi bi-caret-down-fill" id="yesterdayControllerIcon"></i>
+              </button>
+                -->
+
+                          <i class="bi bi-info-circle" id="forecastDataUnderMaintenanceIcon" tabindex="0" onclick="alert(CONTENT.mapStatusForecast + ' ' +CONTENT.enterMaintenance);" alt="Forecast Data Under Maintenance" title="Forecast Data Under Maintenance" style="cursor:pointer;display: none;color:#ff0000;margin-left: 2px;"></i>
+
+                          <a href="#" onclick="window.open('remark_notes.html#tabContent-fc', '_blank'); return false;" style=" display: inline; color: #004B87; margin-left: 5px; text-decoration: none; float: right; line-height: inherit;"><i class="fa-regular fa-circle-question forecast-remarks" tabindex="0" alt="Notes of Products" title="Notes of Products" style="display: none"></i></a>
+
+
+                          <!--
+              &nbsp;
+              <button type="button" id="refreshButton" class="btn btn-primary datatimetrigger" alt =  "Refresh" title="Refresh" tabindex = "0" onclick="refresh(true)">
+                <i class="bi bi-arrow-repeat"></i>
+              </button>
+              -->
+
+
+                        </div>
+                        <span id="legendDataTime" class="c-map-legendDataTime"></span>
+
+                      </div>
+                    </div>
+
+                  </p>
+
+                  <!--remove yesterday button on temperature layer
+      <div id="yesterdayController" style="display:none;">
+        <hr>
+        <button type="button" class="btn btn-primary yesterdaybtn" tabindex = "0" onclick="switchLayer('PastMaxTemperature')" alt = "Yesterday's Max Temp">Yesterday's Max Temp</button>
+        <button type="button" class="btn btn-primary yesterdaybtn" tabindex = "0" onclick="switchLayer('PastMinTemperature')" alt = "Yesterday's Min Temp">Yesterday's Min Temp</button>
+      </div>
+      -->
+
+
+                </div>
+
+                <!--create tooltip for display -->
+                <div id="tooltip" style="font-family:'Roboto','Noto Sans','Noto Sans TC',sans-serif;height: 24px; visibility: hidden; background-color: #fffffff1;color:#333333;padding:0px 5px 0px 5px;border: #004B87 1px solid;border-radius:8px;"></div>
+
+                <!-- Useful Link-->
+                <!-- Button trigger modal -->
+                <!--
+       <div id = "mapControllerDiv">
+      <button type="button" class="btn btn-primary c-map-links" id="menuCollapse" style="display:none;" onclick="toggleMapController()">
+        <i class="bi bi-arrow-bar-left" id="mapControllerIcon"></i>
+    </button>
+      </div>
+      -->
+
+                <button type="button" class="btn btn-primary c-map-links" style="top:95px !important;" id="mapTileTrigger" alt="Map" title="Map" tabindex="0" onclick="document.getElementById('mapTileController').click();">
+                  <input type="checkbox" id="mapTileController" style="display:none" name="mapTileController" title="mapTileController" alt="mapTileController" checked="true" />
+                  <i class="bi bi-layers"></i>
+                </button>
+
+                <button type="button" class="btn btn-primary c-map-links" data-toggle="modal" data-target="#usefullinksModal" id="UsefulLinks">
+                  <i class="bi bi-link-45deg"></i>
+                </button>
+
+                <div class="modal fade" id="usefullinksModal" tabindex="-1" role="dialog" aria-labelledby="usefullinksModal" aria-hidden="true">
+                  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable" role="document" id="useful-links">
+                    <div class="modal-content">
+                      <div class="modal-header">
+                        <div class="modal-title" id="link-modal-title">Useful Links</div>
+                        <div class="pull-right">
+                          <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                            <span aria-hidden="true">&times;</span>
+                          </button>
+                        </div>
+                      </div>
+                      <div class="modal-body">
+
+                        <div class="accordion" id="weatherAccordion">
+
+                          <!-- Information of Weather Station Section -->
+                          <div class="accordion-item-static">
+                            <h2 class="accordion-header-static">
+                              <a class="accordion-button-static"
+                                 href="https://www.hko.gov.hk/en/cis/stn.htm" target="_blank" style="color: unset; width: 100%; display: flex; flex-flow: row nowrap; align-items: center; padding-left: 6px;">
+                                <span class="img" title="Information of Weather Station" style="display: inline-block; width: 18px; height: 18px; background: url('/images/dropdown/climate_information_service.png') no-repeat 0 0 / 135% auto;"></span>
+                                <span class="accordion-text">&nbsp;Information of Weather Station</span>
+                              </a>
+                            </h2>
+                          </div>
+
+                          <!-- Local Weather Section -->
+                          <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingLocal">
+                              <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseLocal" aria-expanded="false" aria-controls="collapseLocal">
+                                <img src="images/local.png" style="width: 18px;" alt="Other Local Weather Information" title="Other Local Weather Information">
+                                <span class="accordion-text">&nbsp;Other Local Weather Information</span>
+                                <span class="accordion-icon"></span>
+                              </button>
+                            </h2>
+                            <div id="collapseLocal" class="accordion-content" aria-labelledby="headingLocal">
+                              <div class="accordion-body">
+                                <a href="solar.html" target="_blank"><i class="bi bi-link-45deg"></i> Solar Radiation </a><br>
+                                <a href="https://www.hko.gov.hk/en/wxinfo/uvinfo/uvinfo.html" target="_blank"><i class="bi bi-link-45deg"></i> Ultraviolet (UV) radiation </a><br>
+                                <a href="https://www.weather.gov.hk/en/tide/marine/realtide.htm" target="_blank"><i class="bi bi-link-45deg"></i> Tide </a><br>
+                                <a href="https://www.hko.gov.hk/en/wxinfo/aws/kpinfo.htm" target="_blank"><i class="bi bi-link-45deg"></i> King's Park Meteorological Station </a><br>
+                                <a href="https://www.hko.gov.hk/en/radiation/monitoring/index.html" target="_blank"><i class="bi bi-link-45deg"></i> Radiation level </a><br>
+                                <a href="https://www.hko.gov.hk/en/wxinfo/radars/radar_range1.htm?pv_mode=playback" target="_blank"><i class="bi bi-link-45deg"></i> Radar Imagery </a><br>
+                                <a href="https://maps.weather.gov.hk/ocf/index_e.html" target="_blank"><i class="bi bi-link-45deg"></i> Automatic Regional Weather Forecast </a><br>
+                                <a href="https://cowin.hku.hk/english/map.html" target="_blank"><i class="bi bi-link-45deg"></i> Co-WIN </a><br>
+                              </div>
+                            </div>
+                          </div>
+
+                          <!-- High-Impact Weather Section -->
+                          <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingHighImpact">
+                              <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseHighImpact" aria-expanded="false" aria-controls="collapseHighImpact">
+                                <img src="images/Highimpact.png" style="width: 18px;" alt="High-Impact Weather Information" title="High-Impact Weather Information">
+                                <span class="accordion-text">&nbsp;High-Impact Weather Information</span>
+                                <span class="accordion-icon"></span>
+                              </button>
+                            </h2>
+                            <div id="collapseHighImpact" class="accordion-content" aria-labelledby="headingHighImpact">
+                              <div class="accordion-body">
+                                <a href="https://www.hko.gov.hk/en/wxinfo/currwx/tc_gis.htm" target="_blank"><i class="bi bi-link-45deg"></i> Tropical Cyclone </a><br>
+                                <a href="https://www.hko.gov.hk/en/rhr/main.html" target="_blank"><i class="bi bi-link-45deg"></i> Heavy Rain and Thunderstorm </a><br>
+                                <a href="https://maps.weather.gov.hk/llis/llaw_e.html#/map" target="_blank"><i class="bi bi-link-45deg"></i> Lightning Location </a><br>
+                              </div>
+                            </div>
+                          </div>
+
+                          <!-- Community Weather Section -->
+                          <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingCommunity">
+                              <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseCommunity" aria-expanded="false" aria-controls="collapseCommunity">
+                                <img src="images/community.png" style="width: 18px;" alt="Community Weather Information" title="Community Weather Information">
+                                <span class="accordion-text">&nbsp;Community Weather Information</span>
+                                <span class="accordion-icon"></span>
+                              </button>
+                            </h2>
+                            <div id="collapseCommunity" class="accordion-content" aria-labelledby="headingCommunity">
+                              <div class="accordion-body">
+                                <a href="https://visithk.weather.gov.hk/index_uc.htm" target="_blank"><i class="bi bi-link-45deg"></i> Tourists </a><br>
+                                <a href="https://www.hko.gov.hk/en/aviat/soaring/index.shtml" target="_blank"><i class="bi bi-link-45deg"></i> Aviation Sports </a><br>
+                                <a href="https://www.hko.gov.hk/en/sports/watersports.shtml" target="_blank"><i class="bi bi-link-45deg"></i> Water Sports </a><br>
+                                <a href="https://www.hko.gov.hk/en/103461/Hong-Kong-Hiking-Trail-Weather-Service" target="_blank"><i class="bi bi-link-45deg"></i> Hiking </a><br>
+                                <a href="https://www.hko.gov.hk/en/gts/astronomy/astro_portal.html" target="_blank"><i class="bi bi-link-45deg"></i> Astronomical Observation </a><br>
+                                <a href="https://www.hko.gov.hk/en/fishermen/main.htm" target="_blank"><i class="bi bi-link-45deg"></i> Fishermen</a><br>
+                                <a href="https://www.hko.gov.hk/en/wservice/tsheet/pms/mariners.htm" target="_blank"><i class="bi bi-link-45deg"></i> Marine Community </a><br>
+                              </div>
+                            </div>
+                          </div>
+
+                          <!-- China Weather Section -->
+                          <div class="accordion-item">
+                            <h2 class="accordion-header" id="headingChina">
+                              <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseChina" aria-expanded="false" aria-controls="collapseChina">
+                                <img src="images/china.png" style="width: 18px;" alt="China Weather" title="China Weather">
+                                <span class="accordion-text">&nbsp;China Weather</span>
+                                <span class="accordion-icon"></span>
+                              </button>
+                            </h2>
+                            <div id="collapseChina" class="accordion-content" aria-labelledby="headingChina">
+                              <div class="accordion-body">
+                                <a href="https://www.hko.gov.hk/en/wxinfo/worldwx/wwi.htm?ra=2&place=1" target="_blank"><i class="bi bi-link-45deg"></i> China Cities Weather </a><br>
+                                <a href="https://www.gbaweather.net/en/" target="_blank"><i class="bi bi-link-45deg"></i> Greater Bay Area Weather </a><br>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+
+
+
+                      </div>
+                      <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-dismiss="modal"><i class="bi bi-x-lg"></i>&nbsp&nbsp Close</button>
+                        <!-- <button type="button" class="btn btn-primary">Save changes</button> -->
+                      </div>
+                    </div>
+
+                  </div>
+
+
+                  <!-- Map primary selection -->
+                  <div class="c-map-status" id="mapStatus"></div>
+                </div>
+              </div>
+            </div>
+
+            <div id="mapLegend">
+              <h2>Legend</h2>
+              <div id="map_legend">
+
+                <div id="legend-StationIcons" class="map_legend_box map_legend_stn_icons for_all">
+                  <div class="map_legend_title">Station Icons</div>
+                  <div class="map_legend_content">
+                    <div>「 <img src="images/hill_icon.png" border=0 alt="Station higher than 500 metres above mean sea level" title="Station higher than 500 metres above mean sea level" style="width:20px;"> 」: Station higher than 500 metres above mean sea level</div>
+                    <div>「 <img src="images/maintenance-help.png" width="25" height="25" border=0 alt="Under Maintenance / Data Temporarily Not Available" title="Under Maintenance / Data Temporarily Not Available"> 」: Under Maintenance / Data Temporarily Not Available</div>
+                    <div class="wind-hints">「 <img src="images/hp-wd.png" width="30" height="30" border=0 alt="Number for wind speed in kilometres per hour; arrow for wind direction" title="Number for wind speed in kilometres per hour; arrow for wind direction">」: Number for wind speed in kilometres per hour; arrow for wind direction </div>
+                    <div class="wind-hints-excl">「 <span style="font-size:20px;">*</span> 」: Derived from incomplete data set</div>
+                    <div><a href="" onclick="event.preventDefault();window.open('help_legend.html#wx-legend', '_blank'); return false;" rel="noopener noreferrer">More Info</a></div>
+                  </div>
+                </div>
+
+                <div id="legend-Temperature" class="map_legend_box">
+                  <div class="map_legend_title">Temperature<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: degree Celsius (&deg;C)<br>
+                    <img src="images/tt_legend_v2.png" alt="temperature color palette" title="temperature color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-RH" class="map_legend_box">
+                  <div class="map_legend_title">Relative Humidity<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: percent (%)<br />
+                    <img src="images/rh_legend_v2.png" alt="Relative Humidity color palette" title="Relative Humidity color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-MaxTemperature" class="map_legend_box">
+                  <div class="map_legend_title">Maximum Temperature<br>(recorded: <span class="hkaws_maxmin_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: degree Celsius (&deg;C)<br>
+                    <img src="images/tt_legend_v2.png" alt="Maximum Temperature color palette" title="Maximum Temperature color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-MinTemperature" class="map_legend_box">
+                  <div class="map_legend_title">Minimum Temperature<br>(recorded: <span class="hkaws_maxmin_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: degree Celsius (&deg;C)<br>
+                    <img src="images/tt_legend_v2.png" alt="Minimum Temperature color palette" title="Minimum Temperature color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-PastMaxTemperature" class="map_legend_box">
+                  <div class="map_legend_title">Yesterday's Maximum Temperature<br>(recorded: <span class="hkaws_maxmin_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: degree Celsius (&deg;C)<br>
+                    <img src="images/tt_legend_v2.png" alt="Maximum Temperature color palette" title="Maximum Temperature color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-PastMinTemperature" class="map_legend_box">
+                  <div class="map_legend_title">Yesterday's Minimum Temperature<br>(recorded: <span class="hkaws_maxmin_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: degree Celsius (&deg;C)<br>
+                    <img src="images/tt_legend_v2.png" alt="Minimum Temperature color palette" title="Minimum Temperature color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-TemperatureChange" class="map_legend_box">
+                  <div class="map_legend_title">Past 24-hour Temperature Difference<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: degree Celsius (&deg;C)<br />
+                    <img src="images/tc24_legend_v2.png" alt="Past 24-hour Temperature Difference color palette" title="Past 24-hour Temperature Difference color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-GrassTemperature" class="map_legend_box">
+                  <div class="map_legend_title">Grass Temperature<br>(updated at <span class="hkaws_grass_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: degree Celsius (&deg;C)<br>
+                    <img src="images/tt_legend_v2.png" alt="Grass Temperature color palette" title="Grass Temperature color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-Visibility" class="map_legend_box">
+                  <div class="map_legend_title">Visibility<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: metres or kilometres (m or km)<br>
+                    <img src="images/vis_legend_v2.png" alt="Visibility color palette" title="Visibility color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-WindGust" class="map_legend_box">
+                  <div class="map_legend_title">Maximum Gust<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: kilometres per hour (km/h)<br>
+                    <img src="images/gust_legend_v2.png" alt="Maximum Gust color palette" title="Maximum Gust color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-MSLP" class="map_legend_box">
+                  <div class="map_legend_title">Mean Sea Level Pressure<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">Unit: hectopascal (hPa)</div>
+                </div>
+
+                <div style="display: none;">
+                  <div id="legend-HKHI" class="map_legend_box">
+                    <!--<div id="legend-HKHI" class="map_legend_box">-->
+                    <!--<div class="map_legend_title">Hong Kong Heat Index<br>(updated at <span class="hkaws_time"></span>)</div>-->
+                    <div class="map_legend_title"></div>
+                    <!--<div class="map_legend_content"></div>-->
+                  </div>
+                </div>
+
+                <div id="legend-Wind" class="map_legend_box">
+                  <div class="map_legend_title">Wind<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Wind Speed<br>Unit: kilometres per hour (km/h) - numbers in wind compasses<br>
+                    <img src="images/wind_spd_legend_v2.png" alt="Wind color palette" title="Wind color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-PastWind" class="map_legend_box">
+                  <div class="map_legend_title">Wind<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Wind Speed<br>Unit: kilometres per hour (km/h)<br>
+                    <img src="images/wind_spd_legend_v2.png" alt="Wind color palette" title="Wind color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-PastRH" class="map_legend_box">
+                  <div class="map_legend_title">Relative Humidity<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: percent (%)<br />
+                    <img src="images/rh_legend_v2.png" alt="Relative Humidity color palette" title="Relative Humidity color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-PastVisibility" class="map_legend_box">
+                  <div class="map_legend_title">Visibility<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: metres or kilometres (m or km)<br>
+                    <img src="images/vis_legend_v2.png" alt="Visibility color palette" title="Visibility color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-PastMSLP" class="map_legend_box">
+                  <div class="map_legend_title">Mean Sea Level Pressure<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">Unit: hectopascal (hPa)</div>
+                </div>
+
+                <div style="display: none;">
+                  <!--<div id="legend-PastHKHI" class="map_legend_box">
+      <div class="map_legend_title">Hong Kong Heat Index<br>(updated at <span class="hkaws_time"></span>)</div>-->
+                  <div id="legend-PastHKHI" class="map_legend_box">
+                    <div class="map_legend_title"></div>
+                    <!--<div class="map_legend_content"></div>-->
+                  </div>
+                </div>
+
+                <div id="legend-PastTemperature" class="map_legend_box">
+                  <div class="map_legend_title">Temperature<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: degree Celsius (&deg;C)<br>
+                    <img src="images/tt_legend_v2.png" alt="temperature color palette" title="temperature color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-PastWindGust" class="map_legend_box">
+                  <div class="map_legend_title">Maximum Gust<br>(updated at <span class="hkaws_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: kilometres per hour (km/h)<br>
+                    <img src="images/gust_legend_v2.png" alt="Maximum Gust color palette" title="Maximum Gust color palette" />
+                  </div>
+                </div>
+
+                <div id="legend-RMN" class="map_legend_box">
+                  <div class="map_legend_title">Ambient Gamma Radiation Level in HK<br>(updated at <span class="RMN_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Unit: microsievert per hour (&#181;Sv/h) <br>
+                    <span style="float:right;"><a class="jsLanguageRelatedLink" href="https://www.weather.gov.hk/en/radiation/rmn_textonly.htm" target="_blank" alt="dose rate record" title="dose rate record">dose rate record</a></span>
+                    <img src="images/rmn_legend_v2.png" alt="RMN color palette" title="RMN color palette" />
+                    <div>* Radiation level is affected by natural <br> &nbsp;&nbsp;&nbsp;variations of weather and generally <br> &nbsp;&nbsp;&nbsp;varies between 0.06 and 0.3 &#181;Sv/h.</div>
+                  </div>
+                </div>
+
+
+
+                <div id="legend-Rainfall" class="map_legend_box">
+                  <div class="map_legend_title">
+                    <!--<span id="rainfall_legend_title">Rainfall Past-hourly Accumulated</span>
+        <span id="rainfall_legend_forecast_title" style="display:none">Rainfall Half-hourly Accumulated</span> -->
+                    <!--<br>(updated at <span class="hkaws_time"></span>)-->
+                  </div>
+                  <div class="map_legend_content">
+                    <span id="rainfall_legend_title">Rainfall Past-hourly Accumulated</span>
+                    <span id="rainfall_legend_forecast_title" style="display:none">Rainfall Half-hourly Accumulated</span>
+                    <br>Unit: mm<br>
+                    <img src="images/rainfall_legend_v2.png" alt="rainfall color palette" title="rainfall color palette" id="rainfall_legend_img" />
+                    <div id="rainfall_record">
+                      <span style="float:left;"><a href="https://www.hko.gov.hk/en/rhr/main.html" target="_blank" alt="Regional Information on Heavy Rain and Thunderstorm" title="Regional Information on Heavy Rain and Thunderstorm">Regional Information</a></span>
+                      <span style="float:right;"><a href="http://www.hko.gov.hk/textonly/current/rainfall_sr.htm" target="_blank" alt="rainfall record" title="rainfall record">rainfall record</a></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="legend-Radar" class="map_legend_box">
+                  <div class="map_legend_title">Weather Radar (Range: <span class="radar_range"></span>)<br>(updated at <span class="radar_time"></span>)</div>
+                  <div class="map_legend_content">
+                    Rainfall Rate - Radar
+                    <span style="float:right;">
+                      <a href="https://www.hko.gov.hk/en/wxinfo/awsgis/remark_notes.html#wx-help-radar" target="_blank" alt="Notes" title="Notes">Notes</a>
+                      &nbsp;
+                      <a href="http://www.hko.gov.hk/textonly/current/rainfall_sr.htm" target="_blank" alt="rainfall record" title="rainfall record">Rainfall Record</a>
+                    </span>
+                    <br>Unit: millimetres per hour (mm/h)<br>
+                    <img src="images/radar_legend_v2.png" alt="Weather Radar color palette" title="Weather Radar color palette" />
+                    (<span class="radar_range"></span> : updated at <span class="radar_time"></span>)
+                  </div>
+                </div>
+
+                <div id="legend-Lightning" class="map_legend_box">
+                  <div class="map_legend_title">
+                    <span id="lightning_legend_title">Lightning Location</span>
+                    <span id="lightning_legend_forecast_title" style="display:none">Lightning Location</span>
+                    <!--<div id = "lightning_time">(Detection : <span class="lightning_time"></span>)</div>-->
+                    <div id="lightning_time_forecast">(Forecast : <span class="lightning_time_forecast"></span>)</div>
+                  </div>
+
+                  <div class="map_legend_content">
+                    <div id="lightning_c2g">
+                      <img src="images/llis_icon1.png" alt="Lightning Location" title="Lightning Location" id="lightning_legend_img" width="13px" /><span id="lightning_location">&nbsp;Cloud-To-Ground Lightning</span>
+                      <span id="lightning_forecast_location">&nbsp;Lightning Location</span>
+                    </div>
+
+                    <div id="lightning_c2c">
+                      <img src="images/llis_icon2.png" alt="Lightning Location" title="Lightning Location" style="transform: rotate(45deg);" width="13px" />&nbsp;Cloud-To-Cloud Lightning
+                      <!-- <div id = "lightning_time2">(Detection : <span class="lightning_time2"></span>)</div> -->
+                    </div>
+                    <div id="lightning_time">(Detection : <span class="lightning_time"></span>)</div>
+                    <span style="float:right;">
+                      <a class="jsLanguageRelatedLink" href="https://www.hko.gov.hk/en/wxinfo/awsgis/remark_notes.html#wx-help-lightninglocation" target="_blank" alt="Notes" title="Notes">Notes</a>
+                      &nbsp;
+                      <a class="jsLanguageRelatedLink" href="https://www.hko.gov.hk/en/wxinfo/llis/gm_index.htm#columnRegion" target="_blank" alt="lightning count" title="lightning count" id="lightning_count">lightning count</a>
+                    </span>
+
+                  </div>
+
+                </div>
+
+
+
+
+              </div>
+
+            </div>
+
+
+            <!-- End of map_legend -->
+            <!-- Help -->
+            <div class="c-help">
+              <h2>Notes</h2>
+
+              <!--
+  <div class="c-help-tabs">
+    <button class="tab-btn active" data-tab="general">General</button>
+    <button class="tab-btn" data-tab="guide">Guide</button>
+    <button class="tab-btn" data-tab="remark">Remark</button>
+  </div>
+    -->
+
+              <div class="c-help-content">
+                <!--
+    <div id="general" class="tab-pane active">
+      <div class="c-help-title"><h3>General</h3></div>
+      <ul>
+        <li>「 <img src="images/hill_icon.png" border=0 alt="Station higher than 500 metres above mean sea level" title="Station higher than 500 metres above mean sea level" style="width:20px;"> 」: Station higher than 500 metres above mean sea level</li>
+        <li>「 <span style="font-size:20px;">*</span> 」: Derived from incomplete data set</li>
+        <li>「 <img src="images/maintenance-help.png" width="25" height="25" border=0 alt="Under Maintenance / Data Temporarily Not Available" title="Under Maintenance / Data Temporarily Not Available"> 」: Under Maintenance / Data Temporarily Not Available</li>
+        <li class="wind-hints">「 <img src="images/hp-wd.png" width="30" height="30" border=0 alt="Number for wind speed in kilometres per hour; arrow for wind direction" title="Number for wind speed in kilometres per hour; arrow for wind direction">」: Number for wind speed in kilometres per hour; arrow for wind direction </li>
+        <li><a href="" onclick="event.preventDefault();window.open('help_legend.html#wx-legend', '_blank'); return false;" rel="noopener noreferrer">More Legends and Icons</a></li>
+      </ul>
+    </div>-->
+                <!--
+    <div id="guide" class="tab-pane">
+      <div class="c-help-title"><h3>Guide</h3></div>
+      <ul>
+        <li>「 <img src="images/guide-Past.png" width="30" height="30" border=0 alt="Switch to Past Data" title="Switch to Past Data">」: Switch to Past Data </li>
+        <li>「 <img src="images/guide-Observation.png" width="30" height="30" border=0 alt="Switch to Present Data" title="Switch to Present Data">」: Switch to Present Data </li>
+        <li>「 <img src="images/guide-Radar.png" width="40" height="30" border=0 alt="Toggle on/off Radar Layer" title="Toggle on/off Radar Layer">」: Toggle on/off Radar Layer </li>
+        <li>「 <img src="images/guide-Lightning.png" width="40" height="30" border=0 alt="Toggle on/off Lightning Layer" title="Toggle on/off Lightning Layer">」: Toggle on/off Lightning Layer </li>
+        <li>「 <img src="images/guide-WeatherIcon.png" width="40" height="30" border=0 alt="Toggle on/off Weather (Forecast Only) Layer" title="Toggle on/off Weather (Forecast Only) Layer">」: Toggle on/off Weather (Forecast Only) Layer </li>
+      </ul>
+    </div>
+    -->
+                <div id="remark" class="tab-pane active">
+                  <!--<div class="c-help-title"><h3>Remark</h3></div>-->
+                  <ul>
+                    <li class="obs-remarks">The observational data is provisional. Only limited data validation has been carried out.</li>
+
+                    <li class="hkhi-hints">The numerical Hong Kong Heat Index reading above represents the average of readings in the 10 minutes ending at the indicated time.</li>
+                    <li class="hkhi-hints">The Hong Kong Heat Index was calculated from the measured Natural Wet Bulb Temperature (Tnw), Globe Temperature (Tg) and Dry Bulb Temperature (Ta). Its value is given by 0.80Tnw + 0.05Tg + 0.15Ta. Generally speaking, the public should take appropriate <a href="https://www.hko.gov.hk/en/wservice/warning/hotwxadv.htm" target="_blank">precautions</a> when the index at King’s Park reaches around 30 or above to prevent from adverse health effects brought by hot weather. Reference : K.L. Lee, Y.H. Chan , T.C. Lee, William B. Goggins & Emily Y.Y. Chan, <a href="http://link.springer.com/article/10.1007/s00484-015-1094-7" target="_blank">The development of the Hong Kong Heat Index for enhancing the heat stress information service of the Hong Kong Observatory</a>, International Journal of Biometeorology, DOI 10.1007/s00484-015-1094-7, November 2015.</li>
+                    <li class="hkhi-hints">To maintain data reliability, the heat stress monitoring station will undergo brief maintenance and consumable replenishment every few weeks. Data updates may be temporarily suspended at that time.</li>
+                    <li class="hkhi-hints">To see a time series plot of the Hong Kong Heat Index in the past 24 hours, please click the mouse on the station of your choice.</li>
+
+                    <li class="temperature-hints rh-hints">The temperature and relative humidity displayed on this webpage are instantaneous readings, while the temperature and relative humidity in the hourly bulletin "<a href="https://www.hko.gov.hk/en/wxinfo/currwx/current.htm" target="_blank">Local Weather Report</a>" are manually taken by weather observers during a ten-minute period before the end of each hour. Since the measurement times of the two may differ, the two readings may not be the same.</li>
+
+                    <li class="grasstemperature-hints">This webpage displays the grass temperature for the period 5 p.m. to 8 a.m. the following day. It is updated every 10 minutes.</li>
+                    <li class="grasstemperature-hints">The grass temperature for the period 8 a.m. to 5 p.m. is not displayed. The measurement may not truly reflect the grass temperature due to direct exposure of the sensor to the sun.</li>
+                    <li class="grasstemperature-hints">The measurement may not truly reflect the grass temperature in the presence of frost.</li>
+
+                    <li class="wind-hints">The Observatory has set up backup weather stations and anemometers in some areas. When the main weather stations or anemometers in those areas are under maintenance, the webpage will display data from the backup stations or anemometers.</li>
+                    <li class="wind-hints">The Chek Lap Kok wind station is located near the middle of the North Runway of the Hong Kong International Airport. When this station is under maintenance, wind data of Chek Lap Kok may be temporarily provided by another wind station within the Hong Kong International Airport.</li>
+
+                    <li class="windgust-hints">The Observatory has set up backup weather stations and anemometers in some areas. When the main weather stations or anemometers in those areas are under maintenance, the webpage will display data from the backup stations or anemometers.</li>
+                    <li class="windgust-hints">The Chek Lap Kok wind station is located near the middle of the North Runway of the Hong Kong International Airport. When this station is under maintenance, wind data of Chek Lap Kok may be temporarily provided by another wind station within the Hong Kong International Airport.</li>
+
+                    <li class="visibility-hints">The numerical visibility reading above represents the average of readings in the 10 minutes ending at the indicated time.</li>
+                    <li class="visibility-hints">The visibility at Chek Lap Kok is provided by the visibility meter near the middle of the south runway of the Hong Kong International Airport. When this visibility meter cannot provide data, the visibility value will come from one of the neighbouring meters at the airport.</li>
+                    <li class="visibility-hints">The reported visibility ranges between 100 metres and 50 kilometres. A visibility report of 100 metres refers to visibilities of 100 metres or less. A visibility report of 50 kilometres refer to visibilities of 50 kilometres or more.</li>
+                    <li class="visibility-hints">According to World Meteorological Organization guidelines, based on different ranges, visibility is rounded down to the nearest: 100 metres (for visibility: 100 metres to 4,999 metres), 1 kilometre (for visibility: 5 kilometres to 30 kilometres), or 5 kilometres (for visibility: 31 kilometres to 50 kilometres).</li>
+
+                    <li class="webcam-hints">Please note that the photographs are captured by webcams automatically and are compressed onsite before transmitted to the Hong Kong Observatory Headquarters. Due to limited image resolution and possible effect of environmental factors other than weather on image quality, these photographs should be used for reference only.</li>
+
+                    <li>The forecast information adopts the data directly generated from <a href="https://maps.weather.gov.hk/ocf/index_e.html">The Automatic Regional Weather Forecast (ARWF)</a>  computer system without manual adjustments. The individual weather element forecast given in a station includes at most the forecast information of weather, temperature, relative humidity as well as wind direction and speed, subject to the available observations of that station. The forecast may be different from the official weather forecasts issued by the Observatory or the measurements recorded at individual weather stations. Please refer to the <a href="http://www.weather.gov.hk/en/wxinfo/currwx/flw.htm" target="_blank">official forecasts</a> issued by the Observatory.</li>
+                    <!--<li class="obs-remarks"><a href="remark_notes.html" target="_blank">Notes of products</a></li>-->
+                    <!--<li class="forecast-remarks">
+<a href="#" onclick="window.open('remark_notes.html#tabContent-fc', '_blank'); return false;">Notes of products</a></li>-->
+                    <!--<li>When the anemometer of Chek Lap Kok is under maintenance, wind data of Chek Lap Kok may be temporarily provided by another wind station within the Hong Kong International Airport.</li>-->
+                    <!-- <li><a class="jsUserGuildLink" href="https://www.youtube.com/embed/ISfhrktBtpA" target="_blank" alt="User guide" title="User guide">User Guide</a></li> -->
+                    <!--<li class="mobile-only"><a href="javascript:;" data-toggle="modal" data-target="#guideModal" id="Guide">Guide</a></li>-->
+
+                    <li class="wind-hints"><a href="javascript:;" onclick="window.open('anemometer.html', '_blank'); return false;">Exposure of the Wind Station</a></li>
+                    <li><a href="text.html" rel="noopener noreferrer" target="_blank">Text Version</a></li>
+
+                    <!--<li><a href="https://www.hko.gov.hk/en/wxinfo/ts/index.htm" target="_blank">Regional Weather (Traditional Version)</a></li>-->
+
+                  </ul>
+                </div>
+
+              </div>
+
+            </div>
+
+            <!-- loading -->
+            <div id="loading" style="font-family:'Roboto','Noto Sans','Noto Sans TC',sans-serif;font-weight:bold;color:#333333;" role="alert" aria-busy="true"><img src="images/loader_v2.gif" alt="now loading" title="now loading" width="100px"><span class="text">Now loading. Please wait.</span></div>
+          </div>
+          <!-- wxGis END -->
+
+          <!-- libraries START -->
+          <script src="files/irwip-ol.js"></script>
+          <script src="files/irwip-dateFormat.js"></script>
+          <script src="files/irwip-DP_DateExtensions.js"></script>
+          <!-- libraries END -->
+
+          <script type="text/template" id="templateMapStatus">
+            <div class="c-map-status-content" id="mapStatusContent">
+              <p>{{status}}</p>
+            </div>
+          </script>
+
+          <script>
+            // 20180208 - dynamically add timestamp when calling JS files to avoid file caching
+            var currentTimestamp = Date.now();
+            document.write("<script type='text/javascript' src='files/irwip-module-content.js?v=" + currentTimestamp + "'><\/script>");
+            document.write("<script type='text/javascript' src='files/irwip-map-config.js?v=" + currentTimestamp + "'><\/script>");
+            //document.write("<script type='text/javascript' src='files/gis-drawOnMap.js?v=" + currentTimestamp + "'><\/script>");
+            document.write("<script type='text/javascript' src='files/irwip-gis-navbarAndLegend.js?v=" + currentTimestamp + "'><\/script>");
+            //document.write("<script type='text/javascript' src='files/gis.js?v=" + currentTimestamp + "'><\/script>");
+            document.write("<script type='text/javascript' src='files/irwip-station-config-aws.js?v=" + currentTimestamp + "'><\/script>");
+            //document.write("<script type='text/javascript' src='files/station-config-rmn.js?v=" + currentTimestamp + "'><\/script>");
+            document.write("<script type='text/javascript' src='files/irwip-station-config-api.js?v=" + currentTimestamp + "'><\/script>");
+            document.write("<script type='text/javascript' src='files/irwip-data-parser.js?v=" + currentTimestamp + "'><\/script>");
+            document.write("<script type='text/javascript' src='files/irwip-gis-common.js?v=" + currentTimestamp + "'><\/script>");
+            document.write("<script type='text/javascript' src='files/irwip-pako.min.js?v=" + currentTimestamp + "'><\/script>");
+            document.write("<script type='text/javascript' src='files/irwip-LunarCalendar.min.js?v=" + currentTimestamp + "'><\/script>");
+            document.write("<script type='text/javascript' src='files/irwip-rangetouch.js?v=" + currentTimestamp + "'><\/script>");
+          </script>
+
+
+          <!-- Multi option div Dropdown js-->
+          <script type="text/javascript" src="files/irwip-map-menu.js"></script>
+
+
+
+          <script src="files/irwip.js?v=" + currentTimestamp></script>
+
+          <!-- Bootstrap Time Slider-->
+          <script type="text/javascript" src="files/irwip-map-slider.js"></script>
+
+          <script>
+
+            $(document).ready(function () {
+
+              document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.addEventListener('click', function () {
+                  const tabId = this.getAttribute('data-tab');
+
+                  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                  this.classList.add('active');
+
+                  document.querySelectorAll('.tab-pane').forEach(pane => pane.classList.remove('active'));
+                  document.getElementById(tabId).classList.add('active');
+                });
+
+                document.querySelectorAll('[class$="-hints"]').forEach(el => {
+                  el.style.display = 'none';
+                });
+
+              });
+
+              /* layermenuedit
+              var isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || 'ontouchend' in document || window.innerWidth<=1024;
+              if(isMobile){
+              layeronoff();
+              toggleMapController();
+              }
+              else
+              elementDisplayChange();
+              */
+              /* layermenuedit */
+              if (window.innerWidth <= 1024) {
+                toggleMapController();
+              }
+              elementDisplayChange();
+              /* layermenuedit */
+            });
+
+            function toggleYesterdayController() {
+              document.getElementById('yesterdayController').style.display = (document.getElementById('yesterdayController').style.display === 'none') ? '' : 'none';
+
+              const yesterdayControllerIcon = document.getElementById("yesterdayControllerIcon");
+              if (yesterdayControllerIcon.classList.contains("bi-caret-down-fill")) {
+                yesterdayControllerIcon.classList.remove("bi-caret-down-fill");
+                yesterdayControllerIcon.classList.add("bi-caret-up");
+              } else {
+                yesterdayControllerIcon.classList.remove("bi-caret-up");
+                yesterdayControllerIcon.classList.add("bi-caret-down-fill");
+              }
+            }
+
+            async function switchLayer(element) {
+              const targetOption = document.querySelector('#observationController li.option[data-value="' + element + '"]');
+              if (!isLoadPastCSV && element.includes('Past') && element != "PastMinTemperature" && element != "PastMaxTemperature") {
+                isLoadPastCSV = true;
+                await refresh(true);
+              }
+              if (targetOption && targetOption.tabIndex !== -1) {
+                targetOption.click();
+              } else {
+                alert(CONTENT.enterMaintenance);
+              }
+            }
+
+            function layeronoff() {
+              document.getElementById('layeronoffImage').style.filter = (document.getElementById('layeronoffImage').style.filter === '') ? 'brightness(0) saturate(100%) invert(100%) sepia(100%) saturate(100%) brightness(100%) contrast(100%)' : '';
+              elementDisplayChange();
+            }
+
+            function toggleMapController() {
+              const mapControllerIcon = document.getElementById("mapControllerIcon");
+              //const mapController = document.getElementById("mapController");
+              const mapController = document.getElementsByClassName("c-map-secondary-controller")[0];
+
+              if (mapControllerIcon.classList.contains("bi-x-circle")) {
+                mapControllerIcon.classList.remove("bi-x-circle");
+                mapControllerIcon.classList.add("bi-gear");
+                mapController.style.display = "none";
+              } else {
+                mapControllerIcon.classList.remove("bi-gear");
+                mapControllerIcon.classList.add("bi-x-circle");
+                mapController.style.display = "inline";
+              }
+            }
+
+            function elementDisplayChange() {
+              //const mapController = document.getElementById("mapController");
+              const mapController = document.getElementsByClassName("c-map-secondary-controller")[0];
+
+              function replaceInnerText(element, replaceText) {
+                if (element) {
+                  if (element.innerText != '')
+                    element.innerHTML = element.innerHTML.replace(element.innerText, replaceText);
+                  else
+                    element.innerHTML += replaceText;
+                }
+              }
+
+              var radar = document.getElementById('radarController');
+              var lightning = document.getElementById('lightningController');
+              var urban = document.getElementById('urbanstationController');
+              var weatherIcon = document.getElementById('wxiconController');
+
+              if (window.innerWidth <= 1024) {
+                document.getElementsByClassName('c-map-primary-controller')[0].children[0].innerText = CONTENT.menuShortTerm + ":";
+                document.getElementsByClassName('selectedItem')[0].style.display = 'none';
+                document.getElementById('layerController').style.display = '';
+                document.getElementById("menuCollapse").style.display = 'inline';
+                mapController.style.display = mapController.style.display == 'inline-block' ? 'block' : mapController.style.display;
+                document.getElementsByClassName('c-map-primary-controller')[0].style.marginRight = '0px';
+
+                if (document.getElementById('layeronoffImage').style.filter === '') {
+                  replaceInnerText(radar, '');
+                  replaceInnerText(lightning, '');
+                  replaceInnerText(urban, '');
+                  replaceInnerText(weatherIcon, '');
+                }
+                else {
+                  replaceInnerText(radar, CONTENT.menuRadar);
+                  replaceInnerText(lightning, CONTENT.menuLightning);
+                  replaceInnerText(urban, CONTENT.menuUrban);
+                  replaceInnerText(weatherIcon, CONTENT.menuWeatherIcon);
+                }
+              }
+              else {
+                document.getElementsByClassName('c-map-primary-controller')[0].children[0].innerText = CONTENT.menuFullTerm + ":";
+                document.getElementsByClassName('selectedItem')[0].style.display = '';
+                document.getElementById("menuCollapse").style.display = 'none';
+                mapController.style.display = 'inline-block';
+                //document.getElementById("mapControllerIcon").className = 'bi bi-arrow-bar-left';
+                document.getElementById("mapControllerIcon").className = 'bi bi-x-circle';
+                document.getElementsByClassName('c-map-primary-controller')[0].style.marginRight = '10px';
+
+                document.getElementById('layerController').style.display = (document.getElementById('layeronoffImage').style.filter === '') ? 'none' : '';
+                replaceInnerText(radar, CONTENT.menuRadar);
+                replaceInnerText(lightning, CONTENT.menuLightning);
+                replaceInnerText(urban, CONTENT.menuUrban);
+                replaceInnerText(weatherIcon, CONTENT.menuWeatherIcon);
+              }
+
+            }
+
+            function controlLayerDisplay() {
+              if (window.innerWidth <= 1024) {
+                if (document.getElementById('layeronoffImage').style.filter != '')
+                  layeronoff();
+              } else {
+                if (document.getElementById('layeronoffImage').style.filter == '')
+                  layeronoff();
+              }
+            }
+
+            window.addEventListener('resize', elementDisplayChange);
+            window.addEventListener('resize', controlLayerDisplay);
+
+            document.addEventListener('DOMContentLoaded', function () {
+              const buttons = document.querySelectorAll('.accordion-button');
+
+              buttons.forEach(button => {
+                const content = document.getElementById(button.getAttribute('aria-controls'));
+                const links = content.querySelectorAll('a');
+                links.forEach(link => {
+                  link.setAttribute('tabindex', '-1');
+                });
+
+                button.addEventListener('click', function () {
+                  const content = document.getElementById(this.getAttribute('aria-controls'));
+                  const isOpen = this.classList.contains('active');
+                  const links = content.querySelectorAll('a');
+
+
+                  buttons.forEach(btn => {
+                    btn.classList.remove('active');
+                    const otherContent = document.getElementById(btn.getAttribute('aria-controls'));
+                    otherContent.style.maxHeight = null;
+                    const otherLinks = otherContent.querySelectorAll('a');
+                    otherLinks.forEach(link => {
+                      link.setAttribute('tabindex', '-1');
+                    });
+                  });
+
+                  if (!isOpen) {
+                    this.classList.add('active');
+                    content.style.maxHeight = content.scrollHeight + 'px';
+                    links.forEach(link => {
+                      link.setAttribute('tabindex', '0');
+                    });
+                    if (links.length > 0) {
+                      links[0].focus();
+                      button.foboxcus();
+                    }
+                  } else {
+                    this.classList.remove('active');
+                    content.style.maxHeight = null;
+                    links.forEach(link => {
+                      link.setAttribute('tabindex', '-1');
+                    });
+                  }
+                });
+              });
+            });
+
+            function updateLegendBox() {
+              const legendBox = document.getElementById('legend-box');
+              const mapLegend = document.getElementById('mapLegend');
+              const isHidden = legendBox.style.display === 'none' || legendBox.style.display === '';
+              legendBox.style.display = isHidden ? 'block' : 'none';
+
+              if (isHidden) {
+                legendBox.innerHTML = '';
+                if (mapLegend) {
+                  // Clone all child elements (map_legend_box) and remove IDs
+                  legendBox.innerHTML = 'Legend : <br>';
+                  const legendItems = mapLegend.querySelectorAll('.map_legend_box');
+                  legendItems.forEach(item => {
+                    const clonedItem = item.cloneNode(true);
+                    // Remove ID to avoid duplicates
+                    clonedItem.removeAttribute('id');
+                    legendBox.appendChild(clonedItem);
+                  });
+                } else {
+                  legendBox.innerHTML = '';
+                }
+              }
+            }
+
+            document.querySelectorAll('.accordion-button').forEach(button => {
+              button.addEventListener('click', () => {
+
+                const targetId = button.getAttribute('data-bs-target');
+                if (!targetId) return;
+
+                const targetContentId = targetId.replace('#', '');
+                const targetContent = document.getElementById(targetContentId);
+                if (!targetContent) return;
+
+                const isExpanded = button.getAttribute('aria-expanded') === 'true';
+
+                button.setAttribute('aria-expanded', !isExpanded);
+
+                if (!isExpanded) {
+                  targetContent.classList.add('active');
+                  targetContent.style.maxHeight = targetContent.scrollHeight + 'px';
+
+                  const links = targetContent.querySelectorAll('a');
+                  links.forEach(link => {
+                    link.setAttribute('tabindex', '0');
+                  });
+                } else {
+                  targetContent.classList.remove('active');
+                  targetContent.style.maxHeight = null;
+
+                  const links = targetContent.querySelectorAll('a');
+                  links.forEach(link => {
+                    link.setAttribute('tabindex', '-1');
+                  });
+                }
+
+                document.querySelectorAll('.accordion-button').forEach(otherButton => {
+                  if (otherButton !== button) {
+                    otherButton.setAttribute('aria-expanded', 'false');
+                    const otherTargetId = otherButton.getAttribute('data-bs-target');
+                    if (otherTargetId) {
+                      const otherContentId = otherTargetId.replace('#', '');
+                      const otherContent = document.getElementById(otherContentId);
+                      if (otherContent) {
+                        otherContent.classList.remove('active');
+                        otherContent.style.maxHeight = null;
+
+                        const otherLinks = otherContent.querySelectorAll('a');
+                        otherLinks.forEach(link => {
+                          link.setAttribute('tabindex', '-1');
+                        });
+                      }
+                    }
+                  }
+                });
+              });
+            });
+
+            const selectBtn = document.querySelector('.select-btn');
+
+            selectBtn.addEventListener('click', (e) => {
+              const isExpanded = selectBtn.getAttribute('aria-expanded') === 'true';
+              selectBtn.setAttribute('aria-expanded', !isExpanded);
+            });
+
+            document.addEventListener('click', (e) => {
+              if (!selectBtn.contains(e.target)) {
+                selectBtn.setAttribute('aria-expanded', 'false');
+              }
+            });
+
+            document.querySelectorAll('.c-map-layer-trigger').forEach(trigger => {
+              trigger.addEventListener('click', (e) => {
+                const checkbox = trigger.querySelector('input[type="checkbox"]');
+                if (checkbox.disabled) return;
+                const isSelected = checkbox.checked;
+                trigger.setAttribute('aria-selected', isSelected);
+              });
+            });
+
+            var isiOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+            if (isiOS) {
+              document.addEventListener('DOMContentLoaded', function () {
+                const ul = document.querySelector('#observationController');
+                const scrollHint = ul.querySelector('.scroll-hint');
+                const arrowUp = scrollHint.querySelector('.arrow-up');
+                const arrowDown = scrollHint.querySelector('.arrow-down');
+
+                function debounce(func, wait) {
+                  let timeout;
+                  return function (...args) {
+                    clearTimeout(timeout);
+                    timeout = setTimeout(() => func.apply(this, args), wait);
+                  };
+                }
+
+                let lastScrollTop = null;
+                let lastArrowUpTop = null;
+                let lastArrowDownBottom = null;
+                let samePositionCount = 0;
+                let checkInterval = null;
+                let pendingUpdate = false;
+                let isDisplayed = false;
+
+                function updateScrollHint() {
+                  var scrollTop = ul.scrollTop;
+                  var scrollHeight = ul.scrollHeight;
+                  var clientHeight = ul.clientHeight;
+                  var threshold = 10;
+                  var offset = 10;
+
+                  scrollHint.classList.remove('hide-up', 'hide-down');
+
+                  scrollHint.style.display = 'block';
+
+                  if (scrollTop <= threshold) {
+                    scrollHint.classList.add('hide-up');
+                    arrowDown.style.bottom = `${offset - ul.scrollTop}px`;
+                    arrowDown.style.top = 'auto';
+                    arrowDownBottom = offset - ul.scrollTop;
+                  } else if (scrollTop + clientHeight >= scrollHeight - threshold) {
+                    scrollHint.classList.add('hide-down');
+                    arrowUp.style.top = `${ul.scrollTop + offset}px`;
+                    arrowUp.style.bottom = 'auto';
+                    arrowUpTop = ul.scrollTop + offset;
+                  } else {
+                    arrowUp.style.top = `${ul.scrollTop + offset}px`;
+                    arrowUp.style.bottom = 'auto';
+                    arrowDown.style.bottom = `${offset - ul.scrollTop}px`;
+                    arrowDown.style.top = 'auto';
+                    arrowUpTop = ul.scrollTop + offset;
+                    arrowDownBottom = offset - ul.scrollTop;
+                  }
+
+                }
+
+                function scrollDisplayNone() {
+                  updateScrollHint();
+                  scrollHint.style.display = 'none';
+                }
+
+                updateScrollHint();
+
+                const debouncedUpdateScrollHint = debounce(updateScrollHint, 10);
+
+                ul.addEventListener('touchend', debouncedUpdateScrollHint);
+                ul.addEventListener('scroll', debouncedUpdateScrollHint);
+                ul.addEventListener('scroll', scrollDisplayNone);
+                ul.addEventListener('touchstart', scrollDisplayNone);
+
+                selectBtn.addEventListener('click', (e) => {
+                  updateScrollHint();
+                });
+
+              });
+            }
+
+
+          </script>
+
+          <!--Source - END -->
+<script>var last_revision_date = '9 July 2026';</script>
+                </div>
+				<!--End Content-->
+                </div>
+            </div>
+            <script type="text/javascript">pageBottom();</script>
+        </div>
+    </div>
+    <div id="footer" class="footerArea">
+        <div class="container"> 
+			<script type="text/javascript">createFooter();</script>
+        </div>
+    </div>
+</div>
+</body>
+</html>

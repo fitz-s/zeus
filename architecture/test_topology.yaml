@@ -35,7 +35,8 @@ test_trust_policy:
     tests/test_station_temperature_adapters.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_warm_materializer.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_fast_obs_receipt_chain.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Terminal remainder monotonicity; actual live HTTP receipt cut without replay lookahead; civil-day DST bounds; optional physical station routing and shared FMI budget."}
-    tests/test_station_forecast_live_ingest_wiring.py: {created: "2026-06-29", last_used: "2026-09-29", note: "Audited official station original entity-body writer, separate provider/availability clocks, typed HIGH/LOW quantity and actual shared current/frontier readers."}
+    tests/test_station_forecast_live_ingest_wiring.py: {created: "2026-06-29", last_used: "2026-09-30", note: "Official station original-body writer and HKO same-issued legacy capture recovery; HIGH/LOW exact context, whole old tuple/clock preservation, old-cut rejection and bounded SQLite legacy precision versus exact new capture clocks."}
+    tests/test_openmeteo_model_surface.py: {created: "2026-09-29", last_used: "2026-09-29", note: "98 local-loopback checks retain original36 and verify eight exact profiles, same-byte hash/decode, native domain/cell identity, immutable versions, causal cache recovery and no-network cut-aware reads; no city/probability readiness claim."}
     tests/test_day0_observation_reader.py: {created: "2026-05-22", last_used: "2026-09-29", note: "Audited HKO reported observation/publication/availability clocks, invalid source unavailability and observation-order reader relationships."}
     tests/test_observation_prints_ledger.py: {created: "2026-07-16", last_used: "2026-09-29", note: "Audited HKO source transaction and append-only three-clock writer relationships."}
     tests/events/test_redemption_forecast_day0_authority.py: {created: "2026-05-24", last_used: "2026-09-29", note: "Audited Day0 authority and immutable old/current semantics revision boundaries."}
@@ -53,7 +54,8 @@ test_trust_policy:
     tests/state/test_fill_dedup.py: {created: "2026-07-13", last_used: "2026-09-09", note: "Canonical economic-fill proof ordering and exactly-once aggregate/source alias reduction; explicit main/trades schema isolation, conflicting same-name fact tables, unchanged default readers and invalid schema rejection."}
     tests/test_governor_scope_lattice.py: {created: "2026-06-22", last_used: "2026-08-31", note: "RiskAllocator scope lattice for unknown submit side effects and unresolved reconcile findings, including exact single-market local-orphan or exchange-ghost venue orders, position-drift ENTRY-token, and canonical recorded-trade isolation; ambiguous, unscopeable, nonlocal, collateral, or multi-market findings remain systemic."}
     tests/test_full_loss_investigation_loop.py: {created: "2026-08-22", last_used: "2026-08-22", note: "Deterministic whole-position full-loss economics from command-deduped entry fills, reversible false-incident retraction/restoration, isolated-memory boundary, idempotent batching, repair-worktree fail-closed gate, and validated result persistence."}
-    tests/test_total_loss_loop.py: {created: "2026-08-22", last_used: "2026-08-22", note: "Sub-second held-bid floor crossing, no-bid and BUY_NO token mapping, bounded historical backfill, precursor ranking, repo-local isolated memory, incident evidence DB, and Codex CLI command-shape antibodies."}
+    tests/test_total_loss_loop.py: {created: "2026-08-22", last_used: "2026-09-29", note: "248 isolated relationship checks retain incident/settlement detection and permit bounded diagnostics under fresh DEGRADED truth; config-bound main/forecast/composite roles, stop at each launch boundary, and worker argv/status debt cannot confer new repair or delivery authority."}
+    tests/test_station_ground_evidence.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Owner-reviewed private canonical DB/raw-artifact ground evidence tests; immutable physical facts, original source versus first-recorded possession, scoped recovery and cutoff replay. Pending consumer/dual-source combinations remain separately admitted."}
     tests/test_healthcheck.py: {created: "2026-04-30", last_used: "2026-07-31", note: "Live health relationships including terminal command versus venue-fact conflicts classified by canonical lifecycle and order-truth reducer proof."}
     tests/test_data_freshness_gate.py: {created: "2026-04-30", last_used: "2026-08-03", note: "Source freshness three-branch behavior, source-role-scoped Day0 veto, and operator override."}
     tests/test_status_summary_single_writer.py: {created: "2026-06-10", last_used: "2026-07-31", note: "Daemon-only status writer ownership, freshness, and canonical command-recommendation projection contract across pulse and result writes."}
@@ -100,7 +102,8 @@ test_trust_policy:
     tests/data/test_fusion_upgrade_trigger.py: {created: "2026-06-11", last_used: "2026-08-30", note: "Fusion upgrade detects both provider-family growth and exact persisted source-row revision changes without repeated no-op materialization, pins every upgrade seed manifest to the posterior cycle named by its durable transition marker, and reclaims a marker whose active seed or request carries another cycle."}
     tests/test_cycle_monotone_materialization.py: {created: "2026-06-12", last_used: "2026-09-23", note: "Cycle-monotone replacement materialization, exact family-leg admission, Day0 conditioning identity, held-family retry liveness, and committed same-cycle late ENS baseline replacement. Late-baseline antibodies require exact source-cycle identity, bounded queue-lock acquisition, inactive prior ownership, a marker-path CAS, and a newly built seed pinned to the committed source_run_id."}
     tests/data/test_previous_runs_substitution.py: {created: "2026-06-11", last_used: "2026-09-01", note: "Previous-runs substitution and replacement materialization queue contracts, including pre-admission exact-duplicate seed coalescing, fixed-window exact-input success coalescing without sliding expiry, structured BLOCKED-result coalescing by exact current-input/logic fingerprint, stale held-q debt before broader held/global/never-priced scopes, and one held plus one global-only family kept inside the bounded raw inspection window. Claim-time canonical held-exposure classes keep newest-source-cycle and current same-cycle baseline subtiers before per-request computed-at FIFO, and Day0 seeds older than the current posterior frontier are rejected. A 30-second absolute child deadline has atomic typed stage receipts, VM progress plus an independent SQLite interrupt watchdog, and batch forwarding over a provided connection. Exact held Day0 observation-advance work gets a one-second retry only while q is stale and only for its three-attempt/75-second cumulative budget; fresh q removes the special tier, every retry honors retry_at, and exhausted work returns to ordinary exponential fairness. Retained future-of-ENS producer-owned seed debt preserves exact marker paths until equality-triggered reset; recently verified waiters yield the bounded current-q window and are rechecked within five seconds; JIT request-cycle boundaries stay below and ahead of current eligible ensemble HWM, with bounded concurrency, timeout isolation, and bounded latest-only receipts."}
-    tests/test_openmeteo_ecmwf_ifs9_bucket_transport.py: {created: "2026-06-11", last_used: "2026-08-21", note: "Exact-run Open-Meteo bucket transport admission, grid/downscaling parity, pooled reader and point-value reuse lifecycle, and bounded distinct-valid-time fanout that preserves deterministic 24-hour payload ordering and all-or-nothing assembly."}
+    tests/test_openmeteo_ecmwf_ifs9_anchor.py: {created: "2026-06-06", last_used: "2026-09-29", note: "Run-pinned anchor request/artifact and actual hourly local-day axis, original UTC-offset header, DST/fractional phase, finite samples and future issue refusal. Parent localday/client combined180 passed; not full Day0/native/public-held admission."}
+    tests/test_openmeteo_ecmwf_ifs9_bucket_transport.py: {created: "2026-06-11", last_used: "2026-09-29", note: "Exact-run bucket admission and all-or-nothing payload parity; original-request O1280 frozen-byte replay, complete index/height/surface facts, local-possession cutoff and damaged-evidence RESET, snapshot TOCTOU, terrain-neighbor and dateline twins. Parent module-only 59 pass; no public posterior or HTTP authority claim."}
     tests/test_replacement_forecast_current_target_plan.py: {created: "2026-06-06", last_used: "2026-08-10", note: "Current active-family coverage and seedability, including automatic reseed for probability-semantics drift, qualified fast-station Day0 evidence, and duplicate raw-METAR writer canonicalization that preserves one causal conditioning clock."}
     tests/test_fmi_airport_temperature.py: {created: "2026-09-27", last_used: "2026-09-27", note: "EFHK FMI WFS station/unit/time validation, causal local fetch, decimal current-state freshness, no settlement absorption, and scoped reseed."}
     tests/test_replacement_download_cycle_currency_gate.py: {created: "2026-06-09", last_used: "2026-08-21", note: "Current-target cycle currency, durable rotation over a dynamic same-cycle target universe including zero-completion head retention and scoped held-slice isolation for timeboxed broad bucket point-cache convergence, direct independent-bucket fallback when metered quota is unavailable with bounded valid-time worker propagation, run-pinned and metadata-stamped anchor fallback, source-clock priority propagation into worker threads, and deadline-bounded worker-width fanout so one maintenance slice cannot multiply its wall-clock budget by queued city/date targets."}
@@ -162,7 +165,7 @@ test_trust_policy:
     tests/data/test_source_run_arrived_event.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Order-engine rebuild W0.3 antibody: probe_openmeteo_source_clock_updates emits exactly one SOURCE_RUN_ARRIVED opportunity event per newly-usable run when passed an EventWriter; replaying the probe over the SAME undelivered run (the real advance_cursor=False live shape) is idempotent (zero additional rows); omitting event_writer preserves prior no-emission behavior."}
     tests/execution/test_entry_economics_submit_gate.py: {created: "2026-07-01", last_used: "2026-07-27", note: "Entry economics submit antibody: robust and posterior-mean current-state proofs retain distinct truthful fields and exact payoff/cost identities."}
     tests/test_replacement_member_vote_smoothing_not_live_wired.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: AIFS member-vote smoothing remains experiment-layer math and must not reappear as an edli live settings switch or materializer reader."}
-    tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-07-28", note: "Manifest schema antibody: every unknown top-level field is rejected with typed evidence; inventory compatibility may skip only the exact retired authority stamp and never accepts it as current input."}
+    tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-09-30", note: "Schema antibody retains unknown-field and retired-stamp rejection. Explicit local-proof append/as-of replay binds registered exact original request/family/body in private canonical transactions, rejects self-consistent foreign URL/unit/cell, preserves source clocks, and streams complete128/129/1000 frontiers. Module139 pass on fixed5eac; normal caller/HWM/new-seed/public RESET is independent, not granted by local possession."}
     tests/test_forecast_manifest_repin.py: {created: "2026-07-08", last_used: "2026-07-08", note: "Forecast posterior blackout antibody: a present artifact rewritten by benign trailing-newline serialization drift no longer leaves stale byte_size/sha manifest truth that aborts materialization; repin preserves metadata, missing artifacts still fail closed."}
     tests/test_repair_active_entry_q_versions.py: {created: "2026-07-09", last_used: "2026-07-09", note: "Active ENTRY q_version repair antibody: dry-run reconstructs missing active exposure q_version from existing FinalIntentCertificate evidence, apply writes only empty venue_commands.q_version cells, and ambiguous certificates refuse writes; no venue action or DB copy."}
     tests/test_repair_dust_exit_projection.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Dust pending-exit projection repair antibody: only existing canonical EXIT_CHAIN_DUST_STILL_HELD backoff evidence may mark position_current.order_status=backoff_exhausted; no venue action or share mutation."}
@@ -189,7 +192,7 @@ test_trust_policy:
     tests/calibration/test_probability_replay_corpus.py: {created: "2026-09-25", last_used: "2026-09-25", note: "Current-recipe replay corpus: an old-revision Day0 carrier state becomes a current-recipe row; future-available evidence is refused; the origin prediction stays verbatim; replay generations and repeated decisions cannot raise effective n; a resolver change prevents pooling; the fit adapter selects by evaluation_recipe_id and keeps executed-order contracts separate; ValidatedIdentity requires a covering certificate."}
     tests/calibration/test_day0_resolver_terminal_residual.py: {created: "2026-09-24", last_used: "2026-09-24", note: "Resolver-graded Day0 terminal residual: AWC+OGIMET renderings of one report grade as one resolver failure, censored/late labels excluded, one checkpoint per phase, HIGH/LOW failure support and overflow, C->F contract rounding, negative WMO half-up boundaries, HKO floor, sparse-station parent inheritance with nonzero uncertainty, zero-failure binomial bound, terminal non-violation == s exactly (0.97/0.8 counterexample), G- moves only violation-splitting claims, no post-composition mask/boundary, switch-OFF byte-identical carrier/SQL/revision, switch-ON fail-closed without a causal artifact."}
     tests/calibration/test_market_anchored_live_fit.py: {created: "2026-08-27", last_used: "2026-09-09", note: "Fit provider for the live market-anchored calibrator: fails open to None below min_train_rows and on an unreachable DB, trains only on rows settled strictly before the fit instant (walk-forward law), stamps the fit instant as training_cutoff, reuses one artifact within a non-negative TTL age and refits after backward or expired time, caches a failed fit so a dead DB is not re-dialed per candidate, rejects malformed/naive/future training cutoffs at serving, skips rows missing decision time/target date or carrying an unmodeled lead, and shrinks an overconfident q toward the market anchor. Physical-WORLD artifact sharing across attached aliases, borrowed connection lifetime, cache failure isolation, bounded SQL and lock deadlines, post-deadline cache-only serving, and exclusion of late or invalid current attribution grades. Canonical corpus antibodies preserve raw inputs, validate header/payload and token identity, retain unknown command coverage, filter future fill/payout/alias revisions before ranking, separate metric/mode and normalize actual shares by event."}
-    tests/calibration/test_day0_remaining_bias.py: {created: "2026-09-24", last_used: "2026-09-30", note: "Day0 remaining-carrier center shift: zero shift is byte-identical to golden pre-change carriers (V2 F high/low, V3 HK); absent/malformed/stale/future/out-of-rail/wrong-node-count/retired schema-1 artifact serves 0 with status artifact_unavailable; a metric without a curve serves 0 with inactive_cell; station curve then pooled curve; the served shift is continuous across every 2-hour band edge (Lipschitz bound) and unchanged evidence across a band edge cannot move carrier q by a step (Helsinki 09-30 antibody); a warm shift moves point q and draws up and rebinds identity; the shift equals moving only the remaining members; F carriers get 9/5; entry and all three held rebuild kinds apply and stamp one lookup with the persisted member vector unshifted; replay reproduces the persisted shift after the artifact disappears; semantics revision v28 smooth_center_bias stamped (v27 and v20 superseded)."}
+    tests/calibration/test_day0_remaining_bias.py: {created: "2026-09-24", last_used: "2026-09-30", note: "Offline fitted-center loader characterization: absence/malformed/stale/future/out-of-rail/wrong-node-count/retired-schema diagnostics, station/pooled interpolation and curve continuity are offline evidence only. Earlier warm-shift carrier/application/replay fixtures describe the superseded fitted-live mechanism, not current authority or an exemption from no-affine repair. Current live carriers must not read the artifact; unshifted_live_v1, explicit finite nonbool/nonstring zero bias, old-certificate refusal and normal ENTRY/HELD/JIT rebuild require their separately reviewed production/consumer antibodies. Offline fit/refit remains; no weather q, sigma or instantaneous-current-temperature conditioning is altered by loader reuse."}
     tests/scripts/test_fit_day0_remaining_center_bias.py: {created: "2026-09-24", last_used: "2026-09-30", note: "Fitter on synthetic log-likelihood curves: a well-measured band serves nearly its MLE; an unmeasured band serves 0 and every metric curve has all 12 nodes; a thin noisy band is shrunk to a small fraction of its MLE; adding one settled day moves no node by >= 0.25 degC (no gate flip); a station node sits between the pooled node and its own estimate; variance is clustered by city-day; an edge-of-grid maximum saturates at the edge with finite variance (never flips to unmeasured); tau2 is Paule-Mandel so one noisy band cannot zero every node; fast-residual posteriors (carrier q after a further likelihood transport) never become records."}
     tests/engine/test_market_anchored_city_local_wiring.py: {created: "2026-09-08", last_used: "2026-09-09", note: "City-local market-anchored calendar identity: New York/Tokyo UTC-boundary serving and training lead buckets, DST, exact payload city/date wiring, old/invalid artifact rejection, full runtime city timezone snapshots, and parameter-hash binding. Real entry-connection close and TTL expiry followed by attached-WORLD monitor refit, ContextVar scope cleanup, and setup time charged to the existing monitor budget."}
     tests/engine/test_receipt_stage_timings.py: {created: "2026-09-17", last_used: "2026-09-17", note: "Pre-submit receipt-store cost attribution. The receipt store runs synchronously between the trade decision and actuate_winner at a measured p50 0.516s/p99 2.300s (n=3,269 live calls), and a payload-level decomposition accounted for only ~138 ms of that median (zlib-9+base64 123.6 ms, json.dumps 10.1 ms, INSERT+fsync 4.4 ms), leaving ~73% in the component builders. Stages accumulate time and count per label while collecting, record even when a builder raises (a failed delta still spent the decision thread's budget), are inert outside a receipt store so monitor/exit callers of the same builders are never attributed to an auction, and are thread-local. RED-on-revert antibody: asserts each of the nine stage labels is applied at a real call site in global_batch_runtime source plus the begin/end bracket and the stages= log field, so unwrapping any builder or encode FAILS here — verified by mutation (unwrapping delta_book_native_side reproduces the failure). Guards the exists-but-unwired class: the helper-only tests pass even if nothing calls them."}
@@ -422,7 +425,7 @@ test_trust_policy:
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-08-20", note: "WU-settled hard-fact exits abstain for hourly WU and same-station METAR evidence: both remain statistical because the revisable Daily Observations product controls venue resolution. Station mismatch, bare scalars, intraday rows, and completed-hourly rows cannot force q=1 hold or exit."}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
-    tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-09-25", note: "Day0 remaining-window probability law, including source-clock total-variance decomposition, WU changed-payload retraction history as a conservative Jeffreys revision-survival mixture, zero-transition prior-only evaluation requiring explicit reduce-only opt-in while ENTRY fails closed, invalid or unbound source authority failing closed, and instrument/observation-latency uncertainty as the irreducible floor. Current decision-carrier generation and strict replay share canonical persisted path sigma across C/F, HIGH/LOW and entry/held authority, with tampering still rejected. The fast-residual composite routes its revision model by the hash-bound settlement_channel: noaa_wrh_* reaches the same-station AWC->OGIMET confirmation model and never the WU model, wu_icao_history keeps the WU model, a carried NOAA likelihood is station-checked under the composite, and an unverifiable persisted composite, or one whose hash-bound likelihood is missing or null, fails closed family-scoped instead of falling back to the label prefix."}
+    tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-09-30", note: "Day0 remaining-window probability law, including source-clock total-variance decomposition, WU changed-payload retraction history as a conservative Jeffreys revision-survival mixture, zero-transition prior-only evaluation requiring explicit reduce-only opt-in while ENTRY fails closed, invalid or unbound source authority failing closed, and instrument/observation-latency uncertainty as the irreducible floor. Current decision-carrier generation and strict replay share canonical persisted path sigma across C/F, HIGH/LOW and entry/held authority, with tampering still rejected. A qualified current FAST carrier uses its own same-station native-product-minus-FAST likelihood and typed NOT_REQUIRED for generic revision history: no additional AWC/OGIMET lookup, WU model or generic survival factor is attached. Exact carrier content, conditioning, samples, station, cut and policy remain required; partial/foreign placeholders fail closed. Ordinary non-FAST NOAA/WU history requirements remain unchanged. The narrow consumer-route namespace invalidates both process caches without relabeling old joint revisions. AMBER consumes the same current source sigma without offline age-fit variance; both consumer-route caches invalidate old polluted witnesses while 18/24/30-hour qualification remains separate."}
     tests/test_day0_window.py: {created: "2026-04-01", last_used: "2026-07-24", note: "Causal remaining-window selection excludes an hourly grid point already observed at the exact boundary while retaining the terminal sub-hour fallback."}
     tests/test_diurnal_peak_prob_monotone.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_edli_status_pulse_submit_counter.py: {created: "2026-06-09", last_used: "2026-06-10"}
@@ -579,7 +582,7 @@ test_trust_policy:
     tests/test_executable_forecast_reader_member_floor.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_executable_forecast_bundle_selection.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
-    tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-09-23"}
+    tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-09-30", note: "Normal native source-run/window/LSM proof linkage; active station/query coordinate, identifier and validity negatives remain strict. Retired legacy height is not coordinate identity or typed GROUND authority."}
     tests/test_ens_boundary_interval_admission.py: {created: "2026-09-25", last_used: "2026-09-25"}
     tests/test_opendata_release_calendar_selection.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_opendata_writes_v2_table.py: {created: "2026-05-02", last_used: "2026-09-23"}
@@ -892,6 +895,7 @@ test_trust_policy:
     tests/test_forecast_retention.py: {created: "2026-09-29", last_used: "2026-09-29", note: "src/data/forecast_retention.py reachability antibodies (current window, open positions, pending anchor cross-check kept; unreachable evicted), bounded file/row/WAL work, dry-run, idempotence, daemon job registration."}
     tests/test_trade_retention.py: {created: "2026-09-29", last_used: "2026-09-29", note: "src/data/trade_retention.py antibodies: shared family law, reader window, by-id referrer ledger (every referrer table, id columns and any *snapshot_id JSON key incl. position_events payloads and all certificate types), changes() mismatch rollback, newest-per-condition, unknown family/reachability/lagging ledger evict nothing, bounded rows/chunks/WAL, append-only trigger restored, idempotent, post_trade_capital registration."}
     tests/test_day0_hourly_vectors_prune_index.py: {created: "2026-09-05", last_used: "2026-09-05", note: "src/data/day0_hourly_vectors.py::_ensure_schema coverage: the retention prune DELETE in persist_day0_hourly_vectors (captured_at < cutoff) is served by idx_day0_hourly_vectors_captured_at, never a full table scan under the forecasts LIVE flock (2026-09-05 forecasts write-lock hog)."}
+    tests/test_day0_hourly_vectors_quota_root_cause.py: {created: "2026-09-05", last_used: "2026-09-30", note: "Audited current normal ENS acquisition/persistence entry points; actual parent52 module nodes pass. Private SQLite and canonical metadata pin bind exact city/date usable new ensemble run; successTTL recovery uses causal old run identity, not old q freshness/fullness. Failed retry-not-before, healthy new51 throttle, quota/deadline and deterministic no-refetch remain obligations; normal held/public RESET is separate from module acceptance."}
     tests/test_posterior_starvation_alert.py: {created: "2026-07-17", last_used: "2026-07-28", note: "P1 observability antibody (2026-07-13/14 CONUS 30-37h dark-posterior incident): a live-tradeable (city,target_date,metric) family with no fresh runtime_layer='live' forecast_posteriors emits one ZEUS_POSTERIOR_STARVATION ERROR log per scope per watchdog pass; local-day-complete eastern families are excluded while UTC-yesterday western families remain checked. Log-only alert, not a new gate: locks deliberate absence from event_reactor_adapter."}
 
 categories:
@@ -907,6 +911,7 @@ categories:
     - tests/test_world_wal_checkpoint_starvation.py
     - tests/test_wal_busy_factory_fail_conservative.py
     - tests/test_bayes_precision_fusion_download.py
+    - tests/test_openmeteo_model_surface.py
     - tests/test_bayes_precision_fusion_arrival_guard.py
     - tests/test_finite_evidence_probability_symmetry.py
     - tests/test_replacement_forecast_extras_coverage_gate.py
@@ -1885,9 +1890,9 @@ test_metadata:
       - src/data/bayes_precision_fusion_download.py
       - src/data/replacement_current_value_serving.py
     law_dependencies: [AGENTS.md]
-    notes: Actual provider bytes bind native station forecast quantities to current selector and frontier without acquiring settlement or trade authority.
+    notes: Actual provider bytes bind native station forecast quantities to current selector and frontier. HKO same-issued recovery preserves original raw clocks, validates canonical body context and rejects old cuts; serving recovery alone does not acquire full ENS/posterior, settlement or trade authority.
     created: 2026-06-29
-    last_reused_or_audited: 2026-09-29
+    last_reused_or_audited: 2026-09-30
   tests/test_total_loss_loop.py:
     modules: [execution, events, ingest]
     category: relationship_protection
@@ -1899,7 +1904,10 @@ test_metadata:
       Protects the distinction between a floor-crossing incident boundary and a
       stop-loss rule, exact held-token mapping, non-blocking backfill, dedicated
       episodic memory, time-aligned evidence, and capability-probed Codex
-      orchestration.
+      orchestration. Fresh DATA_DEGRADED permits bounded read-only diagnosis,
+      not repair permission. Config-bound health roles, exact worker argv and
+      explicit stop at every launch boundary keep queued debt observable.
+    last_reused_or_audited: 2026-09-29
   tests/test_full_loss_investigation_loop.py:
     modules: [scripts, execution]
     category: relationship_protection
@@ -3752,6 +3760,21 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
+  tests/test_openmeteo_ecmwf_ifs9_anchor.py:
+    modules: [data]
+    category: core_law_antibody
+    kind: relationship
+    cohort: law_antibody
+    trust: trusted
+    source_under_test: [src/data/openmeteo_ecmwf_ifs9_anchor.py]
+    authority_docs: [docs/authority/replacement_final_form_2026_06_09.md]
+    notes: >
+      Run-pinned local-day hourly proxy and source artifact identity; complete
+      actual hourly axis/header/date/units are distinct from physical station
+      and native-surface authority. Narrow parent combined180 pass, not full q.
+    created: 2026-06-06
+    last_reused_or_audited: 2026-09-29
+
   tests/test_openmeteo_cell_selection_and_elevation_are_product_identity.py:
     cohort: law_antibody
     trust: trusted
@@ -3763,6 +3786,42 @@ test_metadata:
       identity. These params must be persisted with every raw_model_forecasts row.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
+
+  tests/test_station_ground_evidence.py:
+    modules: [data]
+    category: core_law_antibody
+    kind: relationship
+    profile: source_precision
+    blocks_commit: true
+    asserted_invariants: [INV-14, INV-47]
+    source_under_test: [src/data/station_ground_evidence.py, src/config.py]
+    law_dependencies: [docs/authority/replacement_final_form_2026_06_09.md]
+    notes: >
+      Private canonical artifact rows and original body bytes defend frozen
+      facts, source/canonical possession cutoffs and scoped recovery without
+      HTTP renewal. Dual whole-entity identity/official URL and known-period
+      target coverage are module antibodies; normal caller/HWM/public chains
+      remain separate relationship acceptance. No live writes or self-claimed
+      source truth.
+    created: 2026-09-29
+    last_reused_or_audited: 2026-09-29
+  tests/test_openmeteo_model_surface.py:
+    modules: [data]
+    category: core_law_antibody
+    kind: relationship
+    profile: source_precision
+    blocks_commit: true
+    asserted_invariants: [INV-14, INV-47]
+    source_under_test: [src/data/openmeteo_model_surface.py]
+    law_dependencies: [AGENTS.md]
+    notes: >
+      Uses real OmFileWriter/Reader data with only HTTP transport and cache root
+      routed to loopback/tmp_path. Proves bounded allowlisted model/domain
+      identity, immutable content-addressed manifest evidence, cut-aware local
+      reads, recovery without retro-authorizing old decisions, ABA/tamper
+      resistance, and no-network read-only misses. No live cache or DB writes.
+    created: 2026-09-29
+    last_reused_or_audited: 2026-09-29
 
   tests/test_openmeteo_request_params_persisted.py:
     cohort: law_antibody

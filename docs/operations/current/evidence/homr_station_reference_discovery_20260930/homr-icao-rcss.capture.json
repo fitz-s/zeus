@@ -1,0 +1,23 @@
+{
+  "artifact_path": "/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-rcss-ground-proof.6m0hz3x5/homr-icao-rcss-7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e.json",
+  "byte_size": 52590,
+  "captured_at": "2026-09-30T14:20:52.929002+00:00",
+  "fetch_started_at": "2026-09-30T14:20:52.662951+00:00",
+  "headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:20:52 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "quantity": "UNPROVEN",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?qid=ICAO%3ARCSS",
+  "sha256": "7c66a391e3d76d84a28d731f1eaacc00d6314311adeea124bb58d860b6897f9e",
+  "stations": [],
+  "status": 200
+}

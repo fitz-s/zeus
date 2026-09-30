@@ -1,0 +1,79 @@
+{
+  "artifact_path": "/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-homr-unproven-discovery.dcfjdgon/ZUCK.96c583e1ad102081501f006625d8f3d5f04fb222ea17cc8b2a87bec8d7f7e708.body",
+  "authority": "DISCOVERY_ONLY_NO_REGISTRY_CHANGE",
+  "byte_size_captured": 53531,
+  "captured_at": "2026-09-30T14:57:49.001954+00:00",
+  "city": "Chongqing",
+  "complete": true,
+  "error": null,
+  "facts": {
+    "classification": "CANDIDATE_STATION_REFERENCE_REQUIRES_INDEPENDENT_REVIEW",
+    "elevation_ft": "1365",
+    "elevation_m": "416.1",
+    "ground": [
+      {
+        "elevationFeet": "1365",
+        "elevationMeters": "416.1",
+        "elevationType": "GROUND"
+      }
+    ],
+    "height_role": "typed_GROUND_reference_not_thermal_DCP",
+    "ids": [
+      {
+        "id": "ZUCK",
+        "idType": "ICAO"
+      },
+      {
+        "id": "57516",
+        "idType": "WMO"
+      },
+      {
+        "id": "30137833",
+        "idType": "NCDCSTNID"
+      },
+      {
+        "id": "CHI0000ZUCK",
+        "idType": "GHCNH"
+      }
+    ],
+    "individual_periods": false,
+    "locations": [
+      {
+        "latitude_dec": "29.719217",
+        "latitude_dms": "29,43,09,N",
+        "latitude_rptd": "29.719217",
+        "longitude_dec": "106.641678",
+        "longitude_dms": "106,38,30,E",
+        "longitude_rptd": "106.641678"
+      }
+    ],
+    "multiple_locations": false,
+    "ncdc_id": "30137833",
+    "other_elevation_types": [
+      "GROUND"
+    ],
+    "por": {
+      "beginDate": "1944-01-01T00:00:00.000",
+      "endDate": "Present"
+    },
+    "station_count": 1
+  },
+  "fetch_started_at": "2026-09-30T14:57:48.671725+00:00",
+  "http_status": 200,
+  "query_utc_date": "2026-09-30",
+  "request_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZUCK&qidMod=is&phrData=false",
+  "response_headers": {
+    "Access-Control-Allow-Headers": "X-Requested-With, Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Max-Age": "3600",
+    "Connection": "close",
+    "Content-Type": "application/json",
+    "Date": "Wed, 30 Sep 2026 14:57:48 GMT",
+    "Server": "Apache",
+    "Strict-Transport-Security": "max-age=31536000",
+    "Transfer-Encoding": "chunked"
+  },
+  "sha256": "96c583e1ad102081501f006625d8f3d5f04fb222ea17cc8b2a87bec8d7f7e708",
+  "station_id": "ZUCK"
+}
