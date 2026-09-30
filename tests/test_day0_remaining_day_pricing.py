@@ -4519,6 +4519,7 @@ def test_wu_fast_source_clock_carrier_replays_at_later_monitor_cut(metric):
     """A producer-ordered carrier replays into each current token's bin order."""
     import src.engine.event_reactor_adapter as era
     from src.config import ensemble_n_mc
+    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
     from src.signal.ensemble_signal import sigma_instrument_for_city
 
     city = runtime_cities_by_name()["Tel Aviv"]
@@ -4550,6 +4551,7 @@ def test_wu_fast_source_clock_carrier_replays_at_later_monitor_cut(metric):
         preliminary_survival_identity=likelihood["identity_hash"],
     )
     identity_inputs["current_path_state"] = current_state
+    identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
     carrier = build_day0_remaining_probability_carrier(
         future_extremes_c=future,
         boundary_scenarios=((None, 1.0),),
@@ -4561,6 +4563,7 @@ def test_wu_fast_source_clock_carrier_replays_at_later_monitor_cut(metric):
         n_samples=500,
         identity_inputs=identity_inputs,
         settlement_semantics=semantics,
+        remaining_center_bias_native=0.0,
     )
     payload = {
         "metric": metric,
@@ -4581,6 +4584,8 @@ def test_wu_fast_source_clock_carrier_replays_at_later_monitor_cut(metric):
         "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
         "_edli_day0_remaining_carrier_future_extremes_c": list(future),
         "_edli_day0_remaining_carrier_path_error_sigma_c": 0.4,
+        "_edli_day0_remaining_center_policy": identity_inputs["day0_remaining_center_policy"],
+        "_edli_day0_remaining_center_bias_c": 0.0,
         "_edli_day0_current_temperature_native": current_state["value_native"],
         "_edli_day0_current_temperature_observed_at_utc": current_state["observed_at_utc"],
         "_edli_day0_current_temperature_source": current_state["source"],
@@ -4618,6 +4623,12 @@ def test_wu_fast_source_clock_carrier_replays_at_later_monitor_cut(metric):
             decision_time=at,
         )
 
+    old_without_policy = {
+        key: value for key, value in payload.items()
+        if key not in {"_edli_day0_remaining_center_policy", "_edli_day0_remaining_center_bias_c"}
+    }
+    with pytest.raises(ValueError, match="DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT"):
+        replay(old_without_policy, monitor_at)
     composed = replay(payload, monitor_at)
     assert composed.shape == (len(bins),)
     assert np.isfinite(composed).all()
@@ -11273,68 +11284,109 @@ class TestRemainingDayMembers:
 
     def test_fast_residual_frontier_moves_peak_atom_before_slow_wu_catches_up(self):
         """Munich antibody: a 99% fast 31C scenario cannot leave q at 30C."""
-        import hashlib
-
         import src.engine.event_reactor_adapter as era
-        from src.config import runtime_cities_by_name
+        from src.config import ensemble_n_mc, runtime_cities_by_name
         from src.contracts.settlement_semantics import SettlementSemantics
+        from src.data.daily_obs_append import _wu_history_observations
+        from src.data.day0_fast_obs import (
+            latest_fast_station_conditioning, parse_metar_api_payload,
+        )
+        from src.data.replacement_forecast_materializer import (
+            _apply_fast_residual_likelihood_to_probability_carrier,
+        )
+        from src.data.replacement_forecast_materialization_request_builder import _bins_to_temperature_bins
+        from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+        from src.signal.ensemble_signal import sigma_instrument_for_city
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
 
+        city = runtime_cities_by_name()["Munich"]
+        semantics = SettlementSemantics.for_city(city)
         observed_at = "2026-08-11T13:53:33.843000+00:00"
-        residual_weights = ((0.0, 0.9898621721893085),)
-        identity = {
-            "semantics_revision": "same_station_causal_residual_v1",
-            "station_id": "EDDM",
-            "settlement_channel": "wu_icao_history",
-            "fast_channel": "aviationweather_metar",
-            "unit": "C",
-            "as_of": observed_at,
-            "window_start": "2026-08-04T13:53:33.843000+00:00",
-            "matched_pairs": 294,
-            "residual_weights_c": residual_weights,
-            "unknown_weight": 0.010137827810691391,
-            "settlement_extreme_c": 30.0,
-        }
-        identity_hash = hashlib.sha256(
-            json.dumps(
-                identity,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        cut = datetime.fromisoformat(observed_at)
+        pair_times = tuple(cut - timedelta(minutes=15 * (index + 1)) for index in range(294))
+        # Controlled source bodies through ordinary parsers, append-only writer,
+        # and the current causal residual builder, not a relabeled old v1 hash.
+        products = _wu_history_observations({
+            "metadata": {"location_id": "EDDM:9:DE", "units": "m"},
+            "observations": [{"obs_id": "EDDM", "temp": 30.0,
+                              "valid_time_gmt": int(moment.timestamp())}
+                             for moment in pair_times],
+        }, icao="EDDM", cc="DE", unit="C")
+        reports = parse_metar_api_payload([{
+            "icaoId": "EDDM", "obsTime": moment.timestamp(),
+            "receiptTime": moment.isoformat(), "temp": 30.0,
+            "rawOb": f"EDDM {moment:%d%H%M}Z 30/15 T03000150",
+        } for moment in pair_times])
+        conn = sqlite3.connect(":memory:")
+        ensure_table(conn)
+        for product, report in zip(products, reports, strict=True):
+            moment = datetime.fromtimestamp(product["valid_time_gmt"], UTC)
+            for channel, native, published in (
+                ("wu_icao_history", product["temp"], moment.isoformat()),
+                ("aviationweather_metar", report.temp_c, report.receipt_time.isoformat()),
+            ):
+                assert append_print(conn, city=city.name, station_id="EDDM",
+                    source_channel=channel, publish_ts_utc=published,
+                    value_native=native, unit="C", fetched_at_utc=(moment + timedelta(seconds=10)).isoformat(),
+                    raw_report=report.raw)
+        current = parse_metar_api_payload([{
+            "icaoId": "EDDM", "obsTime": cut.timestamp(), "receiptTime": observed_at,
+            "temp": 31.0, "rawOb": f"EDDM {cut:%d%H%M}Z 31/15 T03100150",
+        }])[0]
+        assert append_print(conn, city=city.name, station_id="EDDM",
+            source_channel="aviationweather_metar", publish_ts_utc=observed_at,
+            value_native=current.temp_c, unit="C", fetched_at_utc=(cut + timedelta(seconds=10)).isoformat(),
+            raw_report=current.raw)
+        qualified = latest_fast_station_conditioning(conn, city=city.name,
+            target_date=cut.date().isoformat(), metric="high", decision_time=cut + timedelta(seconds=20),
+            settlement_extreme_native=30.0, settlement_unit="C")
+        conn.close()
+        assert qualified is not None and qualified.likelihood.matched_pairs == 294
+        assert qualified.likelihood.unknown_weight == pytest.approx(0.010137827810691391)
+        bins = [Bin(None, 30, "C", "30C or below"), Bin(31, 31, "C", "31C"),
+                Bin(32, None, "C", "32C or above")]
+        base = build_day0_remaining_probability_carrier(
+            future_extremes_c=(30.0, 30.0, 30.0), boundary_scenarios=((None, 1.0),),
+            metric="high", path_error_sigma_c=0.0,
+            instrument_sigma_c=float(sigma_instrument_for_city(city).value),
+            bin_bounds_c=tuple((bin_.low, bin_.high) for bin_ in bins),
+            n_point=ensemble_n_mc(), n_samples=500,
+            identity_inputs={**day0_remaining_carrier_identity_inputs(city=city.name, unit="C",
+                decision_time_utc=observed_at, station_id="EDDM",
+                preliminary_survival_identity=qualified.likelihood.identity_hash),
+                "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+                "current_path_state": {"value_native": current.temp_c,
+                    "observed_at_utc": observed_at, "source": "aviationweather_metar"}},
+            settlement_semantics=semantics)
+        transport_bins = _bins_to_temperature_bins([
+            {"bin_id": str(index), "lower_c": bin_.low, "upper_c": bin_.high,
+             "display_unit": "C", "settlement_unit": "C", "rounding_rule": semantics.rounding_rule}
+            for index, bin_ in enumerate(bins)
+        ])
+        transported_q, _, _, _, likelihood_payload = _apply_fast_residual_likelihood_to_probability_carrier(
+            q={bin_.bin_id: base["q"][index] for index, bin_ in enumerate(transport_bins)},
+            q_samples_by_bin={bin_.bin_id: [row[index] for row in base["samples"]]
+                              for index, bin_ in enumerate(transport_bins)},
+            bins=transport_bins, metric="high", observed_extreme_c=qualified.observed_extreme_c,
+            half_step=semantics.precision / 2.0, rounding_rule=semantics.rounding_rule,
+            likelihood=qualified.likelihood)
         conditioning = {
             "active": True,
             "metric": "high",
-            "observed_extreme_c": 31.0,
+            "observed_extreme_c": qualified.observed_extreme_c,
             "source": "wu_api+same_station_fast_tail",
-            "observation_time": observed_at,
-            "sample_count": 32,
-            "unit": "C",
+            "observation_time": qualified.observation_time,
+            "sample_count": qualified.sample_count,
+            "unit": qualified.unit,
             "support_truncation": False,
-            "fast_residual_likelihood": {
-                **identity,
-                "identity_hash": identity_hash,
-                "residual_weights_c": [
-                    {"residual_c": 0.0, "weight": 0.9898621721893085}
-                ],
-                "scenario_weights": [
-                    {
-                        "observed_bound_c": 30.0,
-                        "weight": 0.010137827810691391,
-                    },
-                    {
-                        "observed_bound_c": 31.0,
-                        "weight": 0.9898621721893085,
-                    },
-                ],
-                "support_truncation": False,
-            },
+            "fast_residual_likelihood": likelihood_payload,
         }
         payload = {
             "metric": "high",
+            "target_date": cut.date().isoformat(),
             "rounded_value": 30,
             "high_so_far": 30.0,
             "settlement_source": "wu_icao_history",
-            "_edli_day0_provisional_boundary_survival_probability": 0.999,
             "_edli_day0_probability_boundary_native": 31.0,
             "_edli_day0_peak_set_probability": 0.95,
             "_edli_day0_peak_set_sample_count": 70,
@@ -11342,33 +11394,60 @@ class TestRemainingDayMembers:
                 "monthly_empirical_jeffreys_v1"
             ),
             "_edli_global_day0_binding": {
+                "configured_station_id": "EDDM",
                 "statistical_probability_conditioning": conditioning,
             },
+            "_edli_day0_remaining_content_identity": base["content_identity"],
+            "_edli_day0_probability_operator": base["operator"],
+            "_edli_day0_remaining_carrier_q": base["q"],
+            "_edli_day0_remaining_probability_samples": base["samples"],
+            "_edli_day0_remaining_probability_sample_count": base["sample_count"],
+            "_edli_day0_remaining_carrier_probability_cutoff_utc": observed_at,
+            "_edli_day0_remaining_carrier_future_extremes_c": [30.0, 30.0, 30.0],
+            "_edli_day0_remaining_carrier_path_error_sigma_c": 0.0,
+            "_edli_day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+            "_edli_day0_remaining_center_bias_c": 0.0,
+            "_edli_day0_current_temperature_native": current.temp_c,
+            "_edli_day0_current_temperature_observed_at_utc": observed_at,
+            "_edli_day0_current_temperature_source": "aviationweather_metar",
+            "_edli_day0_carrier_bin_topology": [
+                {"bin_id": bin_.label, "lower_c": bin_.low, "upper_c": bin_.high,
+                 "settlement_step_c": semantics.precision, "rounding_rule": semantics.rounding_rule}
+                for bin_ in bins
+            ],
+            "_edli_day0_remaining_vector_witness": {
+                "vector_id": "controlled-munich-component-vector",
+                "expected_models": ["ecmwf_ifs"], "actual_models": ["ecmwf_ifs"],
+                "capture_times_by_model_utc": {"ecmwf_ifs": observed_at},
+                "provider_source_cycle_time_by_model_utc": {"ecmwf_ifs": observed_at},
+                "provider_source_available_at_by_model_utc": {"ecmwf_ifs": observed_at},
+                "source_run_id_by_model": {"ecmwf_ifs": "component-source-run"},
+                "provider_run_id_by_model": {"ecmwf_ifs": "component-provider-run"},
+                "request_hash_by_model": {"ecmwf_ifs": "component-request-hash"},
+            },
         }
-        city = runtime_cities_by_name()["Munich"]
         point = era._day0_remaining_p_raw_vector(
             np.array([30.0, 30.0, 30.0], dtype=float),
             city=city,
-            settlement_semantics=SettlementSemantics.for_city(city),
-            bins=[
-                Bin(None, 30, "C", "30C or below"),
-                Bin(31, 31, "C", "31C"),
-                Bin(32, None, "C", "32C or above"),
-            ],
+            settlement_semantics=semantics,
+            bins=bins,
             payload=payload,
             extra_member_sigma=0.0,
+            decision_time=cut + timedelta(seconds=20),
         )
 
         assert point.sum() == pytest.approx(1.0)
         assert point[0] < 0.02
         assert point[1] > 0.90
-        assert payload["_edli_day0_fast_residual_boundary_scenarios_native"] == [
+        assert point.tolist() == pytest.approx([transported_q[bin_.bin_id] for bin_ in transport_bins])
+        assert "_edli_day0_provisional_boundary_survival_probability" not in payload
+        assert conditioning["fast_residual_likelihood"]["scenario_weights"] == [
             {
-                "observed_bound_native": 30.0,
+                "observed_bound_c": 30.0,
                 "weight": pytest.approx(0.010137827810691391),
             },
             {
-                "observed_bound_native": 31.0,
+                "observed_bound_c": 31.0,
                 "weight": pytest.approx(0.9898621721893085),
             },
         ]
