@@ -1519,6 +1519,14 @@ def _exact_current_value_serving_lag(
     consumed: dict[str, tuple[int, datetime, datetime | None]] = {}
     for model in used_models:
         item = serving.get(model)
+        if model == "ecmwf_ifs" and item is None:
+            from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
+            audit = shape.get("provider_geometry_audit") if isinstance(shape,Mapping) else None
+            if (not isinstance(audit,Mapping) or audit.get("anchor_ifs9_role") != "anchor_only"
+                or not current_evidence_shape_has_held_authority(provenance,materialized_at=posterior_computed_at,
+                    city=city,target_date=target_date,metric=metric,anchor_id=provenance.get("anchor_id"))):
+                return True,"basis=anchor_only_ifs9_provenance_unverifiable",None
+            continue
         if not isinstance(item, Mapping):
             return (
                 True,
@@ -1585,6 +1593,8 @@ def _exact_current_value_serving_lag(
     newer_cycle_changes: list[
         tuple[str, int, int, datetime, datetime]
     ] = []
+    if "ecmwf_ifs" in used_models and "ecmwf_ifs" not in serving and "ecmwf_ifs" in selected:
+        return True,"basis=anchor_only_ifs9_raw_instrument_became_available",None
     for model, (consumed_id, consumed_cycle, consumed_at) in consumed.items():
         current = selected.get(model)
         if current is None:
