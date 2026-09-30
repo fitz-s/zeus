@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 # Created: 2026-09-24
-# Last reused or audited: 2026-09-24
+# Last reused or audited: 2026-09-30
 # Authority basis: Day0 remaining-center settlement residual study 2026-09-24;
 #   docs/authority/replacement_final_form_2026_06_09.md "Day0 conditional
 #   remaining-path operator"; served by src/calibration/day0_remaining_bias.py.
+#   2026-09-30: gate + step table replaced by a shrunk continuous node curve after a
+#   band edge and a refit gate flip each moved Helsinki q(15C) 0.07 -> 0.45 on
+#   unchanged evidence.
 """Fit ``state/day0_remaining_center_bias.json``: the settlement-graded center shift
-of the Day0 remaining-day carrier, per (metric, 2-hour local band).
+of the Day0 remaining-day carrier, one continuous curve of local hour per metric.
 
 RECORDS. One per (city, target_date, metric, local hour on the target day): the last
 live posterior of that hour whose served q is the shared remaining-day carrier
-(``CARRIER_SHAPES``). Fast-residual posteriors are excluded from fitting and from
-every evaluation: their served q is the carrier after a further fast-residual
-transport, which the carrier likelihood below does not describe.
+(``CARRIER_SHAPES``). Fast-residual posteriors are excluded from fitting: their
+served q is the carrier after a further fast-residual transport, which the carrier
+likelihood below does not describe.
 Each record keeps the carrier's UNSHIFTED remaining-hourly members, typed final-daily
 centers, path sigma, observed boundary and report-survival weight exactly as
 persisted, plus the settled integer from ``read_current_settlement_history`` (current
@@ -20,31 +23,17 @@ resolver, known-before-cutoff labels only).
 LIKELIHOOD. log P(settled integer | b) under the shipped carrier builder
 (``build_day0_remaining_probability_carrier`` with ``remaining_center_bias_native``):
 the same observed-boundary atom, survival mixture, settlement rounding and typed
-final centers the server integrates. ``b = 0`` is the live unshifted recipe, so every
-comparison is against what already serves. ``b`` is evaluated on a fixed grid once
-per record; every fit below is a sum over that matrix.
+final centers the server integrates. ``b = 0`` is the unshifted recipe. ``b`` is
+evaluated on a fixed grid once per record; every fit below is a sum over that matrix.
 
-FIT. Per cell, the pooled MLE of ``b``; each city's own MLE is shrunk toward it by
-empirical Bayes (normal-normal, method-of-moments between-city variance, per-city
-variance from the log-likelihood curvature deflated by rows per city-day) and snapped
-to the grid.
-
-ACTIVATION (chosen inside the training data only). The last 30% of training dates is
-an inner validation block; ``b`` is refit on the earlier dates (>= MIN_ROWS rows) and
-scored there, clustered by city-day (hourly rows averaged within each city-day first).
-A cell is active only with a mean gain >= MIN_GAIN_NATS and a one-sided 95% upper
-bound of (new - old) log loss below zero. Active cells are then refit on all training
-dates.
-
-OUTER FOLDS. The last 30% of dates split into chronological blocks. Each block is
-predicted by the whole rule (fit + activation) trained only on earlier dates whose
-labels were known before the block's first decision; inactive cells score as
-unchanged. The per-cell clustered result is printed and stored as ``oos_*``.
-
-SERVED. A cell is served (``active``) only when the rule activates it on all training
-dates (``rule_active``) AND the rule's own outer-fold record for that cell meets the
-same bar. A cell the rule never activated out of sample has no out-of-sample win and
-stays unshifted.
+FIT. Evidence pools per (metric, 2-hour local band). Each band's MLE ``b`` comes with
+a variance clustered by city-day. Its node is the posterior mean under a N(0, tau2)
+prior, tau2 the method-of-moments spread of the metric's band MLEs:
+``node = b * tau2 / (tau2 + v)``. A station's node adds its own deviation from the
+band MLE, shrunk the same way toward 0. There is no activation gate: a thin band's
+node is near 0 by its own variance, so a refit moves a node by the change in its
+evidence, never by a binary flip. The loader interpolates linearly between nodes at
+the band centres, so the served shift is continuous in local hour.
 
 WALK-FORWARD. The artifact trains on labels known before ``fit_date`` 00:00 UTC and
 serves decisions from that instant on; the loader refuses an artifact dated after
@@ -61,7 +50,7 @@ import os
 import sqlite3
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -71,9 +60,11 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from src.calibration.day0_remaining_bias import (  # noqa: E402
+    BAND_HOURS,
     MAX_ABS_SHIFT_C,
+    NODE_HOURS,
     SCHEMA_VERSION,
-    cell_key,
+    band_of,
 )
 from src.config import runtime_cities_by_name  # noqa: E402
 from src.contracts.settlement_semantics import SettlementSemantics  # noqa: E402
@@ -95,11 +86,7 @@ CARRIER_SHAPES = (
 )
 GRID_C = np.round(np.arange(-1.5, 1.5 + 1e-9, 0.1), 10)
 ZERO = int(np.argmin(np.abs(GRID_C)))
-MIN_ROWS = 200
-MIN_GAIN_NATS = 0.02
-Z_ONE_SIDED_95 = 1.6448536269514722
-HOLDOUT_FRACTION = 0.3
-OUTER_BLOCKS = 3
+BANDS = tuple(range(0, 24, BAND_HOURS))
 PROBABILITY_FLOOR = 1e-12
 assert GRID_C[ZERO] == 0.0 and np.max(np.abs(GRID_C)) <= MAX_ABS_SHIFT_C
 
@@ -123,7 +110,7 @@ class Record:
     city: str
     target_date: str
     metric: str
-    cell: str
+    band: int
     decided_at: datetime
     label_known_at: datetime
     loglik: np.ndarray  # log P(settled integer | GRID_C[i])
@@ -240,7 +227,7 @@ def build_records(forecast_db: str, *, fit_date: str) -> tuple[list[Record], dic
                 city=city_name,
                 target_date=target,
                 metric=metric,
-                cell=cell_key(metric, local.hour + local.minute / 60.0),
+                band=band_of(local.hour + local.minute / 60.0),
                 decided_at=decided,
                 label_known_at=label.label_known_at,
                 loglik=loglik,
@@ -250,208 +237,143 @@ def build_records(forecast_db: str, *, fit_date: str) -> tuple[list[Record], dic
     return records, {"hours": len(last), "records": len(records), "skipped": dict(skipped)}
 
 
-def _grid_index(value: float) -> int:
-    return int(np.argmin(np.abs(GRID_C - value)))
+@dataclass(frozen=True)
+class Estimate:
+    """One pooled likelihood estimate: MLE ``b`` and its clustered variance ``v``."""
+
+    b: float
+    v: float  # inf when the curve has no interior maximum
+    n: int
+    clusters: int
 
 
-def fit_cell(records: list[Record]) -> tuple[int, dict[str, int]]:
-    """Pooled grid MLE and EB-shrunk per-city grid indices for one cell."""
-
-    total = np.sum([r.loglik for r in records], axis=0)
-    pooled = int(np.argmax(total))
-    by_city: dict[str, list[Record]] = collections.defaultdict(list)
-    for record in records:
-        by_city[record.city].append(record)
-    raw: dict[str, tuple[float, float]] = {}
-    step = float(GRID_C[1] - GRID_C[0])
-    for city, rows in by_city.items():
-        curve = np.sum([r.loglik for r in rows], axis=0)
-        best = int(np.argmax(curve))
-        if best in (0, GRID_C.size - 1):
-            continue
-        curvature = (curve[best + 1] - 2.0 * curve[best] + curve[best - 1]) / step**2
-        if not curvature < 0.0:
-            continue
-        rows_per_day = len(rows) / len({r.target_date for r in rows})
-        raw[city] = (float(GRID_C[best]), -rows_per_day / curvature)
-    b_pool = float(GRID_C[pooled])
-    tau2 = 0.0
-    if len(raw) >= 2:
-        tau2 = max(
-            0.0,
-            float(np.mean([(b - b_pool) ** 2 - v for b, v in raw.values()])),
-        )
-    stations = {
-        city: _grid_index(b_pool + tau2 / (tau2 + v) * (b - b_pool))
-        for city, (b, v) in raw.items()
-    }
-    return pooled, stations
+_UNMEASURED = Estimate(0.0, math.inf, 0, 0)
 
 
-def _chosen(record: Record, model: tuple[int, dict[str, int]] | None) -> int:
-    if model is None:
-        return ZERO
-    pooled, stations = model
-    return stations.get(record.city, pooled)
+def estimate(records: list[Record], cluster) -> Estimate:
+    """MLE of ``b`` from the summed log-likelihood curve and its clustered variance.
 
-
-def clustered_gain(records: list[Record], model_for) -> dict:
-    """Mean per-city-day log-loss reduction (nats) and the one-sided 95% UB of new-old.
-
-    ``model_for(record)`` is the (pooled, stations) model serving that record, or None
-    for an unchanged (b = 0) record. Hourly rows are averaged within each city-day first.
+    ``b`` is the vertex of the parabola through the grid maximum and its neighbours.
+    The variance is the larger of the cluster sandwich (sum of squared per-cluster
+    scores over the squared curvature) and the model-based rows-per-cluster /
+    curvature, so neither hourly autocorrelation nor a lucky score sum can make a
+    thin cell look precise.
     """
 
-    days: dict[tuple, list[float]] = collections.defaultdict(list)
+    if not records:
+        return _UNMEASURED
+    step = float(GRID_C[1] - GRID_C[0])
+    total = np.sum([r.loglik for r in records], axis=0)
+    groups: dict[object, list[np.ndarray]] = collections.defaultdict(list)
     for record in records:
-        index = _chosen(record, model_for(record))
-        days[(record.city, record.target_date)].append(
-            float(record.loglik[index] - record.loglik[ZERO])
-        )
-    gains = np.asarray([np.mean(v) for v in days.values()])
-    if gains.size < 2:
-        return {"n": len(records), "city_days": int(gains.size), "gain": None, "ub_new_minus_old": None}
-    mean = float(gains.mean())
-    se = float(gains.std(ddof=1) / math.sqrt(gains.size))
-    return {
-        "n": len(records),
-        "city_days": int(gains.size),
-        "gain": mean,
-        "ub_new_minus_old": -mean + Z_ONE_SIDED_95 * se,
+        groups[cluster(record)].append(record.loglik)
+    i = int(np.argmax(total))
+    if i in (0, GRID_C.size - 1):
+        # The maximum is not inside the grid: the curve bounds nothing.
+        return Estimate(0.0, math.inf, len(records), len(groups))
+    y0, y1, y2 = total[i - 1], total[i], total[i + 1]
+    second = (y0 - 2.0 * y1 + y2) / step**2
+    if not second < 0.0:
+        return Estimate(0.0, math.inf, len(records), len(groups))
+    b = float(np.clip(GRID_C[i] + (y0 - y2) / (2.0 * second * step), GRID_C[0], GRID_C[-1]))
+    scores = [
+        float(np.interp(b, GRID_C, np.gradient(np.sum(curves, axis=0), step)))
+        for curves in groups.values()
+    ]
+    sandwich = float(np.sum(np.square(scores))) / second**2
+    model = (len(records) / len(groups)) / -second
+    return Estimate(b, max(sandwich, model), len(records), len(groups))
+
+
+def _prior_variance(pairs: list[tuple[float, float]]) -> float:
+    """Method-of-moments spread of the true values behind noisy (estimate, variance)."""
+
+    finite = [(b, v) for b, v in pairs if math.isfinite(v)]
+    if len(finite) < 2:
+        return 0.0
+    return max(0.0, float(np.mean([b * b - v for b, v in finite])))
+
+
+def _shrink(value: float, variance: float, prior: float) -> float:
+    """Posterior mean under N(0, prior): value x prior / (prior + variance)."""
+
+    if not math.isfinite(variance) or prior <= 0.0:
+        return 0.0
+    return value * prior / (prior + variance)
+
+
+def fit_metric(records: list[Record]) -> dict:
+    """Node curve for one metric: per-band estimates shrunk toward 0, plus stations.
+
+    Pooled node = band MLE shrunk by its clustered variance under a N(0, tau2) prior,
+    tau2 the method-of-moments spread of the band MLEs. A station's node adds its own
+    deviation from the band MLE, shrunk the same way toward 0 under the spread of
+    all stations' deviations in that band; its variance is never below the band's
+    median within-city per-city-day variance over its own city-days. No gate: an
+    unmeasured band is 0 and a
+    thin one is near 0, so a refit moves each node by the change in its evidence.
+    """
+
+    by_band: dict[int, list[Record]] = collections.defaultdict(list)
+    for record in records:
+        by_band[record.band].append(record)
+    pooled = {
+        band: estimate(by_band.get(band, []), lambda r: (r.city, r.target_date))
+        for band in BANDS
     }
-
-
-def _passes(result: dict | None) -> bool:
-    """The activation bar: mean gain >= MIN_GAIN_NATS and UB(new - old) < 0."""
-
-    return (
-        result is not None
-        and result["gain"] is not None
-        and result["gain"] >= MIN_GAIN_NATS
-        and result["ub_new_minus_old"] < 0.0
-    )
-
-
-def _split(records: list[Record]) -> tuple[list[Record], list[Record]]:
-    """Chronological inner (fit, validation) by target date: validation = the last
-    HOLDOUT_FRACTION of dates. Label latency is enforced once, at the outer boundary
-    (every record here was already known before the outer block or ``fit_date``);
-    re-imposing it inside the training set would drop the whole pre-backfill history
-    (current-resolver labels for 08-24..09-02 were recorded 09-13) without protecting
-    anything the caller will be scored on."""
-
-    dates = sorted({r.target_date for r in records})
-    if len(dates) < 2:
-        return records, []
-    first = dates[max(1, int(len(dates) * (1.0 - HOLDOUT_FRACTION)))]
-    return (
-        [r for r in records if r.target_date < first],
-        [r for r in records if r.target_date >= first],
-    )
-
-
-def fit_rule(records: list[Record]) -> tuple[dict, dict]:
-    """(active models by cell, per-cell inner-validation verdicts) from ``records`` only."""
-
-    inner_train, inner_valid = _split(records)
-    by_cell = collections.defaultdict(list)
-    for record in records:
-        by_cell[record.cell].append(record)
-    active: dict[str, tuple[int, dict[str, int]]] = {}
-    verdicts: dict[str, dict] = {}
-    for cell, rows in sorted(by_cell.items()):
-        fit_rows = [r for r in inner_train if r.cell == cell]
-        valid_rows = [r for r in inner_valid if r.cell == cell]
-        verdict = {"n": len(rows), "active": False, "inner": None}
-        # The activation evidence must itself come from a fit on >= MIN_ROWS rows.
-        if len(fit_rows) >= MIN_ROWS and valid_rows:
-            model = fit_cell(fit_rows)
-            verdict["inner"] = clustered_gain(valid_rows, lambda _record: model)
-            verdict["active"] = _passes(verdict["inner"])
-        if verdict["active"]:
-            active[cell] = fit_cell(rows)
-        verdicts[cell] = verdict
-    return active, verdicts
-
-
-def outer_folds(records: list[Record]) -> dict:
-    """Score the whole rule on chronological blocks of the last HOLDOUT_FRACTION."""
-
-    dates = sorted({r.target_date for r in records})
-    tail = dates[int(len(dates) * (1.0 - HOLDOUT_FRACTION)):]
-    blocks = [list(b) for b in np.array_split(tail, min(OUTER_BLOCKS, len(tail))) if len(b)]
-    scored: list[Record] = []
-    models_by_record: dict[int, dict] = {}
-    activations: collections.Counter = collections.Counter()
-    for block in blocks:
-        test = [r for r in records if block[0] <= r.target_date <= block[-1]]
-        if not test:
-            continue
-        start = min(r.decided_at for r in test)
-        train = [r for r in records if r.target_date < block[0] and r.label_known_at < start]
-        active, _verdicts = fit_rule(train)
-        activations.update(active.keys())
-        for record in test:
-            models_by_record[id(record)] = active
-            scored.append(record)
-    by_cell = collections.defaultdict(list)
-    for record in scored:
-        by_cell[record.cell].append(record)
-
-    def gain(rows: list[Record]) -> dict:
-        return clustered_gain(rows, lambda r: models_by_record[id(r)].get(r.cell))
-
+    tau2 = _prior_variance([(e.b, e.v) for e in pooled.values()])
+    nodes = [_shrink(pooled[band].b, pooled[band].v, tau2) for band in BANDS]
+    station_nodes: dict[str, list[float]] = {}
+    for index, band in enumerate(BANDS):
+        by_city: dict[str, list[Record]] = collections.defaultdict(list)
+        for record in by_band.get(band, []):
+            by_city[record.city].append(record)
+        base = pooled[band].b
+        # A few city-days cannot measure their own dispersion: a station's variance
+        # is at least the band's typical within-city per-city-day variance over its
+        # own city-days.
+        own = {city: estimate(rows, lambda r: r.target_date) for city, rows in by_city.items()}
+        per_day = [e.v * e.clusters for e in own.values() if math.isfinite(e.v)]
+        floor = float(np.median(per_day)) if per_day else math.inf
+        raw = {
+            city: (e.b - base, max(e.v, floor / max(e.clusters, 1))) for city, e in own.items()
+        }
+        spread = _prior_variance(list(raw.values()))
+        for city, (offset, variance) in raw.items():
+            deviation = _shrink(offset, variance, spread)
+            if deviation:
+                station_nodes.setdefault(city, list(nodes))[index] = float(
+                    np.clip(nodes[index] + deviation, -MAX_ABS_SHIFT_C, MAX_ABS_SHIFT_C)
+                )
     return {
-        "blocks": [[str(b[0]), str(b[-1])] for b in blocks],
-        "cells": {
-            cell: {**gain(rows), "active_blocks": activations.get(cell, 0)}
-            for cell, rows in sorted(by_cell.items())
-        },
-        "metrics": {
-            metric: gain([r for r in scored if r.metric == metric])
-            for metric in ("high", "low")
-            if any(r.metric == metric for r in scored)
+        "nodes_c": [float(v) for v in nodes],
+        "stations": {city: [float(v) for v in curve] for city, curve in sorted(station_nodes.items())},
+        "prior_variance_c2": tau2,
+        "bands": {
+            str(band): {
+                "b_mle_c": pooled[band].b,
+                "variance_c2": None if not math.isfinite(pooled[band].v) else pooled[band].v,
+                "n": pooled[band].n,
+                "city_days": pooled[band].clusters,
+                "node_c": float(nodes[index]),
+            }
+            for index, band in enumerate(BANDS)
         },
     }
 
 
 def build_artifact(records: list[Record], *, fit_date: str, record_counts: dict) -> dict:
-    active, verdicts = fit_rule(records)
-    folds = outer_folds(records)
-    cells = {}
-    for cell, verdict in verdicts.items():
-        model = active.get(cell) or fit_cell([r for r in records if r.cell == cell])
-        pooled, stations = model
-        oos = folds["cells"].get(cell)
-        cells[cell] = {
-            "b_c": float(GRID_C[pooled]),
-            "stations": {city: float(GRID_C[i]) for city, i in sorted(stations.items())},
-            "n": verdict["n"],
-            "rule_active": bool(verdict["active"]),
-            "active": bool(verdict["active"]) and _passes(oos),
-            "inner_gain": None if verdict["inner"] is None else verdict["inner"]["gain"],
-            "inner_ub_new_minus_old": (
-                None if verdict["inner"] is None else verdict["inner"]["ub_new_minus_old"]
-            ),
-            "oos_gain": (oos or {}).get("gain"),
-            "oos_ub_new_minus_old": (oos or {}).get("ub_new_minus_old"),
-            "oos_city_days": (oos or {}).get("city_days"),
-            "oos_active_blocks": (oos or {}).get("active_blocks"),
-        }
+    metrics = sorted({r.metric for r in records})
     return {
         "schema_version": SCHEMA_VERSION,
         "fit_date": fit_date,
         "fitted_at_utc": datetime.now(timezone.utc).isoformat(),
         "grid_c": [float(GRID_C[0]), float(GRID_C[-1]), float(GRID_C[1] - GRID_C[0])],
-        "rule": {
-            "min_rows": MIN_ROWS,
-            "min_gain_nats": MIN_GAIN_NATS,
-            "holdout_fraction": HOLDOUT_FRACTION,
-            "outer_blocks": OUTER_BLOCKS,
-        },
+        "node_hours_local": list(NODE_HOURS),
         "record_counts": record_counts,
-        "outer_folds": {"blocks": folds["blocks"], "metrics": folds["metrics"]},
-        "cells": cells,
+        "metrics": {
+            metric: fit_metric([r for r in records if r.metric == metric]) for metric in metrics
+        },
     }
 
 
@@ -484,25 +406,17 @@ def main() -> int:
     artifact = build_artifact(records, fit_date=fit_date, record_counts=counts)
     _write_artifact_atomic(artifact, args.out)
     print(f"wrote {args.out} fit_date={fit_date} counts={counts}")
-    print(f"outer blocks {artifact['outer_folds']['blocks']}")
-    print(
-        "cell        n  rule   served  b_c   inner_gain  inner_ub  "
-        "oos_days  oos_gain  oos_ub(new-old)  blocks"
-    )
-    for cell, v in sorted(
-        artifact["cells"].items(), key=lambda kv: (kv[0].split("|")[0], int(kv[0].split("|")[1]))
-    ):
+    print("metric band     n  city_days   b_mle   sd     node")
+    for metric, curve in artifact["metrics"].items():
+        for band, v in curve["bands"].items():
+            sd = None if v["variance_c2"] is None else math.sqrt(v["variance_c2"])
+            print(
+                f"{metric:6s} {int(band):4d} {v['n']:5d} {v['city_days']:10d} "
+                f"{_format(v['b_mle_c'])} {_format(sd)} {_format(v['node_c'])}"
+            )
         print(
-            f"{cell:9s} {v['n']:5d}  {str(v['rule_active']):5s}  {str(v['active']):5s} "
-            f"{v['b_c']:+.2f}  {_format(v['inner_gain'])}  "
-            f"{_format(v['inner_ub_new_minus_old'])}  {v['oos_city_days'] or 0:8d}  "
-            f"{_format(v['oos_gain'])}  {_format(v['oos_ub_new_minus_old'])}  "
-            f"{v['oos_active_blocks'] or 0}"
-        )
-    for metric, v in artifact["outer_folds"]["metrics"].items():
-        print(
-            f"{metric} pooled outer: n={v['n']} city_days={v['city_days']} "
-            f"gain={_format(v['gain'])} ub(new-old)={_format(v['ub_new_minus_old'])}"
+            f"{metric} prior_variance={curve['prior_variance_c2']:.4f} "
+            f"station_curves={len(curve['stations'])}"
         )
     return 0
 

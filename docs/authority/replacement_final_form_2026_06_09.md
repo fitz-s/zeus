@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-09-29 (§1e Day0 diurnal-residual mixture enters q; the post-selection nowcast veto is deleted)
+**Last audited:** 2026-09-30 (§1e Day0 remaining-center shift is a shrunk continuous curve of local hour, no gate, no step)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -378,19 +378,26 @@ not change this point expectation or erase representable Gaussian tail mass
 merely because no sample reached it. Full-day forecast distributions are unchanged.
 
 The remaining-hourly member centers of the shared carrier take one
-settlement-graded additive shift per (metric, 2-hour local band), fitted
-walk-forward by the terminal-bin likelihood of this same operator on posteriors
-whose served q is the carrier itself (fast-residual-transported rows excluded)
-(`scripts/fit_day0_remaining_center_bias.py`, served by
-`src/calibration/day0_remaining_bias.py`). The shift enters before the
-max/min and the settlement integration, identically in the point q and the
-confidence draws. It never moves the observed extreme or the typed final-daily
-provider centers. A cell serves only when two tests both beat the unshifted
-carrier by at least 0.02 nats per city-day, each with a one-sided 95% upper
-bound below zero. The first is the rule's inner chronological validation. The
-second is the chronological outer-fold score of that same rule. Otherwise, or
-when the artifact is absent or stale, the unshifted carrier serves and
-provenance names the reason.
+settlement-graded additive shift `b(h)`, a continuous function of local hour per
+metric (`scripts/fit_day0_remaining_center_bias.py`, served by
+`src/calibration/day0_remaining_bias.py`). Evidence pools per (metric, 2-hour
+local band): the band's MLE comes from the terminal-bin likelihood of this same
+operator on posteriors whose served q is the carrier itself
+(fast-residual-transported rows excluded), with a variance clustered by
+city-day. The band's node is the posterior mean under a N(0, tau2) prior, with
+tau2 the method-of-moments spread of the metric's band MLEs. A station's node
+adds its own shrunk deviation. `b(h)` interpolates linearly between nodes at the
+band centres and is flat past the end nodes. There is no activation gate and no
+step. The same evidence on either side of a band edge serves the same q up to
+the curve's continuous drift. A refit moves `b` by the change in evidence, never
+by a binary flip. The shift enters before the max/min and the settlement
+integration, identically in the point q and the confidence draws. It never moves
+the observed extreme or the typed final-daily provider centers. When the
+artifact is absent, stale, malformed or of an older schema, the unshifted
+carrier serves and provenance names the reason. The refit job refits at boot
+whenever the incumbent's schema is not current. This change is Day0 survival revision
+`day0_settlement_channel_revision_model_v28_smooth_center_bias_v1` and resolver
+revision `day0_resolver_terminal_composition_v27_smooth_center_bias_v1`.
 
 #### Day0 diurnal-residual mixture (2026-09-29)
 

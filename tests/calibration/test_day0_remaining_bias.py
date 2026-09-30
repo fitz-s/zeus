@@ -1,16 +1,20 @@
 # Created: 2026-09-24
-# Last reused or audited: 2026-09-27
+# Last reused or audited: 2026-09-30
 # Authority basis: Day0 remaining-center settlement residual study 2026-09-24;
 #   docs/authority/replacement_final_form_2026_06_09.md "Day0 conditional
-#   remaining-path operator" (settlement-graded remaining-member center shift).
+#   remaining-path operator" (settlement-graded remaining-member center shift);
+#   2026-09-30 continuity repair (Helsinki band-edge q jump).
 """Contracts for the Day0 remaining-carrier center shift.
 
-(a) an active cell's shift moves q the fitted direction, in the point q AND the draws;
+(a) a warm shift moves q the fitted direction, in the point q AND the draws;
 (b) artifact absent -> q, samples and identity are byte-identical to the pre-change
     carrier (golden values captured from the unmodified builder);
 (c) a degF carrier receives the shift scaled by 9/5;
-(d) an inactive or unfitted cell serves no shift and says so;
+(d) a metric without a curve serves no shift and says so; the retired step-table
+    schema is refused;
 (e) the Day0 semantics revision is bumped and stamped into q_version;
+(f) the served shift is continuous in local hour: unchanged evidence across a band
+    edge cannot move q by a step;
 plus: the boundary and the typed final centers never move, and the entry and held
 adapter rebuilds apply the same lookup and stamp the same provenance.
 """
@@ -30,8 +34,10 @@ from src.calibration.day0_remaining_bias import (
     APPLIED,
     ARTIFACT_UNAVAILABLE,
     INACTIVE_CELL,
+    NODE_HOURS,
     SCHEMA_VERSION,
-    cell_key,
+    RemainingBiasTable,
+    band_of,
     day0_remaining_bias,
 )
 from src.config import runtime_cities_by_name
@@ -60,8 +66,17 @@ def _install(tmp_path, monkeypatch, artifact: object) -> None:
     monkeypatch.setattr(mod, "artifact_path", lambda: path)
 
 
-def _artifact(*, fit_date: str = "2026-09-24", **cells: dict) -> dict:
-    return {"schema_version": SCHEMA_VERSION, "fit_date": fit_date, "cells": cells}
+def _artifact(*, fit_date: str = "2026-09-24", **metrics: dict) -> dict:
+    return {"schema_version": SCHEMA_VERSION, "fit_date": fit_date, "metrics": metrics}
+
+
+def _flat(value: float, **stations: float) -> dict:
+    """A metric curve that serves ``value`` at every hour (stations likewise)."""
+
+    return {
+        "nodes_c": [value] * len(NODE_HOURS),
+        "stations": {city: [v] * len(NODE_HOURS) for city, v in stations.items()},
+    }
 
 
 def _carrier(city: str, unit: str, metric: str, fut, fin, boundary, bounds, bias=0.0):
@@ -163,10 +178,14 @@ def test_artifact_absent_serves_zero_with_visible_status(tmp_path, monkeypatch) 
     "artifact",
     (
         "{not json",
-        _artifact(**{"high|8": {"b_c": 0.5, "active": True}}) | {"schema_version": 99},
-        _artifact(**{"high|8": {"b_c": 9.0, "active": True}}),  # past the sanity rail
-        _artifact(fit_date="2026-09-10", **{"high|8": {"b_c": 0.5, "active": True}}),  # stale
-        _artifact(fit_date="2026-09-25", **{"high|8": {"b_c": 0.5, "active": True}}),  # future
+        _artifact(high=_flat(0.5)) | {"schema_version": 99},
+        # The retired gated step-table schema is refused, never read as a curve.
+        {"schema_version": 1, "fit_date": "2026-09-24",
+         "cells": {"high|8": {"b_c": 0.5, "active": True, "stations": {}}}},
+        _artifact(high=_flat(9.0)),  # past the sanity rail
+        _artifact(high={"nodes_c": [0.5] * 11}),  # wrong node count
+        _artifact(fit_date="2026-09-10", high=_flat(0.5)),  # stale
+        _artifact(fit_date="2026-09-25", high=_flat(0.5)),  # future
     ),
 )
 def test_unusable_artifact_serves_zero(tmp_path, monkeypatch, artifact) -> None:
@@ -182,16 +201,8 @@ def test_unusable_artifact_serves_zero(tmp_path, monkeypatch, artifact) -> None:
 # (d) ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "cells",
-    (
-        {"high|8": {"b_c": 0.5, "active": False, "n": 150}},  # low-n / failed gate
-        {"high|10": {"b_c": 0.5, "active": True}},  # a different band only
-        {"low|8": {"b_c": 0.5, "active": True}},  # the other metric only
-    ),
-)
-def test_inactive_or_unfitted_cell_serves_no_shift(tmp_path, monkeypatch, cells) -> None:
-    _install(tmp_path, monkeypatch, _artifact(**cells))
+def test_metric_without_a_curve_serves_no_shift(tmp_path, monkeypatch) -> None:
+    _install(tmp_path, monkeypatch, _artifact(low=_flat(0.5)))
 
     bias = day0_remaining_bias(
         city="Atlanta", metric="high", decision_time=DECISION, timezone_name="America/New_York"
@@ -202,12 +213,8 @@ def test_inactive_or_unfitted_cell_serves_no_shift(tmp_path, monkeypatch, cells)
     assert bias.artifact is not None and bias.artifact.startswith("2026-09-24:")
 
 
-def test_active_cell_uses_station_value_then_pool(tmp_path, monkeypatch) -> None:
-    _install(
-        tmp_path,
-        monkeypatch,
-        _artifact(**{"high|8": {"b_c": 0.5, "active": True, "stations": {"Atlanta": 0.3}}}),
-    )
+def test_station_curve_then_pooled_curve(tmp_path, monkeypatch) -> None:
+    _install(tmp_path, monkeypatch, _artifact(high=_flat(0.5, Atlanta=0.3)))
 
     atlanta = day0_remaining_bias(
         city="Atlanta", metric="HIGH", decision_time=DECISION, timezone_name="America/New_York"
@@ -216,9 +223,54 @@ def test_active_cell_uses_station_value_then_pool(tmp_path, monkeypatch) -> None
         city="Miami", metric="high", decision_time=DECISION, timezone_name="America/New_York"
     )
 
-    assert (atlanta.shift_c, atlanta.status) == (0.3, APPLIED)
-    assert (pooled.shift_c, pooled.status) == (0.5, APPLIED)
-    assert cell_key("high", 9.99) == "high|8" and cell_key("low", 23.5) == "low|22"
+    assert (atlanta.shift_c, atlanta.status) == (pytest.approx(0.3), APPLIED)
+    assert (pooled.shift_c, pooled.status) == (pytest.approx(0.5), APPLIED)
+    assert band_of(9.99) == 8 and band_of(23.5) == 22
+
+
+# Continuity: the served shift is one continuous function of local hour ----------
+
+
+def _table(nodes: list[float]) -> RemainingBiasTable:
+    return RemainingBiasTable(
+        _artifact(high={"nodes_c": nodes, "stations": {}}), identity="t"
+    )
+
+
+def test_shift_is_continuous_across_every_band_edge() -> None:
+    # The live 09-29 Helsinki shape: +0.8 in the first band, 0 from 02:00 on. A step
+    # table served 0.8 at 01:59 and 0.0 at 02:01 on unchanged evidence.
+    nodes = [0.8] + [0.0] * (len(NODE_HOURS) - 1)
+    table = _table(nodes)
+    for edge in range(2, 24, 2):
+        before = table.shift(city="Helsinki", metric="high", local_hour=edge - 1 / 60).shift_c
+        after = table.shift(city="Helsinki", metric="high", local_hour=edge + 1 / 60).shift_c
+        # Lipschitz in local hour: |db| <= max node gap / node spacing x elapsed hours.
+        assert abs(after - before) <= 0.8 / 2.0 * (2 / 60) + 1e-12
+    assert table.shift(city="Helsinki", metric="high", local_hour=1.0).shift_c == 0.8
+    assert table.shift(city="Helsinki", metric="high", local_hour=2.0).shift_c == (
+        pytest.approx(0.4)
+    )
+    assert table.shift(city="Helsinki", metric="high", local_hour=3.0).shift_c == 0.0
+    # Flat past the end nodes, including across local midnight's two ends.
+    assert table.shift(city="Helsinki", metric="high", local_hour=0.0).shift_c == 0.8
+    assert table.shift(city="Helsinki", metric="high", local_hour=23.99).shift_c == 0.0
+
+
+def test_same_evidence_across_a_band_edge_moves_q_by_almost_nothing() -> None:
+    """Helsinki 2026-09-30 high: one carrier (same members, observation, bins) at
+    01:57 and 02:08 local. The served q of any bin may move only by the shift's
+    continuous drift over those 11 minutes, never by the 0.8 degC step."""
+
+    nodes = [0.8] + [0.0] * (len(NODE_HOURS) - 1)
+    table = _table(nodes)
+    case = ("Hong Kong", "C", "high", (16.44, 15.36, 15.10), (), 12.0,
+            [(None, 13), (14, 14), (15, 15), (16, 16), (17, None)])
+    q = []
+    for local_hour in (1 + 57 / 60, 2 + 8 / 60):
+        shift = table.shift(city="Helsinki", metric="high", local_hour=local_hour).shift_c
+        q.append(np.asarray(_carrier(*case, bias=shift)["q"]))
+    assert float(np.max(np.abs(q[1] - q[0]))) < 0.05
 
 
 # (a) and (c) -------------------------------------------------------------------
@@ -341,7 +393,7 @@ def _run_adapter_rebuild(tmp_path, monkeypatch, authority_kind: str, b_c: float 
     if b_c is None:
         monkeypatch.setattr(mod, "artifact_path", lambda: tmp_path / "absent.json")
     else:
-        _install(tmp_path, monkeypatch, _artifact(**{"high|8": {"b_c": b_c, "active": True}}))
+        _install(tmp_path, monkeypatch, _artifact(high=_flat(b_c)))
     monkeypatch.setattr(era, "_day0_extra_member_sigma_native", lambda **_kwargs: 0.7)
     original = hourly.build_day0_remaining_probability_carrier
     calls: list[dict] = []
@@ -440,13 +492,17 @@ def test_semantics_revision_is_bumped_and_stamped() -> None:
         day0_probability_semantics_revision,
     )
 
-    assert DAY0_PROBABILITY_SEMANTICS_REVISION == (
-        "day0_settlement_channel_revision_model_v25_land_grid_v3"
-    )
+    assert DAY0_PROBABILITY_SEMANTICS_REVISION in {
+        "day0_settlement_channel_revision_model_v28_smooth_center_bias_v1",
+        "day0_resolver_terminal_composition_v27_smooth_center_bias_v1",
+    }
     stamped = bind_day0_probability_semantics("q-hash")
-    assert day0_probability_semantics_revision(stamped) == (
-        "day0_settlement_channel_revision_model_v25_land_grid_v3"
-    )
-    assert day0_probability_semantics_revision(
-        "day0-semrev:day0_remaining_center_bias_v20:q-hash"
-    ) != DAY0_PROBABILITY_SEMANTICS_REVISION
+    assert day0_probability_semantics_revision(stamped) == DAY0_PROBABILITY_SEMANTICS_REVISION
+    for superseded in (
+        "day0_remaining_center_bias_v20",
+        "day0_settlement_channel_revision_model_v27_diurnal_mixture_v1",
+        "day0_resolver_terminal_composition_v26_diurnal_mixture_v1",
+    ):
+        assert day0_probability_semantics_revision(
+            f"day0-semrev:{superseded}:q-hash"
+        ) != DAY0_PROBABILITY_SEMANTICS_REVISION

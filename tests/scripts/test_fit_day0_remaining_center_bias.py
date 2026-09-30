@@ -1,13 +1,14 @@
 # Created: 2026-09-24
-# Last reused or audited: 2026-09-24
+# Last reused or audited: 2026-09-30
 # Authority basis: Day0 remaining-center settlement residual study 2026-09-24;
-#   scripts/fit_day0_remaining_center_bias.py activation rule (inner validation inside
-#   each chronological outer fold, city-day clustered, >= 0.02 nats and UB < 0).
+#   2026-09-30 continuity repair: scripts/fit_day0_remaining_center_bias.py serves a
+#   shrunk continuous node curve per metric (no activation gate, no step table).
 """Fitter contracts on synthetic log-likelihood curves (no database)."""
 
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -15,113 +16,144 @@ from types import SimpleNamespace
 import numpy as np
 
 from scripts import fit_day0_remaining_center_bias as fit
+from src.calibration.day0_remaining_bias import NODE_HOURS, RemainingBiasTable
 
 
 def _curve(true_b: float, sharp: float = 8.0) -> np.ndarray:
     return -sharp * (fit.GRID_C - true_b) ** 2 - 1.0
 
 
-def _records(cell: str, true_b: float, *, days: int, cities: int, hours: int, noise: float):
-    rng = np.random.default_rng(7)
+def _records(metric: str, band: int, true_b: float, *, days: int, cities: int, hours: int,
+             noise: float, sharp: float = 8.0, seed: int = 7, start_day: int = 0):
+    rng = np.random.default_rng(seed)
     start = datetime(2026, 8, 1, tzinfo=UTC)
     out = []
-    for day in range(days):
+    for day in range(start_day, start_day + days):
         decided = start + timedelta(days=day, hours=6)
         for city in range(cities):
+            day_b = true_b + rng.normal(0.0, noise)
             for hour in range(hours):
                 out.append(
                     fit.Record(
                         city=f"city{city}",
                         target_date=(start + timedelta(days=day)).date().isoformat(),
-                        metric=cell.split("|")[0],
-                        cell=cell,
+                        metric=metric,
+                        band=band,
                         decided_at=decided + timedelta(minutes=hour),
                         label_known_at=decided + timedelta(hours=18),
-                        loglik=_curve(true_b + rng.normal(0.0, noise)),
+                        loglik=_curve(day_b, sharp),
                     )
                 )
     return out
 
 
-def test_real_shift_is_activated_and_recovered() -> None:
-    records = _records("high|4", 0.5, days=30, cities=6, hours=2, noise=0.3)
-
-    active, verdicts = fit.fit_rule(records)
-
-    assert verdicts["high|4"]["active"] is True
-    pooled, _stations = active["high|4"]
-    assert abs(fit.GRID_C[pooled] - 0.5) <= 0.1
+def _node(artifact: dict, metric: str, band: int) -> float:
+    return artifact["metrics"][metric]["bands"][str(band)]["node_c"]
 
 
-def test_null_cell_is_not_activated() -> None:
-    records = _records("low|0", 0.0, days=30, cities=6, hours=2, noise=0.3)
+def test_well_measured_band_serves_nearly_its_estimate() -> None:
+    records = [
+        *_records("high", 4, 0.5, days=30, cities=8, hours=2, noise=0.3),
+        *_records("high", 12, -0.3, days=30, cities=8, hours=2, noise=0.3, seed=8),
+        *_records("high", 20, 0.0, days=30, cities=8, hours=2, noise=0.3, seed=9),
+    ]
 
-    active, verdicts = fit.fit_rule(records)
+    artifact = fit.build_artifact(records, fit_date="2026-09-01", record_counts={})
 
-    assert "low|0" not in active
-    assert verdicts["low|0"]["active"] is False
-
-
-def test_low_n_cell_is_never_activated() -> None:
-    records = _records("high|8", 0.8, days=20, cities=3, hours=1, noise=0.1)
-    assert len(records) < fit.MIN_ROWS
-
-    active, verdicts = fit.fit_rule(records)
-
-    assert active == {}
-    assert verdicts["high|8"]["inner"] is None
+    band = artifact["metrics"]["high"]["bands"]["4"]
+    assert abs(band["b_mle_c"] - 0.5) <= 0.1
+    assert 0.8 * band["b_mle_c"] <= band["node_c"] <= band["b_mle_c"]
+    assert _node(artifact, "high", 12) < 0.0
 
 
-def test_inner_fit_below_min_rows_is_never_activated_even_when_the_cell_is_large() -> None:
-    # 12 days x 20 rows = 240 >= MIN_ROWS in total, but the inner fit sees < MIN_ROWS.
-    records = _records("high|8", 0.8, days=12, cities=10, hours=2, noise=0.1)
-    inner_fit, _valid = fit._split(records)
-    assert len(records) >= fit.MIN_ROWS > len(inner_fit)
+def test_unmeasured_band_serves_zero_and_the_curve_has_every_node() -> None:
+    records = _records("high", 4, 0.5, days=30, cities=8, hours=2, noise=0.3)
 
-    active, verdicts = fit.fit_rule(records)
+    artifact = fit.build_artifact(records, fit_date="2026-09-01", record_counts={})
 
-    assert active == {} and verdicts["high|8"]["inner"] is None
-
-
-def test_inner_split_is_chronological_by_target_date() -> None:
-    records = _records("high|4", 0.5, days=10, cities=2, hours=1, noise=0.0)
-
-    inner_fit, valid = fit._split(records)
-
-    assert max(r.target_date for r in inner_fit) < min(r.target_date for r in valid)
-    assert len(inner_fit) + len(valid) == len(records)
+    nodes = artifact["metrics"]["high"]["nodes_c"]
+    assert len(nodes) == len(NODE_HOURS)
+    assert nodes[fit.BANDS.index(10)] == 0.0
 
 
-def test_outer_folds_train_only_on_labels_known_before_each_block() -> None:
-    records = _records("high|4", 0.5, days=30, cities=6, hours=2, noise=0.3)
-    seen: list[tuple[str, str]] = []
-    original = fit.fit_rule
+def test_thin_band_is_shrunk_toward_zero_by_its_own_variance() -> None:
+    """A band with a few noisy city-days and a large raw estimate may not serve its
+    raw estimate: the posterior mean under the metric's prior shrinks it by
+    tau2 / (tau2 + v), so its node is a small fraction of the MLE."""
 
-    def spy(train):
-        seen.append((max(r.target_date for r in train), max(r.label_known_at for r in train).isoformat()))
-        return original(train)
+    well = [
+        *_records("high", 4, 0.3, days=30, cities=8, hours=2, noise=0.3),
+        *_records("high", 12, -0.2, days=30, cities=8, hours=2, noise=0.3, seed=8),
+        *_records("high", 20, 0.1, days=30, cities=8, hours=2, noise=0.3, seed=9),
+    ]
+    thin = _records("high", 22, 1.0, days=3, cities=1, hours=2, noise=1.0, sharp=0.6, seed=3)
 
-    fit.fit_rule = spy
-    try:
-        result = fit.outer_folds(records)
-    finally:
-        fit.fit_rule = original
-    for (last_train_date, _), block in zip(seen, result["blocks"], strict=True):
-        assert last_train_date < block[0]
-    cell = result["cells"]["high|4"]
-    assert cell["gain"] > fit.MIN_GAIN_NATS and cell["ub_new_minus_old"] < 0.0
+    artifact = fit.build_artifact(well + thin, fit_date="2026-09-01", record_counts={})
+
+    band = artifact["metrics"]["high"]["bands"]["22"]
+    assert abs(band["b_mle_c"]) >= 0.5
+    assert abs(band["node_c"]) <= 0.25 * abs(band["b_mle_c"])
 
 
-def test_served_cell_needs_both_the_rule_and_its_outer_fold_record() -> None:
-    real = _records("high|4", 0.5, days=30, cities=6, hours=2, noise=0.3)
-    null = _records("low|0", 0.0, days=30, cities=6, hours=2, noise=0.3)
+def test_one_new_day_cannot_flip_a_band_on_or_off() -> None:
+    """Refit-to-refit: adding one settled day moves every node by a small amount; the
+    served curve never jumps between 0 and the full estimate as a gate would."""
 
-    artifact = fit.build_artifact(real + null, fit_date="2026-09-01", record_counts={})
+    def build(days: int) -> dict:
+        records = [
+            *_records("high", 0, 0.8, days=days, cities=4, hours=2, noise=0.6, sharp=2.0),
+            *_records("high", 12, -0.2, days=days, cities=4, hours=2, noise=0.6, seed=8),
+            *_records("high", 20, 0.1, days=days, cities=4, hours=2, noise=0.6, seed=9),
+        ]
+        return fit.build_artifact(records, fit_date="2026-09-01", record_counts={})
 
-    served, unshifted = artifact["cells"]["high|4"], artifact["cells"]["low|0"]
-    assert served["rule_active"] and served["active"]
-    assert served["oos_gain"] >= fit.MIN_GAIN_NATS and served["oos_ub_new_minus_old"] < 0.0
-    assert not unshifted["active"]
+    for days in range(6, 20):
+        before, after = build(days), build(days + 1)
+        for a, b in zip(before["metrics"]["high"]["nodes_c"], after["metrics"]["high"]["nodes_c"]):
+            assert abs(b - a) < 0.25
+
+
+def test_station_node_is_shrunk_toward_the_pooled_node() -> None:
+    records = _records("high", 4, 0.3, days=30, cities=10, hours=2, noise=0.1)
+    # city0 runs 0.6 warmer than the pool on every day.
+    records = [
+        r if r.city != "city0" else fit.Record(
+            r.city, r.target_date, r.metric, r.band, r.decided_at, r.label_known_at,
+            _curve(0.9),
+        )
+        for r in records
+    ]
+
+    curve = fit.build_artifact(records, fit_date="2026-09-01", record_counts={})["metrics"]["high"]
+    table = RemainingBiasTable(
+        {"schema_version": fit.SCHEMA_VERSION, "fit_date": "2026-09-01",
+         "metrics": {"high": curve}},
+        identity="t",
+    )
+
+    pooled = table.shift(city="unseen", metric="high", local_hour=5.0).shift_c
+    own = table.shift(city="city0", metric="high", local_hour=5.0).shift_c
+    assert pooled < own <= 0.9 + 1e-9
+
+
+def test_estimate_variance_is_clustered_by_city_day() -> None:
+    """Twenty identical hourly rows of one city-day are one piece of evidence."""
+
+    one_day = _records("high", 4, 0.5, days=1, cities=1, hours=1, noise=0.0)
+    twenty = _records("high", 4, 0.5, days=1, cities=1, hours=20, noise=0.0)
+
+    v1 = fit.estimate(one_day, lambda r: (r.city, r.target_date)).v
+    v20 = fit.estimate(twenty, lambda r: (r.city, r.target_date)).v
+
+    assert math.isfinite(v1) and v20 >= v1 - 1e-12
+
+
+def test_edge_maximum_is_unmeasured() -> None:
+    rows = _records("high", 4, 3.0, days=5, cities=2, hours=1, noise=0.0)
+
+    est = fit.estimate(rows, lambda r: (r.city, r.target_date))
+
+    assert est.b == 0.0 and math.isinf(est.v)
 
 
 def test_fast_residual_posteriors_are_excluded_from_records(tmp_path, monkeypatch) -> None:
@@ -178,23 +210,4 @@ def test_fast_residual_posteriors_are_excluded_from_records(tmp_path, monkeypatc
 
     assert counts["hours"] == 1
     assert [r.decided_at for r in records] == [datetime(2026, 9, 19, 18, 10, tzinfo=UTC)]
-    assert records[0].cell == "high|2"
-
-
-def test_clustered_gain_averages_hours_within_a_city_day_first() -> None:
-    base = datetime(2026, 8, 1, tzinfo=UTC)
-    good = fit.Record("a", "2026-08-01", "high", "high|4", base, base, _curve(0.5))
-    many = [
-        fit.Record("b", "2026-08-01", "high", "high|4", base, base, _curve(0.0))
-        for _ in range(9)
-    ]
-    model = (int(np.argmin(np.abs(fit.GRID_C - 0.5))), {})
-
-    result = fit.clustered_gain([good, *many], lambda _record: model)
-
-    per_day = [
-        float(_curve(0.5)[model[0]] - _curve(0.5)[fit.ZERO]),
-        float(_curve(0.0)[model[0]] - _curve(0.0)[fit.ZERO]),
-    ]
-    assert result["city_days"] == 2
-    assert np.isclose(result["gain"], np.mean(per_day))
+    assert records[0].band == 2

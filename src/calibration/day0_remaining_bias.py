@@ -1,15 +1,30 @@
 # Created: 2026-09-24
-# Last reused or audited: 2026-09-24
+# Last reused or audited: 2026-09-30
 # Authority basis: Day0 remaining-center settlement residual study 2026-09-24
 #   (27,513 settled carrier rows: HIGH local 00-12 settled - mean member remaining max
-#   = +0.27..+0.50 degC at a served width that already matches the residual sd).
+#   = +0.27..+0.50 degC at a served width that already matches the residual sd);
+#   2026-09-30 continuity repair (Helsinki 09-30 high: a band edge and a refit gate
+#   flip each moved q(15C) 0.07 -> 0.45 on unchanged evidence).
 #   Fitted by scripts/fit_day0_remaining_center_bias.py; applied by
 #   src/data/day0_hourly_vectors.build_day0_remaining_probability_carrier.
 """Settlement-graded center bias of the Day0 remaining-day carrier.
 
 WHAT IT CORRECTS. The remaining-hourly member extremes the shared Day0 carrier
-integrates are cold in some (metric, local-hour band) cells while its width is
-right. The fitted value ``b`` (degC) moves those member centers; nothing else.
+integrates run cold or warm by an amount that depends on the local hour while its
+width is right. The served value ``b(h)`` (degC) moves those member centers; nothing
+else.
+
+SHAPE. ``b`` is ONE continuous function of local hour ``h``: piecewise linear through
+per-band node values placed at the band centres (01:00, 03:00, ..., 23:00 local) and
+flat beyond the first and last centre. A band is only where evidence is pooled; it is
+never a step in the served q. The same evidence at 01:59 and 02:01 serves shifts that
+differ by at most (1/60 h) x the local slope.
+
+SIZE. Every node value is already shrunk toward 0 by its own uncertainty in the fitter
+(normal prior centred at 0, variance from the settled likelihood curvature, clustered
+by city-day): a thin or noisy band contributes almost nothing, a well-measured band
+contributes almost all of its estimate. There is no activation gate, so a daily refit
+moves ``b`` by the change in evidence, never by a binary flip.
 
 WHERE IT APPLIES. ``b`` is added to the remaining-hourly member centers before the
 observed-boundary max/min and the settlement integration, identically in the point
@@ -19,13 +34,12 @@ the separately typed final-daily provider centers are never shifted. The persist
 the residual basis the fitter reads, and a fit on already-shifted centers would
 measure its own correction and unwind it.
 
-QUALIFIED FALLBACK, NOT FAIL-OPEN. A missing, stale, malformed or future-dated
-artifact serves shift 0 with status ``artifact_unavailable``; a cell that is absent
-or was not activated by the walk-forward gate serves shift 0 with status
-``inactive_cell``. Shift 0 is acceptable only because the unshifted recipe is the one
-already live. Every carrier stamps the status, so an absent artifact is visible in
-provenance, never silent. This module never raises into the decision path and never
-reads a database.
+QUALIFIED FALLBACK, NOT FAIL-OPEN. A missing, stale, malformed, older-schema or
+future-dated artifact serves shift 0 with status ``artifact_unavailable``. Shift 0 is
+acceptable only because the unshifted recipe is the fallback the carrier has always
+had. Every carrier stamps the status, so an absent artifact is visible in provenance,
+never silent. This module never raises into the decision path and never reads a
+database.
 
 WALK-FORWARD. The fitter trains on settled days strictly before ``fit_date`` whose
 labels were known before that date began (UTC). An artifact whose ``fit_date`` lies
@@ -34,6 +48,7 @@ after the decision date could have seen the decision day's outcome and is refuse
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import logging
@@ -42,16 +57,20 @@ import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 _LOG = logging.getLogger("zeus.day0_remaining_bias")
 
 ARTIFACT_FILENAME = "day0_remaining_center_bias.json"
-SCHEMA_VERSION = 1
-# Local-hour band width of one cell: ``metric|band`` with band = floor(hour/2)*2.
+# 2: one shrunk node curve per metric, served by linear interpolation. 1 was a gated
+# 2-hour step table and is refused (a boot refit replaces it).
+SCHEMA_VERSION = 2
+# Evidence is pooled per 2-hour local band; each band's shrunk value is a node at the
+# band centre, and the served shift interpolates linearly between nodes.
 BAND_HOURS = 2
-# Sanity rail on the raw estimate, not a tuning knob: the study's largest cell is
+NODE_HOURS = tuple(band + BAND_HOURS / 2.0 for band in range(0, 24, BAND_HOURS))
+# Sanity rail on a node value, not a tuning knob: the study's largest band is
 # +0.50 degC. A value past this is a unit flip or a corrupted settlement row, and the
 # whole artifact is refused rather than served.
 MAX_ABS_SHIFT_C = 2.0
@@ -60,14 +79,28 @@ MAX_ABS_SHIFT_C = 2.0
 MAX_ARTIFACT_AGE_DAYS = 7
 
 APPLIED = "applied"
+# The artifact carries no curve for this metric (the fitter saw none of its rows).
 INACTIVE_CELL = "inactive_cell"
 ARTIFACT_UNAVAILABLE = "artifact_unavailable"
 
 
-def cell_key(metric: str, local_hour: float) -> str:
-    """``metric|band`` for a local clock hour in [0, 24)."""
+def band_of(local_hour: float) -> int:
+    """The 2-hour band that pools fitting evidence for a local clock hour in [0, 24)."""
 
-    return f"{metric}|{int(local_hour) // BAND_HOURS * BAND_HOURS}"
+    return int(local_hour) // BAND_HOURS * BAND_HOURS
+
+
+def interpolate_nodes(nodes: Sequence[float], local_hour: float) -> float:
+    """The node curve at ``local_hour``: linear between band centres, flat past the ends."""
+
+    if local_hour <= NODE_HOURS[0]:
+        return float(nodes[0])
+    if local_hour >= NODE_HOURS[-1]:
+        return float(nodes[-1])
+    right = bisect.bisect_right(NODE_HOURS, local_hour)
+    x0, x1 = NODE_HOURS[right - 1], NODE_HOURS[right]
+    y0, y1 = float(nodes[right - 1]), float(nodes[right])
+    return y0 + (local_hour - x0) / (x1 - x0) * (y1 - y0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,39 +122,46 @@ class Day0RemainingBias:
 _UNAVAILABLE = Day0RemainingBias(0.0, ARTIFACT_UNAVAILABLE, None)
 
 
-def _shift_value(raw: object) -> float:
-    value = float(raw)
-    if not math.isfinite(value) or abs(value) > MAX_ABS_SHIFT_C:
-        raise ValueError(f"day0 remaining bias out of range: {raw!r}")
-    return value
+def _nodes(raw: object, where: str) -> tuple[float, ...]:
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+        raise ValueError(f"day0 remaining bias {where} nodes malformed")
+    values = tuple(float(value) for value in raw)
+    if len(values) != len(NODE_HOURS) or not all(
+        math.isfinite(v) and abs(v) <= MAX_ABS_SHIFT_C for v in values
+    ):
+        raise ValueError(f"day0 remaining bias {where} nodes out of range: {raw!r}")
+    return values
 
 
 class RemainingBiasTable:
-    """Validated lookup over the fitted artifact. Pure; no I/O."""
+    """Validated node curves over the fitted artifact. Pure; no I/O.
 
-    __slots__ = ("_cells", "_fit_date", "_identity")
+    Every metric the fitter saw carries a curve; a metric with no curve serves 0
+    (``inactive_cell``), the value the fitter's shrinkage gives an unmeasured band.
+    """
+
+    __slots__ = ("_curves", "_fit_date", "_identity")
 
     def __init__(self, artifact: Mapping[str, Any], *, identity: str) -> None:
         if int(artifact.get("schema_version", 0)) != SCHEMA_VERSION:
             raise ValueError("day0 remaining bias artifact schema_version mismatch")
         fit_date = str(artifact.get("fit_date") or "").strip()
         date.fromisoformat(fit_date)
-        cells = artifact.get("cells")
-        if not isinstance(cells, Mapping):
-            raise ValueError("day0 remaining bias artifact has no cells")
-        parsed: dict[str, tuple[bool, float, dict[str, float]]] = {}
-        for key, cell in cells.items():
-            if not isinstance(cell, Mapping):
-                raise ValueError(f"day0 remaining bias cell {key!r} malformed")
-            stations = cell.get("stations") or {}
+        metrics = artifact.get("metrics")
+        if not isinstance(metrics, Mapping):
+            raise ValueError("day0 remaining bias artifact has no metrics")
+        curves: dict[str, tuple[tuple[float, ...], dict[str, tuple[float, ...]]]] = {}
+        for metric, curve in metrics.items():
+            if not isinstance(curve, Mapping):
+                raise ValueError(f"day0 remaining bias metric {metric!r} malformed")
+            stations = curve.get("stations") or {}
             if not isinstance(stations, Mapping):
-                raise ValueError(f"day0 remaining bias cell {key!r} stations malformed")
-            parsed[str(key)] = (
-                cell.get("active") is True,
-                _shift_value(cell["b_c"]),
-                {str(city): _shift_value(value) for city, value in stations.items()},
+                raise ValueError(f"day0 remaining bias metric {metric!r} stations malformed")
+            curves[str(metric)] = (
+                _nodes(curve.get("nodes_c"), str(metric)),
+                {str(city): _nodes(v, f"{metric}/{city}") for city, v in stations.items()},
             )
-        self._cells = parsed
+        self._curves = curves
         self._fit_date = fit_date
         self._identity = identity
 
@@ -134,11 +174,13 @@ class RemainingBiasTable:
         return self._identity
 
     def shift(self, *, city: str, metric: str, local_hour: float) -> Day0RemainingBias:
-        cell = self._cells.get(cell_key(metric, local_hour))
-        if cell is None or not cell[0]:
+        curve = self._curves.get(metric)
+        if curve is None:
             return Day0RemainingBias(0.0, INACTIVE_CELL, self._identity)
-        _active, pooled, stations = cell
-        return Day0RemainingBias(stations.get(city, pooled), APPLIED, self._identity)
+        pooled, stations = curve
+        return Day0RemainingBias(
+            interpolate_nodes(stations.get(city, pooled), local_hour), APPLIED, self._identity
+        )
 
 
 def artifact_path() -> Path:

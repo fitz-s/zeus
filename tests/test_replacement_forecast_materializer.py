@@ -3525,10 +3525,12 @@ def test_day0_current_path_revision_separates_old_q_cohort() -> None:
     stamped = bind_day0_probability_semantics("current-path-cert")
     assert day0_probability_semantics_revision(stamped) == DAY0_PROBABILITY_SEMANTICS_REVISION
     assert DAY0_PROBABILITY_SEMANTICS_REVISION in {
-        "day0_settlement_channel_revision_model_v27_diurnal_mixture_v1",
-        "day0_resolver_terminal_composition_v26_diurnal_mixture_v1",
+        "day0_settlement_channel_revision_model_v28_smooth_center_bias_v1",
+        "day0_resolver_terminal_composition_v27_smooth_center_bias_v1",
     }
     assert stamped not in {
+        "day0-semrev:day0_settlement_channel_revision_model_v27_diurnal_mixture_v1:current-path-cert",
+        "day0-semrev:day0_resolver_terminal_composition_v26_diurnal_mixture_v1:current-path-cert",
         "day0-semrev:day0_settlement_channel_revision_model_v26_land_grid_v3:current-path-cert",
         "day0-semrev:day0_resolver_terminal_composition_v25_land_grid_v3:current-path-cert",
     }

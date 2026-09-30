@@ -1173,9 +1173,11 @@ class TestDay0RemainingCenterBiasRefitScheduled:
 
         import src.ingest_main as im
 
+        from src.calibration.day0_remaining_bias import SCHEMA_VERSION
+
         today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
         (tmp_path / "day0_remaining_center_bias.json").write_text(
-            _json.dumps({"schema_version": 1, "fit_date": today, "cells": {}}),
+            _json.dumps({"schema_version": SCHEMA_VERSION, "fit_date": today, "metrics": {}}),
             encoding="utf-8",
         )
         run_calls = []
@@ -1186,6 +1188,38 @@ class TestDay0RemainingCenterBiasRefitScheduled:
             im._day0_remaining_center_bias_refit_tick.__wrapped__()
 
         assert run_calls == []
+
+    def test_same_day_incumbent_with_an_older_schema_refits_at_boot(self, tmp_path) -> None:
+        """The 2026-09-30 06:40Z artifact is the retired schema-1 step table; a deploy
+        of the schema-2 loader must refit at boot, not serve the unshifted carrier
+        until tomorrow's cron."""
+        import datetime as _dt
+        import json as _json
+
+        import src.ingest_main as im
+        from src.calibration.day0_remaining_bias import SCHEMA_VERSION
+
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        for schema in (SCHEMA_VERSION - 1, None):
+            payload = {"fit_date": today, "cells": {}}
+            if schema is not None:
+                payload["schema_version"] = schema
+            (tmp_path / "day0_remaining_center_bias.json").write_text(
+                _json.dumps(payload), encoding="utf-8"
+            )
+            run_calls = []
+
+            def _fake_run(cmd, **kwargs):
+                run_calls.append(cmd)
+                return type("R", (), {"returncode": 0, "stdout": "wrote ok", "stderr": ""})()
+
+            with (
+                patch("src.config.STATE_DIR", tmp_path),
+                patch("subprocess.run", side_effect=_fake_run),
+            ):
+                im._day0_remaining_center_bias_refit_tick.__wrapped__()
+
+            assert len(run_calls) == 1, f"schema={schema}"
 
 
 class TestSettlementSigmaFloorMergeGate:

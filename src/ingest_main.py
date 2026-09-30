@@ -5214,15 +5214,22 @@ def _day0_remaining_center_bias_refit_tick():
 
     from src.config import STATE_DIR
 
+    from src.calibration.day0_remaining_bias import SCHEMA_VERSION as _CENTER_BIAS_SCHEMA
+
     script_path = Path(__file__).parent.parent / "scripts" / "fit_day0_remaining_center_bias.py"
     out_path = STATE_DIR / "day0_remaining_center_bias.json"
     fit_date = datetime.now(timezone.utc).date().isoformat()
+    # An incumbent written by an older fitter schema is unservable by the current
+    # loader (it serves the unshifted carrier), so a same-day fit_date alone never
+    # skips: a schema change refits at boot instead of waiting for the next cron.
     if out_path.exists():
         try:
-            incumbent_fit_date = json.loads(out_path.read_text(encoding="utf-8")).get("fit_date")
+            incumbent = json.loads(out_path.read_text(encoding="utf-8"))
+            incumbent_fit_date = incumbent.get("fit_date")
+            incumbent_schema = incumbent.get("schema_version")
         except Exception:
-            incumbent_fit_date = None
-        if incumbent_fit_date == fit_date:
+            incumbent_fit_date = incumbent_schema = None
+        if incumbent_fit_date == fit_date and incumbent_schema == _CENTER_BIAS_SCHEMA:
             logger.info(
                 "[DAY0_REMAINING_CENTER_BIAS_REFIT] skipping -- incumbent already fit through %s",
                 fit_date,

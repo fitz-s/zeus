@@ -2456,7 +2456,7 @@ files:
   src/calibration/day0_remaining_bias.py:
     zone: K3_extension
     authority_role: calibration_offset_loader
-    why: "Read-only loader for the fitted Day0 remaining-carrier center shift (state/day0_remaining_center_bias.json, produced daily by scripts/fit_day0_remaining_center_bias.py). One lookup day0_remaining_bias() serves the materializer and every adapter carrier rebuild; missing/stale/malformed artifact or inactive cell serves shift 0 with an explicit day0_remaining_bias_status. No DB reads; never raises into the decision path."
+    why: "Read-only loader for the fitted Day0 remaining-carrier center shift (state/day0_remaining_center_bias.json, produced daily by scripts/fit_day0_remaining_center_bias.py). One lookup day0_remaining_bias() serves the materializer and every adapter carrier rebuild; the shift is a shrunk node curve per metric interpolated linearly in local hour (continuous, no gate); missing/stale/malformed/older-schema artifact or a metric without a curve serves shift 0 with an explicit day0_remaining_bias_status. No DB reads; never raises into the decision path."
     downstream:
     - src/data/replacement_forecast_materializer.py
     - src/engine/event_reactor_adapter.py
