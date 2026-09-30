@@ -15716,6 +15716,11 @@ def test_ordinary_wrh_amber_current_kernel_ignores_age_fit(tmp_path, monkeypatch
         fixture.conn.commit()
         fixture.request, fixture.result = request, result
         public = normal._kord_public_bundles(fixture, monkeypatch, at=cut)
+        from src.data.staleness_degrade_ladder import StalenessBand, classify_posterior_staleness
+        actual_cycle = datetime.fromisoformat(next(iter(public.values())).source_cycle_time)
+        actual_age = classify_posterior_staleness(cut, actual_cycle)
+        assert fixture.cut == actual_cycle + timedelta(hours=20, minutes=15)
+        assert actual_age.band is StalenessBand.AMBER and actual_age.age_hours == pytest.approx(20 + 25 / 60)
         original = tuple(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
             (result.posterior_id,)).fetchone())
         # A real, hash-sealed controlled offline artifact; loader itself is not
