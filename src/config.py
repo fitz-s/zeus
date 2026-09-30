@@ -913,7 +913,9 @@ def station_ground_facts_from_bytes(
         return None
 
 
-def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]:
+def _station_ground_for_entry(
+    entry: dict, station_id: str, *, effective_at: datetime | None = None,
+) -> dict[str, object]:
     result: dict[str, object] = {
         "ground_status": "UNPROVEN", "ground_reason": "STATION_GROUND_PROOF_MISSING",
         "ground_elevation_m": None, "ground_facts": None, "ground_audit": None,
@@ -988,6 +990,21 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
             audit_keys.extend(("query_date", "query_url"))
         if any(claim.get(key) != value for key, value in facts.items()):
             raise ValueError("ground claim differs from official site facts")
+        if effective_at is not None:
+            if not isinstance(effective_at, datetime) or effective_at.tzinfo is None or effective_at.utcoffset() is None:
+                raise ValueError("ground analysis cutoff must be timezone-aware")
+            if effective_at < checked:
+                result["ground_reason"] = "STATION_GROUND_NOT_POSSESSED_AT_ANALYSIS_CUTOFF"
+                return result
+            # Verify the registry's source-capture facts first, then select the
+            # independently supplied decision interval from the same raw bytes.
+            # A future location becoming effective is not another HTTP capture.
+            facts = station_ground_facts_from_bytes(
+                source_kind=kind, station_id=station_id, raw_body=raw,
+                identity_bridge_bytes=bridge_raw, effective_at=effective_at,
+            )
+            if facts is None:
+                raise ValueError("official ground unavailable at analysis cutoff")
         # The recorded reference point need not equal the official DMS point.
         # Preserve both and apply the existing station identity tolerance only.
         lat, lon = float(entry["lat"]), float(entry["lon"])
@@ -1009,13 +1026,15 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
 
 
 def runtime_station_geometry_for_city(
-    city: City, *, registry_path: Path | None = None,
+    city: City, *, registry_path: Path | None = None, effective_at: datetime | None = None,
 ) -> dict[str, object]:
     """Bind station reference identity separately from proved measurement ground.
 
     Invalid registry rows degrade only this city. The existing 5 km station
     request-coordinate tolerance is an identity check, not a fitted forecast
-    cutoff; it does not attest the model grid's land mask or elevation.
+    cutoff; it does not attest the model grid's land mask or elevation. Explicit
+    effective_at selects decision-time facts after source possession; omission
+    returns source-capture metadata, not published-posterior authority.
     """
     path = registry_path or CONFIG_DIR / "station_precise_coords.json"
     source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
@@ -1074,7 +1093,7 @@ def runtime_station_geometry_for_city(
         station_surface="UNKNOWN", source=str(entry.get("source") or ""),
         validity_reason=None,
     )
-    proof.update(_station_ground_for_entry(entry, expected_id))
+    proof.update(_station_ground_for_entry(entry, expected_id, effective_at=effective_at))
     return proof
 
 

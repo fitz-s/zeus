@@ -1142,6 +1142,45 @@ def test_wmd_ground_rejects_explicit_point_or_position_quantity_change(tmp_path,
     assert config.station_ground_facts_from_bytes(raw_body=ET.tostring(root), **kwargs) is None
 
 
+def test_wmd_runtime_decision_interval_changes_without_capture_renewal(tmp_path, monkeypatch):
+    import copy
+    import hashlib
+    from datetime import datetime, timezone
+    import xml.etree.ElementTree as ET
+    import src.config as config
+    registry, artifact, _, rows = _official_wmd_registry(tmp_path, monkeypatch)
+    ns = {"w": "http://def.wmo.int/wmdr/2017", "g": "http://www.opengis.net/gml/3.2"}
+    root = ET.fromstring(artifact.read_bytes())
+    facility = root.find("w:facility/w:ObservingFacility", ns)
+    future = copy.deepcopy(facility.find("w:geospatialLocation", ns))
+    future.find("w:GeospatialLocation/w:validPeriod/g:TimePeriod/g:beginPosition", ns).text = "2026-10-01"
+    future.find("w:GeospatialLocation/w:geoLocation/g:Point/g:pos", ns).text = "48.9675 2.4275 100"
+    facility.append(future)
+    raw = ET.tostring(root)
+    artifact.write_bytes(raw)
+    rows["Paris"]["station_ground_proof"]["body_sha256"] = hashlib.sha256(raw).hexdigest()
+    registry.write_text(json.dumps(rows))
+    city = config.cities_by_name["Paris"]
+    previous = config.runtime_station_geometry_for_city(city, effective_at=datetime(2026, 9, 30, 1, 15, tzinfo=timezone.utc))
+    successor = config.runtime_station_geometry_for_city(city, effective_at=datetime(2026, 10, 1, tzinfo=timezone.utc))
+    assert previous["ground_status"] == successor["ground_status"] == "VERIFIED"
+    assert previous["ground_elevation_m"] == 67
+    assert successor["ground_elevation_m"] == 100
+    assert previous["ground_audit"] == successor["ground_audit"]
+    assert successor["ground_audit"]["checked_at"] == "2026-09-30T01:00:00Z"
+    assert config.runtime_station_geometry_for_city(city)["ground_elevation_m"] == 67  # capture metadata only
+    too_early = config.runtime_station_geometry_for_city(city, effective_at=datetime(2026, 9, 30, 0, 59, tzinfo=timezone.utc))
+    assert too_early["ground_status"] == "UNPROVEN"
+    assert too_early["ground_reason"] == "STATION_GROUND_NOT_POSSESSED_AT_ANALYSIS_CUTOFF"
+    rows["Paris"]["station_ground_proof"]["bridge"]["checked_at"] = "2026-09-30T01:01:00Z"
+    rows["Paris"]["station_ground_proof"]["checked_at"] = "2026-09-30T01:01:00Z"
+    registry.write_text(json.dumps(rows))
+    before_bridge = config.runtime_station_geometry_for_city(city, effective_at=datetime(2026, 9, 30, 1, tzinfo=timezone.utc))
+    assert before_bridge["ground_reason"] == "STATION_GROUND_NOT_POSSESSED_AT_ANALYSIS_CUTOFF"
+    assert config.runtime_station_geometry_for_city(city, effective_at=datetime(2026, 9, 30, 1, 2, tzinfo=timezone.utc))["ground_elevation_m"] == 67
+    assert config.runtime_station_geometry_for_city(city, effective_at=datetime(2026, 10, 1))["ground_status"] == "UNPROVEN"
+
+
 @pytest.mark.parametrize("mutation", [
     "foreign_wsi", "multiple_facilities", "foreign_icao", "wrong_wmo", "duplicate_icao", "not_metar",
     "closed", "future_location", "closed_location", "missing_facility_ground", "duplicate_location",
