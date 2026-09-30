@@ -49243,7 +49243,7 @@ def test_geoblocked_actual_adapter_keeps_held_point_trace_lanes(tmp_path,monkeyp
         tmp_path,monkeypatch,"high","none",_hko_clock_native_sources,inspect_cut=inspect_cut)
 
 
-def _kord_normal_prior_fixture(tmp_path, monkeypatch):
+def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None):
     """Ordinary KORD physical writers; controlled forecasts/ENS, not live weather."""
     from dataclasses import replace
     from datetime import date, datetime, timedelta, timezone
@@ -49272,7 +49272,8 @@ def _kord_normal_prior_fixture(tmp_path, monkeypatch):
 
     utc = timezone.utc
     city = runtime_cities_by_name()["Chicago"]
-    target, cycle = date(2026, 10, 1), datetime(2026, 10, 1, tzinfo=utc)
+    target, cycle = target_date or date(2026, 10, 1), datetime(2026, 10, 1, tzinfo=utc)
+    lead = (target-cycle.date()).days
     capture, cut = cycle + timedelta(minutes=10), cycle + timedelta(hours=8, minutes=15)
     native_capture = cycle + timedelta(hours=8, minutes=5)
     station = runtime_station_geometry_for_city(city, effective_at=cut)
@@ -49302,7 +49303,7 @@ def _kord_normal_prior_fixture(tmp_path, monkeypatch):
     manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
     native_payload.update(data_version=ECMWF_OPENDATA_LOW_DATA_VERSION,
         generated_at=native_capture.isoformat(),unit="F",members_unit="F",lat=city.lat,lon=city.lon,
-        lead_day=0,nearest_grid_lat=42.0,nearest_grid_lon=-88.0,
+        lead_day=lead,nearest_grid_lat=42.0,nearest_grid_lon=-88.0,
         local_day_window={"start":midnight.astimezone(utc).isoformat(),
                           "end":(midnight+timedelta(days=1)).astimezone(utc).isoformat()},
         manifest_sha256=manifest_sha,manifest_hash=manifest_sha,grid_surface_evidence=native_grid)
@@ -49313,7 +49314,7 @@ def _kord_normal_prior_fixture(tmp_path, monkeypatch):
     native_root = tmp_path/"native-ens"
     native_dir = native_root/"raw"/"coordinate_manifests"/manifest_sha/"open_ens_mn2t6_localday_min"/"chicago"/"20261001"
     native_dir.mkdir(parents=True)
-    native_path = native_dir/"open_ens_mn2t6_localday_min_target_2026-10-01_lead_0.json"
+    native_path = native_dir/f"open_ens_mn2t6_localday_min_target_{target}_lead_{lead}.json"
     native_path.write_text(json.dumps(native_payload),encoding="utf-8")
     builtin = sqlite3.connect(":memory:")
     sql_clock = [native_capture]
@@ -49378,7 +49379,8 @@ def _kord_normal_prior_fixture(tmp_path, monkeypatch):
         baseline_data_version=snapshot["dataset_id"],baseline_source_available_at=native_capture,
         source_cycle_time=cycle,computed_at=cut,expires_at=cut+timedelta(hours=2),
         openmeteo_anchor=anchor,openmeteo_raw_payload_bytes=raw,openmeteo_source_available_at=capture,
-        day0_observation_state=DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,bins=bins,
+        day0_observation_state=(DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+            if midnight.astimezone(utc) <= cut else None),bins=bins,
         settlement_step_c=_settlement_step_c(city.settlement_unit))
     request = _hko_request_with_owned_anchor(conn, request)  # Generic actual-city branch, not HKO source permission.
 
@@ -49607,6 +49609,24 @@ def test_noaa_kord_normal_prior_has_independent_physical_public_authority(tmp_pa
     fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch)
     try:
         _kord_public_bundles(fixture,monkeypatch,at=fixture.cut)
+    finally:
+        fixture.conn.close()
+        fixture.builtin.close()
+
+
+def test_noaa_kord_normal_future_prior_uses_its_actual_target(tmp_path,monkeypatch,_noaa_native_sources):
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    try:
+        assert fixture.request.target_date == _dt.date(2026,10,2)
+        assert fixture.request.day0_observation_state is None
+        assert fixture.request.source_cycle_time == _dt.datetime(2026,10,1,tzinfo=_dt.timezone.utc)
+        _kord_public_bundles(fixture,monkeypatch,at=fixture.cut)
+        row = fixture.conn.execute("SELECT target_date FROM ensemble_snapshots WHERE source_run_id=?",
+            (fixture.request.baseline_source_run_id,)).fetchone()
+        assert row[0] == "2026-10-02"
+        payload_path = next((tmp_path/"native-ens").rglob("*_target_2026-10-02_lead_1.json"))
+        payload = json.loads(payload_path.read_text())
+        assert payload["target_date_local"] == "2026-10-02" and payload["lead_day"] == 1
     finally:
         fixture.conn.close()
         fixture.builtin.close()

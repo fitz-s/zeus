@@ -1438,7 +1438,8 @@ def _reader_shanghai_native_high(conn, request, root, monkeypatch):
         cycle=cycle.isoformat(),selected_coords=selected,decision_at=captured))["grid_surface_evidence"]
     grid["mask_source_fetched_at"] = captured.isoformat()
     manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
-    body.update(city=city.name,lat=city.lat,lon=city.lon,timezone=city.timezone,unit=city.settlement_unit,
+    lead = (request.target_date-cycle.date()).days
+    body.update(city=city.name,lat=city.lat,lon=city.lon,timezone=city.timezone,unit=city.settlement_unit,lead_day=lead,
         generated_at=captured.isoformat(),manifest_sha256=manifest_sha,manifest_hash=manifest_sha,
         grid_surface_evidence=grid)
     body["selected_step_ranges"] = body["selected_step_ranges_inner"]
@@ -1453,7 +1454,7 @@ def _reader_shanghai_native_high(conn, request, root, monkeypatch):
     cycle_directory = native._cycle_extract_dir_name(run_date=cycle.date(),run_hour=cycle.hour)
     directory = source_root/"raw"/"coordinate_manifests"/manifest_sha/"open_ens_mx2t6_localday_max"/"shanghai"/cycle_directory
     directory.mkdir(parents=True)
-    path = directory/f"open_ens_mx2t6_localday_max_target_{request.target_date}_lead_1.json"
+    path = directory/f"open_ens_mx2t6_localday_max_target_{request.target_date}_lead_{lead}.json"
     path.write_text(json.dumps(body),encoding="utf-8")
     builtin = sqlite3.connect(":memory:")
     conn.create_function("strftime",2,lambda fmt,value: captured.isoformat(timespec="milliseconds")
@@ -1505,7 +1506,9 @@ def _shanghai_reader_current_certificate(tmp_path, monkeypatch):
         expires_at=datetime(2026,10,1,16,15,tzinfo=UTC))
 
 
-def _shanghai_reader_certificate(tmp_path, monkeypatch, *, expires_at):
+def _shanghai_reader_certificate(tmp_path, monkeypatch, *, expires_at,
+    target_date=date(2026,10,2),source_cycle_time=datetime(2026,10,1,tzinfo=UTC),
+    computed_at=None,first_compute_at=None,ground_recorded_at=None):
     """Normal Shanghai physical ownership; controlled forecast/ENS inputs.
 
     The complete relative fixture window follows retained HOMR possession,
@@ -1525,10 +1528,12 @@ def _shanghai_reader_certificate(tmp_path, monkeypatch, *, expires_at):
         source = _hko_source_surface.__wrapped__(root,monkeypatch,None)
         next(source)
         try:
-            cut = datetime(2026,10,1,8,15,tzinfo=UTC)
+            cut = computed_at or datetime(2026,10,1,8,15,tzinfo=UTC)
             actual_override = materializer._replacement_bayes_precision_fusion_override
             conn,request = _shanghai_current_owner_request(root,monkeypatch,
-                computed_at=cut,first_compute_at=cut-timedelta(minutes=10))
+                target_date=target_date,source_cycle_time=source_cycle_time,
+                computed_at=cut,first_compute_at=first_compute_at or cut-timedelta(minutes=10),
+                ground_recorded_at=ground_recorded_at)
             assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
             # This is the first certificate construction, never a renewal of
             # an existing posterior. None delegates expiry to the owner law.
@@ -1630,6 +1635,29 @@ def test_reader_initial_certificate_uses_owner_default_expiry(tmp_path,monkeypat
             public = read_replacement_forecast_bundle(normal.conn,**normal.kwargs,authority_purpose=purpose)
             assert public.ok,public.reason_code
             assert public.bundle.posterior_id == normal.row["posterior_id"]
+    finally:
+        next(world,None)
+
+
+def test_reader_day0_high_uses_normal_full_native_prior_and_owned_observation(tmp_path,monkeypatch):
+    world = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None,
+        target_date=date(2026,10,1),source_cycle_time=datetime(2026,9,30,12,tzinfo=UTC),
+        first_compute_at=datetime(2026,9,30,20,5,tzinfo=UTC),
+        computed_at=datetime(2026,10,1,8,15,tzinfo=UTC),
+        ground_recorded_at=datetime(2026,9,30,13,tzinfo=UTC))
+    normal = next(world)
+    try:
+        assert normal.request.day0_observed_extreme_c == 26.
+        assert normal.request.day0_observed_extreme_source == "noaa_wrh_zspd"
+        assert normal.request.baseline_source_available_at == datetime(2026,9,30,20,5,tzinfo=UTC)
+        assert normal.request.openmeteo_source_available_at == datetime(2026,9,30,15,tzinfo=UTC)
+        proof = json.loads(normal.row["provenance_json"])
+        assert proof["day0_conditioning"]["observed_extreme_c"] == 26.
+        assert proof["day0_conditioning"]["source"] == "noaa_wrh_zspd"
+        assert proof["bayes_precision_fusion"]["current_evidence_shape"]["snapshot_id"] != 9001
+        for purpose in ReplacementForecastAuthorityPurpose:
+            public = read_replacement_forecast_bundle(normal.conn,**normal.kwargs,authority_purpose=purpose)
+            assert public.ok,public.reason_code
     finally:
         next(world,None)
 
