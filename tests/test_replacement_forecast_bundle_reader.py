@@ -1569,17 +1569,38 @@ def _shanghai_reader_current_certificate(tmp_path, monkeypatch):
 def _reader_with_posterior_fault(normal, *, missing=False, **fields):
     """Negative-only exact row SELECT; licensed storage and all other reads stay real."""
     class FaultCursor:
-        def __init__(self,cursor): self.cursor = cursor
+        def __init__(self,cursor,*,fk_projection=False):
+            self.cursor = cursor
+            self.fk_projection = fk_projection
         def fetchone(self):
             row = self.cursor.fetchone()
             if row is not None and "posterior_id" in row.keys() and row["posterior_id"]==normal.row["posterior_id"]:
                 return None if missing else {**dict(row),**fields}
             return row
+        def fetchall(self):
+            rows = self.cursor.fetchall()
+            if not self.fk_projection:
+                return rows
+            result = []
+            for row in rows:
+                if row[0] == normal.row["computed_at"] and row[1] == normal.row["provenance_json"] and row[2] == normal.row["openmeteo_anchor_id"]:
+                    if not missing:
+                        # Both views expose the exact same negative row.
+                        result.append(tuple(fields.get(key,value) for key,value in
+                            zip(("computed_at","provenance_json","openmeteo_anchor_id"),row)))
+                else:
+                    result.append(row)
+            return result
         def __getattr__(self,name): return getattr(self.cursor,name)
     class FaultRead:
         def execute(self,sql,parameters=()):
             cursor = normal.conn.execute(sql,parameters)
-            return FaultCursor(cursor) if "FROM forecast_posteriors" in sql else cursor
+            query = " ".join(sql.upper().split())
+            fk_projection = (query.startswith("SELECT COMPUTED_AT,PROVENANCE_JSON,OPENMETEO_ANCHOR_ID FROM FORECAST_POSTERIORS")
+                and tuple(parameters[:3]) == (normal.row["city"],normal.row["target_date"],normal.row["temperature_metric"])
+                and len(parameters)==4 and datetime.fromisoformat(parameters[3])==normal.request.computed_at)
+            return FaultCursor(cursor,fk_projection=fk_projection) if "FROM FORECAST_POSTERIORS" in query else cursor
+        def __getattr__(self,name): return getattr(normal.conn,name)
     return FaultRead()
 
 
@@ -2705,11 +2726,12 @@ def test_replacement_bundle_reader_binds_to_readiness_posterior_not_latest_scope
         assert newer["posterior_id"] != normal.row["posterior_id"]
         assert datetime.fromisoformat(newer["computed_at"]) == datetime.fromisoformat(newer["recorded_at"]) == cut
         assert newer["posterior_identity_hash"] != normal.row["posterior_identity_hash"]
-        for key in ("source_cycle_time","source_available_at","expires_at"):
+        for key in ("source_cycle_time","source_available_at"):
             assert newer[key] == normal.row[key]
         readiness = latest_replacement_readiness(conn,city=normal.row["city"],target_date=normal.row["target_date"],
             temperature_metric=request.temperature_metric,decision_time=cut)
         assert readiness is not None
+        assert readiness.expires_at == normal.readiness.expires_at == normal.request.expires_at
         class ClockType(type):
             def __instancecheck__(cls,value): return isinstance(value,datetime)
         class ReadClock(datetime,metaclass=ClockType):
@@ -4175,16 +4197,34 @@ def test_raw_hwm_unreadable_consumed_evidence_stays_superseded() -> None:
 
 
 def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance(
-    _shanghai_reader_current_certificate,
+    monkeypatch, _shanghai_reader_current_certificate,
 ) -> None:
     normal = _shanghai_reader_current_certificate
     provenance = json.loads(normal.row["provenance_json"])
     serving = provenance["bayes_precision_fusion"]["current_value_serving"]
     model = next(iter(serving))
     serving[model].pop("served_cycle")
-    result = read_replacement_forecast_bundle(_reader_with_posterior_fault(normal,
-        provenance_json=json.dumps(provenance)),**normal.kwargs)
+    fault = _reader_with_posterior_fault(normal,provenance_json=json.dumps(provenance))
+    full = fault.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (normal.row["posterior_id"],)).fetchone()
+    projected = fault.execute("SELECT computed_at,provenance_json,openmeteo_anchor_id FROM forecast_posteriors"
+        " WHERE city=? AND target_date=? AND temperature_metric=? AND datetime(computed_at)=datetime(?)",
+        (normal.row["city"],normal.row["target_date"],normal.row["temperature_metric"],normal.row["computed_at"])).fetchall()
+    assert len(projected)==1
+    assert json.loads(projected[0][1]) == json.loads(full["provenance_json"]) == provenance
+    assert projected[0][0] == normal.row["computed_at"]
+    assert projected[0][2] == normal.row["openmeteo_anchor_id"]
+    actual_hwm = reader.replacement_live_input_lag_reason
+    hwm_connections = []
+    def observe_hwm(conn,**kwargs):
+        hwm_connections.append(conn)
+        return actual_hwm(conn,**kwargs)
+    monkeypatch.setattr(reader,"replacement_live_input_lag_reason",observe_hwm)
+    # The HWM connection is explicit in the healthy fixture. Expose the same
+    # corrupt row in that read view, not a healthy second view of the row.
+    result = read_replacement_forecast_bundle(fault,**{**normal.kwargs,"raw_input_hwm_conn":fault})
 
+    assert hwm_connections == [fault]
     assert result.ok is False
     assert "current_value_serving_provenance_unverifiable" in result.reason_code
 
