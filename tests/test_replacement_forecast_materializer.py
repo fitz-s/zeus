@@ -7121,46 +7121,77 @@ def test_materialized_shape_binds_verified_selected_ens_grid_hash() -> None:
     conn.close()
 
 
+def _normal_hko_cli_inputs(tmp_path, monkeypatch):
+    """Generic CLI admission inputs, not a Shanghai or full-posterior license."""
+    from tests.test_config import _official_hko_registry
+    from src.config import runtime_cities_by_name
+    from src.data.station_ground_evidence import archive_station_ground_evidence
+
+    _official_hko_registry(tmp_path, monkeypatch)
+    test_state = tmp_path / "isolated-state"
+    test_state.mkdir()
+    forecast_db = test_state / "zeus-forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.row_factory = sqlite3.Row
+    apply_canonical_schema(conn, forecast_tables=True)
+    _create_readiness_state(conn)
+    conn.commit()
+    archived = archive_station_ground_evidence(forecast_db, ["Hong Kong"])
+    assert archived["status"] == "GROUND_SOURCE_ARCHIVED", archived
+    sqlite3.connect(test_state / "zeus-world.db").close()
+    raw = json.loads(_hko_raw_openmeteo_bytes())
+    raw.pop("_zeus_current_target_scope")
+    scoped = {**raw, "_zeus_current_target_scope": {
+        "city": "Hong Kong", "target_date": "2026-10-01", "metric": "high",
+    }}
+    sealed = (json.dumps(scoped, indent=2, sort_keys=True, default=str)+"\n").encode()
+    guard = _hko_precision_guard(decision_at=_hko_dt(4), raw_payload_bytes=sealed)
+    metadata_path = tmp_path / "precision.json"
+    metadata_path.write_text(json.dumps(asdict(guard.metadata), default=str), encoding="utf-8")
+    city = runtime_cities_by_name()["Hong Kong"]
+    seed = {
+        "city": city.name, "city_id": city.name, "city_timezone": city.timezone,
+        "target_date": "2026-10-01", "temperature_metric": "high",
+        "source_cycle_time": _hko_dt(0).isoformat(), "computed_at": _hko_dt(4).isoformat(),
+        "expires_at": _hko_dt(6).isoformat(),
+        "baseline_source_run_id": "b0-run", "baseline_data_version": _current_baseline_data_version("high"),
+        "baseline_source_available_at": _hko_dt(2).isoformat(),
+        "openmeteo_source_run_id": "om9-run", "openmeteo_source_available_at": _hko_dt(3).isoformat(),
+        "latitude": city.lat, "longitude": city.lon,
+        "precision_metadata_json": str(metadata_path),
+        "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0, "center_c": 25.0}],
+    }
+    return conn, raw, sealed, seed
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_direct_cli_seals_one_source_artifact_and_refuses_old_proof_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Direct fetch and precision metadata must describe the same sealed bytes."""
+    """Generic CLI seal/precision admission; no forecast-q or Shanghai license."""
     import scripts.materialize_replacement_forecast_live as cli
 
-    raw = json.loads(_fixture_raw_openmeteo_bytes())
-    raw.pop("_zeus_current_target_scope")
-    metadata_path = tmp_path / "precision.json"
-    metadata_path.write_text(json.dumps(asdict(_precision_guard().metadata), default=str), encoding="utf-8")
-    seed = {
-        "city": "Shanghai", "city_timezone": "Asia/Shanghai",
-        "target_date": "2026-06-07", "temperature_metric": "high",
-        "source_cycle_time": _dt(0).isoformat(), "computed_at": _dt(4).isoformat(),
-        "baseline_source_run_id": "b0-run",
-        "baseline_data_version": _current_baseline_data_version("high"),
-        "baseline_source_available_at": _dt(2).isoformat(),
-        "openmeteo_source_run_id": "om9-run", "openmeteo_source_available_at": _dt(3).isoformat(),
-        "latitude": 31.1433, "longitude": 121.8053,
-        "precision_metadata_json": str(metadata_path),
-        "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0}],
-    }
+    conn, raw, sealed, seed = _normal_hko_cli_inputs(tmp_path, monkeypatch)
+    metadata_path = Path(seed["precision_metadata_json"])
     input_path = tmp_path / "seed.json"
     input_path.write_text(json.dumps(seed), encoding="utf-8")
     monkeypatch.setattr(cli, "fetch_openmeteo_ecmwf_ifs9_anchor_payload", lambda _request: dict(raw))
     captured: list[bytes] = []
 
     def checked_dry_run(_conn, request):
+        assert _conn is conn
         captured.append(request.openmeteo_raw_payload_bytes)
-        reasons = materializer_mod._precision_guard_block_reason(request)
+        reasons = materializer_mod._precision_guard_block_reason(request, _conn)
         return materializer_mod.ReplacementForecastMaterializeResult(
             status="BLOCKED" if reasons else "READY", reason_codes=reasons,
             posterior_id=None, anchor_id=None, readiness_id=None,
         )
 
     monkeypatch.setattr(cli, "_dry_run_from_read_snapshot", checked_dry_run)
-    conn = sqlite3.connect(":memory:")
     code, response = cli._materialize(input_path, commit=False, init_schema=False, conn=conn)
     assert code == 0, response
-    assert captured == [_fixture_raw_openmeteo_bytes()]
+    assert response["reason_codes"] == []
+    assert captured == [sealed]
 
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["source_geometry_proof"]["raw_payload_sha256"] = "f" * 64
@@ -7168,8 +7199,8 @@ def test_direct_cli_seals_one_source_artifact_and_refuses_old_proof_hash(
     code, response = cli._materialize(input_path, commit=False, init_schema=False, conn=conn)
     conn.close()
     assert code == 1
-    assert "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH" in response["reason_codes"]
-    assert captured == [_fixture_raw_openmeteo_bytes()] * 2
+    assert response["reason_codes"] == ["OM9_PRECISION_GUARD_NOT_LIVE_PASS", "OM9_SOURCE_RESPONSE_IDENTITY_MISMATCH"]
+    assert captured == [sealed] * 2
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
@@ -8896,32 +8927,38 @@ def test_materialize_script_threads_day0_zero_observation_state(
     )
 
 
-def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) -> None:
-    (tmp_path / "openmeteo_payload.json").write_bytes(_fixture_raw_openmeteo_bytes())
-    test_state = tmp_path / "isolated-state"
-    test_state.mkdir()
-    for db_name in ("zeus-forecasts.db", "zeus-world.db"):
-        sqlite3.connect(test_state / db_name).close()
-    request = {
-        "city": "Shanghai",
-        "city_id": "Shanghai",
-        "city_timezone": "Asia/Shanghai",
-        "target_date": "2026-06-07",
-        "temperature_metric": "high",
-        "source_cycle_time": "2026-06-06T00:00:00+00:00",
-        "computed_at": "2026-06-06T04:00:00+00:00",
-        "expires_at": "2026-06-06T06:00:00+00:00",
-        "baseline_source_run_id": "b0-run",
-        "baseline_data_version": _current_baseline_data_version("high"),
-        "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
-        "openmeteo_source_run_id": "om9-run",
-        "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
-        "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0, "center_c": 25.0}],
-        "openmeteo_payload_json": "openmeteo_payload.json",
-    }
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_materialize_script_fails_closed_without_precision_metadata(tmp_path, monkeypatch) -> None:
+    """Generic input-requiredness after real precision admission, not full q."""
+    import scripts.materialize_replacement_forecast_live as cli
+    conn, _raw, sealed, request = _normal_hko_cli_inputs(tmp_path, monkeypatch)
+    (tmp_path / "openmeteo_payload.json").write_bytes(sealed)
+    request["openmeteo_payload_json"] = "openmeteo_payload.json"
     input_json = tmp_path / "request.json"
     input_json.write_text(json.dumps(request), encoding="utf-8")
+    admitted = []
+    def checked_dry_run(actual_conn, actual_request):
+        assert actual_conn is conn
+        assert actual_request.openmeteo_raw_payload_bytes == sealed
+        reasons = materializer_mod._precision_guard_block_reason(actual_request, actual_conn)
+        assert reasons == ()
+        admitted.append(actual_request)
+        return materializer_mod.ReplacementForecastMaterializeResult(
+            status="READY", reason_codes=reasons, posterior_id=None, anchor_id=None, readiness_id=None,
+        )
+    monkeypatch.setattr(cli, "_dry_run_from_read_snapshot", checked_dry_run)
+    code, response = cli._materialize(input_json, commit=False, init_schema=False, conn=conn)
+    assert code == 0, response
+    assert len(admitted) == 1
+    original_entities = tuple(tuple(row) for row in conn.execute(
+        "SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    assert original_entities
+    conn.close()
 
+    # Only the required key is removed after the same parser/real guard pass.
+    del request["precision_metadata_json"]
+    input_json.write_text(json.dumps(request), encoding="utf-8")
+    test_state = tmp_path / "isolated-state"
     result = subprocess.run(
         [sys.executable, "scripts/materialize_replacement_forecast_live.py", "--input-json", str(input_json)],
         cwd=REPO_ROOT,
@@ -8937,9 +8974,13 @@ def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) ->
     assert result.returncode == 2
     payload = json.loads(result.stderr)
     assert payload["status"] == "ERROR"
-    assert "precision_metadata_json" in payload["error"]
+    assert payload["error"] == "input JSON requires precision_metadata_json for Open-Meteo ECMWF IFS 9km anchor"
     assert (test_state / "zeus-world.db").is_file()
     assert (test_state / "zeus-forecasts.db").is_file()
+    assert (tmp_path / "openmeteo_payload.json").read_bytes() == sealed
+    with sqlite3.connect(f"file:{test_state / 'zeus-forecasts.db'}?mode=ro", uri=True) as after:
+        after.execute("PRAGMA query_only=ON")
+        assert tuple(after.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == original_entities
 
 
 def test_boot_current_posterior_family_scan_uses_covering_index(
