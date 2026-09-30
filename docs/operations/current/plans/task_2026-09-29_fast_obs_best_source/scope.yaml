@@ -51,6 +51,11 @@ in_scope:
 - tests/test_observation_prints_ledger.py
 - src/data/replacement_forecast_current_target_plan.py
 - architecture/_schema_fingerprint.txt
+- src/execution/executor.py
+- tests/test_replacement_forecast_materializer.py
+- tests/test_replacement_forecast_bundle_reader.py
+- tests/test_venue_command_repo.py
+- artifacts/fast_obs_audit/ROUND3.md
 allow_companions:
 - config/AGENTS.md
 - architecture/source_rationale.yaml

@@ -8127,18 +8127,22 @@ def execute_exit_order(
         def reject_final_pre_venue_cancellation() -> OrderResult | None:
             """Terminalize this persisted command if final authority is absent."""
 
-            if pre_venue_cancelled is None:
-                return None
-            try:
-                pre_venue_abort = bool(pre_venue_cancelled())
-                abort_reason = "global_final_authority_revoked_pre_venue"
-            except Exception as exc:  # noqa: BLE001 - final authority fails closed.
-                pre_venue_abort = True
-                abort_reason = (
-                    "global_final_authority_unavailable_pre_venue:"
-                    f"{type(exc).__name__}"
-                )
-            if not pre_venue_abort:
+            # SCOPE: this command's earliest snapshot/authority deadline.
+            # DRAIN: reject before the SDK and re-decide with fresh evidence.
+            # RESET: a new valid snapshot/intent, not a longer caller deadline.
+            # Client binding and certificate persistence can consume the last
+            # milliseconds of validity after the initial pre-persist check.
+            abort_reason = _exit_execution_authority_deadline_error(intent, conn=conn)
+            if abort_reason is None and pre_venue_cancelled is not None:
+                try:
+                    if pre_venue_cancelled():
+                        abort_reason = "global_final_authority_revoked_pre_venue"
+                except Exception as exc:  # noqa: BLE001 - final authority fails closed.
+                    abort_reason = (
+                        "global_final_authority_unavailable_pre_venue:"
+                        f"{type(exc).__name__}"
+                    )
+            if abort_reason is None:
                 return None
             append_event(
                 conn,

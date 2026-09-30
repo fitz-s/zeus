@@ -7133,7 +7133,8 @@ def test_exit_authority_deadline_is_rechecked_at_final_venue_seam(conn, monkeypa
             "SELECT state FROM venue_commands WHERE position_id = ?",
             ("pos-expired-authority",),
         ).fetchone()
-        assert command["state"] == "REJECTED"
+        # Already-expired authority is rejected before command persistence.
+        assert command is None
     finally:
         _clear_exit_submit_prereqs()
 
