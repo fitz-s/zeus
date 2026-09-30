@@ -278,11 +278,19 @@ def test_source_geometry_binds_response_station_and_static_surface(monkeypatch, 
     ).status == "PASS"
 
 
-def test_source_geometry_producer_uses_actual_response_and_precise_station(monkeypatch) -> None:
+def test_source_geometry_producer_uses_actual_response_and_precise_station(monkeypatch, tmp_path) -> None:
     import json
+    import src.config as config
     import scripts.download_replacement_forecast_current_targets as dl
     import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
     from src.config import cities_by_name
+
+    # Explicit missing-ground scenario, independent of new legitimate station
+    # metadata coverage. Airport reference elevation still cannot supply ground.
+    rows = json.loads((config.CONFIG_DIR / "station_precise_coords.json").read_text())
+    rows["Manila"].pop("station_ground_proof", None)
+    (tmp_path / "station_precise_coords.json").write_text(json.dumps(rows))
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
 
     requested = cities_by_name["Manila"]
     response = {"latitude": 14.516696, "longitude": 121.05752,

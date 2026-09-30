@@ -745,6 +745,7 @@ def test_airport_height_absence_does_not_erase_reference_identity(tmp_path):
     import src.config as config
     rows = json.loads((config.CONFIG_DIR / "station_precise_coords.json").read_text())
     rows["Manila"].pop("elevation_m")
+    rows["Manila"].pop("station_ground_proof", None)
     registry = tmp_path / "station_precise_coords.json"
     registry.write_text(json.dumps(rows))
     geometry = config.runtime_station_geometry_for_city(config.cities_by_name["Manila"], registry_path=registry)
