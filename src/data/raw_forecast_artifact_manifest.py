@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, fields, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -494,3 +495,347 @@ def write_manifest_to_db(
     if row is None:
         raise RuntimeError("raw forecast artifact manifest DB write failed")
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["artifact_id"])
+
+
+ANCHOR_LOCAL_PROOF_REVISION = "openmeteo_anchor_local_proof_possession_v1"
+_PROOF_CLOCK_SQL = "strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')"
+_LOCAL_PROOF_MAX_BYTES = 1024 * 1024
+_LOCAL_BODY_MAX_BYTES = 32 * 1024 * 1024
+_LOCAL_PROOF_MAX_ROWS = 128
+
+
+@dataclass(frozen=True)
+class AnchorLocalProofEvidence:
+    """Resolved local evidence, not q, HTTP freshness, or a new source issue."""
+
+    original_body_artifact: Mapping[str, Any]
+    proof_artifact_id: int
+    proof_sha256: str
+    owned_body: Mapping[str, Any]
+    precision_metadata: Mapping[str, Any]
+    scope: Mapping[str, str]
+    local_possessed_at: datetime
+    recorded_at: datetime
+
+
+def _proof_error(reason: str) -> ValueError:
+    return ValueError(f"anchor_local_proof:{reason}")
+
+
+def _proof_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("anchor_local_proof:deadline_expired")
+
+
+def _proof_json(value: object) -> bytes:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    except (ValueError, TypeError) as exc:
+        raise _proof_error("invalid_json") from exc
+
+
+def _proof_rows_as_dicts(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:
+    names = [column[0] for column in cursor.description]
+    return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+
+def _proof_original(conn: sqlite3.Connection, artifact_id: int) -> dict[str, Any]:
+    if isinstance(artifact_id, bool) or not isinstance(artifact_id, int) or artifact_id <= 0:
+        raise _proof_error("invalid_original_id")
+    rows = _proof_rows_as_dicts(conn.execute(
+        "SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,),
+    ))
+    if not rows:
+        raise _proof_error("original_missing")
+    body = rows[0]
+    from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID
+    if (body["source_id"], body["product_id"]) != (SOURCE_ID, PRODUCT_ID) or body["data_version"] not in {HIGH_DATA_VERSION, LOW_DATA_VERSION}:
+        raise _proof_error("unsupported_original")
+    try:
+        if any(not isinstance(body[key], str) or len(body[key].encode()) > _LOCAL_PROOF_MAX_BYTES
+               for key in ("artifact_metadata_json", "request_params_json")):
+            raise _proof_error("original_descriptor_byte_budget")
+        clocks = [_parse_utc(body[key], field_name=key) for key in
+                  ("source_cycle_time", "source_available_at", "captured_at", "recorded_at")]
+        metadata = json.loads(body["artifact_metadata_json"])
+        params = json.loads(body["request_params_json"])
+        if not isinstance(metadata, dict) or not isinstance(params, dict) or not isinstance(params.get("run"), str):
+            raise _proof_error("invalid_original")
+        expected_metric = "high" if body["data_version"] == HIGH_DATA_VERSION else "low"
+        request_run = datetime.fromisoformat(params["run"].replace("Z", "+00:00"))
+        if request_run.tzinfo is None:
+            # The provider's run wire parameter is UTC without a suffix. This
+            # interprets request grammar, never repairs an original source clock.
+            request_run = request_run.replace(tzinfo=UTC)
+        if (not isinstance(metadata, dict) or not isinstance(params, dict) or not params
+                or not isinstance(metadata.get("city"), str) or not metadata["city"].strip()
+                or date.fromisoformat(metadata["target_date"]).isoformat() != metadata["target_date"]
+                or metadata.get("metric") != expected_metric or body["training_allowed"] != 0
+                or clocks != sorted(clocks) or request_run.astimezone(UTC) != clocks[0]
+                or params.get("models") != "ecmwf_ifs" or not isinstance(params.get("timezone"), str)
+                or not params["timezone"] or "temperature_2m" not in str(params.get("hourly", "")).split(",")
+                or any(isinstance(params[key], bool) or not isinstance(params[key], (int, float))
+                       or not math.isfinite(params[key]) or abs(params[key]) > bound
+                       for key, bound in (("latitude", 90), ("longitude", 180)))):
+            raise _proof_error("invalid_original")
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise _proof_error("invalid_original") from exc
+    return body
+
+
+def _proof_scope(body: Mapping[str, Any]) -> dict[str, str]:
+    metadata = json.loads(body["artifact_metadata_json"])
+    return {key: metadata[key] for key in ("city", "target_date", "metric")}
+
+
+def _proof_path(path: str, root: Path | str | None) -> Path:
+    result = Path(path)
+    if not result.is_absolute():
+        if root is None:
+            raise _proof_error("relative_path_without_root")
+        result = Path(root) / result
+    return result.resolve(strict=True)
+
+
+def _proof_bytes(path: Path, expected_sha: str, expected_size: int, *, limit: int,
+                 deadline: float | None) -> bytes:
+    _proof_deadline(deadline)
+    if isinstance(expected_size, bool) or not isinstance(expected_size, int) or not 0 < expected_size <= limit:
+        raise _proof_error("byte_budget_or_size")
+    if path.stat().st_size != expected_size:
+        raise _proof_error("byte_size_mismatch")
+    chunks = []
+    remaining = expected_size + 1
+    with path.open("rb") as handle:
+        while remaining:
+            _proof_deadline(deadline)
+            chunk = handle.read(min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    encoded = b"".join(chunks)
+    if len(encoded) != expected_size or hashlib.sha256(encoded).hexdigest() != expected_sha:
+        raise _proof_error("body_or_proof_sha_mismatch")
+    return encoded
+
+
+def _proof_precision(body: Mapping[str, Any], owned: Mapping[str, Any], precision: Mapping[str, Any],
+                     *, root: Path | str | None, deadline: float | None) -> dict[str, Any]:
+    if not isinstance(precision, Mapping) or not precision:
+        raise _proof_error("precision_missing")
+    frozen = json.loads(_proof_json(dict(precision)))
+    raw = _proof_bytes(_proof_path(owned["path"], root), body["sha256"], body["byte_size"],
+                       limit=_LOCAL_BODY_MAX_BYTES, deadline=deadline)
+    try:
+        payload = json.loads(raw)
+        params = json.loads(body["request_params_json"])
+        scope = _proof_scope(body)
+        proof = frozen["source_geometry_proof"]
+        if (not isinstance(payload, dict) or frozen["city"] != scope["city"]
+                or frozen["target_local_date"] != scope["target_date"]
+                or frozen["timezone_name"] != params["timezone"]
+                or payload["timezone"] != params["timezone"]
+                or proof["raw_payload_sha256"] != body["sha256"]
+                or not isinstance(proof.get("static_asset_audit"), dict) or not proof["static_asset_audit"]
+                or not isinstance(proof.get("station_ground_proof"), dict) or not proof["station_ground_proof"]):
+            raise _proof_error("precision_identity_mismatch")
+        for claim, fact in (("requested_lat", params["latitude"]), ("requested_lon", params["longitude"]),
+                            ("nearest_grid_lat", payload["latitude"]), ("nearest_grid_lon", payload["longitude"])):
+            if isinstance(frozen[claim], bool) or not isinstance(frozen[claim], (int, float)) or frozen[claim] != fact:
+                raise _proof_error("precision_request_or_cell_mismatch")
+        response_scope = payload.get("_zeus_current_target_scope")
+        if response_scope is not None and (not isinstance(response_scope, dict)
+                or response_scope.get("city") != scope["city"] or response_scope.get("target_date") != scope["target_date"]
+                or response_scope.get("metric", scope["metric"]) != scope["metric"]):
+            raise _proof_error("response_scope_mismatch")
+    except (TypeError, ValueError, KeyError) as exc:
+        raise _proof_error("precision_identity_mismatch") from exc
+    # Native physics/ground/full-slot adequacy is revalidated by the owning consumer.
+    return frozen
+
+
+def _local_proof_rows(conn: sqlite3.Connection, body: Mapping[str, Any], deadline: float | None) -> list[dict[str, Any]]:
+    _proof_deadline(deadline)
+    # The encoded original ID also retains narrow ownership when latest metadata is damaged.
+    rows = _proof_rows_as_dicts(conn.execute(
+        """SELECT * FROM raw_forecast_artifacts
+           WHERE source_id=? AND product_id=? AND source_cycle_time=? AND data_version=?
+             AND ((json_valid(artifact_metadata_json) AND json_extract(artifact_metadata_json,'$.original_artifact_id')=?)
+                  OR artifact_path GLOB ?)
+           ORDER BY artifact_id DESC LIMIT ?""",
+        (body["source_id"], body["product_id"], body["source_cycle_time"], ANCHOR_LOCAL_PROOF_REVISION,
+         body["artifact_id"], f"*/openmeteo_anchor_local_proof_{body['artifact_id']}_*.json", _LOCAL_PROOF_MAX_ROWS + 1),
+    ))
+    _proof_deadline(deadline)
+    if len(rows) > _LOCAL_PROOF_MAX_ROWS:
+        raise _proof_error("frontier_row_budget")
+    if any(not isinstance(row[key], str) or len(row[key].encode()) > _LOCAL_PROOF_MAX_BYTES
+           for row in rows for key in ("artifact_metadata_json", "request_params_json")):
+        raise _proof_error("frontier_descriptor_byte_budget")
+    return rows
+
+
+def _proof_frontier(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"artifact_id": row["artifact_id"], "descriptor_sha256": hashlib.sha256(_proof_json(row)).hexdigest()}
+            for row in sorted(rows, key=lambda row: row["artifact_id"])]
+
+
+def _proof_recorded(row: Mapping[str, Any]) -> datetime | None:
+    try:
+        metadata = json.loads(row["artifact_metadata_json"])
+        if metadata["recorded_at"] != row["recorded_at"]:
+            return None
+        return _parse_utc(row["recorded_at"], field_name="recorded_at")
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def read_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int, *, city: str,
+                           target_date: str, metric: str, decision_at: datetime | str,
+                           root: Path | str | None = None,
+                           deadline_monotonic: float | None = None) -> AnchorLocalProofEvidence | None:
+    """Read latest exact-scope local possession as of both possession and SQL recording.
+
+    Missing is None; damaged latest evidence is an explicit scoped rejection, never
+    fallback. A new independently observed possession may cover only its frozen
+    prior frontier. Subsequent unknown/ABA evidence remains blocking (INV-47).
+    """
+    _proof_deadline(deadline_monotonic)
+    cut = _parse_utc(decision_at, field_name="decision_at")
+    body = _proof_original(conn, original_artifact_id)
+    scope = _proof_scope(body)
+    if scope != {"city": city, "target_date": target_date, "metric": metric}:
+        raise _proof_error("scope_mismatch")
+    rows = _local_proof_rows(conn, body, deadline_monotonic)
+    visible = [row for row in rows if _proof_recorded(row) is None or _proof_recorded(row) <= cut]
+    if not visible:
+        return None
+    row = visible[0]
+    try:
+        encoded = _proof_bytes(_proof_path(row["artifact_path"], root), row["sha256"], row["byte_size"],
+                               limit=_LOCAL_PROOF_MAX_BYTES, deadline=deadline_monotonic)
+        doc = json.loads(encoded)
+        metadata = json.loads(row["artifact_metadata_json"])
+        possessed = _parse_utc(doc["local_possessed_at"], field_name="local_possessed_at")
+        prepared = _parse_utc(doc["prepared_at"], field_name="prepared_at")
+        recorded = _proof_recorded(row)
+        expected_metadata = {"revision": ANCHOR_LOCAL_PROOF_REVISION, "original_artifact_id": original_artifact_id,
+                             **scope, "document_sha256": row["sha256"], "local_possessed_at": doc["local_possessed_at"],
+                             "recorded_at": row["recorded_at"], "clock_role": "local_proof_possession_not_http"}
+        prior = [item for item in rows if item["artifact_id"] < row["artifact_id"]]
+        if (doc["revision"] != ANCHOR_LOCAL_PROOF_REVISION or doc["original_body_artifact"] != body
+                or doc["scope"] != scope or doc["request_params"] != json.loads(body["request_params_json"])
+                or doc.get("clock_resolution") != "milliseconds" or "recorded_at" in doc
+                or possessed.microsecond % 1000 or prepared.microsecond % 1000
+                or recorded is None or not possessed <= prepared <= recorded <= cut
+                or _parse_utc(body["recorded_at"], field_name="original_recorded_at") > possessed
+                or row["source_available_at"] != doc["local_possessed_at"] or row["captured_at"] != doc["local_possessed_at"]
+                or row["request_url"] != body["request_url"] or row["request_params_json"] != body["request_params_json"]
+                or row["training_allowed"] != 0 or metadata != expected_metadata
+                or doc["observed_frontier"] != _proof_frontier(prior)
+                or doc["owned_body"]["sha256"] != body["sha256"] or doc["owned_body"]["byte_size"] != body["byte_size"]):
+            raise _proof_error("latest_invalid_or_frontier_changed")
+        precision = _proof_precision(body, doc["owned_body"], doc["precision_metadata"], root=root, deadline=deadline_monotonic)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise _proof_error("latest_invalid_or_frontier_changed") from exc
+    return AnchorLocalProofEvidence(body, row["artifact_id"], row["sha256"], doc["owned_body"],
+                                    precision, scope, possessed, recorded)
+
+
+def _write_local_proof_file(path: Path, encoded: bytes) -> None:
+    if path.exists():
+        if path.read_bytes() != encoded:
+            raise _proof_error("sealed_file_changed")
+        return
+    # A caller rollback can leave an unreferenced file; only committed canonical
+    # rows make it selectable. Publish complete bytes without overwriting a peer.
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != encoded:
+                raise _proof_error("sealed_file_changed")
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int,
+                            manifest: RawForecastArtifactManifest, *, precision_metadata: Mapping[str, Any],
+                            root: Path | str | None = None,
+                            deadline_monotonic: float | None = None) -> int:
+    """Append exact local proof in the caller's transaction, without renewing raw clocks.
+
+    SCOPE is one original request/family. DRAIN is normal producer-owned byte/proof
+    validation and this explicit append. RESET needs the owning consumer at a new
+    cut; this helper grants neither native physics nor network/venue authority.
+    """
+    _proof_deadline(deadline_monotonic)
+    if not conn.in_transaction:
+        raise _proof_error("caller_write_transaction_required")
+    if not isinstance(manifest, RawForecastArtifactManifest):
+        raise TypeError("manifest must be RawForecastArtifactManifest")
+    body = _proof_original(conn, original_artifact_id)
+    scope = _proof_scope(body)
+    payload = manifest.to_dict()
+    if (any(payload[key] != body[key] for key in ("source_id", "product_id", "data_version", "source_cycle_time", "sha256", "byte_size", "request_url"))
+            or _proof_json(payload["request_params"]) != _proof_json(json.loads(body["request_params_json"]))
+            or any(manifest.product_metadata.get(key) != value for key, value in scope.items())):
+        raise _proof_error("original_request_or_scope_mismatch")
+    observed = _local_proof_rows(conn, body, deadline_monotonic)
+    owned = {"path": str(_proof_path(manifest.artifact_path, root)), "sha256": body["sha256"], "byte_size": body["byte_size"]}
+    precision = _proof_precision(body, owned, precision_metadata, root=root, deadline=deadline_monotonic)
+    try:
+        existing = read_anchor_local_proof(conn, original_artifact_id, **scope,
+                                           decision_at=conn.execute(f"SELECT {_PROOF_CLOCK_SQL}").fetchone()[0],
+                                           root=root, deadline_monotonic=deadline_monotonic)
+    except ValueError:
+        existing = None  # A real new possession, not reuse, can repair exactly observed bad evidence.
+    if existing is not None and existing.owned_body == owned and existing.precision_metadata == precision:
+        return existing.proof_artifact_id
+    # Actual verification is complete. Sample the canonical SQL clock at its
+    # millisecond resolution; do not round any original provider/source clock.
+    verified_at = conn.execute(f"SELECT {_PROOF_CLOCK_SQL}").fetchone()[0]
+    if _parse_utc(body["recorded_at"], field_name="original_recorded_at") > _parse_utc(verified_at, field_name="verified_at"):
+        raise _proof_error("original_recorded_in_future")
+    doc = {"revision": ANCHOR_LOCAL_PROOF_REVISION, "original_body_artifact": body,
+           "scope": scope, "request_params": json.loads(body["request_params_json"]), "owned_body": owned,
+           "precision_metadata": precision, "local_possessed_at": verified_at, "prepared_at": verified_at,
+           "clock_resolution": "milliseconds", "observed_frontier": _proof_frontier(observed)}
+    encoded = _proof_json(doc)
+    if len(encoded) > _LOCAL_PROOF_MAX_BYTES:
+        raise _proof_error("proof_byte_budget")
+    digest = hashlib.sha256(encoded).hexdigest()
+    path = Path(owned["path"]).with_name(f"openmeteo_anchor_local_proof_{original_artifact_id}_{digest}.json")
+    _write_local_proof_file(path, encoded)
+    _proof_deadline(deadline_monotonic)
+    if (_proof_original(conn, original_artifact_id) != body
+            or _proof_frontier(_local_proof_rows(conn, body, deadline_monotonic)) != doc["observed_frontier"]):
+        raise _proof_error("frontier_changed_before_insert")
+    metadata = {"revision": ANCHOR_LOCAL_PROOF_REVISION, "original_artifact_id": original_artifact_id,
+                **scope, "document_sha256": digest, "local_possessed_at": verified_at,
+                "clock_role": "local_proof_possession_not_http"}
+    conn.execute(
+        f"""INSERT INTO raw_forecast_artifacts
+            (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
+             artifact_path,sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,json_set(?,'$.recorded_at',{_PROOF_CLOCK_SQL}),{_PROOF_CLOCK_SQL},0)""",
+        (body["source_id"], body["product_id"], ANCHOR_LOCAL_PROOF_REVISION, body["source_cycle_time"],
+         verified_at, verified_at, str(path), digest, len(encoded), body["request_url"], body["request_params_json"], _proof_json(metadata).decode()),
+    )
+    result = read_anchor_local_proof(conn, original_artifact_id, **scope,
+                                     decision_at=conn.execute(f"SELECT {_PROOF_CLOCK_SQL}").fetchone()[0],
+                                     root=root, deadline_monotonic=deadline_monotonic)
+    if result is None:
+        raise _proof_error("insert_readback_unavailable")
+    return result.proof_artifact_id
