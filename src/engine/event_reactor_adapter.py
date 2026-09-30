@@ -28777,6 +28777,7 @@ def _posterior_bound_multimodel_members(
     ):
         from src.data.replacement_forecast_materializer import (
             _bayes_precision_fusion_city_local_lead_days,
+            _configured_scheme_sources,
             _freshest_declared_provider_representatives,
         )
         from src.forecast.model_selection import source_physically_eligible
@@ -28794,7 +28795,10 @@ def _posterior_bound_multimodel_members(
                 lead_days=lead_days,
             )
         }
-        selected_current = _freshest_declared_provider_representatives(eligible_current)
+        selected_current = _freshest_declared_provider_representatives(
+            eligible_current,
+            configured=_configured_scheme_sources(str(family.city), str(family.metric)),
+        )
         if set(scheme["configured_current_sources"]) != set(
             scheme["configured_sources"]
         ).intersection(selected_current):

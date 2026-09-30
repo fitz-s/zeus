@@ -27,7 +27,7 @@ import numpy as np
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
@@ -4167,8 +4167,20 @@ def _bayes_precision_fusion_lead_bucket(lead_days: int) -> str:
     return "L4P"
 
 
+def _configured_scheme_sources(city: str, metric: str) -> tuple[str, ...]:
+    """Sources the city's active source-clock scheme weights (empty when none)."""
+    from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
+        scheme_for_city,
+    )
+
+    scheme = scheme_for_city(city, metric=metric)
+    return () if scheme is None else tuple(str(source) for source in scheme.weights)
+
+
 def _freshest_declared_provider_representatives(
     served: Mapping[str, object],
+    *,
+    configured: Iterable[str] = (),
 ) -> dict[str, object]:
     """Remove stale same-provider alternatives before the specificity selector runs.
 
@@ -4177,9 +4189,16 @@ def _freshest_declared_provider_representatives(
     can discard the fresh member and leave the current-evidence cohort impossible.
     Keep every newest-cycle tie so ``select_models`` still applies the declared
     highest-resolution-first rule within one issuance.
+
+    ``configured`` names the sources the city's active scheme weights.  They are
+    never collapsed away: a scheme weight belongs to that source, and a newer
+    unconfigured sibling (hourly NBM beside a configured HRRR) cannot stand in for
+    it.  Dropping one renormalized the scheme onto a single provider family and made
+    the current-evidence shape impossible (Los Angeles, 2026-09-30).
     """
     from src.forecast.model_selection import PROVIDER_FAMILIES  # noqa: PLC0415
 
+    kept = frozenset(str(model) for model in configured)
     out = dict(served)
     for family in PROVIDER_FAMILIES:
         present = [model for model in family if model in out]
@@ -4196,7 +4215,7 @@ def _freshest_declared_provider_representatives(
             continue
         newest = max(cycles.values())
         for model, cycle in cycles.items():
-            if cycle < newest:
+            if cycle < newest and model not in kept:
                 out.pop(model, None)
     return out
 
@@ -4295,7 +4314,8 @@ def _replacement_bayes_precision_fusion_override(
                 )
             }
             served_current = _freshest_declared_provider_representatives(
-                served_current
+                served_current,
+                configured=_configured_scheme_sources(request.city, metric),
             )
             persisted_current = {
                 m: (s.value_c, s.raw_model_forecast_id) for m, s in served_current.items()

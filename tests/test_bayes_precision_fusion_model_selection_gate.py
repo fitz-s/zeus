@@ -53,6 +53,42 @@ def test_fresh_provider_rep_outranks_stale_higher_resolution_member() -> None:
     assert set(current) == {"ecmwf_ifs", "icon_global"}
 
 
+def test_configured_scheme_source_survives_newer_unconfigured_sibling() -> None:
+    """A scheme-weighted source is never collapsed away by a newer sibling.
+
+    Live 2026-09-30 (Los Angeles): the high scheme weights gfs_hrrr, icon_global
+    and ukmo_global.  Hourly NBM (10Z, unconfigured) is newer than HRRR (06Z) in
+    the NCEP family, so HRRR was dropped; the scheme renormalized onto icon (06Z)
+    and ukmo (00Z), no two-family cohort existed within 3h, the current ENS shape
+    raised, and both LA families stayed CAPTURE_MISSING for hours.
+    """
+    from types import SimpleNamespace
+
+    from src.data.replacement_forecast_materializer import (
+        _freshest_declared_provider_representatives,
+    )
+
+    served = {
+        "gfs_hrrr": SimpleNamespace(served_cycle="2026-09-30T06:00:00+00:00"),
+        "ncep_nbm_conus": SimpleNamespace(served_cycle="2026-09-30T10:00:00+00:00"),
+        "icon_global": SimpleNamespace(served_cycle="2026-09-30T06:00:00+00:00"),
+        "ukmo_global_deterministic_10km": SimpleNamespace(
+            served_cycle="2026-09-30T00:00:00+00:00"
+        ),
+    }
+    configured = ("gfs_hrrr", "icon_global", "ukmo_global_deterministic_10km")
+
+    current = _freshest_declared_provider_representatives(
+        served, configured=configured
+    )
+
+    assert set(configured) <= set(current)
+    # An unconfigured stale sibling still collapses exactly as before.
+    assert _freshest_declared_provider_representatives(served).keys() == {
+        "ncep_nbm_conus", "icon_global", "ukmo_global_deterministic_10km"
+    }
+
+
 def test_same_cycle_provider_reps_preserve_specificity_selection() -> None:
     from types import SimpleNamespace
 

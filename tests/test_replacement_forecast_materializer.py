@@ -821,6 +821,60 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
         assert model in override.low_n_prior_weighted_models
 
 
+def test_live_override_keeps_every_scheme_weighted_source(monkeypatch) -> None:
+    """The live override collapses provider families around the active scheme.
+
+    Pins the wiring: the materializer passes the city's scheme sources into the
+    family-freshness collapse, so a configured older sibling (HRRR beside hourly
+    NBM) is never renormalized away (Los Angeles, 2026-09-30).
+    """
+    from src.config import City
+    from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
+
+    la = City(
+        name="Los Angeles", lat=33.93817, lon=-118.3866,
+        timezone="America/Los_Angeles", settlement_unit="F", cluster="US-West",
+        wu_station="KLAX", settlement_source_type="wu_icao",
+    )
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {la.name: la})
+    scheme = CityOneScheme(
+        city="Los Angeles", scheme_status="ACTIVE",
+        final_sources=("gfs_hrrr", "icon_global", "ukmo_global_deterministic_10km"),
+        weights={
+            "gfs_hrrr": 0.385, "icon_global": 0.275,
+            "ukmo_global_deterministic_10km": 0.340,
+        },
+        sample_n=259, walkforward_pass=True, one_scheme_status="ACTIVE",
+    )
+    monkeypatch.setattr(
+        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city",
+        lambda *_args, **_kwargs: scheme,
+    )
+    seen: list[tuple[str, ...]] = []
+
+    def spy(served, *, configured=()):
+        seen.append(tuple(configured))
+        return {}
+
+    monkeypatch.setattr(
+        materializer_mod, "_freshest_declared_provider_representatives", spy
+    )
+    request = replace(
+        _request(),
+        city="Los Angeles", city_id="Los Angeles",
+        city_timezone="America/Los_Angeles", temperature_metric="high",
+        target_date=date(2026, 10, 1),
+        source_cycle_time=datetime(2026, 9, 30, 0, tzinfo=UTC),
+        computed_at=datetime(2026, 9, 30, 11, 23, tzinfo=UTC),
+    )
+
+    materializer_mod._replacement_bayes_precision_fusion_override(
+        request, metric="high", anchor_value_corrected_c=27.0, conn=_conn(),
+    )
+
+    assert seen and set(seen[0]) == set(scheme.weights)
+
+
 @pytest.mark.parametrize(("city", "metric", "scheme_models", "d2_newer"), (
     ("London", "high", ("ecmwf_ifs", "icon_d2", "icon_global", "ukmo_global_deterministic_10km"), False),
     ("Milan", "high", ("ecmwf_ifs", "icon_d2", "icon_global", "ukmo_global_deterministic_10km"), False),
