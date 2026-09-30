@@ -64,7 +64,8 @@ def _actual_o1280_static_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(transport,"_o1280_snapshot_now",lambda:clock[0])
     points,_,center = transport.om_get_surrounding_gridpoints(22.3,114.17)
     point = transport.om_get_coordinates(points[center])
-    kwargs = dict(latitude=point.grid_latitude,longitude=point.grid_longitude_east,target_elevation_m=32.,local_cache=str(path))
+    kwargs = dict(latitude=point.grid_latitude,longitude=point.grid_longitude_east,target_elevation_m=32.,
+        requested_latitude=point.grid_latitude,requested_longitude=point.grid_longitude_east,local_cache=str(path))
     return transport,path,data,write,clock,kwargs
 
 
@@ -74,7 +75,7 @@ def test_frozen_o1280_complete_cell_cannot_be_replaced_by_missing_or_wrong_facts
     from copy import deepcopy
     transport,_,_,_,_,kwargs = _actual_o1280_static_fixture(tmp_path,monkeypatch)
     proof = transport.capture_source_cell_geometry_proof(**kwargs)
-    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m")}
+    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m","requested_latitude","requested_longitude")}
     args["decision_at"]="2026-09-30T12:01:00Z"
     assert transport.validate_source_cell_geometry_proof(proof,**args) is None
     missing=deepcopy(proof)
@@ -90,7 +91,7 @@ def test_frozen_o1280_own_snapshot_replays_after_other_cell_edit_without_clock_r
     from pathlib import Path
     transport,path,data,write,clock,kwargs = _actual_o1280_static_fixture(tmp_path,monkeypatch)
     a=transport.capture_source_cell_geometry_proof(**kwargs)
-    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m")}
+    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m","requested_latitude","requested_longitude")}
     assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T11:59:59Z") is not None
     assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T12:00:00Z") is None
     clock[0]=datetime(2026,9,30,13,tzinfo=UTC)
@@ -136,7 +137,7 @@ def test_frozen_o1280_hash_and_decode_share_one_byte_snapshot(tmp_path,monkeypat
         finally:
             owned.write_bytes(original)
     monkeypatch.setattr(transport,"_o1280_snapshot_cell",racing)
-    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m")}
+    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m","requested_latitude","requested_longitude")}
     assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T12:01:00Z") is None
 
 
@@ -144,7 +145,7 @@ def test_frozen_o1280_bad_manifest_requires_new_local_possession_not_http_or_old
     from pathlib import Path
     transport,_,_,_,clock,kwargs = _actual_o1280_static_fixture(tmp_path,monkeypatch)
     a=transport.capture_source_cell_geometry_proof(**kwargs)
-    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m")}
+    args={key:kwargs[key] for key in ("latitude","longitude","target_elevation_m","requested_latitude","requested_longitude")}
     Path(a["static_asset_audit"]["manifest_path"]).write_bytes(b"damaged-controlled-manifest")
     assert transport.validate_source_cell_geometry_proof(a,**args,decision_at="2026-09-30T12:01:00Z") is not None
     clock[0]=datetime(2026,9,30,14,tzinfo=UTC)
@@ -167,6 +168,61 @@ def test_frozen_o1280_absent_owned_static_retains_distinct_diagnostic_absence(tm
     path.symlink_to(tmp_path/"missing-symlink-target")
     with pytest.raises(ValueError,match="symlink"):
         transport.capture_source_cell_geometry_proof(**kwargs)
+
+
+def test_frozen_o1280_replays_original_query_neighbor_instead_of_reselecting_response_cell(tmp_path,monkeypatch):
+    from copy import deepcopy
+    transport,_,data,write,_,kwargs=_actual_o1280_static_fixture(tmp_path,monkeypatch)
+    request_lat,request_lon=22.3,114.17
+    points,_,center=transport.om_get_surrounding_gridpoints(request_lat,request_lon)
+    data[:]=-999
+    data[0,points[center]]=1500
+    neighbor=next(index for index in points if index!=points[center])
+    data[0,neighbor]=425
+    write()
+    selected=transport.select_terrain_optimised_point(request_lat,request_lon,413,
+        read_elevation=lambda index:float(data[0,index]))
+    assert selected.flat_index==neighbor and selected.model_elevation_m==425 and not selected.is_center
+    kwargs.update(latitude=selected.grid_latitude,longitude=selected.grid_longitude_east,
+        target_elevation_m=413,requested_latitude=request_lat,requested_longitude=request_lon)
+    proof=transport.capture_source_cell_geometry_proof(**kwargs)
+    assert proof["raw_grid_elevation_m"]==425
+    assert proof["effective_grid_elevation_m"]==425
+    assert proof["cell_is_center"] is False
+    args={key:value for key,value in kwargs.items() if key!="local_cache"}
+    assert transport.validate_source_cell_geometry_proof(proof,**args,decision_at="2026-09-30T12:01:00Z") is None
+    for key,value in (("effective_grid_elevation_m",413),("cell_is_center",True),("requested_latitude",selected.grid_latitude)):
+        altered=deepcopy(proof)
+        altered[key]=value
+        assert transport.validate_source_cell_geometry_proof(altered,**args,decision_at="2026-09-30T12:01:00Z") is not None
+    # The same native cell queried as the center is a genuinely different
+    # lapse-selection branch, with effective DEM413 rather than native425.
+    kwargs.update(requested_latitude=selected.grid_latitude,requested_longitude=selected.grid_longitude_east)
+    centered=transport.capture_source_cell_geometry_proof(**kwargs)
+    assert centered["raw_grid_elevation_m"]==425 and centered["effective_grid_elevation_m"]==413 and centered["cell_is_center"] is True
+
+
+@pytest.mark.parametrize("selected_lon",(-180.,180.))
+def test_frozen_o1280_dateline_selected_coordinate_wrap_twin(tmp_path,monkeypatch,selected_lon):
+    transport,_,_,_,_,kwargs=_actual_o1280_static_fixture(tmp_path,monkeypatch)
+    points,_,center=transport.om_get_surrounding_gridpoints(22.3,selected_lon)
+    point=transport.om_get_coordinates(points[center])
+    kwargs.update(latitude=point.grid_latitude,longitude=selected_lon,requested_latitude=22.3,requested_longitude=selected_lon)
+    proof=transport.capture_source_cell_geometry_proof(**kwargs)
+    args={key:value for key,value in kwargs.items() if key!="local_cache"}
+    assert transport.validate_source_cell_geometry_proof(proof,**args,decision_at="2026-09-30T12:01:00Z") is None
+    args["longitude"]=-selected_lon
+    assert transport.validate_source_cell_geometry_proof(proof,**args,decision_at="2026-09-30T12:01:00Z") is None
+
+
+def test_frozen_o1280_sea_fallback_is_diagnostic_not_land_authority(tmp_path,monkeypatch):
+    transport,_,data,write,_,kwargs=_actual_o1280_static_fixture(tmp_path,monkeypatch)
+    data[:]=-999
+    write()
+    proof=transport.capture_source_cell_geometry_proof(**kwargs)
+    assert proof["cell_is_sea"] is True
+    args={key:value for key,value in kwargs.items() if key!="local_cache"}
+    assert transport.validate_source_cell_geometry_proof(proof,**args,decision_at="2026-09-30T12:01:00Z") is not None
 
 
 def test_bucket_point_reader_pool_reuses_valid_time_reader_and_closes() -> None:

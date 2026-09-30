@@ -1097,7 +1097,8 @@ def _read_o1280_snapshot(audit: Mapping[str, object], *, decision_at: object) ->
 
 
 def capture_source_cell_geometry_proof(*, latitude: float, longitude: float,
-        target_elevation_m: float, local_cache: str | None = None) -> dict[str, object]:
+        target_elevation_m: float, requested_latitude: float, requested_longitude: float,
+        local_cache: str | None = None) -> dict[str, object]:
     """Normal producer freezes already-owned O1280 bytes; no HTTP or DB write.
 
     Its local possession clock is independent of the forecast's original issue
@@ -1117,7 +1118,12 @@ def capture_source_cell_geometry_proof(*, latitude: float, longitude: float,
     body = original.read_bytes()
     if not 0<len(body)<=16*1024*1024:
         raise ValueError("O1280 local static size changed")
-    geometry = _o1280_snapshot_cell(body, latitude=latitude, longitude=longitude, target_elevation_m=target_elevation_m)
+    geometry = _o1280_snapshot_cell(body, latitude=requested_latitude, longitude=requested_longitude,
+        target_elevation_m=target_elevation_m)
+    if (not math.isclose(float(geometry["selected_grid_lat"]),latitude,abs_tol=1e-5)
+        or not math.isclose((float(geometry["selected_grid_lon"])+180)%360-180,(longitude+180)%360-180,abs_tol=1e-5)):
+        raise ValueError("O1280 response cell does not match actual requested terrain selection")
+    geometry.update(requested_latitude=requested_latitude,requested_longitude=requested_longitude)
     sha = hashlib.sha256(body).hexdigest()
     root = _o1280_snapshot_root()
     asset_path = root/f"ecmwf_ifs_o1280_hsurf.{sha}.om"
@@ -1159,13 +1165,15 @@ def capture_source_cell_geometry_proof(*, latitude: float, longitude: float,
 
 
 def validate_source_cell_geometry_proof(proof: Mapping[str,object], *, latitude: float,
-        longitude: float, target_elevation_m: float, decision_at: object) -> str | None:
+        longitude: float, target_elevation_m: float, requested_latitude: float,
+        requested_longitude: float, decision_at: object) -> str | None:
     """Replay this frozen O1280 source's own bytes and complete cell facts, read-only."""
     try:
         body = _read_o1280_snapshot(proof["static_asset_audit"],decision_at=decision_at)
         if proof["static_hsurf_sha256"]!=proof["static_asset_audit"]["whole_sha256"]:
             return "OM9_FROZEN_SOURCE_STATIC_IDENTITY_MISMATCH"
-        actual = _o1280_snapshot_cell(body,latitude=latitude,longitude=longitude,target_elevation_m=target_elevation_m)
+        actual = _o1280_snapshot_cell(body,latitude=requested_latitude,longitude=requested_longitude,target_elevation_m=target_elevation_m)
+        actual.update(requested_latitude=requested_latitude,requested_longitude=requested_longitude)
         for key,value in actual.items():
             claimed = proof.get(key)
             if isinstance(value,bool):
@@ -1178,10 +1186,8 @@ def validate_source_cell_geometry_proof(proof: Mapping[str,object], *, latitude:
                     return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
             elif claimed!=value:
                 return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
-        grid_lon = float(actual["selected_grid_lon"])
-        if grid_lon>180:
-            grid_lon-=360
-        if actual["cell_is_sea"] or not math.isclose(float(actual["selected_grid_lat"]),latitude,abs_tol=1e-5) or not math.isclose(grid_lon,longitude,abs_tol=1e-5):
+        grid_lon = (float(actual["selected_grid_lon"])+180)%360-180
+        if actual["cell_is_sea"] or not math.isclose(float(actual["selected_grid_lat"]),latitude,abs_tol=1e-5) or not math.isclose(grid_lon,(longitude+180)%360-180,abs_tol=1e-5):
             return "OM9_FROZEN_SOURCE_SELECTED_CELL_MISMATCH"
         return None
     except (KeyError,IndexError,TypeError,ValueError,OSError,RuntimeError):
