@@ -10848,14 +10848,50 @@ def test_global_candidate_probability_use_requires_typed_reduce_only_sell():
 
 
 def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     import src.data.day0_observation_reader as day0_reader
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as current_target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
 
-    forecast = sqlite3.connect(":memory:")
+    vector_fixture = _hko_clock_normal_materializer_fixture(
+        tmp_path, monkeypatch, "low"
+    )
+    # Same-day statistical ENTRY has a real normal producer certificate. It
+    # must not be conflated with provisional absorbing/settlement authority.
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    observation = observation_instant_row_to_day0_observation(
+        dict(vector_fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1"
+        ).fetchone()), metric="low")
+    normal_event = build_day0_extreme_updated_event(
+        observation=observation,
+        settlement_semantics=SettlementSemantics.for_city(vector_fixture.city),
+        decision_time=vector_fixture.cut, received_at=vector_fixture.cut.isoformat())
+    normal_points = []
+    for use in (era._CurrentProbabilityUse.ENTRY, era._CurrentProbabilityUse.HELD_MONITOR):
+        actual_payload = {}
+        actual = era._prepare_current_global_probability_family(
+            normal_event, forecast_conn=vector_fixture.conn,
+            topology_conn=vector_fixture.conn, observation_conn=vector_fixture.conn,
+            decision_time=vector_fixture.cut, max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True, probability_use=use,
+            day0_payload_out=actual_payload,
+            raw_input_hwm_conn=vector_fixture.conn)
+        assert actual.posterior_id == vector_fixture.result.posterior_id
+        assert actual.probability_authority == "replacement_0_1"
+        assert "_edli_day0_exact_yes_payoffs" not in actual_payload
+        assert np.isfinite(actual.probability_witness.yes_point_q).all()
+        assert actual.probability_witness.yes_point_q.sum() == pytest.approx(1.0)
+        assert actual.probability_witness.source_truth_identity
+        normal_points.append(actual.probability_witness.yes_point_q.copy())
+    np.testing.assert_allclose(normal_points[0], normal_points[1])
+    from tests.test_station_forecast_live_ingest_wiring import _hourly_schema_conn
+    forecast = _hourly_schema_conn()
     forecast.row_factory = sqlite3.Row
     forecast.execute(
         """
@@ -10877,7 +10913,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         (
             (
                 "Hong Kong",
-                "2026-07-11",
+                "2026-09-30",
                 "low",
                 "c0",
                 "yes0",
@@ -10888,7 +10924,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
             ),
             (
                 "Hong Kong",
-                "2026-07-11",
+                "2026-09-30",
                 "low",
                 "c1",
                 "yes1",
@@ -10899,7 +10935,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
             ),
             (
                 "Hong Kong",
-                "2026-07-11",
+                "2026-09-30",
                 "low",
                 "c2",
                 "yes2",
@@ -10931,10 +10967,10 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "Hong Kong",
-            "2026-07-11",
+            "2026-09-30",
             28.1,
-            "2026-07-11T07:02:00+00:00",
-            "2026-07-11T15:02:00+08:00",
+            "2026-09-30T07:02:00+00:00",
+            "2026-09-30T15:02:00+08:00",
             "hko_hourly_accumulator",
             "CAUSAL",
             "AUTHORIZED",
@@ -10944,7 +10980,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     )
     provisional_fact = {
         "observation_source": "hko_hourly_accumulator",
-        "observation_time": "2026-07-11T07:02:00+00:00",
+        "observation_time": "2026-09-30T07:02:00+00:00",
         "observed_extreme_native": 28.1,
     }
     monkeypatch.setattr(
@@ -10954,8 +10990,8 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     )
     revision_likelihood = {
         "semantics": "hko_provisional_monotonic_survival_beta_jeffreys_v1",
-        "lookback_start": "2026-07-04",
-        "lookback_end": "2026-07-11",
+        "lookback_start": "2026-09-23",
+        "lookback_end": "2026-09-30",
         "transition_count": 900,
         "retraction_count": 0,
         "median_update_seconds": 600.0,
@@ -10973,24 +11009,26 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         posterior_identity_hash="source-clock-posterior-17",
         dependency_hash="source-clock-dependency-17",
         posterior_config_hash="source-clock-config-17",
-        source_cycle_time="2026-07-11T00:00:00+00:00",
-        source_available_at="2026-07-11T06:00:00+00:00",
+        source_cycle_time="2026-09-30T00:00:00+00:00",
+        source_available_at="2026-09-30T06:00:00+00:00",
         provenance_json={
             "bayes_precision_fusion": {"predictive_sigma_c": 1.2},
             "day0_provisional_observation": {
                 "active": True,
                 "support_truncation": False,
                 "source": "hko_hourly_accumulator",
-                "observation_time": "2026-07-11T07:02:00+00:00",
+                "observation_time": "2026-09-30T07:02:00+00:00",
                 "observed_extreme_c": 28.1,
             }
         },
     )
     bundle_reads = 0
+    bundle_authority_purposes = []
 
-    def read_bundle(*_args, **_kwargs):
+    def read_bundle(*_args, **kwargs):
         nonlocal bundle_reads
         bundle_reads += 1
+        bundle_authority_purposes.append(kwargs["authority_purpose"])
         return SimpleNamespace(ok=True, bundle=bundle, reason_code="READY")
 
     monkeypatch.setattr(
@@ -11008,15 +11046,15 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         "_forecast_snapshot_row_for_event",
         lambda *_args, **_kwargs: {
             "snapshot_id": "hko-day0-current-base-1",
-            "source_cycle_time": "2026-07-11T00:00:00+00:00",
-            "available_at": "2026-07-11T06:00:00+00:00",
+            "source_cycle_time": "2026-09-30T00:00:00+00:00",
+            "available_at": "2026-09-30T06:00:00+00:00",
         },
     )
 
     def current_observation_payload(*_args, **kwargs):
         return {
-            "observation_time": "2026-07-11T07:02:00+00:00",
-            "observation_available_at": "2026-07-11T07:05:00+00:00",
+            "observation_time": "2026-09-30T07:02:00+00:00",
+            "observation_available_at": "2026-09-30T07:05:00+00:00",
             "raw_value": 28.1,
             "rounded_value": 28,
             "low_so_far": 28.1,
@@ -11035,9 +11073,9 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
             "live_authority_status": "live",
             "_edli_global_day0_binding": {
                 "city": "Hong Kong",
-                "target_date": "2026-07-11",
+                "target_date": "2026-09-30",
                 "metric": "low",
-                "observation_time": "2026-07-11T07:02:00+00:00",
+                "observation_time": "2026-09-30T07:02:00+00:00",
                 "observed_extreme_native": 28.1,
                 "rounded_value": 28,
                 "settlement_source": "hko_hourly_accumulator",
@@ -11055,8 +11093,97 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         current_observation_payload,
     )
 
+
+    # This test keeps the two deliberately distinct component simplexes below:
+    # they establish consumer routing, not a normal licensed posterior q.
+    # Post-local source authority itself is produced by the real current-print
+    # writer, hourly parser/persistence and materializer witness builder.
+    from dataclasses import replace
+    from src.data import daily_obs_append, day0_hourly_vectors as hourly
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.data.replacement_forecast_materializer import _day0_remaining_vector_witness
+
+    def normal_remaining_witness(*, run_hour, capture_hour, capture_minute):
+        utc = _dt.timezone.utc
+        observed = _dt.datetime(2026, 9, 30, capture_hour, 0, tzinfo=utc)
+        publish = observed + _dt.timedelta(minutes=2)
+        fetched = observed + _dt.timedelta(minutes=5)
+        spot = {"updateTime": publish.isoformat(), "temperature": {
+            "recordTime": observed.isoformat(),
+            "data": [{"place": "Hong Kong Observatory", "value": 29, "unit": "C"}],
+        }}
+
+        class Response:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return spot
+
+        class Clock(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fetched.astimezone(tz) if tz else fetched.replace(tzinfo=None)
+
+        with monkeypatch.context() as fetch:
+            fetch.setattr(daily_obs_append.httpx, "get", lambda *_a, **_k: Response())
+            fetch.setattr(daily_obs_append, "datetime", Clock)
+            assert daily_obs_append._accumulate_hko_reading(vector_fixture.conn)
+
+        run = observed.replace(hour=run_hour)
+        captured = observed.replace(minute=capture_minute)
+        computed = captured + _dt.timedelta(seconds=2)
+        endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
+        models = hourly.day0_hourly_models_for_city(vector_fixture.city)
+        for model in models:
+            api = OPENMETEO_MODEL_IDS.get(model, model)
+            # A genuine run-pinned suffix, not a new full-day scalar/prior.
+            body = {"timezone": "Asia/Hong_Kong", "utc_offset_seconds": 28800,
+                "hourly_units": {"temperature_2m": "°C"}, "hourly": {
+                    "time": [f"2026-09-30T{hour:02d}:00"
+                             for hour in range(run_hour + 8, 24)],
+                    "temperature_2m": [29.0] * (24 - run_hour - 8)}}
+            params = {"endpoint": endpoint, "models": api,
+                      "timezone": "Asia/Hong_Kong", "hourly": "temperature_2m"}
+            request_hash = hourly.build_request_hash(endpoint=endpoint, params=params,
+                models=[model], captured_at=captured.isoformat(), payload=body)
+            meta = hourly._day0_provider_run_meta(
+                model=model, model_api_id=api, run=run,
+                available_at=run + _dt.timedelta(minutes=5),
+                modified_at=run + _dt.timedelta(minutes=5),
+                authority="run_pinned_single_runs", endpoint_mode="single_runs",
+                request_params=params, request_hash=request_hash,
+                fetch_started_at=captured, fetch_finished_at=computed)
+            vectors = hourly.parse_openmeteo_hourly_payload(
+                body, city=vector_fixture.city, models=[model],
+                captured_at=captured.isoformat(), source_run_meta_json=json.dumps(meta))
+            assert len(vectors) == 1
+            assert hourly.persist_day0_hourly_vectors(
+                vectors, target_date="2026-09-30", conn=vector_fixture.conn,
+                request_hash=request_hash, endpoint=endpoint, now=computed) == 1
+        anchor_vector_id = vector_fixture.conn.execute(
+            "SELECT vector_id FROM day0_hourly_vectors "
+            "WHERE model = ? AND target_date = ? AND captured_at = ?",
+            ("ecmwf_ifs", "2026-09-30", captured.isoformat()),
+        ).fetchone()[0]
+        request = replace(vector_fixture.request, computed_at=computed,
+            day0_observed_extreme_c=28.1,
+            day0_observed_extreme_observation_time="2026-09-30T07:02:00+00:00")
+        proof = _day0_remaining_vector_witness(vector_fixture.conn, request,
+            metric="low", computed_at_utc=computed, anchor_vector_id=anchor_vector_id)
+        assert proof is not None
+        assert set(proof["actual_models"]) == set(models)
+        assert proof["target_end_utc"] == "2026-09-30T16:00:00+00:00"
+        assert proof["capture_times_utc"] == [captured.isoformat()] * len(models)
+        return proof
+
+    remaining_witness = normal_remaining_witness(
+        run_hour=6, capture_hour=7, capture_minute=10
+    )
+    current_remaining_witness = remaining_witness
+
     remaining_calls = 0
-    remaining_capture = {"value": "2026-07-11T07:10:00+00:00"}
+    remaining_capture = {"value": "2026-09-30T07:10:00+00:00"}
 
     def remaining_components(*_args, **kwargs):
         nonlocal remaining_calls
@@ -11064,11 +11191,10 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         kwargs["payload"].update(
             {
                 "_edli_day0_remaining_model_names": [
-                    "ecmwf",
-                    "icon",
-                    "ukmo",
+                    *remaining_witness["actual_models"],
                 ],
                 "_edli_day0_remaining_models": 3,
+                "_edli_day0_remaining_vector_witness": remaining_witness,
                 "_edli_day0_remaining_capture_times_utc": [
                     remaining_capture["value"]
                 ],
@@ -11116,8 +11242,13 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
             "station_id": "HKO",
             "settlement_source": "hko_hourly_accumulator",
             "settlement_unit": "C",
-            "observation_time": "2026-07-11T07:02:00+00:00",
-            "observation_available_at": "2026-07-11T07:05:00+00:00",
+            "observation_time": "2026-09-30T07:02:00+00:00",
+            "target_date": "2026-09-30",
+            "cycle": "2026-09-30T00:00:00+00:00",
+            "captured_at": "2026-09-30T06:00:00+00:00",
+            "available_at": "2026-09-30T06:00:00+00:00",
+            "snapshot_id": "rmf-Hong Kong|2026-09-30|low|2026-09-30",
+            "observation_available_at": "2026-09-30T07:05:00+00:00",
             "raw_value": 28.1,
             "rounded_value": 28,
             "low_so_far": 28.1,
@@ -11134,16 +11265,16 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     )
     event = make_opportunity_event(
         event_type="DAY0_EXTREME_UPDATED",
-        entity_key="Hong Kong|2026-07-11|low|HKO",
+        entity_key="Hong Kong|2026-09-30|low|HKO",
         source="global-auction-current-day0-scope",
-        observed_at="2026-07-11T07:02:00+00:00",
-        available_at="2026-07-11T07:05:00+00:00",
-        received_at="2026-07-11T07:05:00+00:00",
+        observed_at="2026-09-30T07:02:00+00:00",
+        available_at="2026-09-30T07:05:00+00:00",
+        received_at="2026-09-30T07:05:00+00:00",
         payload=event_payload,
         causal_snapshot_id=str(event_payload["snapshot_id"]),
     )
     decision_at = _dt.datetime(
-        2026, 7, 11, 7, 30, tzinfo=_dt.timezone.utc
+        2026, 9, 30, 7, 30, tzinfo=_dt.timezone.utc
     )
     day0_payload: dict[str, object] = {}
     prepared = era._prepare_current_global_probability_family(
@@ -11177,14 +11308,17 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         "_edli_day0_provisional_boundary_survival_probability"
     ] == pytest.approx(0.95)
     assert day0_payload["_edli_day0_redecision_authority_scope"] == (
-        "held_exposure_current_day0_only_v1"
+        "held_exposure_current_bundle_day0_only_v1"
     )
     assert day0_payload["_edli_global_day0_binding"][
         "evidence_finality"
     ] == "PROVISIONAL_CURRENT_SNAPSHOT"
     assert "_edli_day0_exact_yes_payoffs" not in day0_payload
-    assert bundle_reads == 0
-    assert replacement_calls == 0
+    assert day0_payload["_edli_global_day0_binding"]["posterior_id"] == 17
+    # The current bundle contributes its source-clock certificate, never its
+    # persisted q: the distinct remaining-window simplex above is still used.
+    assert bundle_reads == 1
+    assert replacement_calls == 1
 
     reduce_only = era._prepare_current_global_probability_family(
         event,
@@ -11199,8 +11333,17 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     assert reduce_only.probability_witness.yes_point_q.tolist() == pytest.approx(
         [0.2, 0.5, 0.3]
     )
-    assert bundle_reads == 0
+    assert bundle_reads == 2
+    assert bundle_authority_purposes == [
+        bundle_reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        bundle_reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    ]
 
+    remaining_witness = normal_remaining_witness(
+        run_hour=12, capture_hour=15, capture_minute=30
+    )
+    post_remaining_witness = remaining_witness
+    remaining_capture["value"] = "2026-09-30T15:30:00+00:00"
     post_day_payload: dict[str, object] = {}
     post_day = era._prepare_current_global_probability_family(
         event,
@@ -11208,7 +11351,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         topology_conn=forecast,
         observation_conn=observations,
         decision_time=_dt.datetime(
-            2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
+            2026, 9, 30, 16, 30, tzinfo=_dt.timezone.utc
         ),
         max_age=_dt.timedelta(seconds=30),
         day0_payload_out=post_day_payload,
@@ -11229,10 +11372,10 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         "held_exposure_current_day0_only_v1"
     )
     assert post_day_payload["_edli_day0_post_local_vector_cutoff_utc"] == (
-        "2026-07-11T16:00:00+00:00"
+        "2026-09-30T16:00:00+00:00"
     )
 
-    remaining_capture["value"] = "2026-07-11T17:00:00+00:00"
+    remaining_capture["value"] = "2026-09-30T17:00:00+00:00"
     with pytest.raises(
         ValueError,
         match="GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_AFTER_TARGET",
@@ -11243,32 +11386,60 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
             topology_conn=forecast,
             observation_conn=observations,
             decision_time=_dt.datetime(
-                2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
+                2026, 9, 30, 16, 30, tzinfo=_dt.timezone.utc
             ),
             max_age=_dt.timedelta(seconds=30),
             allow_provisional_day0_replacement=True,
             probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
         )
-    remaining_capture["value"] = "2026-07-11T07:10:00+00:00"
+    remaining_capture["value"] = "2026-09-30T15:30:00+00:00"
+
+    # One clock fault, derived from the lawful producer witness above; no
+    # alternate authority recipe is installed for a negative case.
+    remaining_witness = {**post_remaining_witness,
+        "causal_as_of_utc": "2026-09-30T16:30:01+00:00"}
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_FUTURE"):
+        era._prepare_current_global_probability_family(
+            event, forecast_conn=forecast, topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=_dt.datetime(2026, 9, 30, 16, 30, tzinfo=_dt.timezone.utc),
+            max_age=_dt.timedelta(seconds=30), allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR)
+
+    # The original 07:10 bundle cannot be promoted to a fresh post-local tail.
+    remaining_witness = current_remaining_witness
+    remaining_capture["value"] = "2026-09-30T07:10:00+00:00"
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_STALE"):
+        era._prepare_current_global_probability_family(
+            event, forecast_conn=forecast, topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=_dt.datetime(2026, 9, 30, 16, 30, tzinfo=_dt.timezone.utc),
+            max_age=_dt.timedelta(seconds=30), allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR)
+    remaining_witness = post_remaining_witness
+    remaining_capture["value"] = "2026-09-30T15:30:00+00:00"
 
     with pytest.raises(
         ValueError,
-        match="GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
+        match="POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
     ):
         era._prepare_current_global_probability_family(
             event,
             forecast_conn=forecast,
             topology_conn=forecast,
             observation_conn=observations,
-            decision_time=decision_at,
+            decision_time=_dt.datetime(2026, 9, 30, 16, 30, tzinfo=_dt.timezone.utc),
             max_age=_dt.timedelta(seconds=30),
             allow_provisional_day0_replacement=True,
             probability_use=era._CurrentProbabilityUse.ENTRY,
         )
 
-    assert remaining_calls == 4
-    assert replacement_calls == 0
-    assert bundle_reads == 0
+    assert remaining_calls == 6
+    assert replacement_calls == 2
+    assert bundle_reads == 2
+
+    remaining_witness = current_remaining_witness
+    remaining_capture["value"] = "2026-09-30T07:10:00+00:00"
 
     def unavailable_remaining_components(*_args, **_kwargs):
         raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
@@ -11318,6 +11489,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
 
     forecast.close()
     observations.close()
+    vector_fixture.conn.close()
 
 
 @pytest.mark.parametrize("soft_anchor", (688035, None))
