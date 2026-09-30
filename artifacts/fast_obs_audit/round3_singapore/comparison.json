@@ -1,0 +1,589 @@
+{
+  "city": "Singapore",
+  "candidate_station": {
+    "id": "S24",
+    "device_id": "S24",
+    "name": "Changi Meteorological Station",
+    "location": {
+      "longitude": 103.9823,
+      "latitude": 1.3678
+    }
+  },
+  "resolver_station": "WSSS",
+  "n_pairs": 49,
+  "n_exact": 27,
+  "mismatches": [
+    {
+      "time": "2026-09-29T16:30:00+00:00",
+      "candidate_c": 28.0,
+      "resolver_c": 29.0,
+      "candidate_contract": 28,
+      "resolver_contract": 29,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T17:00:00+00:00",
+      "candidate_c": 27.9,
+      "resolver_c": 29.0,
+      "candidate_contract": 28,
+      "resolver_contract": 29,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T18:00:00+00:00",
+      "candidate_c": 28.0,
+      "resolver_c": 29.0,
+      "candidate_contract": 28,
+      "resolver_contract": 29,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T20:00:00+00:00",
+      "candidate_c": 27.6,
+      "resolver_c": 27.0,
+      "candidate_contract": 28,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T21:30:00+00:00",
+      "candidate_c": 27.3,
+      "resolver_c": 28.0,
+      "candidate_contract": 27,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T22:00:00+00:00",
+      "candidate_c": 27.3,
+      "resolver_c": 28.0,
+      "candidate_contract": 27,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T22:30:00+00:00",
+      "candidate_c": 27.4,
+      "resolver_c": 28.0,
+      "candidate_contract": 27,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T23:00:00+00:00",
+      "candidate_c": 27.4,
+      "resolver_c": 28.0,
+      "candidate_contract": 27,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T02:30:00+00:00",
+      "candidate_c": 30.6,
+      "resolver_c": 30.0,
+      "candidate_contract": 31,
+      "resolver_contract": 30,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T03:30:00+00:00",
+      "candidate_c": 31.7,
+      "resolver_c": 31.0,
+      "candidate_contract": 32,
+      "resolver_contract": 31,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T04:00:00+00:00",
+      "candidate_c": 31.4,
+      "resolver_c": 33.0,
+      "candidate_contract": 31,
+      "resolver_contract": 33,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T05:30:00+00:00",
+      "candidate_c": 32.5,
+      "resolver_c": 32.0,
+      "candidate_contract": 33,
+      "resolver_contract": 32,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T06:00:00+00:00",
+      "candidate_c": 30.4,
+      "resolver_c": 32.0,
+      "candidate_contract": 30,
+      "resolver_contract": 32,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T06:17:00+00:00",
+      "candidate_c": 27.2,
+      "resolver_c": 29.0,
+      "candidate_contract": 27,
+      "resolver_contract": 29,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T06:30:00+00:00",
+      "candidate_c": 26.0,
+      "resolver_c": 28.0,
+      "candidate_contract": 26,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T09:30:00+00:00",
+      "candidate_c": 26.4,
+      "resolver_c": 27.0,
+      "candidate_contract": 26,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T09:33:00+00:00",
+      "candidate_c": 26.4,
+      "resolver_c": 27.0,
+      "candidate_contract": 26,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T13:00:00+00:00",
+      "candidate_c": 25.7,
+      "resolver_c": 25.0,
+      "candidate_contract": 26,
+      "resolver_contract": 25,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T14:00:00+00:00",
+      "candidate_c": 26.0,
+      "resolver_c": 27.0,
+      "candidate_contract": 26,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T14:30:00+00:00",
+      "candidate_c": 26.4,
+      "resolver_c": 27.0,
+      "candidate_contract": 26,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T15:00:00+00:00",
+      "candidate_c": 26.8,
+      "resolver_c": 26.0,
+      "candidate_contract": 27,
+      "resolver_contract": 26,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T15:30:00+00:00",
+      "candidate_c": 26.1,
+      "resolver_c": 25.0,
+      "candidate_contract": 26,
+      "resolver_contract": 25,
+      "match": false
+    }
+  ],
+  "pairs": [
+    {
+      "time": "2026-09-29T16:30:00+00:00",
+      "candidate_c": 28.0,
+      "resolver_c": 29.0,
+      "candidate_contract": 28,
+      "resolver_contract": 29,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T17:00:00+00:00",
+      "candidate_c": 27.9,
+      "resolver_c": 29.0,
+      "candidate_contract": 28,
+      "resolver_contract": 29,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T17:30:00+00:00",
+      "candidate_c": 28.0,
+      "resolver_c": 28.0,
+      "candidate_contract": 28,
+      "resolver_contract": 28,
+      "match": true
+    },
+    {
+      "time": "2026-09-29T18:00:00+00:00",
+      "candidate_c": 28.0,
+      "resolver_c": 29.0,
+      "candidate_contract": 28,
+      "resolver_contract": 29,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T18:30:00+00:00",
+      "candidate_c": 27.7,
+      "resolver_c": 28.0,
+      "candidate_contract": 28,
+      "resolver_contract": 28,
+      "match": true
+    },
+    {
+      "time": "2026-09-29T19:00:00+00:00",
+      "candidate_c": 27.7,
+      "resolver_c": 28.0,
+      "candidate_contract": 28,
+      "resolver_contract": 28,
+      "match": true
+    },
+    {
+      "time": "2026-09-29T19:30:00+00:00",
+      "candidate_c": 27.3,
+      "resolver_c": 27.0,
+      "candidate_contract": 27,
+      "resolver_contract": 27,
+      "match": true
+    },
+    {
+      "time": "2026-09-29T20:00:00+00:00",
+      "candidate_c": 27.6,
+      "resolver_c": 27.0,
+      "candidate_contract": 28,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T20:30:00+00:00",
+      "candidate_c": 27.1,
+      "resolver_c": 27.0,
+      "candidate_contract": 27,
+      "resolver_contract": 27,
+      "match": true
+    },
+    {
+      "time": "2026-09-29T21:00:00+00:00",
+      "candidate_c": 27.2,
+      "resolver_c": 27.0,
+      "candidate_contract": 27,
+      "resolver_contract": 27,
+      "match": true
+    },
+    {
+      "time": "2026-09-29T21:30:00+00:00",
+      "candidate_c": 27.3,
+      "resolver_c": 28.0,
+      "candidate_contract": 27,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T22:00:00+00:00",
+      "candidate_c": 27.3,
+      "resolver_c": 28.0,
+      "candidate_contract": 27,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T22:30:00+00:00",
+      "candidate_c": 27.4,
+      "resolver_c": 28.0,
+      "candidate_contract": 27,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T23:00:00+00:00",
+      "candidate_c": 27.4,
+      "resolver_c": 28.0,
+      "candidate_contract": 27,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-29T23:30:00+00:00",
+      "candidate_c": 27.6,
+      "resolver_c": 28.0,
+      "candidate_contract": 28,
+      "resolver_contract": 28,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T00:00:00+00:00",
+      "candidate_c": 28.0,
+      "resolver_c": 28.0,
+      "candidate_contract": 28,
+      "resolver_contract": 28,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T00:30:00+00:00",
+      "candidate_c": 29.2,
+      "resolver_c": 29.0,
+      "candidate_contract": 29,
+      "resolver_contract": 29,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T01:00:00+00:00",
+      "candidate_c": 29.7,
+      "resolver_c": 30.0,
+      "candidate_contract": 30,
+      "resolver_contract": 30,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T01:30:00+00:00",
+      "candidate_c": 30.1,
+      "resolver_c": 30.0,
+      "candidate_contract": 30,
+      "resolver_contract": 30,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T02:00:00+00:00",
+      "candidate_c": 30.1,
+      "resolver_c": 30.0,
+      "candidate_contract": 30,
+      "resolver_contract": 30,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T02:30:00+00:00",
+      "candidate_c": 30.6,
+      "resolver_c": 30.0,
+      "candidate_contract": 31,
+      "resolver_contract": 30,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T03:00:00+00:00",
+      "candidate_c": 31.0,
+      "resolver_c": 31.0,
+      "candidate_contract": 31,
+      "resolver_contract": 31,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T03:30:00+00:00",
+      "candidate_c": 31.7,
+      "resolver_c": 31.0,
+      "candidate_contract": 32,
+      "resolver_contract": 31,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T04:00:00+00:00",
+      "candidate_c": 31.4,
+      "resolver_c": 33.0,
+      "candidate_contract": 31,
+      "resolver_contract": 33,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T04:30:00+00:00",
+      "candidate_c": 32.1,
+      "resolver_c": 32.0,
+      "candidate_contract": 32,
+      "resolver_contract": 32,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T05:00:00+00:00",
+      "candidate_c": 31.7,
+      "resolver_c": 32.0,
+      "candidate_contract": 32,
+      "resolver_contract": 32,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T05:30:00+00:00",
+      "candidate_c": 32.5,
+      "resolver_c": 32.0,
+      "candidate_contract": 33,
+      "resolver_contract": 32,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T06:00:00+00:00",
+      "candidate_c": 30.4,
+      "resolver_c": 32.0,
+      "candidate_contract": 30,
+      "resolver_contract": 32,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T06:17:00+00:00",
+      "candidate_c": 27.2,
+      "resolver_c": 29.0,
+      "candidate_contract": 27,
+      "resolver_contract": 29,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T06:30:00+00:00",
+      "candidate_c": 26.0,
+      "resolver_c": 28.0,
+      "candidate_contract": 26,
+      "resolver_contract": 28,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T07:00:00+00:00",
+      "candidate_c": 27.2,
+      "resolver_c": 27.0,
+      "candidate_contract": 27,
+      "resolver_contract": 27,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T07:30:00+00:00",
+      "candidate_c": 28.7,
+      "resolver_c": 29.0,
+      "candidate_contract": 29,
+      "resolver_contract": 29,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T08:00:00+00:00",
+      "candidate_c": 28.2,
+      "resolver_c": 28.0,
+      "candidate_contract": 28,
+      "resolver_contract": 28,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T08:30:00+00:00",
+      "candidate_c": 26.9,
+      "resolver_c": 27.0,
+      "candidate_contract": 27,
+      "resolver_contract": 27,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T09:00:00+00:00",
+      "candidate_c": 27.2,
+      "resolver_c": 27.0,
+      "candidate_contract": 27,
+      "resolver_contract": 27,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T09:30:00+00:00",
+      "candidate_c": 26.4,
+      "resolver_c": 27.0,
+      "candidate_contract": 26,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T09:33:00+00:00",
+      "candidate_c": 26.4,
+      "resolver_c": 27.0,
+      "candidate_contract": 26,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T10:00:00+00:00",
+      "candidate_c": 24.7,
+      "resolver_c": 25.0,
+      "candidate_contract": 25,
+      "resolver_contract": 25,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T10:30:00+00:00",
+      "candidate_c": 24.9,
+      "resolver_c": 25.0,
+      "candidate_contract": 25,
+      "resolver_contract": 25,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T11:00:00+00:00",
+      "candidate_c": 25.1,
+      "resolver_c": 25.0,
+      "candidate_contract": 25,
+      "resolver_contract": 25,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T11:30:00+00:00",
+      "candidate_c": 25.3,
+      "resolver_c": 25.0,
+      "candidate_contract": 25,
+      "resolver_contract": 25,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T12:00:00+00:00",
+      "candidate_c": 25.6,
+      "resolver_c": 26.0,
+      "candidate_contract": 26,
+      "resolver_contract": 26,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T12:30:00+00:00",
+      "candidate_c": 25.6,
+      "resolver_c": 26.0,
+      "candidate_contract": 26,
+      "resolver_contract": 26,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T13:00:00+00:00",
+      "candidate_c": 25.7,
+      "resolver_c": 25.0,
+      "candidate_contract": 26,
+      "resolver_contract": 25,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T13:30:00+00:00",
+      "candidate_c": 25.7,
+      "resolver_c": 26.0,
+      "candidate_contract": 26,
+      "resolver_contract": 26,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T14:00:00+00:00",
+      "candidate_c": 26.0,
+      "resolver_c": 27.0,
+      "candidate_contract": 26,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T14:30:00+00:00",
+      "candidate_c": 26.4,
+      "resolver_c": 27.0,
+      "candidate_contract": 26,
+      "resolver_contract": 27,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T15:00:00+00:00",
+      "candidate_c": 26.8,
+      "resolver_c": 26.0,
+      "candidate_contract": 27,
+      "resolver_contract": 26,
+      "match": false
+    },
+    {
+      "time": "2026-09-30T15:30:00+00:00",
+      "candidate_c": 26.1,
+      "resolver_c": 25.0,
+      "candidate_contract": 26,
+      "resolver_contract": 25,
+      "match": false
+    }
+  ],
+  "resolver_body_sha256": "e23752206aa67c1528aad1d3d0ac0d1cb88ce70ca85917be0fdc724fa9a691f2",
+  "first_availability": "NOT_MEASURED_HISTORICAL_FETCH"
+}
