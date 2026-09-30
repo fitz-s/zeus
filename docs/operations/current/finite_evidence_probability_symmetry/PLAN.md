@@ -4954,6 +4954,36 @@ live minimum-lot entries that converted a small fractional target into a larger
 binary loss budget. A venue minimum is an execution constraint, not an alpha
 source or a risk exception.
 
+## 2026-09-30 small-capital minimum lot
+
+Operator approval 2026-09-30 ("执行1但是只有在小资金的时候才能执行"): reinstate one
+minimum lot, only while capital is small. The rule above still holds whenever
+capital is large; this section relaxes it only for small capital.
+
+With holding `h`, full-Kelly holding `T`, multiplier `κ` (1/8, unchanged) and
+venue lot `L`, one lot is admitted iff `h < κT < L` and `h + L <= T`
+(`small_capital_minimum_lot_admits`). `κT < L` is the small-capital condition.
+Full Kelly is linear in wealth, `T = f*·W`, so the threshold is
+`W < L/(κ·f*)`. It is derived per candidate from that candidate's own edge and
+price rather than fixed as one dollar figure, and it switches off by itself
+once wealth lets the fractional target reach one lot. `h + L <= T` keeps the
+final holding inside full Kelly. `h < κT` limits it to one lot per token: after
+the fill, `h >= L > κT` and the reason becomes
+`FRACTIONAL_KELLY_TARGET_REACHED`. The single-order sizer and the family joint
+planner call the same predicate, and so do both BUY validators. The lot keeps
+every other law: positive log-wealth and EV at the executable price including
+fees, the live price band, cash and allocator capacity at the worst limit, the
+fill-prefix proof, the joint fractional budget, and
+`_positive_common_expected_growth` at selection. The typed mode is
+`SMALL_CAPITAL_MINIMUM_LOT`, with no repair certificate or receipt schema
+change.
+
+The 07-19 flaw this avoids: the retired repair compared the remaining
+increment `κT - h` with `L` rather than the target `κT`. At any wealth, a
+nearly reached target therefore rounded up by a whole lot, which is how a
+fractional target became a larger binary loss budget. The new predicate
+compares the target itself, so it is inert once capital is large.
+
 ## 2026-07-19 narrow-wake auction evidence continuity
 
 Targeted producer wakes were replacing the process-global book cache with only

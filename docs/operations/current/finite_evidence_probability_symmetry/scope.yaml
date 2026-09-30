@@ -184,6 +184,7 @@ in_scope:
 - tests/solve/test_shim_decide.py
 - tests/solve/test_menu_adapter.py
 - tests/solve/test_solver_properties.py
+- tests/solve/test_small_capital_minimum_lot.py
 - tests/runtime/test_resolve_zeus_equity_base.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py
 - tests/AGENTS.md
@@ -251,6 +252,7 @@ tests:
 - tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py::source-clock
   subset
 - tests/solve/test_solver_properties.py
+- tests/solve/test_small_capital_minimum_lot.py
 - tests/engine/test_multiwinner_wealth_composition.py
 - tests/test_money_path_semantic_ci.py
 - tests/solve/test_shim_decide.py
