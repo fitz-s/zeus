@@ -1438,18 +1438,27 @@ def _wu_current_carrier_test_witness(*, city: str, target_date: str, metric: str
     ("metric", "model", "value_c"),
     (("high", "cwa_township_hourly_high", 33.0), ("low", "cwa_township_hourly_low", 24.0)),
 )
-def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_cold_start(
+def test_hourly_cwa_extreme_retains_reader_and_cold_start_center_without_ground_license(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     frozen_two_source_scheme: bool,
     metric: str,
     model: str,
     value_c: float,
 ) -> None:
-    """Each 061 extreme enters its own q center; retired 063 remains excluded."""
+    """061 source/mean component; the unsupported RCSS full-q premise is refuted."""
     from src.config import City
 
-    conn = _conn()
+    conn = _conn(archive_ground=False)
     target = date(2026, 7, 24)
+    # TEST_ONLY_CONTROLLED_CANONICAL_INSERT_CLOCK: these diagnostic markers
+    # and the normal station writer are possessed before this component cut.
+    # Never rewrite a licensed row's first canonical clock.
+    builtin = sqlite3.connect(":memory:")
+    conn.create_function("strftime",2,lambda fmt,value:
+        "2026-07-23T10:15:00.000+00:00"
+        if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now")
+        else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
     cwa_id = 701
     conn.execute(
         """
@@ -1483,30 +1492,6 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
     )
     monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Taipei": taipei})
 
-    # The real override reads the persisted station row and builds its own
-    # _z_by_model/precision-center/current-value provenance.  These only replace
-    # external ENS capture and the already-validated current-shape input.
-    likelihood = SimpleNamespace(
-        model="gfs_global", z=30.0, train_residuals=(), n_train=0,
-        residuals_by_date={},
-    )
-    capture = SimpleNamespace(
-        has_extras=True, anchor_z=25.0, anchor_tau0=1.0,
-        likelihood=(likelihood,), disagree_var=0.0,
-        anchor_raw_m2_native=None, anchor_raw_n_train=0,
-        dropped_models=(),
-        selection=SimpleNamespace(excluded_regionals=(), dropped_aliases=()),
-    )
-    monkeypatch.setattr(
-        "src.data.bayes_precision_fusion_capture.capture_bayes_precision_instruments",
-        lambda **_kwargs: capture,
-    )
-    monkeypatch.setattr(
-        "src.forecast.bayes_precision_fusion.fuse_bayes_precision_posterior",
-        lambda **_kwargs: SimpleNamespace(
-            sd=0.5, method="TEST_FUSION", used_models=("gfs_global",), regional_models=(),
-        ),
-    )
     if frozen_two_source_scheme:
         from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
 
@@ -1523,16 +1508,6 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
         lambda *_args, **_kwargs: scheme,
     )
 
-    class _Shape:
-        center_sigma_c = 0.5
-        predictive_sigma_c = 1.2
-        members_c = (23.0, 24.0, 25.0)
-
-        @staticmethod
-        def as_payload() -> dict[str, object]:
-            return {"source": "test-current-ens-shape"}
-
-    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
     request = replace(
         _request(),
         city="Taipei", city_id="Taipei", city_timezone="Asia/Taipei",
@@ -1541,21 +1516,31 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
         computed_at=datetime(2026, 7, 23, 10, 16, tzinfo=UTC),
     )
 
-    for model_id, model_name, value in ((703, "ecmwf_ifs", 25.0), (704, "gfs_global", 30.0)):
-        conn.execute("""INSERT INTO raw_model_forecasts
-            (raw_model_forecast_id,model,city,target_date,metric,source_cycle_time,source_available_at,captured_at,lead_days,forecast_value_c,endpoint)
-            VALUES (?,?,'Taipei',?,?,'2026-07-23T10:00:00+00:00','2026-07-23T10:15:00+00:00','2026-07-23T10:15:00+00:00',1,?,'single_runs')""",
-            (model_id, model_name, target.isoformat(), metric, value))
     _qualify_raw_fixture_rows(conn)
     override = materializer_mod._replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=25.0, conn=conn,
     )
 
-    assert override is not None
-    assert model in override.used_models
-    assert "cwa_township" not in override.used_models
-    assert cwa_id in override.raw_model_forecast_ids
-    serving = override.current_value_serving[model]
+    # Refuted original full-q premise: RCSS has no registered canonical
+    # ground route. A scheme cannot legalize it or the mixed gfs_global grid.
+    from src.data.replacement_current_value_serving import (
+        read_current_instrument_values, station_ground_target_coverage_for_city,
+    )
+    assert override is None
+    assert any("current provider precision DATA_DEGRADED for Taipei 2026-07-24"
+               in entry.message and "TARGET_STATION_GROUND_EVIDENCE_INVALID" in entry.message
+               for entry in caplog.records)
+    coverage = station_ground_target_coverage_for_city(None,city="Taipei",
+        target_date=target,decision_at=request.computed_at)
+    assert coverage["status"] == "DATA_DEGRADED"
+    assert coverage["reason"] == "TARGET_STATION_GROUND_EVIDENCE_INVALID"
+    served = read_current_instrument_values(conn,city="Taipei",metric=metric,
+        target_date=str(target),source_cycle_time_iso=request.source_cycle_time.isoformat(),
+        decision_time_iso=request.computed_at.isoformat(),include_station_sources=True)
+    assert model in served
+    assert "cwa_township" not in served
+    assert cwa_id == served[model].raw_model_forecast_id
+    serving = served[model].as_provenance()
     assert {key: value for key,value in serving.items() if key != "physical_response"} == {
         "served_via": "single_runs",
         "previous_run_substitution": False,
@@ -1573,14 +1558,17 @@ def test_hourly_cwa_extreme_persisted_row_enters_real_precision_override_when_co
     assert hashlib.sha256(body).hexdigest() == evidence["entity_body_sha256"]
     from src.data.station_forecast_adapter import reextract_station_response_value
     assert reextract_station_response_value(body, evidence) == value_c
-    station_basis = override.precision_center_basis[model]
-    assert station_basis["n"] == 0.0
-    assert station_basis["weight"] > 0.0
+    # Same mean owner used at materializer.py:4701. The two baseline values
+    # are explicit mathematical inputs, not licensed gfs/IFS instruments.
+    from src.forecast.center import raw_precision_center
+    centers = {"ecmwf_ifs":25.0,"gfs_global":30.0,model:served[model].value_c}
+    n_by_model = dict.fromkeys(centers,(None,0))
+    weights,center = raw_precision_center(n_by_model,centers,unit="C")
+    assert n_by_model[model][1] == 0.0
+    assert weights[model] > 0.0
     if metric == "low":
-        # Without the 24C station member, the mocked 30C extra + 25C anchor
-        # center at 27.5C; the real raw-precision center must move below 27C.
-        assert override.anchor_value_c < 27.0
-        assert model in override.low_n_prior_weighted_models
+        assert center < 27.0
+        assert model in [key for key,(_,n) in n_by_model.items() if n == 0 and weights[key] > 0]
 
 
 def test_live_override_keeps_every_scheme_weighted_source(monkeypatch) -> None:
