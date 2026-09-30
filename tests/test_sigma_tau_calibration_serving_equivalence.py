@@ -57,7 +57,7 @@ def _full_row(conn) -> dict:
 # Sep30 06Z -> Oct1 local-day end (Oct1 16Z) preserves the original +8h
 # geometry: lead_target_h = 34.0h -> bucket
 # [24,36) (NOT [36,48), which is where the UTC-anchored cut would have placed it).
-_REQUEST_KWARGS = dict(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12))
+_REQUEST_KWARGS = dict(source_cycle_time=_dt(6), computed_at=_dt(11), expires_at=_dt(12))
 _EXPECTED_BUCKET = "[24,36)"
 
 

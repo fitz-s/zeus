@@ -303,8 +303,11 @@ def _hko_request(**kwargs):
     from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
     raw = _hko_raw_openmeteo_bytes()
     cycle = kwargs.pop("source_cycle_time", _hko_dt(0))
-    cut = kwargs.pop("computed_at", _hko_dt(4))
-    expiry = kwargs.pop("expires_at", _hko_dt(6))
+    # 00Z permits partial polling at 06:40Z; this controlled input proves
+    # the complete target window, not the complete global run at that time.
+    # Defaults describe a lawful later decision, never an invented 04Z ENS.
+    cut = kwargs.pop("computed_at", _hko_dt(8))
+    expiry = kwargs.pop("expires_at", _hko_dt(10))
     baseline_available = kwargs.pop("baseline_source_available_at", cycle+timedelta(hours=2))
     anchor_available = kwargs.pop("openmeteo_source_available_at", cycle+timedelta(hours=3))
     guard = kwargs.pop("openmeteo_precision_guard", _DEFAULT_PRECISION_GUARD)
@@ -801,6 +804,25 @@ def test_writer_fixture_binds_endpoint_series_without_renewing_same_body_capture
 def _fixture_current_shape(_conn, request, **kwargs):
     """Controlled ENS members; real decomposition and later geometry binding."""
     center = float(kwargs["center_c"])
+    # Compute is read-only. A setup that ran the ordinary native writer must
+    # consume that exact canonical identity/member input, not mint 9001 or
+    # recenter the issued ENS when the provider center changes. Thin source-
+    # selection components below retain their explicitly unlicensed seam.
+    actual = None
+    if "source_run" in {row[0] for row in _conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        actual = materializer_mod.read_current_evidence_snapshot_identity(
+            _conn,request,metric=request.temperature_metric)
+    if actual is not None:
+        members = tuple(json.loads(actual.members_json))
+        if actual.members_unit in ("F", "degF", "°F"):
+            members = tuple((value-32)/1.8 for value in members)
+        return materializer_mod._current_evidence_shape_from_values(
+            snapshot_id=actual.snapshot_id,source_cycle_time=actual.source_cycle_time,
+            source_available_at=actual.source_available_at,members_c=members,
+            grid_surface_evidence_revision=actual.grid_surface_evidence_revision,
+            grid_surface_evidence_identity_hash=actual.grid_surface_evidence_identity_hash,
+            native_coordinate_compatibility=actual.native_coordinate_compatibility,
+            **{key:kwargs[key] for key in ("provider_values_c","provider_weights","center_c","provider_cycles")})
     return materializer_mod._current_evidence_shape_from_values(
         snapshot_id=9001, source_cycle_time=str(request.source_cycle_time.isoformat()),
         source_available_at=str(request.computed_at.isoformat()),
@@ -1124,18 +1146,30 @@ def _fixture_native_shape_identity(conn, request, monkeypatch, *, members_c):
         @classmethod
         def now(cls, tz=None): return captured.astimezone(tz or UTC)
     if row is None:
-        with monkeypatch.context() as ingress:
-            ingress.setattr(native, "datetime", NativeClock)
-            ingress.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: captured.isoformat())
-            decision, release = native._select_cycle_for_track(track=track, now_utc=captured)
-            assert decision is native.FetchDecision.FETCH_ALLOWED and release["selected_cycle_time"] == cycle
-            collected = native.collect_open_ens_cycle(track=track, skip_download=True, skip_extract=True,
-                grid_surface_source_evidence=grid, conn=conn, now_utc=captured,
-                _paths=native._resolve_opendata_paths(source_root=root, environ={}))
+        # TEST_ONLY_CONTROLLED_CANONICAL_INSERT_CLOCK. The native row's
+        # schema DEFAULT records this actual private INSERT, not wall-now
+        # after the hypothetical decision. Existing rows are never updated.
+        builtin = sqlite3.connect(":memory:")
+        conn.create_function("strftime",2,lambda fmt,value: captured.isoformat(timespec="milliseconds")
+            if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now")
+            else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+        try:
+            with monkeypatch.context() as ingress:
+                ingress.setattr(native, "datetime", NativeClock)
+                ingress.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: captured.isoformat())
+                decision, release = native._select_cycle_for_track(track=track, now_utc=captured)
+                assert decision is native.FetchDecision.FETCH_ALLOWED and release["selected_cycle_time"] == cycle
+                collected = native.collect_open_ens_cycle(track=track, skip_download=True, skip_extract=True,
+                    grid_surface_source_evidence=grid, conn=conn, now_utc=captured,
+                    _paths=native._resolve_opendata_paths(source_root=root, environ={}))
+        finally:
+            conn.create_function("strftime",2,lambda fmt,value:
+                builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
         assert collected["status"] == "ok", collected
         row = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=? AND city=? AND target_date=? AND temperature_metric=?",
             (collected["source_run_id"], city.name, str(request.target_date), metric)).fetchone())
     assert row["source_cycle_time"] == cycle.isoformat()
+    assert captured <= datetime.fromisoformat(row["recorded_at"]) <= request.computed_at
     actual_members = tuple(json.loads(row["members_json"]))
     if city.settlement_unit == "F":
         actual_members = tuple((value-32)/1.8 for value in actual_members)
@@ -1147,7 +1181,7 @@ def _fixture_native_shape_identity(conn, request, monkeypatch, *, members_c):
 
 def _install_hko_live_fusion(monkeypatch, **kwargs):
     """Lawful ground/geometry write seam; not a claim of normal provider capture."""
-    request = kwargs.pop("request", None) or _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12))
+    request = kwargs.pop("request", None) or _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(11), expires_at=_hko_dt(12))
     conn = kwargs.pop("conn",None)
     selected_cells = kwargs.pop("selected_cells", None)
     kwargs.setdefault("shape_cycle_time", request.source_cycle_time)
@@ -1676,6 +1710,7 @@ def test_hourly_cwa_extreme_retains_reader_and_cold_start_center_without_ground_
         assert model in [key for key,(_,n) in n_by_model.items() if n == 0 and weights[key] > 0]
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_live_override_keeps_every_scheme_weighted_source(monkeypatch) -> None:
     """The live override collapses provider families around the active scheme.
 
@@ -1714,17 +1749,14 @@ def test_live_override_keeps_every_scheme_weighted_source(monkeypatch) -> None:
     monkeypatch.setattr(
         materializer_mod, "_freshest_declared_provider_representatives", spy
     )
-    request = replace(
-        _request(),
-        city="Los Angeles", city_id="Los Angeles",
-        city_timezone="America/Los_Angeles", temperature_metric="high",
-        target_date=date(2026, 10, 1),
-        source_cycle_time=datetime(2026, 9, 30, 0, tzinfo=UTC),
-        computed_at=datetime(2026, 9, 30, 11, 23, tzinfo=UTC),
-    )
+    from src.data.station_ground_evidence import archive_station_ground_evidence, forecast_db_from_connection
+    conn = _conn(archive_ground=False)
+    assert archive_station_ground_evidence(forecast_db_from_connection(conn), ["Los Angeles"])["status"] == "GROUND_SOURCE_ARCHIVED"
+    request = _la_current_physical_request(conn,metric="high",
+        cycle=datetime(2026,9,30,tzinfo=UTC),decision=datetime(2026,9,30,11,23,tzinfo=UTC))
 
     materializer_mod._replacement_bayes_precision_fusion_override(
-        request, metric="high", anchor_value_corrected_c=27.0, conn=_conn(),
+        request, metric="high", anchor_value_corrected_c=27.0, conn=conn,
     )
 
     assert seen and set(seen[0]) == set(scheme.weights)
@@ -3442,6 +3474,8 @@ def test_day0_owner_witness_blocks_swapped_owner_before_posterior_insert(
 def test_materializer_blocks_non_live_posterior_before_execution_authority_table(monkeypatch) -> None:
     conn = _conn()
     request = _install_hko_live_fusion(monkeypatch, conn=conn, request=_hko_request())
+    producer_readiness = tuple(tuple(row) for row in conn.execute("SELECT * FROM readiness_state ORDER BY rowid"))
+    assert producer_readiness and all(row["strategy_key"] == "producer_readiness" for row in conn.execute("SELECT * FROM readiness_state"))
     assert isinstance(materializer_mod.prepare_replacement_forecast_live(conn, request),
                       materializer_mod.PreparedReplacementForecastMaterialization)
     monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *a, **k: None)
@@ -3458,14 +3492,22 @@ def test_materializer_blocks_non_live_posterior_before_execution_authority_table
     assert result.anchor_id is not None
     assert result.readiness_id is None
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM readiness_state ORDER BY rowid")) == producer_readiness
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state WHERE strategy_key!='producer_readiness'").fetchone()[0] == 0
 
 
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_writes_authorized_06z_cycle_as_live_layer(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
     request = _install_hko_live_fusion(monkeypatch, conn=conn,
-        request=_hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12)))
+        request=_hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(11), expires_at=_hko_dt(12)))
+    # The old 10Z component cut precedes the real 10:45 safe-fetch release.
+    # Keep its refusal, then prove the same issued run's lawful later RESET.
+    assert materializer_mod.read_current_evidence_snapshot_identity(conn,
+        replace(request,computed_at=_hko_dt(10)),metric="high") is None
+    actual = materializer_mod.read_current_evidence_snapshot_identity(conn,request,metric="high")
+    assert actual is not None
+    assert actual.snapshot_id == materializer_mod._replacement_bayes_precision_fusion_override().current_evidence_shape["snapshot_id"]
     result = materialize_replacement_forecast_live(conn, request)
 
     assert result.ok is True
@@ -3482,7 +3524,7 @@ def test_non_day0_partial_cohort_proof_changes_equal_q_posterior_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
-    request = _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12))
+    request = _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(11), expires_at=_hko_dt(12))
     request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
     fusion = materializer_mod._replacement_bayes_precision_fusion_override()
     anchor_id = materializer_mod._insert_anchor(conn, request, metric="high")
@@ -3534,7 +3576,7 @@ def test_materializer_surfaces_bounds_missing_sub_reason(monkeypatch: pytest.Mon
     subprocess log."""
     conn = _conn()
     request = _install_hko_live_fusion(monkeypatch, conn=conn,
-        request=_hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12)))
+        request=_hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(11), expires_at=_hko_dt(12)))
     assert isinstance(materializer_mod.prepare_replacement_forecast_live(conn, request),
                       materializer_mod.PreparedReplacementForecastMaterialization)
     monkeypatch.setattr(
@@ -3831,9 +3873,9 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
 def test_materializer_keeps_readiness_separate_by_baseline_source_run(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
     first_request = _hko_request(baseline_source_run_id="ecmwf_open_data:mx2t6_high:2026-09-30T00Z",
-        baseline_source_available_at=_hko_dt(2), computed_at=_hko_dt(4), expires_at=_hko_dt(6))
+        baseline_source_available_at=_hko_dt(2), computed_at=_hko_dt(8), expires_at=_hko_dt(10))
     second_request = _hko_request(baseline_source_run_id="ecmwf_open_data:mx2t6_high:2026-09-30T00Z:revised",
-        baseline_source_available_at=_hko_dt(2,15), computed_at=_hko_dt(4,15), expires_at=_hko_dt(6,15))
+        baseline_source_available_at=_hko_dt(2,15), computed_at=_hko_dt(8,15), expires_at=_hko_dt(10,15))
     first_request = _install_hko_live_fusion(monkeypatch, conn=conn, request=first_request)
     first = materialize_replacement_forecast_live(conn, first_request)
     second_request = _install_hko_live_fusion(monkeypatch, conn=conn, request=second_request)
@@ -3934,8 +3976,8 @@ def test_prepared_materialization_keeps_compute_read_only(
 def test_materializer_lifts_computed_at_to_source_run_possession(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
     _ensure_source_run_table(conn)
-    request = _hko_request(computed_at=_hko_dt(4), expires_at=_hko_dt(6))
-    late_possession = _hko_dt(4, 5)
+    request = _hko_request(computed_at=_hko_dt(8), expires_at=_hko_dt(10))
+    late_possession = _hko_dt(8, 5)
     # The producer sees the effective possession cut after the request is
     # normalized. Its frozen geometry audit must carry that same cut.
     owned = _install_hko_live_fusion(
@@ -4746,7 +4788,7 @@ def test_materializer_ignores_malformed_pre_day0_frontier_ledger(
 ) -> None:
     cycle = datetime(2026,10,1,tzinfo=UTC)
     conn, request = _shanghai_current_owner_request(tmp_path,monkeypatch,
-        computed_at=cycle+timedelta(hours=4))
+        computed_at=cycle+timedelta(hours=8))
     pre_day0 = materialize_replacement_forecast_live(conn, request)
     assert pre_day0.ok is True
     conn.execute(
@@ -6097,7 +6139,7 @@ def test_materializer_requires_dependency_source_run_ids_before_writing_shadow_r
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_posterior_available_at_includes_baseline_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
-    request = _hko_request(baseline_source_available_at=_hko_dt(3,30), openmeteo_source_available_at=_hko_dt(3))
+    request = _hko_request(baseline_source_available_at=_hko_dt(7,30), openmeteo_source_available_at=_hko_dt(3))
     request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
 
     result = materialize_replacement_forecast_live(
@@ -6107,7 +6149,7 @@ def test_materializer_posterior_available_at_includes_baseline_dependency(monkey
 
     assert result.ok is True
     posterior_row = conn.execute("SELECT source_available_at FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
-    assert posterior_row["source_available_at"] == _hko_dt(3,30).isoformat()
+    assert posterior_row["source_available_at"] == _hko_dt(7,30).isoformat()
 
 
 def test_materializer_blocks_expired_request_before_writing_shadow_rows() -> None:
@@ -7806,8 +7848,8 @@ def test_final_lock_uses_real_writer_without_revalidation_or_unbounded_reads(
 
     cycle = datetime(2026,10,1,tzinfo=UTC)
     conn, request = _shanghai_current_owner_request(tmp_path,monkeypatch,
-        computed_at=cycle+timedelta(hours=4),first_compute_at=cycle+timedelta(hours=3),
-        expires_at=cycle+timedelta(hours=6))
+        computed_at=cycle+timedelta(hours=8),first_compute_at=cycle+timedelta(hours=7),
+        expires_at=cycle+timedelta(hours=10))
     assert request.day0_observed_extreme_c is None
     prepared = _prepare_for_final_write(conn, request)
     locked_sql: list[str] = []
@@ -8484,9 +8526,14 @@ def test_source_clock_production_selector_has_no_cap_before_legal_winners(tmp_pa
     from src.data import replacement_current_value_serving as current
     from src.data.station_ground_evidence import archive_station_ground_evidence
     db = tmp_path / "forecast.db"
-    conn = _low_revision_authority_conn(db)
+    conn = _low_revision_authority_conn(db, include_current_fixture=False)
     assert archive_station_ground_evidence(db, ["Hong Kong"])["status"] == "GROUND_SOURCE_ARCHIVED"
     request = _hko_request_with_owned_anchor(conn, _low_revision_request())
+    native, _, members = _fixture_native_shape_identity(conn,request,monkeypatch,
+        members_c=tuple(19.+index*.01 for index in range(51)))
+    assert members == pytest.approx(tuple(19.+index*.01 for index in range(51)))
+    request = replace(request,baseline_source_run_id=native["source_run_id"],
+        baseline_source_available_at=datetime.fromisoformat(native["source_available_at"]))
     captured = _hko_current_provider_inputs(request, {
         "icon_global": 27., "ukmo_global_deterministic_10km": 29.,
     }, conn=conn)
@@ -8496,6 +8543,7 @@ def test_source_clock_production_selector_has_no_cap_before_legal_winners(tmp_pa
     baseline_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (baseline.posterior_id,)).fetchone()
     baseline_q = {key: json.loads(baseline_row[key]) for key in ("q_json", "q_lcb_json", "q_ucb_json")}
     baseline_fusion = json.loads(baseline_row["provenance_json"])["bayes_precision_fusion"]
+    assert baseline_fusion["current_evidence_shape"]["snapshot_id"] == native["snapshot_id"]
     baseline_override = materializer_mod._replacement_bayes_precision_fusion_override(
         request, metric="low", anchor_value_corrected_c=request.openmeteo_anchor.low_c, conn=conn)
     assert baseline_override is not None
@@ -8536,7 +8584,13 @@ def test_source_clock_production_selector_has_no_cap_before_legal_winners(tmp_pa
         decision_iso=kwargs["decision_time_iso"], schema=schema, max_substitution_age_hours=8.,
     ))
     ordered = list(conn.execute(query, params))
-    assert len(ordered) == 527  # 520 noise + five retained legacy diagnostics + two winners.
+    assert len(ordered) == 522  # 520 unsupported diagnostics + two actual qualified winners.
+    legacy = ("ecmwf_ifs9", "gfs", "icon", "gem", "jma")
+    legacy_ids = {row[0] for row in conn.execute("SELECT raw_model_forecast_id FROM raw_model_forecasts WHERE model IN (?,?,?,?,?)",legacy)}
+    assert len(legacy_ids) == 5  # Still stored, not silently deleted to match the count.
+    assert legacy_ids.isdisjoint({row[0] for row in ordered})
+    assert set(legacy).isdisjoint(current.read_current_instrument_values(conn, **kwargs,
+        source_cycle_time_iso=request.source_cycle_time.isoformat()))
     for model, raw_id in expected.items():
         assert next(index for index, row in enumerate(ordered, 1) if row[0] == raw_id) > 512
     assert future_id not in {row[0] for row in ordered}
@@ -9735,7 +9789,8 @@ def _coordinate_bound_frontier_conn() -> sqlite3.Connection:
             contributes_to_target_extrema INTEGER,
             source_cycle_time TEXT, issue_time TEXT,
             source_available_at TEXT, available_at TEXT,
-            members_json TEXT, members_unit TEXT, provenance_json TEXT
+            members_json TEXT, members_unit TEXT, provenance_json TEXT,
+            source_run_id TEXT
         )
         """
     )
@@ -9756,7 +9811,7 @@ def _insert_coordinate_bound_frontier_row(
             ?, 'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
-            ?, ?, '[20.0,21.0]', 'degC', ?)
+            ?, ?, '[20.0,21.0]', 'degC', ?, NULL)
         """,
         (snapshot_id, metric, dataset_id, available_at.isoformat(), available_at.isoformat(),
          _fixture_ens_surface_provenance()),
@@ -10012,7 +10067,8 @@ def test_seed_cycle_boundary_allows_only_proven_retired_low_migration(
 
 def _low_revision_authority_conn(db_path: Path | None = None, *, include_legacy_provider_fixtures: bool = True,
                                  city_name="Hong Kong", include_retired_incumbent=True,
-                                 target_date=date(2026,10,1), source_cycle=None, run_prefix="", snapshot_offset=0) -> sqlite3.Connection:
+                                 target_date=date(2026,10,1), source_cycle=None, run_prefix="", snapshot_offset=0,
+                                 include_current_fixture=True) -> sqlite3.Connection:
     """Canonical run/coverage/ENS schema with controlled members, not GRIB capture."""
     from src.contracts.ensemble_snapshot_provenance import (
         ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
@@ -10052,6 +10108,8 @@ def _low_revision_authority_conn(db_path: Path | None = None, *, include_legacy_
         if run_id == "old18" and not include_retired_incumbent:
             continue
         is_current = run_id == "new12"
+        if is_current and not include_current_fixture:
+            continue
         run_id = run_prefix+run_id
         snapshot_id += snapshot_offset
         cycle = source_cycle+timedelta(hours=hour-12)
@@ -10183,6 +10241,32 @@ def _low_revision_request() -> ReplacementForecastMaterializeRequest:
         temperature_metric="low",
         baseline_data_version=_current_baseline_data_version("low"),
     )
+
+
+def _normal_low_revision_migration_fixture(monkeypatch):
+    """Retain old 18Z; acquire the actual 12Z window only after safe fetch.
+
+    The legacy 12:05 diagnostic setup remains available to its structural
+    tests, but is not updated or relabeled into this normal native world.
+    """
+    conn = _low_revision_authority_conn(include_current_fixture=False)
+    from src.data import ecmwf_open_data as native_writer
+    _, early_release = native_writer._select_cycle_for_track(track="mn2t6_low",now_utc=_hko_dt(12,5))
+    assert early_release["selected_cycle_time"] != _hko_dt(12)
+    assert conn.execute("SELECT 1 FROM ensemble_snapshots WHERE snapshot_id=12").fetchone() is None
+    old_snapshot = tuple(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=18").fetchone())
+    old_posterior = tuple(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=1").fetchone())
+    request = _install_hko_live_fusion(monkeypatch,conn=conn,request=_low_revision_request())
+    shape = materializer_mod._replacement_bayes_precision_fusion_override().current_evidence_shape
+    native = conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=?",(shape["snapshot_id"],)).fetchone()
+    assert native["source_release_time"] == _hko_dt(18,40).isoformat()
+    assert _hko_dt(18,40) < datetime.fromisoformat(native["recorded_at"]) <= request.computed_at
+    assert native["source_cycle_time"] == _hko_dt(12).isoformat()
+    assert tuple(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=18").fetchone()) == old_snapshot
+    assert tuple(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=1").fetchone()) == old_posterior
+    request = replace(request,baseline_source_run_id=native["source_run_id"],
+        baseline_source_available_at=datetime.fromisoformat(native["source_available_at"]))
+    return conn,request
 
 
 @pytest.mark.usefixtures("_hko_source_surface")
@@ -11290,9 +11374,7 @@ def test_low_revision_migration_materializes_current_12z_and_rebinds_readiness(
     """A fully evidenced old 18Z LOW yields to current window-v2 12Z q."""
     from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
 
-    conn = _low_revision_authority_conn()
-    request = _install_hko_live_fusion(monkeypatch, conn=conn,
-        request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12))
+    conn, request = _normal_low_revision_migration_fixture(monkeypatch)
     assert latest_eligible_ensemble_input_cycle(
         conn, city="Hong Kong", target_date=request.target_date,
         metric="low", decision_time=request.computed_at,
@@ -11310,10 +11392,10 @@ def test_low_revision_migration_materializes_current_12z_and_rebinds_readiness(
         "SELECT * FROM readiness_state WHERE readiness_id=?", (result.readiness_id,)
     ).fetchone()
     assert posterior["source_cycle_time"] == _hko_dt(12).isoformat()
-    assert json.loads(posterior["dependency_source_run_ids_json"])["baseline_b0"] == "new12"
+    assert json.loads(posterior["dependency_source_run_ids_json"])["baseline_b0"] == request.baseline_source_run_id
     assert readiness["status"] == "READY"
     assert str(result.posterior_id) in readiness["source_run_id"]
-    assert conn.execute("SELECT count(*) FROM readiness_state").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM readiness_state WHERE strategy_key!='producer_readiness'").fetchone()[0] == 1
 
 
 @pytest.mark.usefixtures("_hko_source_surface")
@@ -11321,9 +11403,7 @@ def test_low_revision_repeat_materialization_keeps_one_new_certificate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The identical 12Z input reuses its posterior and readiness identity."""
-    conn = _low_revision_authority_conn()
-    request = _install_hko_live_fusion(monkeypatch, conn=conn,
-        request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12))
+    conn, request = _normal_low_revision_migration_fixture(monkeypatch)
 
     first = materialize_replacement_forecast_live(conn, request)
     second = materialize_replacement_forecast_live(conn, request)
@@ -11351,19 +11431,7 @@ def test_low_revision_bundle_consumer_reads_certified_12z_over_retained_18z(
         ReplacementForecastReadinessDecision,
     )
 
-    conn = _low_revision_authority_conn()
-    current_serving = {
-        model: {
-            "served_via": "single_runs", "raw_model_forecast_id": raw_id,
-            "served_cycle": _hko_dt(12).isoformat(),
-            "captured_at": _hko_dt(12, 5).isoformat(),
-        }
-        for raw_id, model in enumerate(("ecmwf_ifs9", "gfs", "icon", "gem", "jma"), 101)
-    }
-    request = _install_hko_live_fusion(
-        monkeypatch, conn=conn, request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12),
-        current_serving=current_serving,
-    )
+    conn, request = _normal_low_revision_migration_fixture(monkeypatch)
     result = materialize_replacement_forecast_live(conn, request)
     assert result.ok is True, result.reason_codes
     conn.commit()  # Publish the actual row/FK before independent readonly validation.
@@ -11383,7 +11451,7 @@ def test_low_revision_bundle_consumer_reads_certified_12z_over_retained_18z(
     assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == 2
 
     served = read_replacement_forecast_bundle(
-        conn, baseline_bundle=_BaselineBundle(_Evidence("new12")),
+        conn, baseline_bundle=_BaselineBundle(_Evidence(request.baseline_source_run_id)),
         readiness=readiness, city="Hong Kong", target_date=request.target_date,
         temperature_metric="low", decision_time=_hko_dt(20, 1).isoformat(),
         current_bin_topology_hash=posterior["bin_topology_hash"],
@@ -11395,7 +11463,7 @@ def test_low_revision_bundle_consumer_reads_certified_12z_over_retained_18z(
     assert served.bundle is not None
     assert served.bundle.posterior_id == result.posterior_id
     assert served.bundle.source_cycle_time == _hko_dt(12).isoformat()
-    assert served.bundle.baseline_source_run_id == "new12"
+    assert served.bundle.baseline_source_run_id == request.baseline_source_run_id
 
 
 @pytest.mark.parametrize("invalidity", ("same_revision", "expired_candidate"))
