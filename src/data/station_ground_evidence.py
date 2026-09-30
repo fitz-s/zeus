@@ -635,8 +635,19 @@ def _read_wmd_facts(evidence, *, conn, decision, effective_at):
         or bodies["ground"]["byte_size"] != evidence["byte_size"]
         or bodies["ground"]["artifact_path"] != evidence["body_path"]):
         raise ValueError("WMD combined possession differs from its input entities")
-    return station_ground_facts_from_bytes(source_kind=OSCAR_WMD_SOURCE_KIND,
+    facts = station_ground_facts_from_bytes(source_kind=OSCAR_WMD_SOURCE_KIND,
         station_id=station, raw_body=raw["ground"], identity_bridge_bytes=raw["identity_bridge"], effective_at=effective_at)
+    # A mutually consistent manifest/DB URL is still only a claim. Bind the
+    # primary product to the official identity independently derived from both
+    # whole source bodies by the owning parser, as for the single-body reader.
+    if facts is not None and (
+        facts["source_kind"] != OSCAR_WMD_SOURCE_KIND
+        or facts["station_id"] != station
+        or facts["source_url"] != evidence["source_url"]
+        or facts["source_url"] != bodies["ground"]["request_url"]
+    ):
+        raise ValueError("WMD primary product differs from parsed official identity")
+    return facts
 
 
 def _read_wmd_manifest(evidence, *, conn, decision, deadline):

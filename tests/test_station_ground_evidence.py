@@ -635,6 +635,43 @@ def test_wmd_normal_archive_binds_two_whole_entities_and_original_possession(tmp
         assert conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id").fetchall() == rows
 
 
+@pytest.mark.parametrize("role", ("ground", "identity_bridge"))
+def test_wmd_self_consistent_resigned_foreign_source_url_is_not_official_authority(tmp_path, monkeypatch, role):
+    """Keep whole bytes/facts/clocks valid; falsify and re-seal only the source URL."""
+    db, _, primary, bridge, _, clock = _wmd_setup(tmp_path, monkeypatch)
+    first = _archive(db, "Paris")
+    assert ground.read_frozen_station_ground_evidence(first, decision_at=clock[0]) == first
+    assert ground.read_current_station_ground_evidence(db, city="Paris", decision_at=clock[0]) == first
+    changed = json.loads(json.dumps(first))
+    foreign = "https://untrusted.example/foreign-station.xml" if role == "ground" else "https://untrusted.example/foreign-station.json"
+    changed["input_bodies"][role]["request_url"] = foreign
+    if role == "ground":
+        changed["source_url"] = foreign
+    else:
+        changed["source_audit"]["bridge"]["source_url"] = foreign
+    # Not a mere DB tuple mismatch: bind the altered URL into the complete
+    # frozen input tuple, canonical manifest bytes and its actual DB descriptor.
+    payload = {key:value for key,value in changed.items()
+        if key not in {"artifact_id", "manifest_path", "manifest_sha256", "recorded_at"}}
+    manifest = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    changed["manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
+    changed["manifest_path"] = str(ground._store_root() / f"{changed['station_id']}.{changed['manifest_sha256']}.manifest.json")
+    Path(changed["manifest_path"]).write_bytes(manifest)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_forecast_artifacts SET request_url=? WHERE artifact_id=?",
+            (foreign, changed["input_bodies"][role]["artifact_id"]))
+        conn.execute("""UPDATE raw_forecast_artifacts SET request_url=?, artifact_path=?,
+            sha256=?, byte_size=?, artifact_metadata_json=? WHERE artifact_id=?""",
+            (changed["source_url"], changed["manifest_path"], changed["manifest_sha256"], len(manifest),
+             json.dumps({"station_ground_evidence": changed}), changed["artifact_id"]))
+    assert changed["facts"] == first["facts"]
+    assert changed["facts_identity"] == first["facts_identity"]
+    assert Path(changed["body_path"]).read_bytes() == primary.read_bytes()
+    assert Path(changed["input_bodies"]["identity_bridge"]["artifact_path"]).read_bytes() == bridge.read_bytes()
+    assert ground.read_frozen_station_ground_evidence(changed, decision_at=clock[0]) is None
+    assert ground.read_current_station_ground_evidence(db, city="Paris", decision_at=clock[0]) is None
+
+
 def _wmd_bridge_capture(registry, bridge, claims, *, captured, note):
     """TEST_ONLY new acquired AWC body, not a rewrite of canonical evidence."""
     rows = json.loads(bridge.read_bytes())
