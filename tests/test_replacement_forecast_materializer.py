@@ -536,6 +536,13 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 local_start = datetime.combine(date.fromisoformat(old["target_date"]),
                                                datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
                 payload.update(elevation=target_elevation, utc_offset_seconds=int(local_start.utcoffset().total_seconds()))
+                if model == "gfs_hrrr":
+                    # Pinned upstream HRRR has 48h only at 00/06/12/18Z.
+                    # A controlled body cannot invent slots outside that run.
+                    assert run.hour % 6 == 0
+                    hours = [(datetime.fromisoformat(at).replace(tzinfo=ZoneInfo(city.timezone)).astimezone(UTC)-run).total_seconds()/3600
+                             for at in payload["hourly"]["time"]]
+                    assert min(hours) >= 0 and max(hours) <= 48
             body = (json.dumps(payload, indent=2) + "\n").encode()
             from src.data.openmeteo_client import PREVIOUS_RUNS_URL
             url = PREVIOUS_RUNS_URL if previous else "https://single-runs-api.open-meteo.com/v1/forecast"
@@ -1661,7 +1668,7 @@ def _la_current_physical_request(conn, *, metric, cycle, decision, city_name="Lo
     cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
                                      target_elevation_m=station["ground_elevation_m"])
     lon = cell["selected_grid_lon"] - 360. if cell["selected_grid_lon"] > 180. else cell["selected_grid_lon"]
-    target = target or date(2026, 10, 2)
+    target = target or date(2026, 10, 1 if city_name == "Los Angeles" else 2)
     local_start = datetime.combine(target, datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
     assert cycle <= local_start.astimezone(UTC)  # A real full prior cannot invent an elapsed prefix.
     body = json.dumps({"latitude": cell["selected_grid_lat"], "longitude": lon,
@@ -1710,20 +1717,20 @@ def test_source_clock_partial_current_producer_to_jit(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES (?, ?, '2026-10-02', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
+            ) VALUES (?, ?, '2026-10-01', ?, ?, ?, ?, ?, 1, ?, 'single_runs', 'COVERED')""",
             (model, city, metric, run.isoformat(),
              (run + timedelta(minutes=5)).isoformat(),
              (run + timedelta(minutes=10)).isoformat(),
              (run + timedelta(minutes=11)).isoformat(), 20.0 + index),
         )
     if shadowed_hrrr:
-        newer = run + timedelta(hours=6 if split_cohort else 3)
+        newer = run + timedelta(hours=3)
         conn.execute(
             """INSERT INTO raw_model_forecasts (
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES ('ncep_nbm_conus', ?, '2026-10-02', ?, ?, ?, ?, ?, 2, 24.0,
+            ) VALUES ('ncep_nbm_conus', ?, '2026-10-01', ?, ?, ?, ?, ?, 1, 24.0,
                       'single_runs', 'COVERED')""",
             (city, metric, newer.isoformat(),
              (newer + timedelta(minutes=5)).isoformat(),
@@ -1731,13 +1738,13 @@ def test_source_clock_partial_current_producer_to_jit(
              (newer + timedelta(minutes=11)).isoformat()),
         )
     if split_cohort:
-        icon_cycle = run + timedelta(hours=4)
+        icon_cycle = run + timedelta(hours=6)
         conn.execute(
             """INSERT INTO raw_model_forecasts (
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES ('icon_global', ?, '2026-10-02', ?, ?, ?, ?, ?, 2, 25.0,
+            ) VALUES ('icon_global', ?, '2026-10-01', ?, ?, ?, ?, ?, 1, 25.0,
                       'single_runs', 'COVERED')""",
             (city, metric, icon_cycle.isoformat(),
              (icon_cycle + timedelta(minutes=5)).isoformat(),
@@ -1806,6 +1813,10 @@ def test_source_clock_partial_current_producer_to_jit(
         cohort = scheme_proof["configured_cohort_value_serving"]
         assert set(cohort) == set(scheme_proof["configured_coherent_sources"])
         assert scheme_proof["configured_cohort_decision_time"] == decision.isoformat()
+        if split_cohort:
+            assert cohort["icon_global"]["served_cycle"] == run.isoformat()
+            assert scheme_proof["between_cohort_value_serving"]["icon_global"]["served_cycle"] == (run + timedelta(hours=6)).isoformat()
+            assert override.current_value_serving["icon_global"]["served_cycle"] == (run + timedelta(hours=6)).isoformat()
     else:
         assert override.method == "SOURCE_CLOCK_FIXED_WEIGHT"
         assert "fallback_reason" not in scheme_proof
@@ -1821,7 +1832,7 @@ def test_source_clock_partial_current_producer_to_jit(
         "decorrelated_providers_served": override.decorrelated_providers_served,
         "decorrelated_providers_complete": override.decorrelated_providers_complete,
     }}
-    family = SimpleNamespace(city=city, target_date="2026-10-02", metric=metric)
+    family = SimpleNamespace(city=city, target_date="2026-10-01", metric=metric)
     posterior_kwargs = {"posterior_computed_at": decision} if hrrr_absent else {}
     present, certificate = adapter._source_clock_model_count_certificate(
         provenance, family=family, decision_time=decision, **posterior_kwargs,
@@ -1894,19 +1905,20 @@ def test_source_clock_partial_current_producer_to_jit(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES ('gfs_hrrr', ?, '2026-10-02', ?, ?, ?, ?, ?, 2, 21.0,
+            ) VALUES ('gfs_hrrr', ?, '2026-10-01', ?, ?, ?, ?, ?, 1, 21.0,
                       'single_runs', 'COVERED')""",
             (city, metric, run.isoformat(), arrived.isoformat(),
              arrived.isoformat(), arrived.isoformat()),
         )
-        # Future availability must not leak into the original decision.
+        _qualify_raw_fixture_rows(conn)
+        # The same fully qualified future row is absent only because its actual
+        # availability/capture is later than the original decision.
         assert adapter._posterior_bound_spine_inputs(
             conn, family=family, decision_time=decision,
             source_cycle_time=run.isoformat(), provenance=provenance, **posterior_kwargs,
         ) is not None
         later = arrived + timedelta(minutes=1)
         reason: dict[str, str] = {}
-        _qualify_raw_fixture_rows(conn)
         assert adapter._posterior_bound_multimodel_members(
             conn, family=family, decision_time=later,
             source_cycle_time=run.isoformat(), provenance=provenance,
@@ -1933,18 +1945,19 @@ def test_source_clock_partial_current_producer_to_jit(
             source_cycle_time=run.isoformat(), provenance=refreshed_provenance,
         ) is not None
     if shadowed_hrrr and not split_cohort:
-        newer_hrrr_cycle = run + timedelta(hours=5)
+        newer_hrrr_cycle = run + timedelta(hours=6)
         arrived = newer_hrrr_cycle + timedelta(minutes=10)
         conn.execute(
             """INSERT INTO raw_model_forecasts (
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES ('gfs_hrrr', ?, '2026-10-02', ?, ?, ?, ?, ?, 2, 21.0,
+            ) VALUES ('gfs_hrrr', ?, '2026-10-01', ?, ?, ?, ?, ?, 1, 21.0,
                       'single_runs', 'COVERED')""",
             (city, metric, newer_hrrr_cycle.isoformat(), arrived.isoformat(),
              arrived.isoformat(), arrived.isoformat()),
         )
+        _qualify_raw_fixture_rows(conn)
         assert adapter._posterior_bound_spine_inputs(
             conn, family=family, decision_time=decision,
             source_cycle_time=run.isoformat(), provenance=provenance, **posterior_kwargs,
