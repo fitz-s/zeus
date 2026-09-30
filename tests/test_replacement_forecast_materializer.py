@@ -138,7 +138,7 @@ def _hko_source_surface(tmp_path, monkeypatch, _hko_native_surfaces):
 
 @pytest.fixture
 def _hko_native_surfaces(tmp_path, monkeypatch):
-    """Ordinary loopback whole-OM captures for the two explicit model domains."""
+    """Ordinary loopback whole-OM captures for explicit global and US domains."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import numpy as np
@@ -146,10 +146,10 @@ def _hko_native_surfaces(tmp_path, monkeypatch):
     from src.data import openmeteo_model_surface as surface
 
     bodies = {}
-    for model, domain, shape in (
-        ("icon_global", "dwd_icon", (1441, 2879)),
-        ("ukmo_global_deterministic_10km", "ukmo_global_deterministic_10km", (1920, 2560)),
-    ):
+    models = ("icon_global", "ukmo_global_deterministic_10km", "gfs_hrrr", "ncep_nbm_conus")
+    for model in models:
+        profile = surface._profile(model)
+        domain, shape = profile["domain"], (profile["ny"], profile["nx"])
         path = tmp_path / f"{domain}.om"
         writer = OmFileWriter(str(path))
         root = writer.write_array(np.full(shape, 32.0, dtype=np.float32), chunks=(20,20), name="HSURF")
@@ -176,7 +176,7 @@ def _hko_native_surfaces(tmp_path, monkeypatch):
     monkeypatch.setattr(surface, "_cache_root", lambda: tmp_path / "native-static")
     monkeypatch.setattr(surface, "_now", lambda: _hko_dt(0)-timedelta(hours=1))
     try:
-        for model in ("icon_global", "ukmo_global_deterministic_10km"):
+        for model in models:
             capture = surface.ensure_model_surface(model)
             assert capture.status == "READY", capture.reason
         yield
@@ -504,18 +504,48 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 params["run"] = run.strftime("%Y-%m-%dT%H:%M")
             variable = params["hourly"]
             grid_lat, grid_lon = (31.14, 121.80) if model == "ecmwf_ifs" and old["city"].casefold() == "shanghai" else (city.lat, city.lon)
+            if old["city"] == "Los Angeles":
+                # Retained actual served-header goldens for the projected grids;
+                # regular-grid coordinates are exact official cell centers.
+                selected = {"icon_global": (34., -118.375),
+                            "ukmo_global_deterministic_10km": (33.9375, -118.40625),
+                            "gfs_hrrr": (33.94541, -118.40222),
+                            "ncep_nbm_conus": (33.94122, -118.38857)}
+                grid_lat, grid_lon = selected.get(model, (grid_lat, grid_lon))
+                if model == "ecmwf_ifs":
+                    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+                    cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
+                                                      target_elevation_m=29.7)
+                    grid_lat, grid_lon = cell["selected_grid_lat"], cell["selected_grid_lon"]
+                    if grid_lon > 180:
+                        grid_lon -= 360.
             payload = {"latitude": grid_lat, "longitude": grid_lon, "elevation": 8.0,
                 "timezone": city.timezone, "hourly_units": {variable: "°C"},
                 "hourly": {"time": [f"{old['target_date']}T{hour:02d}:00" for hour in range(24)],
                            variable: [old["forecast_value_c"]] * 24}}
+            if old["city"] == "Los Angeles":
+                from zoneinfo import ZoneInfo
+                local_start = datetime.combine(date.fromisoformat(old["target_date"]),
+                                               datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
+                payload.update(elevation=29.7, utc_offset_seconds=int(local_start.utcoffset().total_seconds()))
             body = (json.dumps(payload, indent=2) + "\n").encode()
             from src.data.openmeteo_client import PREVIOUS_RUNS_URL
             url = PREVIOUS_RUNS_URL if previous else "https://single-runs-api.open-meteo.com/v1/forecast"
             bound = dl._bind_physical_response(payload, model=model, url=url, params=params, run=run,
-                captures=[(body, datetime.fromisoformat(captured).timestamp())])
+                captures=[(body, datetime.fromisoformat(captured).timestamp())],
+                network_captures=[(body, datetime.fromisoformat(captured).timestamp(),
+                                   {"content-type": "application/json"})]
+                    if old["city"] == "Los Angeles" else ())
             raw = {key: old[key] for key in ("model", "city", "target_date", "metric", "source_cycle_time",
                 "source_available_at", "lead_days", "forecast_value_c", "endpoint")}
             raw.update(captured_at=captured, **identity, _physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY])
+            if old["city"] == "Los Angeles":
+                # Normal same-DB enrichment of a pre-identity setup row preserves
+                # its raw ID; no foreign artifact/receipt ID is transplanted.
+                with patch.object(dl, "datetime", Clock):
+                    dl._persist_rows(conn, [raw])
+                staging.close()
+                continue
             with patch.object(dl, "datetime", Clock):
                 dl._persist_rows(staging, [raw])
         produced = dict(staging.execute("SELECT * FROM raw_model_forecasts").fetchone())
@@ -526,7 +556,8 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 conn.execute(f"ALTER TABLE raw_model_forecasts ADD COLUMN {name}")
                 columns.append(name)
         if produced["artifact_id"] is not None:
-            artifact = dict(staging.execute("SELECT * FROM raw_forecast_artifacts").fetchone())
+            artifact = dict(staging.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",
+                                           (produced["artifact_id"],)).fetchone())
             artifact_columns = [r[1] for r in conn.execute("PRAGMA table_info(raw_forecast_artifacts)")]
             for name in artifact:
                 if name not in artifact_columns:
@@ -926,7 +957,6 @@ def _hko_request_with_owned_anchor(conn,request):
     )
     from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
     city = runtime_cities_by_name()[request.city]
-    assert city.name == "Hong Kong"
     payload = json.loads(request.openmeteo_raw_payload_bytes)
     payload["_zeus_current_target_scope"]["metric"] = request.temperature_metric
     raw = (json.dumps(payload,sort_keys=True)+"\n").encode()
@@ -951,8 +981,18 @@ def _hko_request_with_owned_anchor(conn,request):
     conn.create_function("strftime",2,lambda fmt,value:builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
     conn.commit()  # The independent readonly authority reader sees committed possession.
     # Keep the builtin alive for the private conn's callback lifetime.
+    if city.name == "Hong Kong":
+        guard = _hko_precision_guard(decision_at=request.computed_at,raw_payload_bytes=raw)
+    else:
+        from scripts.download_replacement_forecast_current_targets import _precision_metadata
+        metadata = OpenMeteoIfs9PrecisionMetadata(**_precision_metadata(
+            city.name, request.target_date.isoformat(), anchor_sigma_c=3.0,
+            raw_payload_bytes=raw, analysis_at=request.computed_at))
+        guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+            metadata, raw_payload_bytes=raw, decision_at=request.computed_at)
+        assert guard.passable_for_live_materialization, guard.reason_codes
     return replace(request,anchor_artifact_id=artifact_id,openmeteo_raw_payload_bytes=raw,
-        openmeteo_precision_guard=_hko_precision_guard(decision_at=request.computed_at,raw_payload_bytes=raw))
+        openmeteo_precision_guard=guard)
 
 
 def _hko_current_provider_inputs(request,values,*,conn):
@@ -1555,6 +1595,40 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
             assert "ukmo_global_deterministic_10km" in override.used_models
 
 
+def _la_current_physical_request(conn, *, metric, cycle, decision):
+    """TEST_ONLY external inputs, with LA's own ground and normal anchor writer."""
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+    from zoneinfo import ZoneInfo
+    city = runtime_cities_by_name()["Los Angeles"]
+    station = runtime_station_geometry_for_city(city, effective_at=decision)
+    assert station["ground_status"] == "VERIFIED"
+    assert station["ground_elevation_m"] == pytest.approx(29.7)
+    cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
+                                     target_elevation_m=station["ground_elevation_m"])
+    lon = cell["selected_grid_lon"] - 360. if cell["selected_grid_lon"] > 180. else cell["selected_grid_lon"]
+    target = date(2026, 10, 2)
+    local_start = datetime.combine(target, datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
+    assert cycle <= local_start.astimezone(UTC)  # A real full prior cannot invent an elapsed prefix.
+    body = json.dumps({"latitude": cell["selected_grid_lat"], "longitude": lon,
+        "elevation": station["ground_elevation_m"], "timezone": city.timezone,
+        "utc_offset_seconds": int(local_start.utcoffset().total_seconds()),
+        "hourly_units": {"temperature_2m": "°C"},
+        "hourly": {"time": [f"{target}T{hour:02d}:00" for hour in range(24)], "temperature_2m": [20.]*24},
+        "_zeus_current_target_scope": {"city": city.name, "target_date": str(target), "metric": metric}},
+        sort_keys=True).encode()
+    anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(body), city_timezone=city.timezone,
+        target_local_date=target, source_cycle_time=cycle)
+    request = replace(_request(), city=city.name, city_id=city.name, city_timezone=city.timezone,
+        target_date=target, temperature_metric=metric, baseline_data_version=_current_baseline_data_version(metric),
+        source_cycle_time=cycle, computed_at=decision, expires_at=decision+timedelta(hours=3),
+        openmeteo_source_available_at=cycle+timedelta(minutes=5), baseline_source_available_at=cycle+timedelta(minutes=5),
+        openmeteo_anchor=anchor, openmeteo_raw_payload_bytes=body)
+    return _hko_request_with_owned_anchor(conn, request)
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize(("missing_hrrr", "shadowed_hrrr", "split_cohort"), (
     (True, False, False), (True, True, False),
@@ -1570,7 +1644,9 @@ def test_source_clock_partial_current_producer_to_jit(
 
     conn = _conn()
     city = "Los Angeles"
-    run = datetime(2026, 9, 27, 18, tzinfo=UTC)
+    from src.data.station_ground_evidence import archive_station_ground_evidence, forecast_db_from_connection
+    assert archive_station_ground_evidence(forecast_db_from_connection(conn), [city])["status"] == "GROUND_SOURCE_ARCHIVED"
+    run = datetime(2026, 9, 30, 18, tzinfo=UTC)
     decision = run + timedelta(hours=7 if split_cohort else 4 if shadowed_hrrr else 1)
     configured = ("gfs_hrrr", "icon_global", "ukmo_global_deterministic_10km")
     for index, model in enumerate(("ecmwf_ifs", *configured)):
@@ -1581,7 +1657,7 @@ def test_source_clock_partial_current_producer_to_jit(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES (?, ?, '2026-09-29', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
+            ) VALUES (?, ?, '2026-10-02', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
             (model, city, metric, run.isoformat(),
              (run + timedelta(minutes=5)).isoformat(),
              (run + timedelta(minutes=10)).isoformat(),
@@ -1594,7 +1670,7 @@ def test_source_clock_partial_current_producer_to_jit(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES ('ncep_nbm_conus', ?, '2026-09-29', ?, ?, ?, ?, ?, 2, 24.0,
+            ) VALUES ('ncep_nbm_conus', ?, '2026-10-02', ?, ?, ?, ?, ?, 2, 24.0,
                       'single_runs', 'COVERED')""",
             (city, metric, newer.isoformat(),
              (newer + timedelta(minutes=5)).isoformat(),
@@ -1608,7 +1684,7 @@ def test_source_clock_partial_current_producer_to_jit(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES ('icon_global', ?, '2026-09-29', ?, ?, ?, ?, ?, 2, 25.0,
+            ) VALUES ('icon_global', ?, '2026-10-02', ?, ?, ?, ?, ?, 2, 25.0,
                       'single_runs', 'COVERED')""",
             (city, metric, icon_cycle.isoformat(),
              (icon_cycle + timedelta(minutes=5)).isoformat(),
@@ -1658,12 +1734,7 @@ def test_source_clock_partial_current_producer_to_jit(
             return {"source": "test-current-ens-shape", "provider_count": 3}
 
     monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
-    request = replace(
-        _request(), city=city, city_id=city,
-        city_timezone=runtime_cities_by_name()[city].timezone,
-        temperature_metric=metric, target_date=date(2026, 9, 29),
-        source_cycle_time=run, computed_at=decision,
-    )
+    request = _la_current_physical_request(conn, metric=metric, cycle=run, decision=decision)
     _qualify_raw_fixture_rows(conn)
     override = materializer_mod._replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
@@ -1697,7 +1768,7 @@ def test_source_clock_partial_current_producer_to_jit(
         "decorrelated_providers_served": override.decorrelated_providers_served,
         "decorrelated_providers_complete": override.decorrelated_providers_complete,
     }}
-    family = SimpleNamespace(city=city, target_date="2026-09-29", metric=metric)
+    family = SimpleNamespace(city=city, target_date="2026-10-02", metric=metric)
     posterior_kwargs = {"posterior_computed_at": decision} if hrrr_absent else {}
     present, certificate = adapter._source_clock_model_count_certificate(
         provenance, family=family, decision_time=decision, **posterior_kwargs,
@@ -1770,7 +1841,7 @@ def test_source_clock_partial_current_producer_to_jit(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES ('gfs_hrrr', ?, '2026-09-29', ?, ?, ?, ?, ?, 2, 21.0,
+            ) VALUES ('gfs_hrrr', ?, '2026-10-02', ?, ?, ?, ?, ?, 2, 21.0,
                       'single_runs', 'COVERED')""",
             (city, metric, run.isoformat(), arrived.isoformat(),
              arrived.isoformat(), arrived.isoformat()),
@@ -1816,7 +1887,7 @@ def test_source_clock_partial_current_producer_to_jit(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES ('gfs_hrrr', ?, '2026-09-29', ?, ?, ?, ?, ?, 2, 21.0,
+            ) VALUES ('gfs_hrrr', ?, '2026-10-02', ?, ?, ?, ?, ?, 2, 21.0,
                       'single_runs', 'COVERED')""",
             (city, metric, newer_hrrr_cycle.isoformat(), arrived.isoformat(),
              arrived.isoformat(), arrived.isoformat()),
