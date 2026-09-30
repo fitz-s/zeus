@@ -863,77 +863,32 @@ def _precision_guard(**overrides: object):
 
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_reauthenticates_same_artifact_and_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.config import cities_by_name, runtime_station_geometry_for_city
-    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
-    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
-    from src.data.openmeteo_ecmwf_ifs9_precision_guard import _haversine_km
-
-    city = cities_by_name["Hong Kong"]
-    station = runtime_station_geometry_for_city(city)
-    assert station["validity_reason"] is None
-    response = {
-        **json.loads(_hko_raw_openmeteo_bytes()),
-        "hourly": {
-            "time": [f"2026-10-01T{hour:02d}:00" for hour in range(24)],
-            "temperature_2m": [27.0 if hour == 12 else 18.5 for hour in range(24)],
-        },
-        "hourly_units": {"temperature_2m": "°C"},
-        "_zeus_current_target_scope": {"city": "Hong Kong", "target_date": "2026-10-01", "metric": "high"},
-    }
-    raw_bytes = (json.dumps(response, sort_keys=True, indent=2) + "\n").encode()
-    static_cell = source_cell_geometry_proof(latitude=station["lat"], longitude=station["lon"],
-                                            target_elevation_m=32.0)
-    proof = {
-        **static_cell,
-        "raw_payload_sha256": hashlib.sha256(raw_bytes).hexdigest(),
-        "station_registry_sha256": station["registry_sha256"],
-        "station_ground_proof": {"revision": "station_ground_roles_v1", "status": "VERIFIED", "reason": None,
-                                 "facts": station["ground_facts"], "audit": station["ground_audit"]},
-    }
-    metadata = OpenMeteoIfs9PrecisionMetadata(
-        city="Hong Kong", station_id=station["station_id"],
-        city_lat=float(city.lat), city_lon=float(city.lon),
-        station_lat=station["lat"], station_lon=station["lon"],
-        requested_lat=station["lat"], requested_lon=station["lon"],
-        requested_coordinate_precision_decimals=4,
-        nearest_grid_lat=response["latitude"], nearest_grid_lon=response["longitude"],
-        nearest_grid_distance_km=_haversine_km(
-            station["lat"], station["lon"], response["latitude"], response["longitude"]
-        ),
-        native_grid="openmeteo_ecmwf_ifs_9km", delivery_grid_resolution="9km",
-        interpolation_method="openmeteo_api_point_interpolation",
-        endpoint_mode="hourly_zeus_aggregated",
-        local_day_start_utc="2026-09-30T16:00:00+00:00",
-        local_day_end_utc="2026-10-01T16:00:00+00:00",
-        timezone_name="Asia/Hong_Kong", target_local_date="2026-10-01",
-        temperature_unit="celsius", anchor_sigma_c=3.0,
-        grid_elevation_m=32.0, station_elevation_m=station["ground_elevation_m"],
-        land_sea_mask="land", city_class="standard",
-        station_mapping_policy="operator_verified_station", source_geometry_proof=proof,
-    )
-    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=raw_bytes)
+    """Reauthenticate owned canonical bytes at an independent request cut."""
+    conn = _conn()
+    request = _hko_request_with_owned_anchor(conn, _hko_request())
+    raw_bytes = request.openmeteo_raw_payload_bytes
+    anchor = request.openmeteo_anchor
+    guard = request.openmeteo_precision_guard
     assert guard.passable_for_live_materialization
-    anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
-        response, city_timezone="Asia/Hong_Kong", target_local_date=date(2026, 10, 1),
-        source_cycle_time=_hko_dt(0),
-    )
-    request = replace(_hko_request(), openmeteo_anchor=anchor, openmeteo_precision_guard=guard,
-                      openmeteo_raw_payload_bytes=raw_bytes)
-    assert materializer_mod._precision_guard_block_reason(request) == ()
-    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_raw_payload_bytes=None)) == (
+    missing_cut = evaluate_openmeteo_ecmwf_ifs9_precision_guard(guard.metadata, raw_payload_bytes=raw_bytes)
+    assert not missing_cut.passable_for_live_materialization
+    assert missing_cut.reason_codes == ("OM9_SOURCE_GEOMETRY_DECISION_CUT_REQUIRED",)
+    assert materializer_mod._precision_guard_block_reason(request, conn) == ()
+    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_raw_payload_bytes=None), conn) == (
         "OM9_SOURCE_RESPONSE_BYTES_MISSING",
     )
-    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_anchor=replace(anchor, high_c=28.0))) == (
+    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_anchor=replace(anchor, high_c=28.0)), conn) == (
         "OM9_SOURCE_RESPONSE_ANCHOR_MISMATCH",
     )
     bad_guard = replace(guard, status="PASS", reason_codes=("fabricated",))
-    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_precision_guard=bad_guard)) == (
+    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_precision_guard=bad_guard), conn) == (
         "OM9_PRECISION_GUARD_RESULT_MISMATCH",
     )
     changed_raw = raw_bytes.replace(b"27.0", b"29.0")
-    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_raw_payload_bytes=changed_raw)) == (
+    assert materializer_mod._precision_guard_block_reason(replace(request, openmeteo_raw_payload_bytes=changed_raw), conn) == (
         "OM9_SOURCE_RESPONSE_ANCHOR_MISMATCH",
     )
+    conn.close()
 
 
 def _bins() -> tuple[_TemperatureBin, ...]:
