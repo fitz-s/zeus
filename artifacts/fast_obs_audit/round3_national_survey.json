@@ -1,0 +1,2068 @@
+{
+  "scope": "ALL_CONFIGURED_CITIES; empirical national-origin completion is PARTIAL",
+  "roster_count": 54,
+  "exact_pair_comparison_rule": "same UTC valid instant; contract units/rounding; no nearest-time join",
+  "zero_pair_meaning": "No valid pair recovered in this investigation; not proof provider data does not exist",
+  "rows": [
+    {
+      "city": "Amsterdam",
+      "settlement_station": "EHAM",
+      "country": "NL",
+      "settlement_unit": "C",
+      "candidate": "KNMI ten-minute Schiphol 06240",
+      "candidate_url": "https://api.dataplatform.knmi.nl/open-data/v1/datasets/10-minute-in-situ-meteorological-observations/versions/1.0/files",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_MISMATCH_OR_NO_OVERLAP",
+      "disposition": "NetCDF decoded; zero exact-time overlapping pairs in retained comparison. Anonymous quota refused repeated requests. Not promoted.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Ankara",
+      "settlement_station": "LTAC",
+      "country": "TR",
+      "settlement_unit": "C",
+      "candidate": "MGM Hezarfen RASAT / airport METAR",
+      "candidate_url": "https://rasat.mgm.gov.tr/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Public search/result application returned HTML. Native data request contract remains unresolved; no exact-time station series extracted.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Atlanta",
+      "settlement_station": "KATL",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 76,
+      "n_exact": 76,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Auckland",
+      "settlement_station": "NZAA",
+      "country": "NZ",
+      "settlement_unit": "C",
+      "candidate": "MetService Classic one-minute airport observations",
+      "candidate_url": "https://developer.metservice.com/docs/api-catalog/1min-obs-api/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Operational commercial API documented; licensed key not available. No claim that the November preview API is currently usable.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Austin",
+      "settlement_station": "KAUS",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 83,
+      "n_exact": 83,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Beijing",
+      "settlement_station": "ZBAA",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Buenos Aires",
+      "settlement_station": "SAEZ",
+      "country": "AR",
+      "settlement_unit": "C",
+      "candidate": "Argentina SMN METAR/SPECI / SAEZ",
+      "candidate_url": "https://ws2.smn.gob.ar/mensajes-metar-speci",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Native bulletin endpoint connection failed in this environment. Equality and first availability remain unknown.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Busan",
+      "settlement_station": "RKPK",
+      "country": "KR",
+      "settlement_unit": "C",
+      "candidate": "KMA aviation native METAR",
+      "candidate_url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+      "n_pairs": 5,
+      "n_exact": 5,
+      "mismatches": [],
+      "races": [
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Busan",
+            "station": "RKPK",
+            "channel": "kma_amo_raw_metar",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T18:00:03.194810+00:00",
+            "positive_receipt_at": "2026-09-30T18:01:13.612319+00:00",
+            "lag_lower_ms": 3194.81,
+            "lag_upper_ms": 73612.319
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Busan",
+                "station": "RKPK",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:04:27.831570+00:00",
+                "positive_receipt_at": "2026-09-30T18:05:08.734576+00:00",
+                "lag_lower_ms": 267831.57,
+                "lag_upper_ms": 308734.576
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Busan",
+                "station": "RKPK",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+                "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+                "lag_lower_ms": 483398.93,
+                "lag_upper_ms": 542160.612
+              }
+            }
+          ]
+        }
+      ],
+      "decision": "RETAIN_ALREADY_WIRED",
+      "disposition": "Native exact-time comparison and faster transition passed. Existing KmaMetarCursor is already the runtime native transport; no duplicate source fetcher introduced.",
+      "evidence": [
+        "round3_origin_measurements.json",
+        "round3_race/"
+      ]
+    },
+    {
+      "city": "Cape Town",
+      "settlement_station": "FACT",
+      "country": "ZA",
+      "settlement_unit": "C",
+      "candidate": "SAWS aviation / FACT",
+      "candidate_url": "https://aviation.weathersa.co.za/aviationold/avmobile.php",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Native aviation endpoint connection failed; no license/credential or exact record obtained.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Chengdu",
+      "settlement_station": "ZUUU",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Chicago",
+      "settlement_station": "KORD",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 90,
+      "n_exact": 90,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Chongqing",
+      "settlement_station": "ZUCK",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Dallas",
+      "settlement_station": "KDAL",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 76,
+      "n_exact": 76,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Denver",
+      "settlement_station": "KBKF",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 76,
+      "n_exact": 76,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Guangzhou",
+      "settlement_station": "ZGGG",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Helsinki",
+      "settlement_station": "EFHK",
+      "country": "FI",
+      "settlement_unit": "C",
+      "candidate": "FMI WFS 100968",
+      "candidate_url": "https://opendata.fmi.fi/wfs",
+      "n_pairs": 49,
+      "n_exact": 37,
+      "mismatches": [
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T15:50:00+00:00",
+          "candidate_raw": 14.4,
+          "candidate_unit": "C",
+          "candidate_contract": 14,
+          "resolver_raw": 15.0,
+          "resolver_unit": "C",
+          "resolver_contract": 15,
+          "match": false,
+          "candidate_versions": [
+            14
+          ],
+          "resolver_versions": [
+            15
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T16:20:00+00:00",
+          "candidate_raw": 14.5,
+          "candidate_unit": "C",
+          "candidate_contract": 15,
+          "resolver_raw": 14.0,
+          "resolver_unit": "C",
+          "resolver_contract": 14,
+          "match": false,
+          "candidate_versions": [
+            15
+          ],
+          "resolver_versions": [
+            14
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T17:50:00+00:00",
+          "candidate_raw": 13.4,
+          "candidate_unit": "C",
+          "candidate_contract": 13,
+          "resolver_raw": 14.0,
+          "resolver_unit": "C",
+          "resolver_contract": 14,
+          "match": false,
+          "candidate_versions": [
+            13
+          ],
+          "resolver_versions": [
+            14
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T18:20:00+00:00",
+          "candidate_raw": 13.3,
+          "candidate_unit": "C",
+          "candidate_contract": 13,
+          "resolver_raw": 14.0,
+          "resolver_unit": "C",
+          "resolver_contract": 14,
+          "match": false,
+          "candidate_versions": [
+            13
+          ],
+          "resolver_versions": [
+            14
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T19:50:00+00:00",
+          "candidate_raw": 11.3,
+          "candidate_unit": "C",
+          "candidate_contract": 11,
+          "resolver_raw": 12.0,
+          "resolver_unit": "C",
+          "resolver_contract": 12,
+          "match": false,
+          "candidate_versions": [
+            11
+          ],
+          "resolver_versions": [
+            12
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T22:20:00+00:00",
+          "candidate_raw": 11.6,
+          "candidate_unit": "C",
+          "candidate_contract": 12,
+          "resolver_raw": 11.0,
+          "resolver_unit": "C",
+          "resolver_contract": 11,
+          "match": false,
+          "candidate_versions": [
+            12
+          ],
+          "resolver_versions": [
+            11
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T03:20:00+00:00",
+          "candidate_raw": 7.6,
+          "candidate_unit": "C",
+          "candidate_contract": 8,
+          "resolver_raw": 7.0,
+          "resolver_unit": "C",
+          "resolver_contract": 7,
+          "match": false,
+          "candidate_versions": [
+            8
+          ],
+          "resolver_versions": [
+            7
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T06:50:00+00:00",
+          "candidate_raw": 10.5,
+          "candidate_unit": "C",
+          "candidate_contract": 11,
+          "resolver_raw": 10.0,
+          "resolver_unit": "C",
+          "resolver_contract": 10,
+          "match": false,
+          "candidate_versions": [
+            11
+          ],
+          "resolver_versions": [
+            10
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T08:20:00+00:00",
+          "candidate_raw": 12.5,
+          "candidate_unit": "C",
+          "candidate_contract": 13,
+          "resolver_raw": 12.0,
+          "resolver_unit": "C",
+          "resolver_contract": 12,
+          "match": false,
+          "candidate_versions": [
+            13
+          ],
+          "resolver_versions": [
+            12
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T08:50:00+00:00",
+          "candidate_raw": 13.5,
+          "candidate_unit": "C",
+          "candidate_contract": 14,
+          "resolver_raw": 13.0,
+          "resolver_unit": "C",
+          "resolver_contract": 13,
+          "match": false,
+          "candidate_versions": [
+            14
+          ],
+          "resolver_versions": [
+            13
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T10:50:00+00:00",
+          "candidate_raw": 15.2,
+          "candidate_unit": "C",
+          "candidate_contract": 15,
+          "resolver_raw": 16.0,
+          "resolver_unit": "C",
+          "resolver_contract": 16,
+          "match": false,
+          "candidate_versions": [
+            15
+          ],
+          "resolver_versions": [
+            16
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T14:50:00+00:00",
+          "candidate_raw": 14.4,
+          "candidate_unit": "C",
+          "candidate_contract": 14,
+          "resolver_raw": 15.0,
+          "resolver_unit": "C",
+          "resolver_contract": 15,
+          "match": false,
+          "candidate_versions": [
+            14
+          ],
+          "resolver_versions": [
+            15
+          ]
+        }
+      ],
+      "races": [],
+      "decision": "NOT_PROMOTED_MISMATCH_OR_NO_OVERLAP",
+      "disposition": "Retained Round-2 systematic value mismatches. Physical-current only, not settlement-grade.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Hong Kong",
+      "settlement_station": "HKO headquarters",
+      "country": "HK",
+      "settlement_unit": "C",
+      "candidate": "HKO headquarters native observations",
+      "candidate_url": "https://www.hko.gov.hk/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "RETAIN_EXISTING_NATIVE_NO_NEW_COMPARISON",
+      "disposition": "Existing native headquarters lane retained. No new Round-3 airport substitute or first-availability comparison was performed.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Houston",
+      "settlement_station": "KHOU",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 72,
+      "n_exact": 72,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Istanbul",
+      "settlement_station": "LTFM",
+      "country": "TR",
+      "settlement_unit": "C",
+      "candidate": "MGM Hezarfen RASAT / airport METAR",
+      "candidate_url": "https://rasat.mgm.gov.tr/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Public search/result application returned HTML. Native data request contract remains unresolved; no exact-time station series extracted.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Jinan",
+      "settlement_station": "ZSJN",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station. Existing WU current/history routes remain; a CMA native replacement is unproven.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Jakarta",
+      "settlement_station": "WIHH",
+      "country": "ID",
+      "settlement_unit": "C",
+      "candidate": "BMKG aviation / WIHH",
+      "candidate_url": "https://aviation.bmkg.go.id/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Browser/challenge HTTP 403. No bypass attempted and no substitution of WIII.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Jeddah",
+      "settlement_station": "OEJN",
+      "country": "SA",
+      "settlement_unit": "C",
+      "candidate": "NCM observation/aviation API / OEJN",
+      "candidate_url": "https://api-doc.ncm.gov.sa/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "API documentation reached; authenticated exact-station temperature response not obtained. Endpoint and pair comparison remain unfinished.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Karachi",
+      "settlement_station": "OPKC",
+      "country": "PK",
+      "settlement_unit": "C",
+      "candidate": "PMD aviation / OPKC",
+      "candidate_url": "https://rmcsindh.pmd.gov.pk/Services_Aviation.html",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Official aviation service page reached; exact machine-readable METAR retrieval contract not resolved.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Kuala Lumpur",
+      "settlement_station": "WMKK",
+      "country": "MY",
+      "settlement_unit": "C",
+      "candidate": "MET Malaysia aviation / WMKK",
+      "candidate_url": "https://api.met.gov.my/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Public MET API documentation describes forecasts/warnings, not this airport temperature observation. Aviation bulletin origin remains unverified; public forecast values rejected as wrong product.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Lagos",
+      "settlement_station": "DNMM",
+      "country": "NG",
+      "settlement_unit": "C",
+      "candidate": "NiMet aviation / DNMM",
+      "candidate_url": "https://nimet.gov.ng/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Redirect/challenge frontend did not yield station observations; origin comparison unfinished.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "London",
+      "settlement_station": "EGLC",
+      "country": "GB",
+      "settlement_unit": "C",
+      "candidate": "Met Office DataHub hourly / EGLC",
+      "candidate_url": "https://datahub.metoffice.gov.uk/docs/o/category/observations/overview",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Hourly observation API documented; subscription/key and exact EGLC record were not obtained. Network size is not exact-station proof.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Los Angeles",
+      "settlement_station": "KLAX",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 75,
+      "n_exact": 75,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Lucknow",
+      "settlement_station": "VILK",
+      "country": "IN",
+      "settlement_unit": "C",
+      "candidate": "IMD AMSS OLBS / airport METAR",
+      "candidate_url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Public query form and official API gateway identified; no completed station bulletin extraction/authorized API response. Comparison unfinished, not a provider-outage finding.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Madrid",
+      "settlement_station": "LEMD",
+      "country": "ES",
+      "settlement_unit": "C",
+      "candidate": "AEMET station 3129 / LEMD airport observation",
+      "candidate_url": "https://opendata.aemet.es/opendata/api/observacion/convencional/datos/estacion/3129",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Official API discovered; no authenticated airport-value payload obtained. HTML candidate returned 404. Pair and latency comparison unfinished.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Manila",
+      "settlement_station": "RPLL",
+      "country": "PH",
+      "settlement_unit": "C",
+      "candidate": "PAGASA RPLL METAR",
+      "candidate_url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+      "n_pairs": 5,
+      "n_exact": 5,
+      "mismatches": [],
+      "races": [
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Manila",
+            "station": "RPLL",
+            "channel": "pagasa_metar",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T18:05:01.503881+00:00",
+            "positive_receipt_at": "2026-09-30T18:06:33.042082+00:00",
+            "lag_lower_ms": 301503.881,
+            "lag_upper_ms": 393042.082
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "SLOWER",
+              "interval": {
+                "city": "Manila",
+                "station": "RPLL",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:01:01.476616+00:00",
+                "positive_receipt_at": "2026-09-30T18:02:17.314250+00:00",
+                "lag_lower_ms": 61476.616,
+                "lag_upper_ms": 137314.25
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "SLOWER",
+              "interval": {
+                "city": "Manila",
+                "station": "RPLL",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:02:01.488317+00:00",
+                "positive_receipt_at": "2026-09-30T18:03:25.574393+00:00",
+                "lag_lower_ms": 121488.317,
+                "lag_upper_ms": 205574.39299999998
+              }
+            }
+          ]
+        }
+      ],
+      "decision": "NOT_ACTIVATED_NO_SPEED_ADVANTAGE",
+      "disposition": "Exact values matched, but native first availability was slower. Do not activate this alternative.",
+      "evidence": [
+        "round3_origin_measurements.json",
+        "round3_race/"
+      ]
+    },
+    {
+      "city": "Mexico City",
+      "settlement_station": "MMMX",
+      "country": "MX",
+      "settlement_unit": "C",
+      "candidate": "SMN / SENEAM aviation / MMMX",
+      "candidate_url": "https://www.gob.mx/seneam/acciones-y-programas/mas-servicios-de-control",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Candidate page returned a browser/challenge response; no station payload acquired. General automatic-station data not substituted for MMMX.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Miami",
+      "settlement_station": "KMIA",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 77,
+      "n_exact": 77,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Milan",
+      "settlement_station": "LIMC",
+      "country": "IT",
+      "settlement_unit": "C",
+      "candidate": "Aeronautica Militare METAR / airport",
+      "candidate_url": "https://www.meteoam.it/it/metar-taf",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Corrected the old /metar-e-taf 404 to the official /metar-taf app. Public JS/frontend checked; direct native record and timing comparison remain unfinished.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Moscow",
+      "settlement_station": "UUWW",
+      "country": "RU",
+      "settlement_unit": "C",
+      "candidate": "Aviamettelecom / Meteocenter / UUWW",
+      "candidate_url": "https://www.aviamettelecom.ru/services/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Official service and display frontend reached; exact UUWW machine record not extracted. Public-app reverse engineering remains unfinished.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Munich",
+      "settlement_station": "EDDM",
+      "country": "DE",
+      "settlement_unit": "C",
+      "candidate": "DWD CDC 01262",
+      "candidate_url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/",
+      "n_pairs": 48,
+      "n_exact": 34,
+      "mismatches": [
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-29T15:50:00+00:00",
+          "candidate_raw": 22.4,
+          "candidate_unit": "C",
+          "candidate_contract": 22,
+          "resolver_raw": 23.0,
+          "resolver_unit": "C",
+          "resolver_contract": 23,
+          "match": false,
+          "candidate_versions": [
+            22
+          ],
+          "resolver_versions": [
+            23
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-29T16:20:00+00:00",
+          "candidate_raw": 21.4,
+          "candidate_unit": "C",
+          "candidate_contract": 21,
+          "resolver_raw": 22.0,
+          "resolver_unit": "C",
+          "resolver_contract": 22,
+          "match": false,
+          "candidate_versions": [
+            21
+          ],
+          "resolver_versions": [
+            22
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-29T16:50:00+00:00",
+          "candidate_raw": 19.4,
+          "candidate_unit": "C",
+          "candidate_contract": 19,
+          "resolver_raw": 20.0,
+          "resolver_unit": "C",
+          "resolver_contract": 20,
+          "match": false,
+          "candidate_versions": [
+            19
+          ],
+          "resolver_versions": [
+            20
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-29T17:50:00+00:00",
+          "candidate_raw": 16.1,
+          "candidate_unit": "C",
+          "candidate_contract": 16,
+          "resolver_raw": 17.0,
+          "resolver_unit": "C",
+          "resolver_contract": 17,
+          "match": false,
+          "candidate_versions": [
+            16
+          ],
+          "resolver_versions": [
+            17
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T01:20:00+00:00",
+          "candidate_raw": 6.5,
+          "candidate_unit": "C",
+          "candidate_contract": 7,
+          "resolver_raw": 6.0,
+          "resolver_unit": "C",
+          "resolver_contract": 6,
+          "match": false,
+          "candidate_versions": [
+            7
+          ],
+          "resolver_versions": [
+            6
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T04:50:00+00:00",
+          "candidate_raw": 4.3,
+          "candidate_unit": "C",
+          "candidate_contract": 4,
+          "resolver_raw": 5.0,
+          "resolver_unit": "C",
+          "resolver_contract": 5,
+          "match": false,
+          "candidate_versions": [
+            4
+          ],
+          "resolver_versions": [
+            5
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T08:50:00+00:00",
+          "candidate_raw": 16.2,
+          "candidate_unit": "C",
+          "candidate_contract": 16,
+          "resolver_raw": 17.0,
+          "resolver_unit": "C",
+          "resolver_contract": 17,
+          "match": false,
+          "candidate_versions": [
+            16
+          ],
+          "resolver_versions": [
+            17
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T11:20:00+00:00",
+          "candidate_raw": 20.9,
+          "candidate_unit": "C",
+          "candidate_contract": 21,
+          "resolver_raw": 22.0,
+          "resolver_unit": "C",
+          "resolver_contract": 22,
+          "match": false,
+          "candidate_versions": [
+            21
+          ],
+          "resolver_versions": [
+            22
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T11:50:00+00:00",
+          "candidate_raw": 21.9,
+          "candidate_unit": "C",
+          "candidate_contract": 22,
+          "resolver_raw": 23.0,
+          "resolver_unit": "C",
+          "resolver_contract": 23,
+          "match": false,
+          "candidate_versions": [
+            22
+          ],
+          "resolver_versions": [
+            23
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T12:20:00+00:00",
+          "candidate_raw": 22.7,
+          "candidate_unit": "C",
+          "candidate_contract": 23,
+          "resolver_raw": 24.0,
+          "resolver_unit": "C",
+          "resolver_contract": 24,
+          "match": false,
+          "candidate_versions": [
+            23
+          ],
+          "resolver_versions": [
+            24
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T13:20:00+00:00",
+          "candidate_raw": 22.9,
+          "candidate_unit": "C",
+          "candidate_contract": 23,
+          "resolver_raw": 24.0,
+          "resolver_unit": "C",
+          "resolver_contract": 24,
+          "match": false,
+          "candidate_versions": [
+            23
+          ],
+          "resolver_versions": [
+            24
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T13:50:00+00:00",
+          "candidate_raw": 23.1,
+          "candidate_unit": "C",
+          "candidate_contract": 23,
+          "resolver_raw": 24.0,
+          "resolver_unit": "C",
+          "resolver_contract": 24,
+          "match": false,
+          "candidate_versions": [
+            23
+          ],
+          "resolver_versions": [
+            24
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T14:50:00+00:00",
+          "candidate_raw": 23.6,
+          "candidate_unit": "C",
+          "candidate_contract": 24,
+          "resolver_raw": 25.0,
+          "resolver_unit": "C",
+          "resolver_contract": 25,
+          "match": false,
+          "candidate_versions": [
+            24
+          ],
+          "resolver_versions": [
+            25
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T15:20:00+00:00",
+          "candidate_raw": 23.4,
+          "candidate_unit": "C",
+          "candidate_contract": 23,
+          "resolver_raw": 24.0,
+          "resolver_unit": "C",
+          "resolver_contract": 24,
+          "match": false,
+          "candidate_versions": [
+            23
+          ],
+          "resolver_versions": [
+            24
+          ]
+        }
+      ],
+      "races": [],
+      "decision": "NOT_PROMOTED_MISMATCH_OR_NO_OVERLAP",
+      "disposition": "Retained Round-2 systematic value mismatches. Physical-current only, not settlement-grade.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "NYC",
+      "settlement_station": "KLGA",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 94,
+      "n_exact": 94,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Panama City",
+      "settlement_station": "MPMG",
+      "country": "PA",
+      "settlement_unit": "C",
+      "candidate": "AAC MPMG METAR",
+      "candidate_url": "https://www.aeronautica.gob.pa/met/met.php?c=metar",
+      "n_pairs": 2,
+      "n_exact": 2,
+      "mismatches": [],
+      "races": [
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Panama City",
+            "station": "MPMG",
+            "channel": "aac_metar",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T17:58:08.143218+00:00",
+            "positive_receipt_at": "2026-09-30T18:01:12.003006+00:00",
+            "lag_lower_ms": -111856.78199999999,
+            "lag_upper_ms": 72003.006
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "INTERVALS_OVERLAP",
+              "interval": {
+                "city": "Panama City",
+                "station": "MPMG",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T17:59:13.751878+00:00",
+                "positive_receipt_at": "2026-09-30T18:00:08.793752+00:00",
+                "lag_lower_ms": -46248.122,
+                "lag_upper_ms": 8793.752
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "INTERVALS_OVERLAP",
+              "interval": {
+                "city": "Panama City",
+                "station": "MPMG",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T17:59:14.061274+00:00",
+                "positive_receipt_at": "2026-09-30T18:00:09.643371+00:00",
+                "lag_lower_ms": -45938.726,
+                "lag_upper_ms": 9643.371000000001
+              }
+            }
+          ]
+        }
+      ],
+      "decision": "NOT_ACTIVATED_NO_SPEED_ADVANTAGE",
+      "disposition": "Exact values matched; availability intervals overlap AWC/WRH. Faster transport is not established, so not activated.",
+      "evidence": [
+        "round3_origin_measurements.json",
+        "round3_race/"
+      ]
+    },
+    {
+      "city": "Paris",
+      "settlement_station": "LFPB",
+      "country": "FR",
+      "settlement_unit": "C",
+      "candidate": "Meteo-France observation API / LFPB",
+      "candidate_url": "https://portail-api.meteofrance.fr/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "WIS2 collection request failed; registered observation API identified. Exact LFPB record and receipt series remain unmeasured.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Qingdao",
+      "settlement_station": "ZSQD",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "San Francisco",
+      "settlement_station": "KSFO",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 77,
+      "n_exact": 77,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Sao Paulo",
+      "settlement_station": "SBGR",
+      "country": "BR",
+      "settlement_unit": "C",
+      "candidate": "REDEMET METAR / SBGR",
+      "candidate_url": "https://api-redemet.decea.mil.br/mensagens/metar/SBGR",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Native endpoint returned HTTP 401. No API credential obtained; no identity or latency inference from refusal.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Seattle",
+      "settlement_station": "KSEA",
+      "country": "US",
+      "settlement_unit": "F",
+      "candidate": "NOAA WRH native station temperature / hourly view",
+      "candidate_url": "https://www.weather.gov/wrh/timeseries",
+      "n_pairs": 85,
+      "n_exact": 85,
+      "mismatches": [],
+      "races": [],
+      "decision": "CANONICAL_RESOLVER_PRECISION_NOT_SPEED_PROMOTION",
+      "disposition": "Use actual resolver-native Fahrenheit and product membership; one shared batch/minute for all 11 stations. Not a claim that WRH publishes before AWC.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Seoul",
+      "settlement_station": "RKSI",
+      "country": "KR",
+      "settlement_unit": "C",
+      "candidate": "KMA aviation native METAR",
+      "candidate_url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+      "n_pairs": 10,
+      "n_exact": 10,
+      "mismatches": [],
+      "races": [
+        {
+          "observation": "2026-09-30T17:30:00+00:00",
+          "candidate": {
+            "city": "Seoul",
+            "station": "RKSI",
+            "channel": "kma_amo_raw_metar",
+            "observed_at": "2026-09-30T17:30:00+00:00",
+            "negative_request_at": "2026-09-30T17:29:05.770052+00:00",
+            "positive_receipt_at": "2026-09-30T17:30:06.601835+00:00",
+            "lag_lower_ms": -54229.948,
+            "lag_upper_ms": 6601.835
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Seoul",
+                "station": "RKSI",
+                "channel": "awc",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:35:06.519900+00:00",
+                "positive_receipt_at": "2026-09-30T17:36:09.809246+00:00",
+                "lag_lower_ms": 306519.9,
+                "lag_upper_ms": 369809.246
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Seoul",
+                "station": "RKSI",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:35:06.815693+00:00",
+                "positive_receipt_at": "2026-09-30T17:36:10.353952+00:00",
+                "lag_lower_ms": 306815.693,
+                "lag_upper_ms": 370353.952
+              }
+            }
+          ]
+        },
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Seoul",
+            "station": "RKSI",
+            "channel": "kma_amo_raw_metar",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T18:00:01.472697+00:00",
+            "positive_receipt_at": "2026-09-30T18:01:13.226783+00:00",
+            "lag_lower_ms": 1472.697,
+            "lag_upper_ms": 73226.783
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Seoul",
+                "station": "RKSI",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:04:27.831570+00:00",
+                "positive_receipt_at": "2026-09-30T18:05:08.734576+00:00",
+                "lag_lower_ms": 267831.57,
+                "lag_upper_ms": 308734.576
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Seoul",
+                "station": "RKSI",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+                "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+                "lag_lower_ms": 483398.93,
+                "lag_upper_ms": 542160.612
+              }
+            }
+          ]
+        }
+      ],
+      "decision": "RETAIN_ALREADY_WIRED",
+      "disposition": "Native exact-time comparison and faster transition passed. Existing KmaMetarCursor is already the runtime native transport; no duplicate source fetcher introduced.",
+      "evidence": [
+        "round3_origin_measurements.json",
+        "round3_race/"
+      ]
+    },
+    {
+      "city": "Shanghai",
+      "settlement_station": "ZSPD",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Shenzhen",
+      "settlement_station": "ZGSZ",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Singapore",
+      "settlement_station": "WSSS",
+      "country": "SG",
+      "settlement_unit": "C",
+      "candidate": "NEA/MSS Changi S24",
+      "candidate_url": "https://api.data.gov.sg/v1/environment/air-temperature",
+      "n_pairs": 49,
+      "n_exact": 27,
+      "mismatches": [
+        {
+          "time": "2026-09-29T16:30:00+00:00",
+          "candidate_c": 28.0,
+          "resolver_c": 29.0,
+          "candidate_contract": 28,
+          "resolver_contract": 29,
+          "match": false
+        },
+        {
+          "time": "2026-09-29T17:00:00+00:00",
+          "candidate_c": 27.9,
+          "resolver_c": 29.0,
+          "candidate_contract": 28,
+          "resolver_contract": 29,
+          "match": false
+        },
+        {
+          "time": "2026-09-29T18:00:00+00:00",
+          "candidate_c": 28.0,
+          "resolver_c": 29.0,
+          "candidate_contract": 28,
+          "resolver_contract": 29,
+          "match": false
+        },
+        {
+          "time": "2026-09-29T20:00:00+00:00",
+          "candidate_c": 27.6,
+          "resolver_c": 27.0,
+          "candidate_contract": 28,
+          "resolver_contract": 27,
+          "match": false
+        },
+        {
+          "time": "2026-09-29T21:30:00+00:00",
+          "candidate_c": 27.3,
+          "resolver_c": 28.0,
+          "candidate_contract": 27,
+          "resolver_contract": 28,
+          "match": false
+        },
+        {
+          "time": "2026-09-29T22:00:00+00:00",
+          "candidate_c": 27.3,
+          "resolver_c": 28.0,
+          "candidate_contract": 27,
+          "resolver_contract": 28,
+          "match": false
+        },
+        {
+          "time": "2026-09-29T22:30:00+00:00",
+          "candidate_c": 27.4,
+          "resolver_c": 28.0,
+          "candidate_contract": 27,
+          "resolver_contract": 28,
+          "match": false
+        },
+        {
+          "time": "2026-09-29T23:00:00+00:00",
+          "candidate_c": 27.4,
+          "resolver_c": 28.0,
+          "candidate_contract": 27,
+          "resolver_contract": 28,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T02:30:00+00:00",
+          "candidate_c": 30.6,
+          "resolver_c": 30.0,
+          "candidate_contract": 31,
+          "resolver_contract": 30,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T03:30:00+00:00",
+          "candidate_c": 31.7,
+          "resolver_c": 31.0,
+          "candidate_contract": 32,
+          "resolver_contract": 31,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T04:00:00+00:00",
+          "candidate_c": 31.4,
+          "resolver_c": 33.0,
+          "candidate_contract": 31,
+          "resolver_contract": 33,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T05:30:00+00:00",
+          "candidate_c": 32.5,
+          "resolver_c": 32.0,
+          "candidate_contract": 33,
+          "resolver_contract": 32,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T06:00:00+00:00",
+          "candidate_c": 30.4,
+          "resolver_c": 32.0,
+          "candidate_contract": 30,
+          "resolver_contract": 32,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T06:17:00+00:00",
+          "candidate_c": 27.2,
+          "resolver_c": 29.0,
+          "candidate_contract": 27,
+          "resolver_contract": 29,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T06:30:00+00:00",
+          "candidate_c": 26.0,
+          "resolver_c": 28.0,
+          "candidate_contract": 26,
+          "resolver_contract": 28,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T09:30:00+00:00",
+          "candidate_c": 26.4,
+          "resolver_c": 27.0,
+          "candidate_contract": 26,
+          "resolver_contract": 27,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T09:33:00+00:00",
+          "candidate_c": 26.4,
+          "resolver_c": 27.0,
+          "candidate_contract": 26,
+          "resolver_contract": 27,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T13:00:00+00:00",
+          "candidate_c": 25.7,
+          "resolver_c": 25.0,
+          "candidate_contract": 26,
+          "resolver_contract": 25,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T14:00:00+00:00",
+          "candidate_c": 26.0,
+          "resolver_c": 27.0,
+          "candidate_contract": 26,
+          "resolver_contract": 27,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T14:30:00+00:00",
+          "candidate_c": 26.4,
+          "resolver_c": 27.0,
+          "candidate_contract": 26,
+          "resolver_contract": 27,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T15:00:00+00:00",
+          "candidate_c": 26.8,
+          "resolver_c": 26.0,
+          "candidate_contract": 27,
+          "resolver_contract": 26,
+          "match": false
+        },
+        {
+          "time": "2026-09-30T15:30:00+00:00",
+          "candidate_c": 26.1,
+          "resolver_c": 25.0,
+          "candidate_contract": 26,
+          "resolver_contract": 25,
+          "match": false
+        }
+      ],
+      "races": [],
+      "decision": "NOT_PROMOTED_VALUE_MISMATCH",
+      "disposition": "S24 named Changi Meteorological Station: 27/49 exact rounded matches, 22 mismatches. Not a resolver-equivalent fast source; no promotion.",
+      "evidence": [
+        "round3_singapore/comparison.json",
+        "round3_singapore/nea_temperature.json.gz",
+        "round3_singapore/wrh_wsss.json.gz"
+      ]
+    },
+    {
+      "city": "Taipei",
+      "settlement_station": "RCSS",
+      "country": "TW",
+      "settlement_unit": "C",
+      "candidate": "CWA / ANWS aviation / RCSS",
+      "candidate_url": "https://aoaws.anws.gov.tw/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Aviation endpoint connection failed. No substitution of RCTP or an arbitrary Taipei surface station; native observation comparison unfinished.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Tel Aviv",
+      "settlement_station": "LLBG",
+      "country": "IL",
+      "settlement_unit": "C",
+      "candidate": "IMS XML / LLBG candidate",
+      "candidate_url": "https://ims.gov.il/en/CurrentDataXML",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Public XML exists; exact LLBG candidate not resolved. Official XML documentation distinguishes hourly and ten-minute products/time conventions. No nearest station or undocumented time shift used.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Tokyo",
+      "settlement_station": "RJTT",
+      "country": "JP",
+      "settlement_unit": "C",
+      "candidate": "JMA Haneda 44166",
+      "candidate_url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/",
+      "n_pairs": 143,
+      "n_exact": 143,
+      "mismatches": [],
+      "races": [
+        {
+          "observation": "2026-09-30T17:30:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T17:30:00+00:00",
+            "negative_request_at": "2026-09-30T17:36:10.365615+00:00",
+            "positive_receipt_at": "2026-09-30T17:37:07.316833+00:00",
+            "lag_lower_ms": 370365.615,
+            "lag_upper_ms": 427316.833
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "awc",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:39:03.278746+00:00",
+                "positive_receipt_at": "2026-09-30T17:40:03.035007+00:00",
+                "lag_lower_ms": 543278.7459999999,
+                "lag_upper_ms": 603035.007
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T17:30:00+00:00",
+                "negative_request_at": "2026-09-30T17:41:01.336446+00:00",
+                "positive_receipt_at": "2026-09-30T17:43:13.288783+00:00",
+                "lag_lower_ms": 661336.446,
+                "lag_upper_ms": 793288.7829999999
+              }
+            }
+          ]
+        },
+        {
+          "observation": "2026-09-30T17:40:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T17:40:00+00:00",
+            "negative_request_at": "2026-09-30T17:46:10.681611+00:00",
+            "positive_receipt_at": "2026-09-30T17:47:02.544975+00:00",
+            "lag_lower_ms": 370681.611,
+            "lag_upper_ms": 422544.97500000003
+          },
+          "comparators": []
+        },
+        {
+          "observation": "2026-09-30T17:50:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T17:50:00+00:00",
+            "negative_request_at": "2026-09-30T17:57:16.616822+00:00",
+            "positive_receipt_at": "2026-09-30T17:58:15.526389+00:00",
+            "lag_lower_ms": 436616.822,
+            "lag_upper_ms": 495526.38899999997
+          },
+          "comparators": []
+        },
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T17:59:14.611518+00:00",
+            "positive_receipt_at": "2026-09-30T18:07:04.851619+00:00",
+            "lag_lower_ms": -45388.482,
+            "lag_upper_ms": 424851.619
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "INTERVALS_OVERLAP",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:05:08.410804+00:00",
+                "positive_receipt_at": "2026-09-30T18:06:23.377073+00:00",
+                "lag_lower_ms": 308410.804,
+                "lag_upper_ms": 383377.073
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Tokyo",
+                "station": "RJTT",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+                "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+                "lag_lower_ms": 483398.93,
+                "lag_upper_ms": 542160.612
+              }
+            }
+          ]
+        },
+        {
+          "observation": "2026-09-30T18:10:00+00:00",
+          "candidate": {
+            "city": "Tokyo",
+            "station": "RJTT",
+            "channel": "jma_amedas",
+            "observed_at": "2026-09-30T18:10:00+00:00",
+            "negative_request_at": "2026-09-30T18:16:02.091873+00:00",
+            "positive_receipt_at": "2026-09-30T18:17:01.747132+00:00",
+            "lag_lower_ms": 362091.873,
+            "lag_upper_ms": 421747.13200000004
+          },
+          "comparators": []
+        }
+      ],
+      "decision": "RETAIN_ALREADY_WIRED",
+      "disposition": "Extended exact-time identity and independent publication race passed; retain existing wired fast route.",
+      "evidence": [
+        "round3_origin_measurements.json",
+        "round3_race/",
+        "round3_window/comparison.json"
+      ]
+    },
+    {
+      "city": "Toronto",
+      "settlement_station": "CYYZ",
+      "country": "CA",
+      "settlement_unit": "C",
+      "candidate": "ECCC CYYZ-MAN SWOB",
+      "candidate_url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+      "n_pairs": 51,
+      "n_exact": 51,
+      "mismatches": [],
+      "races": [
+        {
+          "observation": "2026-09-30T18:00:00+00:00",
+          "candidate": {
+            "city": "Toronto",
+            "station": "CYYZ",
+            "channel": "eccc_swob",
+            "observed_at": "2026-09-30T18:00:00+00:00",
+            "negative_request_at": "2026-09-30T18:01:03.071422+00:00",
+            "positive_receipt_at": "2026-09-30T18:02:02.544911+00:00",
+            "lag_lower_ms": 63071.422,
+            "lag_upper_ms": 122544.911
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Toronto",
+                "station": "CYYZ",
+                "channel": "awc",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:07:04.021237+00:00",
+                "positive_receipt_at": "2026-09-30T18:08:03.349032+00:00",
+                "lag_lower_ms": 424021.23699999996,
+                "lag_upper_ms": 483349.032
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Toronto",
+                "station": "CYYZ",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T18:00:00+00:00",
+                "negative_request_at": "2026-09-30T18:08:03.398930+00:00",
+                "positive_receipt_at": "2026-09-30T18:09:02.160612+00:00",
+                "lag_lower_ms": 483398.93,
+                "lag_upper_ms": 542160.612
+              }
+            }
+          ]
+        }
+      ],
+      "decision": "RETAIN_ALREADY_WIRED",
+      "disposition": "Extended exact-time identity and independent publication race passed; retain existing wired fast route.",
+      "evidence": [
+        "round3_origin_measurements.json",
+        "round3_race/",
+        "round3_window/comparison.json"
+      ]
+    },
+    {
+      "city": "Warsaw",
+      "settlement_station": "EPWA",
+      "country": "PL",
+      "settlement_unit": "C",
+      "candidate": "IMGW SYNOP 12375",
+      "candidate_url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+      "n_pairs": 2,
+      "n_exact": 1,
+      "mismatches": [
+        {
+          "city": "Warsaw",
+          "channel": "imgw",
+          "station": "EPWA",
+          "time": "2026-09-30T15:00:00+00:00",
+          "candidate_raw": 19.3,
+          "candidate_unit": "C",
+          "candidate_contract": 19,
+          "resolver_raw": 20.0,
+          "resolver_unit": "C",
+          "resolver_contract": 20,
+          "match": false,
+          "candidate_versions": [
+            19
+          ],
+          "resolver_versions": [
+            20
+          ]
+        }
+      ],
+      "races": [],
+      "decision": "NOT_PROMOTED_MISMATCH_OR_NO_OVERLAP",
+      "disposition": "Retained 1/2 equality result includes a contradictory pair; physical-only, not promoted.",
+      "evidence": [
+        "config/physical_current_sources.json",
+        "source_identity_report.json"
+      ]
+    },
+    {
+      "city": "Wellington",
+      "settlement_station": "NZWN",
+      "country": "NZ",
+      "settlement_unit": "C",
+      "candidate": "MetService Classic one-minute airport observations",
+      "candidate_url": "https://developer.metservice.com/docs/api-catalog/1min-obs-api/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "Operational commercial API documented; licensed key not available. No claim that the November preview API is currently usable.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Wuhan",
+      "settlement_station": "ZHHH",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    },
+    {
+      "city": "Zhengzhou",
+      "settlement_station": "ZHCC",
+      "country": "CN",
+      "settlement_unit": "C",
+      "candidate": "CMA / civil-aviation airport observation origin",
+      "candidate_url": "https://data.cma.cn/",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "races": [],
+      "decision": "NOT_PROMOTED_UNMEASURED",
+      "disposition": "CMA catalog reviewed, but no exact ICAO-airport stream acquired. Documented national surface exchange products have publication lag and are not proof of airport identity. Do not replace an airport with a nearby city station.",
+      "evidence": [
+        "round3_origins/discovery.json",
+        "round3_origin_probe.py"
+      ]
+    }
+  ]
+}

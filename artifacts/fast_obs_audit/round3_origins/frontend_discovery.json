@@ -1,0 +1,302 @@
+[
+  {
+    "name": "IN_home",
+    "url": "https://olbs.amsschennai.gov.in/",
+    "request_at": "2026-09-30T17:34:47.602352+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:34:54.856174+00:00",
+    "scripts": [
+      "js/jquery-1.7.1.min.js",
+      "js/jquery-ui.js",
+      "js/json.min.js",
+      "js/rsh.min.js",
+      "js/facebox/facebox.js",
+      "js/printData.js",
+      "js/globals.js",
+      "js/language.js",
+      "js/thirdparty.js",
+      "js/history.js",
+      "js/user.js",
+      "js/gui.js",
+      "js/ctrl.js",
+      "js/jquery.cookie.min.js",
+      "js/jquery.progressbar.min.js",
+      "js/jquery.progressbar.min.js",
+      "js/alerts.js",
+      "js/validate.js",
+      "js/jquery.qtip-1.0.0-rc3.min.js"
+    ],
+    "links": [],
+    "frames": [
+      "<iframe id=\"iframeFileStream\" name=\"iframeFileStream\" style=\"visibility: hidden; display: none; width: 0px; height: 0px; padding: 0px; margin: 0px;\"></iframe>"
+    ],
+    "query_context": [
+      "\t\t<script type=\"text/javascript\" src=\"js/jquery-1.7.1.min.js\"></script>\t",
+      "  \t\t<script type=\"text/javascript\" src=\"js/jquery-ui.js\"></script>\t",
+      "\t\t<script type=\"text/javascript\" src=\"js/json.min.js\"></script>\t\t\t\t",
+      "\t\t<script type=\"text/javascript\" src=\"js/rsh.min.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/facebox/facebox.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/printData.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/globals.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/language.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/thirdparty.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/history.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/user.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/gui.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/ctrl.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/jquery.cookie.min.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/jquery.progressbar.min.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/jquery.progressbar.min.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/alerts.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/validate.js\"></script>",
+      "\t\t<script language=\"javascript\" type=\"text/javascript\" src=\"js/jquery.qtip-1.0.0-rc3.min.js\"></script>"
+    ]
+  },
+  {
+    "name": "IN_app",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/",
+    "request_at": "2026-09-30T17:34:55.381138+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:35:02.986609+00:00",
+    "scripts": [
+      "js/jquery-1.7.1.min.js",
+      "js/jquery-ui.js",
+      "js/json.min.js",
+      "js/rsh.min.js",
+      "js/facebox/facebox.js",
+      "js/printData.js",
+      "js/globals.js",
+      "js/language.js",
+      "js/thirdparty.js",
+      "js/history.js",
+      "js/user.js",
+      "js/gui.js",
+      "js/ctrl.js",
+      "js/jquery.cookie.min.js",
+      "js/jquery.progressbar.min.js",
+      "js/jquery.progressbar.min.js",
+      "js/alerts.js",
+      "js/validate.js",
+      "js/jquery.qtip-1.0.0-rc3.min.js"
+    ],
+    "links": [],
+    "frames": [
+      "<iframe id=\"iframeFileStream\" name=\"iframeFileStream\" style=\"visibility: hidden; display: none; width: 0px; height: 0px; padding: 0px; margin: 0px;\"></iframe>"
+    ],
+    "query_context": [
+      "\t\t<script type=\"text/javascript\" src=\"js/jquery-1.7.1.min.js\"></script>\t",
+      "  \t\t<script type=\"text/javascript\" src=\"js/jquery-ui.js\"></script>\t",
+      "\t\t<script type=\"text/javascript\" src=\"js/json.min.js\"></script>\t\t\t\t",
+      "\t\t<script type=\"text/javascript\" src=\"js/rsh.min.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/facebox/facebox.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/printData.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/globals.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/language.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/thirdparty.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/history.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/user.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/gui.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/ctrl.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/jquery.cookie.min.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/jquery.progressbar.min.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/jquery.progressbar.min.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/alerts.js\"></script>",
+      "\t\t<script type=\"text/javascript\" src=\"js/validate.js\"></script>",
+      "\t\t<script language=\"javascript\" type=\"text/javascript\" src=\"js/jquery.qtip-1.0.0-rc3.min.js\"></script>"
+    ]
+  },
+  {
+    "name": "IT_widget",
+    "url": "https://www-static.meteoam.it/675/AMwebcomponents.bundle.js",
+    "request_at": "2026-09-30T17:35:03.508933+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:35:05.137416+00:00",
+    "scripts": [],
+    "links": [],
+    "api_context": [
+      " * Lodash <https://lodash.com/>",
+      " * Copyright OpenJS Foundation and other contributors <https://openjsf.org/>",
+      " * Released under MIT license <https://lodash.com/license>",
+      "},Bn.isNaN=function(e){return il(e)&&e!=+e},Bn.isNative=function(e){if(Co(e))throw new Oe(\"Unsupported core-js use. Try https://npms.io/search?q=ponyfill.\");return Nr(e)},Bn.isNil=function(e){return null==e},Bn.isNull=function(e){return null===e},Bn.isNumber=il,Bn.isObject=rl,Bn.isObjectLike=al,Bn.isPlainOb",
+      " */var r=n(67294),a=n(27418),o=n(63840);function i(e){for(var t=\"https://reactjs.org/docs/error-decoder.html?invariant=\"+e,n=1;n<arguments.length;n++)t+=\"&args[]=\"+encodeURIComponent(arguments[n]);return\"Minified React error #\"+e+\"; visit \"+t+\" for the ",
+      "uspense\"),c=f(\"react.memo\"),s=f(\"react.lazy\")}var d=\"function\"==typeof Symbol&&Symbol.iterator;function p(e){for(var t=\"https://reactjs.org/docs/error-decoder.html?invariant=\"+e,n=1;n<arguments.length;n++)t+=\"&args[]=\"+encodeURIComponent(arguments[n]);return\"Minified React error #\"+e+\"; visit \"+t+\" for the ",
+      "eProperty(e,t,Object.getOwnPropertyDescriptor(n,t))}))}return e}function i(e){return\"Minified Redux error #\"+e+\"; visit https://redux.js.org/Errors?code=\"+e+\" for the full message or use the non-minified dev environment for full errors. \"}var l=\"function\"==typeof Symbol&&Symbol.observable||\"@@observable\",u=",
+      "onsole.error(\"This browser doesn't support requestAnimationFrame. Make sure that you load a polyfill in older browsers. https://reactjs.org/link/react-polyfills\"),\"function\"!=typeof m&&console.error(\"This browser doesn't support cancelAnimationFrame. Make sure that you load a polyfill in older browsers. htt",
+      "a\",value:\"3100\",name:\"radar/composito_hdf5\"},{label:\"Effemeridi sul punto\",value:\"8000\",name:\"PointEffemeridi\"},{label:\"METAR e TAF\",value:\"2000\",name:\"point_metar\"},{label:\"Previsioni di punto\",value:\"1006\",name:\"point_fcs\"},{label:\"Fulmini\",value:\"3200\",name:\"lampinet\"},{label:\"Stazioni METAR\",value:\"2",
+      "ange-ispra\",label:\"ISPRA\"},{value:\"forecast\",label:\"Previsione\"},{value:\"trange-effemeridi\",label:\"Effemeridi\"},{value:\"metar_taf\",label:\"METAR e TAF\"},{value:\"observation\",label:\"Osservazione\"},{value:\"radar-fcs\",label:\"Radar\"}]};function Te(e,t){var n=Object.keys(e);if(Object.getOwnPropertySymbols){var"
+    ]
+  },
+  {
+    "name": "TR_index",
+    "url": "https://rasat.mgm.gov.tr/_next/static/chunks/pages/index-605b1358fdda78b6.js",
+    "request_at": "2026-09-30T17:35:05.935723+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:35:06.988859+00:00",
+    "scripts": [],
+    "links": [],
+    "api_context": []
+  },
+  {
+    "name": "IL_current",
+    "url": "https://ims.gov.il/en/CurrentDataXML",
+    "request_at": "2026-09-30T17:35:07.505315+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:35:08.475878+00:00",
+    "scripts": [
+      "https://www.googletagmanager.com/gtag/js?id=UA-156066054-1",
+      "/core/misc/drupalSettingsLoader.js?v=11.4.1",
+      "/core/misc/drupal.js?v=11.4.1",
+      "/core/misc/drupal.init.js?v=11.4.1",
+      "/themes/contrib/bootstrap_barrio/js/barrio.js?v=11.4.1",
+      "/themes/imst/js/extra/jquery-3.7.1.min.js?v=30042026",
+      "/themes/imst/js/extra/popper.min.js?v=30042026",
+      "/themes/imst/js/extra/bootstrap.min.js?v=30042026",
+      "/themes/imst/js/extra/owl.carousel.js?v=30042026",
+      "/themes/imst/js/extra/angular.min.js?v=30042026",
+      "/themes/imst/ims/js/angular-animate.min.js?v=30042026",
+      "/themes/imst/ims/js/angular-aria.min.js?v=30042026",
+      "/themes/imst/ims/js/angular-messages.min.js?v=30042026",
+      "/themes/imst/ims/js/angular-material.min.js?v=30042026",
+      "/themes/imst/js/extra/moment-with-locales.js?v=30042026",
+      "/themes/imst/js/extra/moment-timezone-with-data.js?v=30042026",
+      "/themes/imst/js/extra/AppMemory.js?v=30042026",
+      "/themes/imst/js/extra/general_functions.js?v=30042026",
+      "/themes/imst/js/extra/pattern.js?v=30042026",
+      "/themes/imst/js/extra/checklist-model.js?v=30042026",
+      "/themes/imst/js/extra/ims_angular.js?v=30042026",
+      "/themes/imst/js/extra/hydro_map_functions.js?v=30042026",
+      "/themes/imst/js/extra/ims_tools.js?v=30042026",
+      "/themes/imst/js/extra/accessibility.js?v=30042026",
+      "/themes/imst/js/extra/chart-4.js?v=30042026",
+      "/themes/imst/js/extra/annotation-4.min.js?v=30042026",
+      "/themes/imst/js/extra/jquery-ui.js?v=30042026",
+      "/themes/imst/js/extra/slick.min.js?v=30042026",
+      "/themes/imst/js/extra/nouislider.min.js?v=30042026",
+      "/themes/imst/js/extra/RangeSlider.js?v=30042026",
+      "/modules/custom/imstools/js/imstools.js?v=1.x",
+      "/themes/imst/js/extra/suncalc.js?v=10.3.13"
+    ],
+    "links": [
+      [
+        "{{sub.title}}",
+        "{{sub.relative}}"
+      ],
+      [
+        "",
+        "/{{imsc.get_language}}/imsWarnings?gid=18"
+      ],
+      [
+        "",
+        "/{{imsc.get_language}}/imsWarnings?gid=17"
+      ],
+      [
+        "",
+        "/{{imsc.get_language}}/imsWarnings?gid=36"
+      ],
+      [
+        "",
+        "/{{imsc.get_language}}/imsWarnings?gid=50"
+      ],
+      [
+        "{{sub.title}}",
+        "{{sub.relative}}"
+      ],
+      [
+        "Previous",
+        "#carouselExampleIndicators"
+      ],
+      [
+        "Next",
+        "#carouselExampleIndicators"
+      ],
+      [
+        "XML files",
+        "/en/CurrentDataXML"
+      ]
+    ]
+  },
+  {
+    "name": "RU_display",
+    "url": "https://display.meteocenter.ru/",
+    "request_at": "2026-09-30T17:35:08.996543+00:00",
+    "error_class": "ConnectError"
+  },
+  {
+    "name": "ES_humidity",
+    "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09",
+    "request_at": "2026-09-30T17:35:10.152661+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T17:35:10.496614+00:00",
+    "scripts": [
+      "/ruxitagentjs_ICA7NVfqrux_10345260810170330.js",
+      "/js/jquery.min.js",
+      "/js/jquery.cookie.js",
+      "/js/owl-carousel/owl.carousel.min.js",
+      "/js/wow/wow.min.js",
+      "/js/doubletaptogo.min.js",
+      "/js/comun/semaforo-cabecera.js"
+    ],
+    "links": [
+      [
+        "es",
+        "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "ca",
+        "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "gl",
+        "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "va",
+        "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "eu",
+        "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "en",
+        "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "fr",
+        "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "Bienvenido",
+        "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "Benvinguts",
+        "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "Benvidos",
+        "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "Benvinguts",
+        "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "Ongi etorri",
+        "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "Welcome",
+        "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "Bienvenue",
+        "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      ],
+      [
+        "AEMET OpenData",
+        "/es/datos_abiertos/AEMET_OpenData"
+      ]
+    ]
+  }
+]

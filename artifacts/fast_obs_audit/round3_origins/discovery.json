@@ -1,0 +1,1459 @@
+[
+  {
+    "country": "ES",
+    "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x=",
+    "request_at": "2026-09-30T17:18:22.866977+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T17:18:23.666925+00:00",
+    "http_ms": 799.794959,
+    "sha256": "d12c54c23ac50b5175e4713b390126fb2f547e8b1ab925e3965e7ea40c3c177e",
+    "final_url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x=",
+    "content_type": "text/html;charset=ISO-8859-15",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/ES_d12c54c23ac50b5175e4713b390126fb2f547e8b1ab925e3965e7ea40c3c177e.gz",
+    "title": "Hoy y últimos días: Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España",
+    "links": [
+      {
+        "text": "es",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "ca",
+        "url": "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "gl",
+        "url": "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "va",
+        "url": "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "eu",
+        "url": "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "en",
+        "url": "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "fr",
+        "url": "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "Bienvenido",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "Benvinguts",
+        "url": "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "Benvidos",
+        "url": "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "Benvinguts",
+        "url": "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "Ongi etorri",
+        "url": "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "Welcome",
+        "url": "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "Bienvenue",
+        "url": "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos?datos=det&f=temperatura&k=mad&l=3129&w=0&x="
+      },
+      {
+        "text": "Observación",
+        "url": "https://www.aemet.es/es/eltiempo/observacion"
+      },
+      {
+        "text": "Hoy y últimos días",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos"
+      },
+      {
+        "text": "SINOBAS",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/sinobas"
+      },
+      {
+        "text": "Radar",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/radar"
+      },
+      {
+        "text": "Satélites",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/satelite/infra"
+      },
+      {
+        "text": "Rayos",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/rayos"
+      },
+      {
+        "text": "Radiación y ozono",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/radiacion/radiacion"
+      },
+      {
+        "text": "Contaminación de fondo",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/contaminacionfondo"
+      },
+      {
+        "text": "Campañas Antárticas",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/camp_antarticas"
+      },
+      {
+        "text": "Tiempo espacial",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/tiempo_espacial"
+      },
+      {
+        "text": "Plataforma Estatal de Servicios Climáticos",
+        "url": "https://www.aemet.es/es/serviciosclimaticos/pesc"
+      },
+      {
+        "text": "Observación",
+        "url": "https://www.aemet.es/es/idi/observacion"
+      },
+      {
+        "text": "El Observador",
+        "url": "https://www.aemet.es/es/conocermas/recursos_en_linea/elobservador"
+      }
+    ],
+    "scripts": [
+      "https://www.aemet.es/ruxitagentjs_ICA7NVfqrux_10345260810170330.js",
+      "https://www.aemet.es/js/jquery.min.js",
+      "https://www.aemet.es/js/jquery.cookie.js",
+      "https://www.aemet.es/js/owl-carousel/owl.carousel.min.js",
+      "https://www.aemet.es/js/wow/wow.min.js",
+      "https://www.aemet.es/js/doubletaptogo.min.js",
+      "https://www.aemet.es/js/comun/semaforo-cabecera.js"
+    ],
+    "forms": [
+      "<form action=\"/es/buscador\" id=\"FrmBuscador\" method=\"get\"><div class=\"contenedor_buscador\">\n<input aria-label=\"Introduzca texto\" class=\"texto_buscador\" id=\"buscar\" name=\"str\" onblur=\"this.value=(this.value=='') ? 'Introduzca texto' : this.value;\" onfocus=\"this.value=(this.value=='Introduzca texto') ? '' : this.value;\" value=\"Introduzca texto\"/>\n<input name=\"modo\" type=\"hidden\" value=\"and\"/><input name=\"orden\" type=\"hidden\" value=\"n\"/><input name=\"tipo\" type=\"hidden\" value=\"sta\"/><input alt=\"Buscar\" class=\"boton_buscar_cabecera\" title=\"Buscar\" type=\"submit\" value=\" \"/></div>\n</form>"
+    ],
+    "text_preview": "Hoy y últimos días: Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España Aceptar cookies Información sobre uso de cookies Este sitio web utiliza cookies propias y de terceros para mejorar la experiencia de navegación, y ofrecer contenidos y funcionalidades de interés. Para más información sobre las cookies utilizadas consulta nuestra política de cookies Agencia Estatal de Meteorología C - Ir a contenido 0 - Accesibilidad web 1 - Inicio 2 - Mapa web 3 - Ayuda web 4 - Contactar - Atención al ciudadano 5 - Municipios 6 - Avisos es es ca gl va eu en fr Bienvenido Bienvenido Benvinguts Benvidos Benvinguts Ongi etorri Welcome Bienvenue Buscador oculto Menú El tiempo Observación Hoy y últimos días SINOBAS Radar Satélites Rayos Radiación y ozono Contaminación de fondo Campañas Antárticas Tiempo espacial Predicción Avisos Municipios Playas Montaña CC. AA. España Ciudades del mundo Marítima Aeronáutica Mapas con frentes Temperaturas máx/mín Modelos numéricos Mapas probabilísticos Radiación ultravioleta Composición química de la atmósfera Incendios MeteoRuta Intrusiones de polvo mineral sahariano Servicios climáticos Datos climatológicos Valores normales Valores extremos Superación de umbrales Efemérides Fenología Atlas climáticos Series centenarias Vigilancia del clima Resúmenes climatológicos Análisis estacional Vigilancia de la sequía meteorológica Balance hídrico Resumen de precipitaciones Radiación y ozono Composición atmosférica en Izaña Plataforma Estatal de Servicios Climáticos Predicción estacional Proyecciones climáticas para el siglo XXI AR6: Escenarios PNACC Visor AdapteCCa AR5 y anteriores Apoyo a la gestión de embalses Catálogo Conócenos Quiénes somos A qué nos dedicamos Transparencia Institucional, Organizativa y de Planificación Jurídica Económica, Presupuestaria y Estadística Solicitudes de accesos a la información pública Nuestros recursos Nuestra historia Congresos y conferencias Anuncios Reuniones y conferencias Colaboración insti"
+  },
+  {
+    "country": "ES",
+    "url": "https://opendata.aemet.es/opendata/api/observacion/convencional/datos/estacion/3129",
+    "request_at": "2026-09-30T17:18:22.867367+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:23.763809+00:00",
+    "http_ms": 896.442583,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "final_url": "https://opendata.aemet.es/opendata/api/observacion/convencional/datos/estacion/3129",
+    "content_type": "text/plain; charset=UTF-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/ES_e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.gz",
+    "title": "",
+    "links": [],
+    "scripts": [],
+    "forms": [],
+    "text_preview": ""
+  },
+  {
+    "country": "GB",
+    "url": "https://datahub.metoffice.gov.uk/docs/g/category/observations/overview",
+    "request_at": "2026-09-30T17:18:22.867475+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:23.918326+00:00",
+    "http_ms": 1050.8655,
+    "sha256": "a3fdb9ebed6487fef07f9fb659ae4e377fdc8c756d5c5579b00d67713c5779ed",
+    "final_url": "https://datahub.metoffice.gov.uk/docs/g/category/observations/overview",
+    "content_type": "text/html;charset=UTF-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/GB_a3fdb9ebed6487fef07f9fb659ae4e377fdc8c756d5c5579b00d67713c5779ed.gz",
+    "title": "Weather DataHub | Observations Overview",
+    "links": [
+      {
+        "text": "Met Office Weather DataHub Terms and Conditions",
+        "url": "https://datahub.metoffice.gov.uk/docs/g/category/observations/overview"
+      },
+      {
+        "text": "Overview",
+        "url": "https://datahub.metoffice.gov.uk/docs/o/category/observations/overview"
+      },
+      {
+        "text": "Sample data",
+        "url": "https://datahub.metoffice.gov.uk/docs/o/category/observations/type/land-observations/sample-data"
+      },
+      {
+        "text": "API documentation",
+        "url": "https://datahub.metoffice.gov.uk/docs/o/category/observations/type/land-observations/api-documentation"
+      },
+      {
+        "text": "Glossary",
+        "url": "https://datahub.metoffice.gov.uk/docs/glossary?models=mo-land-observations"
+      },
+      {
+        "text": "Accessibility Statement",
+        "url": "https://datahub.metoffice.gov.uk/accessibility-statement"
+      }
+    ],
+    "scripts": [
+      "https://datahub.metoffice.gov.uk/js/main-b36b0c9f8c46c45a69800b336485d680.js"
+    ],
+    "forms": [],
+    "text_preview": "Weather DataHub | Observations Overview Skip to main content Copied to clipboard Close lightbox Lightbox title GRIB2 Code GRIB2 Code value Unit Unit value Time steps Hourly 3 Hourly 6 Hourly Daily Time interpretation Time interpretation value Bits per value The bitsPerValue determines the relative size of the data download required for each\n                                            parameter. The bitsPerValue ranges from 1 to 20 bits for our current parameters. Note the data download size is not a direct multiplier of the bitsPerValue as there are\n                                            standard overheads within the generated GRIB files which are common for all parameters.\n                                            However, the bitsPerValue is a good guide to the relative cost of each parameter. The bits per value may differ across level types. BitsPerValue value Bits per value The bitsPerValue determines the relative size of the data download required for each\n                                            parameter. The bitsPerValue ranges from 1 to 20 bits for our current parameters. Note the data download size is not a direct multiplier of the bitsPerValue as there are\n                                            standard overheads within the generated GRIB files which are common for all parameters.\n                                            However, the bitsPerValue is a good guide to the relative cost of each parameter. The bits per value may differ across level types. Level Type Bits per value Level Type More information on level types Level type value Parameter ID Parameter ID value Previous Next Close lightbox Application name Your application name is used as a link to our gateway through which your API requests are processed. On subscription we automatically create an application for you with a default name. The application name has no bearing on how things are processed. Close Close lightbox Notification title Message By ordering products from the Met"
+  },
+  {
+    "country": "BR",
+    "url": "https://api-redemet.decea.mil.br/mensagens/metar/SBGR",
+    "request_at": "2026-09-30T17:18:23.700225+00:00",
+    "status": 401,
+    "receipt_at": "2026-09-30T17:18:24.835765+00:00",
+    "http_ms": 1135.551208,
+    "sha256": "cf616e4688c77308b54ca4079246cb5826308b11d7fdf9deeb8df37d8b276e5c",
+    "final_url": "https://api-redemet.decea.mil.br/mensagens/metar/SBGR",
+    "content_type": "application/json; charset=utf-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/BR_cf616e4688c77308b54ca4079246cb5826308b11d7fdf9deeb8df37d8b276e5c.gz",
+    "title": "",
+    "links": [],
+    "scripts": [],
+    "forms": [],
+    "text_preview": "{\n  \"message\":\"No API key found in request\",\n  \"request_id\":\"441c345a684547299a4aa15da3182701\"\n}"
+  },
+  {
+    "country": "MY",
+    "url": "https://metapi2.met.gov.my/",
+    "request_at": "2026-09-30T17:18:23.939428+00:00",
+    "status": 503,
+    "receipt_at": "2026-09-30T17:18:25.461563+00:00",
+    "http_ms": 1522.142667,
+    "sha256": "839488ebc08446a096a893996ed23eac321ac166724cd8c5d9092057834d2d79",
+    "final_url": "https://metapi2.met.gov.my/",
+    "content_type": "text/html",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/MY_839488ebc08446a096a893996ed23eac321ac166724cd8c5d9092057834d2d79.gz",
+    "title": "",
+    "links": [],
+    "scripts": [],
+    "forms": [],
+    "text_preview": "503 Service Unavailable No server is available to handle this request."
+  },
+  {
+    "country": "MY",
+    "url": "https://www.met.gov.my/en/",
+    "request_at": "2026-09-30T17:18:23.764209+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:25.892120+00:00",
+    "http_ms": 2127.91925,
+    "sha256": "921ea4e137fba477d825c643f4724f9c75d0f998b7aa677f51fbca82d73333d7",
+    "final_url": "https://www.met.gov.my/en/",
+    "content_type": "text/html",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/MY_921ea4e137fba477d825c643f4724f9c75d0f998b7aa677f51fbca82d73333d7.gz",
+    "title": "METMalaysia - Home",
+    "links": [
+      {
+        "text": "State",
+        "url": "https://www.met.gov.my/en/forecast/weather/state"
+      },
+      {
+        "text": "District",
+        "url": "https://www.met.gov.my/en/forecast/weather/district"
+      },
+      {
+        "text": "Town",
+        "url": "https://www.met.gov.my/en/forecast/weather/town"
+      },
+      {
+        "text": "Tourist Destination",
+        "url": "https://www.met.gov.my/en/forecast/weather/tourist"
+      },
+      {
+        "text": "Interactive Weather",
+        "url": "https://www.met.gov.my/en/"
+      },
+      {
+        "text": "Aviation Weather",
+        "url": "http://abt.met.gov.my/"
+      },
+      {
+        "text": "Observation",
+        "url": "https://www.met.gov.my/en/"
+      },
+      {
+        "text": "Space Weather",
+        "url": "https://www.met.gov.my/en/pencerapan/cuaca-angkasa"
+      },
+      {
+        "text": "Observation",
+        "url": "https://myclimate.met.gov.my/fdrsWmsObsMsiaMetPortal"
+      },
+      {
+        "text": "Observation",
+        "url": "https://myclimate.met.gov.my/fdrsWmsObsAseanMetPortal"
+      },
+      {
+        "text": "Long Range Weather Outlook",
+        "url": "https://www.met.gov.my/en/iklim/tinjauan-cuaca-jangka/"
+      },
+      {
+        "text": "Monthly Weather Bulletin",
+        "url": "https://www.met.gov.my/en/iklim/buletin-cuaca-bulanan"
+      },
+      {
+        "text": "Synoptic",
+        "url": "https://www.met.gov.my/data/research/synoptic-climatology.pdf"
+      },
+      {
+        "text": "Weather",
+        "url": "https://www.met.gov.my/en/"
+      },
+      {
+        "text": "Weather Terminology",
+        "url": "https://www.met.gov.my/en/pendidikan/terminologi-cuaca"
+      },
+      {
+        "text": "Weather Phenomena",
+        "url": "https://www.met.gov.my/en/pendidikan/fenomena-cuaca"
+      },
+      {
+        "text": "Staff Directory",
+        "url": "https://www.met.gov.my/en/hubungi-kami/direktori-kakitangan"
+      },
+      {
+        "text": "State",
+        "url": "https://www.met.gov.my/en/forecast/weather/state"
+      },
+      {
+        "text": "District",
+        "url": "https://www.met.gov.my/en/forecast/weather/district"
+      },
+      {
+        "text": "Town",
+        "url": "https://www.met.gov.my/en/forecast/weather/town"
+      },
+      {
+        "text": "Tourist Destination",
+        "url": "https://www.met.gov.my/en/forecast/weather/tourist"
+      },
+      {
+        "text": "Interactive Weather",
+        "url": "https://www.met.gov.my/en/"
+      },
+      {
+        "text": "Aviation Weather",
+        "url": "http://abt.met.gov.my/"
+      },
+      {
+        "text": "Observation",
+        "url": "https://www.met.gov.my/en/"
+      },
+      {
+        "text": "Space Weather",
+        "url": "https://www.met.gov.my/en/pencerapan/cuaca-angkasa"
+      },
+      {
+        "text": "Observation",
+        "url": "https://myclimate.met.gov.my/fdrsWmsObsMsiaMetPortal"
+      },
+      {
+        "text": "Observation",
+        "url": "https://myclimate.met.gov.my/fdrsWmsObsAseanMetPortal"
+      },
+      {
+        "text": "Long Range Weather Outlook",
+        "url": "https://www.met.gov.my/en/iklim/tinjauan-cuaca-jangka/"
+      },
+      {
+        "text": "Monthly Weather Bulletin",
+        "url": "https://www.met.gov.my/en/iklim/buletin-cuaca-bulanan"
+      },
+      {
+        "text": "Synoptic",
+        "url": "https://www.met.gov.my/data/research/synoptic-climatology.pdf"
+      },
+      {
+        "text": "Weather",
+        "url": "https://www.met.gov.my/en/"
+      },
+      {
+        "text": "Weather Terminology",
+        "url": "https://www.met.gov.my/en/pendidikan/terminologi-cuaca"
+      },
+      {
+        "text": "Weather Phenomena",
+        "url": "https://www.met.gov.my/en/pendidikan/fenomena-cuaca"
+      },
+      {
+        "text": "Staff Directory",
+        "url": "https://www.met.gov.my/en/hubungi-kami/direktori-kakitangan"
+      },
+      {
+        "text": "CUACA DAN IKLIM",
+        "url": "https://data.gov.my/dashboard/weather-and-climate"
+      },
+      {
+        "text": "Staff Directory",
+        "url": "https://www.met.gov.my/en/hubungi-kami/direktori-kakitangan"
+      }
+    ],
+    "scripts": [
+      "https://unpkg.com/feather-icons",
+      "https://www.met.gov.my/js/site.js",
+      "https://www.met.gov.my/js/lunr.js",
+      "https://www.googletagmanager.com/gtag/js?id=G-V6YZ3KD467"
+    ],
+    "forms": [
+      "<form splwpk-search-function=\"splwpk-search-function\"></form>",
+      "<form splwpk-feedback-form=\"splwpk-feedback-form\"></form>",
+      "<form splwpk-advanced-search-function=\"splwpk-advanced-search-function\"></form>"
+    ],
+    "text_preview": "METMalaysia - Home OFFICIAL WEBSITE OF MALAYSIAN METEOROLOGICAL DEPARTMENT Talian Hotline 1-300-22-1638 F.A.Q Contact Us Complaint & Feedback Sitemap Home Corporate Profile Corporate Information Top Management Chief Digital Officer (CDO) Organization Chart Services Meteorological Offices Client Charter Policies & Roadmaps Forecast Main Forecast Country State District Town Tourist Destination Marine Forecast Waters Shipping Interactive Weather Peninsula Sabah & Sarawak Waters Shipping Aviation Weather Nowcasting Warning Criteria Continuous Rain Strong Wind & Rough Seas Thunderstorm Earthquake Observation Surface Temperature Rain Visibility Humidity Radar Malaysia Peninsula Sabah & Sarawak Nowcasting Satellite Peninsular Malaysia Sabah & Sarawak Asean Asia Atmospheric Science Suspended Particulate (TEOM PM-10/PM-2.5) Ultra Violet Index (UVI) Space Weather Acid Deposition Climate FDRS System WMS Malaysia Observation Forecast WMS Asean Observation Forecast Drought Heat Wave Status Drought Monitoring Agrometeorological Agroclimate Analysis & Review Seasonal Forecast Long Range Weather Outlook Current ENSO Status Summary Report Monthly Weather Bulletin Synoptic Climate Information Publication Newsletter Annual Report Technical Papers Coffee Table Book Education Weather Weather Terminology Weather Phenomena Meteorological Instrument Earthquake & Tsunami Terminology Tsunami Earthquake Climate Malaysia Climate Climate Change Atmospheric Science Acid Deposition Ozone Layer UV Radiation Global Atmospheric Watch Cloud Seeding Contact Us Staff Directory Office Addresses Location Map Talian Hotline 1-300-22-1638 F.A.Q Contact Us Complaint & Feedback Sitemap Home Corporate Profile Corporate Information Top Management Chief Digital Officer (CDO) Organization Chart Services Meteorological Offices Client Charter Policies & Roadmaps Forecast Main Forecast Country State District Town Tourist Destination Marine Forecast Waters Shipping Interactive Weather Peninsula Sabah & Sarawak Water"
+  },
+  {
+    "country": "TW",
+    "url": "https://aoaws.anws.gov.tw/",
+    "request_at": "2026-09-30T17:18:25.462623+00:00",
+    "error_class": "ConnectError",
+    "error": "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Missing Subject Key Identifier (_ssl.c:1082)"
+  },
+  {
+    "country": "KR",
+    "url": "https://global.amo.go.kr/control/metar-metreport.do?tab=2",
+    "request_at": "2026-09-30T17:18:24.836679+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:27.500675+00:00",
+    "http_ms": 2664.085792,
+    "sha256": "8a9e50dbac86a6e346f942854c36291d50d776b15795402ea94b170ed10aa0ee",
+    "final_url": "https://global.amo.go.kr/control/metar-metreport.do?tab=2",
+    "content_type": "text/html;charset=utf-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/KR_8a9e50dbac86a6e346f942854c36291d50d776b15795402ea94b170ed10aa0ee.gz",
+    "title": "항공날씨",
+    "links": [
+      {
+        "text": "관측 / 기후",
+        "url": "https://global.amo.go.kr/observation/metar.do"
+      },
+      {
+        "text": "METAR/SPECI",
+        "url": "https://global.amo.go.kr/observation/metar.do"
+      },
+      {
+        "text": "METAR/METREPORT",
+        "url": "https://global.amo.go.kr/control/metar-metreport.do"
+      },
+      {
+        "text": "AIREP",
+        "url": "https://global.amo.go.kr/observation/airep.do"
+      },
+      {
+        "text": "공항기후표",
+        "url": "https://global.amo.go.kr/airportClimate/airportweather-table.do?part=Y"
+      },
+      {
+        "text": "공항기후개요",
+        "url": "https://global.amo.go.kr/airportClimate/airportweather-table.do"
+      },
+      {
+        "text": "예보 / 특보",
+        "url": "https://global.amo.go.kr/forecast/taf.do"
+      },
+      {
+        "text": "공항예보",
+        "url": "https://global.amo.go.kr/forecast/taf.do"
+      },
+      {
+        "text": "공항예보",
+        "url": "https://global.amo.go.kr/forecast/taf.do"
+      },
+      {
+        "text": "TAF",
+        "url": "https://global.amo.go.kr/control/control-taf.do"
+      },
+      {
+        "text": "TAF 보드",
+        "url": "https://global.amo.go.kr/tafboard/amis/list.do"
+      },
+      {
+        "text": "태풍정보",
+        "url": "https://amo.kma.go.kr/weather/typhoon.do"
+      },
+      {
+        "text": "일기도 / WAFS",
+        "url": "https://global.amo.go.kr/weatherMap/map-kwintem.do"
+      },
+      {
+        "text": "한반도 WINTEM",
+        "url": "https://global.amo.go.kr/weatherMap/map-kwintem.do"
+      },
+      {
+        "text": "격자점 기온 바람",
+        "url": "https://global.amo.go.kr/weatherMap/lattice-point.do"
+      },
+      {
+        "text": "난류예측일기도",
+        "url": "https://global.amo.go.kr/weatherMap/turbulentflow.do"
+      },
+      {
+        "text": "종관일기도",
+        "url": "https://global.amo.go.kr/weatherMap/detail-wind-temp.do"
+      },
+      {
+        "text": "상세-바람기온",
+        "url": "https://global.amo.go.kr/weatherMap/detail-wind-temp.do"
+      },
+      {
+        "text": "수치일기도",
+        "url": "https://www.weather.go.kr/w/image/chart/forecast.do"
+      },
+      {
+        "text": "날씨영상",
+        "url": "https://global.amo.go.kr/weatherImage/video-radar-tdwr.do"
+      },
+      {
+        "text": "레이더",
+        "url": "https://global.amo.go.kr/weatherImage/video-radar-tdwr.do"
+      },
+      {
+        "text": "공항기상레이더",
+        "url": "https://global.amo.go.kr/weatherImage/video-radar-tdwr.do"
+      },
+      {
+        "text": "기상레이더",
+        "url": "https://global.amo.go.kr/weatherImage/weather-radar.do"
+      },
+      {
+        "text": "레이더통합분석",
+        "url": "https://global.amo.go.kr/weatherImage/radar-integration.do"
+      },
+      {
+        "text": "낙뢰",
+        "url": "https://global.amo.go.kr/weatherImage/lightning-stroke.do"
+      },
+      {
+        "text": "위성",
+        "url": "https://global.amo.go.kr/weatherImage/satellite.do"
+      },
+      {
+        "text": "공항기상정보",
+        "url": "https://global.amo.go.kr/operation/operational-weather.do"
+      },
+      {
+        "text": "황사정보",
+        "url": "https://www.weather.go.kr/w/dust/dust-obs/values.do"
+      },
+      {
+        "text": "우주기상주의보",
+        "url": "https://global.amo.go.kr/operation/space-weather.do"
+      },
+      {
+        "text": "저고도 항공기상정보",
+        "url": "https://global.amo.go.kr/lowLevel/lowaltitude-weather.do"
+      },
+      {
+        "text": "제주공항 LIDAR",
+        "url": "https://global.amo.go.kr/weatherImage/jeju-windLidar.do"
+      },
+      {
+        "text": "국내공항별",
+        "url": "https://global.amo.go.kr/airportWeather/domestic-airport.do"
+      },
+      {
+        "text": "운항기상 종합정보",
+        "url": "https://global.amo.go.kr/airportWeather/airportweather-world-v2.do"
+      },
+      {
+        "text": "METAR/TAF조회",
+        "url": "https://global.amo.go.kr/observation/metartaf.do"
+      },
+      {
+        "text": "동네예보",
+        "url": "https://www.weather.go.kr/w/weather/forecast/short-term.do"
+      },
+      {
+        "text": "중기예보(10일)",
+        "url": "https://www.weather.go.kr/w/weather/forecast/mid-term.do"
+      },
+      {
+        "text": "특ㆍ정보",
+        "url": "https://www.weather.go.kr/w/weather/warning/status.do"
+      },
+      {
+        "text": "도시별 현재날씨",
+        "url": "https://www.weather.go.kr/w/obs-climate/land/city-obs.do"
+      },
+      {
+        "text": "지역별 현재날씨",
+        "url": "https://www.weather.go.kr/plus/land/current/aws_table_popup.jsp"
+      },
+      {
+        "text": "METAR/SPECI",
+        "url": "https://global.amo.go.kr/observation/metar.do"
+      },
+      {
+        "text": "METAR/METREPORT",
+        "url": "https://global.amo.go.kr/control/metar-metreport.do"
+      },
+      {
+        "text": "AIREP",
+        "url": "https://global.amo.go.kr/observation/airep.do"
+      },
+      {
+        "text": "공항기후표",
+        "url": "https://global.amo.go.kr/airportClimate/airportweather-table.do?part=Y"
+      },
+      {
+        "text": "공항기후개요",
+        "url": "https://global.amo.go.kr/airportClimate/airportweather-table.do"
+      },
+      {
+        "text": "공항예보",
+        "url": "https://global.amo.go.kr/forecast/taf.do"
+      },
+      {
+        "text": "TAF",
+        "url": "https://global.amo.go.kr/control/control-taf.do"
+      },
+      {
+        "text": "태풍정보",
+        "url": "https://amo.kma.go.kr/weather/typhoon.do"
+      },
+      {
+        "text": "한반도 WINTEM",
+        "url": "https://global.amo.go.kr/weatherMap/map-kwintem.do"
+      },
+      {
+        "text": "난류예측일기도",
+        "url": "https://global.amo.go.kr/weatherMap/turbulentflow.do"
+      },
+      {
+        "text": "상세-바람기온",
+        "url": "https://global.amo.go.kr/weatherMap/detail-wind-temp.do"
+      },
+      {
+        "text": "수치일기도",
+        "url": "https://www.weather.go.kr/w/image/chart/forecast.do"
+      },
+      {
+        "text": "공항기상레이더",
+        "url": "https://global.amo.go.kr/weatherImage/video-radar-tdwr.do"
+      },
+      {
+        "text": "기상레이더",
+        "url": "https://global.amo.go.kr/weatherImage/weather-radar.do"
+      },
+      {
+        "text": "낙뢰",
+        "url": "https://global.amo.go.kr/weatherImage/lightning-stroke.do"
+      },
+      {
+        "text": "위성",
+        "url": "https://global.amo.go.kr/weatherImage/satellite.do"
+      },
+      {
+        "text": "공항기상정보",
+        "url": "https://global.amo.go.kr/operation/operational-weather.do"
+      },
+      {
+        "text": "황사정보",
+        "url": "https://www.weather.go.kr/w/dust/dust-obs/values.do"
+      },
+      {
+        "text": "우주기상주의보",
+        "url": "https://global.amo.go.kr/operation/space-weather.do"
+      },
+      {
+        "text": "저고도 항공기상정보",
+        "url": "https://global.amo.go.kr/lowLevel/lowaltitude-weather.do"
+      },
+      {
+        "text": "연직바람관측장비",
+        "url": "https://global.amo.go.kr/weatherImage/windprofiler.do"
+      },
+      {
+        "text": "제주공항 LIDAR",
+        "url": "https://global.amo.go.kr/weatherImage/jeju-windLidar.do"
+      },
+      {
+        "text": "국내공항별",
+        "url": "https://global.amo.go.kr/airportWeather/domestic-airport.do"
+      },
+      {
+        "text": "운항기상 종합정보",
+        "url": "https://global.amo.go.kr/airportWeather/airportweather-world-v2.do"
+      },
+      {
+        "text": "METAR/TAF 조회",
+        "url": "https://global.amo.go.kr/observation/metartaf.do"
+      },
+      {
+        "text": "동네예보",
+        "url": "https://www.weather.go.kr/w/weather/forecast/short-term.do"
+      },
+      {
+        "text": "중기예보(10일)",
+        "url": "https://www.weather.go.kr/w/weather/forecast/mid-term.do"
+      },
+      {
+        "text": "특·정보",
+        "url": "https://www.weather.go.kr/w/weather/warning/status.do"
+      },
+      {
+        "text": "도시별 현재날씨",
+        "url": "https://www.weather.go.kr/w/obs-climate/land/city-obs.do"
+      },
+      {
+        "text": "지역별 상세관측",
+        "url": "https://www.weather.go.kr/plus/land/current/aws_table_popup.jsp"
+      },
+      {
+        "text": "인천(RKSI)",
+        "url": "https://global.amo.go.kr/control/metar-metreport-dep1.do?stnCd=RKSI"
+      }
+    ],
+    "scripts": [
+      "https://global.amo.go.kr/assets/js/maps/vector/vector_maps_demo.js",
+      "https://global.amo.go.kr/js/comis4/dateutil.js",
+      "https://global.amo.go.kr/js/common/jquery/plugin/pdfview/jquery.media2.js",
+      "https://global.amo.go.kr/js/comis4/logger.js",
+      "https://global.amo.go.kr/js/comis4/webstatsLoggerScript.js?ver=0.1",
+      "https://global.amo.go.kr/js/comis4/UserScriptConf.js",
+      "https://global.amo.go.kr/assets/js/favorite-quick.js?update=20261001021826",
+      "https://global.amo.go.kr/assets/js/animsition.min.js",
+      "https://global.amo.go.kr/assets/js/animsition.min.js",
+      "https://global.amo.go.kr/assets/js/menuopen.js",
+      "https://global.amo.go.kr/assets/js/popup.js",
+      "https://global.amo.go.kr/assets/js/main.js"
+    ],
+    "forms": [],
+    "text_preview": "항공날씨 상단메뉴 로그인 회원가입 관측 / 기후 관측 / 기후 METAR/SPECI METAR/METREPORT AIREP 공항기후표 공항기후개요 예보 / 특보 예보/특보 공항예보 공항예보 TAF TAF 보드 이륙예보 SIGWX 저고도/중고도 SIGMET AIRMET 공항/급변풍 경보 태풍정보 일기도 / WAFS 일기도 / WAFS 한반도 WINTEM 격자점 기온 바람 난류예측일기도 종관일기도 상세-바람기온 수치일기도 WAFS SIGWX WINTEM 대류권계면 최대풍 습도 Cross Section 지위고도 난류 적란운 착빙 WAFS OPMET WAFS 제공시간 날씨영상 날씨영상 레이더 공항기상레이더 기상레이더 레이더통합분석 낙뢰 위성 항공기상청 바로가기 메인이동 × 운항지원 정보문 공항기상정보 항공교통 기상정보 항공교통센터 기상정보 대류운 예측 정보 화산재주의보 황사정보 우주기상주의보 관제 관제모니터링 저고도 저고도 항공기상정보 저고도 항공날씨(LAMIS) 저고도 WINTEM 항공기상 달빛정보 해달출몰시각 월령/물때정보 공항.공역 관측자료 AMOS ADS-B 제주공항 LIDAR LLWAS 제주공항급변풍정보 급변풍 예/경보 연직급변풍(양배풍) 물뜀현상 레이더 급변풍 탐지 제주 LLWAS 공항날씨 국내공항별 운항기상 종합정보 METAR/TAF조회 전국날씨 동네예보 중기예보(10일) 특ㆍ정보 도시별 현재날씨 지역별 현재날씨 관측/기후 METAR/SPECI METAR/METREPORT AIREP 공항기후표 공항기후개요 예보/특보 공항예보 공항예보 TAF 이륙예보 SIGWX 저고도/중고도 SIGMET AIRMET 공항/급변풍경보 태풍정보 일기도/WAFS 한반도 WINTEM 난류예측일기도 종관일기도 상세-바람기온 수치일기도 WAFS SIGWX WINTEM 대류권계면 최대풍 습도 Cross Section 지위고도 난류 적란운 착빙 WAFS OPMET WAFS 제공시간 날씨영상 레이더 공항기상레이더 기상레이더 낙뢰 위성 사용자설정 위험기상 알림 기준값설정 개인메뉴관리 운항지원 정보문 공항기상정보 항공교통 기상정보 항공교통센터 기상정보 대류운 예측 정보 화산재주의보 황사정보 우주기상주의보 관제 관제모니터링 공역모니터링 태풍영향분석 항공로 연직시계열 저고도 저고도 항공날씨(LAMIS) 저고도 항공기상정보 저고도 WINTEM 항공기상 달빛정보 해달출몰시각 월령/물때정보 공항.공역 관측자료 AMOS 연직바람관측장비 ADS-B 제주공항 LIDAR LLWAS 제주공항 통합급변풍 제주공항급변풍정보 급변풍 예/경보 연직급변풍(양배풍) 물뜀현상 레이더 급변풍 탐지 제주 LLWAS 공항날씨 국내공항별 운항기상 종합정보 METAR/TAF 조회 전국날씨 동네예보 중기예보(10일) 특·정보 도시별 현재날씨 지역별 상세관측 METAR/METREPORT METAR METREPORT 종류 공항명 관측시각 (UTC) 풍향 (˚) 풍속/G (kt) 시정 (m) 일기현상 구름(운량 okta/운고 100ft) 기온 (˚C) 기압 (hPa) 강수량 (㎜) 신적설 (㎝) 전운량 1층운 2층운 3층운 4층운 METAR 인천(RKSI) 301700Z 340 11/- 10,000 7 3/065 7/200 -/- -/- 17.7 1016.5 METAR 김포(RKSS) 301700Z 320 7/- 10,000 7 7/080 -/- -/- -/- 16.5 1016.5 METAR 제주(RKPC) 301700Z 020 5/- 10,000 7 5/025 7/200 -/- -/- 23.0 1014.8 METAR 무안(RKJB) 301700Z 350 2/- 9,000 - -/017 -/- -/- -/- 19.3 1014.8 METAR 울산(RKPU) 301700Z 330 3/- 10,000 - -/- -/- -/- -/- 16.4 1012.9 METAR 양양(RKNY) 301700Z 300 8/- 10,000 - -/- -/- -/- -/- 21.2 1011.5 METAR 여수(RKJY) 301700Z 300 9/- 10,000 - -/- -/- -/- -/- 21.1 1013.7 ME"
+  },
+  {
+    "country": "CN",
+    "url": "https://data.cma.cn/",
+    "request_at": "2026-09-30T17:18:25.923242+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:28.587079+00:00",
+    "http_ms": 2663.848625,
+    "sha256": "6b2758cc79839b8ba73f0ed50b2aa30371c45dbcb6b17a19ff0b14f544fbbb71",
+    "final_url": "https://data.cma.cn/",
+    "content_type": "text/html",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/CN_6b2758cc79839b8ba73f0ed50b2aa30371c45dbcb6b17a19ff0b14f544fbbb71.gz",
+    "title": "中国气象数据网",
+    "links": [],
+    "scripts": [
+      "https://data.cma.cn/assets/js/index-ze_rRBJb.js"
+    ],
+    "forms": [],
+    "text_preview": "中国气象数据网"
+  },
+  {
+    "country": "IN",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php",
+    "request_at": "2026-09-30T17:18:26.634665+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:28.693447+00:00",
+    "http_ms": 2058.780417,
+    "sha256": "71690106653f1e4749ba984423e7374869fb8d1c0d461483213c756817403deb",
+    "final_url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php",
+    "content_type": "text/html; charset=UTF-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/IN_71690106653f1e4749ba984423e7374869fb8d1c0d461483213c756817403deb.gz",
+    "title": "",
+    "links": [],
+    "scripts": [],
+    "forms": [],
+    "text_preview": "METAR/TAF query Date : 2026-09-30 Time : 17:13:33 Query: METAR: Long TAF: Short TAF:"
+  },
+  {
+    "country": "TR",
+    "url": "https://rasat.mgm.gov.tr/",
+    "request_at": "2026-09-30T17:18:27.537982+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:28.833063+00:00",
+    "http_ms": 1295.085209,
+    "sha256": "7f9c0065ba71445dc0705653d08c40a6c9255130bac17060a11c5fddc09dce23",
+    "final_url": "https://rasat.mgm.gov.tr/",
+    "content_type": "text/html; charset=utf-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/TR_7f9c0065ba71445dc0705653d08c40a6c9255130bac17060a11c5fddc09dce23.gz",
+    "title": "Hezarfen Rasat Görüntüleme",
+    "links": [],
+    "scripts": [
+      "https://rasat.mgm.gov.tr/_next/static/chunks/polyfills-5cd94c89d3acac5f.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/webpack-043901969ab14c5d.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/framework-3ccec772d1fa8b6b.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/main-404bdd3acbdd01ab.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/pages/_app-73d623a1dda1fb8f.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/pages/index-605b1358fdda78b6.js",
+      "https://rasat.mgm.gov.tr/_next/static/T8mkW-IVCJLnn0LMMsebO/_buildManifest.js",
+      "https://rasat.mgm.gov.tr/_next/static/T8mkW-IVCJLnn0LMMsebO/_ssgManifest.js",
+      "https://rasat.mgm.gov.tr/_next/static/T8mkW-IVCJLnn0LMMsebO/_middlewareManifest.js"
+    ],
+    "forms": [],
+    "text_preview": "Hezarfen Rasat Görüntüleme"
+  },
+  {
+    "country": "SA",
+    "url": "https://api-doc.ncm.gov.sa/",
+    "request_at": "2026-09-30T17:18:28.695430+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:29.307504+00:00",
+    "http_ms": 612.077875,
+    "sha256": "cca9aaf718154d76cb211f6eb21e14ce3524deaf8e7e2f18862e9a2eed8ce133",
+    "final_url": "https://api-doc.ncm.gov.sa/",
+    "content_type": "text/html; charset=utf-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/SA_cca9aaf718154d76cb211f6eb21e14ce3524deaf8e7e2f18862e9a2eed8ce133.gz",
+    "title": "NCM API Documentation",
+    "links": [],
+    "scripts": [
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/4bd1b696-0ea860eb2523fa69.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/684-a82a4fa965f61466.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/main-app-037964b5d318d5f2.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/polyfills-42372ed130431b0a.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/webpack-1382574b7b00c5e4.js"
+    ],
+    "forms": [],
+    "text_preview": "NCM API Documentation"
+  },
+  {
+    "country": "MX",
+    "url": "https://www.gob.mx/seneam/acciones-y-programas/mas-servicios-de-control",
+    "request_at": "2026-09-30T17:18:29.310512+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:29.479381+00:00",
+    "http_ms": 168.876292,
+    "sha256": "72b58454af75cab4f9f022c14ddbe75c681230aec88a5211dbad7de9daff8cdd",
+    "final_url": "https://www.gob.mx/seneam/acciones-y-programas/mas-servicios-de-control",
+    "content_type": "text/html",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/MX_72b58454af75cab4f9f022c14ddbe75c681230aec88a5211dbad7de9daff8cdd.gz",
+    "title": "Challenge Validation",
+    "links": [],
+    "scripts": [
+      "https://www.gob.mx/KLY-AgD6GX/XHWmeWka/Xq/pX/XUF2Jw/fDpIR/mx1Gxct"
+    ],
+    "forms": [],
+    "text_preview": "Challenge Validation"
+  },
+  {
+    "country": "IL",
+    "url": "https://ims.gov.il/sites/default/files/ims_data/xml_files/imslasthour.xml",
+    "request_at": "2026-09-30T17:18:28.589582+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:29.698127+00:00",
+    "http_ms": 1108.549041,
+    "sha256": "c4737d6d86d668240789af8641a980d9a8fb70633287c6075852cce8a317bac4",
+    "final_url": "https://ims.gov.il/sites/default/files/ims_data/xml_files/imslasthour.xml",
+    "content_type": "text/html",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/IL_c4737d6d86d668240789af8641a980d9a8fb70633287c6075852cce8a317bac4.gz",
+    "title": "שגיאה",
+    "links": [],
+    "scripts": [],
+    "forms": [],
+    "text_preview": "שגיאה האתר לשירותים ולמידע ממשלתי האתר המבוקש אינו נמצא אנא בדוק כי כתובת האתר שהזנת נכונה (5B)9622200991588697937 לאתר GOV.IL"
+  },
+  {
+    "country": "PK",
+    "url": "https://rmcsindh.pmd.gov.pk/Services_Aviation.html",
+    "request_at": "2026-09-30T17:18:28.835614+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:30.243892+00:00",
+    "http_ms": 1408.290208,
+    "sha256": "d69ef2b464414505d04421ea38c9e6ba518ec37d35b22bf1233c21e63ef81432",
+    "final_url": "https://rmcsindh.pmd.gov.pk/Services_Aviation.html",
+    "content_type": "text/html",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/PK_d69ef2b464414505d04421ea38c9e6ba518ec37d35b22bf1233c21e63ef81432.gz",
+    "title": "Services-Aviation",
+    "links": [
+      {
+        "text": "Weather Forecasting",
+        "url": "https://rmcsindh.pmd.gov.pk/Services.html"
+      },
+      {
+        "text": "Aviation",
+        "url": "https://rmcsindh.pmd.gov.pk/Services_Aviation.html"
+      },
+      {
+        "text": "AVIATION",
+        "url": "https://rmcsindh.pmd.gov.pk/Services_Aviation.html#service_aviation_intro"
+      },
+      {
+        "text": "AVIATION PRODUCTS",
+        "url": "https://rmcsindh.pmd.gov.pk/Services_Aviation.html#service_aviation_product"
+      },
+      {
+        "text": "RESPONSIBILITIES",
+        "url": "https://rmcsindh.pmd.gov.pk/Services_Aviation.html#service_aviation_respons"
+      }
+    ],
+    "scripts": [
+      "https://rmcsindh.pmd.gov.pk/js/jquery-3.1.1.js",
+      "https://rmcsindh.pmd.gov.pk/js/jquery-3.1.1.min.js",
+      "https://rmcsindh.pmd.gov.pk/js/hor_menu.js",
+      "https://rmcsindh.pmd.gov.pk/js/ver_menu.js",
+      "https://use.edgefonts.net/montserrat:n4:default;source-sans-pro:n2:default.js",
+      "https://rmcsindh.pmd.gov.pk/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"
+    ],
+    "forms": [],
+    "text_preview": "Services-Aviation MENU HOME ABOUT SERVICES NETWORK LINKS CONTACT SERVICES Weather Forecasting Aviation Climatology Seismology Agrometeorology Drought AVIATION AVIATION PRODUCTS RESPONSIBILITIES AVIATION SERVICES Regional Meteorological Center (RMC), Karachi under Pakistan Meteorological Department (PMD), is responsible to provide Meteorological Services (Weather Information) to the National / International Airlines and Civil Aviation Authority (CAA) according to the rules/regulations defined by the International Civil Aviation Organization (ICAO) and World Meteorological Organization (WMO). These services are provided through different Meteorological Watch offices (MWOs) under RMC, Karachi, functioning at different Airports of Sindh region. METEOROLOGIAL PRODUCTS FOR AVIATION The Meteorological products/information provided by the RMC, Karachi for aviation activities are: Current weather observation on hourly and half hourly basis. i.e METAR, SPECI. Forecasts; Terminal Aerodrome Forecast (TAFs), Area/Local forecasts, Route Forecast, Landing and take off forecasts (TREND). Warnings; Aerodrome warning, Warning for light/small aircrafts, Wind Shear & Turbulence warnings and SIGMETs for whole FIR. Flight Folder; Significant weather Charts (SIG wx charts) and Prognostic Charts( upper air wind and temperature charts of different levels. RESPONSIBILITIES TOWARDS AVIATION The following are the main responsibilities of Meteorological Offices (MOs) & Meteorological Watch Offices (MWOs) at airports under RMC, Karachi: Preparation of forecasts and other relevant informations for national and international flights operating from their respective Airports. Preparation of forecasts of local Meteorological conditions. Keeping a continuous watch over the Meteorological condition (FIR) and to issue necessary advisory/warnings. Provision of weather briefing of current and forecasted meteorological conditions to the pilots (on telephone or in briefing room), consultation and to provide"
+  },
+  {
+    "country": "ZA",
+    "url": "https://aviation.weathersa.co.za/aviationold/avmobile.php",
+    "request_at": "2026-09-30T17:18:29.701461+00:00",
+    "error_class": "ConnectError",
+    "error": "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1082)"
+  },
+  {
+    "country": "RU",
+    "url": "https://www.aviamettelecom.ru/services/",
+    "request_at": "2026-09-30T17:18:30.257039+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:31.623102+00:00",
+    "http_ms": 1366.070417,
+    "sha256": "5cf095b0a4c5c29e43be65e58357cf2b7dc8c94cc82aa4a3ee7621b56c6e89aa",
+    "final_url": "https://www.aviamettelecom.ru/services/",
+    "content_type": "text/html; charset=UTF-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/RU_5cf095b0a4c5c29e43be65e58357cf2b7dc8c94cc82aa4a3ee7621b56c6e89aa.gz",
+    "title": "Веб-сервисы",
+    "links": [
+      {
+        "text": "",
+        "url": "https://www.aviamettelecom.ru/services/metaviabriefing/"
+      },
+      {
+        "text": "МетАвиаБрифинг",
+        "url": "https://www.aviamettelecom.ru/services/metaviabriefing/"
+      },
+      {
+        "text": "Журнал Бортовой Погоды",
+        "url": "https://www.aviamettelecom.ru/services/zhurnal_bortovoj_pogody/"
+      },
+      {
+        "text": "",
+        "url": "https://www.aviamettelecom.ru/services/metaviatablo/"
+      },
+      {
+        "text": "МетАвиаТабло",
+        "url": "https://www.aviamettelecom.ru/services/metaviatablo/"
+      },
+      {
+        "text": "",
+        "url": "https://www.aviamettelecom.ru/services/svp-taf/"
+      },
+      {
+        "text": "СВП TAF",
+        "url": "https://www.aviamettelecom.ru/services/svp-taf/"
+      },
+      {
+        "text": "Атлас площадей прогнозирования",
+        "url": "https://www.aviamettelecom.ru/services/atlas_ploshchadej_prognozirovaniya/"
+      },
+      {
+        "text": "IWXXM",
+        "url": "https://www.aviamettelecom.ru/services/iwxxm/"
+      },
+      {
+        "text": "Погода в аэропортах России",
+        "url": "https://www.aviamettelecom.ru/services/pogoda-v-aeroportah-rossii/"
+      }
+    ],
+    "scripts": [
+      "https://www.aviamettelecom.ru/local/templates/inner/js/jquery.js?1770021272296028",
+      "https://www.aviamettelecom.ru/local/templates/inner/library/owl.carousel.min.js?158530519844342",
+      "https://www.aviamettelecom.ru/local/bootstrap-4.4.1-dist/js/bootstrap.min.js?157494113660010",
+      "https://www.aviamettelecom.ru/local/templates/inner/js/script-index.js?15875512601840",
+      "https://www.aviamettelecom.ru/local/templates/inner/js/script-header-footer.js?16079486002120",
+      "https://www.aviamettelecom.ru/local/templates/inner/js/script-about.js?15885134121096",
+      "https://www.aviamettelecom.ru/local/templates/inner/js/script-calanedar.js?16389562825106",
+      "https://www.aviamettelecom.ru/local/templates/inner/components/bitrix/menu/vertical_multilevel1/script.js?1585305198508"
+    ],
+    "forms": [],
+    "text_preview": "Веб-сервисы Главная О нас Руководство История Учредительные документы Лицензии Структура АМО Вакансии Деятельность Информационные технологии Система менеджмента качества Показатели деятельности Сервисы Перечень сервисов Форма обратной связи Медиа Новости Фотогалерея Статьи МетеоСпектр Контакты войти Сервисы Перечень сервисов Перечень сервисов Форма обратной связи Форма обратной связи Главная - Сервисы Веб-сервисы Описание сервисов Информация о веб-ресурсах и дополнительных услугах \"Авиаметтелеком Росгидромета\" МетАвиаБрифинг МетАвиа МетАвиаГИС МетАвиа2 Журнал Бортовой Погоды МетАвиаТабло САВАП СВП TAF Атлас площадей прогнозирования МетАвиаСтатист IWXXM Радиозонд Погода в аэропортах России МетАвиаАрхив Клим-инфо КАП ЦКСФ «UNIMAS» Образование О нас Вакансии Деятельность Сервисы Медиа Контакты Карта сайта Информационные технологии Документы Телефон: +7 (499) 795-21-33 Противодействие коррупции Система менеджмента качества Министерство природных ресурсов и экологии Федеральная служба по гидрометеорологии и мониторингу окружающей среды Российское гидрометеорологическое общество Всемирная метеорологическая организация Международная организация гражданской авиации Copyright © ФГБУ \"Авиаметтелеком Росгидромета\", 2011 - 2026 Мы используем файлы cookie. Они помогают улучшить ваше взаимодействие с сайтом. Close"
+  },
+  {
+    "country": "SG",
+    "url": "https://api.data.gov.sg/v1/environment/air-temperature",
+    "request_at": "2026-09-30T17:18:31.635946+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:32.604637+00:00",
+    "http_ms": 968.698417,
+    "sha256": "ddf0bfaef6c788b43317c110f915b2350be4bf35a848b96d2d1d20bc68918a4e",
+    "final_url": "https://api.data.gov.sg/v1/environment/air-temperature",
+    "content_type": "application/json",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/SG_ddf0bfaef6c788b43317c110f915b2350be4bf35a848b96d2d1d20bc68918a4e.gz",
+    "title": "",
+    "links": [],
+    "scripts": [],
+    "forms": [],
+    "text_preview": "{\"metadata\":{\"stations\":[{\"id\":\"S109\",\"device_id\":\"S109\",\"name\":\"Ang Mo Kio Avenue 5\",\"location\":{\"longitude\":103.85,\"latitude\":1.3793}},{\"id\":\"S60\",\"device_id\":\"S60\",\"name\":\"Artillery Avenue (Sentosa)\",\"location\":{\"longitude\":103.8275,\"latitude\":1.2504}},{\"id\":\"S107\",\"device_id\":\"S107\",\"name\":\"East Coast Park\",\"location\":{\"latitude\":1.3133,\"longitude\":103.962}},{\"id\":\"S106\",\"device_id\":\"S106\",\"name\":\"Jalan Noordin (Pulau Ubin)\",\"location\":{\"longitude\":103.9673,\"latitude\":1.4168}},{\"id\":\"S116\",\"device_id\":\"S116\",\"name\":\"Pasir Panjang Terminal\",\"location\":{\"latitude\":1.2824,\"longitude\":103.7545}},{\"id\":\"S06\",\"device_id\":\"S06\",\"name\":\"Paya Lebar Meteorological Station\",\"location\":{\"longitude\":103.904,\"latitude\":1.357}},{\"id\":\"S111\",\"device_id\":\"S111\",\"name\":\"Scotts Road\",\"location\":{\"longitude\":103.8365,\"latitude\":1.3106}},{\"id\":\"S102\",\"device_id\":\"S102\",\"name\":\"Semakau Island\",\"location\":{\"latitude\":1.1902,\"longitude\":103.7657}},{\"id\":\"S80\",\"device_id\":\"S80\",\"name\":\"Sembawang Meteorological Station\",\"location\":{\"latitude\":1.4247,\"longitude\":103.8201}},{\"id\":\"S23\",\"device_id\":\"S23\",\"name\":\"Tengah Meteorological Station\",\"location\":{\"latitude\":1.3858,\"longitude\":103.7119}},{\"id\":\"S115\",\"device_id\":\"S115\",\"name\":\"Tuas South Avenue 3\",\"location\":{\"latitude\":1.2938,\"longitude\":103.6184}}],\"reading_type\":\"DBT 1M F\",\"reading_unit\":\"deg C\"},\"items\":[{\"timestamp\":\"2026-10-01T01:15:00+08:00\",\"readings\":[{\"station_id\":\"S109\",\"value\":26.1},{\"station_id\":\"S60\",\"value\":24.5},{\"station_id\":\"S107\",\"value\":28},{\"station_id\":\"S106\",\"value\":25.2},{\"station_id\":\"S116\",\"value\":27.1},{\"station_id\":\"S06\",\"value\":26.6},{\"station_id\":\"S111\",\"value\":26},{\"station_id\":\"S102\",\"value\":28},{\"station_id\":\"S80\",\"value\":25.1},{\"station_id\":\"S23\",\"value\":24.6},{\"station_id\":\"S115\",\"value\":26.6}]}],\"api_info\":{\"status\":\"healthy\"}}"
+  },
+  {
+    "country": "PA",
+    "url": "https://www.aeronautica.gob.pa/met/met.php?c=metar",
+    "request_at": "2026-09-30T17:18:32.605462+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:33.421071+00:00",
+    "http_ms": 815.616459,
+    "sha256": "3b736f4a03488ae37b6157e54dbad59f894806429d2c1815f3867b6012aae4da",
+    "final_url": "https://www.aeronautica.gob.pa/met/met.php?c=metar",
+    "content_type": "text/html; charset=UTF-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/PA_3b736f4a03488ae37b6157e54dbad59f894806429d2c1815f3867b6012aae4da.gz",
+    "title": "Autoridad de Aeronautica Civil de Panamá***",
+    "links": [
+      {
+        "text": "INFOMETAR",
+        "url": "https://www.aeronautica.gob.pa/met/met.php?c=metar"
+      },
+      {
+        "text": "Metar",
+        "url": "https://www.aeronautica.gob.pa/met/met.php?c=metar"
+      },
+      {
+        "text": "Taf",
+        "url": "https://www.aeronautica.gob.pa/met/met.php?c=taf"
+      }
+    ],
+    "scripts": [
+      "https://www.aeronautica.gob.pa/js/menuScroll.js",
+      "https://www.aeronautica.gob.pa/js/menuPrc.js",
+      "https://code.jquery.com/jquery-1.10.1.min.js",
+      "https://www.aeronautica.gob.pa/js/ScrollAnimaions.js",
+      "https://cdn.onesignal.com/sdks/OneSignalSDK.js",
+      "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
+      "https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit",
+      "https://www.aeronautica.gob.pa/js/jquery.js",
+      "https://www.aeronautica.gob.pa/js/bootstrap.min.js",
+      "https://www.aeronautica.gob.pa/js/cbpHorizontalMenu.min.js"
+    ],
+    "forms": [],
+    "text_preview": "﻿ ﻿ Autoridad de Aeronautica Civil de Panamá*** ﻿ ﻿ Quiénes Somos Trayectoria Directorio Teléfonico Misión y Visión Organigrama Autoridades Actualidad Resoluciones Ética y Transparencia Transparencia Fundamentos Generales Fundamentos Legales Memoria Institucional Servicios Permisos y Alertas Solicitud de Aeronaves Alertas Aviarias Trámites y Consultas Reportes de Accidente e Incidente Consulta de Seguimiento de Trámite M.I.A. Normas y Regulaciones Panamá Trámita Aeronaves de Alquiler Tasas Drones Procedimiento para Operar Drones Protocolo de Operaciones Respuesta a Solicitud de Licencias y Registro de Equipos Educación I.S.F.P.A. Regulaciones Para utilizar esta sección recomendamos utilizar versiones actualizadas de Microsoft Edge, Google Chrome o Mozilla Firefox. Leyes y Guía Normativa Propuesta de Reglamentación Leyes Resoluciones de Junta Directiva Normas Circulares Guías Normativas Manuales Manual de Oficina de Normas y Regulaciones Manuales Libros R.A.C.P. Otros Examenes Medicos Oficina del Programa Estatal de Seguridad Operacional Exenciones Contáctenos Información General Quejas y Sugerencias Contáctenos Información para Aviadores Información de Interés Formulario de Aeronavegabilidad Reportes de Accidente e Incidente Reporte de Seguridad Operacional DSA Aerodromo Aeropuertos Requisitos Generales de Licencias Base de Datos de Pilotos Panameños Información  Meteorología INFOMETAR Información  Aeronáutica N.O.T.A.M Adquisición de AIP AIS/AIM ﻿ Recursos Generales Metar Taf Wintemp SIGMET Imágenes Satelitales Calculadora Meteorológica Políticas y Objetivos de Calidad Contacto PERSPECTIVA DE AERODROMOS: METAR: para obtener METAR intl. aviationweather.gov/data/metar/ AEROPUERTOS INTERNACIONALES ESTACIONES DESCRIPCIÓN MPTO (M) 301700Z 29005KT 240V320 9999 SCT018TCU SCT090 31/25 Q1009 TEMPO CB RMK TCU NE/E= (S) MPMG (M) 301700Z 30004KT 250V360 9999 SCT016CB SCT080 31/25 Q1009 TEMPO TS RMK CB NW/NE/SE/SW/OHD STN= (S) MPPA (M) 301700Z 27006KT 9999 FEW015 BKN090 33/25 Q"
+  },
+  {
+    "country": "FR",
+    "url": "https://wis2nc.meteo.fr/oapi/collections?f=json",
+    "request_at": "2026-09-30T17:18:22.867556+00:00",
+    "error_class": "ConnectError",
+    "error": "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1082)"
+  },
+  {
+    "country": "AR",
+    "url": "https://ws2.smn.gob.ar/mensajes-metar-speci",
+    "request_at": "2026-09-30T17:18:29.481489+00:00",
+    "error_class": "ConnectError",
+    "error": "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1082)"
+  },
+  {
+    "country": "ID",
+    "url": "https://aviation.bmkg.go.id/",
+    "request_at": "2026-09-30T17:18:33.598499+00:00",
+    "status": 403,
+    "receipt_at": "2026-09-30T17:18:33.861912+00:00",
+    "http_ms": 263.441375,
+    "sha256": "a7105b140d366b344774f18f9e1c840c548f470b876baf3d33bc0d28ca4353a8",
+    "final_url": "https://aviation.bmkg.go.id/",
+    "content_type": "text/html; charset=UTF-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/ID_a7105b140d366b344774f18f9e1c840c548f470b876baf3d33bc0d28ca4353a8.gz",
+    "title": "Just a moment...",
+    "links": [],
+    "scripts": [],
+    "forms": [],
+    "text_preview": "Just a moment... Enable JavaScript and cookies to continue"
+  },
+  {
+    "country": "NZ",
+    "url": "https://developer.metservice.com/docs/api-catalog/1min-obs-api/",
+    "request_at": "2026-09-30T17:18:33.863706+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:34.237347+00:00",
+    "http_ms": 373.648708,
+    "sha256": "1f2c6128f0b30c0d8eaa1748826398f77d5971fdda15dc35e56e683f6b941274",
+    "final_url": "https://developer.metservice.com/docs/api-catalog/1min-obs-api/",
+    "content_type": "text/html",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/NZ_1f2c6128f0b30c0d8eaa1748826398f77d5971fdda15dc35e56e683f6b941274.gz",
+    "title": "1-Minute Observations API | MetService API Platform Docs",
+    "links": [
+      {
+        "text": "Weather Fundamentals",
+        "url": "https://developer.metservice.com/docs/weather-fundamentals/"
+      },
+      {
+        "text": "Weather Stations API",
+        "url": "https://developer.metservice.com/docs/api-catalog/weather-stations-api/"
+      },
+      {
+        "text": "1-Minute Observations API",
+        "url": "https://developer.metservice.com/docs/api-catalog/1min-obs-api/"
+      },
+      {
+        "text": "Weather Stations",
+        "url": "https://developer.metservice.com/docs/api-catalog/1min-obs-api/weather-stations/"
+      },
+      {
+        "text": "1-Minute Observations API Variables",
+        "url": "https://developer.metservice.com/docs/api-catalog/1min-obs-api/variables/"
+      },
+      {
+        "text": "Aviation API",
+        "url": "https://developer.metservice.com/docs/api-catalog/aviation/"
+      },
+      {
+        "text": "Next Weather Stations",
+        "url": "https://developer.metservice.com/docs/api-catalog/1min-obs-api/weather-stations/"
+      },
+      {
+        "text": "MetraWeather Home",
+        "url": "https://www.metraweather.com"
+      }
+    ],
+    "scripts": [
+      "https://developer.metservice.com/docs/assets/js/runtime~main.01e2709a.js",
+      "https://developer.metservice.com/docs/assets/js/main.9471fe4b.js"
+    ],
+    "forms": [],
+    "text_preview": "1-Minute Observations API | MetService API Platform Docs Skip to main content API Platform API Catalog Platform Guides Product & Pricing Info Support Console Login Introduction Platform Guides Authentication Platform Limits Error Handling Best Practices Maturity Model API Vision Platform Variables Weather Fundamentals Coverage Map Core Platform APIs Tide API Nowcast API Weather Stations API Classic APIs Point Forecast API 1-Minute Observations API Weather Stations FAQ 1-Minute Observations API Variables Technical Reference Lightning API Aviation API Classic APIs 1-Minute Observations API On this page 1-Minute Observations API CLASSIC Classic API The 1-Minute Observations API is a stable, widely-used Classic API . Because it has specific authentication, error handling, and rate limits, the broad Platform Guides do not apply. Please follow the in-line documentation provided in this guide. Note: This API is currently only available for commercial use. If you would like to be notified when the free tier becomes available, please join the waitlist . Integration Fact Sheet Auth Type API Access Base URL Protocol API Key / Bearer Manual Request https://api.metservice.com/observations/nz/1-minute REST Variables Coverage Horizon Interval Air Temp, Wind Speed/Direction, Dew Point, Rainfall, Pressure (Station/MSL), Visibility, Radiation (Global/Net), Earth Temps, Road Conditions/Temps/Film NZ Observation Stations Real-time + 60 days Historical 1-minute The 1-Minute Observations API provides access to real-time weather observation data from MetService's network of Automatic Weather Stations, Road Sensors, and Airport Runway Sensors across New Zealand. Overview ​ This API delivers 1-minute observation data with a 60-day retention period from the time of observation. The data is collected from various sensor types including: Automatic Weather Stations - Standard meteorological observations Road Sensors - Road surface and atmospheric conditions Airport Runway Sensors - Aviation-spe"
+  },
+  {
+    "country": "IT",
+    "url": "https://www.meteoam.it/it/metar-e-taf",
+    "request_at": "2026-09-30T17:18:33.572395+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T17:18:34.909409+00:00",
+    "http_ms": 1337.022833,
+    "sha256": "9405f0396ad6803d36f8c04b165a65bc64b44589bc7e6d6c8959033b5136a494",
+    "final_url": "https://www.meteoam.it/it/metar-e-taf",
+    "content_type": "text/html; charset=UTF-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/IT_9405f0396ad6803d36f8c04b165a65bc64b44589bc7e6d6c8959033b5136a494.gz",
+    "title": "Pagina non trovata | Meteo Aeronautica Militare",
+    "links": [
+      {
+        "text": "Metar e Taf",
+        "url": "https://www.meteoam.it/it/metar-taf"
+      },
+      {
+        "text": "Metar e Taf",
+        "url": "https://www.meteoam.it/it/metar-taf"
+      }
+    ],
+    "scripts": [
+      "https://embeds.iubenda.com/widgets/71968a5a-2228-4929-a9f8-d5f53296e11c.js",
+      "https://www-static.meteoam.it/675/AMwebcomponents.bundle.js",
+      "https://www-static.meteoam.it/675/AMcustomJS.bundle.js"
+    ],
+    "forms": [],
+    "text_preview": "Pagina non trovata | Meteo Aeronautica Militare You need to enable JavaScript to run this app. PREVISIONI Mappa di dettaglio Segnalazione Fenomeni Intensi Previsioni Testuali Suolo Previsioni Mensili METEOROLOGIA AERONAUTICA Carta Significativa - SWLL e SWH Metar e Taf Sigmet Airmet Gafor MARE E MONTAGNA Mappa Mare Avviso di burrasca Mappa Meteomar Mappa Montagna Meteomont INFORMAZIONE Rivista di Meteorologia Aeronautica Notizie Collaborazioni Nazionali ed Internazionali Galleria Fotografica Contatti PREVISIONI Mappa di dettaglio Segnalazione Fenomeni Intensi Previsioni Testuali Suolo Previsioni Mensili METEOROLOGIA AERONAUTICA Carta Significativa - SWLL e SWH Metar e Taf Sigmet Airmet Gafor MARE E MONTAGNA Mappa Mare Avviso di burrasca Mappa Meteomar Mappa Montagna Meteomont INFORMAZIONE Rivista di Meteorologia Aeronautica Notizie Collaborazioni Nazionali ed Internazionali Galleria Fotografica Contatti Privacy Policy Condizioni di utilizzo Cookie Policy Dichiarazione di Accessibilità Copyright Ufficiale © ® | 2023"
+  },
+  {
+    "country": "NG",
+    "url": "https://nimet.gov.ng/",
+    "request_at": "2026-09-30T17:18:33.608158+00:00",
+    "status": 307,
+    "receipt_at": "2026-09-30T17:18:34.930820+00:00",
+    "http_ms": 1322.673375,
+    "sha256": "b5e28423f263671254661c46f4d59838db96568642bce07806828ecbf7c7c405",
+    "final_url": "https://nimet.gov.ng/",
+    "content_type": "text/html",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/NG_b5e28423f263671254661c46f4d59838db96568642bce07806828ecbf7c7c405.gz",
+    "title": "You are being redirected...",
+    "links": [],
+    "scripts": [],
+    "forms": [],
+    "text_preview": "You are being redirected... Javascript is required. Please enable javascript before you are allowed to see this page."
+  },
+  {
+    "country": "PH",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T17:18:30.770069+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:18:36.952105+00:00",
+    "http_ms": 6182.0175,
+    "sha256": "0387f0ba3bb46e6c60974835fb8cbf2703676bcd18538df8205fdce058e01e26",
+    "final_url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "content_type": "text/html; charset=UTF-8",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/PH_0387f0ba3bb46e6c60974835fb8cbf2703676bcd18538df8205fdce058e01e26.gz",
+    "title": "PAGASA",
+    "links": [
+      {
+        "text": "Weather",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar#weather-mobile"
+      },
+      {
+        "text": "General Weather",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar#general-weather-mobile"
+      },
+      {
+        "text": "Daily Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/weather#daily-weather-forecast"
+      },
+      {
+        "text": "Weather Outlook Selected Philippine Cities",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-outlook-selected-philippine-cities"
+      },
+      {
+        "text": "Asian Cities Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-asian-cities-weather-forecast"
+      },
+      {
+        "text": "Weather Outlook Selected Tourist Areas",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-outlook-selected-tourist-areas"
+      },
+      {
+        "text": "Weekly Weather Outlook",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-outlook-weekly"
+      },
+      {
+        "text": "Weather Advisory",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-advisory"
+      },
+      {
+        "text": "Aviation",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar#aviation-mobile"
+      },
+      {
+        "text": "SIGMET",
+        "url": "https://www.pagasa.dost.gov.ph/aviation#sigmet"
+      },
+      {
+        "text": "METAR",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar"
+      },
+      {
+        "text": "Terminal Aerodome Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/aviation#terminal-aerodome-forecast"
+      },
+      {
+        "text": "Airways and Terminal Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/aviation#airways-and-terminal-forecast"
+      },
+      {
+        "text": "Heat Index",
+        "url": "https://www.pagasa.dost.gov.ph/weather/heat-index"
+      },
+      {
+        "text": "Daily Temperature",
+        "url": "https://www.pagasa.dost.gov.ph/weather/low-high-temperature"
+      },
+      {
+        "text": "Tropical Cyclone Bulletin",
+        "url": "https://www.pagasa.dost.gov.ph/tropical-cyclone/severe-weather-bulletin"
+      },
+      {
+        "text": "TenDay: Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/climate/climate-prediction/10-day-climate-forecast"
+      },
+      {
+        "text": "Agri-Weather",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar#agri-weather-mobile"
+      },
+      {
+        "text": "Farm Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/agri-weather#farm-weather-forecast"
+      },
+      {
+        "text": "Weekend/Special Farm Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/weekend-special-outlook"
+      },
+      {
+        "text": "Ten-Day Regional Agri-Weather Information",
+        "url": "https://www.pagasa.dost.gov.ph/ten-day-regional-agri-weather"
+      },
+      {
+        "text": "Monthly Philippine Agro-Climatic Review and Outlook",
+        "url": "https://www.pagasa.dost.gov.ph/agri-weather/monthly-agroclimatic-review-and-outlook"
+      },
+      {
+        "text": "Impact Assessment for Agriculture",
+        "url": "https://www.pagasa.dost.gov.ph/agri-weather/impact-assessment-for-agriculture"
+      },
+      {
+        "text": "Astronomical Observatory",
+        "url": "https://www.pagasa.dost.gov.ph/astronomy#astronomical-observatory"
+      },
+      {
+        "text": "Weather Terminologies",
+        "url": "https://www.pagasa.dost.gov.ph/information/weather-terminologies"
+      },
+      {
+        "text": "Weather",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar#weather"
+      },
+      {
+        "text": "General Weather",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar#general-weather"
+      },
+      {
+        "text": "Daily Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/weather#daily-weather-forecast"
+      },
+      {
+        "text": "Weather Outlook Selected Philippine Cities",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-outlook-selected-philippine-cities"
+      },
+      {
+        "text": "Asian Cities Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-asian-cities-weather-forecast"
+      },
+      {
+        "text": "Weather Outlook Selected Tourist Areas",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-outlook-selected-tourist-areas"
+      },
+      {
+        "text": "Weekly Weather Outlook",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-outlook-weekly"
+      },
+      {
+        "text": "Weather Advisory",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-advisory"
+      },
+      {
+        "text": "Aviation",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar#aviation"
+      },
+      {
+        "text": "SIGMET",
+        "url": "https://www.pagasa.dost.gov.ph/aviation#sigmet"
+      },
+      {
+        "text": "METAR",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar"
+      },
+      {
+        "text": "Terminal Aerodome Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/aviation#terminal-aerodome-forecast"
+      },
+      {
+        "text": "Airways and Terminal Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/aviation#airways-and-terminal-forecast"
+      },
+      {
+        "text": "Heat Index",
+        "url": "https://www.pagasa.dost.gov.ph/weather/heat-index"
+      },
+      {
+        "text": "Daily Temperature",
+        "url": "https://www.pagasa.dost.gov.ph/weather/low-high-temperature"
+      },
+      {
+        "text": "Tropical Cyclone Bulletin",
+        "url": "https://www.pagasa.dost.gov.ph/tropical-cyclone/severe-weather-bulletin"
+      },
+      {
+        "text": "TenDay: Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/climate/climate-prediction/10-day-climate-forecast"
+      },
+      {
+        "text": "Agri-Weather",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar#agri-weather"
+      },
+      {
+        "text": "Farm Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/agri-weather#farm-weather-forecast"
+      },
+      {
+        "text": "Weekend/Special Farm Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/weekend-special-outlook"
+      },
+      {
+        "text": "Ten-Day Regional Agri-Weather Information",
+        "url": "https://www.pagasa.dost.gov.ph/ten-day-regional-agri-weather"
+      },
+      {
+        "text": "Monthly Philippine Agro-Climatic Review and Outlook",
+        "url": "https://www.pagasa.dost.gov.ph/agri-weather/monthly-agroclimatic-review-and-outlook"
+      },
+      {
+        "text": "Impact Assessment for Agriculture",
+        "url": "https://www.pagasa.dost.gov.ph/agri-weather/impact-assessment-for-agriculture"
+      },
+      {
+        "text": "Astronomical Observatory",
+        "url": "https://www.pagasa.dost.gov.ph/astronomy#astronomical-observatory"
+      },
+      {
+        "text": "Weather Terminologies",
+        "url": "https://www.pagasa.dost.gov.ph/information/weather-terminologies"
+      },
+      {
+        "text": "Weather",
+        "url": "https://pagasa.dost.gov.ph/weather"
+      },
+      {
+        "text": "General Weather",
+        "url": "https://www.pagasa.dost.gov.ph/weather"
+      },
+      {
+        "text": "Daily Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/weather#daily-weather-forecast"
+      },
+      {
+        "text": "Weather Outlook Selected Philippine Cities",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-outlook-selected-philippine-cities"
+      },
+      {
+        "text": "Asian Cities Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-asian-cities-weather-forecast"
+      },
+      {
+        "text": "Weather Outlook Selected Tourist Areas",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-outlook-selected-tourist-areas"
+      },
+      {
+        "text": "Weekly Weather Outlook",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-outlook-weekly"
+      },
+      {
+        "text": "Weather Advisory",
+        "url": "https://www.pagasa.dost.gov.ph/weather/weather-advisory"
+      },
+      {
+        "text": "Aviation",
+        "url": "https://www.pagasa.dost.gov.ph/aviation"
+      },
+      {
+        "text": "SIGMET",
+        "url": "https://www.pagasa.dost.gov.ph/aviation#sigmet"
+      },
+      {
+        "text": "METAR",
+        "url": "https://www.pagasa.dost.gov.ph/aviation/metar"
+      },
+      {
+        "text": "Terminal Aerodome Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/aviation#terminal-aerodome-forecast"
+      },
+      {
+        "text": "Airways and Terminal Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/aviation#airways-and-terminal-forecast"
+      },
+      {
+        "text": "Heat Index",
+        "url": "https://www.pagasa.dost.gov.ph/weather/heat-index"
+      },
+      {
+        "text": "Daily Temperature",
+        "url": "https://www.pagasa.dost.gov.ph/weather/low-high-temperature"
+      },
+      {
+        "text": "Tropical Cyclone Bulletin",
+        "url": "https://www.pagasa.dost.gov.ph/tropical-cyclone/severe-weather-bulletin"
+      },
+      {
+        "text": "TenDay: Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/climate/climate-prediction/10-day-climate-forecast"
+      },
+      {
+        "text": "Agri-Weather",
+        "url": "https://pagasa.dost.gov.ph/agri-weather"
+      },
+      {
+        "text": "Farm Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/agri-weather#farm-weather-forecast"
+      },
+      {
+        "text": "Weekend/Special Farm Weather Forecast",
+        "url": "https://www.pagasa.dost.gov.ph/weekend-special-outlook"
+      }
+    ],
+    "scripts": [
+      "https://pagasa.dost.gov.ph/themes/hiraia/assets/js/pdf.js",
+      "https://cdn.jsdelivr.net/gh/openlayers/openlayers.github.io@master/en/v6.5.0/build/ol.js",
+      "https://unpkg.com/ol-popup@4.0.0/dist/ol-popup.js",
+      "https://openlayersbook.github.io/openlayers_book_samples/assets/proj4js/proj4.js",
+      "https://pagasa.dost.gov.ph/combine/20759e66ace78114cc0edada61c4a3b3-1790749472.js",
+      "https://www.googletagmanager.com/gtag/js?id=G-R8HF8RT5CE"
+    ],
+    "forms": [
+      "<form action=\"https://www.google.com/search\" method=\"get\" name=\"psearch\" onsubmit=\"siteSearch(this)\" style=\"margin: 0px;padding: 0px;height: 0px;margin-right: 8px;\">\n<input id=\"hiddenquery\" name=\"q\" type=\"hidden\"/>\n<input class=\"form-control\" name=\"qfront\" placeholder=\"Search PAGASA Website\" style=\"margin-top: 9px;height: 28px;border-radius: 2px;\" type=\"text\" value=\"\"/><br/>\n</form>"
+    ],
+    "text_preview": "PAGASA Toggle navigation GOVPH Home Weather General Weather Daily Weather Forecast Weather Outlook Selected Philippine Cities Asian Cities Weather Forecast Weather Outlook Selected Tourist Areas Weekly Weather Outlook Weather Advisory Aviation SIGMET METAR Terminal Aerodome Forecast Airways and Terminal Forecast Marine High Seas and Offshore Waters Forecast Gale Warning Heat Index Daily Temperature Flood Flood Information Dam Information Projects Hydromet Data Tropical Cyclone Tropical Cyclone Advisory Tropical Cyclone Bulletin Severe Wind Impact Based Forecast Tropical Cyclone Warning for Shipping Forecast Storm Surge Tropical Cyclone Warning for Agriculture TC-Threat Potential Forecast Tropical Cyclone Associated Rainfall Tropical Cyclone Publications Annual Report on Philippine Tropical Cyclones Tropical Cyclone Preliminary Report About Tropical Cyclone Climate Climate Monitoring Daily Rainfall and Temperature Monthly Monitoring Products Southeast Asia Climate Monitoring Climate Forum Climate Prediction TenDay: Weather Forecast Sub Seasonal Seasonal Forecast Specialized Forecast Climate Advisories El Niño / La Niña Monitoring Advisories Climate Projection Dynamic Downscaling CliMap Statistical Downscaling Climate Data Agri-Weather Climate Information for Agriculture Farm Weather Forecast Weekend/Special Farm Weather Forecast Ten-Day Regional Agri-Weather Information Monthly Philippine Agro-Climatic Review and Outlook Impact Assessment for Agriculture Astronomy Telescoping and Stargazing Astronomy in the Philippines Planetarium Astronomical Observatory Time Service Philippine Standard Time Astronomical Diary Regional Forecast Northern Luzon National Capital Region Southern Luzon Visayas Mindanao Products and Services Engineering Services Calibration Services Numerical Prediction Model Satellites Flood Monitoring for Metro Manila Risk Analysis Map Flood Hazard Map Regional Severe Wind Hazard Maps High Frequency Doppler Radar Vacancy GAD Corner Learnings Publication"
+  }
+]

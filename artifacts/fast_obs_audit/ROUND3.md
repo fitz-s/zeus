@@ -1,7 +1,7 @@
 # Round 3 — REQ-20260930-114240-ee2a70
 
 ## Scope and constraints
-Feature branch only: feat/fast-obs-best-source. No production database writes, live-branch mutation, daemon restart, or deployment. Rebased from ee67338ca onto fetched origin/live 514cdc7d938997bd1e0d9e7ccd5f687edabb73e6; regenerated the schema fingerprint to resolve the sole conflict. Rebase result 65d079fc8b664fc164db8a233c5e3bdc2e744903.
+Feature branch only: feat/fast-obs-best-source. No production database writes, live-branch mutation, daemon restart, or deployment. The failed turn's commits and dirty auction harness were recovered. On this continuation the branch was rebased cleanly onto fetched origin/live 60c38c2ebed288035f37f478de0f1c21cfa7dc72; the isolated dirty test was explicitly stashed and restored. The rebased history was pushed with an exact old-remote lease, then each completed harness item was committed/pushed normally. Code validation below is at 921b12db1; subsequent commits preserve documentation/evidence only. The earlier 514cdc7d9 baseline results remain historical evidence, not current HEAD claims.
 
 ## Execution plan
 1. Reproduce current exit-safety and materializer/reader/command failures; repair the side inconsistent with current law, without skipping tests or weakening live safety. Commit/push each validated item.
@@ -15,7 +15,7 @@ Feature branch only: feat/fast-obs-best-source. No production database writes, l
 Retain single probability/execution authority, K1 DB ownership and INV-37. Network acquisition stays outside canonical write leases. Data absence may degrade evidence but must not fabricate probability or block an otherwise valid incumbent from serving. No q-vs-market gate or shrink. Compare under exact contract units/rounding at equal station/UTC-valid times; do not substitute nearby observations. After schema migration, retain a revision-capable index on rollback and never remove historical evidence.
 
 ## Results
-In progress. Only executed measurements and tests will be recorded below.
+Items 1, 3, 4, 5 and 6 have executed deliverables below. Item 2 has a complete 54-city candidate/disposition inventory but remains PARTIAL as an empirical national-origin comparison: several credentialed or public-app feeds have no retrieved exact-time pairs. No globally-fastest or all-countries-complete claim is made.
 
 ## Item 1a — exit safety (completed)
 Reproduced 18 exit-safety and 7 materializer-suite failures on rebased 514cdc7d9: 25 failed, 864 passed across the four modules. Exit safety now passes all 359 tests (40.16 s); the targeted RED handoff/B2/negative-authority subset passes 30. No skipped or xfailed tests were introduced.
@@ -63,3 +63,57 @@ ROUND3_DEPLOYMENT.md contains the exact operator-only pause/flatness/unload/excl
 Tokyo JMA 44166: 143 distinct exact UTC pairs, 143 contract-value matches. Toronto ECCC CYYZ-MAN: 51/51. Every paired source-body SHA was checked against the retained gzip; no mismatch was found. Historical requests establish equality, not latency. The separate 50-round race (17:28–18:17 UTC September 30) establishes a Tokyo 17:30 lead: JMA 370.366–427.317 s versus AWC 543.279–603.035 s; Toronto 18:00: ECCC 63.071–122.545 s versus AWC 424.021–483.349 s. These are sample-specific bounded intervals, not universal dominance or p99. Both previously wired registry lanes remain settlement-grade. Other same-time races are retained, including overlapping/inconclusive intervals.
 
 `round3_window/comparison.json` contains all 194 exact pairs, `round3_origin_measurements.json` contains native race comparisons, and `summarize_round3_race.py` reproduces the latter without network. Source registry and tests now bind the new evidence rather than silently retaining Round-2 counts. Validation: 87 passed, 1 optional netCDF4 skip in the station-adapter/receipt/FMI suite. No production daemon action.
+
+## Item 2 — national-origin inventory and promotion decisions (empirically partial)
+`ROUND3_NATIONAL_SURVEY.md`, `round3_national_survey.csv`, and `round3_national_survey.json` enumerate all 54 currently configured cities from the actual config. Every row names a national candidate, recovered pair/match counts, disposition, and source reference. JSON retains all measured race intervals and counterexample values. Zero means no valid overlapping pair recovered, not that a provider publishes no data. `build_round3_survey.py` reproduces the inventory offline.
+
+Beyond Tokyo/Toronto, the 50-round native-origin race establishes KMA RKSI 10/10 and RKPK 5/5 rounded exact-time pairs, with at least one strictly faster interval versus AWC and WRH for each. The existing KmaMetarCursor -> report window -> Day0/observation pipeline already owns those native reads; no duplicate polling adapter was added. See src/data/day0_fast_obs.py:1288-1460 and its KMA report-window/Day0 readers. PAGASA RPLL is 5/5 but slower at the measured transition, so unused as an alternative. AAC MPMG is 2/2 with overlapping availability intervals; no speed promotion. A candidate's clock may precede nominal observation time; a negative lower interval bound is preserved rather than relabeled as measured zero latency.
+
+New independently executed Singapore result: NEA's S24, explicitly named Changi Meteorological Station, gives 27/49 exact-time rounded matches against WSSS over the local September 30 day, with 22 mismatches. Examples: 04:00 UTC S24 31.4C ->31 versus WRH33; 06:30 S24 26C versus WRH28. Its higher advertised cadence does not establish resolver value identity. No promotion or runtime source change was made. `round3_singapore/reproduce_comparison.py` verifies all pairs and the saved resolver-body hash offline. No nearest-time join, airport-coordinate certificate, or ad hoc correction was introduced.
+
+Unfinished source-data access/extraction remains explicit for Madrid/AEMET, London/Met Office, Paris/Meteo-France, SBGR/REDEMET, WMKK/MET Malaysia aviation, RCSS/ANWS-CWA, the configured Chinese airport origins/CMA-civil aviation, VILK/IMD, LTAC/LTFM/MGM, LLBG/IMS, OEJN/NCM, OPKC/PMD, MMMX/SMN-SENEAM, SAEZ/SMN, FACT/SAWS, UUWW/Aviamettelecom, LIMC/Aeronautica Militare, WIHH/BMKG, DNMM/NiMet and the commercial New Zealand one-minute API. Some are credential-gated; others are public frontend/query extraction work, not a demonstrated access prohibition. No missing-data source was declared slower or wrong-station merely because this investigation did not retrieve it. HKO's existing headquarters-native lane was retained without a new Round-3 race. FMI/DWD/IMGW retain their measured mismatch dispositions; KNMI retains zero exact-time overlap and quota limitations. These gaps are unfinished investigation, not delegated operator engineering.
+
+`ROUND3_PUBLIC_SOURCES.md` records official product/access references. MET Malaysia's public forecast API and CMA delayed surface-exchange products cannot substitute for the requested airport-current observation product. A full public-page/native endpoint investigation was performed where possible, but the remaining UI/credentialed station extraction and first-availability measurements are not complete. One optional broad local source-summary read was tool-blocked; no bypass was attempted.
+
+## Item 5 — real global auction entry and resting replacement harness
+The previous SELL-only execution test is now six scenarios: no incumbent / incumbent without current-temperature carrier crossed with SELL-boundary, selected ENTRY, and cancel-rest -> reauction -> selected ENTRY. The production observation ledger, revision comparator, CLI materializer/dependency checks, readiness reader, durable wake plus Unix socket, held-family selector, global multi-family auction, actionable payload verifier, canonical receipt/certificate closure, sanctioned WORLD/TRADE admission context, and execution-command journal are exercised. Each auction has 12 competing YES/NO assets across two families and applies its actual selection/Kelly policy. The external venue checks a persisted SUBMITTING command before returning its ACK.
+
+The resting scenario starts from an explicit previous-run ACKED GTC state fixture. Actual C3 reads the same currently valid q version as the served bundle, classifies the old version, and uses the real batch-cancel path. A denied rate budget proves no cancellation/new order is admitted. Only a durable CANCELLED result releases the family for the subsequent auction-selected BUY. Replaying reconciliation issues no second cancel; the new venue submit independently asserts the old order is terminal. This is cancellation plus reauction into a selected BUY, not an atomic exchange-native replace or a claim to have optimized queue priority.
+
+All five controlled forecast model rows now carry production-selector-derived serving provenance; a real HWM check is retained instead of mocking away an unverifiable provider. Fixture preparation ends before independent WORLD writes. The full-suite import-order regression was also fixed by binding control_plane's imported DB factory to the same isolated WORLD path, retaining the real durable pause query; WORLD uses WAL as in production.
+
+Latest dedicated passing six-scenario measurement (milliseconds; no-incumbent first selected-entry includes remaining cold-import/setup overhead):
+
+|Hop|Selected entry, no incumbent|Selected entry, warm incumbent|Rest replacement, warm incumbent|
+|---|---:|---:|---:|
+|Receipt -> WORLD|1|1|0|
+|WORLD -> posterior ready|57|57|60|
+|Posterior ready -> wake|3|2|2|
+|Wake -> served q|8|8|8|
+|Global auction (within q -> ACK)|5.714|5.510|5.942|
+|Cancel confirmation/replay (within q -> ACK)|not applicable|not applicable|19.731|
+|q -> executor ACK|152|33|58|
+|Receipt -> ACK|221|101|128|
+
+The first cold SELL-boundary scenario took 3,242ms; this is not hidden as a warm result. Clock 0 means integer-millisecond quantization. These are individual controlled examples, not p50/p99. Acquired forecasts, book/wealth/health/collateral inputs and actionable parent acquisition remain fixtures; the actual selection/payload/hash/receipt/admission/execution paths run. The fake venue is not a production network measurement, and the harness does not exercise the entire live scheduler/backlog. It is not calibration or profitability evidence.
+
+## Final executed validation and baseline boundaries
+After the final import-order fixture repair, all 20 changed/owning modules completed: **1,381 passed, one skipped, no failures**, in 99.00s. The skip is the optional netCDF4 decoder dependency in the operator environment. The original four baseline-red modules separately completed **890 passed** on the rebased feature. Six auction-chain scenarios passed in a dedicated run. JSON module lists and numerical results are retained; counts overlap and must not be summed.
+
+Expanding into tests/integration/test_w3_solve_seam_g3.py and tests/execution/test_staleness_cancel.py exposes **60 additional baseline failures**. Both modules were run on untouched 60c38c2eb: 888 passed /60 failed. The failure-name set matches the feature run exactly (set difference empty). These were not part of the original 18+7 repair set, have not been repaired here, and prevent any repository-wide-green claim. The initial expanded run also caught two new harness fixture defects; those were fixed and the final dedicated/full changed-scope runs are green. See round3_broader_baseline_comparison.json.
+
+Schema fingerprint validation passed at 0e1b3620407248976c406bc21655846da81a5a121b8a515b9577224a17023cea. Native-source comparison is reproduced offline from public-response evidence; no credentials or copied production database are committed. No production migration or deployment command in ROUND3_DEPLOYMENT.md was executed.
+
+## Published Round-3 implementation commits
+- 0acb1d177: final SDK deadline recheck.
+- 2918692b7: RED handoff atomicity/verification and 18-test exit-safety repair.
+- 28abdef75: seven baseline materializer/reader/command fixture repairs.
+- 5952ae9cc: universal US native resolver precision.
+- 70de4f5f6: measured copied-table migration and deployment/rollback runbook.
+- fe2f7a132: Tokyo143/143, Toronto51/51 and native availability race.
+- 4ac6ed220: real global-auction selected entry to executor.
+- 9715a2815: cancellation-confirmed resting replacement through reauction.
+- 921b12db1: full-suite durable-control factory isolation; 1,381-pass validation.
+
+## Operator-only boundary and remaining risk
+The only genuinely operator-controlled steps are acquiring licensed/API credentials and approving/executing a deployment/live-log measurement. Exact deploy and rollback commands are already in ROUND3_DEPLOYMENT.md; they require a flat maintenance window and preserve existing pauses, durable evidence and the six-column index. They are **verify locally**, not performed work. Remaining public endpoint extraction, source-race extension and additional baseline-test investigation are ordinary unfinished engineering, not falsely labeled operator-only requirements. An unmeasured candidate needs an exact-time paired series and a bounded speed comparison. An already-mismatched candidate needs a demonstrated product/field correction that accounts for its recorded counterexamples; one new matching value does not erase contradictory history. A credential alone establishes neither value identity nor speed.

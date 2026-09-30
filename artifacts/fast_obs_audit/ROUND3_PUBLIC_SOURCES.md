@@ -1,0 +1,15 @@
+# Public primary-source checks for Round 3
+
+These source descriptions support access/product decisions, not unmeasured latency claims. Station response measurements and hashes remain in the adjacent JSON artifacts. Checked September 30, 2026; recheck on use.
+
+- Met Office Weather DataHub, Observations Overview: https://datahub.metoffice.gov.uk/docs/o/category/observations/overview . Describes the hourly observations product. An API/network description is not an EGLC payload or a measured first-availability interval.
+- Meteo-France producer/API documentation: https://portail-api.meteofrance.fr/ . The registered observation products were investigated; no exact LFPB authenticated record or latency comparison was completed. The WIS2 collection request is recorded separately as failed transport, not a country outage.
+- IMD API Management: https://api.imd.gov.in/public/index.php . Official registration/login gateway for observations and bulletins. It does not prove that an anonymously fetched Chennai query form contains usable VILK observations.
+- MET Malaysia public API: https://api.met.gov.my/ and https://www.met.gov.my/info/data-terbuka/ . Public offerings describe forecasts/warnings and imagery, not the exact WMKK thermometer/aviation series. Reject forecast values as the wrong product; the desired native observation endpoint remains unresolved.
+- CMA national data catalog: https://m.data.cma.cn/data/cdcindex/cid/6d1b5efbdcbf9a58.html . Lists surface-observation exchange datasets, including products with publication delays and registration requirements. A city surface station or archived exchange product cannot silently substitute for an airport METAR stream.
+- Israel Meteorological Service XML documentation: https://ims.gov.il/en/CurrentDataXML . Distinguishes hourly and ten-minute products and clock conventions. A native station/time mapping for LLBG was not resolved. Do not assume the whole XML network or its timestamps equals airport METAR.
+- MGM Hezarfen native search: https://rasat.mgm.gov.tr/ . The public application was reached; direct native result extraction remains unfinished. A failed web rendering of one result URL is not evidence the service is down.
+- Aeronautica Militare METAR/TAF: https://www.meteoam.it/it/metar-taf . Correct official route (the old /metar-e-taf returned 404), documented as station-ICAO METAR/TAF. Page and frontend access do not establish LIMC bulletin values or transport latency.
+- NEA/data.gov.sg temperature product: https://data.gov.sg/datasets/d_66b77726bbae1b33f218db60ff5861f0/view . Publishes station-level instrument observations, subject to gaps/corrections. The executed S24 comparison is 27/49 under contract rounding and prevents promotion to WSSS resolver identity.
+
+Unavailable/rejected claims: no exhaustive proof that the current channel is globally fastest; no promotion from HTTP 200, station-name similarity, a nearby timestamp, advertised cadence, forecast data, or authentication refusal. No credential collection, registration, CAPTCHA bypass, or live deployment was performed.

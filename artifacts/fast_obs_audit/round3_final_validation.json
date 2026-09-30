@@ -1,0 +1,354 @@
+{
+  "code_sha": "921b12db1d73471db81ed16a949926309bd5be7d",
+  "tested_base": "60c38c2ebed288035f37f478de0f1c21cfa7dc72",
+  "tests": 1382,
+  "passed": 1381,
+  "failed": 0,
+  "skipped": [
+    {
+      "name": "tests.test_station_temperature_adapters::test_recorded_provider_response_and_ledger_validation[knmi_observations-knmi]",
+      "reason": "could not import 'netCDF4': No module named 'netCDF4'"
+    }
+  ],
+  "per_test_class": {
+    "tests.data.test_fusion_upgrade_trigger": {
+      "tests": 61,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_current_temperature_delivery": {
+      "tests": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane": {
+      "tests": 24,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestParsePayload": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestNoaaMetarCycleFeed": {
+      "tests": 15,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestUnitLaw": {
+      "tests": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestRunningExtremes": {
+      "tests": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestObservationStatuses": {
+      "tests": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestEmitterMonotone": {
+      "tests": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestOracleAnomaly": {
+      "tests": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestEmpiricalThresholds": {
+      "tests": 13,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestMetarMarginAbsorption": {
+      "tests": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestLedgerPublicationDelta": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestLedgerHydration": {
+      "tests": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestFetchFailureDiscipline": {
+      "tests": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestIncrementalFetchWindow": {
+      "tests": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestMetarConnectionReuse": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestMutexNoHttpSplit": {
+      "tests": 24,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestAnomalyPausePersistence": {
+      "tests": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestSplitMemos": {
+      "tests": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestAnomalyFreshnessGates": {
+      "tests": 25,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_day0_fast_obs_lane.TestTtlMissCacheAndPersistedTtl": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_exit_safety": {
+      "tests": 359,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_fast_obs_receipt_chain": {
+      "tests": 36,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_fmi_airport_temperature": {
+      "tests": 13,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_noaa_wrh_settlement_product": {
+      "tests": 55,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_observation_prints_ledger.TestAppendOnly": {
+      "tests": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_observation_prints_ledger.TestParisTypeSpecimenThroughLedger": {
+      "tests": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_observation_prints_ledger.TestSeoulMarginThroughLedger": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_observation_prints_ledger.TestHkoSpotPrintWriterAndFold": {
+      "tests": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_observation_prints_ledger.TestLedgerWriteFailures": {
+      "tests": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_observation_reaction_chain": {
+      "tests": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_order_truth_reducer": {
+      "tests": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_replacement_forecast_materializer": {
+      "tests": 246,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_review_work_delivery": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_settlement_fallback_hierarchy": {
+      "tests": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_station_temperature_adapters": {
+      "tests": 39,
+      "failed": 0,
+      "skipped": 1
+    },
+    "tests.test_warm_materializer": {
+      "tests": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_replacement_forecast_bundle_reader": {
+      "tests": 159,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestAbsoluteLivePriceBand": {
+      "tests": 17,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestGlobalSellReceiptClosure": {
+      "tests": 14,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo": {
+      "tests": 18,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestInsertCommandAtomicWithIntentCreatedEvent": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestPositionDecisionAttributionAppendHook": {
+      "tests": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestEntryCertificateReferentialClosure": {
+      "tests": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestInsertCommandQVersionStamp": {
+      "tests": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestSiblingEntryPortfolioAuthority": {
+      "tests": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestAppendEventStateTransitionIsGrammarChecked": {
+      "tests": 33,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestIdempotencyKeyUniquenessEnforced": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestFindUnresolvedCommandsReturnsOnlyInFlight": {
+      "tests": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestListEventsOrderedBySequenceNo": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestNoModuleOutsideRepoWritesEvents": {
+      "tests": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestFindCommandByIdempotencyKey": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestAppendEventPayloadRoundTrip": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestSavepointComposability": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_venue_command_repo.TestAppendEventPayloadCoercion": {
+      "tests": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_harvester_metric_identity": {
+      "tests": 41,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_harvester_commit_per_event": {
+      "tests": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_ingest_main_boot_resilience.TestForecastsStalenessGuard": {
+      "tests": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_ingest_main_boot_resilience.TestSolarStalenessGuard": {
+      "tests": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_ingest_main_boot_resilience.TestAdvisoryLockGuard": {
+      "tests": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_ingest_main_boot_resilience.TestSolarStatusFilter": {
+      "tests": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    "tests.test_ingest_main_boot_resilience.TestPrePhase1Snapshot": {
+      "tests": 1,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "modules": [
+    "tests/data/test_fusion_upgrade_trigger.py",
+    "tests/test_current_temperature_delivery.py",
+    "tests/test_day0_fast_obs_lane.py",
+    "tests/test_exit_safety.py",
+    "tests/test_fast_obs_receipt_chain.py",
+    "tests/test_fmi_airport_temperature.py",
+    "tests/test_noaa_wrh_settlement_product.py",
+    "tests/test_observation_prints_ledger.py",
+    "tests/test_observation_reaction_chain.py",
+    "tests/test_order_truth_reducer.py",
+    "tests/test_replacement_forecast_materializer.py",
+    "tests/test_review_work_delivery.py",
+    "tests/test_settlement_fallback_hierarchy.py",
+    "tests/test_station_temperature_adapters.py",
+    "tests/test_warm_materializer.py",
+    "tests/test_replacement_forecast_bundle_reader.py",
+    "tests/test_venue_command_repo.py",
+    "tests/test_harvester_metric_identity.py",
+    "tests/test_harvester_commit_per_event.py",
+    "tests/test_ingest_main_boot_resilience.py"
+  ],
+  "junit_sha256": "a979a7b3cb0765f9314431c96072f142c3487ee5f117527ccd95a6799feec552",
+  "scope_note": "Separate broader integration/C3 baseline red: see round3_broader_baseline_comparison.json. No repo-wide green claim."
+}

@@ -1,0 +1,56 @@
+[
+  {
+    "name": "TR_js",
+    "url": "https://rasat.mgm.gov.tr/_next/static/chunks/pages/index-605b1358fdda78b6.js",
+    "requested_at": "2026-09-30T17:20:29.668712+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "name": "IN_form",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/weathermap.php?view=nw",
+    "requested_at": "2026-09-30T17:20:34.278960+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:20:38.195542+00:00"
+  },
+  {
+    "name": "RU_weather",
+    "url": "https://www.aviamettelecom.ru/services/pogoda-v-aeroportah-rossii/",
+    "requested_at": "2026-09-30T17:20:38.716210+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:20:39.955058+00:00"
+  },
+  {
+    "name": "IT_page",
+    "url": "https://www.meteoam.it/it/metar-taf",
+    "requested_at": "2026-09-30T17:20:40.486233+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:20:41.706796+00:00"
+  },
+  {
+    "name": "ES_table",
+    "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?l=3129&k=mad&w=0&datos=det&x=h24&f=temperatura",
+    "requested_at": "2026-09-30T17:20:42.251517+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T17:20:42.723760+00:00"
+  },
+  {
+    "name": "KR_RKSI",
+    "url": "https://global.amo.go.kr/control/metar-metreport-dep1.do?stnCd=RKSI",
+    "requested_at": "2026-09-30T17:20:43.240520+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:20:45.382335+00:00"
+  },
+  {
+    "name": "KR_RKPK",
+    "url": "https://global.amo.go.kr/control/metar-metreport-dep1.do?stnCd=RKPK",
+    "requested_at": "2026-09-30T17:20:45.925617+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T17:20:46.823490+00:00"
+  },
+  {
+    "name": "FR_node",
+    "url": "https://wis2nc-integration.meteo.fr/oapi/collections?f=json",
+    "requested_at": "2026-09-30T17:20:47.365180+00:00",
+    "error": "ConnectError"
+  }
+]

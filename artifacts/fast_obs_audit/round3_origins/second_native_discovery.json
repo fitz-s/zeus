@@ -1,0 +1,62 @@
+[
+  {
+    "tag": "IN_root",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/weathermap.php",
+    "status": 404
+  },
+  {
+    "tag": "TR_index",
+    "url": "https://rasat.mgm.gov.tr/_next/static/chunks/pages/index-605b1358fdda78b6.js",
+    "status": 200,
+    "sha256": "6bc7235a09806899b0f4226caa65a8e07fe3fc7449ba77c226f7403bd427bb76",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/TR_index_6bc7235a09806899b0f4226caa65a8e07fe3fc7449ba77c226f7403bd427bb76.gz",
+    "scripts": [],
+    "frames": [],
+    "urls": [],
+    "opmet_context": []
+  },
+  {
+    "tag": "IT_widget",
+    "url": "https://www-static.meteoam.it/675/AMwebcomponents.bundle.js",
+    "status": 200,
+    "sha256": "f811a291f014859405a701f45f38edfd41cc7f4335b4e4b252a17b7856f8dc25",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/IT_widget_f811a291f014859405a701f45f38edfd41cc7f4335b4e4b252a17b7856f8dc25.gz",
+    "scripts": [],
+    "frames": [],
+    "urls": [],
+    "opmet_context": [
+      "osito_hdf5\"},{label:\"Effemeridi sul punto\",value:\"8000\",name:\"PointEffemeridi\"},{label:\"METAR e TAF\",value:\"2000\",name:\"point_metar\"},{label:\"Previsioni di punto\",value:\"1006\",name:\"point_fcs\"},{label:\"Fulmini\",value:\"3200\",name:\"lampinet\"},{label:\"Stazioni METAR\",value:\"2000\",name:\"point_obs\"},{label:\"Stazioni METEOMONT\",value:\""
+    ]
+  },
+  {
+    "tag": "MY_aviation",
+    "url": "http://abt.met.gov.my/",
+    "error_class": "ConnectError"
+  },
+  {
+    "tag": "RU_weather",
+    "url": "https://www.aviamettelecom.ru/services/pogoda-v-aeroportah-rossii/",
+    "status": 200,
+    "sha256": "f3c8b6aa5a50338a85ef4a135615f0f397e539c110de84493599b7b22a530428",
+    "body_path": "artifacts/fast_obs_audit/round3_origins/RU_weather_f3c8b6aa5a50338a85ef4a135615f0f397e539c110de84493599b7b22a530428.gz",
+    "scripts": [
+      "https://www.aviamettelecom.ru/local/templates/inner/js/jquery.js?1770021272296028",
+      "https://www.aviamettelecom.ru/local/templates/inner/library/owl.carousel.min.js?158530519844342",
+      "https://www.aviamettelecom.ru/local/bootstrap-4.4.1-dist/js/bootstrap.min.js?157494113660010",
+      "https://www.aviamettelecom.ru/local/templates/inner/js/script-index.js?15875512601840",
+      "https://www.aviamettelecom.ru/local/templates/inner/js/script-header-footer.js?16079486002120",
+      "https://www.aviamettelecom.ru/local/templates/inner/js/script-about.js?15885134121096",
+      "https://www.aviamettelecom.ru/local/templates/inner/js/script-calanedar.js?16389562825106",
+      "https://www.aviamettelecom.ru/local/templates/inner/components/bitrix/menu/vertical_multilevel1/script.js?1585305198508",
+      "https://www.aviamettelecom.ru/local/templates/inner/js/qr-code.js?1638956282676"
+    ],
+    "frames": [],
+    "urls": [
+      "http://display.meteocenter.ru/",
+      "https://ok.ru/group/fgbuaviamettelecom",
+      "https://t.me/fgbuaviamettelecom",
+      "https://vk.com/fgbuaviamettelecom"
+    ],
+    "opmet_context": []
+  }
+]
