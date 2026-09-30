@@ -406,7 +406,7 @@ def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00",
     proof = {
         "revision": GRID_SURFACE_EVIDENCE_REVISION,
         "selection_rule": "nearest_land_of_surrounding_four_v1",
-        "request_lat": station["lat"], "request_lon": station["lon"],
+        "request_lat": cities_by_name[city_name].lat, "request_lon": cities_by_name[city_name].lon,
         "station_geometry": dict(station),
         "mask_source": "ecmwf_open_data_ifs_oper_fc_step0_lsm",
         "mask_source_url": "https://example.test/oper-mask.grib2",
@@ -432,6 +432,40 @@ def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00",
         "contract_outcome_evidence": {"settlement_station_id": station["station_id"]},
         "grid_surface_evidence": proof,
     })
+
+
+@pytest.mark.parametrize("role,axis", (("request", "lat"), ("request", "lon"),
+                                      ("station", "lat"), ("station", "lon")))
+def test_ens_fixture_keeps_forecast_query_and_official_station_roles_distinct(role, axis):
+    """Controlled ENS receipt; actual KORD query/official HOMR facts, not q."""
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    from src.data.executable_forecast_reader import grid_surface_evidence_reason
+
+    city = runtime_cities_by_name()["Chicago"]
+    cycle = datetime(2026, 10, 1, tzinfo=UTC)
+    conn = _low_revision_authority_conn(city_name="Chicago", include_legacy_provider_fixtures=False,
+        include_retired_incumbent=False, source_cycle=cycle)
+    try:
+        row = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=12").fetchone())
+        proof = json.loads(row["provenance_json"])
+        geometry = proof["grid_surface_evidence"]["station_geometry"]
+        station = runtime_station_geometry_for_city(city, effective_at=cycle+timedelta(minutes=5))
+        assert station["ground_status"] == "VERIFIED"
+        assert station["ground_elevation_m"] == 204.8
+        assert (geometry["lat"], geometry["lon"]) == (station["lat"], station["lon"])
+        assert (city.lat, city.lon) != (station["lat"], station["lon"])
+        assert grid_surface_evidence_reason(row) is None
+        if role == "request":
+            proof["grid_surface_evidence"][f"request_{axis}"] = station[axis]
+        else:
+            geometry[axis] = getattr(city, axis)
+        # Swap only one role field, leaving city/source/cycle/native cell/body
+        # evidence intact. This is not an UPDATE to a licensed old snapshot.
+        mixed = {**row, "provenance_json": json.dumps(proof)}
+        assert grid_surface_evidence_reason(mixed) == "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
+        assert grid_surface_evidence_reason(row) is None
+    finally:
+        conn.close()
 
 
 @pytest.fixture(autouse=True)
