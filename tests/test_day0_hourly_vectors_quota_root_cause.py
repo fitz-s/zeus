@@ -329,7 +329,7 @@ def _strict_deterministic_vectors(
 
 
 @pytest.mark.parametrize(
-    "barrier", ("none", "retry", "future", "unusable", "quota", "late_record", "incomplete")
+    "barrier", ("none", "old_missing_member", "retry", "future", "unusable", "quota", "late_record", "incomplete")
 )
 def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_deterministic(
     monkeypatch: pytest.MonkeyPatch, tmp_path, barrier: str,
@@ -439,6 +439,12 @@ def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_determini
         assert first.cities_attempted == 0
         unchanged = day0.maybe_refresh_day0_hourly_vectors([city], decision_time=decision, **kwargs)
         assert unchanged.cities_skipped_throttle == 1 and fetches == []
+        if barrier == "old_missing_member":
+            conn.execute(
+                "DELETE FROM day0_hourly_vectors WHERE city=? AND target_date=? AND model=?",
+                (city.name, target, members[0]),
+            )
+            conn.commit()
         moment.update(now=decision + timedelta(minutes=1), run=new_run, available=new_run + timedelta(hours=9))
         if barrier == "future":
             moment.update(run=moment["now"] + timedelta(hours=1))
@@ -450,8 +456,13 @@ def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_determini
             city=city.name, target_dates=(target,), run_hwm=hwm,
             decision_time=moment["now"], remaining_window_starts={target: moment["now"]},
         )
-        if barrier == "none":
-            with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED"):
+        if barrier in {"none", "old_missing_member"}:
+            reason = (
+                "DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE"
+                if barrier == "old_missing_member"
+                else "DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED"
+            )
+            with pytest.raises(ValueError, match=reason):
                 day0.day0_conditional_high_shape(
                     conn=conn, city=city, target_date=target,
                     decision_time=moment["now"], current_state=state,
@@ -476,7 +487,7 @@ def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_determini
             retry = day0.maybe_refresh_day0_hourly_vectors([city], decision_time=moment["now"], **kwargs)
             assert retry.cities_skipped_throttle == 1 and fetches == [new_run]
             return
-        if barrier != "none":
+        if barrier not in {"none", "old_missing_member"}:
             assert fetches == [] and refreshed.vectors_written == 0
             if barrier == "quota":
                 assert refreshed.cities_skipped_quota == 1

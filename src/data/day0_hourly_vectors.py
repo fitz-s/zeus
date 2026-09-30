@@ -2552,13 +2552,15 @@ def _new_ensemble_run_due_for_refresh(
         for target_date in target_dates:
             vectors = read_freshest_day0_hourly_vectors(
                 city=city, target_date=str(target_date), now=decision_time,
-                expected_models=expected, require_expected=True,
+                expected_models=expected, require_expected=False,
                 max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
                 remaining_window_start=remaining_window_starts.get(str(target_date)),
                 require_complete_remaining_window=True,
                 conn=conn, raise_on_db_error=True,
             )
-            if len(vectors) != len(expected):
+            # Cost recovery only needs causal exact-scope evidence of an older
+            # run. Missing old members cannot suppress acquisition of new51.
+            if not vectors:
                 continue
             identities = [
                 _provider_run_identity_from_meta(
