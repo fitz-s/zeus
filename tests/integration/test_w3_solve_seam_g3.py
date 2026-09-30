@@ -50156,3 +50156,86 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
             (fixture.result.posterior_id,)).fetchone()[0] == provenance_json
     finally:
         fixture.conn.close()
+
+
+@pytest.mark.parametrize("fault", ("none", "city", "unit", "source"))
+def test_hko_context_loss_is_typed_family_unavailable_in_actual_batch(tmp_path, monkeypatch, fault):
+    """Actual source/adapter/classifier; no global risk enum or venue claim."""
+    actual_process = global_batch_runtime.process_current_global_batch
+    def inspect_cut(fixture,event,hooks,entry_receipt,held_receipt,selected,traces):
+        cities = dict(era.runtime_cities_by_name())
+        if fault == "city": cities.pop(fixture.city.name)
+        elif fault == "unit": cities[fixture.city.name] = replace(fixture.city,settlement_unit="K")
+        elif fault == "source": cities[fixture.city.name] = replace(fixture.city,settlement_source_type="")
+        family,at = selected.family_key,fixture.cut
+        scope = current_global_auction_scope_from_events((event,),captured_at_utc=at)
+        state = PortfolioState(positions=[],authority="canonical_db",authority_scope="runtime_exposure")
+        wealth = _test_wealth_witness(ledger_snapshot_id="context-loss-ledger",position_set_hash="empty",
+            wealth_floor_usd=Decimal("1000"),wealth_ceiling_usd=Decimal("1000"),
+            spendable_cash_usd=Decimal("1000"),reservations_usd=Decimal("0"),collateral_authority="CHAIN",
+            captured_at_utc=at,max_age=_dt.timedelta(seconds=30),native_holdings_micro=(),native_commitments_micro=())
+        # This node supplies no executable quotes: only the source-unavailable
+        # family route is under test, never order submission or a risk sweep.
+        states = tuple((family,b.bin_id,b.condition_id,side,token,"NO_ASK","",
+            event.event_id,f"gamma-{b.condition_id}","False")
+            for b in selected.bindings for side,token in (("YES",b.yes_token_id),("NO",b.no_token_id)))
+        book = CurrentGlobalBookEpoch(assets=(),asset_states=states,captured_at_utc=at,
+            max_age=_dt.timedelta(seconds=30),witness_identity=current_global_book_epoch_identity(
+                asset_states=states,captured_at_utc=at))
+        trade = sqlite3.connect(":memory:")
+        trade.row_factory = sqlite3.Row
+        from src.state.db import init_schema_trade_only
+        init_schema_trade_only(trade)
+        try:
+            with monkeypatch.context() as loss:
+                loss.setattr(era,"runtime_cities_by_name",lambda:cities)
+                loss.setattr(global_batch_runtime,"scan_current_global_auction_scope",lambda **_:scope)
+                loss.setattr(global_batch_runtime,"current_portfolio_wealth_witness",lambda *_a,**_kw:wealth)
+                loss.setattr(global_batch_runtime,"current_venue_auction_identity",lambda *_a,**_kw:book.witness_identity)
+                era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+                era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
+                entry = hooks["prepare_event"](event,at)
+                held = hooks["prepare_held_event"](event,at)
+                if fault == "none":
+                    assert entry.prepared_global_family is not None and held.prepared_global_family is not None
+                    assert not global_batch_runtime._current_probability_ineligible(entry)
+                else:
+                    causes = {"city":"GLOBAL_DAY0_CITY_CONFIG_MISSING",
+                        "unit":"GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID",
+                        "source":"GLOBAL_DAY0_CONDITIONING_SOURCE_IDENTITY_MISMATCH"}
+                    for receipt in (entry,held):
+                        assert receipt.prepared_global_family is None
+                        assert receipt.proof_accepted is False and receipt.submitted is False
+                        assert f":FamilyAuthorityUnavailable:{causes[fault]}" in receipt.reason
+                    assert global_batch_runtime._current_probability_ineligible(entry)
+                def no_venue(*_): pytest.fail("context loss cannot authorize venue actions")
+                def current_book(probabilities,_at):
+                    from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+                    tokens = {b.condition_id:(b.yes_token_id,b.no_token_id) for b in selected.bindings}
+                    required = frozenset(token for pair in tokens.values() for token in pair)
+                    return {key:_rebind_probability_witness_tokens(witness,
+                        token_map_by_condition=tokens,required_token_ids=required)
+                        for key,witness in probabilities.items()},book
+                result = actual_process((event,),decision_time=at,world_conn=fixture.conn,
+                    forecast_conn=fixture.conn,trade_conn=trade,payload_reader=lambda e:json.loads(e.payload_json),
+                    prepare_event=hooks["prepare_event"],prepare_held_event=hooks["prepare_held_event"],
+                    actuate_winner=no_venue,stamp_receipt=lambda receipt:receipt,venue_submit_count=lambda:0,
+                    current_execution=lambda *_:None,current_time_provider=lambda:at,portfolio_state_provider=lambda:state,
+                    current_book_epoch_provider=current_book,
+                    current_capital_limit_resolver=lambda *_:Decimal("100"))
+            assert result.venue_submit_count == 0
+            if fault != "none":
+                # This exact real runtime branch has no eligible family and
+                # returns its scoped exclusion before book/wealth selection.
+                assert result.receipts[event.event_id].reason == "GLOBAL_FAMILY_INELIGIBLE:"+entry.reason
+                assert trade.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0] == 0
+            else:
+                row = trade.execute("SELECT artifact_json FROM decision_log ORDER BY id DESC LIMIT 1").fetchone()
+                assert row is not None
+                receipt = json.loads(row[0])["summary"]
+                assert family not in receipt["probability_ineligible_by_family"]
+            assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+        finally:
+            trade.close()
+    test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(
+        tmp_path,monkeypatch,"high","none",inspect_cut=inspect_cut)
