@@ -2885,10 +2885,13 @@ def test_day0_owner_witness_blocks_swapped_owner_before_posterior_insert(
 
 
 @pytest.mark.usefixtures("_hko_source_surface")
-def test_materializer_blocks_non_live_posterior_before_execution_authority_table() -> None:
+def test_materializer_blocks_non_live_posterior_before_execution_authority_table(monkeypatch) -> None:
     conn = _conn()
-
-    result = materialize_replacement_forecast_live(conn, _hko_request())
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=_hko_request())
+    assert isinstance(materializer_mod.prepare_replacement_forecast_live(conn, request),
+                      materializer_mod.PreparedReplacementForecastMaterialization)
+    monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *a, **k: None)
+    result = materialize_replacement_forecast_live(conn, request)
 
     assert result.ok is False
     # Catch-all reason stays first (byte-identical prefix for existing consumers);
@@ -2907,12 +2910,9 @@ def test_materializer_blocks_non_live_posterior_before_execution_authority_table
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_writes_authorized_06z_cycle_as_live_layer(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
-    _install_hko_live_fusion(monkeypatch)
-
-    result = materialize_replacement_forecast_live(
-        conn,
-        _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12)),
-    )
+    request = _install_hko_live_fusion(monkeypatch, conn=conn,
+        request=_hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12)))
+    result = materialize_replacement_forecast_live(conn, request)
 
     assert result.ok is True
     assert result.anchor_id is not None
@@ -2976,17 +2976,17 @@ def test_materializer_surfaces_bounds_missing_sub_reason(monkeypatch: pytest.Mon
     a BLOCKED receipt tells the operator WHICH requirement failed without opening a
     subprocess log."""
     conn = _conn()
-    _install_hko_live_fusion(monkeypatch)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn,
+        request=_hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12)))
+    assert isinstance(materializer_mod.prepare_replacement_forecast_live(conn, request),
+                      materializer_mod.PreparedReplacementForecastMaterialization)
     monkeypatch.setattr(
         materializer_mod,
         "_build_fused_q_bounds",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bootstrap exploded")),
     )
 
-    result = materialize_replacement_forecast_live(
-        conn,
-        _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12)),
-    )
+    result = materialize_replacement_forecast_live(conn, request)
 
     assert result.ok is False
     assert result.reason_codes[0] == REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET
@@ -8987,14 +8987,14 @@ def test_current_center_ignores_fitted_debias_and_keeps_raw_precision_center(
 
     request = _hko_request()
     baseline_conn = _conn()
-    _install_hko_live_fusion(monkeypatch, request=request)
+    request = _install_hko_live_fusion(monkeypatch, conn=baseline_conn, request=request)
     _no_center_debias(monkeypatch)
     baseline_q, baseline_provenance = _materialize_q(baseline_conn, request)
 
     shifted_conn = _conn()
-    _install_hko_live_fusion(monkeypatch, request=request)
+    shifted_request = _install_hko_live_fusion(monkeypatch, conn=shifted_conn, request=request)
     _fixed_center_debias(monkeypatch, shift_c=1.0)
-    shifted_q, shifted_provenance = _materialize_q(shifted_conn, request)
+    shifted_q, shifted_provenance = _materialize_q(shifted_conn, shifted_request)
 
     # The fused center is 25.0 with bins cool(<20) / warm(21-30) / hot(>31): a +1.0
     # shift moves the center to 26.0, so mass leaves the cool tail for the hot one.
@@ -9023,7 +9023,7 @@ def test_center_debias_inactive_metric_is_byte_identical_to_no_correction(
 
     request = replace(_hko_request(baseline_data_version=_current_baseline_data_version("low")), temperature_metric="low")
     baseline_conn = _conn()
-    _install_hko_live_fusion(monkeypatch, request=request)
+    request = _install_hko_live_fusion(monkeypatch, conn=baseline_conn, request=request)
     _no_center_debias(monkeypatch)
     baseline_q, baseline_provenance = _materialize_q(
         baseline_conn, request,
@@ -9033,8 +9033,10 @@ def test_center_debias_inactive_metric_is_byte_identical_to_no_correction(
     ).fetchone()["posterior_config_hash"]
 
     # HIGH is enabled and would receive +1.0; this request is LOW, so it must not.
-    low_conn = _conn()
-    _install_hko_live_fusion(monkeypatch, request=request)
+    # Only the HIGH-only fitted knob changes, not the certificate's physical
+    # namespace, own artifact, or immutable capture/possession dependencies.
+    low_conn = baseline_conn
+    _install_hko_live_fusion(monkeypatch, conn=low_conn, request=request)
     _fixed_center_debias(monkeypatch, shift_c=1.0, metric="high")
     low_q, low_provenance = _materialize_q(
         low_conn, request,
@@ -9069,7 +9071,7 @@ def test_served_settlement_log_probability_mu_matches_served_mu_anchor_with_debi
 
     request = _hko_request()
     conn = _conn()
-    _install_hko_live_fusion(monkeypatch, request=request)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
     _fixed_center_debias(monkeypatch, shift_c=1.0)
     q, provenance = _materialize_q(conn, request)
 
