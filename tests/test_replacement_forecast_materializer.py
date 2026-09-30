@@ -240,7 +240,7 @@ def _current_baseline_data_version(metric: str = "high") -> str:
     return value
 
 
-def _conn() -> sqlite3.Connection:
+def _conn(*, archive_ground: bool = True) -> sqlite3.Connection:
     db = None
     if _HKO_FORECAST_DB_DIR is not None:
         _HKO_FORECAST_DB_DIR.mkdir(exist_ok=True)
@@ -251,7 +251,7 @@ def _conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     apply_canonical_schema(conn, forecast_tables=True)
     _create_readiness_state(conn)
-    if db is not None:
+    if db is not None and archive_ground:
         from src.data.station_ground_evidence import archive_station_ground_evidence
         conn.commit()
         archived = archive_station_ground_evidence(db,["Hong Kong"])
@@ -455,7 +455,9 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
             continue
         cities = runtime_cities_by_name()
         city = next(value for name, value in cities.items() if name.casefold() == old["city"].casefold())
-        staging = _conn()
+        # This raw-writer staging DB is not a second ground/authority owner.
+        # Its first artifact must remain the actual forecast body being copied.
+        staging = _conn(archive_ground=False)
         model = old["model"]
         captured = old.get("captured_at") or old["source_available_at"]
         if model == "cwa_township":  # retained retired 063, never promote it to 061
@@ -3434,6 +3436,7 @@ def test_materializer_blocks_day0_without_observed_extreme() -> None:
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_allows_typed_day0_zero_observation_full_day_posterior(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3442,18 +3445,13 @@ def test_materializer_allows_typed_day0_zero_observation_full_day_posterior(
     )
 
     conn = _conn()
-    _install_live_fusion(monkeypatch)
-
-    result = materialize_replacement_forecast_live(
-        conn,
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observation_state=(
-                DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
-            ),
-        ),
+    request = _hko_request(
+        source_cycle_time=_hko_dt(6), computed_at=_hko_dt(18),
+        expires_at=_hko_dt(2)+timedelta(days=1),
+        day0_observation_state=DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,
     )
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
+    result = materialize_replacement_forecast_live(conn, request)
 
     assert result.ok is True
     row = conn.execute(
@@ -3471,6 +3469,14 @@ def test_materializer_allows_typed_day0_zero_observation_full_day_posterior(
     assert "day0_conditioning" not in provenance
     assert "day0_provisional_observation" not in provenance
     assert row["posterior_config_hash"]
+
+    # Restore the approved same-fixture single-fault twin: real current
+    # evidence passes first; only the conflicting declaration is changed.
+    conflict = materialize_replacement_forecast_live(
+        conn, replace(request, day0_observed_extreme_c=26.0),
+    )
+    assert conflict.reason_codes == ("REPLACEMENT_MATERIALIZATION_DAY0_ZERO_OBSERVATION_STATE_CONFLICT",)
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
 
 
 def test_materializer_rejects_conflicting_day0_zero_and_observed_extreme() -> None:
@@ -7862,34 +7868,112 @@ def test_final_provider_witness_query_count_is_fixed_with_many_invalid_rows() ->
     conn.close()
 
 
-def test_source_clock_production_selector_preserves_520_valid_rows() -> None:
-    from src.data.replacement_current_value_serving import read_current_instrument_values
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_source_clock_production_selector_has_no_cap_before_legal_winners(tmp_path, monkeypatch) -> None:
+    """Diagnostic rows cannot truncate two actual, later ordered winners.
 
-    conn = _conn()
+    The retired fixture's 520 made-up provider names had no source authority.
+    They remain explicit diagnostics; only normal ICON/UKMO captures may serve.
+    """
+    from src.data import replacement_current_value_serving as current
+    from src.data.station_ground_evidence import archive_station_ground_evidence
+    db = tmp_path / "forecast.db"
+    conn = _low_revision_authority_conn(db)
+    assert archive_station_ground_evidence(db, ["Hong Kong"])["status"] == "GROUND_SOURCE_ARCHIVED"
+    request = _hko_request_with_owned_anchor(conn, _low_revision_request())
+    captured = _hko_current_provider_inputs(request, {
+        "icon_global": 27., "ukmo_global_deterministic_10km": 29.,
+    }, conn=conn)
+    expected = {model: value.raw_model_forecast_id for model, value in captured.items()}
+    baseline = materialize_replacement_forecast_live(conn, request)
+    assert baseline.ok, baseline.reason_codes
+    baseline_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (baseline.posterior_id,)).fetchone()
+    baseline_q = {key: json.loads(baseline_row[key]) for key in ("q_json", "q_lcb_json", "q_ucb_json")}
+    baseline_fusion = json.loads(baseline_row["provenance_json"])["bayes_precision_fusion"]
+    baseline_override = materializer_mod._replacement_bayes_precision_fusion_override(
+        request, metric="low", anchor_value_corrected_c=request.openmeteo_anchor.low_c, conn=conn)
+    assert baseline_override is not None
+    # Separate causal pair: a genuinely legal new-day full prior, not a late
+    # run's fabricated elapsed prefix. Only the independent decision cut moves.
+    future_cycle = datetime(2026, 10, 1, tzinfo=UTC)
+    future_capture = future_cycle + timedelta(hours=1)
+    future_request = replace(request, target_date=date(2026, 10, 2),
+        source_cycle_time=future_cycle, computed_at=future_cycle+timedelta(hours=2),
+        openmeteo_source_available_at=future_capture)
+    future = _hko_current_provider_inputs(future_request, {"icon_global":31.}, conn=conn)
+    future_id = future["icon_global"].raw_model_forecast_id
+    future_kwargs = dict(city=request.city, metric="low", target_date="2026-10-02",
+        source_cycle_time_iso=future_cycle.isoformat(), include_station_sources=True)
+    after_capture = current.read_current_instrument_values(conn, **future_kwargs,
+        decision_time_iso=future_request.computed_at.isoformat())
+    assert {model:value.raw_model_forecast_id for model,value in after_capture.items()} == {"icon_global":future_id}
+    assert after_capture["icon_global"].value_c == 31.
+    assert not current.read_current_instrument_values(conn, **future_kwargs,
+        decision_time_iso=(future_capture-timedelta(microseconds=1)).isoformat())
     conn.executemany(
         """
         INSERT INTO raw_model_forecasts (
             model, city, target_date, metric, source_cycle_time,
-            source_available_at, captured_at, lead_days, forecast_value_c, endpoint
-        ) VALUES (?, 'Shanghai', '2026-06-07', 'high',
-                  '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
-                  '2026-06-06T03:00:00+00:00', 1, 27.0, 'single_runs')
+            source_available_at, captured_at, lead_days, forecast_value_c, endpoint, recorded_at
+        ) VALUES (?, 'Hong Kong', '2026-10-01', 'low',
+                  '2026-09-30T12:00:00+00:00', '2026-09-30T13:00:00+00:00',
+                  '2026-09-30T13:00:00+00:00', 1, 27.0, 'single_runs',
+                  '2026-09-30T13:00:00+00:00')
         """,
-        ((f"provider_{index:03d}",) for index in range(520)),
+        ((f"diagnostic_unproven_{index:03d}",) for index in range(520)),
     )
-    _qualify_raw_fixture_rows(conn)
-    served = read_current_instrument_values(
-        conn,
-        city="Shanghai",
-        metric="high",
-        target_date="2026-06-07",
-        source_cycle_time_iso="2026-06-06T00:00:00+00:00",
-        decision_time_iso="2026-06-06T04:00:00+00:00",
-        include_station_sources=True,
-    )
-    conn.close()
+    kwargs = dict(city="Hong Kong", metric="low", target_date="2026-10-01",
+                  decision_time_iso=request.computed_at.isoformat())
+    schema = current.current_value_serving_schema(conn)
+    query, params = current._source_clock_rows_query(**dict(
+        city=kwargs["city"], metric=kwargs["metric"], target_date=kwargs["target_date"],
+        decision_iso=kwargs["decision_time_iso"], schema=schema, max_substitution_age_hours=8.,
+    ))
+    ordered = list(conn.execute(query, params))
+    assert len(ordered) == 527  # 520 noise + five retained legacy diagnostics + two winners.
+    for model, raw_id in expected.items():
+        assert next(index for index, row in enumerate(ordered, 1) if row[0] == raw_id) > 512
+    assert future_id not in {row[0] for row in ordered}
+    def assert_winners():
+        served = current.read_current_instrument_values(conn, **kwargs,
+            source_cycle_time_iso=request.source_cycle_time.isoformat(), include_station_sources=True)
+        assert {model: value.raw_model_forecast_id for model, value in served.items()} == expected
+        assert {model: value.value_c for model, value in served.items()} == {"icon_global":27., "ukmo_global_deterministic_10km":29.}
+        assert all(value.served_cycle == request.source_cycle_time.isoformat() for value in served.values())
+        assert not any(model.startswith("diagnostic_unproven_") for model in served)
+        assert dict(current.read_current_instrument_frontier_identity(conn, **kwargs,
+            models=tuple(expected), schema=schema)) == expected
+    assert_winners()
+    rebuilt = materialize_replacement_forecast_live(conn, request)
+    assert rebuilt.ok, rebuilt.reason_codes
+    rebuilt_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (rebuilt.posterior_id,)).fetchone()
+    assert {key: json.loads(rebuilt_row[key]) for key in baseline_q} == baseline_q
+    fusion = json.loads(rebuilt_row["provenance_json"])["bayes_precision_fusion"]
+    assert set(expected).issubset(fusion["used_models"])
+    assert fusion["used_models"] == baseline_fusion["used_models"]
+    rebuilt_override = materializer_mod._replacement_bayes_precision_fusion_override(
+        request, metric="low", anchor_value_corrected_c=request.openmeteo_anchor.low_c, conn=conn)
+    assert rebuilt_override is not None
+    weights = {model: basis["weight"] for model, basis in rebuilt_override.precision_center_basis.items()}
+    assert weights == {model: basis["weight"] for model, basis in baseline_override.precision_center_basis.items()}
+    assert all(math.isfinite(weight) and weight > 0 for weight in weights.values())
+    assert sum(weights.values()) == pytest.approx(1.)
+    assert not any(model.startswith("diagnostic_unproven_") for model in fusion["used_models"])
+    assert not any(model.startswith("diagnostic_unproven_") for model in rebuilt_override.precision_center_basis)
 
-    assert len(served) == 520
+    # Inject the actual regression, not a mirrored count assertion. The same
+    # winner contract must turn red when the production SQL stream is capped.
+    real_query = current._source_clock_rows_query
+    with monkeypatch.context() as capped:
+        def limited(*args, **kwargs):
+            sql, args = real_query(*args, **kwargs)
+            return sql + "\n LIMIT 512", args
+        capped.setattr(current, "_source_clock_rows_query", limited)
+        with pytest.raises(AssertionError):
+            assert_winners()
+        assert not materialize_replacement_forecast_live(conn, request).ok
+    assert_winners()
+    conn.close()
 
 
 def test_final_lock_reads_only_exact_ids_and_bounded_frontiers(
