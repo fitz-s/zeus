@@ -1,6 +1,6 @@
 # Created: 2026-09-05
-# Last reused or audited: 2026-09-27
-# Lifecycle: created=2026-09-05; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Last reused or audited: 2026-09-30
+# Lifecycle: created=2026-09-05; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: current HIGH conditional-variance acquisition plan; shared quota contract.
 # Purpose: Regression tests for the round-3 quota root-cause fixes in
 #   src/data/day0_hourly_vectors.py: a monotone per-model provider-run HWM pin (Open-
@@ -326,6 +326,179 @@ def _strict_deterministic_vectors(
             source_run_meta_json=meta,
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "barrier", ("none", "retry", "future", "unusable", "quota", "late_record", "incomplete")
+)
+def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_deterministic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, barrier: str,
+) -> None:
+    """Normal writer/HWM/refresh/readback, not a mocked READY/due predicate."""
+    from src.config import runtime_cities_by_name
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+    import src.state.db as db_module
+
+    city = runtime_cities_by_name()["Milan"]
+    decision = datetime.now(UTC).replace(microsecond=0) + timedelta(minutes=1)
+    target = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    old_run = datetime.combine(decision.date() - timedelta(days=1), datetime.min.time(), UTC) + timedelta(hours=12)
+    new_run = old_run + timedelta(hours=6)
+    old_available = old_run + timedelta(hours=7)
+    moment = {"now": decision, "run": old_run, "available": old_available}
+    pin_path = tmp_path / "provider-hwm.json"
+    db_path = tmp_path / "vectors.db"
+    conn = sqlite3.connect(db_path)
+    members = day0.day0_source_clock_ensemble_member_models()
+    day0._LAST_REFRESH_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    day0._INCOMPLETE_RETRY_STREAK.clear()
+    monkeypatch.setattr(day0, "_DAY0_PROVIDER_RUN_HWM_PIN", {})
+    monkeypatch.setattr(day0, "_day0_provider_run_hwm_pin_persistence_enabled", lambda: True)
+    monkeypatch.setattr(day0, "_day0_provider_run_hwm_pin_path", lambda: pin_path)
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: moment["now"])
+    models = ("ecmwf_ifs", "icon_global")
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: list(models))
+    tracker = OpenMeteoQuotaTracker()
+    monkeypatch.setattr(day0, "quota_tracker", tracker)
+
+    def ro_connection():
+        read_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        read_conn.execute("PRAGMA query_only=ON")
+        return read_conn
+
+    monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", ro_connection)
+    original_persist = day0.persist_day0_hourly_vectors
+
+    def persist_private(vectors, **kwargs):
+        return original_persist(vectors, conn=conn, **kwargs)
+
+    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", persist_private)
+
+    def vectors(run, available, captured):
+        result = []
+        for member in members:
+            vector = _strict_ensemble_member_vector(
+                city, member, run, available, captured, captured, captured,
+            )
+            meta = _json.loads(vector.source_run_meta_json)
+            meta.update(request_hash=f"sha256:{run.isoformat()}",
+                        provider_run_id=f"openmeteo:ecmwf_ifs025:{run.isoformat()}")
+            result.append(replace(vector, source_run_meta_json=_json.dumps(meta)))
+        return result
+
+    old_vectors = vectors(old_run, old_available, decision - timedelta(minutes=15))
+    assert original_persist(old_vectors, target_date=target, conn=conn,
+                            request_hash="sha256:old", endpoint=day0.OPENMETEO_ENSEMBLE_URL,
+                            now=decision) == 51
+    det_vectors = []
+    for model in models:
+        det_meta = _json.loads(old_vectors[0].source_run_meta_json)
+        det_meta.update(model=model, provider_run_id=f"openmeteo:{model}:{old_run.isoformat()}")
+        det_vectors.append(replace(old_vectors[0], model=model, source_run_meta_json=_json.dumps(det_meta)))
+    targets = day0.day0_hourly_target_dates_for_refresh(city=city, decision_time=decision)
+    for date_text in targets:
+        assert original_persist(det_vectors, target_date=date_text, conn=conn,
+                                request_hash="sha256:det", now=decision) == len(models)
+
+    def metadata(models, **_kwargs):
+        assert models == [day0.DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL]
+        return (OpenMeteoModelUpdate(
+            model=models[0], last_run_initialisation_time=moment["run"],
+            last_run_availability_time=moment["available"],
+            last_run_modification_time=moment["available"],
+        ),)
+
+    monkeypatch.setattr("src.data.openmeteo_model_updates.fetch_model_updates", metadata)
+    fetches = []
+    def fetch_ensemble(_city, **_kwargs):
+        fetches.append(moment["run"])
+        if barrier == "incomplete":
+            return [], ""
+        return vectors(moment["run"], moment["available"], moment["now"]), "sha256:new"
+
+    monkeypatch.setattr(day0, "fetch_day0_source_clock_ensemble_vectors", fetch_ensemble)
+    monkeypatch.setattr(day0, "fetch_day0_hourly_vectors", lambda *_args, **_kwargs: pytest.fail("healthy deterministic sibling re-fetched"))
+    kwargs = dict(interval_s=3600.0, quota_critical_cities=1,
+                  high_ensemble_city_dates=((city.name, target),), return_stats=True,
+                  provider_run_hwm={model: _hwm(model, old_run, old_available) for model in models})
+    try:
+        old_hwm = day0._probe_day0_source_clock_ensemble_run_hwm(decision_time=decision, timeout_s=1.0)
+        assert old_hwm is not None
+        state = day0.Day0CurrentTemperatureState(
+            value_native=14.0, observed_at=decision - timedelta(minutes=1),
+            source="aviationweather_metar",
+        )
+        old_shape = day0.day0_conditional_high_shape(
+            conn=conn, city=city, target_date=target, decision_time=decision,
+            current_state=state,
+        )
+        assert old_shape.witness["ensemble_run"] == old_run.isoformat()
+        first = day0.maybe_refresh_day0_hourly_vectors([city], decision_time=decision, **kwargs)
+        assert first.cities_attempted == 0
+        unchanged = day0.maybe_refresh_day0_hourly_vectors([city], decision_time=decision, **kwargs)
+        assert unchanged.cities_skipped_throttle == 1 and fetches == []
+        moment.update(now=decision + timedelta(minutes=1), run=new_run, available=new_run + timedelta(hours=9))
+        if barrier == "future":
+            moment.update(run=moment["now"] + timedelta(hours=1))
+        elif barrier == "unusable":
+            moment.update(available=moment["now"] - timedelta(minutes=1))
+        hwm = day0._probe_day0_source_clock_ensemble_run_hwm(decision_time=moment["now"], timeout_s=1.0)
+        assert hwm is not None
+        assert not day0._current_ensemble_bundle_already_persisted(
+            city=city.name, target_dates=(target,), run_hwm=hwm,
+            decision_time=moment["now"], remaining_window_starts={target: moment["now"]},
+        )
+        if barrier == "none":
+            with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED"):
+                day0.day0_conditional_high_shape(
+                    conn=conn, city=city, target_date=target,
+                    decision_time=moment["now"], current_state=state,
+                )
+        key = f"{city.name}|{targets[0]}|ens={target}"
+        assert not day0._new_ensemble_run_due_for_refresh(
+            city="Toronto", target_dates=(target,), decision_time=moment["now"],
+            remaining_window_starts={target: moment["now"]},
+        )
+        if barrier == "retry":
+            day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[key] = day0.time.monotonic() + 120
+        elif barrier == "quota":
+            monkeypatch.setattr(tracker, "can_call", lambda: False)
+        elif barrier == "late_record":
+            pin = _json.loads(pin_path.read_text())
+            pin["entries"][hwm.model]["recorded_at"] = (moment["now"] + timedelta(seconds=1)).isoformat()
+            pin_path.write_text(_json.dumps(pin))
+        refreshed = day0.maybe_refresh_day0_hourly_vectors([city], decision_time=moment["now"], **kwargs)
+        if barrier == "incomplete":
+            assert fetches == [new_run] and refreshed.vectors_written == 0
+            assert day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[key] > day0.time.monotonic()
+            retry = day0.maybe_refresh_day0_hourly_vectors([city], decision_time=moment["now"], **kwargs)
+            assert retry.cities_skipped_throttle == 1 and fetches == [new_run]
+            return
+        if barrier != "none":
+            assert fetches == [] and refreshed.vectors_written == 0
+            if barrier == "quota":
+                assert refreshed.cities_skipped_quota == 1
+            else:
+                assert refreshed.cities_skipped_throttle == 1
+            return
+        assert fetches == [new_run]
+        assert refreshed.cities_attempted == 1 and refreshed.vectors_written == 51
+        assert day0._current_ensemble_bundle_already_persisted(
+            city=city.name, target_dates=(target,), run_hwm=hwm,
+            decision_time=moment["now"], remaining_window_starts={target: moment["now"]},
+        )
+        restored_shape = day0.day0_conditional_high_shape(
+            conn=conn, city=city, target_date=target,
+            decision_time=moment["now"], current_state=state,
+        )
+        assert restored_shape.witness["ensemble_run"] == new_run.isoformat()
+        assert len(restored_shape.ensemble_centers_c) == 51
+        repeat = day0.maybe_refresh_day0_hourly_vectors([city], decision_time=moment["now"], **kwargs)
+        assert repeat.cities_skipped_throttle == 1 and fetches == [new_run]
+    finally:
+        conn.close()
 
 
 def _configure_two_date_deterministic_refresh(

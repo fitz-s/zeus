@@ -2509,6 +2509,76 @@ def _current_ensemble_bundle_already_persisted(
         return False
 
 
+def _new_ensemble_run_due_for_refresh(
+    *,
+    city: str,
+    target_dates: Sequence[str],
+    decision_time: datetime,
+    remaining_window_starts: Mapping[str, datetime | None],
+) -> bool:
+    """A known usable ENS run may bypass success TTL, never failed backoff.
+
+    This is a local scheduling hint only. The normal metadata-bracketed fetch
+    and strict 51-member readback still establish probability evidence.
+    """
+    from src.state.db import get_forecasts_connection_read_only
+    from src.strategy.live_inference.source_clock_vnext import (
+        SOURCE_AVAILABILITY_CONSISTENCY_WAIT_MINUTES,
+    )
+
+    _load_persisted_day0_provider_run_hwm_pin(force=True)
+    hwm = _DAY0_PROVIDER_RUN_HWM_PIN.get(DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL)
+    if hwm is None or hwm.model != DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL:
+        return False
+    if (
+        hwm.run_initialisation_time > decision_time
+        or hwm.run_availability_time
+        + timedelta(minutes=SOURCE_AVAILABILITY_CONSISTENCY_WAIT_MINUTES)
+        > decision_time
+    ):
+        return False
+    if _day0_provider_run_hwm_pin_persistence_enabled():
+        try:
+            entry = json.loads(_day0_provider_run_hwm_pin_path().read_text())["entries"][hwm.model]
+            recorded = datetime.fromisoformat(str(entry["recorded_at"]))
+            if recorded.tzinfo is None or recorded > decision_time:
+                return False
+        except (OSError, KeyError, TypeError, ValueError):
+            return False
+    conn = None
+    try:
+        conn = get_forecasts_connection_read_only()
+        expected = day0_source_clock_ensemble_member_models()
+        for target_date in target_dates:
+            vectors = read_freshest_day0_hourly_vectors(
+                city=city, target_date=str(target_date), now=decision_time,
+                expected_models=expected, require_expected=True,
+                max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                remaining_window_start=remaining_window_starts.get(str(target_date)),
+                require_complete_remaining_window=True,
+                conn=conn, raise_on_db_error=True,
+            )
+            if len(vectors) != len(expected):
+                continue
+            identities = [
+                _provider_run_identity_from_meta(
+                    json.loads(vector.source_run_meta_json or "{}"),
+                    expected_model=vector.model,
+                )
+                for vector in vectors
+            ]
+            if all(identity is not None for identity in identities):
+                runs = [identity[0] for identity in identities]
+                if max(runs) <= hwm.run_initialisation_time and min(runs) < hwm.run_initialisation_time:
+                    return True
+        return False
+    except (OSError, sqlite3.Error, RuntimeError, TypeError, ValueError):
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_TABLE_DDL)
     conn.execute(_INDEX_DDL)
@@ -5156,6 +5226,7 @@ def maybe_refresh_day0_hourly_vectors(
             ensemble_missing_models: tuple[str, ...] = ()
             ensemble_vectors: list[Day0HourlyVector] = []
             ensemble_request_hash = ""
+            ensemble_run_due = False
             with _REFRESH_LOCK:
                 retry_not_before = _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.get(
                     refresh_key
@@ -5166,12 +5237,25 @@ def maybe_refresh_day0_hourly_vectors(
                         now_monotonic
                         + INCOMPLETE_BUNDLE_CRITICAL_RETRY_MAX_INTERVAL_S,
                     )
-                if _refresh_throttled_locked(
+                if now_monotonic < _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.get(refresh_key, 0.0):
+                    skipped_throttle += 1
+                    continue
+                throttled = _refresh_throttled_locked(
                     refresh_key,
                     now_monotonic=now_monotonic,
                     interval_s=interval_s,
                     bypass_interval=release_due,
-                ):
+                )
+            if throttled:
+                ensemble_run_due = bool(
+                    ensemble_target_dates
+                    and _new_ensemble_run_due_for_refresh(
+                        city=name, target_dates=ensemble_target_dates,
+                        decision_time=decision_time,
+                        remaining_window_starts=ensemble_window_starts,
+                    )
+                )
+                if not ensemble_run_due:
                     skipped_throttle += 1
                     continue
             if ensemble_target_dates:
@@ -5220,7 +5304,7 @@ def maybe_refresh_day0_hourly_vectors(
                         refresh_key,
                         now_monotonic=now_monotonic,
                         interval_s=interval_s,
-                        bypass_interval=release_due,
+                        bypass_interval=release_due or ensemble_run_due,
                     ):
                         skipped_throttle += 1
                         continue
