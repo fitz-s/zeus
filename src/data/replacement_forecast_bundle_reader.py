@@ -1132,11 +1132,17 @@ def _live_grade_provenance(
         return None
     shape_authorized = (
         current_evidence_shape_has_entry_authority(
-            provenance, materialized_at=row_map.get("computed_at")
+            provenance, materialized_at=row_map.get("computed_at"),
+            city=row_map.get("city"), target_date=row_map.get("target_date"),
+            metric=row_map.get("temperature_metric"),
+            anchor_id=row_map.get("openmeteo_anchor_id"),
         )
         if authority_purpose is ReplacementForecastAuthorityPurpose.ENTRY
         else current_evidence_shape_has_held_authority(
-            provenance, materialized_at=row_map.get("computed_at")
+            provenance, materialized_at=row_map.get("computed_at"),
+            city=row_map.get("city"), target_date=row_map.get("target_date"),
+            metric=row_map.get("temperature_metric"),
+            anchor_id=row_map.get("openmeteo_anchor_id"),
         )
     )
     if not shape_authorized:
