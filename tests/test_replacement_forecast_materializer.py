@@ -2667,7 +2667,7 @@ def _refresh_shanghai_owner_request(conn, monkeypatch, request):
         snapshot_id=9001 if request.temperature_metric=="high" else 9002)
     assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == entities
     assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")) == raw
-    if refreshed.day0_observed_extreme_c is not None:
+    if refreshed.day0_observed_extreme_c is not None and refreshed.day0_observed_extreme_source=="noaa_wrh_zspd":
         _append_shanghai_owner_prints(conn,refreshed)
     return refreshed
 
@@ -2692,7 +2692,8 @@ def _append_shanghai_owner_prints(conn,request):
     conn.commit()
 
 
-def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high", without_current_state=False):
+def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high", without_current_state=False,
+                                   absorbing_extreme=None,current_temp_c=30.):
     """Controlled WRH/AWC bodies and complete remaining vectors, not gate mocks."""
     from src.config import runtime_cities_by_name
     from src.data import day0_fast_obs as fast, day0_hourly_vectors as hourly
@@ -2701,7 +2702,7 @@ def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high", witho
     from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
     from zoneinfo import ZoneInfo
 
-    extreme = 31. if metric=="high" else 19.
+    extreme = absorbing_extreme if absorbing_extreme is not None else (31. if metric=="high" else 19.)
     conn, prior = _shanghai_current_owner_request(tmp_path,monkeypatch,metric=metric,observed_extreme=extreme)
     city = runtime_cities_by_name()[prior.city]
     cut = prior.computed_at+timedelta(minutes=10)
@@ -2736,8 +2737,8 @@ def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high", witho
     assert fast._append_metar_prints_to_ledger(conn,((city,source,prior.target_date.isoformat()),),reports)
     writer_time[0] = observed+timedelta(minutes=1)
     current = fast.parse_metar_api_payload([{"icaoId":"ZSPD","obsTime":observed.timestamp(),
-        "receiptTime":writer_time[0].isoformat(),"temp":30.,"metarType":"METAR",
-        "rawOb":f"ZSPD {observed:%d%H%M}Z 30/20 T03000200"}])
+        "receiptTime":writer_time[0].isoformat(),"temp":current_temp_c,"metarType":"METAR",
+        "rawOb":f"ZSPD {observed:%d%H%M}Z {round(current_temp_c):02d}/20 T{round(current_temp_c*10):04d}0200"}])
     captured = cut-timedelta(minutes=2)
     models = hourly.day0_hourly_models_for_city(city)
     ensemble_models = hourly.day0_source_clock_ensemble_member_models()
@@ -2776,12 +2777,23 @@ def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high", witho
             request_hash=request_hash,endpoint=endpoint,now=cut)==len(vectors)
     conn.commit()
     request = _refresh_shanghai_owner_request(conn,monkeypatch,replace(prior,computed_at=cut,
+        day0_observed_extreme_c=(max if metric=="high" else min)(extreme,current_temp_c),
         day0_observed_extreme_source="aviationweather_metar",day0_observed_extreme_observation_time=observed.isoformat()))
     tables = ("raw_forecast_artifacts","raw_model_forecasts","observation_prints",
               "deterministic_forecast_anchors","forecast_posteriors","readiness_state")
     before_control = {table:tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
                       for table in tables}
     conn.execute("SAVEPOINT current_print_control")
+    # The provisional running extreme and the latest instantaneous state are
+    # different inputs. Retain a real earlier AWC peak, not just a WRH value
+    # relabeled as an AWC boundary; the newest print remains current_temp_c.
+    peak_at = datetime.fromisoformat(prior.day0_observed_extreme_observation_time)
+    writer_time[0] = prior.computed_at-timedelta(minutes=1)
+    peak = fast.parse_metar_api_payload([{"icaoId":"ZSPD","obsTime":peak_at.timestamp(),
+        "receiptTime":(peak_at+timedelta(minutes=1)).isoformat(),"temp":extreme,"metarType":"METAR",
+        "rawOb":f"ZSPD {peak_at:%d%H%M}Z {round(extreme):02d}/15 T{round(extreme*10):04d}0150"}])
+    assert fast._append_metar_prints_to_ledger(conn,((city,source,str(prior.target_date)),),peak)
+    writer_time[0] = observed+timedelta(minutes=1)
     assert fast._append_metar_prints_to_ledger(conn,((city,source,prior.target_date.isoformat()),),current)
     likelihood = fast.build_fast_station_residual_likelihood(conn,city=city.name,target_date=str(prior.target_date),
         metric=metric,observed_source="aviationweather_metar",observation_time=observed,decision_time=cut)
@@ -3084,7 +3096,9 @@ def test_conditional_high_missing_evidence_boundary_does_not_swallow_mismatch(
         ("low", _current_baseline_data_version("low"), 21.0, 22.0, 21.0),
     ],
 )
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_fast_residual_frontier_fails_closed_when_bound_cannot_cover_history(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     metric: str,
     baseline_data_version: str,
@@ -3092,30 +3106,26 @@ def test_fast_residual_frontier_fails_closed_when_bound_cannot_cover_history(
     fast_extreme: float,
     bound: float | None,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    absorbing = replace(
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=absorbing_extreme,
-            day0_observed_extreme_source="noaa_wrh_zspd",
-            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        ),
-        temperature_metric=metric,
-        baseline_data_version=baseline_data_version,
-    )
+    from src.data import day0_fast_obs as fast
+    conn, positive = _shanghai_noaa_future_request(tmp_path,monkeypatch,metric=metric,
+        absorbing_extreme=absorbing_extreme,current_temp_c=31. if metric=="high" else 20.)
+    absorbing = _refresh_shanghai_owner_request(conn,monkeypatch,replace(positive,
+        computed_at=positive.computed_at-timedelta(minutes=10),day0_observed_extreme_c=absorbing_extreme,
+        day0_observed_extreme_source="noaa_wrh_zspd",
+        day0_observed_extreme_observation_time=(positive.computed_at-timedelta(minutes=15)).isoformat()))
+    assert absorbing.baseline_data_version == baseline_data_version
     assert materialize_replacement_forecast_live(conn, absorbing).ok is True
-    provisional = replace(
-        absorbing,
-        computed_at=_dt(18, 10),
+    provisional = _refresh_shanghai_owner_request(conn,monkeypatch,replace(
+        positive,
         day0_observed_extreme_c=fast_extreme,
-        day0_observed_extreme_source="aviationweather_metar",
-        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-    )
-    likelihood = (
-        None if bound is None else SimpleNamespace(settlement_extreme_c=bound)
-    )
+    ))
+    valid = fast.build_fast_station_residual_likelihood(conn,city=provisional.city,
+        target_date=str(provisional.target_date),metric=metric,observed_source="aviationweather_metar",
+        observation_time=provisional.day0_observed_extreme_observation_time,decision_time=provisional.computed_at)
+    assert valid is not None and valid.settlement_extreme_c==absorbing_extreme
+    # Keep the normal likelihood and source evidence; inject only the original
+    # malformed bound (or the original weakened candidate boundary).
+    likelihood = None if bound is None else replace(valid,settlement_extreme_c=bound)
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
         lambda *args, **kwargs: likelihood,
@@ -3130,96 +3140,36 @@ def test_fast_residual_frontier_fails_closed_when_bound_cannot_cover_history(
     assert isinstance(reduced, ReplacementForecastMaterializeRequest)
     assert reduced.day0_observed_extreme_c == absorbing_extreme
     assert reduced.day0_observed_extreme_source == "noaa_wrh_zspd"
-    assert reduced.day0_observed_extreme_observation_time == _dt(17, 55).isoformat()
+    assert reduced.day0_observed_extreme_observation_time == absorbing.day0_observed_extreme_observation_time
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_stronger_absorbing_frontier_after_prepare_invalidates_fast_owner(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Final writer revalidation rejects a fast request superseded after prepare."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    prior = replace(
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=21.0,
-            day0_observed_extreme_source="noaa_wrh_zspd",
-            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        ),
-        temperature_metric="low",
-        baseline_data_version=_current_baseline_data_version("low"),
-    )
+    conn, current = _shanghai_noaa_future_request(tmp_path,monkeypatch,metric="low",
+        absorbing_extreme=21.,current_temp_c=20.)
+    prior = _refresh_shanghai_owner_request(conn,monkeypatch,replace(current,
+        computed_at=current.computed_at-timedelta(minutes=10),day0_observed_extreme_c=21.,
+        day0_observed_extreme_source="noaa_wrh_zspd",
+        day0_observed_extreme_observation_time=(current.computed_at-timedelta(minutes=15)).isoformat()))
     assert materialize_replacement_forecast_live(conn, prior).ok is True
-    current = replace(
-        prior,
-        computed_at=_dt(18, 10),
-        day0_observed_extreme_c=20.0,
-        day0_observed_extreme_source="aviationweather_metar",
-        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-    )
-    from src.data.day0_hourly_vectors import Day0HourlyVector
-
-    conn.execute("""CREATE TABLE observation_prints (
-        id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
-        publish_ts_utc TEXT, value_native REAL, unit TEXT,
-        fetched_at_utc TEXT, raw_report TEXT
-    )""")
-    conn.execute(
-        """INSERT INTO observation_prints VALUES
-           (1, 'Shanghai', 'ZSPD', 'aviationweather_metar', ?, 20, 'C', ?, ?)""",
-        (_dt(18, 5).isoformat(), _dt(18, 5).isoformat(),
-         "METAR ZSPD 061805Z 20/15 T02000150"),
-    )
-    vector = Day0HourlyVector(
-        model="ecmwf_ifs", city="Shanghai", target_date="2026-06-07",
-        timezone_name="Asia/Shanghai", captured_at=_dt(18, 8).isoformat(),
-        times=tuple(f"2026-06-07T{hour:02d}:00" for hour in range(24)),
-        temps_c=tuple(20.0 if hour < 12 else 19.0 for hour in range(24)),
-    )
-    monkeypatch.setattr(
-        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
-        lambda _city: ["ecmwf_ifs"],
-    )
-    monkeypatch.setattr(
-        "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-        lambda **_kwargs: [vector],
-    )
-    likelihood_bound = {"value": 21.0}
-    likelihood = SimpleNamespace(
-        residual_weights_c=((0.0, 1.0),),
-        unknown_weight=0.0,
-        settlement_extreme_c=21.0,
-        identity_hash="2" * 64,
-        as_payload=lambda: {
-            "identity_hash": "2" * 64,
-            "settlement_extreme_c": likelihood_bound["value"],
-        },
-    )
-
-    def _likelihood(*_args, **_kwargs):
-        likelihood.settlement_extreme_c = likelihood_bound["value"]
-        return likelihood
-
-    monkeypatch.setattr(
-        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
-        _likelihood,
-    )
+    current = _refresh_shanghai_owner_request(conn,monkeypatch,current)
     witness = _day0_owner_witness(current, seed_file=tmp_path / "fast-owner.json")
     _record_day0_owner(conn, current, witness)
     prepared = _prepare_for_final_write(
         conn, replace(current, day0_enqueue_owner_witness=witness)
     )
 
-    stronger = replace(
+    stronger = _refresh_shanghai_owner_request(conn,monkeypatch,replace(
         prior,
-        computed_at=_dt(18, 8),
+        computed_at=current.computed_at-timedelta(minutes=2),
         day0_observed_extreme_c=19.0,
-        day0_observed_extreme_observation_time=_dt(18, 7).isoformat(),
-    )
+        day0_observed_extreme_observation_time=(current.computed_at-timedelta(minutes=3)).isoformat(),
+    ))
     assert materialize_replacement_forecast_live(conn, stronger).ok is True
     conn.commit()
-    likelihood_bound["value"] = 19.0
 
     conn.execute("BEGIN IMMEDIATE")
     with pytest.raises(
@@ -3228,7 +3178,7 @@ def test_stronger_absorbing_frontier_after_prepare_invalidates_fast_owner(
         materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
     conn.rollback()
 
-    refreshed = _prepare_for_final_write(conn, prepared.request)
+    refreshed = _prepare_for_final_write(conn, _refresh_shanghai_owner_request(conn,monkeypatch,prepared.request))
     conn.execute("BEGIN IMMEDIATE")
     result = materializer_mod.write_prepared_replacement_forecast_live(
         conn, refreshed
