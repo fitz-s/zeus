@@ -1,0 +1,7 @@
+[
+ {"channel":"fmi_wfs","station":"EFHK","parser":"fmi","url":"https://opendata.fmi.fi/wfs"},
+ {"channel":"dwd_cdc","station":"EDDM","parser":"dwd_cdc","url":"https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip","every_n_rounds":2},
+ {"channel":"imgw_synop","station":"EPWA","parser":"imgw_synop","url":"https://danepubliczne.imgw.pl/api/data/synop/id/12375"},
+ {"channel":"pagasa_metar","station":"RPLL","parser":"metar_html","url":"https://www.pagasa.dost.gov.ph/aviation/metar"},
+ {"channel":"aac_metar","station":"MPMG","parser":"panama","url":"https://www.aeronautica.gob.pa/met/met.php?c=metar"}
+]
