@@ -2,7 +2,7 @@ schema_version: 1
 packet: task_2026-09-29_fast_obs_best_source
 status: in_progress
 branch: feat/fast-obs-best-source
-worktree: /Users/leofitz/zeus/.claude/worktrees/fast-obs-best-source-r2
+worktree: /Users/leofitz/zeus/.claude/worktrees/fast-obs-best-source
 in_scope:
 - src/data/day0_fast_obs.py
 - src/data/fmi_airport_temperature.py

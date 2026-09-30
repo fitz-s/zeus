@@ -17,6 +17,34 @@ _LOG = logging.getLogger(__name__)
 _CURSOR_LOCK = threading.Lock()
 _CURSORS = [0, 0]
 
+
+def current_temperature_priority_families() -> dict[tuple[str, str, str], int]:
+    """Read held and resting exposure, including commands not yet projected.
+
+    Two read-only handles, no ATTACH or cross-database write. Reuse the substrate
+    owner's exact command -> snapshot -> condition -> family resolution rather
+    than treating a missing position projection as proof of no resting order.
+    """
+    from contextlib import closing
+    from src.data.replacement_forecast_seed_discovery import held_position_family_priorities
+    from src.data.substrate_observer import _open_rest_scope_rows_for_refresh
+    from src.state.db import get_trade_connection_read_only, get_forecasts_connection_read_only
+
+    priorities = dict(held_position_family_priorities())
+    try:
+        with closing(get_trade_connection_read_only()) as trade:
+            with closing(get_forecasts_connection_read_only()) as forecasts:
+                rests = _open_rest_scope_rows_for_refresh(
+                    trade, forecasts_conn=forecasts, strict=True,
+                )
+        for family, _condition_id in rests:
+            priorities.setdefault(family, 1)
+    except Exception as exc:
+        # The next debt scan retries this read. Do not claim zero resting orders,
+        # suppress other families, or stop serving a previously valid posterior.
+        _LOG.warning("CURRENT_TEMPERATURE_REST_SCOPE_UNAVAILABLE error=%s", type(exc).__name__)
+    return priorities
+
 def current_temperature_delivery_scopes(
     cities: Sequence[Any], *, now: datetime,
     held: Mapping[tuple[str, str, str], int] | None = None,
@@ -24,8 +52,7 @@ def current_temperature_delivery_scopes(
     if now.tzinfo is None:
         raise ValueError("CURRENT_TEMPERATURE_DELIVERY_CLOCK_NAIVE")
     if held is None:
-        from src.data.replacement_forecast_seed_discovery import held_position_family_priorities
-        held = held_position_family_priorities()
+        held = current_temperature_priority_families()
     by_name = {city.name: city for city in cities}
     scopes = {
         (city.name, now.astimezone(ZoneInfo(city.timezone)).date().isoformat(), metric)
@@ -42,9 +69,8 @@ def reconcile_current_temperature_delivery(
     now: datetime | None = None, max_scopes: int = 12,
 ) -> dict[str, object]:
     from src.data.replacement_forecast_production import _enqueue_fusion_upgrade_reseeds_if_needed
-    from src.data.replacement_forecast_seed_discovery import held_position_family_priorities
     now = now or datetime.now(timezone.utc)
-    held = held_position_family_priorities()
+    held = current_temperature_priority_families()
     all_scopes = current_temperature_delivery_scopes(cities, now=now, held=held)
     groups = ([s for s in all_scopes if s in held], [s for s in all_scopes if s not in held])
     selected = []

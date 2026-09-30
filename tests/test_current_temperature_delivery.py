@@ -61,3 +61,47 @@ def test_replay_does_not_require_new_http_or_inprocess_wake(monkeypatch):
     assert len(calls)==2
     assert calls[0]["scopes"]==calls[1]["scopes"]
     assert calls[1]["changed_sources"]==("day0_current_temperature_state",)
+
+
+def test_unprojected_ended_day_rest_remains_in_delivery_scope(monkeypatch, tmp_path):
+    from src.data import physical_current_delivery as delivery
+    from src.state import db
+    trade_path, forecast_path = tmp_path/'trade.db', tmp_path/'forecast.db'
+    with sqlite3.connect(trade_path) as trade:
+        trade.executescript("""
+        CREATE TABLE venue_commands(command_id,position_id,venue_order_id,state,token_id,snapshot_id,intent_kind);
+        CREATE TABLE venue_order_facts(venue_order_id,state,remaining_size,local_sequence);
+        CREATE TABLE position_current(position_id,city,target_date,temperature_metric,condition_id,phase);
+        CREATE TABLE executable_market_snapshots(snapshot_id,condition_id,selected_outcome_token_id,captured_at);
+        INSERT INTO venue_commands VALUES('command','not-projected','venue-order','ACKED','token','snapshot','ENTRY');
+        INSERT INTO venue_order_facts VALUES('venue-order','LIVE',10,1);
+        INSERT INTO executable_market_snapshots VALUES('snapshot','condition','token','2026-09-29T12:00:00Z');
+        """)
+    with sqlite3.connect(forecast_path) as forecasts:
+        forecasts.execute('CREATE TABLE market_events(condition_id,city,target_date,temperature_metric)')
+        forecasts.execute("INSERT INTO market_events VALUES('condition','fixture','2026-09-28','low')")
+    monkeypatch.setattr('src.data.replacement_forecast_seed_discovery.held_position_family_priorities', lambda: {})
+    monkeypatch.setattr(db,'get_trade_connection_read_only', lambda: sqlite3.connect(f'file:{trade_path}?mode=ro',uri=True))
+    monkeypatch.setattr(db,'get_forecasts_connection_read_only', lambda: sqlite3.connect(f'file:{forecast_path}?mode=ro',uri=True))
+    held=delivery.current_temperature_priority_families()
+    assert held == {('fixture','2026-09-28','low'): 1}
+    scopes=delivery.current_temperature_delivery_scopes(
+        (SimpleNamespace(name='fixture',timezone='UTC'),),
+        now=datetime(2026,9,30,12,tzinfo=UTC), held=held,
+    )
+    assert ('fixture','2026-09-28','low') in scopes
+    with sqlite3.connect(trade_path) as trade:
+        assert trade.execute('SELECT COUNT(*) FROM position_current').fetchone()[0] == 0
+        trade.execute("INSERT INTO venue_order_facts VALUES('venue-order','CANCELED',0,2)")
+    assert delivery.current_temperature_priority_families() == {}
+
+
+def test_rest_scope_failure_preserves_known_held_progress(monkeypatch, caplog):
+    from src.data import physical_current_delivery as delivery
+    monkeypatch.setattr('src.data.replacement_forecast_seed_discovery.held_position_family_priorities',
+                        lambda: {('fixture','2026-09-28','high'): 0})
+    def unavailable():
+        raise sqlite3.OperationalError('test unavailable')
+    monkeypatch.setattr('src.state.db.get_trade_connection_read_only', unavailable)
+    assert delivery.current_temperature_priority_families() == {('fixture','2026-09-28','high'): 0}
+    assert 'CURRENT_TEMPERATURE_REST_SCOPE_UNAVAILABLE' in caplog.text
