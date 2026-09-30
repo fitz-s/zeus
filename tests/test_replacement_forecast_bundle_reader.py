@@ -2882,11 +2882,12 @@ def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve() ->
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
 
 
-def test_replacement_bundle_reader_hwm_budget_starts_at_hwm_stage(monkeypatch) -> None:
+def test_replacement_bundle_reader_hwm_budget_starts_at_hwm_stage(
+    monkeypatch, _shanghai_reader_current_certificate,
+) -> None:
     """A slow prior snapshot stage must not consume the independent HWM budget."""
-    conn = _conn()
+    normal = _shanghai_reader_current_certificate
     hwm_conn = sqlite3.connect(":memory:")
-    posterior_id = _insert_posterior(conn)
     clock = [4.0]
 
     def read_hwm(active_conn, **_kwargs):
@@ -2897,20 +2898,10 @@ def test_replacement_bundle_reader_hwm_budget_starts_at_hwm_stage(monkeypatch) -
     monkeypatch.setattr(reader.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(reader, "replacement_live_input_lag_reason", read_hwm)
 
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        enforce_raw_input_hwm=True,
-        raw_input_hwm_conn=hwm_conn,
-        raw_input_hwm_deadline_monotonic=75.0,
-        raw_input_hwm_read_max_seconds=5.0,
-    )
+    result = read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,
+        "raw_input_hwm_conn":hwm_conn,
+        "raw_input_hwm_deadline_monotonic":75.0,
+        "raw_input_hwm_read_max_seconds":5.0})
 
     hwm_conn.close()
     assert result.ok is True
@@ -2918,11 +2909,10 @@ def test_replacement_bundle_reader_hwm_budget_starts_at_hwm_stage(monkeypatch) -
 
 
 def test_replacement_bundle_reader_hwm_never_crosses_outer_deadline(
-    monkeypatch,
+    monkeypatch, _shanghai_reader_current_certificate,
 ) -> None:
-    conn = _conn()
+    normal = _shanghai_reader_current_certificate
     hwm_conn = sqlite3.connect(":memory:")
-    posterior_id = _insert_posterior(conn)
     monkeypatch.setattr(reader.time, "monotonic", lambda: 76.0)
     monkeypatch.setattr(
         reader,
@@ -2930,20 +2920,10 @@ def test_replacement_bundle_reader_hwm_never_crosses_outer_deadline(
         lambda *_args, **_kwargs: pytest.fail("expired HWM stage must not start"),
     )
 
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        enforce_raw_input_hwm=True,
-        raw_input_hwm_conn=hwm_conn,
-        raw_input_hwm_deadline_monotonic=75.0,
-        raw_input_hwm_read_max_seconds=5.0,
-    )
+    result = read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,
+        "raw_input_hwm_conn":hwm_conn,
+        "raw_input_hwm_deadline_monotonic":75.0,
+        "raw_input_hwm_read_max_seconds":5.0})
 
     hwm_conn.close()
     assert result.ok is False
@@ -2953,15 +2933,14 @@ def test_replacement_bundle_reader_hwm_never_crosses_outer_deadline(
 
 
 def test_replacement_bundle_reader_hwm_cleanup_failure_is_not_masked(
-    monkeypatch,
+    monkeypatch, _shanghai_reader_current_certificate,
 ) -> None:
     class FaultedCleanupConnection:
         def set_progress_handler(self, callback, _instructions):
             if callback is None:
                 raise sqlite3.OperationalError("handler cleanup failed")
 
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
+    normal = _shanghai_reader_current_certificate
     monkeypatch.setattr(reader.time, "monotonic", lambda: 1.0)
     monkeypatch.setattr(
         reader,
@@ -2970,28 +2949,17 @@ def test_replacement_bundle_reader_hwm_cleanup_failure_is_not_masked(
     )
 
     with pytest.raises(RuntimeError, match="HWM_READ_CLEANUP_FAILED"):
-        read_replacement_forecast_bundle(
-            conn,
-            baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-            readiness=_readiness(posterior_id=posterior_id),
-            city="Shanghai",
-            target_date="2026-06-07",
-            temperature_metric="high",
-            decision_time=_dt(4),
-            current_bin_topology_hash="topology-hash",
-            enforce_raw_input_hwm=True,
-            raw_input_hwm_conn=FaultedCleanupConnection(),
-            raw_input_hwm_deadline_monotonic=75.0,
-            raw_input_hwm_read_max_seconds=5.0,
-        )
+        read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,
+            "raw_input_hwm_conn":FaultedCleanupConnection(),
+            "raw_input_hwm_deadline_monotonic":75.0,
+            "raw_input_hwm_read_max_seconds":5.0})
 
 
 def test_replacement_bundle_reader_default_hwm_read_preserves_caller_handler(
-    monkeypatch,
+    monkeypatch, _shanghai_reader_current_certificate,
 ) -> None:
-    conn = _conn()
+    normal = _shanghai_reader_current_certificate
     hwm_conn = sqlite3.connect(":memory:")
-    posterior_id = _insert_posterior(conn)
     monkeypatch.setattr(
         reader,
         "replacement_live_input_lag_reason",
@@ -2999,18 +2967,8 @@ def test_replacement_bundle_reader_default_hwm_read_preserves_caller_handler(
     )
     hwm_conn.set_progress_handler(lambda: 1, 1)
 
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        enforce_raw_input_hwm=True,
-        raw_input_hwm_conn=hwm_conn,
-    )
+    result = read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,
+        "raw_input_hwm_conn":hwm_conn})
 
     assert result.ok is True
     with pytest.raises(sqlite3.OperationalError, match="interrupted"):
