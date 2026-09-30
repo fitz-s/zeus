@@ -3141,9 +3141,12 @@ def test_non_day0_partial_cohort_proof_changes_equal_q_posterior_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
-    _install_hko_live_fusion(monkeypatch)
-    fusion = materializer_mod._replacement_bayes_precision_fusion_override()
     request = _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12))
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
+    fusion = materializer_mod._replacement_bayes_precision_fusion_override()
+    anchor_id = materializer_mod._insert_anchor(conn, request, metric="high")
+    assert conn.execute("SELECT artifact_id FROM deterministic_forecast_anchors WHERE anchor_id=?",
+                        (anchor_id,)).fetchone()[0] == request.anchor_artifact_id
     common = {
         "fallback_reason": "configured_current_provider_set_incomplete",
         "configured_coherent_sources": ["icon_global", "ukmo_global_deterministic_10km"],
@@ -3155,11 +3158,11 @@ def test_non_day0_partial_cohort_proof_changes_equal_q_posterior_identity(
             lambda *_args, **_kwargs: replace(fusion, source_clock_one_scheme=scheme),
         )
         computed = materializer_mod._compute_posterior_payload(
-            conn, request, metric="high", anchor_id=17,
+            conn, request, metric="high", anchor_id=anchor_id,
         )
         assert computed.live_eligible
         posterior_id = materializer_mod._write_posterior_row(
-            conn, request, metric="high", anchor_id=17, result=computed,
+            conn, request, metric="high", anchor_id=anchor_id, result=computed,
         )
         assert posterior_id is not None
         return posterior_id, computed.posterior_config_hash, computed.q
@@ -3594,7 +3597,9 @@ def test_materializer_lifts_computed_at_to_source_run_possession(monkeypatch: py
     late_possession = _hko_dt(4, 5)
     # The producer sees the effective possession cut after the request is
     # normalized. Its frozen geometry audit must carry that same cut.
-    _install_hko_live_fusion(monkeypatch, request=replace(request, computed_at=late_possession))
+    owned = _install_hko_live_fusion(
+        monkeypatch, conn=conn, request=replace(request, computed_at=late_possession))
+    request = replace(owned, computed_at=request.computed_at)
     for source_run_id, source_id, track in (
         ("b0-run", "ecmwf_open_data", "mx2t3_high"),
         ("om9-run", "openmeteo_ecmwf_ifs9", "localday_high"),
@@ -4561,7 +4566,7 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
             ),
         ),
     )
-    _install_hko_live_fusion(monkeypatch, request=request)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
     result = materialize_replacement_forecast_live(
         conn,
         request,
@@ -4607,7 +4612,7 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
 
     revised_request = replace(request, computed_at=_hko_dt(18,10), day0_observed_extreme_c=25.6,
                               day0_observed_extreme_observation_time=_hko_dt(18,5).isoformat())
-    _install_hko_live_fusion(monkeypatch, request=revised_request)
+    revised_request = _install_hko_live_fusion(monkeypatch, conn=conn, request=revised_request)
     revised = materialize_replacement_forecast_live(conn, revised_request)
     assert revised.ok is True
     assert revised.posterior_id != result.posterior_id
@@ -5656,8 +5661,15 @@ def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_preserves_openmeteo_artifact_lineage_without_aifs(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
+    # Private setup-only PK allocation: the ordinary anchor writer must INSERT
+    # artifact 11. No artifact tuple/body/clock or certificate is rewritten.
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE artifact_id>=11").fetchone()[0] == 0
+    original_artifacts = tuple(conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    conn.execute("UPDATE sqlite_sequence SET seq=10 WHERE name='raw_forecast_artifacts'")
     request = _hko_request(anchor_artifact_id=11)
-    _install_hko_live_fusion(monkeypatch, request=request)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
+    assert request.anchor_artifact_id == 11
+    assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id<11 ORDER BY artifact_id")) == original_artifacts
 
     result = materialize_replacement_forecast_live(conn, request)
 
@@ -5676,7 +5688,7 @@ def test_materializer_preserves_openmeteo_artifact_lineage_without_aifs(monkeypa
 def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
     request = _hko_request()
-    _install_hko_live_fusion(monkeypatch, request=request)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
 
     result = materialize_replacement_forecast_live(
         conn,
@@ -5757,7 +5769,7 @@ def test_materializer_requires_dependency_source_run_ids_before_writing_shadow_r
 def test_materializer_posterior_available_at_includes_baseline_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
     request = _hko_request(baseline_source_available_at=_hko_dt(3,30), openmeteo_source_available_at=_hko_dt(3))
-    _install_hko_live_fusion(monkeypatch, request=request)
+    request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
 
     result = materialize_replacement_forecast_live(
         conn,
@@ -8720,16 +8732,19 @@ def test_materialize_script_dry_run_matches_readiness_cert_regression(
     import scripts.materialize_replacement_forecast_live as cli
 
     conn = _conn()
+    # Possess the identical normal body before both analysis cuts. The only
+    # later regression is the readiness certificate, not a future artifact.
+    older_request = _hko_request(computed_at=_hko_dt(9), expires_at=_hko_dt(13))
+    older_request = _install_hko_live_fusion(monkeypatch, conn=conn, request=older_request)
     first_request = _hko_request(computed_at=_hko_dt(11), expires_at=_hko_dt(13))
-    _install_hko_live_fusion(monkeypatch, request=first_request)
+    first_request = _install_hko_live_fusion(monkeypatch, conn=conn, request=first_request)
     incumbent = materialize_replacement_forecast_live(
         conn,
         first_request,
     )
     conn.commit()
     before = conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0]
-    older_request = _hko_request(computed_at=_hko_dt(9), expires_at=_hko_dt(13))
-    _install_hko_live_fusion(monkeypatch, request=older_request)
+    older_request = _install_hko_live_fusion(monkeypatch, conn=conn, request=older_request)
     result = cli._dry_run_from_read_snapshot(
         conn,
         older_request,
@@ -10936,8 +10951,8 @@ def test_low_revision_migration_materializes_current_12z_and_rebinds_readiness(
     from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
 
     conn = _low_revision_authority_conn()
-    _install_hko_live_fusion(monkeypatch, request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12))
-    request = _low_revision_request()
+    request = _install_hko_live_fusion(monkeypatch, conn=conn,
+        request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12))
     assert latest_eligible_ensemble_input_cycle(
         conn, city="Hong Kong", target_date=request.target_date,
         metric="low", decision_time=request.computed_at,
@@ -10967,8 +10982,8 @@ def test_low_revision_repeat_materialization_keeps_one_new_certificate(
 ) -> None:
     """The identical 12Z input reuses its posterior and readiness identity."""
     conn = _low_revision_authority_conn()
-    _install_hko_live_fusion(monkeypatch, request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12))
-    request = _low_revision_request()
+    request = _install_hko_live_fusion(monkeypatch, conn=conn,
+        request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12))
 
     first = materialize_replacement_forecast_live(conn, request)
     second = materialize_replacement_forecast_live(conn, request)
@@ -11005,13 +11020,13 @@ def test_low_revision_bundle_consumer_reads_certified_12z_over_retained_18z(
         }
         for raw_id, model in enumerate(("ecmwf_ifs9", "gfs", "icon", "gem", "jma"), 101)
     }
-    _install_hko_live_fusion(
-        monkeypatch, request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12),
+    request = _install_hko_live_fusion(
+        monkeypatch, conn=conn, request=_low_revision_request(), snapshot_id=12, shape_cycle_time=_hko_dt(12),
         current_serving=current_serving,
     )
-    request = _low_revision_request()
     result = materialize_replacement_forecast_live(conn, request)
     assert result.ok is True, result.reason_codes
+    conn.commit()  # Publish the actual row/FK before independent readonly validation.
     cert = conn.execute(
         "SELECT * FROM readiness_state WHERE readiness_id=?", (result.readiness_id,),
     ).fetchone()
