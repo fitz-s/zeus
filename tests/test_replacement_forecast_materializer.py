@@ -3854,20 +3854,13 @@ def test_materializer_rejects_conflicting_day0_zero_and_observed_extreme() -> No
     )
 
 
-def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_materializer_day0_observed_extreme_conditions_q_and_bounds(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn, request = _shanghai_current_owner_request(tmp_path,monkeypatch,observed_extreme=26.)
 
     result = materialize_replacement_forecast_live(
         conn,
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=26.0,
-            day0_observed_extreme_source="noaa_wrh_zspd",
-            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-            day0_observed_extreme_sample_count=12,
-        ),
+        request,
     )
 
     assert result.ok is True
