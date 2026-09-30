@@ -129,3 +129,42 @@ def test_final_submit_gate_is_wired_before_witness_adoption():
     gate = source.index("_assert_final_resting_limit_valid(")
     assert source.index("_assert_final_jit_witness_revalidates_intent(") < gate
     assert gate < source.index("persist_presubmit_jit_snapshot(")
+
+
+def _sell_authority(bid: str, ask: str | None, limit: str = "0.61"):
+    from src.solve.solver import ExecutableSellCurve
+
+    curve = ExecutableSellCurve(
+        token_id="tok",
+        side="YES",
+        snapshot_id="snap",
+        book_hash="hash",
+        levels=(BidBookLevel(price=Decimal(bid), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=timedelta(seconds=30),
+    )
+    proposal = SimpleNamespace(levels=(SimpleNamespace(price=Decimal(limit)),))
+    candidate = SimpleNamespace(
+        execution_mode="MAKER_REST",
+        executable_sell_curve=curve,
+        economic_sell_curve=proposal,
+        native_ask_levels=(
+            () if ask is None else (BookLevel(price=Decimal(ask), size=Decimal("10")),)
+        ),
+    )
+    return SimpleNamespace(jit_candidate=candidate, actuation=None)
+
+
+def test_final_sell_maker_limit_uses_the_same_law():
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+    limit_of = GlobalSellExecutionAuthority.limit_price
+    # Bid retreated below the selected limit: no longer bid+tick, still valid.
+    assert limit_of(_sell_authority("0.58", "0.70")) == Decimal("0.61")
+    assert limit_of(_sell_authority("0.60", None)) == Decimal("0.61")
+    with pytest.raises(ValueError, match="at_or_below_best_bid"):
+        limit_of(_sell_authority("0.61", "0.70"))
+    with pytest.raises(ValueError, match="at_or_above_best_ask"):
+        limit_of(_sell_authority("0.58", "0.61"))

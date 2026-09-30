@@ -42544,7 +42544,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                 }
             }
             if type(self).fail_metadata:
-                book["yes-token"]["asks"] = [{"price": "0.61", "size": "10"}]
+                book["yes-token"]["asks"] = [{"price": "0.62", "size": "10"}]
             return book
 
         def get_held_clob_market_info(self, condition_id, *, timeout=None):
@@ -42606,7 +42606,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                     {"price": price, "size": size}
                     for price, size in bid_levels
                 ],
-                "asks": [{"price": "0.61", "size": "10"}],
+                "asks": [{"price": "0.62", "size": "10"}],
             }
         else:
             assert kwargs["global_sell_prefetched_orderbook"] == {
@@ -42737,7 +42737,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert metadata_fallback.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
     assert metadata_fallback.proof_accepted is True
     assert metadata_fallback.global_jit_candidate.raw_book["asks"] == [
-        {"price": "0.61", "size": "10"}
+        {"price": "0.62", "size": "10"}
     ]
     Clob.ctf_units = 0
     blocked = era._submit_current_global_sell(
@@ -42798,7 +42798,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                             {"price": price, "size": size}
                             for price, size in bid_levels
                         ],
-                        "asks": [{"price": "0.61", "size": "10"}],
+                        "asks": [{"price": "0.62", "size": "10"}],
                     }
                 ),
                 _dt.datetime.now(_dt.timezone.utc).isoformat(), 1,
@@ -43525,6 +43525,71 @@ def test_global_sell_selected_taker_mode_stays_taker_at_jit(
     )
 
     assert rebound.execution_mode == "TAKER_LIMIT"
+
+
+def _maker_sell_jit(bids, asks):
+    event = _global_scope_event(city="Alpha", source_run_id="maker-sell-law")
+    selected = _adapter_sell_actuation(
+        event, bid_levels=(("0.60", "10"),), required_execution_mode="MAKER_REST"
+    ).decision.candidate
+    assert selected.maker_fill_witness.limit_price == Decimal("0.61")
+    authority = _jit_market_authority(selected, tick="0.01", min_order_size="5")
+    return selected, era._global_sell_candidate_from_raw_book(
+        selected,
+        {
+            "asset_id": selected.token_id,
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [{"price": price, "size": "10"} for price in bids],
+            "asks": [{"price": price, "size": "10"} for price in asks],
+        },
+        captured_at_utc=authority.snapshot.captured_at,
+        market_authority=authority,
+    )
+
+
+@pytest.mark.parametrize(
+    ("bids", "asks"),
+    (
+        (("0.58",), ("0.70",)),  # bid retreat
+        (("0.60",), ("0.64",)),  # ask flicker down, still above the limit
+        (("0.60",), ()),  # ask vanished: open upper bound
+    ),
+    ids=("bid-retreat", "ask-flicker", "ask-absent"),
+)
+def test_global_sell_jit_keeps_selected_maker_limit_inside_spread(bids, asks):
+    selected, rebound = _maker_sell_jit(bids, asks)
+
+    assert rebound.execution_mode == "MAKER_REST"
+    assert rebound.proposal_sell_curve.levels[0].price == Decimal("0.61")
+    assert rebound.maker_fill_witness.limit_price == Decimal("0.61")
+    assert rebound.maker_fill_witness.outcomes == (
+        selected.maker_fill_witness.outcomes
+    )
+    from src.solve.solver import _maker_witness_rejection
+
+    assert _maker_witness_rejection(
+        rebound, decision_at_utc=rebound.book_captured_at_utc
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("bids", "asks"),
+    (
+        (("0.61",), ("0.70",)),  # bid rises to the limit
+        (("0.63",), ("0.70",)),  # bid rises through the limit
+        (("0.58",), ("0.61",)),  # ask falls to the limit
+    ),
+    ids=("bid-at-limit", "bid-above-limit", "ask-at-limit"),
+)
+def test_global_sell_jit_maker_limit_outside_current_spread_rejects(bids, asks):
+    with pytest.raises(ValueError) as exc_info:
+        _maker_sell_jit(bids, asks)
+
+    assert str(exc_info.value) == (
+        "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:"
+        "ValueError:current_limit_or_cashflow_changed"
+    )
 
 
 def _current_maker_buy_candidate(*, side: str = "YES") -> GlobalSingleOrderCandidate:

@@ -3427,10 +3427,16 @@ class GlobalSellExecutionAuthority:
                 "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:"
                 f"best_bid={best_bid}:tick={curve.min_tick}"
             ) from exc
-        if bounded <= best_bid:
-            raise ValueError("GLOBAL_SELL_MAKER_PRICE_NOT_PASSIVE")
-        if bounded != best_bid + Decimal(curve.min_tick):
-            raise ValueError("GLOBAL_SELL_MAKER_PRICE_NOT_NEAREST_TICK")
+        from src.contracts.venue_submission_envelope import resting_limit_violation
+
+        asks = tuple(getattr(candidate, "native_ask_levels", ()) or ())
+        violation = resting_limit_violation(
+            bounded,
+            best_bid=best_bid,
+            best_ask=asks[0].price if asks else None,
+        )
+        if violation is not None:
+            raise ValueError(f"GLOBAL_SELL_MAKER_PRICE_NOT_PASSIVE:{violation}")
         return bounded
 
     def maker_limit_price(self) -> Decimal:
