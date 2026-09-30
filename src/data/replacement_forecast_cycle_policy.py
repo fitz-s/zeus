@@ -436,6 +436,74 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
         return False
 
 
+DAY0_FAST_RESIDUAL_COVERAGE_REVISION = "target_bound_fast_residual_v1"
+
+
+def declares_fast_residual_carrier(provenance: object) -> bool:
+    """Recognize the source role, including incomplete FAST declarations."""
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+    try:
+        payload = json.loads(provenance) if isinstance(provenance, str) else provenance
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+    if payload.get("q_shape") == "fused_day0_fast_residual_likelihood":
+        return True
+    return any(isinstance(payload.get(key), Mapping) and (
+        payload[key].get("source") == DAY0_WU_FAST_RESIDUAL_SOURCE
+        or "fast_residual_likelihood" in payload[key]
+    ) for key in ("day0_provisional_observation", "day0_conditioning"))
+
+
+def fast_residual_carrier_authority_reason(
+    provenance: object, *, city: object, target_date: object, metric: object,
+    materialized_at: object,
+) -> str | None:
+    """Use the public reader's complete FAST replay with independent row scope."""
+    if not declares_fast_residual_carrier(provenance):
+        return None
+    # SCOPE: this declared FAST city/date/metric posterior, including partial
+    # claims. DRAIN: ordinary target-aware materialization; RESET: its new
+    # source/channel/content proof reproduces at the independent computed cut.
+    try:
+        payload = json.loads(provenance) if isinstance(provenance, str) else provenance
+        if not isinstance(payload.get("day0_provisional_observation"), Mapping):
+            raise ValueError("FAST observation missing")
+        if not isinstance(city, str) or not city or not target_date or metric not in ("high", "low"):
+            raise ValueError("independent FAST scope missing")
+        if isinstance(materialized_at, datetime):
+            cut = materialized_at
+        elif isinstance(materialized_at, str) and _STRICT_AWARE_ISO_RE.fullmatch(materialized_at):
+            cut = datetime.fromisoformat(materialized_at.replace("Z", "+00:00"))
+        else:
+            raise ValueError("independent FAST cut missing")
+        if cut.tzinfo is None or cut.utcoffset() is None:
+            raise ValueError("independent FAST cut naive")
+        # Runtime import: the reader itself imports this policy module.
+        from src.data.replacement_forecast_bundle_reader import _wu_fast_pinned_carrier_reason
+
+        return _wu_fast_pinned_carrier_reason(payload, city=city, target_date=target_date,
+            metric=metric, decision_time=cut.astimezone(UTC))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
+
+
+def fast_residual_coverage_dependency(*, city: str, target_date: str) -> dict[str, str]:
+    """Stable route and target-owned product channel; not probability authority."""
+    from src.config import cities_by_name, settlement_source_type_for_city
+
+    city_obj = cities_by_name[city]
+    station = str(city_obj.wu_station).strip().upper()
+    source_type = settlement_source_type_for_city(city_obj, target_date)
+    if not station or source_type not in ("noaa", "wu_icao"):
+        raise ValueError("FAST target has no owned product channel")
+    return {"revision": DAY0_FAST_RESIDUAL_COVERAGE_REVISION,
+        "settlement_channel": "wu_icao_history" if source_type == "wu_icao"
+        else f"noaa_wrh_{station.lower()}"}
+
+
 def _current_evidence_shape_has_probability_authority(
     provenance: object, *, materialized_at: object = None, city: object = None, target_date: object = None,
     metric: object = None, anchor_id: object = None, request_anchor_artifact_id: object = None,
@@ -446,6 +514,9 @@ def _current_evidence_shape_has_probability_authority(
     from src.events.day0_authority import current_day0_remaining_center_policy_has_authority
 
     if not current_day0_remaining_center_policy_has_authority(provenance):
+        return False
+    if fast_residual_carrier_authority_reason(provenance, city=city, target_date=target_date,
+        metric=metric, materialized_at=materialized_at) is not None:
         return False
     shape = _current_evidence_shape(provenance)
     if shape is None:

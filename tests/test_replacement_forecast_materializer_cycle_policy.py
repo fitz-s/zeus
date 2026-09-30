@@ -754,6 +754,84 @@ def test_same_raw_live_policy_transition_retries_without_mtime_churn(tmp_path, m
     physical.close()
 
 
+@pytest.mark.parametrize("unit", ("C", "F"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_fast_coverage_replays_complete_carrier_and_rejects_partial_scope(unit, metric):
+    """Pure current source serializer, not a full forecast/public-physics license."""
+    import copy
+    from tests.test_day0_remaining_day_pricing import _current_fast_source_bundle
+    from src.data.replacement_forecast_cycle_policy import (
+        declares_fast_residual_carrier, fast_residual_carrier_authority_reason,
+    )
+
+    _, bundle, family, cut = _current_fast_source_bundle(unit=unit, metric=metric)
+    proof = bundle.provenance_json
+    scope = dict(city=family.city, target_date=family.target_date, metric=metric, materialized_at=cut)
+    assert declares_fast_residual_carrier(proof)
+    assert fast_residual_carrier_authority_reason(proof, **scope) is None
+    assert fast_residual_carrier_authority_reason(json.dumps(proof), **scope) is None
+    for key, value in (("city", None), ("city", "Shanghai"), ("target_date", None),
+        ("metric", "low" if metric == "high" else "high"), ("metric", None),
+        ("materialized_at", None), ("materialized_at", cut.replace(tzinfo=None)),
+        ("materialized_at", cut - timedelta(minutes=5))):
+        assert fast_residual_carrier_authority_reason(proof, **{**scope, key: value}) is not None
+    partials = [
+        {"q_shape": "fused_day0_fast_residual_likelihood"},
+        {"day0_provisional_observation": {"source": "wu_api+same_station_fast_tail"}},
+        {"day0_conditioning": {"fast_residual_likelihood": {}}},
+    ]
+    for missing in ("day0_provisional_observation", "day0_remaining_carrier_content_identity",
+        "day0_remaining_carrier_q", "day0_remaining_carrier_probability_samples"):
+        changed = copy.deepcopy(proof)
+        changed.pop(missing)
+        partials.append(changed)
+    for key, value in (("day0_preliminary_report_survival_likelihood", {"survival_probability": .5}),
+        ("day0_remaining_carrier_q", [1.0]), ("day0_remaining_center_bias_c", .5)):
+        partials.append({**proof, key: value})
+    for changed in partials:
+        assert declares_fast_residual_carrier(changed)
+        assert fast_residual_carrier_authority_reason(changed, **scope) is not None
+    ordinary = {"q_shape": "ordinary", "day0_provisional_observation": {"source": "aviationweather_metar"}}
+    assert not declares_fast_residual_carrier(ordinary)
+    assert fast_residual_carrier_authority_reason(ordinary, city=None, target_date=None,
+        metric=None, materialized_at=None) is None
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_fast_coverage_uses_real_before_and_after_target_product_contract(monkeypatch, metric):
+    """Reuse normal product parsers/20-pair identities; no forecast license claim."""
+    import copy
+    from tests.test_day0_fast_obs_lane import test_scoped_carrier_replay_rejects_a_self_consistent_other_target_product
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data.replacement_forecast_cycle_policy import (
+        fast_residual_carrier_authority_reason, fast_residual_coverage_dependency,
+    )
+
+    captured = []
+    original = reader._wu_fast_pinned_carrier_reason
+
+    def traced(proof, **scope):
+        result = original(proof, **scope)
+        captured.append((copy.deepcopy(proof), dict(scope), result))
+        return result
+
+    with monkeypatch.context() as replay:
+        replay.setattr(reader, "_wu_fast_pinned_carrier_reason", traced)
+        test_scoped_carrier_replay_rejects_a_self_consistent_other_target_product(monkeypatch, metric)
+    for proof, scope, result in captured:
+        assert fast_residual_carrier_authority_reason(proof, city=scope["city"],
+            target_date=scope["target_date"], metric=scope["metric"],
+            materialized_at=scope["decision_time"]) == result
+    assert any(result is None for _, _, result in captured)
+    assert any(result is not None for _, _, result in captured)
+    before = fast_residual_coverage_dependency(city="Shanghai", target_date="2026-08-23")
+    on = fast_residual_coverage_dependency(city="Shanghai", target_date="2026-08-24")
+    later = fast_residual_coverage_dependency(city="Shanghai", target_date="2026-10-01")
+    assert before["settlement_channel"] == "wu_icao_history"
+    assert on["settlement_channel"] == later["settlement_channel"] == "noaa_wrh_zspd"
+    assert before["revision"] == on["revision"] == later["revision"]
+
+
 def test_day0_v3_coverage_rejects_malformed_provider_and_infinite_value() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute(

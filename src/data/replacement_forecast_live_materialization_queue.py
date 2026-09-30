@@ -1291,10 +1291,14 @@ def _seed_already_covered(
             provenance = json.loads(str(posterior["provenance_json"] or "{}"))
         except (TypeError, ValueError):
             return False
-        from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
+        from src.data.replacement_forecast_cycle_policy import (
+            current_evidence_shape_has_held_authority, declares_fast_residual_carrier,
+        )
         from src.data.station_ground_evidence import forecast_db_from_connection
         fusion = provenance.get("bayes_precision_fusion") if isinstance(provenance, Mapping) else None
-        if isinstance(fusion, Mapping) and "current_evidence_shape" in fusion:
+        if declares_fast_residual_carrier(provenance) or (
+            isinstance(fusion, Mapping) and "current_evidence_shape" in fusion
+        ):
             if not current_evidence_shape_has_held_authority(provenance, materialized_at=posterior["computed_at"],
                 city=city,target_date=target_date,metric=metric,anchor_id=posterior["openmeteo_anchor_id"],
                 forecast_db=forecast_db_from_connection(conn)):
@@ -3020,6 +3024,37 @@ def _blocked_attempt_fingerprint(
         conn = _queue_read_only_connection(db_path)
         try:
             conn.execute("PRAGMA query_only=ON")
+            from src.data.replacement_forecast_cycle_policy import (
+                declares_fast_residual_carrier, fast_residual_coverage_dependency,
+            )
+            from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+            fast_declared = declares_fast_residual_carrier(payload) or (
+                payload.get("day0_observed_extreme_source") == DAY0_WU_FAST_RESIDUAL_SOURCE
+            )
+            posterior_columns = {str(row[1]) for row in conn.execute(
+                "PRAGMA table_info(forecast_posteriors)")}
+            if {"source_id", "city", "target_date", "temperature_metric", "computed_at",
+                "posterior_id", "provenance_json"}.issubset(posterior_columns):
+                recorded_clause = (
+                    "AND julianday(recorded_at) <= julianday(?)"
+                    if "recorded_at" in posterior_columns else ""
+                )
+                params = (SOURCE_ID, *scope, computed_at.isoformat())
+                if recorded_clause:
+                    params += (computed_at.isoformat(),)
+                row = conn.execute(f"""
+                    SELECT provenance_json FROM forecast_posteriors
+                    WHERE source_id=? AND city=? AND target_date=? AND temperature_metric=?
+                      AND julianday(computed_at) <= julianday(?) {recorded_clause}
+                    ORDER BY computed_at DESC, posterior_id DESC LIMIT 1
+                    """, params).fetchone()
+                if row is not None:
+                    fast_declared |= declares_fast_residual_carrier(json.loads(row[0]))
+            fast_coverage_dependency = (
+                fast_residual_coverage_dependency(city=scope[0], target_date=scope[1])
+                if fast_declared else None
+            )
             missing_sources = _source_clock_missing_configured_sources(conn, payload)
             from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
                 scheme_for_city,
@@ -3153,8 +3188,7 @@ def _blocked_attempt_fingerprint(
             logic_revisions[path.name] = None
     from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
 
-    canonical = json.dumps(
-        {
+    identity = {
             "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
             "request": {
                 key: value
@@ -3173,7 +3207,14 @@ def _blocked_attempt_fingerprint(
                 "day0_hourly_frontier": day0_hourly_frontier,
             },
             "logic": logic_revisions,
-        },
+        }
+    # Only this exact FAST scope changes when its target-owned channel/reader
+    # route changes. Old suppression retries once; current repeats stay stable.
+    # Ordinary families acquire no unrelated source-policy fingerprint field.
+    if fast_coverage_dependency is not None:
+        identity["fast_residual_coverage"] = fast_coverage_dependency
+    canonical = json.dumps(
+        identity,
         sort_keys=True,
         separators=(",", ":"),
         default=str,

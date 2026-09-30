@@ -1,6 +1,8 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-15
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-15; last_reused=2026-09-15
+# Purpose: Verify exact posterior probability authority cannot mask normal seed repair.
+# Reuse: Inspect source-bound coverage and current Day0 carrier contracts before reuse.
+# Last reused or audited: 2026-09-30
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (#1 graceful-degradation:
 #   readiness expiring + no fresher cycle => re-materialize from newest persisted cycle) +
 #   tradeable-grade coverage antibody (a NULL-q_lcb / untradeable posterior must not satisfy the
@@ -27,6 +29,7 @@ unconstructible (Fitz: make the wrong state unrepresentable, not patch each inst
 
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import sqlite3
@@ -1053,3 +1056,214 @@ def test_recompute_seed_requires_posterior_at_or_after_requested_clock(
     if conditioned:
         seed["day0_observed_extreme_c"] += 1.0
         assert _seed_already_covered(forecast_db=db_path, seed=seed) is False
+
+
+@pytest.fixture
+def _normal_kord_fast_coverage(tmp_path, monkeypatch):
+    """Actual physical/collector/FAST writers; only external forecast bytes controlled."""
+    from dataclasses import replace
+    from tests.integration import test_w3_solve_seam_g3 as normal
+    from src.data import day0_fast_obs as fast, day0_hourly_vectors as hourly
+    from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
+
+    native = normal._noaa_native_sources.__wrapped__(tmp_path, monkeypatch)
+    next(native)
+    fixture = None
+    try:
+        fixture = normal._kord_normal_prior_fixture(tmp_path, monkeypatch)
+        normal._kord_public_bundles(fixture, monkeypatch, at=fixture.cut)
+        ordinary_seed = dict(city=fixture.request.city, target_date=str(fixture.request.target_date),
+            temperature_metric=fixture.request.temperature_metric, computed_at=fixture.cut.isoformat(),
+            baseline_source_run_id=fixture.request.baseline_source_run_id,
+            openmeteo_source_run_id=fixture.request.openmeteo_source_run_id,
+            source_cycle_time=fixture.request.source_cycle_time.isoformat())
+        assert _seed_already_covered(forecast_db=fixture.db, forecast_conn=fixture.conn, seed=ordinary_seed)
+        fixture.conn.execute("PRAGMA query_only=OFF")
+        from src.data import replacement_forecast_cycle_policy as policy
+        from src.data.replacement_forecast_live_materialization_queue import _blocked_attempt_fingerprint
+        ordinary_fp = _blocked_attempt_fingerprint(input_json=tmp_path / "seed.json",
+            forecast_db=fixture.db, payload=ordinary_seed)
+        assert ordinary_fp is not None
+        with monkeypatch.context() as old_route:
+            old_route.setattr(policy, "DAY0_FAST_RESIDUAL_COVERAGE_REVISION", "previous-FAST-reader-route")
+            assert _blocked_attempt_fingerprint(input_json=tmp_path / "seed.json",
+                forecast_db=fixture.db, payload=ordinary_seed) == ordinary_fp
+        cut, conditioning = normal._kord_causal_fast_inputs(fixture, monkeypatch)
+        fixture.request = replace(fixture.request, computed_at=cut, day0_observation_state=None,
+            day0_observed_extreme_c=conditioning.observed_extreme_c,
+            day0_observed_extreme_source=fast.FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+            day0_observed_extreme_observation_time=conditioning.observation_time,
+            day0_observed_extreme_sample_count=conditioning.sample_count,
+            day0_observed_extreme_unit=conditioning.unit)
+        calls = []
+        builder = hourly.build_day0_remaining_probability_carrier
+
+        def traced(**kwargs):
+            calls.append(copy.deepcopy(kwargs))
+            return builder(**kwargs)
+
+        with monkeypatch.context() as trace:
+            trace.setattr(hourly, "build_day0_remaining_probability_carrier", traced)
+            fixture.sql_clock[0] = cut
+            fixture.result = materialize_replacement_forecast_live(fixture.conn, fixture.request)
+            assert fixture.result.ok, fixture.result.reason_codes
+            fixture.conn.commit()
+            normal._kord_public_bundles(fixture, monkeypatch, at=cut)
+        fixture.cut = cut
+        fixture.base_builder_inputs = calls[-1]
+        yield fixture
+    finally:
+        if fixture is not None:
+            fixture.conn.close()
+            fixture.builtin.close()
+        next(native, None)
+
+
+def test_normal_fast_wrong_channel_cannot_cover_its_seed(_normal_kord_fast_coverage, monkeypatch, tmp_path):
+    """Self-consistent foreign product proof cannot starve this family's normal repair."""
+    from src.data import day0_fast_obs as fast, day0_hourly_vectors as hourly
+    from src.data.replacement_forecast_bundle_reader import _wu_fast_pinned_carrier_reason
+    from src.data.replacement_forecast_current_target_plan import _covering_posterior_input_lag_reason
+    from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src import config
+
+    fixture = _normal_kord_fast_coverage
+    conn, request = fixture.conn, fixture.request
+    seed = dict(city=request.city, target_date=str(request.target_date),
+        temperature_metric=request.temperature_metric, computed_at=fixture.cut.isoformat(),
+        baseline_source_run_id=request.baseline_source_run_id,
+        openmeteo_source_run_id=request.openmeteo_source_run_id)
+    row = dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (fixture.result.posterior_id,)).fetchone())
+    proof = json.loads(row["provenance_json"])
+    assert _seed_already_covered(forecast_db=fixture.db, forecast_conn=conn, seed=seed)
+    columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(forecast_posteriors)")}
+    clause = tradeable_grade_coverage_sql(posterior_columns=columns, decision_time=fixture.cut, alias="p.")
+
+    def plan_reason():
+        return _covering_posterior_input_lag_reason(conn, city=request.city,
+            target_date=str(request.target_date), temperature_metric=request.temperature_metric,
+            decision_time=fixture.cut, baseline_source_run_id=request.baseline_source_run_id,
+            openmeteo_source_run_id=request.openmeteo_source_run_id,
+            posterior_tradeable_grade_clause=clause)
+
+    assert plan_reason() is None
+    raw_before = [tuple(item) for item in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
+    fp_payload = {**seed, "source_cycle_time": request.source_cycle_time.isoformat()}
+    dumped = []
+    real_dumps = json.dumps
+
+    def capture_identity(value, *args, **kwargs):
+        if isinstance(value, dict) and "logic" in value and "raw" in value and "request" in value:
+            dumped.append(copy.deepcopy(value))
+        return real_dumps(value, *args, **kwargs)
+
+    with monkeypatch.context() as identity_trace:
+        identity_trace.setattr(queue.json, "dumps", capture_identity)
+        current_fp = queue._blocked_attempt_fingerprint(input_json=tmp_path / "seed.json",
+            forecast_db=fixture.db, payload=fp_payload)
+    assert current_fp is not None and len(dumped) == 1
+    dependency = dumped[0].pop("fast_residual_coverage")
+    assert dependency["settlement_channel"] == "noaa_wrh_kord"
+    # Exact pre-fix fingerprint format: every original component unchanged,
+    # only the new stable FAST route dependency was absent.
+    old_fp = hashlib.sha256(real_dumps(dumped[0], sort_keys=True,
+        separators=(",", ":"), default=str).encode()).hexdigest()
+    assert old_fp != current_fp
+    marker_dir = tmp_path / "blocked"
+    marker_dir.mkdir()
+    marker = queue._blocked_attempt_marker_path(marker_dir, fp_payload)
+    marker.write_text(real_dumps({"attempt_fingerprint": old_fp}))
+    assert queue._blocked_attempt_state(marker_dir=marker_dir, input_json=tmp_path / "seed.json",
+        forecast_db=fixture.db, payload=fp_payload)[2] is False
+    marker.write_text(real_dumps({"attempt_fingerprint": current_fp}))
+    assert queue._blocked_attempt_state(marker_dir=marker_dir, input_json=tmp_path / "seed.json",
+        forecast_db=fixture.db, payload=fp_payload)[2] is True
+    wrong = copy.deepcopy(proof)
+    likelihood = wrong["day0_provisional_observation"]["fast_residual_likelihood"]
+    likelihood["settlement_channel"] = "wu_icao_history"
+    fields = ("semantics_revision", "station_id", "settlement_channel", "fast_channel", "unit",
+        "as_of", "window_start", "matched_pairs", "unknown_weight", "settlement_extreme_c")
+    identity = {key: likelihood[key] for key in fields}
+    identity["residual_weights_c"] = tuple((item["residual_c"], item["weight"])
+        for item in likelihood["residual_weights_c"])
+    likelihood["identity_hash"] = hashlib.sha256(json.dumps(identity, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    assert fast.validated_fast_residual_day0_conditioning(wrong["day0_provisional_observation"]) is not None
+    inputs = copy.deepcopy(fixture.base_builder_inputs)
+    inputs["identity_inputs"]["preliminary_survival_identity"] = likelihood["identity_hash"]
+    rebuilt = hourly.build_day0_remaining_probability_carrier(**inputs)
+    wrong.update(day0_remaining_carrier_content_identity=rebuilt["content_identity"],
+        day0_remaining_carrier_q=rebuilt["q"], day0_remaining_carrier_probability_samples=rebuilt["samples"])
+    scope = dict(city=request.city, target_date=str(request.target_date),
+        metric=request.temperature_metric, decision_time=fixture.cut)
+    assert _wu_fast_pinned_carrier_reason(wrong, **scope) is not None
+    owner = config.settlement_source_type_for_city
+    with monkeypatch.context() as foreign_contract:
+        foreign_contract.setattr(config, "settlement_source_type_for_city",
+            lambda city, target: "wu_icao" if city.name == "Chicago" else owner(city, target))
+        assert _wu_fast_pinned_carrier_reason(wrong, **scope) is None
+    # Hostile proof corruption is only in this private fixture. Production
+    # repair must append a normal successor, never update the damaged row.
+    conn.execute("PRAGMA query_only=OFF")
+    conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+        (json.dumps(wrong), row["posterior_id"]))
+    conn.commit()
+    damaged = dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (row["posterior_id"],)).fetchone())
+    assert not _seed_already_covered(forecast_db=fixture.db, forecast_conn=conn, seed=seed)
+    assert plan_reason() == "basis=current_evidence_probability_authority_invalid"
+    from src.data.replacement_forecast_bundle_reader import (
+        read_replacement_forecast_bundle, ReplacementForecastAuthorityPurpose,
+    )
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    ready = latest_replacement_readiness(conn, city=request.city, target_date=str(request.target_date),
+        temperature_metric=request.temperature_metric, decision_time=fixture.cut)
+    from src.data import replacement_forecast_bundle_reader as reader
+
+    class ClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+
+    class ReaderClock(datetime, metaclass=ClockType):
+        @classmethod
+        def now(cls, tz=None):
+            return fixture.cut.astimezone(tz) if tz else fixture.cut.replace(tzinfo=None)
+
+    with monkeypatch.context() as consumer:
+        consumer.setattr(reader, "datetime", ReaderClock)
+        for purpose in ReplacementForecastAuthorityPurpose:
+            refused = read_replacement_forecast_bundle(conn, baseline_bundle=None, readiness=ready,
+                city=request.city, target_date=str(request.target_date), temperature_metric=request.temperature_metric,
+                decision_time=fixture.cut, require_baseline_bundle=False, enforce_raw_input_hwm=True,
+                authority_purpose=purpose)
+            assert refused.bundle is None
+            assert refused.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+    from dataclasses import replace
+    from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
+    from tests.integration.test_w3_solve_seam_g3 import _kord_public_bundles
+
+    conn.execute("PRAGMA query_only=OFF")
+    new_cut = fixture.cut + timedelta(minutes=1)
+    fixture.sql_clock[0] = new_cut
+    fixture.request = replace(request, computed_at=new_cut)
+    fixture.result = materialize_replacement_forecast_live(conn, fixture.request)
+    assert fixture.result.ok, fixture.result.reason_codes
+    assert fixture.result.posterior_id != row["posterior_id"]
+    conn.commit()
+    _kord_public_bundles(fixture, monkeypatch, at=new_cut)
+    new_seed = {**seed, "computed_at": new_cut.isoformat()}
+    assert _seed_already_covered(forecast_db=fixture.db, forecast_conn=conn, seed=new_seed)
+    assert _seed_already_covered(forecast_db=fixture.db, forecast_conn=conn, seed=new_seed)
+    repaired = dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (fixture.result.posterior_id,)).fetchone())
+    assert repaired["computed_at"] != damaged["computed_at"]
+    assert repaired["provenance_json"] != damaged["provenance_json"]
+    assert json.loads(repaired["provenance_json"])["day0_provisional_observation"]["fast_residual_likelihood"][
+        "settlement_channel"] == "noaa_wrh_kord"
+    for field in ("source_cycle_time", "source_available_at"):
+        assert repaired[field] == damaged[field]
+    assert dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (row["posterior_id"],)).fetchone()) == damaged
+    assert [tuple(item) for item in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == raw_before

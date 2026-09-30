@@ -2268,7 +2268,10 @@ def _covering_posterior_input_lag_reason(
     # a malformed 64-hex hash must not mask its own normal materialization drain.
     provenance = _json_object(row["provenance_json"])
     fusion = provenance.get("bayes_precision_fusion")
-    if isinstance(fusion, Mapping) and "current_evidence_shape" in fusion:
+    from src.data.replacement_forecast_cycle_policy import declares_fast_residual_carrier
+    if declares_fast_residual_carrier(provenance) or (
+        isinstance(fusion, Mapping) and "current_evidence_shape" in fusion
+    ):
         from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
         from src.data.station_ground_evidence import forecast_db_from_connection
         if not current_evidence_shape_has_held_authority(provenance, materialized_at=row["computed_at"],
