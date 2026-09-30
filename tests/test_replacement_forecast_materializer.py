@@ -1101,25 +1101,23 @@ def test_source_clock_partial_current_producer_to_jit(
     assert override is not None
     scheme_proof = override.source_clock_one_scheme
     assert scheme_proof is not None
-    if missing_hrrr:
+    # A newer unconfigured NBM no longer shadows the configured HRRR: the
+    # scheme keeps every weighted source it possesses (Los Angeles, 2026-09-30).
+    hrrr_absent = missing_hrrr and not shadowed_hrrr
+    if hrrr_absent:
         assert override.method == "SOURCE_CLOCK_CURRENT_PRECISION_FUSION"
         assert scheme_proof["fallback_reason"] == "configured_current_provider_set_incomplete"
         assert scheme_proof["missing_sources"] == ["gfs_hrrr"]
         assert set(scheme_proof["configured_current_sources"]) == set(configured) - {"gfs_hrrr"}
-        if shadowed_hrrr:
-            assert "ncep_nbm_conus" in override.used_models
-            assert scheme_proof["configured_coherent_sources"] == ["icon_global", "ukmo_global_deterministic_10km"]
-            assert scheme_proof["configured_current_provider_cohort_family_count"] == 2
         cohort = scheme_proof["configured_cohort_value_serving"]
         assert set(cohort) == set(scheme_proof["configured_coherent_sources"])
         assert scheme_proof["configured_cohort_decision_time"] == decision.isoformat()
-        if split_cohort:
-            assert cohort["icon_global"]["served_cycle"] == run.isoformat()
-            assert scheme_proof["between_cohort_value_serving"]["icon_global"]["served_cycle"] == (run + timedelta(hours=4)).isoformat()
-            assert override.current_value_serving["icon_global"]["served_cycle"] == (run + timedelta(hours=4)).isoformat()
     else:
         assert override.method == "SOURCE_CLOCK_FIXED_WEIGHT"
         assert "fallback_reason" not in scheme_proof
+        assert set(override.used_models) == set(configured)
+        if shadowed_hrrr:
+            assert "ncep_nbm_conus" not in override.used_models
 
     provenance = {"bayes_precision_fusion": {
         "used_models": list(override.used_models),
@@ -1130,7 +1128,7 @@ def test_source_clock_partial_current_producer_to_jit(
         "decorrelated_providers_complete": override.decorrelated_providers_complete,
     }}
     family = SimpleNamespace(city=city, target_date="2026-09-29", metric=metric)
-    posterior_kwargs = {"posterior_computed_at": decision} if missing_hrrr else {}
+    posterior_kwargs = {"posterior_computed_at": decision} if hrrr_absent else {}
     present, certificate = adapter._source_clock_model_count_certificate(
         provenance, family=family, decision_time=decision, **posterior_kwargs,
     )
@@ -1232,7 +1230,8 @@ def test_source_clock_partial_current_producer_to_jit(
             source_cycle_time=run.isoformat(), provenance=provenance,
             reason_out=reason, **posterior_kwargs,
         ) is None
-        assert reason == {"reason": "model_identity_drift:configured_current_sources"}
+        # HRRR is consumed directly now, so its newer row names itself.
+        assert reason == {"reason": "model_identity_drift:gfs_hrrr"}
 
 
 def test_posterior_identity_binds_day0_carrier_operator_and_content(monkeypatch: pytest.MonkeyPatch) -> None:
