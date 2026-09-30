@@ -7637,7 +7637,6 @@ def _process_pending_cancelled(
     producer_fast_path: bool,
     urgent_wake_pending: Callable[[], bool],
     urgent_day0_pending: Callable[[], bool] | None,
-    generic_completion_latch_cancelled: Callable[[], bool] | None = None,
     exact_held_completion: bool = False,
 ) -> Callable[[], bool]:
     base_cancelled = (
@@ -7648,16 +7647,6 @@ def _process_pending_cancelled(
     def cancelled() -> bool:
         if base_cancelled is not None and base_cancelled():
             return True
-        if (
-            generic_completion_latch_cancelled is not None
-        ):
-            if generic_completion_latch_cancelled():
-                return True
-            if _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set():
-                return True
-            # Deadline/unknown exact debt cancels above and leaves the durable
-            # generic wake pending.
-            return False
         # SCOPE: only an ordinary replayable cycle; exact held completion and
         # committed Day0 hard-fact work are protected. DRAIN: the ordinary cut
         # exits at this safe checkpoint and the durable exact wake owns the next
@@ -8597,53 +8586,6 @@ def _reserve_global_auction_completion(completion_due: bool) -> bool:
             "global auction economic-cut completion reserved"
         )
     return due
-
-
-def _try_latch_generic_held_completion(
-    *,
-    qualified: bool,
-    durable_exact_completion_pending: Callable[[], bool] | None,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> float | None:
-    """Return one bounded generic-completion deadline.
-
-    The caller supplies the already-strict aggregate qualification. An
-    unreadable/new exact completion never receives this exception. The
-    returned deadline is absolute and is not renewed by later stages.
-    """
-
-    if not qualified or durable_exact_completion_pending is None:
-        return None
-    try:
-        if durable_exact_completion_pending():
-            return None
-    except Exception:  # noqa: BLE001 - unknown debt cannot receive priority.
-        return None
-    from src.execution.exit_lifecycle import (
-        GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS,
-    )
-
-    return monotonic() + GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
-
-
-def _generic_held_completion_latch_cancelled(
-    *,
-    deadline_monotonic: float | None,
-    durable_exact_completion_pending: Callable[[], bool] | None,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> bool:
-    """Cancel a latched generic cut at expiry or on new/unknown exact debt."""
-
-    if deadline_monotonic is None:
-        return False
-    if monotonic() >= deadline_monotonic:
-        return True
-    if durable_exact_completion_pending is None:
-        return True
-    try:
-        return bool(durable_exact_completion_pending())
-    except Exception:  # noqa: BLE001 - exact queue unknown must preempt.
-        return True
 
 
 @dataclass(frozen=True)
@@ -9737,21 +9679,6 @@ def run_edli_event_reactor_cycle(
                 "EDLI reactor maintenance preempted after emit by urgent producer wake"
             )
             return False
-        generic_completion_deadline_monotonic = _try_latch_generic_held_completion(
-            qualified=family_scoped_held_completion,
-            durable_exact_completion_pending=(
-                _durable_exact_held_sell_completion_pending
-            ),
-        )
-
-        def _generic_completion_latch_cancelled() -> bool:
-            return _generic_held_completion_latch_cancelled(
-                deadline_monotonic=generic_completion_deadline_monotonic,
-                durable_exact_completion_pending=(
-                    _durable_exact_held_sell_completion_pending
-                ),
-            )
-
         try:
             construct_cut_seconds = float(
                 edli_cfg.get(
@@ -9764,15 +9691,9 @@ def run_edli_event_reactor_cycle(
         if not math.isfinite(construct_cut_seconds) or construct_cut_seconds <= 0.0:
             construct_cut_seconds = DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS
         construct_context = WorkContext(
-            deadline_monotonic=min(
-                time.monotonic() + construct_cut_seconds,
-                generic_completion_deadline_monotonic,
-            )
-            if generic_completion_deadline_monotonic is not None
-            else time.monotonic() + construct_cut_seconds,
+            deadline_monotonic=time.monotonic() + construct_cut_seconds,
             cancel_requested=lambda: _first_cancel_label(
                 ("urgent_wake", _urgent_wake_pending),
-                ("generic_completion_latch", _generic_completion_latch_cancelled),
                 (
                     "exact_held_sell_pending",
                     lambda: _exact_held_sell_preempts(
@@ -10078,7 +9999,6 @@ def run_edli_event_reactor_cycle(
                         exact_turn=exact_executable_held_completion
                     ),
                 ),
-                ("generic_completion_latch", _generic_completion_latch_cancelled),
             ),
             selection_completion_fairness_reserved=(
                 _monitor_completion_mode.fairness_reserved
@@ -10088,9 +10008,6 @@ def run_edli_event_reactor_cycle(
                 or family_scoped_held_completion
             ),
             family_scoped_held_completion=family_scoped_held_completion,
-            generic_completion_deadline_monotonic=(
-                generic_completion_deadline_monotonic
-            ),
             selection_completion_sell_keys=(
                 frozenset(
                     (
@@ -10209,11 +10126,6 @@ def run_edli_event_reactor_cycle(
                         ))
                         if capital_recovery_pending is not None
                         else urgent_day0_pending
-                    ),
-                    generic_completion_latch_cancelled=(
-                        _generic_completion_latch_cancelled
-                        if generic_completion_deadline_monotonic is not None
-                        else None
                     ),
                     exact_held_completion=active_held_sell_completion_cycle,
                 ),

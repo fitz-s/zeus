@@ -2549,39 +2549,6 @@ def _effective_global_book_refresh_family_keys(
     )
 
 
-def _global_batch_deadline_monotonic(
-    *,
-    started_monotonic: float,
-    generic_completion_deadline_monotonic: float | None,
-) -> float:
-    """Keep a generic completion's absolute deadline across adapter stages."""
-
-    deadline = started_monotonic + _GLOBAL_AUCTION_WORK_CUT_SECONDS
-    if generic_completion_deadline_monotonic is not None:
-        deadline = min(deadline, generic_completion_deadline_monotonic)
-    return deadline
-
-
-def _generic_final_actuation_is_cancelled(
-    *,
-    enabled: bool,
-    deadline_monotonic: float | None,
-    exact_completion_pending: Callable[[], bool],
-    epoch_superseded: Callable[[], bool],
-    monotonic: Callable[[], float] = _time.monotonic,
-) -> bool:
-    """Fail closed at the actual venue seam for one generic held completion."""
-
-    if not enabled:
-        return False
-    if deadline_monotonic is None or monotonic() >= deadline_monotonic:
-        return True
-    try:
-        return bool(exact_completion_pending() or epoch_superseded())
-    except Exception:  # noqa: BLE001 - final authority is fail closed.
-        return True
-
-
 def _global_projected_book_refresh_tokens(
     events: Iterable[object],
 ) -> dict[str, frozenset[str] | None]:
@@ -7875,7 +7842,6 @@ def event_bound_live_adapter_from_trade_conn(
     selection_completion_fairness_reserved: bool = False,
     selection_completion_reserved: bool = False,
     family_scoped_held_completion: bool = False,
-    generic_completion_deadline_monotonic: float | None = None,
     selection_completion_sell_keys: frozenset[tuple[str, str]] = frozenset(),
     held_sell_reauction_requests: tuple[object, ...] = (),
     required_held_family_keys: frozenset[str] = frozenset(),
@@ -7972,11 +7938,6 @@ def event_bound_live_adapter_from_trade_conn(
         or held_sell_reauction_requests
     ):
         raise ValueError("GLOBAL_GENERIC_HELD_COMPLETION_SCOPE_INVALID")
-    if (
-        generic_completion_deadline_monotonic is not None
-        and not family_scoped_held_completion
-    ):
-        raise ValueError("GLOBAL_GENERIC_HELD_COMPLETION_DEADLINE_SCOPE_INVALID")
     completion_family_keys: frozenset[str] | None = None
     if (
         selection_completion_reserved
@@ -9152,22 +9113,11 @@ def event_bound_live_adapter_from_trade_conn(
 
         _stable_preflight_monitor_handoff = [False]
 
-        def _generic_final_actuation_cancelled() -> str | bool:
-            """Keep the generic 30-second/fresh-fact fence through venue I/O."""
-
-            return _generic_final_actuation_is_cancelled(
-                enabled=family_scoped_held_completion,
-                deadline_monotonic=generic_completion_deadline_monotonic,
-                exact_completion_pending=lambda: bool(
-                    exact_held_sell_completion_wake_ids(fail_on_error=True)
-                ),
-                epoch_superseded=_epoch_superseded,
-            ) and "generic_completion_fence"
-
+        # A generic held completion is ended through venue I/O by exact
+        # held-SELL debt or any fact the one predicate names, never by elapsed
+        # time; its label is that fact's own.
         final_actuation_cancelled = (
-            _generic_final_actuation_cancelled
-            if family_scoped_held_completion
-            else _hard_invalidation
+            _epoch_superseded if family_scoped_held_completion else _hard_invalidation
         )
 
         def _day0_selection_cancelled() -> object:
@@ -9188,10 +9138,17 @@ def event_bound_live_adapter_from_trade_conn(
             if hard:
                 _stable_preflight_monitor_handoff[0] = False
                 return hard
-            generic_cancelled = _generic_final_actuation_cancelled()
-            if generic_cancelled:
-                _stable_preflight_monitor_handoff[0] = False
-                return generic_cancelled
+            if family_scoped_held_completion:
+                try:
+                    superseded = _epoch_superseded()
+                except Exception:  # noqa: BLE001 - completion authority fails closed
+                    logging.getLogger(__name__).exception(
+                        "generic completion invalidation probe failed"
+                    )
+                    superseded = "probe_error:cut_invalidation"
+                if superseded:
+                    _stable_preflight_monitor_handoff[0] = False
+                    return superseded
             if _stable_preflight_monitor_handoff[0]:
                 # A stable submit-time proof owns the short final-actuation
                 # window. Periodic monitor pressure already has durable completion
@@ -9223,12 +9180,7 @@ def event_bound_live_adapter_from_trade_conn(
             # time for the observed ~26s selected-family JIT revalidation after
             # the global scope/book/solve stages.  Do not borrow the 180s book
             # TTL as whole-batch authority.
-            deadline_monotonic=_global_batch_deadline_monotonic(
-                started_monotonic=global_batch_started,
-                generic_completion_deadline_monotonic=(
-                    generic_completion_deadline_monotonic
-                ),
-            ),
+            deadline_monotonic=global_batch_started + _GLOBAL_AUCTION_WORK_CUT_SECONDS,
             cancel_requested=_day0_selection_cancelled,
             monotonic=_time.monotonic,
         )

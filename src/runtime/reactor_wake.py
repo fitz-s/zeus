@@ -81,6 +81,10 @@ _WAKE_QUEUE_CACHE_LOCK = threading.Lock()
 _WAKE_QUEUE_CACHE: dict[Path, dict[Path, ReactorWake | None]] = {}
 _WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
 _WAKE_QUEUE_REFRESH_LOCKS: dict[Path, threading.Lock] = {}
+# Exact held-SELL wake ids per queue, keyed by the queue revision they were
+# read at. A running cut probes this set at every checkpoint; the revision is
+# two stats, the full queue walk is not.
+_EXACT_HELD_SELL_WAKE_IDS: dict[Path, tuple[tuple[int, ...], frozenset[str]]] = {}
 _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK = threading.Lock()
 HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT_SECONDS = 0.25
 _HELD_SELL_REAUCTION_RECOVERY_CHILD_LOCK = threading.Lock()
@@ -1378,6 +1382,14 @@ def exact_held_sell_completion_wake_ids(
     intentionally not excluded and retains exact-debt priority.
     """
 
+    queue_dir = _wake_queue_dir(path)
+    revision = _wake_queue_revision(
+        queue_dir, path=path, fail_on_error=fail_on_error
+    )
+    with _WAKE_QUEUE_CACHE_LOCK:
+        cached = _EXACT_HELD_SELL_WAKE_IDS.get(queue_dir)
+    if fail_on_error and cached is not None and cached[0] == revision:
+        return cached[1]
     wake_ids = {
         wake.wake_id
         for _queue_file, wake in _queued_wakes(path, fail_on_error=fail_on_error)
@@ -1396,7 +1408,18 @@ def exact_held_sell_completion_wake_ids(
         and legacy.held_sell_reauction_requests
     ):
         wake_ids.add(legacy.wake_id)
-    return frozenset(wake_ids)
+    result = frozenset(wake_ids)
+    # Only a strict read (every file parsed, else raised) read wholly inside
+    # one revision is reusable; a lenient read may have skipped a bad file.
+    if (
+        fail_on_error
+        and revision is not None
+        and revision
+        == _wake_queue_revision(queue_dir, path=path, fail_on_error=True)
+    ):
+        with _WAKE_QUEUE_CACHE_LOCK:
+            _EXACT_HELD_SELL_WAKE_IDS[queue_dir] = (revision, result)
+    return result
 
 
 def reactor_wakes_since(

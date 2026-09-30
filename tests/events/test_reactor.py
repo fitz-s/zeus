@@ -952,48 +952,6 @@ def test_generic_held_completion_qualification_requires_an_unmixed_no_v4_batch()
     )
 
 
-def test_generic_held_completion_latch_is_bounded_and_fails_closed():
-    from src.events import reactor
-
-    exact_pending = [False]
-    clock = [100.0]
-    deadline = reactor._try_latch_generic_held_completion(
-        qualified=True,
-        durable_exact_completion_pending=lambda: exact_pending[0],
-        monotonic=lambda: clock[0],
-    )
-    assert deadline == 130.0
-    assert not reactor._generic_held_completion_latch_cancelled(
-        deadline_monotonic=deadline,
-        durable_exact_completion_pending=lambda: exact_pending[0],
-        monotonic=lambda: clock[0],
-    )
-    exact_pending[0] = True
-    assert reactor._generic_held_completion_latch_cancelled(
-        deadline_monotonic=deadline,
-        durable_exact_completion_pending=lambda: exact_pending[0],
-        monotonic=lambda: clock[0],
-    )
-    assert reactor._try_latch_generic_held_completion(
-        qualified=True,
-        durable_exact_completion_pending=lambda: True,
-        monotonic=lambda: clock[0],
-    ) is None
-    assert reactor._try_latch_generic_held_completion(
-        qualified=True,
-        durable_exact_completion_pending=lambda: (
-            (_ for _ in ()).throw(OSError())
-        ),
-        monotonic=lambda: clock[0],
-    ) is None
-    clock[0] = 130.0
-    assert reactor._generic_held_completion_latch_cancelled(
-        deadline_monotonic=deadline,
-        durable_exact_completion_pending=lambda: False,
-        monotonic=lambda: clock[0],
-    )
-
-
 def _generic_completion_invalidates(wakes, *, valuation_family_keys=None):
     """A strict generic completion's verdict, through the one predicate."""
 
@@ -1180,43 +1138,6 @@ def test_global_dependency_scope_observer_failure_aborts_before_prepare():
             )
     finally:
         conn.close()
-
-
-def test_generic_held_completion_deadline_is_not_restarted_in_adapter():
-    from src.engine.event_reactor_adapter import _global_batch_deadline_monotonic
-
-    assert _global_batch_deadline_monotonic(
-        started_monotonic=100.0,
-        generic_completion_deadline_monotonic=130.0,
-    ) == 130.0
-    assert _global_batch_deadline_monotonic(
-        started_monotonic=100.0,
-        generic_completion_deadline_monotonic=None,
-    ) == 145.0
-
-
-def test_generic_final_actuation_fence_cancels_after_stable_preflight():
-    from src.engine.event_reactor_adapter import _generic_final_actuation_is_cancelled
-
-    clock = [129.0]
-    exact_pending = [False]
-    superseded = [False]
-    fence = lambda: _generic_final_actuation_is_cancelled(
-        enabled=True,
-        deadline_monotonic=130.0,
-        exact_completion_pending=lambda: exact_pending[0],
-        epoch_superseded=lambda: superseded[0],
-        monotonic=lambda: clock[0],
-    )
-    assert fence() is False
-    superseded[0] = True
-    assert fence() is True
-    superseded[0] = False
-    exact_pending[0] = True
-    assert fence() is True
-    exact_pending[0] = False
-    clock[0] = 130.0
-    assert fence() is True
 
 
 def test_generic_required_family_wake_coalesces_and_resets_only_after_terminal_cut(
@@ -7675,22 +7596,13 @@ def test_process_pending_cancellation_names_only_facts_and_exact_debt():
         urgent_day0_pending=day0_urgent,
     )
     assert ordinary_cancelled() is False
-    latched = _process_pending_cancelled(
+    quiet_fast_path = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=True,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=lambda: False,
-        generic_completion_latch_cancelled=lambda: False,
     )
-    assert latched() is False
-    latched_expired = _process_pending_cancelled(
-        committed_day0_wake=False,
-        producer_fast_path=True,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=lambda: False,
-        generic_completion_latch_cancelled=lambda: True,
-    )
-    assert latched_expired() is True
+    assert quiet_fast_path() is False
     exact_turn = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
@@ -7701,7 +7613,7 @@ def test_process_pending_cancellation_names_only_facts_and_exact_debt():
     _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
     try:
         assert ordinary_cancelled() is True
-        assert latched() is True
+        assert quiet_fast_path() is True
         assert exact_turn() is False
         assert day0_cut() is False
     finally:

@@ -87,6 +87,28 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Re-sample loaded SHA/PID, open positions, q identity, posterior/FSR identity, reactor completion cadence, and venue command/event counts.
 - Actual order proof requires separate `venue_commands`, submit event, venue ACK/order ID, fill/trade fact, and capital change lines. A candidate or health-clear signal is not an order.
 
+## Slice B91 -- A generic completion cut ends only on a fact, and probes cheaply
+
+- Live evidence (09-30 08:11-08:41Z, live `cf424e239`): 53 cuts, 31 INCOMPLETE;
+  24 are `generic_completion_fence`/`latch` at `scope_scan`, all at 27.5-29.8 s.
+  Completed scope scans take 2-11 s; the scan SQL itself replays read-only on
+  live in 0.12-0.7 s.
+- Root cause 1 (cost): each scope-scan checkpoint (~400 held-only, ~6,100 full)
+  ran the generic latch and fence probes, each re-walking the 22,364-file
+  durable wake queue for exact held-SELL ids (3.4 ms warm; 140 ms after any
+  publish). Replay with 4 walks/probe: 0.14 s scan -> 17.7 s.
+- Root cause 2 (law): latch and fence cancelled at an absolute 30 s deadline, a
+  second cancel path outside `cut_invalidating_wakes` naming no fact.
+- Change: exact held-SELL ids are reused per queue revision (strict reads
+  only); the latch is deleted; the generic fence is `_epoch_superseded` (exact
+  debt + the one predicate); the cut keeps its 45 s work deadline, which
+  defers (retry) and claims no fact.
+- Files: `src/runtime/reactor_wake.py`, `src/events/reactor.py`,
+  `src/engine/event_reactor_adapter.py`, `tests/engine/test_completion_cut_facts_only.py`,
+  `tests/engine/test_monitor_cut_independence.py`, `tests/events/test_reactor.py`,
+  `architecture/test_topology.yaml`, this plan.
+- Rollback: revert the slice commit.
+
 ## Slice B90 -- The held monitor and the global cut never cancel each other
 
 - Live evidence (09-30 03:34-04:05Z, live `4f9caa572`): 60 cuts, 36 INCOMPLETE;

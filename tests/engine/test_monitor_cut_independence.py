@@ -228,9 +228,7 @@ def test_exact_held_sell_debt_still_preempts_an_ordinary_cut():
         reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
-_CUT_CANCEL_LABELS = frozenset(
-    {"urgent_wake", "generic_completion_latch", "exact_held_sell_pending"}
-)
+_CUT_CANCEL_LABELS = frozenset({"urgent_wake", "exact_held_sell_pending"})
 
 
 def _labels(source: str) -> set[str]:
@@ -254,8 +252,8 @@ def test_cut_cancel_sources_are_facts_never_monitor_schedule():
     """Structural antibody: no cut-cancel leaf may name the monitor.
 
     Every labelled leaf that can cancel a reactor cut is enumerated from source.
-    A new leaf must be a fact (judged by ``cut_invalidating_wakes``), exact
-    held-SELL debt, or a bounded completion latch -- never monitor scheduling.
+    A new leaf must be a fact (judged by ``cut_invalidating_wakes``) or exact
+    held-SELL debt -- never monitor scheduling and never a timer.
     The monitor side is pinned too: its claim path never touches the reactor
     lock, so a cut can never make it wait.
     """
