@@ -1630,6 +1630,7 @@ def test_live_reader_accepts_only_complete_current_day0_carrier_pair(
         provenance.pop(identity_key)
     elif identity_key not in fields and operator_key not in fields:
         provenance.pop(identity_key)
+        provenance.pop(operator_key)
     final_key = "day0_remaining_carrier_final_extremes_c"
     provider_key = "day0_remaining_carrier_station_extreme_providers"
     actual_final = provenance[final_key]
