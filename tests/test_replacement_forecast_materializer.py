@@ -347,12 +347,12 @@ def _fixture_raw_openmeteo_bytes() -> bytes:
     return (json.dumps(response, indent=2, sort_keys=True) + "\n").encode()
 
 
-def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00", city_name: str = "Shanghai", selected_coords=None) -> str:
+def _fixture_ens_surface_provenance(*, cycle: str = "2026-06-06T00:00:00+00:00", city_name: str = "Shanghai", selected_coords=None, decision_at=None) -> str:
     """Portable, internally consistent land-mask witness, not an ECMWF observation."""
     from src.config import cities_by_name, runtime_station_geometry_for_city
     from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
 
-    station = runtime_station_geometry_for_city(cities_by_name[city_name])
+    station = runtime_station_geometry_for_city(cities_by_name[city_name],effective_at=decision_at)
     assert station["validity_reason"] is None
     lat, lon = selected_coords or ((22.25, 114.25) if city_name == "Hong Kong" else (31.14, 121.80))
     neighbors = [
@@ -9161,7 +9161,8 @@ def test_seed_cycle_boundary_allows_only_proven_retired_low_migration(
 
 
 def _low_revision_authority_conn(db_path: Path | None = None, *, include_legacy_provider_fixtures: bool = True,
-                                 city_name="Hong Kong", include_retired_incumbent=True) -> sqlite3.Connection:
+                                 city_name="Hong Kong", include_retired_incumbent=True,
+                                 target_date=date(2026,10,1), source_cycle=None, run_prefix="", snapshot_offset=0) -> sqlite3.Connection:
     """Canonical run/coverage/ENS schema with controlled members, not GRIB capture."""
     from src.contracts.ensemble_snapshot_provenance import (
         ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
@@ -9171,10 +9172,13 @@ def _low_revision_authority_conn(db_path: Path | None = None, *, include_legacy_
     from src.data.forecast_target_contract import compute_target_local_day_window_utc
     city = runtime_cities_by_name()[city_name]
     city_id = city_name if city_name == "Hong Kong" else city_name.upper().replace(" ", "_")
+    source_cycle = source_cycle or _hko_dt(12)
     window = compute_target_local_day_window_utc(city_timezone=city.timezone,
-                                               target_local_date=date(2026, 10, 1))
+                                               target_local_date=target_date)
     selected_coords = None if city_name == "Hong Kong" else (round(city.lat*4)/4, round(city.lon*4)/4)
     assert include_legacy_provider_fixtures is False or city_name == "Hong Kong"
+    if include_retired_incumbent:
+        assert (target_date,source_cycle,run_prefix,snapshot_offset) == (date(2026,10,1),_hko_dt(12),"",0)
 
     if db_path is None:
         conn = _conn()
@@ -9197,7 +9201,10 @@ def _low_revision_authority_conn(db_path: Path | None = None, *, include_legacy_
     ):
         if run_id == "old18" and not include_retired_incumbent:
             continue
-        cycle = _hko_dt(hour)
+        is_current = run_id == "new12"
+        run_id = run_prefix+run_id
+        snapshot_id += snapshot_offset
+        cycle = source_cycle+timedelta(hours=hour-12)
         issued = cycle + timedelta(minutes=5)
         track = "mn2t6_low_short_horizon"
         release_key = "ecmwf_open_data:mn2t6_low_short_horizon"
@@ -9206,7 +9213,7 @@ def _low_revision_authority_conn(db_path: Path | None = None, *, include_legacy_
             track=track, release_calendar_key=release_key,
             source_cycle_time=cycle, source_available_at=issued,
             fetch_finished_at=issued, captured_at=issued, imported_at=issued,
-            target_local_date="2026-10-01", city_id=city_id,
+            target_local_date=target_date.isoformat(), city_id=city_id,
             city_timezone=city.timezone, temperature_metric="low",
             physical_quantity=expected.physical_quantity,
             observation_field=expected.observation_field, data_version=version,
@@ -9226,15 +9233,15 @@ def _low_revision_authority_conn(db_path: Path | None = None, *, include_legacy_
                 completeness_status, readiness_status, computed_at, expires_at,
                 recorded_at
             ) VALUES (?, ?, 'ecmwf_open_data', 'native_grib', ?, ?,
-                      ?, ?, ?, '2026-10-01',
+                      ?, ?, ?, ?,
                       'low', ?, ?, ?, 51, 51, '[0,3,6]', '[0,3,6]', ?,
                       ?, ?,
                       'COMPLETE', 'LIVE_ELIGIBLE', ?,
-                      '2026-10-01T03:00:00+00:00', ?)""",
-            (f"coverage-{run_id}", run_id, release_key, track, city_id, city_name, city.timezone,
+                      ?, ?)""",
+            (f"coverage-{run_id}", run_id, release_key, track, city_id, city_name, city.timezone,target_date.isoformat(),
              expected.physical_quantity, expected.observation_field, version,
              json.dumps([snapshot_id]), window.start_utc.isoformat(), window.end_utc.isoformat(),
-             issued.isoformat(), issued.isoformat()),
+             issued.isoformat(), (source_cycle+timedelta(hours=15)).isoformat(), issued.isoformat()),
         )
         conn.execute(
             """INSERT INTO ensemble_snapshots (
@@ -9245,19 +9252,20 @@ def _low_revision_authority_conn(db_path: Path | None = None, *, include_legacy_
                 authority, causality_status, boundary_ambiguous,
                 forecast_window_attribution_status, contributes_to_target_extrema,
                 members_unit, recorded_at
-            ) VALUES (?, ?, '2026-10-01', 'low', ?, ?, ?, ?, ?, 24,
+            ) VALUES (?, ?, ?, 'low', ?, ?, ?, ?, ?, 24,
                       ?, 'ecmwf_ens', ?, 'ecmwf_open_data', ?, ?, ?,
                       'VERIFIED', 'OK', 0, 'FULLY_INSIDE_TARGET_LOCAL_DAY',
                       1, 'degC', ?)""",
-            (snapshot_id, city_name, expected.physical_quantity, expected.observation_field,
+            (snapshot_id, city_name,target_date.isoformat(), expected.physical_quantity, expected.observation_field,
              cycle.isoformat(), issued.isoformat(), issued.isoformat(),
              json.dumps([19.0 + index * 0.01 for index in range(51)]), version,
              run_id, cycle.isoformat(), issued.isoformat(), issued.isoformat()),
         )
-        if run_id == "new12":
+        if is_current:
             conn.execute(
                 "UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
-                (_fixture_ens_surface_provenance(city_name=city_name, cycle=cycle.isoformat(), selected_coords=selected_coords), snapshot_id),
+                (_fixture_ens_surface_provenance(city_name=city_name, cycle=cycle.isoformat(),
+                    selected_coords=selected_coords,decision_at=issued), snapshot_id),
             )
     legacy_models = ("ecmwf_ifs9", "gfs", "icon", "gem", "jma") if include_legacy_provider_fixtures else ()
     for raw_id, model in enumerate(legacy_models, 101):
@@ -9358,6 +9366,10 @@ def test_normal_wmd_dual_body_writer_materializes_public_target_scoped_probabili
     original_primary = primary.read_bytes()
     city = runtime_cities_by_name()["Paris"]
     assert city.wu_station == "LFPB"
+    target = date(2026,10,1)
+    cycle = _hko_dt(12)
+    baseline_run = "new12"
+    capture = cycle+timedelta(minutes=10)
     db = tmp_path / "wmd-forecast.db"
     conn = _low_revision_authority_conn(db, include_legacy_provider_fixtures=False,
         city_name=city.name, include_retired_incumbent=False)
@@ -9381,19 +9393,19 @@ def test_normal_wmd_dual_body_writer_materializes_public_target_scoped_probabili
     class DownloadClock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return _hko_dt(12,10).astimezone(tz or UTC)
+            return capture.astimezone(tz or UTC)
     monkeypatch.setattr(dl, "datetime", DownloadClock)
     def hourly_payload(lat, lon, value):
         return {"latitude":lat, "longitude":lon, "elevation":32.0,
             "timezone":city.timezone, "utc_offset_seconds":7200,
             "hourly_units":{"temperature_2m":"°C"},
-            "hourly":{"time":[f"2026-10-01T{hour:02d}:00" for hour in range(24)],
+            "hourly":{"time":[f"{target.isoformat()}T{hour:02d}:00" for hour in range(24)],
                       "temperature_2m":[value]*24}}
     def fetch(url, params, **kwargs):
         selected = _selected_test_cell(params["models"], city.lat, city.lon)
         body = (json.dumps(hourly_payload(*selected, 22.0 if params["models"]=="icon_global" else 24.0))+"\n").encode()
-        kwargs["capture_entity_body"](body, _hko_dt(12,10).timestamp())
-        kwargs["capture_network_response"](body, _hko_dt(12,10).timestamp(), {"content-type":"application/json"})
+        kwargs["capture_entity_body"](body, capture.timestamp())
+        kwargs["capture_network_response"](body, capture.timestamp(), {"content-type":"application/json"})
         return json.loads(body)
     monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
     dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db, cycle=_hko_dt(12),
@@ -9426,20 +9438,20 @@ def test_normal_wmd_dual_body_writer_materializes_public_target_scoped_probabili
              f"controlled-{item.bin_id}",item.bin_id,item.lower_c,item.upper_c))
     conn.commit()
     def request_at(cut, *, discovery=False):
-        metadata = _precision_metadata(city.name,"2026-10-01",anchor_sigma_c=3.0,
+        metadata = _precision_metadata(city.name,target.isoformat(),anchor_sigma_c=3.0,
                                        raw_payload_bytes=raw,analysis_at=cut)
         metadata_path.write_text(json.dumps(metadata,default=str))
         if discovery:
             from src.data.replacement_forecast_seed_discovery import discover_replacement_forecast_materialization_seeds
             from src.data.replacement_forecast_live_materialization_queue import _prepare_seed_requests_with_connection
-            seed_dir = tmp_path / f"seeds-{cut.minute}"
-            request_dir = tmp_path / f"requests-{cut.minute}"
+            seed_dir = tmp_path / f"seeds-{target}-{cut.minute}"
+            request_dir = tmp_path / f"requests-{target}-{cut.minute}"
             report = discover_replacement_forecast_materialization_seeds(forecast_db=db,
                 raw_manifest_dir=manifest_dir,seed_dir=seed_dir,request_dir=request_dir,
                 computed_at=cut,limit=1)
             assert report.discovered_count == 1, report
             processed,failed,reasons = _prepare_seed_requests_with_connection(seed_dir=seed_dir,
-                seed_processed_dir=tmp_path / f"processed-{cut.minute}",seed_failed_dir=tmp_path / f"failed-{cut.minute}",
+                seed_processed_dir=tmp_path / f"processed-{target}-{cut.minute}",seed_failed_dir=tmp_path / f"failed-{target}-{cut.minute}",
                 request_dir=request_dir,forecast_db=db,forecast_conn=None,limit=1)
             assert len(processed)==1 and not failed,(processed,failed,reasons)
             requests = list(request_dir.glob("*.json"))
@@ -9447,10 +9459,10 @@ def test_normal_wmd_dual_body_writer_materializes_public_target_scoped_probabili
                 [Path(path+".receipt.json").read_text() for path in processed])
             return build_materialize_request_dataclass(json.loads(requests[0].read_text()),base_dir=request_dir)
         seed = dict(city=city.name,city_id=city.name,city_timezone=city.timezone,
-            target_date="2026-10-01",temperature_metric="low",source_cycle_time=_hko_dt(12).isoformat(),
-            computed_at=cut.isoformat(),expires_at=_hko_dt(22).isoformat(),baseline_source_run_id="new12",
-            baseline_data_version=_current_baseline_data_version("low"),baseline_source_available_at=_hko_dt(12,5).isoformat(),
-            openmeteo_source_run_id="normal-wmd-anchor",openmeteo_source_available_at=_hko_dt(12,5).isoformat(),
+            target_date=target.isoformat(),temperature_metric="low",source_cycle_time=cycle.isoformat(),
+            computed_at=cut.isoformat(),expires_at=(cycle+timedelta(hours=10)).isoformat(),baseline_source_run_id=baseline_run,
+            baseline_data_version=_current_baseline_data_version("low"),baseline_source_available_at=(cycle+timedelta(minutes=5)).isoformat(),
+            openmeteo_source_run_id="normal-wmd-anchor",openmeteo_source_available_at=(cycle+timedelta(minutes=5)).isoformat(),
             openmeteo_anchor_artifact_id=artifact_id,openmeteo_payload_json=str(anchor_path),
             precision_metadata_json=str(metadata_path),
             bins=[asdict(item) for item in _bins()])
@@ -9476,8 +9488,8 @@ def test_normal_wmd_dual_body_writer_materializes_public_target_scoped_probabili
         readiness = ReplacementForecastReadinessDecision(readiness_id=cert["readiness_id"],status=cert["status"],
             reason_codes=tuple(json.loads(cert["reason_codes_json"])),dependency_json=json.loads(cert["dependency_json"]),
             provenance_json=json.loads(cert["provenance_json"]),expires_at=datetime.fromisoformat(cert["expires_at"]))
-        return [read_replacement_forecast_bundle(conn,baseline_bundle=_BaselineBundle(_Evidence("new12")),
-            readiness=readiness,city=city.name,target_date=date(2026,10,1),temperature_metric="low",
+        return [read_replacement_forecast_bundle(conn,baseline_bundle=_BaselineBundle(_Evidence(baseline_run)),
+            readiness=readiness,city=city.name,target_date=target,temperature_metric="low",
             decision_time=cut.isoformat(),current_bin_topology_hash=posterior["bin_topology_hash"],
             enforce_raw_input_hwm=True,authority_purpose=purpose) for purpose in ReplacementForecastAuthorityPurpose]
     request,a = materialize(_hko_dt(20),discovery=True)
@@ -9528,6 +9540,7 @@ def test_normal_wmd_dual_body_writer_materializes_public_target_scoped_probabili
     # B is acquired later and discloses a target-internal future transition,
     # while current facts/geometry remain 67m. Only this target is affected.
     _wmd_known_periods(primary,registry,claims,[("2026-10-01",100)],captured=_hko_dt(20,2).isoformat())
+    future_primary = primary.read_bytes()
     ground_clock[0] = _hko_dt(20,2)+timedelta(seconds=30)
     ground_b = ground.archive_station_ground_evidence(db,[city.name])["archived"][city.name]
     assert ground_b["facts_identity"] == ground_a["facts_identity"]
@@ -9574,6 +9587,83 @@ def test_normal_wmd_dual_body_writer_materializes_public_target_scoped_probabili
     assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(artifact_id,)).fetchone()) == original_anchor_entity
     expiry = datetime.fromisoformat(conn.execute("SELECT expires_at FROM readiness_state WHERE readiness_id=?",(a.readiness_id,)).fetchone()[0])
     assert not any(item.ok for item in public(a,expiry+timedelta(seconds=1)))
+    # Acquire the known future schedule once, then cross its effective boundary
+    # with no new ground HTTP/body acquisition. The old Oct1 window straddles
+    # 67→100m and remains unsupported even when today's facts are now 100m.
+    primary.write_bytes(future_primary)
+    claims[city.name]["station_ground_proof"].update(body_sha256=hashlib.sha256(future_primary).hexdigest(),
+        source_checked_at=_hko_dt(20,6).isoformat(),checked_at=_hko_dt(20,6).isoformat())
+    registry.write_text(json.dumps(claims))
+    ground_clock[0] = _hko_dt(20,6)+timedelta(seconds=30)
+    scheduled = ground.archive_station_ground_evidence(db,[city.name])["archived"][city.name]
+    assert scheduled["facts"]["elevation_m"] == 67.0
+    transition_cut = datetime(2026,10,1,0,1,tzinfo=UTC)
+    ground_clock[0] = transition_cut
+    transitioned = ground.archive_station_ground_evidence(db,[city.name])["archived"][city.name]
+    assert transitioned["manifest_role"] == "known_effective_period_transition"
+    assert transitioned["input_bodies"] == scheduled["input_bodies"]
+    assert transitioned["captured_at"] == scheduled["captured_at"]
+    assert transitioned["recorded_at"] == transition_cut.isoformat()
+    assert transitioned["facts"]["elevation_m"] == 100.0
+    assert coverage(transitioned,date(2026,10,1),transition_cut)["status"] == "DATA_DEGRADED"
+    assert coverage(transitioned,date(2026,10,2),transition_cut)["status"] == "VERIFIED"
+    assert all(item.ok for item in public(a,request.computed_at))
+    assert not any(item.ok for item in public(a,transition_cut))
+    # A genuinely new forecast/run/target in the SAME canonical DB can use
+    # the fully covered Oct2 geometry. Neither old q nor old ground clocks are
+    # relabeled, and future target suitability does not select a future fact.
+    target = date(2026,10,2)
+    cycle = datetime(2026,10,1,12,tzinfo=UTC)
+    capture = cycle+timedelta(minutes=10)
+    baseline_run = "period-new12"
+    next_conn = _low_revision_authority_conn(db,include_legacy_provider_fixtures=False,
+        city_name=city.name,include_retired_incumbent=False,target_date=target,
+        source_cycle=cycle,run_prefix="period-",snapshot_offset=100)
+    next_conn.close()
+    sql_clock[0] = capture+timedelta(minutes=1)
+    dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=cycle,
+        targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,metric="low",target_date=target.isoformat(),
+            lead_days=1,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone)],
+        models=("icon_global","ukmo_global_deterministic_10km"),include_previous_runs=False,prune_after=False)
+    payload = hourly_payload(cell["selected_grid_lat"],cell["selected_grid_lon"],18.5)
+    payload["_zeus_current_target_scope"] = {"city":city.name,"target_date":target.isoformat(),"metric":"low"}
+    raw = (json.dumps(payload,sort_keys=True)+"\n").encode()
+    anchor_path = tmp_path/"wmd-known-period-normal-anchor.json"
+    anchor_path.write_bytes(raw)
+    metadata_path = tmp_path/"wmd-known-period-normal-precision.json"
+    manifest_path = manifest_dir/"wmd-known-period-anchor.manifest.json"
+    manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(anchor_path,
+        request=OpenMeteoEcmwfIfs9AnchorRequest(city.lat,city.lon,cycle,city.timezone),
+        metric="low",source_available_at=cycle+timedelta(minutes=5),captured_at=capture,
+        product_metadata={"city":city.name,"target_date":target.isoformat(),
+            "source_run_id":"normal-wmd-known-period-anchor","openmeteo_payload_json":str(anchor_path),
+            "precision_metadata_json":str(metadata_path),"manifest_json":str(manifest_path)})
+    artifact_id = write_manifest_to_db(conn,manifest)
+    write_manifest(replace(manifest,product_metadata={**manifest.product_metadata,"artifact_id":artifact_id}),manifest_path)
+    for item in _bins():
+        conn.execute("""INSERT INTO market_events(market_slug,city,target_date,temperature_metric,
+            condition_id,token_id,range_label,range_low,range_high) VALUES(?,?,?,'low',?,?,?,?,?)""",
+            (f"controlled-wmd-period-{item.bin_id}",city.name,target.isoformat(),f"controlled-period-{item.bin_id}",
+             f"controlled-period-{item.bin_id}",item.bin_id,item.lower_c,item.upper_c))
+    conn.commit()
+    new_cut = cycle+timedelta(hours=8)
+    ground_clock[0] = new_cut-timedelta(minutes=1)
+    assert ground.archive_station_ground_evidence(db,[city.name])["archived"][city.name] == transitioned
+    known_request,known_result = materialize(new_cut,discovery=True)
+    assert known_result.ok,known_result.reason_codes
+    known_reads = public(known_result,new_cut)
+    assert all(item.ok for item in known_reads),[item.reason_code for item in known_reads]
+    new_provenance = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",(known_result.posterior_id,)).fetchone()[0])
+    new_shape = new_provenance["bayes_precision_fusion"]["current_evidence_shape"]
+    assert new_shape["provider_geometry_audit"]["anchor_station_ground"] == transitioned
+    assert new_shape["provider_geometry_identity_hash"] != shape["provider_geometry_identity_hash"]
+    assert new_shape["provider_geometry_audit"]["anchor_station_ground_target_coverage"]["status"] == "VERIFIED"
+    new_mu = new_provenance["bayes_precision_fusion"]["anchor_value_c"]
+    new_sigma = new_shape["predictive_sigma_c"]
+    new_cdf = lambda x: .5*(1+math.erf((x-new_mu)/(new_sigma*math.sqrt(2))))
+    assert dict(known_reads[0].bundle.q) == pytest.approx(
+        {"cool":new_cdf(20.5),"warm":new_cdf(30.5)-new_cdf(20.5),"hot":1-new_cdf(30.5)},abs=1e-12)
+    assert tuple(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(a.posterior_id,)).fetchone()) == original_certificate
     conn.close()
     builtins.close()
 
