@@ -48779,7 +48779,7 @@ def test_held_point_trace_observes_normal_hko_consumer_without_changing_witness(
 
 @pytest.mark.parametrize("metric",("high","low"))
 @pytest.mark.parametrize("fault",("none","freeze","overflow","off"))
-def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(tmp_path,monkeypatch,metric,fault):
+def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(tmp_path,monkeypatch,metric,fault,inspect_cut=None):
     from src.engine import tier0_auction_corpus as corpus
     from src.engine.global_auction_universe import _rebind_probability_witness_tokens
     from src.events.triggers.day0_extreme_updated import (
@@ -48792,7 +48792,8 @@ def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_toke
     # Isolate callback composition, not source/readiness/probability authority.
     # This node does not claim the world auction, wealth or venue submit E2E.
     monkeypatch.setattr(global_batch_runtime,"process_current_global_batch",
-        lambda events,**kwargs: callbacks.append(kwargs) or SimpleNamespace(events=tuple(events)))
+        lambda events,**kwargs: callbacks.append(kwargs) or
+            SimpleNamespace(events=tuple(events),winner_event_id=None,receipts={}))
     monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",None)
     monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",{})
     monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",{})
@@ -48869,8 +48870,309 @@ def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_toke
         # A second observation cannot retain or re-label the old cut's buffers.
         assert collector == {}
         assert hooks["selection_telemetry_observer"]({family:selected},None,{},SimpleNamespace(),held_at) == ()
+        if inspect_cut is not None:
+            inspect_cut(fixture,event,hooks,entry_receipt,held_receipt,selected,traces)
     finally:
         trade.close(); fixture.conn.close()
+
+
+def test_geoblocked_actual_adapter_keeps_held_point_trace_lanes(tmp_path,monkeypatch):
+    """Typed host access removes BUY only, without granting SELL venue access."""
+    from src.control import venue_access
+    cut = _dt.datetime(2026,9,30,6,20,tzinfo=_dt.timezone.utc)
+    class VenueClock(_dt.datetime):
+        @classmethod
+        def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+    path = tmp_path/"private-venue-access.json"
+    monkeypatch.setattr(venue_access,"_path",lambda:path)
+    monkeypatch.setattr(venue_access,"datetime",VenueClock)
+    monkeypatch.setattr(venue_access,"egress_evidence",lambda: {"interface":"controlled-test"})
+    venue_access.record_geoblock("actual typed test POST refusal",now=cut)
+    assert json.loads(path.read_text())["state"] == "GEOBLOCKED"
+    reason = venue_access.entry_block_reason(now=cut)
+    assert reason.startswith("VENUE_ACCESS_GEOBLOCKED:")
+    from src.engine import tier0_auction_corpus as corpus
+    def inspect_cut(fixture,event,hooks,entry_receipt,held_receipt,selected,traces):
+        baseline = tuple((receipt.reason,receipt.proof_accepted,prepared.decision_id,
+            prepared.probability_witness.witness_identity,
+            prepared.probability_witness.probability_content_identity,
+            prepared.probability_witness.sample_matrix_identity,
+            tuple(prepared.probability_witness.yes_point_q))
+            for receipt in (entry_receipt,held_receipt)
+            for prepared in (receipt.prepared_global_family,))
+        family = selected.family_key
+        sell_outputs = []
+        for fault in ("none","off","freeze"):
+            with monkeypatch.context() as diagnostic:
+                if fault == "freeze":
+                    diagnostic.setattr(corpus,"freeze_held_sell_point_trace",
+                        lambda _: (_ for _ in ()).throw(RuntimeError("optional encoder")))
+                era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+                era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
+                hooks["held_point_trace_scope_observer"](frozenset() if fault=="off" else frozenset({family}))
+                entry_receipt = hooks["prepare_event"](event,fixture.cut)
+                held_receipt = hooks["prepare_held_event"](event,fixture.cut+_dt.timedelta(seconds=1))
+                traces = [json.loads(raw) for raw in hooks["selection_telemetry_observer"](
+                    {family:selected},None,{},SimpleNamespace(),fixture.cut+_dt.timedelta(seconds=1))]
+            assert hooks["buy_candidates_enabled"] is False
+            policy = hooks["candidate_policy_rejection_resolver"]
+            assert policy(SimpleNamespace(action="BUY")) == reason
+            assert policy(SimpleNamespace(action="SELL")) is None
+            # Temporal maturity may be unavailable; that is not a veto of the
+            # complete statistical witness's independently lawful reduce-only.
+            from src.solve.solver import (
+                CandidatePortfolioEndowment,_score_global_single_order_sell_expected,
+                family_payoff_q_samples,global_sell_candidate_from_holding,
+            )
+            prepared = held_receipt.prepared_global_family
+            witness = prepared.probability_witness
+            binding = witness.bindings[int(np.argmin(witness.yes_point_q))]
+            curve = ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",
+                snapshot_id="geoblock-held-book",book_hash="geoblock-held-book-hash",
+                levels=(BidBookLevel(price=Decimal(".95"),size=Decimal("10")),),
+                fee_model=FeeModel(fee_rate=Decimal(".05")),min_tick=Decimal(".01"),
+                min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+            candidate = global_sell_candidate_from_holding(SimpleNamespace(position_id="held-geoblocked",
+                family_key=witness.family_key,bin_id=binding.bin_id,side="YES",
+                token_id=binding.yes_token_id,shares=Decimal("10")),probability_witness=witness,
+                ledger_snapshot_id="geoblocked-ledger",executable_sell_curve=curve,
+                book_captured_at_utc=fixture.cut,neg_risk=False,execution_mode="TAKER_LIMIT",
+                probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+                exit_authority_status=prepared.day0_exit_authority_status,
+                exit_authority_reason=prepared.day0_exit_authority_reason,
+                sell_action_authority_identity=prepared.sell_action_authority_identity)
+            assert candidate is not None and policy(candidate) is None
+            samples = family_payoff_q_samples(witness,bin_id=binding.bin_id,side="YES")
+            point = family_payoff_point_q(witness,bin_id=binding.bin_id,side="YES")
+            score = _score_global_single_order_sell_expected(candidate,
+                held_probability_mean=point,sample_count=len(samples),
+                band_alpha=witness.band_alpha,endowment=CandidatePortfolioEndowment(
+                    loss_wealth_floor_usd=Decimal("1000"),win_wealth_floor_usd=Decimal("1010"),
+                    current_token_shares=Decimal("10"),ledger_snapshot_id="geoblocked-ledger"))
+            assert score.candidate is not None and not score.rejection_reasons
+            assert score.expected_terminal_wealth.held_probability_mean == point
+            sell_outputs.append((candidate.candidate_id,candidate.execution_mode,
+                candidate.probability_witness_identity,score.shares,score.cash_proceeds_usd,
+                score.expected_terminal_wealth.expected_ev_usd,
+                score.expected_terminal_wealth.expected_delta_log_wealth))
+            assert {trace["lane"] for trace in traces} == (
+                {"ENTRY","HELD_MONITOR"} if fault=="none" else set())
+            assert tuple((receipt.reason,receipt.proof_accepted,prepared.decision_id,
+                prepared.probability_witness.witness_identity,
+                prepared.probability_witness.probability_content_identity,
+                prepared.probability_witness.sample_matrix_identity,
+                tuple(prepared.probability_witness.yes_point_q))
+                for receipt in (entry_receipt,held_receipt)
+                for prepared in (receipt.prepared_global_family,)) == baseline
+        assert sell_outputs[0] == sell_outputs[1] == sell_outputs[2]
+    test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(
+        tmp_path,monkeypatch,"high","none",inspect_cut=inspect_cut)
+
+
+def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_path,monkeypatch):
+    """Real selector/order hook and corpus flush, not a mocked winning score."""
+    from src.engine import tier0_auction_corpus as corpus
+    actual_process = global_batch_runtime.process_current_global_batch
+    def inspect_cut(fixture,event,hooks,entry_receipt,held_receipt,selected,traces):
+        family,at = selected.family_key,fixture.cut
+        holding_binding = selected.bindings[0]
+        position = SimpleNamespace(trade_id="controlled-held",position_id="controlled-held",
+            condition_id=holding_binding.condition_id,direction="buy_yes",
+            token_id=holding_binding.yes_token_id,no_token_id=holding_binding.no_token_id,
+            shares=Decimal("1"),chain_shares=Decimal("1"),cost_basis_usd=Decimal(".50"),city=fixture.city.name,
+            target_date="2026-09-30",temperature_metric="high",bin_label=holding_binding.bin_id)
+        state = PortfolioState(positions=[position],authority="canonical_db",authority_scope="runtime_exposure")
+        wealth = _test_wealth_witness(ledger_snapshot_id="runner-ledger",position_set_hash="runner-position",
+            wealth_floor_usd=Decimal("1000"),wealth_ceiling_usd=Decimal("1001"),
+            spendable_cash_usd=Decimal("1000"),reservations_usd=Decimal("0"),
+            collateral_authority="CHAIN",captured_at_utc=at,max_age=_dt.timedelta(seconds=30),
+            native_holdings_micro=((holding_binding.yes_token_id,1000000),),
+            native_commitments_micro=((holding_binding.yes_token_id,500000),))
+        assets = []
+        for binding in selected.bindings:
+            for side,token in (("YES",binding.yes_token_id),("NO",binding.no_token_id)):
+                curve = ExecutableCostCurve(token_id=token,side=side,snapshot_id=f"runner-{token}",
+                    book_hash=f"runner-book-{token}",levels=(BookLevel(price=Decimal(".10"),size=Decimal("100")),),
+                    fee_model=FeeModel(fee_rate=Decimal(".05")),min_tick=Decimal(".01"),
+                    min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+                assets.append(CurrentGlobalBookAsset(family_key=family,bin_id=binding.bin_id,
+                    condition_id=binding.condition_id,gamma_market_id=f"gamma-{binding.condition_id}",
+                    market_event_id=event.event_id,side=side,token_id=token,curve=curve,
+                    bid_levels=(BidBookLevel(price=Decimal(".06"),size=Decimal("100")),),
+                    captured_at_utc=at,neg_risk=False))
+        states = tuple((a.family_key,a.bin_id,a.condition_id,a.side,a.token_id,"EXECUTABLE",
+            a.curve.book_hash,a.market_event_id,a.gamma_market_id,str(a.neg_risk)) for a in assets)
+        book = CurrentGlobalBookEpoch(assets=tuple(assets),asset_states=states,captured_at_utc=at,
+            max_age=_dt.timedelta(seconds=30),witness_identity=current_global_book_epoch_identity(
+                asset_states=states,captured_at_utc=at))
+        scope = current_global_auction_scope_from_events((event,),captured_at_utc=at)
+        prepared = replace(entry_receipt.prepared_global_family,probability_witness=selected)
+        prepared_by_event = global_batch_runtime._bind_selection_holdings({event.event_id:prepared},
+            portfolio_state=state,wealth_witness=wealth)
+        inputs = dict(selection_epoch_identity="runner-reference",selection_cut_at_utc=at,
+            current_scope=scope,current_scope_identity_resolver=lambda:scope.scope_identity,
+            venue_universe_identity=book.witness_identity,
+            current_venue_universe_identity_resolver=lambda:book.witness_identity,
+            universe_max_age=book.max_age,current_probability_resolver=lambda _:CurrentFamilyProbabilityAuthority.from_witness(selected),
+            current_execution_resolver=lambda c:book.execution_authority(c,checked_at_utc=at),
+            current_wealth_identity_resolver=lambda:wealth.economic_identity,wealth_witness=wealth,
+            capital_limit_usd=Decimal("100"),decision_at_utc=at,book_epoch=book)
+        first = select_prepared_global_auction(prepared_by_event,**inputs)
+        assert isinstance(first.decision.candidate,GlobalSingleOrderCandidate), (
+            first.decision.no_trade_reason,first.decision.rejection_reasons,
+            [(row.bin_id,row.side,row.rejection_reason) for row in first.decision.candidate_evaluations])
+        refused_id = first.decision.candidate.candidate_id
+        outputs = []
+        for fault in ("none","off","observer"):
+            trade = sqlite3.connect(":memory:")
+            trade.row_factory = sqlite3.Row
+            from src.state.db import init_schema_trade_only
+            init_schema_trade_only(trade)
+            trade.execute("""INSERT INTO position_current (
+                position_id,trade_id,market_id,phase,city,cluster,target_date,temperature_metric,
+                bin_label,direction,token_id,no_token_id,condition_id,shares,size_usd,cost_basis_usd,
+                entry_price,chain_shares,chain_avg_price,chain_cost_basis_usd,chain_seen_at,
+                chain_state,fill_authority,strategy_key,updated_at,unit)
+                VALUES (?,?,?,'active',?,?,?,'high',?,'buy_yes',?,?,?,1,.5,.5,.5,1,.5,.5,?,
+                    'synced','venue_confirmed_full','forecast_qkernel_entry',?,'C')""",
+                (position.position_id,position.position_id,holding_binding.condition_id,
+                 fixture.city.name,fixture.city.name,'2026-09-30',holding_binding.bin_id,
+                 holding_binding.yes_token_id,holding_binding.no_token_id,holding_binding.condition_id,
+                 at.isoformat(),at.isoformat()))
+            prior_at = (at-_dt.timedelta(hours=2)).isoformat()
+            trade.execute("""INSERT INTO venue_commands (
+                command_id,snapshot_id,envelope_id,position_id,decision_id,idempotency_key,
+                intent_kind,market_id,token_id,side,size,price,state,created_at,updated_at)
+                VALUES ('prior-request','prior-book','prior-envelope','prior-position','prior-decision',
+                    'prior-key','ENTRY','prior-market',?,'BUY',?,?,'REJECTED',?,?)""",
+                (first.decision.candidate.token_id,float(first.decision.shares),
+                 float(first.decision.limit_price),prior_at,prior_at))
+            trade.execute("""INSERT INTO venue_command_events
+                (event_id,command_id,sequence_no,event_type,occurred_at,payload_json,state_after)
+                VALUES ('prior-rejection','prior-request',3,'SUBMIT_REJECTED',?,?,'REJECTED')""",
+                (prior_at,json.dumps({"reason":"venue_rejected_400","proof_class":"deterministic_venue_400",
+                    "venue_order_created":False,"exception_message":
+                    "PolyApiException[status_code=400, error_message={'error': 'invalid post-only order: order crosses book'}]"})))
+            trade.commit()
+            observed = []
+            phase = [0]
+            current_epoch = [book]
+            token_map = {b.condition_id:(b.yes_token_id,b.no_token_id) for b in selected.bindings}
+            required = frozenset(token for pair in token_map.values() for token in pair)
+            def current_at(): return at+_dt.timedelta(seconds=phase[0])
+            def current_book(probabilities,decision_at):
+                from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+                rebound = {key:_rebind_probability_witness_tokens(witness,
+                    token_map_by_condition=token_map,required_token_ids=required)
+                    for key,witness in probabilities.items()}
+                # Two explicit controlled captures exercise the real recursive
+                # preflight transport; original source/prior clocks stay intact.
+                current_assets = tuple(replace(asset,captured_at_utc=decision_at,
+                    curve=replace(asset.curve,snapshot_id=f"{asset.curve.snapshot_id}-{phase[0]}"))
+                    for asset in assets)
+                epoch = CurrentGlobalBookEpoch(assets=current_assets,asset_states=states,
+                    captured_at_utc=decision_at,max_age=book.max_age,
+                    witness_identity=current_global_book_epoch_identity(asset_states=states,captured_at_utc=decision_at))
+                current_epoch[0] = epoch
+                return rebound,epoch
+            def preflight(*_):
+                if phase[0] == 0:
+                    phase[0] = 2
+                    era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+                    era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
+                    return global_batch_runtime.GlobalWinnerPreflight(
+                        status="PROBABILITY_SUPERSEDED",reason="CONTROLLED_PREFLIGHT_REBUILD_REQUIRED")
+                return global_batch_runtime.GlobalWinnerPreflight(
+                    status="BATCH_BLOCKED",reason="CONTROLLED_NO_VENUE_BOUNDARY")
+            def order_rejection(score,decision_at):
+                assert decision_at in (at,at+_dt.timedelta(seconds=2))
+                return era.global_selected_order_same_token_rejection(score,decision_at,trade_conn=trade)
+            refusal = "entry_cooldown:same_token_terminal_no_fill_requires_reprice"
+            assert order_rejection(first.decision,at) == refusal
+            from src.execution.executor import _entry_same_token_cooldown_component
+            submit_verdict = _entry_same_token_cooldown_component(trade,
+                token_id=first.decision.candidate.token_id,candidate_position_id="controlled-submit-attempt",
+                limit_price=first.decision.limit_price,shares=first.decision.shares,now=at)
+            assert not submit_verdict["allowed"] and "entry_cooldown:"+submit_verdict["reason"] == refusal
+            def observer(probabilities,ineligible,prepared_by_event,actual_selected,decision_at):
+                raw = hooks["selection_telemetry_observer"](
+                    probabilities,ineligible,prepared_by_event,actual_selected,decision_at)
+                observed.append((actual_selected,raw))
+                if fault=="observer": raise RuntimeError("optional observer failed")
+                return raw
+            def trace_scope(keys):
+                assert keys == frozenset({family})
+                hooks["held_point_trace_scope_observer"](frozenset() if fault=="off" else keys)
+            try:
+                with monkeypatch.context() as runtime:
+                    era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+                    era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
+                    runtime.setattr(global_batch_runtime,"process_current_global_batch",actual_process)
+                    runtime.setattr(global_batch_runtime,"scan_current_global_auction_scope",lambda **_:scope)
+                    runtime.setattr(global_batch_runtime,"current_portfolio_wealth_witness",lambda *_a,**_kw:wealth)
+                    runtime.setattr(global_batch_runtime,"current_venue_auction_identity",lambda *_a,**_kw:current_epoch[0].witness_identity)
+                    result = actual_process((event,),decision_time=at,world_conn=fixture.conn,
+                        forecast_conn=fixture.conn,trade_conn=trade,payload_reader=lambda e:json.loads(e.payload_json),
+                        prepare_event=hooks["prepare_event"],prepare_held_event=hooks["prepare_held_event"],
+                        actuate_winner=lambda *_:pytest.fail("no venue authority in this controlled node"),
+                        preflight_winner=preflight,
+                        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+                            lambda *_:pytest.fail("no venue authority in this controlled node")),
+                        stamp_receipt=lambda receipt:receipt,venue_submit_count=lambda:0,
+                        current_execution=lambda c,_:current_epoch[0].execution_authority(c,checked_at_utc=current_at()),
+                        current_time_provider=current_at,portfolio_state_provider=lambda:state,
+                        current_book_epoch_provider=current_book,
+                        current_capital_limit_resolver=lambda *_:Decimal("100"),
+                        selected_order_rejection_resolver=order_rejection,
+                        held_point_trace_scope_observer=trace_scope,selection_telemetry_observer=observer)
+                assert len(observed) == 2 and phase[0] == 2, (
+                    len(observed),phase,[(key,receipt.reason) for key,receipt in result.receipts.items()])
+                actual_selected = observed[-1][0]
+                consumer = actual_selected.actuation.probability_witness
+                winner = actual_selected.decision.candidate
+                assert winner is not None and winner.candidate_id != refused_id
+                assert winner.family_key == family and winner.token_id != first.decision.candidate.token_id
+                refused = [row for row in actual_selected.decision.candidate_evaluations
+                    if row.token_id==first.decision.candidate.token_id]
+                assert refused and all(row.rejection_reason==refusal for row in refused)
+                row = trade.execute("""SELECT c.winner_candidate_id,cf.probability_witness_identity,t.payload,s.payload
+                    FROM tier0_auction_cut c JOIN tier0_cut_family cf ON cf.cut_seq=c.cut_seq
+                    JOIN tier0_family_topology t ON t.topology_seq=cf.topology_seq
+                    JOIN tier0_family_snapshot s ON s.state_seq=cf.state_seq WHERE c.status='SELECTED'
+                    ORDER BY c.cut_seq DESC LIMIT 1""").fetchone()
+                assert row is not None and row[0] == winner.candidate_id
+                topology,snapshot = corpus.decode_payload(row[2]),corpus.decode_payload(row[3])
+                bindings = topology["bindings"]
+                column = next(index for index,binding in enumerate(bindings) if binding[0]==winner.bin_id)
+                assert bindings[column][2 if winner.side=="YES" else 3] == winner.token_id
+                winner_legs = [leg for leg in snapshot["legs"]
+                    if leg[:4]==[column,winner.side,"BUY",winner.execution_mode] and leg[4]=="SELECTED"]
+                assert len(winner_legs)==1
+                # q_served is optional sealed-calibration metadata, not the raw
+                # fixed-action q. The existing candidate receipt owns q_raw.
+                native = trade.execute("""SELECT token_id,q_raw FROM tier0_candidate_set_provenance
+                    WHERE selection_epoch_identity=? AND candidate_id=? LIMIT 1""",
+                    (actual_selected.actuation.selection_epoch_identity,winner.candidate_id)).fetchone()
+                assert native[0] == winner.token_id
+                assert native[1] == family_payoff_point_q(consumer,bin_id=winner.bin_id,side=winner.side)
+                stored = snapshot.get("held_sell_point_traces",[])
+                assert bool(stored) is (fault=="none")
+                for trace in stored:
+                    assert trace["consumer_witness_identity"] == row[1].hex() == consumer.witness_identity
+                    assert trace["consumer_bindings"] == bindings
+                    assert trace["consumer_yes_q"] == snapshot["raw_yes_q"]
+                    np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(
+                        json.dumps(trace,sort_keys=True,separators=(",",":"),allow_nan=False).encode()),
+                        consumer.yes_point_q)
+                outputs.append((winner.candidate_id,winner.token_id,actual_selected.actuation.actuation_identity,
+                    winner.probability_witness_identity,tuple(snapshot["raw_yes_q"]),
+                    tuple((key,receipt.reason,receipt.side_effect_status) for key,receipt in result.receipts.items())))
+                assert corpus.pending_cuts(global_batch_runtime._decision_log_connection_key(trade)) == ((),0)
+            finally:
+                trade.close()
+        assert outputs[0] == outputs[1] == outputs[2]
+    test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(
+        tmp_path,monkeypatch,"high","none",inspect_cut=inspect_cut)
 
 
 @pytest.mark.parametrize("metric",("high","low"))
