@@ -7968,15 +7968,6 @@ def _compute_posterior_payload(
     }
     from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
 
-    day0_mixture_policy = (
-        DAY0_PROBABILITY_MIXTURE_POLICY
-        if _day0_shared_carrier is not None or (
-            _target_local_day_is_open(request)
-            and (_day0_obs_extreme_c is not None or _provisional_extreme_c is not None)
-        ) else None
-    )
-    if day0_mixture_policy is not None:
-        posterior_config["day0_probability_mixture_policy"] = day0_mixture_policy
     if (
         request.day0_observation_state
         == DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
@@ -8000,6 +7991,16 @@ def _compute_posterior_payload(
         and _posterior_day0_observed_extreme_c is None
         else None
     )
+    day0_mixture_policy = (
+        DAY0_PROBABILITY_MIXTURE_POLICY
+        if _day0_shared_carrier is not None or (
+            _target_local_day_is_open(request)
+            and (_posterior_day0_observed_extreme_c is not None
+                 or _posterior_day0_provisional_extreme_c is not None)
+        ) else None
+    )
+    if day0_mixture_policy is not None:
+        posterior_config["day0_probability_mixture_policy"] = day0_mixture_policy
     if _posterior_day0_observed_extreme_c is not None:
         posterior_config.update(
             {

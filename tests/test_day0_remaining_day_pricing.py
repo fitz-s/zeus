@@ -15602,3 +15602,39 @@ def test_direct_held_remaining_snapshotless_path_rejects_entry_and_bad_contract(
             family=family, native_costs={}, payload=payload,
             decision_time=datetime(2026, 6, 10, 13, 0, tzinfo=UTC),
         )
+
+
+def test_unmixed_live_missing_fusion_stays_typed_unavailable(tmp_path, monkeypatch):
+    """A normal physical baseline cannot become an exception or surrogate q."""
+    from dataclasses import replace
+    from tests.integration.test_w3_solve_seam_g3 import (
+        _kord_normal_prior_fixture, _noaa_native_sources,
+    )
+    from src.data import replacement_forecast_materializer as materializer
+
+    native = _noaa_native_sources.__wrapped__(tmp_path, monkeypatch)
+    next(native)
+    fixture = None
+    try:
+        fixture = _kord_normal_prior_fixture(tmp_path, monkeypatch)
+        original = tuple(fixture.conn.execute(
+            "SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,),
+        ).fetchone())
+        # Single downstream fault after all ordinary source writers passed.
+        # No alternate q regime is licensed by an absent current fusion.
+        monkeypatch.setattr(materializer, "_replacement_bayes_precision_fusion_override",
+                            lambda *args, **kwargs: None)
+        result = materializer.materialize_replacement_forecast_live(fixture.conn,
+            replace(fixture.request, computed_at=fixture.cut + timedelta(minutes=1)))
+        assert not result.ok
+        assert "Q_MODE:BAYES_PRECISION_FUSION_CAPTURE_MISSING" in result.reason_codes
+        assert tuple(fixture.conn.execute(
+            "SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,),
+        ).fetchone()) == original
+    finally:
+        if fixture is not None:
+            fixture.conn.close()
+            fixture.builtin.close()
+        next(native, None)
