@@ -45039,6 +45039,29 @@ def _make_emos_bootstrap_sampler(mu_native: float, sigma_native: float):
     return _sampler
 
 
+def _day0_city_instrument_sigma_native(*, family, unit: str) -> float:
+    """Use the same city-configured delta owner as the carrier producer.
+
+    SCOPE: this family/variance kernel. DRAIN: normal qualified city/source
+    redecision. RESET: a valid native unit and finite city instrument delta.
+    Missing identity is unavailable, never permission for a zero/default width.
+    """
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
+    if city is None or unit not in {"C", "F"} or getattr(city, "settlement_unit", None) not in {"C", "F"}:
+        raise ValueError("DAY0_INSTRUMENT_IDENTITY_INVALID")
+    if isinstance(getattr(city, "instrument_noise_override", None), bool):
+        raise ValueError("DAY0_INSTRUMENT_IDENTITY_INVALID")
+    try:
+        value = float(sigma_instrument_for_city(city).to(unit).value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("DAY0_INSTRUMENT_IDENTITY_INVALID") from exc
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError("DAY0_INSTRUMENT_IDENTITY_INVALID")
+    return value
+
+
 def _day0_process_sigma_native(
     *,
     payload: dict[str, object],
@@ -45060,14 +45083,13 @@ def _day0_process_sigma_native(
     error and counting provider disagreement twice.  The helper is shared by
     point q and q_lcb bootstrap.
     """
+    base_sigma = _day0_city_instrument_sigma_native(family=family, unit=unit)
     try:
-        from src.signal.forecast_uncertainty import sigma_instrument
         from src.signal.day0_obs_latency import (
             stale_extreme_uncertainty_margin,
             staleness_budget_minutes,
         )
 
-        base_sigma = float(sigma_instrument(unit).value)
         source_clock_sigma_raw = payload.get(
             "_edli_day0_source_clock_predictive_sigma_native"
         )
@@ -45196,13 +45218,8 @@ def _day0_extra_member_sigma_native(
     if conditional_high is not None:
         scale = 1.0 if unit == "C" else 9.0 / 5.0
         return float(conditional_high.extra_sigma_c) * scale
-    try:
-        from src.signal.forecast_uncertainty import sigma_instrument
-
-        base_sigma = float(sigma_instrument(unit).value)
-        extra = float(np.sqrt(max(float(sigma) ** 2 - base_sigma ** 2, 0.0)))
-    except Exception:  # noqa: BLE001
-        return 0.0
+    base_sigma = _day0_city_instrument_sigma_native(family=family, unit=unit)
+    extra = float(np.sqrt(max(float(sigma) ** 2 - base_sigma ** 2, 0.0)))
     return extra if extra > 0.0 and np.isfinite(extra) else 0.0
 
 

@@ -14186,7 +14186,13 @@ def test_latest_causal_day0_family_event_respects_all_three_clocks():
     "day0_settlement_channel_revision_model_v23",
     "day0_resolver_terminal_composition_v22",
     "day0_settlement_channel_revision_model_v24",
-    "day0_resolver_terminal_composition_v23", None,
+    "day0_resolver_terminal_composition_v23",
+    "day0_settlement_channel_revision_model_v28_hko_observation_clock_v1",
+    "day0_resolver_terminal_composition_v27_hko_observation_clock_v1", None,
+    "day0_settlement_channel_revision_model_v28_smooth_center_bias_v1",
+    "day0_resolver_terminal_composition_v27_smooth_center_bias_v1",
+    "day0_settlement_channel_revision_model_v29_smooth_center_bias_observation_clock_v1",
+    "day0_resolver_terminal_composition_v28_smooth_center_bias_observation_clock_v1",
 ])
 def test_probability_cache_requires_current_day0_geometry_revision(
     monkeypatch, probability_use, retired,
@@ -49832,3 +49838,130 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
         assert fixture.conn.execute("SELECT COUNT(*) FROM observation_prints WHERE source_channel='hko_current_1min_mean'").fetchone()[0] == count
     finally:
         fixture.conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_hko_normal_kernel_uses_the_producers_instrument_variance(tmp_path, monkeypatch, metric):
+    """One normal source/cut, independently inspect the actually consumed kernel."""
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric)
+    try:
+        observed = dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1"
+        ).fetchone())
+        observation = observation_instant_row_to_day0_observation(observed, metric=metric)
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),
+            decision_time=fixture.cut, received_at=fixture.cut.isoformat())
+        q_json, provenance_json = fixture.conn.execute(
+            "SELECT q_json, provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,),
+        ).fetchone()
+        provenance, producer_q = json.loads(provenance_json), json.loads(q_json)
+        witnesses = []
+        for use in (era._CurrentProbabilityUse.ENTRY, era._CurrentProbabilityUse.HELD_MONITOR):
+            with era._held_point_trace_capture(True) as consumed:
+                prepared = era._prepare_current_global_probability_family(event,
+                    forecast_conn=fixture.conn, topology_conn=fixture.conn,
+                    observation_conn=fixture.conn, decision_time=fixture.cut,
+                    max_age=_dt.timedelta(seconds=30), allow_provisional_day0_replacement=True,
+                    probability_use=use, raw_input_hwm_conn=fixture.conn)
+            witness = prepared.probability_witness
+            witnesses.append(witness)
+            kernel = json.loads(consumed["kernel"])
+            assert kernel["instrument_sigma_c"] == pytest.approx(.1, abs=1e-12)
+            assert kernel["path_error_sigma_c"] == pytest.approx(
+                provenance["day0_remaining_carrier_path_error_sigma_c"], abs=1e-12)
+            assert kernel["future_extremes_c"] == provenance["day0_remaining_carrier_future_extremes_c"]
+            # Isolate B from variance: substitute only the producer's physical
+            # extreme in this exact consumer recipe. This is not an action or
+            # a claim that the original rounded-boundary path was correct.
+            inputs = {key: kernel[key] for key in (
+                "future_extremes_c", "final_extreme_centers_c", "boundary_scenarios",
+                "metric", "path_error_sigma_c", "instrument_sigma_c", "bin_bounds_c",
+                "operator", "remaining_center_bias_native",
+            )}
+            raw = provenance["day0_provisional_observation"]["observed_extreme_c"]
+            inputs["boundary_scenarios"] = [
+                [raw if boundary is not None else None, weight]
+                for boundary, weight in inputs["boundary_scenarios"]
+            ]
+            replay = build_day0_remaining_probability_carrier(**inputs, n_point=1, n_samples=1,
+                identity_inputs={"unit": "C"}, settlement_semantics=SettlementSemantics(**kernel["settlement"]))
+            expected = [producer_q[fixture.conn.execute(
+                "SELECT range_label FROM market_events WHERE condition_id=?", (binding.condition_id,)
+            ).fetchone()[0]] for binding in witness.bindings]
+            np.testing.assert_allclose(np.asarray(replay["q"])[kernel["carrier_to_witness"]],
+                                       expected, rtol=0, atol=1e-12)
+        np.testing.assert_array_equal(witnesses[0].yes_point_q, witnesses[1].yes_point_q)
+        np.testing.assert_array_equal(witnesses[0].yes_q_samples, witnesses[1].yes_q_samples)
+        from src.engine.monitor_refresh import _current_global_held_point_probability
+        for binding in witnesses[0].bindings:
+            for side, direction in (("YES", "buy_yes"), ("NO", "buy_no")):
+                position = SimpleNamespace(condition_id=binding.condition_id, direction=direction)
+                assert _current_global_held_point_probability(position, witnesses[1]) == pytest.approx(
+                    family_payoff_point_q(witnesses[0], bin_id=binding.bin_id, side=side), abs=1e-12)
+    finally:
+        fixture.conn.close()
+
+
+@pytest.mark.parametrize("city_name,unit,expected", (
+    ("Hong Kong", "C", .1), ("Hong Kong", "F", .18),
+    ("NYC", "F", .5), ("Paris", "C", .28), ("Taipei", "C", .1),
+))
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("basis", ("source_clock", "baseline", "latency", "source_clock_latency"))
+def test_day0_variance_decomposition_uses_city_delta_owner(monkeypatch, city_name, unit, expected, metric, basis):
+    from src.data.day0_hourly_vectors import day0_effective_path_sigma_c
+    from src.signal.day0_obs_latency import stale_extreme_uncertainty_margin, staleness_budget_minutes
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+    city = era.runtime_cities_by_name()[city_name]
+    assert sigma_instrument_for_city(city).to(unit).value == pytest.approx(expected, abs=1e-12)
+    family = SimpleNamespace(city=city_name, metric=metric)
+    cut = _dt.datetime(2026, 9, 30, 6, 20, tzinfo=_dt.timezone.utc)
+    age = 400 if basis in {"latency", "source_clock_latency"} else 0
+    observed = cut-_dt.timedelta(minutes=age)
+    payload = {"observation_time": observed.isoformat(),
+        "_edli_day0_source_clock_predictive_sigma_native": 1.5 if basis == "source_clock" else .01,
+        "_edli_day0_current_temperature_observed_at_utc": observed.isoformat()}
+    centers = (31., 32., 33.)
+    margin = stale_extreme_uncertainty_margin(unit=unit, obs_age_minutes=age,
+        budget_minutes=staleness_budget_minutes(city_name))
+    if basis == "latency":
+        payload.pop("_edli_day0_source_clock_predictive_sigma_native")
+        total = math.hypot(expected, margin/2)
+    else:
+        total = day0_effective_path_sigma_c(source_clock_predictive_sigma_c=payload[
+            "_edli_day0_source_clock_predictive_sigma_native"], centers_c=centers,
+            instrument_sigma_c=expected, observation_margin_c=margin)
+    process = era._day0_process_sigma_native(payload=payload, family=family, unit=unit,
+        decision_time=cut, members_native=centers)
+    extra = era._day0_extra_member_sigma_native(payload=payload, family=family, unit=unit,
+        decision_time=cut, members_native=centers)
+    assert process == pytest.approx(total, abs=1e-12)
+    assert extra == pytest.approx(math.sqrt(max(total**2-expected**2, 0)), abs=1e-12)
+    assert math.hypot(extra, expected) == pytest.approx(total, abs=1e-12)
+
+
+@pytest.mark.parametrize("city_name,unit", (("unknown-city", "C"), ("Hong Kong", "K")))
+def test_day0_missing_instrument_identity_cannot_fall_back_to_zero(city_name, unit):
+    family = SimpleNamespace(city=city_name, metric="high")
+    for seam in (era._day0_process_sigma_native, era._day0_extra_member_sigma_native):
+        with pytest.raises(ValueError, match="DAY0_INSTRUMENT_IDENTITY_INVALID"):
+            seam(payload={}, family=family, unit=unit, decision_time=None, members_native=(32., 33.))
+
+
+@pytest.mark.parametrize("unit,scale", (("C", 1.), ("F", 1.8)))
+def test_day0_conditional_high_keeps_its_existing_extra_variance(unit, scale):
+    shape = SimpleNamespace(effective_sigma_c=.8, extra_sigma_c=.6,
+        provider_between_sigma_c=.2, identity="qualified-conditional-shape")
+    payload = {"_edli_day0_conditional_high_shape": shape}
+    family = SimpleNamespace(city="Hong Kong", metric="high")
+    assert era._day0_process_sigma_native(payload=payload, family=family, unit=unit,
+        decision_time=None) == pytest.approx(.8*scale, abs=1e-12)
+    assert era._day0_extra_member_sigma_native(payload=payload, family=family, unit=unit,
+        decision_time=None) == pytest.approx(.6*scale, abs=1e-12)
