@@ -2692,7 +2692,7 @@ def _append_shanghai_owner_prints(conn,request):
     conn.commit()
 
 
-def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high"):
+def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high", without_current_state=False):
     """Controlled WRH/AWC bodies and complete remaining vectors, not gate mocks."""
     from src.config import runtime_cities_by_name
     from src.data import day0_fast_obs as fast, day0_hourly_vectors as hourly
@@ -2708,7 +2708,9 @@ def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high"):
     observed = cut-timedelta(minutes=5)
     source = fast.fast_obs_source_for_city(city,prior.target_date)
     assert source is not None and source.station_id=="ZSPD"
-    history = [observed-timedelta(hours=index+2) for index in range(fast.FAST_RESIDUAL_MIN_PAIRS)]
+    # Prior local-day pairs train the likelihood without themselves supplying
+    # today's instantaneous state in the single-fault missing-state tests.
+    history = [observed-timedelta(hours=index+4) for index in range(fast.FAST_RESIDUAL_MIN_PAIRS)]
     timestamps = [at.astimezone(ZoneInfo(city.timezone)).strftime("%Y-%m-%dT%H:%M:%S%z") for at in history]
     raw = [f"ZSPD {at:%d%H%M}Z {round(extreme):02d}/15 T{round(extreme*10):04d}0150" for at in history]
     product = {"STATION":[{"STID":"ZSPD","OBSERVATIONS":{
@@ -2736,7 +2738,6 @@ def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high"):
     current = fast.parse_metar_api_payload([{"icaoId":"ZSPD","obsTime":observed.timestamp(),
         "receiptTime":writer_time[0].isoformat(),"temp":30.,"metarType":"METAR",
         "rawOb":f"ZSPD {observed:%d%H%M}Z 30/20 T03000200"}])
-    assert fast._append_metar_prints_to_ledger(conn,((city,source,prior.target_date.isoformat()),),current)
     captured = cut-timedelta(minutes=2)
     models = hourly.day0_hourly_models_for_city(city)
     ensemble_models = hourly.day0_source_clock_ensemble_member_models()
@@ -2776,6 +2777,12 @@ def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high"):
     conn.commit()
     request = _refresh_shanghai_owner_request(conn,monkeypatch,replace(prior,computed_at=cut,
         day0_observed_extreme_source="aviationweather_metar",day0_observed_extreme_observation_time=observed.isoformat()))
+    tables = ("raw_forecast_artifacts","raw_model_forecasts","observation_prints",
+              "deterministic_forecast_anchors","forecast_posteriors","readiness_state")
+    before_control = {table:tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
+                      for table in tables}
+    conn.execute("SAVEPOINT current_print_control")
+    assert fast._append_metar_prints_to_ledger(conn,((city,source,prior.target_date.isoformat()),),current)
     likelihood = fast.build_fast_station_residual_likelihood(conn,city=city.name,target_date=str(prior.target_date),
         metric=metric,observed_source="aviationweather_metar",observation_time=observed,decision_time=cut)
     assert likelihood is not None and likelihood.matched_pairs>=fast.FAST_RESIDUAL_MIN_PAIRS
@@ -2786,6 +2793,17 @@ def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high"):
     assert control.ok is True, control.reason_codes
     conn.execute("ROLLBACK TO qualified_noaa_control")
     conn.execute("RELEASE qualified_noaa_control")
+    if without_current_state:
+        # Private counterfactual only: roll back an uncommitted control input,
+        # never DELETE/UPDATE a committed append-only publication.
+        conn.execute("ROLLBACK TO current_print_control")
+        assert all(tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))==before_control[table]
+                   for table in tables)
+        assert hourly.read_day0_current_temperature_state(conn=conn,city=city,
+            target_date=str(prior.target_date),decision_time=cut) is None
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+    conn.execute("RELEASE current_print_control")
+    conn.commit()
     return conn,request
 
 
@@ -2885,37 +2903,38 @@ def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
 
 @pytest.mark.parametrize(("missing_metric", "healthy_metric"), (("high", "low"), ("low", "high")))
 @pytest.mark.parametrize("state", ("absent", "future_unpossessed"))
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_noaa_missing_current_state_blocks_only_one_family_and_drains_on_next_cut(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     missing_metric: str,
     healthy_metric: str,
     state: str,
 ) -> None:
     """A missing/currently unpossessed print must not abort the next family."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    if state == "future_unpossessed":
-        conn.execute("""CREATE TABLE observation_prints (
-            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
-            publish_ts_utc TEXT, value_native REAL, unit TEXT,
-            fetched_at_utc TEXT, raw_report TEXT
-        )""")
-        conn.execute(
-            "INSERT INTO observation_prints VALUES (1, ?, 'ZSPD', 'aviationweather_metar', ?, 30, 'C', ?, ?)",
-            ("Shanghai", _dt(18, 15).isoformat(), _dt(18, 15).isoformat(),
-             "METAR ZSPD 061815Z 30/20 T03000200"),
-        )
-    missing = replace(
-        _request(
-            computed_at=_dt(18, 10),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=31.0 if missing_metric == "high" else 19.0,
-            day0_observed_extreme_source="aviationweather_metar",
-            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-        ),
-        temperature_metric=missing_metric,
-        baseline_data_version=_current_baseline_data_version(missing_metric),
-    )
+    from src.config import runtime_cities_by_name
+    from src.data import day0_fast_obs as fast
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    conn, missing = _shanghai_noaa_future_request(tmp_path,monkeypatch,metric=missing_metric,without_current_state=True)
+    city = runtime_cities_by_name()[missing.city]
+    # Only the uncommitted current-print control was rolled back; prior-day
+    # training pairs and all ordinary owned forecast entities remain intact.
+    def append_current(observed):
+        fetched = observed+timedelta(minutes=1)
+        class CaptureClock(fast.datetime):
+            @classmethod
+            def now(cls,tz=None):
+                return fetched.astimezone(tz) if tz else fetched.replace(tzinfo=None)
+        monkeypatch.setattr(fast,"datetime",CaptureClock)
+        reports = fast.parse_metar_api_payload([{"icaoId":"ZSPD","obsTime":observed.timestamp(),
+            "receiptTime":fetched.isoformat(),"temp":30.,"metarType":"METAR",
+            "rawOb":f"ZSPD {observed:%d%H%M}Z 30/20 T03000200"}])
+        source = fast.fast_obs_source_for_city(city,missing.target_date)
+        assert fast._append_metar_prints_to_ledger(conn,((city,source,str(missing.target_date)),),reports)
+        conn.commit()
+    if state=="future_unpossessed":
+        append_current(missing.computed_at+timedelta(minutes=5))
+    committed_prints = {row["id"]:tuple(row) for row in conn.execute("SELECT * FROM observation_prints")}
     blocked = materialize_replacement_forecast_live(conn, missing)
     assert blocked.status == "BLOCKED"
     assert blocked.reason_codes == (
@@ -2927,74 +2946,39 @@ def test_noaa_missing_current_state_blocks_only_one_family_and_drains_on_next_cu
     assert prepared.reason_codes == blocked.reason_codes
     assert materializer_mod.compute_replacement_posterior_readonly(conn, missing) is None
 
-    healthy = replace(
-        _request(),
+    # The sibling has an independently issued forecast. Do not fabricate two
+    # different same-run hourly bodies (flat HIGH versus non-flat LOW) under
+    # one physical product/capture identity merely to keep both centers 25C.
+    healthy_cycle = missing.source_cycle_time+timedelta(hours=6)
+    healthy = _install_hko_live_fusion(monkeypatch,conn=conn,request=replace(
+        missing,
         temperature_metric=healthy_metric,
         baseline_data_version=_current_baseline_data_version(healthy_metric),
-    )
+        source_cycle_time=healthy_cycle,
+        openmeteo_anchor=replace(missing.openmeteo_anchor,source_cycle_time=healthy_cycle),
+        openmeteo_source_available_at=healthy_cycle+timedelta(hours=3),
+        baseline_source_available_at=healthy_cycle+timedelta(hours=2),
+        day0_observed_extreme_c=31. if healthy_metric=="high" else 19.,
+        day0_observed_extreme_source="noaa_wrh_zspd",
+    ),snapshot_id=9001 if healthy_metric=="high" else 9002,
+        selected_cells={model:_selected_test_cell(model,city.lat,city.lon)
+            for model in ("icon_global","ukmo_global_deterministic_10km")})
+    _append_shanghai_owner_prints(conn,healthy)
     good = materialize_replacement_forecast_live(conn, healthy)
     assert good.ok is True
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 1
 
-    from src.data.day0_hourly_vectors import Day0HourlyVector
-
-    if state == "absent":
-        conn.execute("""CREATE TABLE observation_prints (
-            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
-            publish_ts_utc TEXT, value_native REAL, unit TEXT,
-            fetched_at_utc TEXT, raw_report TEXT
-        )""")
-        conn.execute(
-            "INSERT INTO observation_prints VALUES (1, ?, 'ZSPD', 'aviationweather_metar', ?, 30, 'C', ?, ?)",
-            ("Shanghai", _dt(18, 5).isoformat(), _dt(18, 5).isoformat(),
-             "METAR ZSPD 061805Z 30/20 T03000200"),
-        )
-    else:
-        conn.execute(
-            """UPDATE observation_prints
-               SET publish_ts_utc=?, fetched_at_utc=?, raw_report=? WHERE id=1""",
-            (_dt(18, 5).isoformat(), _dt(18, 5).isoformat(),
-             "METAR ZSPD 061805Z 30/20 T03000200"),
-        )
-    vector = Day0HourlyVector(
-        model="ecmwf_ifs", city="Shanghai", target_date="2026-06-07",
-        timezone_name="Asia/Shanghai", captured_at=_dt(18, 8).isoformat(),
-        times=tuple(f"2026-06-07T{hour:02d}:00" for hour in range(24)),
-        temps_c=tuple(29.0 if hour < 12 else 31.0 for hour in range(24)),
-    )
-    if missing_metric == "high":
-        from src.data.day0_hourly_vectors import day0_source_clock_ensemble_member_models
-
-        def source_meta(model: str, *, ensemble: bool = False) -> str:
-            return json.dumps({
-                "provider_source_cycle_time_utc": _dt(6).isoformat(),
-                "provider_source_available_at_utc": _dt(7).isoformat(),
-                "fetch_finished_at": _dt(18, 9).isoformat(),
-                "request_hash": "same-ens-request" if ensemble else f"provider-{model}",
-                "provider_run_id": "same-ens-run" if ensemble else f"provider-{model}",
-            })
-
-        providers = [
-            replace(vector, source_run_meta_json=source_meta("ecmwf_ifs")),
-            replace(vector, model="icon_global", source_run_meta_json=source_meta("icon_global")),
-        ]
-        ensemble = [
-            replace(vector, model=model, source_run_meta_json=source_meta(model, ensemble=True))
-            for model in day0_source_clock_ensemble_member_models()
-        ]
-    else:
-        providers, ensemble = [vector], []
-    monkeypatch.setattr(
-        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
-        lambda _city: [item.model for item in providers],
-    )
-    monkeypatch.setattr(
-        "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
-        lambda **kwargs: ensemble if len(kwargs.get("expected_models") or ()) == 51 else providers,
-    )
-    recovered = materialize_replacement_forecast_live(conn, missing)
+    # Recover by a new actual parser/writer event and a later cut. Do not
+    # UPDATE a future report's publication/possession back into the old cut.
+    observed = missing.computed_at+timedelta(minutes=1)
+    append_current(observed)
+    current = _refresh_shanghai_owner_request(conn,monkeypatch,replace(missing,
+        computed_at=observed+timedelta(minutes=2),day0_observed_extreme_observation_time=observed.isoformat()))
+    recovered = materialize_replacement_forecast_live(conn, current)
     assert recovered.ok is True
     assert recovered.posterior_id is not None
+    assert all(tuple(row)==committed_prints[row["id"]] for row in conn.execute("SELECT * FROM observation_prints")
+               if row["id"] in committed_prints)
 
 
 @pytest.mark.usefixtures("_hko_source_surface")
