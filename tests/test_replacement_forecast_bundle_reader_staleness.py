@@ -37,6 +37,8 @@ from src.data.replacement_forecast_readiness import (
     build_replacement_forecast_readiness,
 )
 from src.state.schema.v2_schema import apply_canonical_schema
+from tests.test_replacement_forecast_materializer import _hko_native_surfaces, _hko_source_surface
+from tests.test_replacement_forecast_bundle_reader import _shanghai_reader_current_certificate
 
 
 def _hwm_consumed_context(serving):
@@ -237,6 +239,23 @@ def test_raw_hwm_real_same_value_receipt_progress_and_zero_cost_repeat(tmp_path,
         assert lag(rebound, world.clock[0]) is None
 
 
+def _normal_read_at(normal, monkeypatch, *, cut=None, readiness=None):
+    """Advance a private reader clock; never rewrite source/row/readiness clocks."""
+    from src.data import replacement_forecast_bundle_reader as reader
+    cut = cut or normal.request.computed_at
+    class ClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+    class ReaderClock(datetime, metaclass=ClockType):
+        @classmethod
+        def now(cls, tz=None):
+            return cut.astimezone(tz or UTC)
+    monkeypatch.setattr(reader, "datetime", ReaderClock)
+    return reader.read_replacement_forecast_bundle(normal.conn,
+        **{**normal.kwargs, "decision_time": cut,
+           "readiness": readiness or normal.readiness})
+
+
 UTC = timezone.utc
 _TOPO_HASH = "topo-hash-fixed-001"
 
@@ -391,31 +410,15 @@ def _readiness(*, posterior_id: int, computed_at: datetime, expires_at: datetime
     )
 
 
-def test_bundle_reader_blocks_expired_readiness() -> None:
+def test_bundle_reader_blocks_expired_readiness(
+    monkeypatch, _shanghai_reader_current_certificate,
+) -> None:
     """Expired point-in-time authority cannot license a new capital decision."""
-    conn = _conn()
-    posterior_id = _insert_posterior(
-        conn,
-        source_cycle_time=_dt(6, 0),
-        source_available_at=_dt(6, 1),
-        computed_at=_dt(6, 1, 30),
-    )
-    readiness = _readiness(
-        posterior_id=posterior_id,
-        computed_at=_dt(6, 1),
-        expires_at=_dt(6, 2),          # expires at 06-06 02:00 ...
-        decision_time=_dt(6, 1),       # readiness built at a fresh decision moment
-    )
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=readiness,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(6, 12),      # ... but the decision happens at 12:00 (expired)
-        current_bin_topology_hash=_TOPO_HASH,
-    )
+    normal = _shanghai_reader_current_certificate
+    assert _normal_read_at(normal, monkeypatch).ok
+    # The original normal producer's expiry is untouched. At its actual
+    # boundary neither ENTRY nor a stale point-in-time authority can bind.
+    result = _normal_read_at(normal, monkeypatch, cut=normal.readiness.expires_at)
     assert result.ok is False
     assert result.reason_code == "REPLACEMENT_LIVE_READINESS_EXPIRED"
 
@@ -463,39 +466,27 @@ def test_bundle_reader_blocks_stale_source_cycle() -> None:
 def test_bundle_reader_rejects_forged_soft_anchor_dependency(
     field: str,
     bad_value: object,
+    monkeypatch,
+    _shanghai_reader_current_certificate,
 ) -> None:
-    conn = _conn()
-    posterior_id = _insert_posterior(
-        conn,
-        source_cycle_time=_dt(6, 0),
-        source_available_at=_dt(6, 7),
-        computed_at=_dt(6, 7, 30),
-    )
-    readiness = _readiness(
-        posterior_id=posterior_id,
-        computed_at=_dt(6, 11),
-        expires_at=_dt(6, 23),
-        decision_time=_dt(6, 11),
-    )
+    from datetime import timedelta
+    normal = _shanghai_reader_current_certificate
+    readiness = normal.readiness
+    assert _normal_read_at(normal, monkeypatch).ok
     dependency_json = json.loads(json.dumps(readiness.dependency_json))
     soft_anchor = next(
         item
         for item in dependency_json["dependencies"]
         if item["role"] == "soft_anchor_posterior"
     )
+    if field == "source_available_at":
+        bad_value = (normal.request.computed_at + timedelta(microseconds=1)).isoformat()
+    elif field == "posterior_id":
+        bad_value = str(normal.row["posterior_id"])
     soft_anchor[field] = bad_value
     forged = replace(readiness, dependency_json=dependency_json)
 
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=forged,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(6, 12),
-        current_bin_topology_hash=_TOPO_HASH,
-    )
+    result = _normal_read_at(normal, monkeypatch, readiness=forged)
     assert result.ok is False
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
 
@@ -562,37 +553,18 @@ def test_bundle_reader_amber_still_binds() -> None:
     assert result.bundle is not None
 
 
-def test_bundle_reader_accepts_fresh_readiness() -> None:
+def test_bundle_reader_accepts_fresh_readiness(
+    monkeypatch, _shanghai_reader_current_certificate,
+) -> None:
     """Fresh forecast (not expired, recent SYNOPTIC cycle) still binds — gate is not over-broad.
 
     Uses a 12Z (synoptic) cycle so this asserts the STALENESS gate is not over-broad without
     tripping the separate intermediate-cycle (06/18Z) shadow-only gate. The intermediate-phase
     admission behaviour is covered by test_replacement_forecast_cycle_phase_admission.py.
     """
-    conn = _conn()
-    posterior_id = _insert_posterior(
-        conn,
-        source_cycle_time=_dt(6, 0),   # 00Z synoptic cycle, ~12h before decision (within bound)
-        source_available_at=_dt(6, 7),
-        computed_at=_dt(6, 7, 30),
-    )
-    readiness = _readiness(
-        posterior_id=posterior_id,
-        computed_at=_dt(6, 11),
-        expires_at=_dt(6, 23),
-        decision_time=_dt(6, 11),
-    )
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=readiness,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(6, 12),
-        current_bin_topology_hash=_TOPO_HASH,
-    )
+    normal = _shanghai_reader_current_certificate
+    result = _normal_read_at(normal, monkeypatch)
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
     assert result.bundle is not None
-    assert result.bundle.posterior_id == posterior_id
+    assert result.bundle.posterior_id == normal.row["posterior_id"]
