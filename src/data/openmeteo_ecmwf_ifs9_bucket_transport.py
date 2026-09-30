@@ -1108,7 +1108,11 @@ def capture_source_cell_geometry_proof(*, latitude: float, longitude: float,
     import hashlib
     from pathlib import Path
     original = Path(local_cache or HSURF_LOCAL_CACHE)
-    if original.is_symlink() or not original.is_file() or not 0<original.stat().st_size<=16*1024*1024:
+    if original.is_symlink():
+        raise ValueError("O1280 local static is a symlink")
+    if not original.exists():
+        raise FileNotFoundError("O1280 local static unavailable")
+    if not original.is_file() or not 0<original.stat().st_size<=16*1024*1024:
         raise ValueError("O1280 local static unavailable")
     body = original.read_bytes()
     if not 0<len(body)<=16*1024*1024:

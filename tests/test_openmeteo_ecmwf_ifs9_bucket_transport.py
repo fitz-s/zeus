@@ -159,6 +159,16 @@ def test_frozen_o1280_bad_manifest_requires_new_local_possession_not_http_or_old
     assert transport.capture_source_cell_geometry_proof(**kwargs)==recovered
 
 
+def test_frozen_o1280_absent_owned_static_retains_distinct_diagnostic_absence(tmp_path,monkeypatch):
+    transport,path,_,_,_,kwargs = _actual_o1280_static_fixture(tmp_path,monkeypatch)
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        transport.capture_source_cell_geometry_proof(**kwargs)
+    path.symlink_to(tmp_path/"missing-symlink-target")
+    with pytest.raises(ValueError,match="symlink"):
+        transport.capture_source_cell_geometry_proof(**kwargs)
+
+
 def test_bucket_point_reader_pool_reuses_valid_time_reader_and_closes() -> None:
     opened: list[tuple[str, str]] = []
     readers: list[object] = []
