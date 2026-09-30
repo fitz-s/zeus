@@ -78,11 +78,12 @@ GLOBAL_AUCTION_COMPLETION_WAKE_REASON = (
 COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON = "collateral_authority_refreshed"
 GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT = 16
 _WAKE_QUEUE_CACHE_LOCK = threading.Lock()
+_V4_WAKE_QUEUE_PREFIX = "held-sell-v4-"
 _WAKE_QUEUE_CACHE: dict[Path, dict[Path, ReactorWake | None]] = {}
 _WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
 _WAKE_QUEUE_REFRESH_LOCKS: dict[Path, threading.Lock] = {}
-# Immutable queued exact held-SELL ids per revision. The mutable legacy
-# pointer is read separately on every strict probe, never part of this cache.
+# Queued exact held-SELL ids per revision (including refreshed V4 slots).
+# The mutable legacy pointer is read on every probe, never cached here.
 _EXACT_HELD_SELL_WAKE_IDS: dict[Path, tuple[tuple[int, ...], frozenset[str]]] = {}
 _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK = threading.Lock()
 HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT_SECONDS = 0.25
@@ -1012,7 +1013,7 @@ def _wake_queue_target(wake: ReactorWake, *, path: Path | None) -> Path:
 
 
 def _v4_wake_queue_target(scope_identity: str, *, path: Path | None) -> Path:
-    return _wake_queue_dir(path) / f"held-sell-v4-{scope_identity}.json"
+    return _wake_queue_dir(path) / f"{_V4_WAKE_QUEUE_PREFIX}{scope_identity}.json"
 
 
 def _read_reactor_wake_path(
@@ -1098,7 +1099,7 @@ def _queued_wakes(
     *,
     fail_on_error: bool = False,
 ) -> list[tuple[Path, ReactorWake]]:
-    """Read immutable queue files once, then refresh only on durable revision change."""
+    """Reuse unique-ID records; refresh normal V4 slots on revision changes."""
 
     queue_dir = _wake_queue_dir(path)
     with _WAKE_QUEUE_CACHE_LOCK:
@@ -1143,9 +1144,14 @@ def _queued_wakes(
             cached = dict(_WAKE_QUEUE_CACHE.get(queue_dir, {}))
         fresh: dict[Path, ReactorWake | None] = {}
         for queue_file in queue_files:
+            # V4 publishes replace one deterministic scope slot. The writer's
+            # process-local eviction cannot invalidate another reader's cache.
+            # Re-read these mutable slots on this directory refresh; ordinary
+            # timestamp/unique-ID records retain their immutable cache contract.
             fresh[queue_file] = (
                 cached[queue_file]
                 if queue_file in cached
+                and not queue_file.name.startswith(_V4_WAKE_QUEUE_PREFIX)
                 else _read_reactor_wake_path(
                     queue_file,
                     fail_on_error=fail_on_error,

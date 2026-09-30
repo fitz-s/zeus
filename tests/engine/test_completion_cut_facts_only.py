@@ -303,6 +303,101 @@ def test_lenient_invalid_queue_read_never_seeds_a_strict_exact_cache(tmp_path):
         reactor_wake.exact_held_sell_completion_wake_ids(path=path, fail_on_error=True)
 
 
+def _publish_private_v4_then_ordinary(path, metric, wake_id, q_identity):
+    """The normal publisher, with only private queue/lineage/socket paths."""
+    from src.runtime import reactor_wake
+
+    now = datetime.now(timezone.utc)
+    family = ("Dallas", "2026-09-30", metric)
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id=f"pos-{metric}", family=family,
+        probability_content_identity=q_identity,
+        held_token_id=f"token-{metric}", held_best_bid=0.4,
+        bid_observed_at=now.isoformat(), probability_observed_at=now.isoformat(),
+        schema_version=4, generation="one-private-debt",
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        selection_epoch_identity="private-epoch",
+        sell_book_witness_identity="private-book",
+        debt_event_id="private-debt", monitor_event_id="private-monitor",
+    )
+    wake = reactor_wake.publish_reactor_wake(
+        path=path, source="private-normal-publisher",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        wake_id=wake_id, forecast_families=(family,),
+        held_sell_reauction_requests=(request,),
+    )
+    reactor_wake.publish_reactor_wake(
+        path=path, source="private-normal-publisher",
+        reason="forecast_posterior_advanced", forecast_families=(family,),
+    )
+    return wake
+
+
+@pytest.mark.parametrize("other_process", (False, True))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_cached_exact_ids_follow_normal_v4_slot_replacement_and_reset(
+    tmp_path, monkeypatch, other_process, metric
+):
+    import subprocess
+    import sys
+    import src.engine.event_reactor_adapter as era
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    _write_queue(reactor_wake, path, 1)
+    probe = reactor_wake.exact_held_sell_completion_wake_ids
+    monkeypatch.setattr(
+        reactor_wake, "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: probe(path=path, **kwargs),
+    )
+    captured = _run_generic_completion_batch(monkeypatch, era)
+    assert captured["selection_cancelled"]() is False
+    assert captured["final_actuation_cancelled"]() is False
+
+    first = _publish_private_v4_then_ordinary(path, metric, "wake-old", "q-old")
+    assert probe(path=path, fail_on_error=True) == frozenset({first.wake_id})
+    original_slot = reactor_wake._wake_queue_target(first, path=path)
+
+    def publish(wake_id, q_identity):
+        if other_process:
+            subprocess.run(
+                [sys.executable, "-c",
+                 "from pathlib import Path; import sys; "
+                 "from tests.engine.test_completion_cut_facts_only import "
+                 "_publish_private_v4_then_ordinary; "
+                 "_publish_private_v4_then_ordinary(Path(sys.argv[1]),"
+                 "sys.argv[2],sys.argv[3],sys.argv[4])",
+                 str(path), metric, wake_id, q_identity],
+                cwd=_ROOT, check=True, capture_output=True, timeout=8,
+            )
+        else:
+            _publish_private_v4_then_ordinary(path, metric, wake_id, q_identity)
+
+    for wake_id, q_identity in (("wake-new", "q-new"), ("wake-old", "q-old")):
+        publish(wake_id, q_identity)
+        legacy = reactor_wake._read_reactor_wake_path(path, fail_on_error=True)
+        assert legacy.reason == "forecast_posterior_advanced"
+        warm_ids = probe(path=path, fail_on_error=True)
+        assert warm_ids == frozenset({wake_id})
+        slots = [
+            (file, wake)
+            for file, wake in reactor_wake._queued_wakes(path, fail_on_error=True)
+            if wake.held_sell_reauction_requests
+        ]
+        assert len(slots) == 1
+        assert slots[0][0] == original_slot
+        assert slots[0][1].held_sell_reauction_requests[0].probability_content_identity == q_identity
+        assert captured["selection_cancelled"]() == "exact_held_sell_pending"
+        assert captured["final_actuation_cancelled"]() == "exact_held_sell_pending"
+        _clear_private_queue_cache(reactor_wake, path)
+        assert probe(path=path, fail_on_error=True) == warm_ids
+
+    assert reactor_wake.acknowledge_reactor_wake(slots[0][1], path=path)
+    assert probe(path=path, fail_on_error=True) == frozenset()
+    assert captured["selection_cancelled"]() is False
+    assert captured["final_actuation_cancelled"]() is False
+
+
 def test_a_request_marker_or_elapsed_time_never_cancels_a_generic_completion(
     monkeypatch,
 ):
