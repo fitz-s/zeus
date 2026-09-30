@@ -33,7 +33,7 @@ import copy
 import json
 import hashlib
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -228,15 +228,25 @@ def _pin_seed_consumer_now(conn, cut, builtin):
 @pytest.fixture
 def _normal_seed_certificate(tmp_path, monkeypatch, request):
     """Read-import the actual HIGH/LOW collector/public worlds, never retag a quantity."""
-    from tests.test_replacement_forecast_bundle_reader import _shanghai_reader_current_certificate
+    from tests.test_replacement_forecast_bundle_reader import (
+        _shanghai_reader_current_certificate, _shanghai_reader_certificate,
+    )
     from src.data.station_ground_evidence import forecast_db_from_connection
 
-    metric = getattr(request.node, "callspec", SimpleNamespace(params={})).params.get("metric", "high")
+    params = getattr(request.node, "callspec", SimpleNamespace(params={})).params
+    metric = params.get("metric", "high")
     source = None
     if metric == "low":
         normal = request.getfixturevalue("_normal_kord_fast_coverage")
     else:
-        source = _shanghai_reader_current_certificate.__wrapped__(tmp_path, monkeypatch)
+        if params.get("conditioned"):
+            source = _shanghai_reader_certificate(tmp_path.resolve(), monkeypatch, expires_at=None,
+                target_date=date(2026, 10, 1), source_cycle_time=datetime(2026, 9, 30, 12, tzinfo=UTC),
+                first_compute_at=datetime(2026, 9, 30, 20, 5, tzinfo=UTC),
+                computed_at=datetime(2026, 10, 1, 8, 15, tzinfo=UTC),
+                ground_recorded_at=datetime(2026, 9, 30, 13, tzinfo=UTC))
+        else:
+            source = _shanghai_reader_current_certificate.__wrapped__(tmp_path, monkeypatch)
         normal = next(source)
     builtin = sqlite3.connect(":memory:")
     try:
@@ -557,60 +567,102 @@ def test_day0_coverage_prefers_active_provisional_over_fallback_conditioning(
     assert _seed_already_covered(forecast_db=normal.db, forecast_conn=conn, seed=seed) is True
 
 
-def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) -> None:
-    db_path = _db(tmp_path)
-    _insert_posterior(db_path, q_lcb_json=json.dumps({"cold": 0.1, "warm": 0.7}))
-    _insert_readiness(db_path, expires_at=datetime.now(UTC) + timedelta(hours=3))
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        "UPDATE forecast_posteriors SET computed_at = ?, provenance_json = ?",
-        (
-            "2026-06-06T10:00:00+00:00",
-            json.dumps(
-                {
-                    "q_lcb_basis": "fused_center_bootstrap_p05",
-                    "bayes_precision_fusion": {
-                        "used_models": ["gfs_global", "ukmo_global_deterministic_10km"],
-                        "current_evidence_shape": {
-                            **_current_geometry_fixture(),
-                            "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                            "shape_lag_hours": 0.0,
-                            "source_cycle_time": "2026-06-06T00:00:00+00:00",
-                            "stale_shape_reused": False,
-                            "translation_applied": False,
-                        },
-                        "current_value_serving": {
-                            "gfs_global": {
-                                "served_cycle": "2026-06-06T00:00:00+00:00",
-                                "captured_at": "2026-06-06T08:00:00+00:00",
-                            },
-                            "ukmo_global_deterministic_10km": {
-                                "served_cycle": "2026-06-06T06:00:00+00:00",
-                                "captured_at": "2026-06-06T09:00:00+00:00",
-                            },
-                        },
-                    },
-                }
-            ),
-        ),
-    )
-    for model, cycle, captured in (
-        ("gfs_global", "2026-06-06T00:00:00+00:00", "2026-06-06T08:00:00+00:00"),
-        ("ukmo_global_deterministic_10km", "2026-06-06T06:00:00+00:00", "2026-06-06T09:00:00+00:00"),
-    ):
-        from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _persist_exact_provider_body
-        _persist_exact_provider_body(conn, tmp_path,city=_CITY,metric=_METRIC,target_date=_TARGET_DATE,
-            model=model,cycle=cycle,captured=captured,value=24.0)
+def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path, monkeypatch) -> None:
+    """A real US HRRR full-prior source can be newer than its native ENS/anchor."""
+    import math
+    from dataclasses import replace
+    from datetime import date
+    from zoneinfo import ZoneInfo
+    from tests.integration import test_w3_solve_seam_g3 as normal
+    from src.data import bayes_precision_fusion_download as dl, openmeteo_model_surface as surface
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
     from src.data.replacement_current_value_serving import read_current_instrument_values
-    served = read_current_instrument_values(conn,city=_CITY,metric=_METRIC,target_date=_TARGET_DATE,
-        source_cycle_time_iso="2026-06-06T00:00:00+00:00",decision_time_iso="2026-06-06T11:00:00+00:00")
-    provenance = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors").fetchone()[0])
-    provenance["bayes_precision_fusion"]["current_value_serving"] = {model: value.as_provenance() for model,value in served.items()}
-    conn.execute("UPDATE forecast_posteriors SET provenance_json=?",(json.dumps(provenance),))
-    conn.commit()
-    conn.close()
-    seed = {**_seed(), "computed_at": "2026-06-06T11:00:00+00:00"}
-    assert _seed_already_covered(forecast_db=db_path, seed=seed) is True
+    from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
+
+    root = tmp_path.resolve()
+    native = normal._noaa_native_sources.__wrapped__(root, monkeypatch)
+    next(native)
+    fixture = None
+    try:
+        # The next local day is necessary: a 06Z HRRR cannot reconstruct the
+        # original KORD Day0 prefix starting 05Z. The real collector builds
+        # lead1, rather than relabelling a Day0 LOW snapshot or its request.
+        fixture = normal._kord_normal_prior_fixture(root, monkeypatch,
+            target_date=date(2026, 10, 2))
+        normal._kord_public_bundles(fixture, monkeypatch, at=fixture.cut)
+        original_id = fixture.result.posterior_id
+        original = tuple(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (original_id,)).fetchone())
+        run = fixture.request.source_cycle_time + timedelta(hours=6)
+        capture, cut = fixture.cut + timedelta(minutes=5), fixture.cut + timedelta(minutes=10)
+        fixture.sql_clock[0] = capture
+        target = dl.BayesPrecisionFusionDownloadTarget(city=fixture.city.name, metric="low",
+            target_date=str(fixture.request.target_date), lead_days=1,
+            latitude=fixture.city.lat, longitude=fixture.city.lon, timezone_name=fixture.city.timezone)
+        profile = surface._profile("gfs_hrrr")
+        px, py = surface._project(profile, latitude=target.latitude, longitude=target.longitude)
+        indices = [int(surface._float32(surface._float32(value-profile[f"origin_{axis}"])
+            / profile["dx" if axis == "x" else "dy"]) + .5)
+            for value, axis in ((px, "x"), (py, "y"))]
+        selected_lat, selected_lon = surface._project(profile,
+            x=surface._float32(surface._float32(surface._float32(indices[0])*profile["dx"])+profile["origin_x"]),
+            y=surface._float32(surface._float32(surface._float32(indices[1])*profile["dy"])+profile["origin_y"]))
+        selected_lon = surface._float32(math.fmod(surface._float32(selected_lon+180), 360)-180)
+        params = dict(latitude=target.latitude, longitude=target.longitude, timezone=target.timezone_name,
+            models="gfs_hrrr", hourly="temperature_2m", temperature_unit="celsius",
+            cell_selection="land", run=run.replace(tzinfo=None).isoformat())
+        midnight = datetime.combine(fixture.request.target_date, datetime.min.time(),
+            tzinfo=ZoneInfo(target.timezone_name))
+        payload = dict(latitude=selected_lat, longitude=selected_lon, elevation=32.,
+            timezone=target.timezone_name, utc_offset_seconds=int(midnight.utcoffset().total_seconds()),
+            hourly_units={"temperature_2m": "°C"},
+            hourly={"time": [f"{target.target_date}T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m": [19.0]*24})
+        body = json.dumps(payload, sort_keys=True).encode()
+        bound = dl._bind_physical_response(payload, model="gfs_hrrr", url=SINGLE_RUNS_FORECAST_URL,
+            params=params, run=run, captures=[(body, capture.timestamp())],
+            network_captures=[(body, capture.timestamp(), {"content-type": "application/json"})])
+        row = dict(model="gfs_hrrr", city=target.city, metric=target.metric, target_date=target.target_date,
+            source_cycle_time=run.isoformat(), source_available_at=capture.isoformat(),
+            captured_at=capture.isoformat(), lead_days=1, forecast_value_c=19.0, endpoint="single_runs",
+            _physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY],
+            **dl._bayes_precision_fusion_product_identity("gfs_hrrr", "single_runs", target))
+        assert dl._persist_rows(fixture.conn, [row]) == 1
+        fixture.conn.commit()
+        served = read_current_instrument_values(fixture.conn, city=target.city, metric="low",
+            target_date=target.target_date, source_cycle_time_iso=fixture.request.source_cycle_time.isoformat(),
+            decision_time_iso=cut.isoformat())
+        assert served["gfs_hrrr"].served_cycle == run.isoformat()
+        fixture.sql_clock[0] = cut
+        fixture.request = replace(fixture.request, computed_at=cut)
+        fixture.result = materialize_replacement_forecast_live(fixture.conn, fixture.request)
+        assert fixture.result.ok, fixture.result.reason_codes
+        fixture.conn.commit()
+        public = normal._kord_public_bundles(fixture, monkeypatch, at=cut)
+        proof = next(iter(public.values())).provenance_json["bayes_precision_fusion"]
+        assert "gfs_hrrr" in proof["used_models"]
+        assert datetime.fromisoformat(proof["current_value_serving"]["gfs_hrrr"]["served_cycle"]) > fixture.request.source_cycle_time
+        _pin_seed_consumer_now(fixture.conn, cut, fixture.builtin)
+        seed = _seed_from_certificate(fixture)
+        assert _seed_already_covered(forecast_db=fixture.db, forecast_conn=fixture.conn, seed=seed) is True
+        # The former bare GFS identity remains unsupported; no metadata can
+        # grant it the native HRRR proof used by the lawful positive.
+        fixture.conn.execute("PRAGMA query_only=OFF")
+        raw_before = [tuple(item) for item in fixture.conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
+        from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _persist_exact_provider_body
+        with pytest.raises(ValueError, match="MODEL_SURFACE_UNSUPPORTED"):
+            _persist_exact_provider_body(fixture.conn, root, city=target.city, metric="low",
+                target_date=target.target_date, model="gfs_global", cycle=run.isoformat(),
+                captured=capture.isoformat(), value=19.0)
+        assert [tuple(item) for item in fixture.conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == raw_before
+        assert _seed_already_covered(forecast_db=fixture.db, forecast_conn=fixture.conn, seed=seed) is True
+        assert tuple(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (original_id,)).fetchone()) == original
+    finally:
+        if fixture is not None:
+            fixture.conn.close()
+            fixture.builtin.close()
+        next(native, None)
 
 
 def test_artifact_without_target_day_samples_is_not_an_input_hwm(tmp_path) -> None:
