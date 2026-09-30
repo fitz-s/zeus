@@ -10848,7 +10848,7 @@ def test_global_candidate_probability_use_requires_typed_reduce_only_sell():
 
 
 def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path,_hko_clock_native_sources,
 ):
     import src.data.day0_observation_reader as day0_reader
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -48610,6 +48610,33 @@ def test_global_batch_original_exception_is_not_masked_by_a_failing_flush(monkey
         trade_conn.close()
 
 
+@pytest.fixture
+def _hko_clock_native_sources(tmp_path, monkeypatch):
+    """Reuse normal whole-OM captures and real O1280 decoding, not authority."""
+    from datetime import datetime, timezone
+    from src.data import station_ground_evidence as ground
+    from tests.test_config import _official_hko_registry
+    from tests.test_replacement_forecast_materializer import _hko_native_surfaces,_hko_source_surface
+    _official_hko_registry(tmp_path,monkeypatch)
+    monkeypatch.setattr(ground,"_store_root",lambda:tmp_path/"station-ground")
+    class GroundClock(datetime):
+        @classmethod
+        def now(cls,tz=None):
+            return datetime(2026,9,29,23,30,tzinfo=timezone.utc).astimezone(tz or timezone.utc)
+    monkeypatch.setattr(ground,"datetime",GroundClock)
+    native = _hko_native_surfaces.__wrapped__(tmp_path,monkeypatch)
+    try:
+        next(native)
+        static = _hko_source_surface.__wrapped__(tmp_path,monkeypatch,None)
+        try:
+            next(static)
+            yield
+        finally:
+            next(static,None)
+    finally:
+        next(native,None)
+
+
 def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, prior_hour=12,
                                            observed_extreme_native=None, shuffled_conditions=False):
     """Normal writers + controlled source receipts; no probability authority mock.
@@ -48647,7 +48674,10 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
 
     utc = timezone.utc
     cycle = datetime(2026, 9, 29, prior_hour, tzinfo=utc)
-    issued, captured = cycle + timedelta(minutes=5), cycle + timedelta(minutes=10)
+    issued = cycle + timedelta(minutes=5)
+    # The native static fixture was actually acquired at 23Z. A later body
+    # capture is causal; the original forecast issue/cycle still governs age.
+    captured = datetime(2026,9,29,23,10,tzinfo=utc)
     cut = datetime(2026, 9, 30, 6, 20, tzinfo=utc)
     target = date(2026, 9, 30)
     city = runtime_cities_by_name()["Hong Kong"]
@@ -48737,7 +48767,8 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
             return captured.astimezone(tz) if tz else captured.replace(tzinfo=None)
     def write_provider_cohort(source_cycle,source_capture):
         def provider_http(_url,params,**kwargs):
-            payload = {"latitude":float(params["latitude"]),"longitude":float(params["longitude"]),
+            selected = ((22.25,114.125) if params["models"] == "icon_global" else (22.3125,114.1875))
+            payload = {"latitude":selected[0],"longitude":selected[1],
                 "elevation":32.0,"timezone":city.timezone,"utc_offset_seconds":28800,
                 "hourly_units":{"temperature_2m":"°C"},
                 "hourly":{"time":[f"2026-09-30T{hour:02d}:00" for hour in range(24)],
@@ -48833,7 +48864,10 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
         assert len(vectors) == 1
         assert hourly.persist_day0_hourly_vectors(vectors,target_date=target.isoformat(),conn=conn,
             request_hash=request_hash,endpoint=endpoint,now=cut) == 1
-    raw = {"latitude":station["lat"],"longitude":station["lon"],"elevation":station["elevation_m"],
+    from src.data import openmeteo_ecmwf_ifs9_bucket_transport as source_surface
+    cell = source_surface.source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,
+        target_elevation_m=station["elevation_m"])
+    raw = {"latitude":cell["selected_grid_lat"],"longitude":cell["selected_grid_lon"],"elevation":station["elevation_m"],
         "timezone":city.timezone,"utc_offset_seconds":28800,"hourly_units":{"temperature_2m":"°C"},
         "hourly":{"time":times,"temperature_2m":[27.0 if h<6 else 33.0 for h in range(24)]},
         "_zeus_current_target_scope":{"city":city.name,"target_date":target.isoformat(),"metric":metric}}
@@ -48845,16 +48879,6 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(artifact_path,request=anchor_request,
         metric=metric,source_available_at=captured,captured_at=captured,
         product_metadata={"city":city.name,"target_date":target.isoformat()})
-    geometry = {"revision":"openmeteo_ifs9_o1280_source_cell_v1","static_hsurf_sha256":"b"*64,
-        "selected_flat_index":100,"selected_grid_lat":station["lat"],"selected_grid_lon":station["lon"],
-        "raw_grid_elevation_m":station["elevation_m"],"effective_grid_elevation_m":station["elevation_m"],
-        "target_dem_elevation_m":station["elevation_m"],"cell_is_sea":False,"cell_is_center":False,
-        "nearby_sea":False,"raw_payload_sha256":hashlib.sha256(raw_bytes).hexdigest(),
-        "station_registry_sha256":station["registry_sha256"]}
-    # Controlled HSURF source input, not a mock of its authenticity guard.
-    from src.data import openmeteo_ecmwf_ifs9_bucket_transport as source_surface
-    monkeypatch.setattr(source_surface,"source_cell_geometry_proof",lambda **_kw: {
-        key:value for key,value in geometry.items() if key not in {"raw_payload_sha256","station_registry_sha256"}})
     def anchor_http(_url,params,**kwargs):
         kwargs["capture_entity_body"](raw_bytes,captured.timestamp())
         kwargs["capture_network_response"](raw_bytes,captured.timestamp(),{"content-type":"application/json"})
@@ -48877,7 +48901,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     # The real producer parses the retained official HKO ground entity body;
     # this September cut is after its immutable possession time, unlike June.
     metadata = OpenMeteoIfs9PrecisionMetadata(**_precision_metadata(
-        city.name, target.isoformat(), anchor_sigma_c=3, raw_payload_bytes=raw_bytes
+        city.name, target.isoformat(), anchor_sigma_c=3, raw_payload_bytes=raw_bytes,analysis_at=cut
     ))
     # Normal seed transport needs the producer's retained metadata paths, not
     # a test-only reconstruction of probability authority after the fact.
@@ -48898,7 +48922,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     write_manifest(manifest,manifest_path)
     assert metadata.source_geometry_proof["station_ground_proof"]["facts"] == station["ground_facts"]
     assert datetime.fromisoformat(station["ground_audit"]["checked_at"].replace("Z", "+00:00")) <= cut
-    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata,raw_payload_bytes=raw_bytes)
+    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata,raw_payload_bytes=raw_bytes,decision_at=cut)
     anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(raw,city_timezone=city.timezone,
         target_local_date=target,source_cycle_time=cycle,require_full_localday=True)
     point = 32 if metric == "high" else 27
@@ -48921,6 +48945,15 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
         day0_observed_extreme_c=observed_extreme_native,day0_observed_extreme_source="hko_hourly_accumulator",
         day0_observed_extreme_observation_time="2026-09-30T06:10:00+00:00",
         day0_observed_extreme_sample_count=2,day0_observed_extreme_unit="C")
+    # Canonical ground possession is acquired normally in this same private
+    # forecast namespace, not self-reported by the posterior's own audit.
+    from src.data import station_ground_evidence as ground
+    conn.commit()
+    archived = ground.archive_station_ground_evidence(db,[city.name])
+    assert city.name in archived["archived"],archived
+    ground_entity = archived["archived"][city.name]
+    assert datetime.fromisoformat(ground_entity["captured_at"]) <= datetime.fromisoformat(ground_entity["recorded_at"]) < cut
+    assert ground.read_current_station_ground_evidence(db,city=city.name,decision_at=cut) == ground_entity
     sql_clock[0] = cut
     result = materialize_replacement_forecast_live(conn,request)
     assert result.ok, result.reason_codes
@@ -48944,7 +48977,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
 
 
 @pytest.mark.parametrize("metric",("high","low"))
-def test_held_point_trace_observes_normal_hko_consumer_without_changing_witness(tmp_path,monkeypatch,metric):
+def test_held_point_trace_observes_normal_hko_consumer_without_changing_witness(tmp_path,monkeypatch,metric,_hko_clock_native_sources):
     from src.engine import tier0_auction_corpus as corpus
     from src.events.triggers.day0_extreme_updated import (
         build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
@@ -48986,7 +49019,7 @@ def test_held_point_trace_observes_normal_hko_consumer_without_changing_witness(
 
 @pytest.mark.parametrize("metric",("high","low"))
 @pytest.mark.parametrize("fault",("none","freeze","overflow","off"))
-def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(tmp_path,monkeypatch,metric,fault,inspect_cut=None):
+def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(tmp_path,monkeypatch,metric,fault,_hko_clock_native_sources,inspect_cut=None):
     from src.engine import tier0_auction_corpus as corpus
     from src.engine.global_auction_universe import _rebind_probability_witness_tokens
     from src.events.triggers.day0_extreme_updated import (
@@ -49083,7 +49116,7 @@ def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_toke
         trade.close(); fixture.conn.close()
 
 
-def test_geoblocked_actual_adapter_keeps_held_point_trace_lanes(tmp_path,monkeypatch):
+def test_geoblocked_actual_adapter_keeps_held_point_trace_lanes(tmp_path,monkeypatch,_hko_clock_native_sources):
     """Typed host access removes BUY only, without granting SELL venue access."""
     from src.control import venue_access
     cut = _dt.datetime(2026,9,30,6,20,tzinfo=_dt.timezone.utc)
@@ -49173,10 +49206,10 @@ def test_geoblocked_actual_adapter_keeps_held_point_trace_lanes(tmp_path,monkeyp
                 for prepared in (receipt.prepared_global_family,)) == baseline
         assert sell_outputs[0] == sell_outputs[1] == sell_outputs[2]
     test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(
-        tmp_path,monkeypatch,"high","none",inspect_cut=inspect_cut)
+        tmp_path,monkeypatch,"high","none",_hko_clock_native_sources,inspect_cut=inspect_cut)
 
 
-def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_path,monkeypatch):
+def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_path,monkeypatch,_hko_clock_native_sources):
     """Real selector/order hook and corpus flush, not a mocked winning score."""
     from src.engine import tier0_auction_corpus as corpus
     actual_process = global_batch_runtime.process_current_global_batch
@@ -49388,11 +49421,11 @@ def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_pat
                 trade.close()
         assert outputs[0] == outputs[1] == outputs[2]
     test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(
-        tmp_path,monkeypatch,"high","none",inspect_cut=inspect_cut)
+        tmp_path,monkeypatch,"high","none",_hko_clock_native_sources,inspect_cut=inspect_cut)
 
 
 @pytest.mark.parametrize("metric",("high","low"))
-def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(tmp_path,monkeypatch,metric):
+def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(tmp_path,monkeypatch,metric,_hko_clock_native_sources):
     fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric,prior_hour=6)
     try:
         from src.data import replacement_forecast_bundle_reader as reader
@@ -49407,9 +49440,9 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
             "SELECT * FROM forecast_posteriors WHERE posterior_id=?",
             (fixture.result.posterior_id,),
         ).fetchone())
-        ground_checked = _dt.datetime.fromisoformat(
+        ground_possessed = _dt.datetime.fromisoformat(
             provenance["bayes_precision_fusion"]["current_evidence_shape"]
-            ["provider_geometry_audit"]["anchor_station_ground"]["checked_at"].replace("Z", "+00:00")
+            ["provider_geometry_audit"]["anchor_station_ground"]["recorded_at"]
         )
         # A current audit claim cannot retroactively authorize an older DB q.
         # Keep the actual normal producer's proof untouched; change only the
@@ -49418,13 +49451,15 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
             reader.ReplacementForecastAuthorityPurpose.ENTRY,
             reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION,
         ):
-            assert reader._live_grade_provenance(current_row, authority_purpose=purpose) is not None
+            from src.data.station_ground_evidence import forecast_db_from_connection
+            namespace = forecast_db_from_connection(fixture.conn)
+            assert reader._live_grade_provenance(current_row, authority_purpose=purpose,forecast_db=namespace) is not None
             assert reader._live_grade_provenance(
-                {**current_row, "computed_at": (ground_checked-_dt.timedelta(seconds=1)).isoformat()},
-                authority_purpose=purpose,
+                {**current_row, "computed_at": (ground_possessed-_dt.timedelta(seconds=1)).isoformat()},
+                authority_purpose=purpose,forecast_db=namespace,
             ) is None
             assert reader._live_grade_provenance(
-                {**current_row, "computed_at": None}, authority_purpose=purpose,
+                {**current_row, "computed_at": None}, authority_purpose=purpose,forecast_db=namespace,
             ) is None
         assert reader._held_pinned_provenance_reason(provenance,city="Hong Kong",target_date="2026-09-30",
             metric=metric,decision_time=fixture.cut) is None
@@ -49448,7 +49483,9 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
             request=replace(fixture.anchor_request,run=fixture.request.source_cycle_time+_dt.timedelta(hours=6)),metric=metric,
             source_available_at=capture,captured_at=capture,
             product_metadata={"city":"Hong Kong","target_date":"2026-09-30"})
+        fixture.sql_clock[0] = capture
         incomplete_artifact_id = write_manifest_to_db(fixture.conn,incomplete)
+        fixture.conn.commit()
         decision = fixture.cut+_dt.timedelta(minutes=2)
         selected = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
             target_date="2026-09-30",temperature_metric=metric,decision_time=decision,
@@ -49514,6 +49551,7 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
         new_cycle = fixture.request.source_cycle_time+_dt.timedelta(hours=6)
         new_capture = decision+_dt.timedelta(minutes=2)
+        fixture.sql_clock[0] = new_capture
         run = dict(fixture.conn.execute("SELECT * FROM source_run WHERE source_run_id=?",
                                        (fixture.request.baseline_source_run_id,)).fetchone())
         new_run_id = run["source_run_id"]+"-new"
@@ -49546,12 +49584,20 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
             kwargs["capture_network_response"](raw_body,new_capture.timestamp(),{"content-type":"application/json"})
             return json.loads(raw_body)
         monkeypatch.setattr("src.data.openmeteo_client.fetch",current_anchor_http)
-        assert dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=new_cycle,
-            targets=[dl.BayesPrecisionFusionDownloadTarget(city="Hong Kong",target_date="2026-09-30",metric=metric,
-                latitude=fixture.anchor_request.latitude,longitude=fixture.anchor_request.longitude,
-                timezone_name=fixture.city.timezone,lead_days=0)],models=("ecmwf_ifs",),
-            frozen_source_runs={"ecmwf_ifs":(new_cycle,new_capture)},include_previous_runs=False,
-            prune_after=False)["written_row_count"] == 1
+        class AnchorClock(_dt.datetime):
+            @classmethod
+            def now(cls,tz=None):
+                return new_capture.astimezone(tz) if tz else new_capture.replace(tzinfo=None)
+        with monkeypatch.context() as fetch:
+            fetch.setattr(dl,"datetime",AnchorClock)
+            assert dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=new_cycle,
+                targets=[dl.BayesPrecisionFusionDownloadTarget(city="Hong Kong",target_date="2026-09-30",metric=metric,
+                    latitude=fixture.anchor_request.latitude,longitude=fixture.anchor_request.longitude,
+                    timezone_name=fixture.city.timezone,lead_days=0)],models=("ecmwf_ifs",),
+                frozen_source_runs={"ecmwf_ifs":(new_cycle,new_capture)},include_previous_runs=False,
+                prune_after=False)["written_row_count"] == 1
+        fixture.conn.commit()
+        fixture.sql_clock[0] = new_capture+_dt.timedelta(minutes=1)
         normal = materialize_replacement_forecast_live(fixture.conn,replace(fixture.request,
             source_cycle_time=new_cycle,baseline_source_run_id=new_run_id,baseline_source_available_at=new_capture,
             openmeteo_anchor=replace(fixture.request.openmeteo_anchor,source_cycle_time=new_cycle),
@@ -49574,7 +49620,7 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
 
 
 @pytest.mark.parametrize("metric",("high","low"))
-def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tmp_path,monkeypatch,metric):
+def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tmp_path,monkeypatch,metric,_hko_clock_native_sources):
     """Actual source tick and seed transport, with only private routing/HTTP clocks.
 
     Controlled ENS/HSURF receipts remain the existing fixture's declared toy
@@ -49639,7 +49685,14 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
             "last_run_modification_time":(remaining_run+_dt.timedelta(minutes=5)).isoformat(),
             "update_interval_seconds":21600,"temporal_resolution_seconds":3600}
         def remaining_http(url,params,**kwargs):
-            raw = json.dumps(ens_suffix if "ensemble-api" in url else suffix).encode()
+            payload = dict(ens_suffix if "ensemble-api" in url else suffix)
+            if "ensemble-api" not in url:
+                model = params["models"]
+                anchor_body = json.loads(fixture.artifact_path.read_bytes())
+                selected = ((anchor_body["latitude"],anchor_body["longitude"]) if model=="ecmwf_ifs"
+                    else (22.25,114.125) if model=="icon_global" else (22.3125,114.1875))
+                payload.update(latitude=selected[0],longitude=selected[1])
+            raw = json.dumps(payload).encode()
             if "capture_entity_body" in kwargs:
                 kwargs["capture_entity_body"](raw,remaining_capture.timestamp())
             if "capture_network_response" in kwargs:
@@ -49750,8 +49803,10 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
         assert old_state.source == "hko_rhrread_spot" and old_state.value_native == 33
         monkeypatch.setattr(reader,"datetime",WriteClock)
         current_row = dict(latest)
+        from src.data.station_ground_evidence import forecast_db_from_connection
         for purpose in (reader.ReplacementForecastAuthorityPurpose.ENTRY,reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION):
-            assert reader._live_grade_provenance(current_row,authority_purpose=purpose) is not None
+            assert reader._live_grade_provenance(current_row,authority_purpose=purpose,
+                forecast_db=forecast_db_from_connection(fixture.conn)) is not None
         row = dict(fixture.conn.execute("SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone())
         observation = observation_instant_row_to_day0_observation(row,metric=metric)
         event = build_day0_extreme_updated_event(observation=observation,
@@ -49880,7 +49935,7 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
-def test_hko_normal_kernel_uses_the_producers_instrument_variance(tmp_path, monkeypatch, metric):
+def test_hko_normal_kernel_uses_the_producers_instrument_variance(tmp_path, monkeypatch, metric,_hko_clock_native_sources):
     """One normal source/cut, independently inspect the actually consumed kernel."""
     from src.events.triggers.day0_extreme_updated import (
         build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
@@ -50008,7 +50063,7 @@ def test_day0_conditional_high_keeps_its_existing_extra_variance(unit, scale):
 
 @pytest.mark.parametrize("metric,raw", (("high", 32.9), ("low", 27.4)))
 @pytest.mark.parametrize("shuffled", (False, True))
-def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, monkeypatch, metric, raw, shuffled):
+def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, monkeypatch, metric, raw, shuffled,_hko_clock_native_sources):
     """Real writers/authority; controlled HTTP/51-ENS inputs, no q override."""
     from src.data import day0_hourly_vectors as hourly
     from src.events.triggers.day0_extreme_updated import (
@@ -50159,7 +50214,7 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
 
 
 @pytest.mark.parametrize("fault", ("none", "city", "unit", "source"))
-def test_hko_context_loss_is_typed_family_unavailable_in_actual_batch(tmp_path, monkeypatch, fault):
+def test_hko_context_loss_is_typed_family_unavailable_in_actual_batch(tmp_path, monkeypatch, fault,_hko_clock_native_sources):
     """Actual source/adapter/classifier; no global risk enum or venue claim."""
     actual_process = global_batch_runtime.process_current_global_batch
     def inspect_cut(fixture,event,hooks,entry_receipt,held_receipt,selected,traces):
@@ -50238,4 +50293,4 @@ def test_hko_context_loss_is_typed_family_unavailable_in_actual_batch(tmp_path, 
         finally:
             trade.close()
     test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(
-        tmp_path,monkeypatch,"high","none",inspect_cut=inspect_cut)
+        tmp_path,monkeypatch,"high","none",_hko_clock_native_sources,inspect_cut=inspect_cut)
