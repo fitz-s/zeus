@@ -113,7 +113,7 @@ METAR_AWC_RECOVERY_INTERVAL_S = 90.0
 #: encodes is a valid local-day extreme for entry-probability computation.
 FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
 
-FAST_RESIDUAL_LIKELIHOOD_REVISION = "same_station_causal_residual_v1"
+FAST_RESIDUAL_LIKELIHOOD_REVISION = "same_station_causal_product_minus_fast_residual_v2"
 def validated_fast_residual_day0_conditioning(
     conditioning: object,
 ) -> Mapping[str, object] | None:
@@ -408,7 +408,7 @@ class FastObsSource:
 
 @dataclass(frozen=True)
 class FastStationResidualLikelihood:
-    """Causal WU-minus-METAR measurement model for one settlement station.
+    """Causal settlement-product-minus-METAR model for one station.
 
     The residual carrier is deliberately separate from the anomaly margin.
     ``unknown_weight`` is the 95% zero-hit Clopper-Pearson mass and leaves only
@@ -659,16 +659,9 @@ def _fast_residual_value_c(
             precise = metar_t_group_temperature_c(str(raw_report or ""))
             return precise if precise is not None and math.isfinite(precise) else None
         return value if normalized_unit == "C" else None
-    # The settlement mirror renders the SAME report, and when it carries that
-    # report's T group the tenths are the measurement itself.  Its published
-    # number is a rounded view of them: weather.gov prints a whole-degree F
-    # (78.8F) whose exact preimage is 26.0C while the report says 25.6C.
-    # Converting that published view manufactures a residual of up to ~0.4C
-    # out of one measurement, so read the same precise group both channels
-    # carry before falling back to the published unit.
-    precise = metar_t_group_temperature_c(str(raw_report or ""))
-    if precise is not None and math.isfinite(precise):
-        return precise
+    # The builder binds this side to the city's settlement product. Its native
+    # published value is the modeled quantity; the shared METAR is provenance,
+    # not permission to replace that product with the fast physical measurement.
     if normalized_unit == "C":
         return value
     if normalized_unit == "F":

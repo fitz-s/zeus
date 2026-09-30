@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-09-30
 # Authority basis: docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md R2/R3 proof.
 
 import pytest
@@ -37,10 +37,31 @@ def test_hko_observation_clock_revision_does_not_relabel_old_certificates():
         "day0_resolver_terminal_composition_v28_instrument_variance_owner_v1",
         "day0_settlement_channel_revision_model_v30_smooth_center_bias_observation_clock_city_instrument_variance_v1",
         "day0_resolver_terminal_composition_v29_smooth_center_bias_observation_clock_city_instrument_variance_v1",
+        "day0_settlement_channel_revision_model_v31_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1",
+        "day0_resolver_terminal_composition_v30_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1",
     ):
         old = f"day0-semrev:{previous}:immutable-entry-certificate"
         assert day0_probability_semantics_revision(old) != DAY0_PROBABILITY_SEMANTICS_REVISION
         assert bind_day0_probability_semantics(old) == old
+
+
+def test_product_residual_joint_revision_preserves_all_existing_operator_suffixes(monkeypatch):
+    from src.events import day0_authority as authority
+
+    suffix = "smooth_center_bias_observation_clock_city_instrument_native_boundary_v1"
+    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == f"day0_settlement_channel_revision_model_v32_{suffix}"
+    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == f"day0_resolver_terminal_composition_v31_{suffix}"
+    for current_revision, previous_revision in (
+        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL, f"day0_settlement_channel_revision_model_v31_{suffix}"),
+        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER, f"day0_resolver_terminal_composition_v30_{suffix}"),
+    ):
+        monkeypatch.setattr(authority, "DAY0_PROBABILITY_SEMANTICS_REVISION", current_revision)
+        old = f"day0-semrev:{previous_revision}:immutable-source-certificate"
+        assert authority.bind_day0_probability_semantics(old) == old
+        assert authority.day0_probability_semantics_revision(old) == previous_revision
+        rebuilt = authority.bind_day0_probability_semantics("immutable-source-certificate")
+        assert authority.day0_probability_semantics_revision(rebuilt) == current_revision
+        assert rebuilt != old
 
 
 def _forecast(**overrides):

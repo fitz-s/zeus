@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-09-23
+# Last reused/audited: 2026-09-30
 # Lifecycle: created=2026-06-10; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
@@ -65,6 +65,207 @@ from src.data.day0_oracle_anomaly import (
 )
 
 UTC = timezone.utc
+
+
+def _native_product_residual_context(monkeypatch, *, city_name, product_c=14.0, fault=None):
+    """Controlled original WRH/AWC bodies through their ordinary print writers.
+
+    This is a source-quantity relationship, not a licensed forecast or public q.
+    The two products deliberately render one observation differently.
+    """
+    from src.config import cities_by_name
+    from src.data import day0_fast_obs as fast, noaa_wrh_timeseries as wrh
+    from src.data.daily_obs_append import _append_noaa_wrh_prints
+    from src.state.schema.observation_prints_schema import ensure_table
+
+    city = cities_by_name[city_name]
+    assert city.settlement_source_type == "noaa"
+    cutoff = datetime(2026, 9, 30, 20, tzinfo=UTC)
+    fetch = cutoff + timedelta(minutes=1) if fault == "future_fetch" else cutoff - timedelta(minutes=1)
+    station = city.wu_station
+    product_station = "KAAA" if fault == "foreign_station" else station
+    source = fast.fast_obs_source_for_city(city, cutoff.date())
+    assert source is not None and source.station_id == station
+    timestamps, native_values, product_reports, awc_rows = [], [], [], []
+    pair_count = 19 if fault == "thin" else fast.FAST_RESIDUAL_MIN_PAIRS
+    for index in range(pair_count):
+        observed = cutoff - timedelta(hours=index + 2)
+        if fault == "outside_window":
+            observed -= timedelta(days=7)
+        product_observed = observed + timedelta(minutes=5) if fault == "foreign_observation" else observed
+        raw = f"{station} {observed:%d%H%M}Z 00000KT 10SM CLR 14/10 A3000 RMK AO2 T01440100"
+        product_raw = f"{product_station} {product_observed:%d%H%M}Z 00000KT 10SM CLR 14/10 A3000 RMK AO2 T01440100"
+        timestamps.append(product_observed.astimezone(ZoneInfo(city.timezone)).strftime("%Y-%m-%dT%H:%M:%S%z"))
+        native = product_c if city.settlement_unit == "C" else product_c * 9.0 / 5.0 + 32.0
+        native_values.append(None if fault == "missing_native" else float("nan") if fault == "nonfinite_native" else native)
+        product_reports.append(product_raw)
+        awc_rows.append({"icaoId": station, "obsTime": observed.timestamp(),
+                         "receiptTime": (observed + timedelta(seconds=30)).isoformat(),
+                         "temp": 14.4, "metarType": "METAR", "rawOb": raw})
+    product_body = json.dumps({"STATION": [{"STID": product_station, "OBSERVATIONS": {
+        "date_time": timestamps, "air_temp_set_1": native_values,
+        "sea_level_pressure_set_1": [1013.0] * pair_count, "metar_set_1": product_reports,
+    }}]})
+    rows = wrh.rows_from_payload(json.loads(product_body), product_station)
+    reports = fast.parse_metar_api_payload(json.loads(json.dumps(awc_rows)))
+    assert len(reports) == pair_count
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    for target in {date.fromisoformat(row.local_date) for row in rows}:
+        _append_noaa_wrh_prints(conn, city_name=city.name, station=product_station,
+            unit=city.settlement_unit, rows=rows, target_date_local=target,
+            view=city.settlement_page_view, fetch_utc=fetch)
+
+    class ClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+
+    writer_time = [fetch]
+
+    class WriterClock(datetime, metaclass=ClockType):
+        @classmethod
+        def now(cls, tz=None):
+            return writer_time[0].astimezone(tz) if tz else writer_time[0].replace(tzinfo=None)
+
+    monkeypatch.setattr(fast, "datetime", WriterClock)
+    assert fast._append_metar_prints_to_ledger(conn, ((city, source, cutoff.date()),), reports)
+    current_observed = cutoff - timedelta(minutes=1)
+    current_report = fast.parse_metar_api_payload([{
+        "icaoId": station, "obsTime": current_observed.timestamp(),
+        "receiptTime": cutoff.isoformat(), "temp": 14.4, "metarType": "METAR",
+        "rawOb": f"{station} {current_observed:%d%H%M}Z 14/10 T01440100",
+    }])
+    writer_time[0] = cutoff + timedelta(seconds=5)
+    assert fast._append_metar_prints_to_ledger(conn, ((city, source, cutoff.date()),), current_report)
+    conn.commit()
+    return conn, city, cutoff
+
+
+@pytest.mark.parametrize("city_name", ("Chicago", "Paris"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("product_c", (14.0, 14.8))
+def test_fast_residual_uses_native_product_not_raw_t_group(monkeypatch, city_name, metric, product_c):
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data import day0_fast_obs as fast
+
+    conn, city, cutoff = _native_product_residual_context(monkeypatch, city_name=city_name, product_c=product_c)
+    try:
+        original_rows = conn.execute("SELECT * FROM observation_prints ORDER BY id").fetchall()
+        assert len(original_rows) == 2 * fast.FAST_RESIDUAL_MIN_PAIRS + 1
+        target = cutoff.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+        current = fast.latest_fast_station_extreme_c(conn, city=city.name, target_date=target,
+            metric=metric, decision_time=cutoff + timedelta(minutes=5))
+        # Chicago's local day starts at 05Z; six training prints are yesterday.
+        expected_day_count = 15 if city_name == "Chicago" else 21
+        assert current == (14.4, cutoff.isoformat(), expected_day_count, city.settlement_unit)
+        likelihood = fast.build_fast_station_residual_likelihood(conn, city=city.name,
+            target_date=target, metric=metric, observed_source=fast.FAST_OBS_SOURCE_ID,
+            observation_time=current[1], decision_time=cutoff + timedelta(minutes=5))
+        assert likelihood is not None
+        expected_unknown = 1.0 - 0.05 ** (1.0 / 20.0)
+        assert likelihood.matched_pairs == 20
+        assert likelihood.window_start == (cutoff - timedelta(days=7)).isoformat()
+        assert likelihood.residual_weights_c == ((round(product_c - 14.4, 6), 1.0 - expected_unknown),)
+        assert likelihood.unknown_weight == expected_unknown
+        assert likelihood.settlement_extreme_c == pytest.approx(product_c)
+        assert likelihood.settlement_channel == f"noaa_wrh_{city.wu_station.lower()}"
+        assert conn.execute("SELECT * FROM observation_prints ORDER BY id").fetchall() == original_rows
+        if city.settlement_unit == "F" and product_c == 14.0:
+            semantics = SettlementSemantics.for_city(city)
+            assert semantics.round_single(57.2) == 57
+            assert semantics.round_single(14.4 * 9 / 5 + 32) == 58
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("city_name", ("Chicago", "Paris"))
+@pytest.mark.parametrize("fault", ("future_fetch", "foreign_station", "foreign_observation", "outside_window", "thin", "missing_native", "nonfinite_native"))
+def test_native_product_residual_keeps_causal_pair_and_thin_boundaries(monkeypatch, city_name, fault):
+    conn, city, cutoff = _native_product_residual_context(monkeypatch, city_name=city_name, fault=fault)
+    try:
+        for metric in ("high", "low"):
+            assert build_fast_station_residual_likelihood(conn, city=city.name,
+                target_date=cutoff.astimezone(ZoneInfo(city.timezone)).date().isoformat(), metric=metric,
+                observed_source=FAST_OBS_SOURCE_ID, observation_time=cutoff,
+                decision_time=cutoff + timedelta(minutes=5)) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("value,unit", ((None, "F"), (float("nan"), "C"), (float("inf"), "F"), (57.2, "K")))
+@pytest.mark.parametrize("settlement_unit", ("C", "F"))
+def test_product_residual_missing_native_never_uses_valid_raw_t(value, unit, settlement_unit):
+    from src.data.day0_fast_obs import _fast_residual_value_c
+
+    assert _fast_residual_value_c(channel="noaa_wrh_kord", value_native=value,
+        unit=unit, raw_report="KORD 301315Z 14/10 T01440100",
+        settlement_unit=settlement_unit) is None
+
+
+@pytest.mark.parametrize("settlement_unit,native,raw,expected", (
+    ("C", 14.0, "KORD 301315Z 14/10 T01440100", 14.0),
+    ("F", 14.0, "KORD 301315Z 14/10 T01440100", 14.4),
+    ("C", 14.0, "KORD 301315Z 14/10", 14.0),
+    ("F", 14.0, "KORD 301315Z 14/10", None),
+))
+def test_fast_physical_quantity_keeps_its_original_native_unit_law(settlement_unit, native, raw, expected):
+    from src.data.day0_fast_obs import _fast_residual_value_c
+
+    assert _fast_residual_value_c(channel=FAST_OBS_SOURCE_ID, value_native=native,
+        unit="C", raw_report=raw, settlement_unit=settlement_unit) == expected
+
+
+@pytest.mark.parametrize("channel", ("wu_icao_history", "noaa_wrh_kord"))
+@pytest.mark.parametrize("unit,native", (("C", 14.0), ("F", 57.2)))
+def test_cfg_selected_product_quantity_stays_native_even_with_same_report(channel, unit, native):
+    from src.data.day0_fast_obs import _fast_residual_value_c
+
+    assert _fast_residual_value_c(channel=channel, value_native=native, unit=unit,
+        raw_report="KORD 301315Z 14/10 T01440100", settlement_unit=unit) == pytest.approx(14.0)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_native_product_likelihood_revision_rebuilds_identity_without_relabeling_old(monkeypatch, metric):
+    import copy
+    import hashlib
+    from src.data import day0_fast_obs as fast
+
+    conn, city, cutoff = _native_product_residual_context(monkeypatch, city_name="Chicago")
+    try:
+        likelihood = fast.build_fast_station_residual_likelihood(conn, city=city.name,
+            target_date=cutoff.astimezone(ZoneInfo(city.timezone)).date().isoformat(), metric=metric,
+            observed_source=FAST_OBS_SOURCE_ID, observation_time=cutoff,
+            decision_time=cutoff + timedelta(minutes=5))
+        assert likelihood is not None
+        assert likelihood.semantics_revision == "same_station_causal_product_minus_fast_residual_v2"
+        payload = likelihood.as_payload()
+        payload["scenario_weights"] = [{"observed_bound_c": 14.0, "weight": 1.0}]
+        conditioning = {"active": True, "source": FAST_OBS_SOURCE_ID, "metric": metric,
+            "unit": "F", "observation_time": cutoff.isoformat(), "observed_extreme_c": 14.4,
+            "sample_count": 15, "fast_residual_likelihood": payload}
+        assert fast.validated_fast_residual_day0_conditioning(conditioning) is conditioning
+        old = copy.deepcopy(conditioning)
+        old_payload = old["fast_residual_likelihood"]
+        old_payload["semantics_revision"] = "same_station_causal_residual_v1"
+        old_identity = {key: old_payload[key] for key in (
+            "semantics_revision", "station_id", "settlement_channel", "fast_channel", "unit",
+            "as_of", "window_start", "matched_pairs", "unknown_weight", "settlement_extreme_c")}
+        old_identity["residual_weights_c"] = tuple(
+            (row["residual_c"], row["weight"]) for row in old_payload["residual_weights_c"])
+        old_payload["identity_hash"] = hashlib.sha256(json.dumps(
+            old_identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        immutable_old = copy.deepcopy(old)
+        with pytest.raises(ValueError, match="GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"):
+            fast.validated_fast_residual_day0_conditioning(old)
+        assert old == immutable_old
+        assert old_payload["identity_hash"] != likelihood.identity_hash
+        rebuilt = fast.build_fast_station_residual_likelihood(conn, city=city.name,
+            target_date=cutoff.astimezone(ZoneInfo(city.timezone)).date().isoformat(), metric=metric,
+            observed_source=FAST_OBS_SOURCE_ID, observation_time=cutoff,
+            decision_time=cutoff + timedelta(minutes=5))
+        assert rebuilt == likelihood
+    finally:
+        conn.close()
 
 
 def test_fast_station_residual_likelihood_is_causal_station_local_and_thin_inert(
