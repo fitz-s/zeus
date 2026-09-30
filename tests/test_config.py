@@ -779,6 +779,32 @@ def test_international_homr_ground_is_station_reference_not_temperature_dcp(name
     assert config.station_ground_facts_from_bytes(source_kind=kind, station_id="KORD", raw_body=body) is None
 
 
+@pytest.mark.parametrize("station", ("ZSPD", "EGLC"))
+@pytest.mark.parametrize("feet", ("-99999", -99999, -99999.0))
+def test_international_homr_documented_missing_ground_is_not_negative_terrain(station, feet):
+    import src.config as config
+    kind = config.HOMR_INTERNATIONAL_GROUND_SOURCE_KIND
+    body = (config.PROJECT_ROOT / f"config/noaa_homr_{station.lower()}_station.json").read_bytes()
+    assert config.station_ground_facts_from_bytes(source_kind=kind, station_id=station, raw_body=body) is not None
+    payload = json.loads(body)
+    payload["stationCollection"]["stations"][0]["location"]["elevations"][0].update(
+        elevationFeet=feet, elevationMeters="-30479.6952")
+    assert config.station_ground_facts_from_bytes(source_kind=kind, station_id=station, raw_body=json.dumps(payload).encode()) is None
+
+
+@pytest.mark.parametrize("station", ("ZSPD", "EGLC"))
+@pytest.mark.parametrize("feet,metres", (("0", "0"), ("-3", "-0.9")))
+def test_international_homr_legitimate_zero_and_negative_ground_remain_valid(station, feet, metres):
+    import src.config as config
+    payload = json.loads((config.PROJECT_ROOT / f"config/noaa_homr_{station.lower()}_station.json").read_bytes())
+    payload["stationCollection"]["stations"][0]["location"]["elevations"][0].update(
+        elevationFeet=feet, elevationMeters=metres)
+    facts = config.station_ground_facts_from_bytes(source_kind=config.HOMR_INTERNATIONAL_GROUND_SOURCE_KIND,
+        station_id=station, raw_body=json.dumps(payload).encode())
+    assert facts is not None
+    assert facts["elevation_m"] == float(metres)
+
+
 def _official_international_homr_registry(tmp_path, monkeypatch, name="Shanghai"):
     import hashlib
     import src.config as config

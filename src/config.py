@@ -818,8 +818,11 @@ def _homr_international_ground_facts(raw: bytes, station_id: str) -> dict[str, o
     if len(elevations) != 1:
         raise ValueError("official station ground missing or ambiguous")
     ground = elevations[0]
+    # NCEI DSI9767B section2aa reserves -99999 feet for missing ground.
+    # Its finite converted metres are not terrain; zero/negative terrain is legal.
+    if number(ground["elevationFeet"]) == -99999:
+        raise ValueError("official ground is documented missing")
     elevation = number(ground["elevationMeters"])
-    number(ground["elevationFeet"])
 
     def interval(value: object, scale: Decimal) -> tuple[Decimal, Decimal]:
         decimal = Decimal(str(value))
