@@ -1244,13 +1244,16 @@ def _materialize(
                 writer_lock=effective_writer_lock,
                 stage_receipt=stage_receipt,
             )
+            if result.ok and result.posterior_id is not None:
+                # Commit precedes this timestamp, and this timestamp precedes
+                # notification. A socket consumer can serve q inside publish;
+                # recording READY afterwards incorrectly reverses causality.
+                from src.runtime.observation_reaction_trace import emit_posterior_ready
+                emit_posterior_ready(conn, result.posterior_id, wake_published=False)
             if result.ok and publish_wake:
                 stage_receipt.mark("wake")
                 stage_receipt.require_budget()
                 wake_published = _publish_materialization_wake(request)
-            if result.ok and result.posterior_id is not None:
-                from src.runtime.observation_reaction_trace import emit_posterior_ready
-                emit_posterior_ready(conn, result.posterior_id, wake_published=wake_published)
         else:
             if anchor_artifact_id is not None:
                 request = replace(request, anchor_artifact_id=anchor_artifact_id)

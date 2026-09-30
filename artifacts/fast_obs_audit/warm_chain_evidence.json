@@ -1,0 +1,83 @@
+{
+  "baseline": "49acb2fbe643fc20decbdad8fea3d284e2ee1da7",
+  "comparison": {
+    "real_chain_and_contracts": {
+      "tests": 536,
+      "failures": [
+        "test_day0_final_writer_uses_frozen_frontier_without_likelihood_recompute",
+        "test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier[high-ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_land_grid_v3__coordsha_a9779c458866184e45f049cf7ae14d554b3981a65963f7b26792e63752231d0f-30.0-31.0]",
+        "test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier[low-ecmwf_opendata_mn2t3_local_calendar_day_min_window_land_grid_v3__coordsha_a9779c458866184e45f049cf7ae14d554b3981a65963f7b26792e63752231d0f-21.0-20.0]",
+        "test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows",
+        "test_forecast_posteriors_runtime_layer_migration_repairs_invalid_observation_view",
+        "test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns",
+        "test_materializer_equal_frontier_uses_current_request_identity"
+      ],
+      "passed": 529,
+      "skipped": 0
+    },
+    "baseline49ac_contracts": {
+      "tests": 531,
+      "failures": [
+        "test_day0_final_writer_uses_frozen_frontier_without_likelihood_recompute",
+        "test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier[high-ecmwf_opendata_mx2t3_local_calendar_day_max_boundary_land_grid_v3__coordsha_a9779c458866184e45f049cf7ae14d554b3981a65963f7b26792e63752231d0f-30.0-31.0]",
+        "test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier[low-ecmwf_opendata_mn2t3_local_calendar_day_min_window_land_grid_v3__coordsha_a9779c458866184e45f049cf7ae14d554b3981a65963f7b26792e63752231d0f-21.0-20.0]",
+        "test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows",
+        "test_forecast_posteriors_runtime_layer_migration_repairs_invalid_observation_view",
+        "test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns",
+        "test_materializer_equal_frontier_uses_current_request_identity"
+      ],
+      "passed": 524,
+      "skipped": 0
+    },
+    "warm_chain_focused": {
+      "tests": 8,
+      "failures": [],
+      "passed": 8,
+      "skipped": 0
+    }
+  },
+  "measurements": [
+    {
+      "incumbent_without_carrier": false,
+      "materialize_ms": 168.417625,
+      "posterior_id": 1,
+      "posterior_to_q_ms": 19,
+      "posterior_to_wake_ms": 11,
+      "q": {
+        "cool": 7.04557225e-314,
+        "hot": 0.991552207954743,
+        "warm": 0.008447792045256997
+      },
+      "q_to_ack_ms": 107,
+      "receipt_to_ack_ms": 359,
+      "receipt_to_world_ms": 0,
+      "serve_ms": 8.268542,
+      "wake_to_q_ms": 8,
+      "world_to_posterior_ms": 233
+    },
+    {
+      "incumbent_without_carrier": true,
+      "materialize_ms": 58.601459,
+      "posterior_id": 2,
+      "posterior_to_q_ms": 12,
+      "posterior_to_wake_ms": 4,
+      "q": {
+        "cool": 7.04557225e-314,
+        "hot": 0.991552207954743,
+        "warm": 0.008447792045256997
+      },
+      "q_to_ack_ms": 46,
+      "receipt_to_ack_ms": 115,
+      "receipt_to_world_ms": 1,
+      "serve_ms": 8.337416,
+      "wake_to_q_ms": 8,
+      "world_to_posterior_ms": 56
+    }
+  ],
+  "limitations": [
+    "Controlled forecast and observation inputs; no public-network latency included.",
+    "Production CLI, split SQLite DBs, Unix socket, held-family selector, probability reader, reduce-only executor and command journal executed.",
+    "Fake venue replaces only the external venue interface. SELL is a test scenario, not a global-auction policy selection.",
+    "Integer millisecond 0 values are sub-millisecond quantization, not zero work."
+  ]
+}
