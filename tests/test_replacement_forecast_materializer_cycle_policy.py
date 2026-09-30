@@ -58,7 +58,7 @@ from src.data.replacement_forecast_materializer import (
 )
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
-from tests.test_replacement_forecast_materializer import _hko_source_surface, _hko_precision_guard, _hko_dt
+from tests.test_replacement_forecast_materializer import _hko_source_surface, _hko_native_surfaces, _hko_precision_guard, _hko_dt
 
 pytestmark = pytest.mark.usefixtures("_hko_source_surface")
 

@@ -26,6 +26,7 @@ from tests.test_replacement_forecast_materializer import (
     _TemperatureBin,
     _fixed_center_debias,
     _hko_source_surface,
+    _hko_native_surfaces,
     _current_baseline_data_version,
 )
 
