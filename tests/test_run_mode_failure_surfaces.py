@@ -8831,16 +8831,54 @@ def test_confirmed_fill_projection_bypasses_monitor_bootstrap_defer(monkeypatch)
     assert not main_module._capital_recovery_handoff_pending.is_set()
 
 
-def test_capital_cancel_recovery_reserves_reactor_then_resets(monkeypatch) -> None:
+def _canonical_capital_recovery_db(tmp_path, monkeypatch, *, scoped=False):
+    import src.execution.command_recovery as recovery
+    import src.main as main
+    import src.state.db as db
+    from src.risk_allocator import load_cap_policy
+
+    path = tmp_path / "capital-trades.db"
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    db.init_schema_trade_only(conn)
+    count = 1 if scoped else max(3, load_cap_policy().systemic_market_count_limit)
+    now = datetime.now(timezone.utc).isoformat()
+    for index in range(count):
+        conn.execute(
+            "INSERT INTO venue_commands(command_id,snapshot_id,envelope_id,position_id,"
+            "decision_id,idempotency_key,intent_kind,market_id,token_id,side,size,price,"
+            "venue_order_id,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"capital-{index}", "snapshot", "envelope", f"position-{index}",
+             "decision", f"capital-key-{index}", "ENTRY", f"market-{index}",
+             f"token-{index}", "BUY", 1.0, 0.5, f"order-{index}", "SUBMITTING", now, now),
+        )
+    conn.commit()
+    scope = recovery.capital_blocking_command_scope(conn)
+    assert recovery.capital_blocking_command_count(conn) == scope.total_count == count
+    assert scope.requires_global_handoff(
+        systemic_market_count_limit=load_cap_policy().systemic_market_count_limit
+    ) is (not scoped)
+    conn.close()
+
+    def read_only(*, deadline_monotonic=None):
+        assert deadline_monotonic is not None
+        actual = db._connect_read_only(path, deadline_monotonic=deadline_monotonic)
+        actual.execute("PRAGMA query_only=ON")
+        return actual
+
+    monkeypatch.setattr(db, "get_trade_connection_read_only", read_only)
+    # This DB-only control seam cannot prepare an authenticated adapter/thread.
+    monkeypatch.setattr(main, "_venue_order_truth_adapter_ready", lambda: False)
+    monkeypatch.setattr(main, "_start_venue_order_truth_prewarm_async", lambda: "TEST_ONLY_NO_IO")
+    monkeypatch.setattr(main, "_venue_heartbeat_adapter", None)
+    return count
+
+
+def test_capital_cancel_recovery_reserves_reactor_then_resets(monkeypatch, tmp_path) -> None:
     """Only the capital fast pass owns the reactor fairness handoff."""
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
-    import src.state.db as state_db
-    from src.execution.command_recovery import CapitalBlockingCommandScope
-
-    class FakeConn:
-        def close(self) -> None:
-            return None
+    _canonical_capital_recovery_db(tmp_path, monkeypatch)
 
     observed: list[tuple[str, bool, bool]] = []
     main_module._capital_recovery_handoff_pending.clear()
@@ -8849,17 +8887,6 @@ def test_capital_cancel_recovery_reserves_reactor_then_resets(monkeypatch) -> No
     monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
     monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 9)
     monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 9)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
-    monkeypatch.setattr(
-        command_recovery,
-        "capital_blocking_command_scope",
-        lambda _conn: CapitalBlockingCommandScope(
-            total_count=3,
-            scoped_markets=("market-a", "market-b"),
-            unscopeable_count=0,
-            projection_count=0,
-        ),
-    )
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
@@ -8880,15 +8907,10 @@ def test_capital_cancel_recovery_reserves_reactor_then_resets(monkeypatch) -> No
     assert not main_module._edli_reactor_active_lock.locked()
 
 
-def test_scoped_capital_recovery_does_not_reserve_global_reactor(monkeypatch) -> None:
+def test_scoped_capital_recovery_does_not_reserve_global_reactor(monkeypatch, tmp_path) -> None:
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
-    import src.state.db as state_db
-    from src.execution.command_recovery import CapitalBlockingCommandScope
-
-    class FakeConn:
-        def close(self) -> None:
-            return None
+    _canonical_capital_recovery_db(tmp_path, monkeypatch, scoped=True)
 
     calls: list[tuple[str, bool]] = []
     main_module._capital_recovery_handoff_pending.clear()
@@ -8897,17 +8919,6 @@ def test_scoped_capital_recovery_does_not_reserve_global_reactor(monkeypatch) ->
     monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
     monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
     monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
-    monkeypatch.setattr(
-        command_recovery,
-        "capital_blocking_command_scope",
-        lambda _conn: CapitalBlockingCommandScope(
-            total_count=1,
-            scoped_markets=("market-a",),
-            unscopeable_count=0,
-            projection_count=0,
-        ),
-    )
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
@@ -8926,35 +8937,31 @@ def test_scoped_capital_recovery_does_not_reserve_global_reactor(monkeypatch) ->
     assert not main_module._capital_recovery_handoff_pending.is_set()
 
 
-def test_capital_cancel_recovery_resets_handoff_after_failure(monkeypatch) -> None:
+def test_capital_cancel_recovery_resets_handoff_after_failure(monkeypatch, tmp_path) -> None:
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
-    import src.state.db as state_db
 
-    class FakeConn:
-        def close(self) -> None:
-            return None
+    _canonical_capital_recovery_db(tmp_path, monkeypatch)
 
     main_module._capital_recovery_handoff_pending.clear()
     monkeypatch.setattr(main_module, "get_mode", lambda: "live")
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
-    monkeypatch.setattr(
-        command_recovery,
-        "capital_blocking_command_count",
-        lambda _conn: 1,
-    )
+    def fail_apply(**_kwargs):
+        assert main_module._capital_recovery_handoff_pending.is_set()
+        assert main_module._edli_reactor_active_lock.locked()
+        raise RuntimeError("apply failed")
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
-        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("apply failed")),
+        fail_apply,
     )
 
     with pytest.raises(RuntimeError, match="apply failed"):
         main_module._edli_command_recovery_cycle.__wrapped__()
 
     assert not main_module._capital_recovery_handoff_pending.is_set()
+    assert not main_module._edli_reactor_active_lock.locked()
 
 
 def test_capital_cancel_recovery_waits_for_active_reactor(monkeypatch) -> None:
@@ -9018,15 +9025,12 @@ def test_capital_cancel_recovery_waits_for_active_reactor(monkeypatch) -> None:
 
 
 def test_capital_cancel_recovery_skips_apply_when_reactor_drain_times_out(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
-    import src.state.db as state_db
 
-    class FakeConn:
-        def close(self) -> None:
-            return None
+    _canonical_capital_recovery_db(tmp_path, monkeypatch)
 
     class BusyLock:
         def locked(self) -> bool:
@@ -9041,12 +9045,6 @@ def test_capital_cancel_recovery_skips_apply_when_reactor_drain_times_out(
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyLock())
-    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
-    monkeypatch.setattr(
-        command_recovery,
-        "capital_blocking_command_count",
-        lambda _conn: 1,
-    )
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",

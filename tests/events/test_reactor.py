@@ -8211,28 +8211,90 @@ def test_global_selection_cancels_when_exact_publisher_arrives_after_probe_creat
     tmp_path,
 ):
     from src.events import reactor
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+    from src.state.ledger import CANONICAL_POSITION_EVENT_COLUMNS, append_many_and_project
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
 
     now = datetime.now(timezone.utc)
+    observed = (now - timedelta(seconds=1)).isoformat()
+    conn = sqlite3.connect(tmp_path / "held-trades.db")
+    init_schema(conn)
+    position = Position(
+        trade_id="probe-arrival-position", market_id="probe-condition",
+        city="Cape Town", cluster="Cape Town", target_date=now.date().isoformat(),
+        bin_label="33C", direction="buy_no", temperature_metric="high", env="test",
+        token_id="probe-arrival-token", no_token_id="probe-arrival-token",
+        condition_id="probe-condition", state="holding", shares=3.0,
+        last_monitor_at=observed, strategy_key="test_global_sell",
+    )
+    position._day0_monitor_probability_receipt = {"probability_content_identity": "q-probe-arrival"}
+    position._zeus_held_monitor_full_depth_action_authority = True
+    projection = build_position_current_projection(position)
+    upsert_position_current(conn, projection)
+    event = {column: None for column in CANONICAL_POSITION_EVENT_COLUMNS}
+    event.update(
+        event_id="probe-arrival-position:monitor_refreshed:1",
+        position_id=position.trade_id, event_version=1, sequence_no=1,
+        event_type="MONITOR_REFRESHED", occurred_at=observed,
+        phase_before="active", phase_after="active", caused_by="monitor_cycle",
+        idempotency_key="probe-arrival-position:monitor_refreshed:1",
+        venue_status="ready", source_module="tests.events.test_reactor", env="test",
+        strategy_key=position.strategy_key, payload_json=json.dumps({
+            "last_monitor_prob_is_fresh": True,
+            "last_monitor_market_price_is_fresh": True,
+            "last_monitor_best_bid": 0.21,
+            "held_sell_full_depth_action_authority": True,
+            "day0_monitor_probability_receipt": position._day0_monitor_probability_receipt,
+            "held_sell_reauction_monitor_lineage": {
+                "selection_epoch_identity": "epoch-probe-arrival",
+                "sell_book_witness_identity": "book-probe-arrival",
+            },
+        }),
+    )
+    append_many_and_project(conn, [event], projection)
+    assert exit_lifecycle._dual_write_exit_retry_released_if_available(
+        conn, position, previous_next_retry_at="", previous_retry_count=1,
+        previous_error="venue timeout", release_reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+    )
+    payload = conn.execute(
+        "SELECT payload_json FROM position_events WHERE position_id=? "
+        "AND event_type='EXIT_RETRY_RELEASED' ORDER BY sequence_no DESC LIMIT 1",
+        (position.trade_id,),
+    ).fetchone()[0]
+    obligation = json.loads(payload)["held_sell_reauction_obligation"]
+    assert obligation["monitor_event_id"] == event["event_id"]
+    assert obligation["debt_event_id"] == "probe-arrival-position:exit_retry_released:2"
+    conn.commit()
+    conn.close()
+    path = tmp_path / "probe-arrival-wake.json"
     reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
     try:
         def ordinary_cancelled():
             return reactor._exact_held_sell_preempts(exact_turn=False)
 
         assert ordinary_cancelled() is False
-        assert reactor.request_global_auction_completion(
+        accepted, request = reactor.request_global_auction_completion(
             reason="test_probe_arrival",
-            position_id="probe-arrival-position",
-            family=("Cape Town", "2026-08-23", "high"),
+            position_id=position.trade_id,
+            family=(position.city, position.target_date, "high"),
             probability_content_identity="q-probe-arrival",
             held_token_id="probe-arrival-token",
             held_best_bid=0.21,
-            bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
-            probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+            bid_observed_at=observed,
+            probability_observed_at=observed,
             completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+            **{field: obligation[field] for field in (
+                "selection_epoch_identity", "sell_book_witness_identity", "debt_event_id", "monitor_event_id",
+            )},
             book_state="EXECUTABLE",
             schema_version=4,
-            wake_path=tmp_path / "probe-arrival-wake.json",
+            wake_path=path, return_request=True,
         )
+        assert accepted is True and request.lineage_status == "COMPLETE"
+        assert reactor_wake.v4_held_sell_reauction_request_is_queued(request, path=path)
         assert ordinary_cancelled() is True
         assert reactor._exact_held_sell_preempts(exact_turn=True) is False
     finally:
