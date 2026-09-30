@@ -578,9 +578,7 @@ def test_frozen_precision_identity_normalizes_only_explicit_same_date_and_instan
             variant in ("date_objects","utc_z","same_offset"))
 
 
-@pytest.mark.parametrize("metric", ("high", "low"))
-@pytest.mark.parametrize("missing_transport", (None, "precision", "manifest"))
-def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_path, monkeypatch, metric, missing_transport):
+def _normal_owned_anchor_seed_public(tmp_path, monkeypatch, metric, missing_transport, capture_case=None):
     """Real local acquisition/seed/public chain; controlled 51 ENS, not GRIB."""
     from src.data import bayes_precision_fusion_download as dl
     from tests.test_replacement_forecast_materializer import _low_revision_authority_conn, _bins, _BaselineBundle, _Evidence
@@ -592,6 +590,7 @@ def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_pat
     from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle, ReplacementForecastAuthorityPurpose
     from src.data.replacement_forecast_readiness import ReplacementForecastReadinessDecision
     from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
+    from src.data.replacement_forecast_seed_discovery import held_position_family_priorities as real_held_priorities
 
     context = _normal_localproof_recovery(tmp_path, monkeypatch, metric)
     city, cycle, db = context.city, context.cycle, context.scope["forecast_db"]
@@ -617,7 +616,13 @@ def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_pat
             (f"controlled-localproof-{metric}-{item.bin_id}", city.name, target.isoformat(), metric,
                 f"controlled-{item.bin_id}", f"controlled-{item.bin_id}", item.bin_id, item.lower_c, item.upper_c))
     conn.commit()
+    http_calls=[]
     def fetch(url, params, **kwargs):
+        if url.endswith("/meta.json"):
+            return {"last_run_initialisation_time":cycle.timestamp(),
+                "last_run_modification_time":(cycle+timedelta(minutes=1)).timestamp(),
+                "last_run_availability_time":(cycle+timedelta(minutes=1)).timestamp()}
+        http_calls.append(dict(params))
         selected = _selected_test_cell(params["models"], city.lat, city.lon)
         body = (json.dumps({"latitude":selected[0],"longitude":selected[1],"elevation":32.,
             "timezone":city.timezone,"utc_offset_seconds":28800,"hourly_units":{"temperature_2m":"°C"},
@@ -706,6 +711,89 @@ def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_pat
         assert served.ok, served.reason_code
         assert served.bundle.posterior_id == result.posterior_id
 
+    if capture_case is not None:
+        from src.data import replacement_forecast_production as production, openmeteo_model_updates as updates
+        from src.data import source_clock_update_probe as probe, replacement_forecast_seed_discovery as discovery
+        from src.data.replacement_current_value_serving import physical_capture_debt_reason, physical_source_proof_dependency
+        from src.state import db as state_db
+        damage,held=capture_case
+        state=tmp_path/"capture-consumer-state"
+        state.mkdir()
+        # The per-test canonical DB factory owns this namespace. Refresh the
+        # imported path adapter, not the held-role classifier or its result.
+        monkeypatch.setattr(discovery,"_zeus_trade_db_path",state_db._zeus_trade_db_path)
+        trades_path=discovery._zeus_trade_db_path()
+        assert trades_path.resolve().is_relative_to(tmp_path.resolve())
+        with sqlite3.connect(trades_path) as trades:
+            trades.execute("""CREATE TABLE position_current(position_id TEXT PRIMARY KEY,
+                city TEXT,target_date TEXT,temperature_metric TEXT,
+                phase TEXT CHECK(phase IN ('pending_entry','active','day0_window','pending_exit')),
+                shares REAL CHECK(shares>0),direction TEXT CHECK(direction IN ('buy_yes','buy_no')),token_id TEXT)""")
+            if held:
+                trades.execute("INSERT INTO position_current VALUES(?,?,?,?,'active',20.,'buy_yes',?)",
+                    (f"private-held-{metric}",city.name,target.isoformat(),metric,f"controlled-{_bins()[0].bin_id}"))
+                assert trades.execute("SELECT shares FROM position_current WHERE position_id=?",(f"private-held-{metric}",)).fetchone()[0]==20.
+        monkeypatch.setattr(discovery,"held_position_family_priorities",real_held_priorities)
+        assert real_held_priorities()==({(city.name,target.isoformat(),metric):1} if held else {})
+        monkeypatch.setattr(updates,"_fetch_openmeteo",fetch)
+        metadata_path=state/"updates.jsonl"
+        updates.write_model_updates_jsonl(metadata_path,updates.fetch_model_updates(
+            ("icon_global","ukmo_global_deterministic_10km"),max_workers=1))
+        monkeypatch.setattr(probe,"DEFAULT_MODEL_UPDATES_JSONL",metadata_path)
+        monkeypatch.setattr(dl,"BAYES_PRECISION_FUSION_EXTRA_MODELS",("icon_global","ukmo_global_deterministic_10km"))
+        monkeypatch.setattr(dl,"BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS",())
+        serving=provenance["bayes_precision_fusion"]["current_value_serving"]
+        old_proof=physical_source_proof_dependency(serving["ukmo_global_deterministic_10km"]["physical_response"])
+        raw_id,body_id=conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts WHERE model=? AND city=? AND target_date=? AND metric=?",
+            ("ukmo_global_deterministic_10km",city.name,target.isoformat(),metric)).fetchone()
+        raw_before=[tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
+        receipt_id,receipt_path=conn.execute("SELECT artifact_id,artifact_path FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=? ORDER BY artifact_id DESC LIMIT 1",(body_id,)).fetchone()
+        Path(receipt_path).unlink()
+        if damage=="extreme":
+            conn.execute("UPDATE raw_forecast_artifacts SET captured_at='unknown',source_available_at='unknown',recorded_at='unknown' WHERE artifact_id=?",(receipt_id,))
+        conn.commit()
+        assert not any(item.ok for item in public(posterior,readiness,datetime.now(UTC)))
+        assert physical_capture_debt_reason(conn,raw_model_forecast_id=raw_id,decision_time_iso=datetime.now(UTC).isoformat())=="HTTP_CAPTURE_RECEIPT_MISSING"
+        calls=len(http_calls)
+        cfg={"forecast_db":db,"seed_dir":tmp_path/"normal-capture-seeds","raw_manifest_dir":context.output,
+            "bpf_extra_rotation_state_path":tmp_path/"normal-capture-rotation.json"}
+        captured=production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg,
+            planning_cycle=cycle,max_wall_clock_seconds=10,include_previous_runs=False,prune_after=False)
+        assert captured["physical_capture_recovered_raw_ids"]==(raw_id,),captured
+        assert captured["written_row_count"]==0 and len(http_calls)==calls+1
+        assert captured["committed_families"]==((city.name,target.isoformat(),metric),)
+        assert [tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]==raw_before
+        reset_cut=datetime.now(UTC)
+        reset_request,reset_result,reset_posterior,reset_readiness=normal_materialize(reset_cut,"http-reset")
+        assert reset_result.posterior_id!=result.posterior_id
+        reset_prov=json.loads(reset_posterior["provenance_json"])
+        reset_shape=reset_prov["bayes_precision_fusion"]["current_evidence_shape"]
+        new_proof=physical_source_proof_dependency(reset_prov["bayes_precision_fusion"]["current_value_serving"]["ukmo_global_deterministic_10km"]["physical_response"])
+        assert new_proof!=old_proof and new_proof["capture_receipt_artifact_id"]!=receipt_id
+        assert reset_shape["provider_geometry_identity_hash"]==provenance["bayes_precision_fusion"]["current_evidence_shape"]["provider_geometry_identity_hash"]
+        assert reset_posterior["q_json"]==posterior["q_json"]
+        assert reset_shape["provider_geometry_audit"]["anchor_local_proof"]==audit["anchor_local_proof"]
+        assert not any(item.ok for item in public(posterior,readiness,cut))
+        for served in public(reset_posterior,reset_readiness,reset_cut):
+            assert served.ok,served.reason_code
+            assert served.bundle.posterior_id==reset_result.posterior_id
+        repeated=production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg,
+            planning_cycle=cycle,max_wall_clock_seconds=10,include_previous_runs=False,prune_after=False)
+        assert len(http_calls)==calls+1 and not repeated.get("physical_capture_recovered_raw_ids"),repeated
+        assert [tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]==raw_before
+        assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(context.aid,)).fetchone())==context.original_row
+        expiry=replacement_readiness_expires_at(cycle)
+        assert reset_readiness.expires_at<=expiry
+        count=conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0]
+        stale=materialize_replacement_forecast_live(conn,replace(reset_request,
+            computed_at=expiry+timedelta(microseconds=1),expires_at=expiry+timedelta(minutes=1)))
+        assert not stale.ok and "REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TOO_STALE" in stale.reason_codes
+        assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0]==count
+        assert not any(item.ok for item in public(reset_posterior,reset_readiness,expiry+timedelta(microseconds=1)))
+        conn.close()
+        return
+
     # A corrupt latest dependency cannot fall back to the original missing
     # path, but a new actual local verification drains it through normal APIs.
     proof_path = Path(conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?",
@@ -743,6 +831,19 @@ def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_pat
     assert not any(item.ok for item in public(reset_posterior,reset_readiness,expiry+timedelta(microseconds=1)))
     assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(context.aid,)).fetchone()) == context.original_row
     conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("missing_transport", (None, "precision", "manifest"))
+def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_path, monkeypatch, metric, missing_transport):
+    _normal_owned_anchor_seed_public(tmp_path,monkeypatch,metric,missing_transport)
+
+
+@pytest.mark.parametrize("metric",("low","high"))
+@pytest.mark.parametrize("damage",("ordinary","extreme"))
+@pytest.mark.parametrize("held",(False,True))
+def test_normal_same_issued_http_proof_progress_reseeds_new_public_certificate(tmp_path,monkeypatch,metric,damage,held):
+    _normal_owned_anchor_seed_public(tmp_path,monkeypatch,metric,None,capture_case=(damage,held))
 
 
 @pytest.mark.parametrize("metric",("high","low"))
