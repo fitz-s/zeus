@@ -33,16 +33,38 @@ from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 @pytest.fixture(autouse=True)
 def _isolated_source_transports(tmp_path, monkeypatch):
     """The producer's static prerequisite is also transport, not an implicit live test dependency."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from src.data import bayes_precision_fusion_download as dl
     from src.data import openmeteo_client as client
     from src.data import openmeteo_model_surface as surface
-    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _controlled_model_static_transport
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import (
+        _controlled_model_static_transport, _controlled_native_static_bytes,
+    )
     _controlled_model_static_transport.__wrapped__(tmp_path, monkeypatch)
     controlled_stream = surface.httpx.stream
-    allowed_urls = {surface._asset_url(profile[0]) for profile in surface._PROFILES.values()}
+    static_models = {}
+    for model in set(surface._PROFILES) | set(dl.BAYES_PRECISION_FUSION_EXTRA_MODELS) | set(dl.BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS):
+        try:
+            profile = surface._profile(model)
+        except surface._Invalid:
+            continue
+        static_models[surface._asset_url(str(profile["domain"]))] = model
+    @contextmanager
+    def projected_stream(model):
+        # Same real OM encoder and normal decoder as regular domains, not a
+        # native-authority stub or an implicit external static download.
+        body = _controlled_native_static_bytes(model)
+        yield SimpleNamespace(status_code=200,
+            headers={"etag": '"controlled-fixture"', "last-modified": "Mon, 01 Jan 2024 00:00:00 GMT", "content-length": str(len(body))},
+            iter_raw=lambda **_kwargs: iter((body,)))
     def static_stream(method, url, **kwargs):
-        if method != "GET" or url not in allowed_urls:
+        if method != "GET" or url not in static_models:
             raise AssertionError("unexpected external static HTTP must not leave the test")
-        return controlled_stream(method, url, **kwargs)
+        model = static_models[url]
+        if model in surface._PROFILES:
+            return controlled_stream(method, url, **kwargs)
+        return projected_stream(model)
     monkeypatch.setattr(surface.httpx, "stream", static_stream)
     def forbidden(*_args, **_kwargs):
         raise AssertionError("tests must supply an explicit inert forecast HTTP provider")
