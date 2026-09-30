@@ -842,6 +842,7 @@ def _station_capture_view(row: Mapping[str, object]) -> dict[str, object] | None
     if not _legacy_hko_context(row):
         return None
     try:
+        from datetime import timedelta
         from src.data.station_forecast_adapter import _HKO_ENDPOINT
         artifact = row["physical_artifact"]
         if (not isinstance(artifact, Mapping) or artifact["data_version"] != "station_forecast_entity_body_v1"
@@ -852,14 +853,23 @@ def _station_capture_view(row: Mapping[str, object]) -> dict[str, object] | None
             return None
         decision = datetime.fromisoformat(str(row["physical_proof_cutoff"]).replace("Z", "+00:00"))
         clocks = []
+        recorded_upper = None
         for key in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at"):
             stamp = datetime.fromisoformat(str(row[key]).replace("Z", "+00:00"))
             if key == "recorded_at" and stamp.tzinfo is None:
+                if stamp.strftime("%Y-%m-%d %H:%M:%S") != row[key]:
+                    return None
                 stamp = stamp.replace(tzinfo=timezone.utc)
+                # The former writer's SQLite CURRENT_TIMESTAMP is UTC seconds,
+                # not an exact instant preceding its own microsecond capture.
+                recorded_upper = stamp + timedelta(seconds=1)
+                if recorded_upper > decision:
+                    return None
             if stamp.tzinfo is None or stamp > decision:
                 return None
             clocks.append(stamp)
-        if not clocks[0] <= clocks[1] <= clocks[2] <= clocks[3]:
+        if (not clocks[0] <= clocks[1] <= clocks[2]
+                or (clocks[2] >= recorded_upper if recorded_upper is not None else clocks[2] > clocks[3])):
             return None
         return {**row, "artifact_id": artifact["artifact_id"], "raw_sha256": artifact["sha256"],
             **{key: artifact[key] for key in ("source_available_at", "captured_at", "recorded_at")},

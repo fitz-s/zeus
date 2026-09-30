@@ -1109,7 +1109,8 @@ def test_hourly_product_accepts_equal_clocks_and_optional_sent():
 
 
 @pytest.mark.parametrize("metric", ["high", "low"])
-@pytest.mark.parametrize("fault", [None, "value", "city", "metric", "issue", "timezone", "body"])
+@pytest.mark.parametrize("fault", [None, "value", "city", "metric", "issue", "timezone", "body",
+    "sqlite_second", "capture_upper", "capture_over", "aware_lag", "future_record_upper", "invalid_record"])
 def test_hko_same_issue_entity_recovers_only_its_immutable_legacy_context(monkeypatch, tmp_path, metric, fault):
     import urllib.request
     from datetime import datetime, timedelta, timezone
@@ -1122,7 +1123,7 @@ def test_hko_same_issue_entity_recovers_only_its_immutable_legacy_context(monkey
     monkeypatch.setattr(config, "_TEST_STATE_ROOT", private_state)
     monkeypatch.setattr(config, "STATE_DIR", private_state)
 
-    clock = [datetime(2026, 7, 23, 10, 15, tzinfo=timezone.utc)]
+    clock = [datetime(2026, 7, 23, 10, 15, 0, 750000, tzinfo=timezone.utc)]
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -1184,8 +1185,15 @@ def test_hko_same_issue_entity_recovers_only_its_immutable_legacy_context(monkey
         elif fault == "metric": typed["metric"] = "low" if metric == "high" else "high"
         elif fault == "issue": typed["source_cycle_time"] = "2026-07-23T10:13:00+00:00"
         elif fault == "timezone": typed["timezone_requested"] = "UTC"
+        elif fault in {"sqlite_second", "capture_upper", "capture_over"}:
+            typed["recorded_at"] = "2026-07-23 10:15:00"
+            if fault != "sqlite_second":
+                typed["captured_at"] = "2026-07-23T10:15:01" + (".000001" if fault == "capture_over" else "") + "+00:00"
+        elif fault == "aware_lag": typed["recorded_at"] = "2026-07-23T10:15:00+00:00"
+        elif fault == "future_record_upper": typed["recorded_at"] = cut.strftime("%Y-%m-%d %H:%M:%S")
+        elif fault == "invalid_record": typed["recorded_at"] = "2026-02-30 10:15:00"
         else: Path(typed["physical_artifact"]["artifact_path"]).write_bytes(b"{}")
-        assert not serving._source_clock_product_has_authority(json.dumps(typed), lead_days=1)
+        assert serving._source_clock_product_has_authority(json.dumps(typed), lead_days=1) is (fault == "sqlite_second")
         assert conn.execute("SELECT * FROM raw_model_forecasts").fetchall() == original
     finally:
         conn.close()
