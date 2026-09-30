@@ -49536,7 +49536,7 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
     Controlled ENS/HSURF receipts remain the existing fixture's declared toy
     inputs. No current reader, seed builder, readiness or q authority is mocked.
     """
-    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric)
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric,prior_hour=6)
     try:
         from pathlib import Path
         import src.ingest_main as im
@@ -49549,6 +49549,88 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
         observed = fixture.cut+_dt.timedelta(minutes=1)
         available = observed+_dt.timedelta(minutes=1)
         written = available+_dt.timedelta(seconds=1)
+        from src.contracts.settlement_semantics import SettlementSemantics
+        from src.events.triggers.day0_extreme_updated import (
+            build_day0_extreme_updated_event,observation_instant_row_to_day0_observation,
+        )
+        event_row = dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone())
+        event = build_day0_extreme_updated_event(
+            observation=observation_instant_row_to_day0_observation(event_row,metric=metric),
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=written,
+            received_at=written.isoformat())
+        def prepare(use):
+            return era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
+                topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=written,
+                max_age=_dt.timedelta(seconds=30),allow_unobserved_day0_replacement=False,
+                allow_provisional_day0_replacement=True,probability_use=use,raw_input_hwm_conn=fixture.conn)
+        previous = prepare(era._CurrentProbabilityUse.HELD_MONITOR)
+        original = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                                            (fixture.result.posterior_id,)).fetchone())
+        # A real newest run begins inside this local day. Its suffix may feed
+        # the independent remaining-vector lane, never a full-day scalar/HWM.
+        from src.data import day0_hourly_vectors as hourly,openmeteo_model_updates as updates
+        from src.data import bayes_precision_fusion_download as dl
+        from src.data.replacement_forecast_cycle_policy import replacement_source_cycle_max_age_hours
+        prior_rows = [tuple(row) for row in fixture.conn.execute(
+            "SELECT raw_model_forecast_id,model,metric,source_cycle_time,source_available_at,captured_at,recorded_at,artifact_id,raw_sha256 "
+            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
+        remaining_capture = observed+_dt.timedelta(seconds=30)
+        remaining_run = observed.replace(minute=0,second=0,microsecond=0)
+        axis = [remaining_run+_dt.timedelta(hours=i) for i in range(34)]
+        times = [at.astimezone(ZoneInfo(fixture.city.timezone)).isoformat() for at in axis]
+        next_value = 35.0 if metric=="high" else 24.0
+        common = {"latitude":fixture.city.lat,"longitude":fixture.city.lon,"elevation":32.0,
+                  "timezone":fixture.city.timezone,"utc_offset_seconds":28800}
+        suffix = {**common,"hourly":{"time":times,"temperature_2m":[next_value]*len(axis)},
+                  "hourly_units":{"temperature_2m":"°C"}}
+        ensemble_hourly = {"time":times}
+        for index in range(51):
+            key = "temperature_2m" if index==0 else f"temperature_2m_member{index:02d}"
+            ensemble_hourly[key] = [next_value+(index-25)*.02]*len(axis)
+        ens_suffix = {**common,"hourly":ensemble_hourly,
+            "hourly_units":{key:"°C" for key in ensemble_hourly if key!="time"}}
+        metadata_body = {"last_run_initialisation_time":remaining_run.isoformat(),
+            "last_run_availability_time":(remaining_run+_dt.timedelta(minutes=5)).isoformat(),
+            "last_run_modification_time":(remaining_run+_dt.timedelta(minutes=5)).isoformat(),
+            "update_interval_seconds":21600,"temporal_resolution_seconds":3600}
+        def remaining_http(url,params,**kwargs):
+            raw = json.dumps(ens_suffix if "ensemble-api" in url else suffix).encode()
+            if "capture_entity_body" in kwargs:
+                kwargs["capture_entity_body"](raw,remaining_capture.timestamp())
+            if "capture_network_response" in kwargs:
+                kwargs["capture_network_response"](raw,remaining_capture.timestamp(),{"content-type":"application/json"})
+            return json.loads(raw)
+        class RemainingClock(_dt.datetime):
+            @classmethod
+            def now(cls,tz=None):
+                return remaining_capture.astimezone(tz) if tz else remaining_capture.replace(tzinfo=None)
+        with monkeypatch.context() as fetch:
+            fetch.setattr(updates,"_fetch_openmeteo",lambda *_a,**_kw:json.loads(json.dumps(metadata_body)))
+            fetch.setattr("src.data.openmeteo_client.fetch",remaining_http)
+            fetch.setattr(hourly,"_day0_utc_now",lambda:remaining_capture)
+            fetch.setattr(dl,"datetime",RemainingClock)
+            vectors,vector_hash = hourly.fetch_day0_hourly_vectors(fixture.city,now=remaining_capture,
+                causal_boundary_utc=observed)
+            assert len(vectors) == len(hourly.day0_hourly_models_for_city(fixture.city))
+            ens,ens_hash = hourly.fetch_day0_source_clock_ensemble_vectors(fixture.city,now=remaining_capture)
+            assert len(ens) == 51
+            vector_endpoint = json.loads(vectors[0].source_run_meta_json)["endpoint"]
+            for rows,identity,endpoint in ((vectors,vector_hash,vector_endpoint),
+                                          (ens,ens_hash,hourly.OPENMETEO_ENSEMBLE_URL)):
+                assert hourly.persist_day0_hourly_vectors(rows,target_date="2026-09-30",conn=fixture.conn,
+                    request_hash=identity,endpoint=endpoint,now=remaining_capture) == len(rows)
+            models = tuple(hourly.day0_hourly_models_for_city(fixture.city))
+            scoped = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=remaining_run,
+                targets=[dl.BayesPrecisionFusionDownloadTarget(city=fixture.city.name,target_date="2026-09-30",
+                    metric=metric,latitude=fixture.city.lat,longitude=fixture.city.lon,
+                    timezone_name=fixture.city.timezone,lead_days=0)],models=models,
+                frozen_source_runs={model:(remaining_run,remaining_run+_dt.timedelta(minutes=5)) for model in models},
+                include_previous_runs=False,prune_after=False)
+            assert scoped["written_row_count"] == 0
+        assert [tuple(row) for row in fixture.conn.execute(
+            "SELECT raw_model_forecast_id,model,metric,source_cycle_time,source_available_at,captured_at,recorded_at,artifact_id,raw_sha256 "
+            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == prior_rows
         value = 31.8 if metric == "high" else 25.8
         body = ("Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
             f"{observed.astimezone(ZoneInfo('Asia/Hong_Kong')).strftime('%Y%m%d%H%M')},HK Observatory,{value}\n").encode()
@@ -49630,16 +49712,113 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
         event = build_day0_extreme_updated_event(observation=observation,
             settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=written,
             received_at=written.isoformat())
-        def prepare(use):
-            return era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
-                topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=written,
-                max_age=_dt.timedelta(seconds=30),allow_unobserved_day0_replacement=False,
-                allow_provisional_day0_replacement=True,probability_use=use,raw_input_hwm_conn=fixture.conn)
         held = prepare(era._CurrentProbabilityUse.HELD_MONITOR)
         exited = prepare(era._CurrentProbabilityUse.REDUCE_ONLY_EXIT)
         assert isinstance(held.probability_witness,JointOutcomeProbabilityWitness)
         assert held.probability_witness.witness_identity == exited.probability_witness.witness_identity
         np.testing.assert_array_equal(held.probability_witness.yes_point_q,exited.probability_witness.yes_point_q)
+        assert not np.array_equal(previous.probability_witness.yes_point_q,held.probability_witness.yes_point_q)
+        # A controlled executable book lies between the two *produced* beliefs;
+        # no scalar q override makes this stopping-law relationship pass. The
+        # local signal and global fixed-action mean law both have to flip.
+        from src.config import exit_fee_rate
+        from src.state.portfolio import ExitContext,Position
+        from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+        from src.solve.solver import (
+            CandidatePortfolioEndowment,_score_global_single_order_sell_expected,
+            family_payoff_q_samples,global_sell_candidate_from_holding,
+        )
+        tokens = {b.condition_id:(b.yes_token_id,f"normal-no-{index}")
+                  for index,b in enumerate(held.probability_witness.bindings)}
+        required_tokens = frozenset(token for pair in tokens.values() for token in pair)
+        old_witness,new_witness = (_rebind_probability_witness_tokens(prepared.probability_witness,
+            token_map_by_condition=tokens,required_token_ids=required_tokens)
+            for prepared in (previous,held))
+        fee_rate = Decimal(str(exit_fee_rate()))
+        for side,direction in (("YES","buy_yes"),("NO","buy_no")):
+            possibilities = []
+            for binding in new_witness.bindings:
+                old_point = family_payoff_point_q(old_witness,bin_id=binding.bin_id,side=side)
+                new_point = family_payoff_point_q(new_witness,bin_id=binding.bin_id,side=side)
+                old_samples = family_payoff_q_samples(old_witness,bin_id=binding.bin_id,side=side)
+                new_samples = family_payoff_q_samples(new_witness,bin_id=binding.bin_id,side=side)
+                old_mean,new_mean = float(old_samples.mean()),float(new_samples.mean())
+                for cents in range(5,96):
+                    bid = Decimal(cents)/100
+                    net = float(bid-fee_rate*bid*(1-bid))
+                    if max(new_point,new_mean)+.02 < net < min(old_point,old_mean)-.01:
+                        possibilities.append((old_point-new_point,binding,bid,old_point,new_point,
+                                              old_samples,new_samples,old_mean,new_mean))
+            assert possibilities, (metric,side,old_witness.yes_point_q,new_witness.yes_point_q)
+            _,binding,bid,old_point,new_point,old_samples,new_samples,old_mean,new_mean = max(
+                possibilities,key=lambda values:values[0])
+            token = binding.yes_token_id if side=="YES" else binding.no_token_id
+            position = Position(trade_id=f"normal-{metric}-{side}",market_id=binding.condition_id,
+                city=fixture.city.name,cluster=fixture.city.name,target_date="2026-09-30",
+                bin_label=binding.bin_id,direction=direction,unit="C",temperature_metric=metric,
+                shares=10,shares_filled=10,filled_cost_basis_usd=5,cost_basis_usd=5,
+                token_id=binding.yes_token_id,no_token_id=binding.no_token_id,condition_id=binding.condition_id)
+            def context(point,samples,*,quote=bid):
+                # The confidence carrier is the actual draw envelope plus its
+                # actual producer point, not a fabricated absorbing 0/1 band.
+                return ExitContext(fresh_prob=point,fresh_prob_is_fresh=True,
+                    current_market_price=float(bid),current_market_price_is_fresh=True,
+                    best_bid=None if quote is None else float(quote),bid_size=10,
+                    bid_ladder=() if quote is None else ((float(quote),10),),
+                    hours_to_settlement=9,position_state="active",day0_active=True,
+                    day0_exit_authority_status=held.day0_exit_authority_status,
+                    day0_exit_authority_reason=held.day0_exit_authority_reason,
+                    current_ci=(min(point,float(samples.min())),max(point,float(samples.max()))),
+                    probability_receipt={"q_version":new_witness.q_version},bankroll=1000)
+            assert position.evaluate_exit(context(old_point,old_samples)).reason == "HOLD"
+            flipped = position.evaluate_exit(context(new_point,new_samples))
+            assert flipped.should_exit and flipped.reason == "SELL_REVERSAL"
+            assert position.evaluate_exit(context(new_point,new_samples,quote=None)).reason == "HOLD"
+            holding = SimpleNamespace(position_id=position.trade_id,family_key=new_witness.family_key,
+                bin_id=binding.bin_id,side=side,token_id=token,shares=Decimal("10"))
+            curve = ExecutableSellCurve(token_id=token,side=side,snapshot_id="normal-book",
+                book_hash="normal-book-hash",levels=(BidBookLevel(price=bid,size=Decimal("10")),),
+                fee_model=FeeModel(fee_rate=fee_rate),min_tick=Decimal(".01"),
+                min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+            def candidate(witness,current_curve=curve):
+                return global_sell_candidate_from_holding(holding,probability_witness=witness,
+                    ledger_snapshot_id="normal-ledger",executable_sell_curve=current_curve,
+                    book_captured_at_utc=written,neg_risk=False,execution_mode="TAKER_LIMIT",
+                    probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+                    exit_authority_status=held.day0_exit_authority_status,
+                    exit_authority_reason=held.day0_exit_authority_reason,
+                    sell_action_authority_identity=held.sell_action_authority_identity)
+            endowment = CandidatePortfolioEndowment(loss_wealth_floor_usd=Decimal("1000"),
+                win_wealth_floor_usd=Decimal("1010"),current_token_shares=Decimal("10"),
+                ledger_snapshot_id="normal-ledger")
+            for witness,mean,admitted in ((old_witness,old_mean,False),(new_witness,new_mean,True)):
+                proposal = candidate(witness)
+                assert proposal is not None
+                score = _score_global_single_order_sell_expected(proposal,held_probability_mean=mean,
+                    sample_count=witness.yes_q_samples.shape[0],band_alpha=witness.band_alpha,endowment=endowment)
+                assert (score.candidate is not None and not score.rejection_reasons) is admitted
+                if admitted:
+                    assert score.expected_terminal_wealth.expected_ev_usd > 0
+                    assert score.expected_terminal_wealth.expected_delta_log_wealth > 0
+                    assert score.candidate.probability_witness_identity == new_witness.witness_identity
+            outband = replace(curve,levels=(BidBookLevel(price=Decimal(".04"),size=Decimal("10")),))
+            assert candidate(new_witness,outband) is None
+        for field in ("source_cycle_time","source_available_at"):
+            assert latest[field] == original[field]
+        assert [tuple(row) for row in fixture.conn.execute(
+            "SELECT raw_model_forecast_id,model,metric,source_cycle_time,source_available_at,captured_at,recorded_at,artifact_id,raw_sha256 "
+            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == prior_rows
+        from src.data.replacement_forecast_readiness import latest_replacement_readiness
+        readiness = latest_replacement_readiness(fixture.conn,city=fixture.city.name,target_date="2026-09-30",
+            temperature_metric=metric,decision_time=written)
+        bound = fixture.request.source_cycle_time+_dt.timedelta(hours=replacement_source_cycle_max_age_hours())
+        assert readiness.expires_at <= bound
+        for purpose in (reader.ReplacementForecastAuthorityPurpose.ENTRY,reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION):
+            stale = reader.read_replacement_forecast_bundle(fixture.conn,baseline_bundle=None,readiness=readiness,
+                city=fixture.city.name,target_date="2026-09-30",temperature_metric=metric,
+                decision_time=bound+_dt.timedelta(seconds=1),require_baseline_bundle=False,
+                enforce_raw_input_hwm=True,raw_input_hwm_conn=fixture.conn,authority_purpose=purpose)
+            assert stale.reason_code == "REPLACEMENT_LIVE_READINESS_EXPIRED" and not stale.ok
         for binding in held.probability_witness.bindings:
             for direction,side in (("buy_yes","YES"),("buy_no","NO")):
                 position = SimpleNamespace(condition_id=binding.condition_id,direction=direction)
