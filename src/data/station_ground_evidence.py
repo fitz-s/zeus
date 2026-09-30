@@ -104,15 +104,30 @@ def _body_dependency(conn: sqlite3.Connection, artifact_id: int) -> dict[str, ob
         "original_metadata_sha256": hashlib.sha256(str(row[-1]).encode()).hexdigest()}
 
 
-def _read_body_dependency(dependency: Mapping[str, object], *, conn: sqlite3.Connection, decision: datetime) -> bytes:
+def _original_source_clocks_valid(dependency):
+    try:
+        capture, available, recorded, cycle = (_stamp(dependency[key]) for key in
+            ("captured_at", "source_available_at", "recorded_at", "source_cycle_time"))
+        return capture == available == cycle and capture <= recorded
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _read_body_dependency(dependency: Mapping[str, object], *, conn: sqlite3.Connection,
+    decision: datetime, source_capture_confirmation: datetime | None = None) -> bytes:
     if isinstance(dependency.get("artifact_id"), bool) or not isinstance(dependency.get("artifact_id"), int):
         raise ValueError("station ground body artifact identity is invalid")
     if _body_dependency(conn, int(dependency["artifact_id"])) != dependency:
         raise ValueError("station ground body DB identity differs")
-    capture, available, recorded, cycle = (_stamp(dependency[key]) for key in
-        ("captured_at", "source_available_at", "recorded_at", "source_cycle_time"))
-    if not capture == available == cycle or not capture <= recorded <= decision:
-        raise ValueError("station ground body original clocks differ")
+    recorded = _stamp(dependency["recorded_at"])
+    if recorded > decision:
+        raise ValueError("station ground original body not possessed at decision")
+    if not _original_source_clocks_valid(dependency):
+        # Unknown/broken original source clocks remain unknown in the frozen
+        # tuple. Only a genuine later source event may authorize these exact
+        # bytes anew; this is not metadata repair or a backdated first capture.
+        if source_capture_confirmation is None or not recorded < source_capture_confirmation <= decision:
+            raise ValueError("station ground body original clocks differ")
     path = Path(str(dependency["artifact_path"]))
     if path.parent.resolve() != _store_root() or path.is_symlink() or not path.is_file() or path.stat().st_size > 256*1024:
         raise ValueError("station ground body owned path differs")
@@ -172,7 +187,9 @@ def _archive_manifest(conn, prepared, old_id, deadline, *, role, prior):
     name, source_kind, station_id, facts, audit, digest, body, body_path, captured = prepared
     now = datetime.now(UTC)
     dependency = _body_dependency(conn, int(old_id))
-    original_body = _read_body_dependency(dependency, conn=conn, decision=now)
+    original_clock_valid = _original_source_clocks_valid(dependency)
+    original_body = _read_body_dependency(dependency, conn=conn, decision=now,
+        source_capture_confirmation=captured if role == "source_capture_confirmation" else None)
     source_id, product_id = f"station_ground::{station_id}", f"station_ground::{source_kind}::{station_id}"
     if (original_body != body or dependency["sha256"] != digest
         or dependency["source_id"] != source_id or dependency["product_id"] != product_id
@@ -180,7 +197,7 @@ def _archive_manifest(conn, prepared, old_id, deadline, *, role, prior):
         or json.loads(str(dependency["request_params_json"])) != {"source_kind": source_kind, "station_id": station_id}
         or station_ground_facts_from_bytes(source_kind=source_kind, station_id=station_id, raw_body=original_body) != facts):
         raise ValueError("ground manifest original entity is unbound")
-    if captured < _stamp(dependency["captured_at"]) or (prior is not None and captured < prior[0]):
+    if (original_clock_valid and captured < _stamp(dependency["captured_at"])) or (prior is not None and captured < prior[0]):
         raise ValueError("old source capture cannot restore newer ground evidence")
     previous = _body_dependency(conn, prior[2] if prior is not None else int(old_id))
     original = captured.isoformat()
@@ -196,6 +213,8 @@ def _archive_manifest(conn, prepared, old_id, deadline, *, role, prior):
         "previous_source_evidence": previous}
     if prior is not None and prior[4]:
         payload["previous_source_capture_invalid"] = True
+    if not original_clock_valid:
+        payload["original_source_clock_invalid"] = True
     if role == "canonical_metadata_recovery":
         payload["recovery_of"] = {"artifact_id": previous["artifact_id"],
             "invalid_metadata_sha256": previous["original_metadata_sha256"]}
@@ -239,7 +258,7 @@ def _archive_entity(conn, prepared, forecast_db, deadline):
             if latest_evidence is not None and latest_evidence["facts"] == facts:
                 return latest_evidence
             return _archive_manifest(conn, prepared, old[0], deadline,
-                role="canonical_metadata_recovery", prior=latest)
+                role="source_capture_confirmation" if latest is not None and captured > latest[0] else "canonical_metadata_recovery", prior=latest)
         # Exact canonical file restoration above can make this very same
         # immutable candidate readable again; it does not create possession.
         latest_evidence = _candidate_evidence(latest, now, deadline)
@@ -455,17 +474,20 @@ def _read_manifest_evidence(evidence, *, decision_at, deadline_monotonic=None):
         if set(bodies) != {"ground"}:
             return None  # WMD identity bridge has its own separately approved branch.
         dependency = bodies["ground"]
-        body = _read_body_dependency(dependency, conn=conn, decision=decision)
+        role = evidence.get("manifest_role")
+        original_clock_valid = _original_source_clocks_valid(dependency)
+        body = _read_body_dependency(dependency, conn=conn, decision=decision,
+            source_capture_confirmation=capture if role == "source_capture_confirmation" else None)
         if (dependency["source_id"] != evidence["source_id"] or dependency["product_id"] != evidence["product_id"]
             or dependency["data_version"] != KIND or dependency["sha256"] != evidence["body_sha256"]
             or dependency["artifact_path"] != evidence["body_path"] or dependency["byte_size"] != evidence["byte_size"]
             or dependency["request_url"] != evidence["source_url"]
             or _stamp(dependency["recorded_at"]) > _stamp(evidence["recorded_at"])
-            or _stamp(dependency["captured_at"]) > capture
+            or (original_clock_valid and _stamp(dependency["captured_at"]) > capture)
+            or evidence.get("original_source_clock_invalid", False) is not (not original_clock_valid)
             or json.loads(str(dependency["request_params_json"])) != {"source_kind": evidence["source_kind"], "station_id": evidence["station_id"]}
         ):
             return None
-        role = evidence.get("manifest_role")
         if role is None:
             # Exact old metadata-recovery manifests keep their original clocks;
             # this is not compatibility for an unbound entity or new capture.

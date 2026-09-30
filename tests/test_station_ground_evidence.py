@@ -552,3 +552,35 @@ def test_late_old_or_equal_capture_cannot_wash_invalid_event_bound(tmp_path, mon
     _update_official(registry, official_body, claims, body + b"<!-- delayed old response -->", source_capture)
     _archive(db)
     assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:00:00Z") is None
+
+
+@pytest.mark.parametrize("bad_capture", ("bad-original-clock", "2026-09-30T12:00:00Z"))
+def test_actual_same_byte_source_recapture_recovers_unknown_original_clock_only_at_new_cut(tmp_path, monkeypatch, bad_capture):
+    db, registry, official_body, claims, clock = _setup(tmp_path, monkeypatch)
+    body_a = official_body.read_bytes()
+    a = _archive(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at=? WHERE artifact_id=?", (bad_capture, a["artifact_id"]))
+        broken = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (a["artifact_id"],)).fetchone()
+    clock[0] = datetime(2026, 9, 29, 23, tzinfo=UTC)
+    _update_official(registry, official_body, claims, body_a, "2026-09-29T22:00:00Z")
+    equal_event = ground.archive_station_ground_evidence(db, ["Hong Kong"])
+    assert not equal_event["archived"]  # equal to the known possession bound is insufficient
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:00:00Z") is None
+    _update_official(registry, official_body, claims, body_a, "2026-09-29T22:30:00Z")
+    confirmation = _archive(db)
+    assert confirmation["manifest_role"] == "source_capture_confirmation"
+    assert confirmation["original_source_clock_invalid"] is True
+    assert "recovery_of" not in confirmation
+    assert confirmation["input_bodies"]["ground"]["captured_at"] == bad_capture
+    assert confirmation["captured_at"] == "2026-09-29T22:30:00+00:00"
+    assert confirmation["recorded_at"] == "2026-09-29T23:00:00+00:00"
+    assert ground.read_frozen_station_ground_evidence(a, decision_at="2026-09-29T22:00:00Z") is None
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T22:59:59Z") is None
+    assert ground.read_current_station_ground_evidence(db, city="Hong Kong", decision_at="2026-09-29T23:00:00Z") == confirmation
+    assert ground.read_frozen_station_ground_evidence(confirmation, decision_at="2026-09-29T23:00:00Z") == confirmation
+    clock[0] = datetime(2026, 9, 30, tzinfo=UTC)
+    assert _archive(db) == confirmation
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (a["artifact_id"],)).fetchone() == broken
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 2
