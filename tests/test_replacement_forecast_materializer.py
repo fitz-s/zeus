@@ -10444,11 +10444,13 @@ def _normal_hko_writer_proof_relationship(tmp_path, monkeypatch, *, include_raw_
             assert sum(points) == pytest.approx(1.0)
             assert sum(means) == pytest.approx(1.0)
     current_request = replace(request, computed_at=_hko_dt(20, 1))
+    sql_clock[0] = current_request.computed_at
     current = materialize_replacement_forecast_live(conn, current_request)
     assert current.ok, current.reason_codes
     conn.commit()  # Publish the new independent canonical anchor before public replay.
     current_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
                                (current.posterior_id,)).fetchone()
+    assert datetime.fromisoformat(current_row["recorded_at"]) == current_request.computed_at
     current_provenance = json.loads(current_row["provenance_json"])
     current_shape = current_provenance["bayes_precision_fusion"]["current_evidence_shape"]
     assert current_shape["provider_geometry_audit"]["anchor_station_ground"] == ground_b
@@ -10510,6 +10512,7 @@ def _normal_hko_writer_proof_relationship(tmp_path, monkeypatch, *, include_raw_
         assert historical.bundle.posterior_id == rebuilt.posterior_id
         assert dict(historical.bundle.q) == pytest.approx(q, abs=1e-12)
     changed_request = replace(request, computed_at=_hko_dt(20, 3))
+    sql_clock[0] = changed_request.computed_at
     new_scope = {**authority_scope, "materialized_at": changed_request.computed_at}
     assert not current_evidence_shape_has_entry_authority(provenance, **new_scope)
     assert not current_evidence_shape_has_held_authority(provenance, **new_scope)
@@ -10535,6 +10538,7 @@ def _normal_hko_writer_proof_relationship(tmp_path, monkeypatch, *, include_raw_
     assert rebound.ok, rebound.reason_codes
     conn.commit()
     rebound_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (rebound.posterior_id,)).fetchone()
+    assert datetime.fromisoformat(rebound_row["recorded_at"]) == rebound_request.computed_at
     rebound_provenance = json.loads(rebound_row["provenance_json"])
     rebound_shape = rebound_provenance["bayes_precision_fusion"]["current_evidence_shape"]
     assert rebound_shape["provider_geometry_audit"]["anchor_station_ground"] == changed_ground
@@ -10583,11 +10587,13 @@ def _normal_hko_writer_proof_relationship(tmp_path, monkeypatch, *, include_raw_
     assert ground.read_current_station_ground_evidence(
         db, city="Hong Kong", decision_at=request.computed_at) == ground_a
     reset_request = replace(request, computed_at=_hko_dt(20, 5))
+    sql_clock[0] = reset_request.computed_at
     reset = materialize_replacement_forecast_live(conn, reset_request)
     assert reset.ok, reset.reason_codes
     conn.commit()  # RESET certificates are public only after canonical commit.
     reset_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
                             (reset.posterior_id,)).fetchone()
+    assert datetime.fromisoformat(reset_row["recorded_at"]) == reset_request.computed_at
     reset_provenance = json.loads(reset_row["provenance_json"])
     reset_shape = reset_provenance["bayes_precision_fusion"]["current_evidence_shape"]
     assert reset_shape["provider_geometry_audit"]["anchor_station_ground"] == confirmed_a
