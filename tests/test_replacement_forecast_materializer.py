@@ -146,7 +146,8 @@ def _hko_native_surfaces(tmp_path, monkeypatch):
     from src.data import openmeteo_model_surface as surface
 
     bodies = {}
-    models = ("icon_global", "ukmo_global_deterministic_10km", "gfs_hrrr", "ncep_nbm_conus")
+    models = ("icon_global", "ukmo_global_deterministic_10km", "gfs_hrrr", "ncep_nbm_conus",
+              "icon_d2", "meteofrance_arome_france_hd")
     for model in models:
         profile = surface._profile(model)
         domain, shape = profile["domain"], (profile["ny"], profile["nx"])
@@ -504,7 +505,11 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 params["run"] = run.strftime("%Y-%m-%dT%H:%M")
             variable = params["hourly"]
             grid_lat, grid_lon = (31.14, 121.80) if model == "ecmwf_ifs" and old["city"].casefold() == "shanghai" else (city.lat, city.lon)
-            if old["city"] == "Los Angeles":
+            if old["city"] in {"Los Angeles", "Milan"}:
+                from src.config import runtime_station_geometry_for_city
+                station = runtime_station_geometry_for_city(city, effective_at=datetime.fromisoformat(captured))
+                assert station["ground_status"] == "VERIFIED"
+                target_elevation = station["ground_elevation_m"]
                 # Retained actual served-header goldens for the projected grids;
                 # regular-grid coordinates are exact official cell centers.
                 selected = {"icon_global": (34., -118.375),
@@ -512,10 +517,13 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                             "gfs_hrrr": (33.94541, -118.40222),
                             "ncep_nbm_conus": (33.94122, -118.38857)}
                 grid_lat, grid_lon = selected.get(model, (grid_lat, grid_lon))
+                if old["city"] == "Milan" and model != "ecmwf_ifs":
+                    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+                    grid_lat, grid_lon = _selected_test_cell(model, city.lat, city.lon)
                 if model == "ecmwf_ifs":
                     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
                     cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
-                                                      target_elevation_m=29.7)
+                                                      target_elevation_m=target_elevation)
                     grid_lat, grid_lon = cell["selected_grid_lat"], cell["selected_grid_lon"]
                     if grid_lon > 180:
                         grid_lon -= 360.
@@ -523,11 +531,11 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 "timezone": city.timezone, "hourly_units": {variable: "°C"},
                 "hourly": {"time": [f"{old['target_date']}T{hour:02d}:00" for hour in range(24)],
                            variable: [old["forecast_value_c"]] * 24}}
-            if old["city"] == "Los Angeles":
+            if old["city"] in {"Los Angeles", "Milan"}:
                 from zoneinfo import ZoneInfo
                 local_start = datetime.combine(date.fromisoformat(old["target_date"]),
                                                datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
-                payload.update(elevation=29.7, utc_offset_seconds=int(local_start.utcoffset().total_seconds()))
+                payload.update(elevation=target_elevation, utc_offset_seconds=int(local_start.utcoffset().total_seconds()))
             body = (json.dumps(payload, indent=2) + "\n").encode()
             from src.data.openmeteo_client import PREVIOUS_RUNS_URL
             url = PREVIOUS_RUNS_URL if previous else "https://single-runs-api.open-meteo.com/v1/forecast"
@@ -535,11 +543,11 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 captures=[(body, datetime.fromisoformat(captured).timestamp())],
                 network_captures=[(body, datetime.fromisoformat(captured).timestamp(),
                                    {"content-type": "application/json"})]
-                    if old["city"] == "Los Angeles" else ())
+                    if old["city"] in {"Los Angeles", "Milan"} else ())
             raw = {key: old[key] for key in ("model", "city", "target_date", "metric", "source_cycle_time",
                 "source_available_at", "lead_days", "forecast_value_c", "endpoint")}
             raw.update(captured_at=captured, **identity, _physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY])
-            if old["city"] == "Los Angeles":
+            if old["city"] in {"Los Angeles", "Milan"}:
                 # Normal same-DB enrichment of a pre-identity setup row preserves
                 # its raw ID; no foreign artifact/receipt ID is transplanted.
                 with patch.object(dl, "datetime", Clock):
@@ -1492,16 +1500,37 @@ def test_live_override_keeps_every_scheme_weighted_source(monkeypatch) -> None:
     ("London", "high", ("icon_d2", "ukmo_uk_deterministic_2km"), True),
 ))
 def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
-    monkeypatch: pytest.MonkeyPatch, city: str, metric: str,
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest, city: str, metric: str,
     scheme_models: tuple[str, ...], d2_newer: bool,
 ) -> None:
     """A valid persisted row cannot extend a regional model's physical horizon."""
     from src.config import runtime_cities_by_name
     from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
 
+    if city == "Milan":
+        request.getfixturevalue("_hko_source_surface")
     conn = _conn()
     city_cfg = runtime_cities_by_name()[city]
     run = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    if city == "Milan":
+        # Actual WMDR + AWC bytes were first captured after Sep30 00:21Z.
+        # Keep both original possession clocks; only these controlled forecasts
+        # move together to a later run/target/cut, with the same D2/D1 geometry.
+        from src.data import station_ground_evidence as ground
+        class GroundClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return _hko_dt(0, 30).astimezone(tz or UTC)
+        monkeypatch.setattr(ground, "datetime", GroundClock)
+        conn.commit()
+        db = ground.forecast_db_from_connection(conn)
+        assert ground.archive_station_ground_evidence(db, [city])["status"] == "GROUND_SOURCE_ARCHIVED"
+        entity = ground.read_current_station_ground_evidence(db, city=city, decision_at=_hko_dt(1))
+        assert len(entity["input_bodies"]) == 2
+        assert entity["facts"]["elevation_m"] == 234.
+        run = _hko_dt(0)
+    far_target = date(2026, 10, 2) if city == "Milan" else date(2026, 9, 25)
+    near_target = far_target - timedelta(days=1)
     models = tuple(dict.fromkeys((
         "ecmwf_ifs", "icon_d2", "icon_global", "ukmo_global_deterministic_10km",
         *scheme_models,
@@ -1513,11 +1542,11 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES (?, ?, '2026-09-25', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
-            (model, city, metric, model_run.isoformat(),
-             (model_run + timedelta(minutes=5)).isoformat(),
-             (model_run + timedelta(minutes=10)).isoformat(),
-             (model_run + timedelta(minutes=11)).isoformat(), 20.0 + index),
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
+            (model, city, far_target.isoformat(), metric, model_run.isoformat(),
+             (model_run + timedelta(minutes=35 if city == "Milan" else 5)).isoformat(),
+             (model_run + timedelta(minutes=40 if city == "Milan" else 10)).isoformat(),
+             (model_run + timedelta(minutes=41 if city == "Milan" else 11)).isoformat(), 20.0 + index),
         )
     scheme = CityOneScheme(
         city=city, scheme_status="ACTIVE", final_sources=scheme_models,
@@ -1561,25 +1590,48 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
             return {"source": "test-current-ens-shape"}
 
     monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
-    for target, d2_eligible in ((date(2026, 9, 25), False), (date(2026, 9, 24), True)):
+    for target, d2_eligible in ((far_target, False), (near_target, True)):
         # The physical target changes; copy the raw evidence to that exact natural key.
         if d2_eligible:
-            conn.execute(
-                """UPDATE raw_model_forecasts SET target_date='2026-09-24', lead_days=1
-                   WHERE city=?""",
-                (city,),
-            )
+            if city == "Milan":
+                # Different target, different normal entity. Do not relabel
+                # already licensed D2 raw rows or their immutable body metadata.
+                far_rows = [tuple(row) for row in conn.execute(
+                    "SELECT * FROM raw_model_forecasts WHERE city=? AND target_date=? ORDER BY raw_model_forecast_id",
+                    (city, far_target.isoformat()))]
+                conn.execute("""INSERT INTO raw_model_forecasts (
+                    model, city, target_date, metric, source_cycle_time,
+                    source_available_at, captured_at, recorded_at, lead_days,
+                    forecast_value_c, endpoint, coverage_status)
+                    SELECT model, city, ?, metric, source_cycle_time,
+                        source_available_at, captured_at, recorded_at, 1,
+                        forecast_value_c, endpoint, coverage_status
+                    FROM raw_model_forecasts WHERE city=? AND target_date=?""",
+                    (target.isoformat(), city, far_target.isoformat()))
+            else:
+                conn.execute(
+                    """UPDATE raw_model_forecasts SET target_date=?, lead_days=1
+                       WHERE city=?""",
+                    (target.isoformat(), city),
+                )
         request = replace(
             _request(), city=city, city_id=city,
             city_timezone=city_cfg.timezone, temperature_metric=metric,
             target_date=target, source_cycle_time=run,
             computed_at=run + timedelta(hours=4 if d2_newer else 1),
         )
-        _qualify_raw_fixture_rows(conn, rebuild=d2_eligible)
+        if city == "Milan":
+            request = _la_current_physical_request(conn, metric=metric, cycle=run,
+                decision=request.computed_at, city_name=city, target=target)
+        _qualify_raw_fixture_rows(conn, rebuild=d2_eligible and city != "Milan")
         override = materializer_mod._replacement_bayes_precision_fusion_override(
             request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
         )
         assert override is not None
+        if city == "Milan" and d2_eligible:
+            assert far_rows == [tuple(row) for row in conn.execute(
+                "SELECT * FROM raw_model_forecasts WHERE city=? AND target_date=? ORDER BY raw_model_forecast_id",
+                (city, far_target.isoformat()))]
         assert ("icon_d2" in override.used_models) is d2_eligible
         if len(scheme_models) == 2 and not d2_eligible:
             assert override.source_clock_one_scheme is not None
@@ -1595,20 +1647,21 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
             assert "ukmo_global_deterministic_10km" in override.used_models
 
 
-def _la_current_physical_request(conn, *, metric, cycle, decision):
-    """TEST_ONLY external inputs, with LA's own ground and normal anchor writer."""
+def _la_current_physical_request(conn, *, metric, cycle, decision, city_name="Los Angeles", target=None):
+    """TEST_ONLY external inputs with the request city's own normal ground/anchor."""
     from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
     from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
     from zoneinfo import ZoneInfo
-    city = runtime_cities_by_name()["Los Angeles"]
+    city = runtime_cities_by_name()[city_name]
+    assert city_name in {"Los Angeles", "Milan"}
     station = runtime_station_geometry_for_city(city, effective_at=decision)
     assert station["ground_status"] == "VERIFIED"
-    assert station["ground_elevation_m"] == pytest.approx(29.7)
+    assert station["ground_elevation_m"] == pytest.approx(29.7 if city_name == "Los Angeles" else 234.)
     cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
                                      target_elevation_m=station["ground_elevation_m"])
     lon = cell["selected_grid_lon"] - 360. if cell["selected_grid_lon"] > 180. else cell["selected_grid_lon"]
-    target = date(2026, 10, 2)
+    target = target or date(2026, 10, 2)
     local_start = datetime.combine(target, datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
     assert cycle <= local_start.astimezone(UTC)  # A real full prior cannot invent an elapsed prefix.
     body = json.dumps({"latitude": cell["selected_grid_lat"], "longitude": lon,
