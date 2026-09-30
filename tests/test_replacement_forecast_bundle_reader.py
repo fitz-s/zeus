@@ -1497,6 +1497,13 @@ def _reader_shanghai_native_high(conn, request, root, monkeypatch):
 
 @pytest.fixture
 def _shanghai_reader_current_certificate(tmp_path, monkeypatch):
+    # Preserve the established two-argument fixture/__wrapped__ interface and
+    # its explicit eight-hour test TTL. The factory is for separate worlds.
+    yield from _shanghai_reader_certificate(tmp_path,monkeypatch,
+        expires_at=datetime(2026,10,1,16,15,tzinfo=UTC))
+
+
+def _shanghai_reader_certificate(tmp_path, monkeypatch, *, expires_at):
     """Normal Shanghai physical ownership; controlled forecast/ENS inputs.
 
     The complete relative fixture window follows retained HOMR possession,
@@ -1508,6 +1515,7 @@ def _shanghai_reader_current_certificate(tmp_path, monkeypatch):
     from src.data import replacement_forecast_materializer as materializer
     from src.data.replacement_forecast_readiness import latest_replacement_readiness
     from src.data.station_ground_evidence import forecast_db_from_connection
+    from dataclasses import replace
     root = tmp_path.resolve()
     native = _hko_native_surfaces.__wrapped__(root,monkeypatch)
     next(native)
@@ -1519,6 +1527,10 @@ def _shanghai_reader_current_certificate(tmp_path, monkeypatch):
             actual_override = materializer._replacement_bayes_precision_fusion_override
             conn,request = _shanghai_current_owner_request(root,monkeypatch,
                 computed_at=cut,first_compute_at=cut-timedelta(minutes=10))
+            assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+            # This is the first certificate construction, never a renewal of
+            # an existing posterior. None delegates expiry to the owner law.
+            request = replace(request,expires_at=expires_at)
             builtin = None
             try:
                 request,snapshot,builtin = _reader_shanghai_native_high(conn,request,root,monkeypatch)
@@ -1602,6 +1614,22 @@ def _reader_with_posterior_fault(normal, *, missing=False, **fields):
             return FaultCursor(cursor,fk_projection=fk_projection) if "FROM FORECAST_POSTERIORS" in query else cursor
         def __getattr__(self,name): return getattr(normal.conn,name)
     return FaultRead()
+
+
+def test_reader_initial_certificate_uses_owner_default_expiry(tmp_path,monkeypatch):
+    world = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None)
+    normal = next(world)
+    try:
+        assert normal.request.expires_at is None
+        assert normal.readiness.expires_at == normal.request.source_cycle_time+timedelta(hours=30)
+        assert normal.request.computed_at == datetime(2026,10,1,8,15,tzinfo=UTC)
+        assert datetime.fromisoformat(normal.row["source_cycle_time"]) == normal.request.source_cycle_time
+        for purpose in ReplacementForecastAuthorityPurpose:
+            public = read_replacement_forecast_bundle(normal.conn,**normal.kwargs,authority_purpose=purpose)
+            assert public.ok,public.reason_code
+            assert public.bundle.posterior_id == normal.row["posterior_id"]
+    finally:
+        next(world,None)
 
 
 def _reader_new_icon_cycle(normal):
