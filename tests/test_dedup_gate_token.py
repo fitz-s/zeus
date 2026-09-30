@@ -1538,6 +1538,103 @@ def test_pre_submit_transport_redecision_bypasses_terminal_no_fill_cooldown(mem_
     assert ready["candidate_price"] == "0.1"
 
 
+_GEOBLOCK_DETAIL = (
+    "PolyApiException[status_code=403, error_message={'error': 'Trading "
+    "restricted in your region, please refer to available regions - "
+    "https://docs.polymarket.com/developers/CLOB/geoblock'}]"
+)
+
+
+def _insert_geoblock_rejection(conn, *, final_order_id=None, order_fact=False):
+    """Live shape of command 6f37c222b7a24d8a (2026-09-29 17:03Z)."""
+
+    conn.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, envelope_id, created_at, updated_at)
+           VALUES ('cmd-geoblock', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   5.97, 0.32, '0x7108', 'REJECTED', 'pre-submit:cmd-geoblock',
+                   '2026-09-29T17:03:05+00:00', '2026-09-29T17:03:07+00:00')""",
+        (TOKEN_X,),
+    )
+    conn.execute(
+        """INSERT INTO venue_submission_envelopes
+           (envelope_id, order_id, error_code, error_message)
+           VALUES ('final-geoblock', ?, 'venue_rejected_geoblock_403', ?)""",
+        (final_order_id, _GEOBLOCK_DETAIL),
+    )
+    conn.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-geoblock', 'cmd-geoblock', 3, 'SUBMIT_REJECTED',
+                   '2026-09-29T17:03:07+00:00', ?, 'REJECTED')""",
+        (
+            json.dumps(
+                {
+                    "reason": "venue_rejected_geoblock_403",
+                    "detail": _GEOBLOCK_DETAIL,
+                    "final_submission_envelope_stage": "post_submit_result",
+                    "final_submission_envelope_id": "final-geoblock",
+                    "final_submission_envelope_command_id": "cmd-geoblock",
+                }
+            ),
+        ),
+    )
+    if order_fact:
+        conn.execute(
+            """INSERT INTO venue_order_facts
+               (venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, local_sequence)
+               VALUES ('0x7108', 'cmd-geoblock', 'LIVE', '5.97', '0', 'WS_USER',
+                       '2026-09-29T17:03:08+00:00', 1)"""
+        )
+    conn.commit()
+
+
+@pytest.mark.parametrize("age_seconds", [1, 133, 3600])
+def test_geoblock_rejected_predecessor_does_not_block_same_price(mem_db, age_seconds):
+    """2026-09-29 14:50-17:07Z: 19 global winners were refused at submit with
+    same_token_terminal_no_fill_{requires_reprice,cooling_down} because the prior
+    command on the token was a geoblock 403 -- a host-access fact, not an order
+    fact. The same price must be admissible immediately and forever after."""
+
+    from datetime import timedelta
+
+    _insert_geoblock_rejection(mem_db)
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.32,
+        shares=5.97,
+        now=datetime.fromisoformat("2026-09-29T17:03:07+00:00")
+        + timedelta(seconds=age_seconds),
+    )
+
+    assert result["allowed"] is True
+    assert result["reason"] == "allowed_terminal_geoblock_no_fill_redecision"
+    assert result["terminal_no_fill_redecision_proof"] == "geoblock"
+    assert result["cooldown_seconds"] == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"final_order_id": "0xvenue-order"}, {"order_fact": True}]
+)
+def test_geoblock_proof_fails_closed_on_venue_order_evidence(mem_db, kwargs):
+    _insert_geoblock_rejection(mem_db, **kwargs)
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.32,
+        shares=5.97,
+        now=datetime.fromisoformat("2026-09-29T17:05:20+00:00"),
+    )
+
+    assert result.get("terminal_no_fill_redecision_proof") != "geoblock"
+
+
 def test_terminal_fak_no_match_redecision_allows_same_price_after_cooldown(mem_db):
     venue_order_id = "0x" + "8e" * 32
     mem_db.execute(

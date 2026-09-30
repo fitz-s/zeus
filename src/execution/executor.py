@@ -556,6 +556,8 @@ def _entry_terminal_no_fill_redecision_proof(
         # With no bound/order/trade identity, local lock/transport loss created
         # no venue exposure and a fresh decision may retry the same price.
         return pre_submit_redecision_proof
+    if _entry_geoblock_no_fill_proof(conn, command_id=command_id, payload=payload):
+        return "geoblock"
     proof_class = str(payload.get("proof_class") or "")
     if proof_class == "deterministic_venue_fak_no_match_400":
         payload_order_id = str(payload.get("venue_order_id") or "").strip()
@@ -593,6 +595,43 @@ def _entry_terminal_no_fill_redecision_proof(
     ):
         return "fok"
     return None
+
+
+def _entry_geoblock_no_fill_proof(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    payload: Mapping[str, object],
+) -> bool:
+    """A geoblock 403 is a fact about host venue access, not about this order.
+
+    The venue refused the POST for the host's region before creating any order,
+    so no price or size of this token carries the rejection forward. Proof: the
+    typed reason and venue message, no order/trade facts, no venue order id on
+    the final envelope.
+    """
+
+    if payload.get("reason") != "venue_rejected_geoblock_403":
+        return False
+    message = str(payload.get("detail") or payload.get("exception_message") or "")
+    if not _is_polymarket_geoblock_403_message(message):
+        return False
+    if _entry_has_positive_trade_fact(conn, command_id=command_id):
+        return False
+    if _table_exists(conn, "venue_order_facts") and conn.execute(
+        "SELECT 1 FROM venue_order_facts WHERE command_id = ? LIMIT 1",
+        (command_id,),
+    ).fetchone():
+        return False
+    final_id = str(payload.get("final_submission_envelope_id") or "").strip()
+    if final_id and _table_exists(conn, "venue_submission_envelopes"):
+        row = conn.execute(
+            "SELECT order_id FROM venue_submission_envelopes WHERE envelope_id = ?",
+            (final_id,),
+        ).fetchone()
+        if row is not None and str(row[0] or "").strip():
+            return False
+    return True
 
 
 def _entry_invalid_amount_no_fill_proof(
@@ -2637,11 +2676,13 @@ def _entry_same_token_cooldown_component(
     if no_fill_redecision_proof in {
         "pre_submit_db_lock",
         "pre_submit_transport",
+        "geoblock",
     }:
-        # The exact proof says the adapter never crossed POST and canonical
-        # order/trade facts are absent. Re-decision must therefore recapture a
-        # fresh quote immediately; applying the generic terminal-no-fill
-        # cooldown only turns local writer contention into lost alpha.
+        # The exact proof says the adapter never crossed POST (or the venue
+        # refused the host, not the order) and canonical order/trade facts are
+        # absent. Re-decision must therefore recapture a fresh quote
+        # immediately; applying the generic terminal-no-fill cooldown only
+        # turns local contention or host access into lost alpha.
         return {
             "component": "entry_same_token_cooldown",
             "allowed": True,
@@ -3118,10 +3159,14 @@ def _allocation_payload_for_intent(intent: ExecutionIntent) -> dict[str, str]:
 
 
 def _is_polymarket_geoblock_403(exc: Exception) -> bool:
-    message = str(exc)
+    return type(exc).__name__ == "PolyApiException" and _is_polymarket_geoblock_403_message(
+        str(exc)
+    )
+
+
+def _is_polymarket_geoblock_403_message(message: str) -> bool:
     return (
-        type(exc).__name__ == "PolyApiException"
-        and "status_code=403" in message
+        "status_code=403" in message
         and "Trading restricted in your region" in message
         and "geoblock" in message
     )
