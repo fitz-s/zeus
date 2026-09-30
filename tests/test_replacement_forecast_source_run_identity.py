@@ -32,6 +32,11 @@ _CURRENT_MANIFEST_JSON = '{"coordinate_profile":"test-current"}'
 @pytest.fixture(autouse=True)
 def _current_coordinate_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.config as config
+    from src.data import ecmwf_open_data as native
+
+    # Import the collector before the protocol-only profile override. Its
+    # bound alias must not retain this test's temporary profile afterward.
+    assert native.runtime_coordinate_manifest_json is config.runtime_coordinate_manifest_json
 
     monkeypatch.setattr(
         config,
