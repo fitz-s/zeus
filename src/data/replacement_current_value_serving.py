@@ -300,9 +300,10 @@ def _physical_artifact_at_cutoff(row: Mapping[str, object], candidates=None) -> 
         elif recorded is None and captured is not None and captured > cutoff:
             continue
         # Unknown event order fails closed instead of hiding malformed proof.
-        order = captured or recorded or datetime.max.replace(tzinfo=timezone.utc)
-        candidate = (order, recorded or order, int(artifact["artifact_id"]), artifact)
-        if best is None or candidate[:3] > best[:3]:
+        invalid_capture = captured is None or (recorded is not None and captured > recorded)
+        order = (recorded if invalid_capture else captured) or recorded or datetime.max.replace(tzinfo=timezone.utc)
+        candidate = (order, invalid_capture, recorded or order, int(artifact["artifact_id"]), artifact)
+        if best is None or candidate[:4] > best[:4]:
             best = candidate
     latest = best[-1] if best is not None else None
     return {**row, "physical_artifact": latest}
@@ -894,7 +895,18 @@ def physical_capture_debt_reason(
                 return "ENTITY_BODY_MISSING" if source_geometry_static_prerequisite_reason() is None else None
             asset = read_model_surface_capture(model, decision_at=decision)
             return "ENTITY_BODY_MISSING" if asset.status == "READY" else None
-        row = _revalidated_legacy_product_row(row)
+        selected = row
+        row = _revalidated_legacy_product_row(selected)
+        invalid_http_receipt = False
+        if row is None and artifact.get("data_version") == "openmeteo_single_model_http_capture_receipt_v1":
+            # This is a force-acquisition basis, NOT permission to serve the
+            # older body. A corrupt latest append must still block current q.
+            # Independent canonical possession and exact recorded request scope
+            # bound the repair; the immutable raw issue/product remain strict.
+            if stamp(artifact["recorded_at"]) > decision:
+                return None
+            row = _revalidated_legacy_product_row(raw)
+            invalid_http_receipt = row is not None
         if row is None:
             return None
         artifact = row["physical_artifact"]
@@ -944,7 +956,7 @@ def physical_capture_debt_reason(
             return None
         if epoch_after_body:
             return "MODEL_SURFACE_EPOCH_AFTER_BODY"
-        if artifact.get("capture_receipt_artifact_id") is None:
+        if invalid_http_receipt or artifact.get("capture_receipt_artifact_id") is None:
             return "HTTP_CAPTURE_RECEIPT_MISSING"
         return None
     except (KeyError, IndexError, TypeError, ValueError, OSError, json.JSONDecodeError):

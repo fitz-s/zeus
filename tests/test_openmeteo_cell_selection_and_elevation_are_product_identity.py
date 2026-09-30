@@ -294,6 +294,52 @@ def test_physical_capture_debt_does_not_force_missing_non_network_evidence(tmp_p
     conn.close()
 
 
+@pytest.mark.parametrize("metric", ("high","low"))
+@pytest.mark.parametrize("damage", ("clock","future_capture","metadata","receipt_file"))
+def test_matching_broken_latest_http_receipt_can_drain_without_serving_old_body(tmp_path, monkeypatch, metric, damage):
+    from tests.test_station_ground_evidence import _setup, _archive
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason, read_current_instrument_values
+    db, _, _, _, _ = _setup(tmp_path,monkeypatch)
+    _archive(db)
+    conn = sqlite3.connect(db)
+    scope = dict(city="Hong Kong", metric=metric, target_date="2026-09-30", model="icon_global",
+                 cycle="2026-09-29T12:00:00+00:00",value=20,network=True)
+    _persist_exact_provider_body(conn,tmp_path,**scope,captured="2026-09-29T22:05:00+00:00")
+    conn.commit()
+    raw_id = conn.execute("SELECT raw_model_forecast_id FROM raw_model_forecasts").fetchone()[0]
+    raw_before = conn.execute("SELECT * FROM raw_model_forecasts").fetchall()
+    def current(cut):
+        return read_current_instrument_values(conn,city=scope["city"],metric=metric,target_date=scope["target_date"],
+            source_cycle_time_iso=scope["cycle"],decision_time_iso=cut)
+    assert current("2026-09-29T22:10:00Z")["icon_global"].value_c==20
+    _persist_exact_provider_body(conn,tmp_path,**scope,captured="2026-09-29T22:30:00+00:00",expected_written=0)
+    conn.commit()
+    latest_id, latest_path = conn.execute("SELECT artifact_id,artifact_path FROM raw_forecast_artifacts"
+        " WHERE data_version='openmeteo_single_model_http_capture_receipt_v1' ORDER BY artifact_id DESC LIMIT 1").fetchone()
+    if damage=="clock":
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at='broken-clock' WHERE artifact_id=?",(latest_id,))
+    elif damage=="future_capture":
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at='2026-09-30T10:00:00Z' WHERE artifact_id=?",(latest_id,))
+    elif damage=="metadata":
+        conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json='{}' WHERE artifact_id=?",(latest_id,))
+    else:
+        Path(latest_path).unlink()
+    conn.commit()
+    old_cut="2026-09-29T22:10:00Z"
+    rejected_cut="2026-09-29T22:45:00Z"
+    assert "icon_global" not in current(rejected_cut)
+    assert physical_capture_debt_reason(conn,raw_model_forecast_id=raw_id,decision_time_iso=rejected_cut)=="HTTP_CAPTURE_RECEIPT_MISSING"
+    assert current(old_cut)["icon_global"].value_c==20
+    _persist_exact_provider_body(conn,tmp_path,**scope,captured="2026-09-29T23:00:00+00:00",expected_written=0)
+    conn.commit()
+    assert current("2026-09-29T23:05:00Z")["icon_global"].value_c==20
+    assert physical_capture_debt_reason(conn,raw_model_forecast_id=raw_id,decision_time_iso="2026-09-29T23:05:00Z") is None
+    assert "icon_global" not in current(rejected_cut)
+    assert current(old_cut)["icon_global"].value_c==20
+    assert conn.execute("SELECT * FROM raw_model_forecasts").fetchall()==raw_before
+    conn.close()
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize("column,value", (
     ("latitude_requested", 0.0), ("longitude_requested", 0.0),
