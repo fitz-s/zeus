@@ -3929,6 +3929,9 @@ def test_materializer_does_not_publish_stale_ensemble_as_live_probability(
     conn = _conn()
     request = _hko_request()
     request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request)
+    producer_readiness = tuple(tuple(row) for row in conn.execute("SELECT * FROM readiness_state ORDER BY rowid"))
+    assert producer_readiness and all(row["strategy_key"] == "producer_readiness"
+        for row in conn.execute("SELECT * FROM readiness_state"))
     assert isinstance(materializer_mod.prepare_replacement_forecast_live(conn, request),
                       materializer_mod.PreparedReplacementForecastMaterialization)
     request = _install_hko_live_fusion(monkeypatch, conn=conn, request=request, shape_lag_hours=6.0)
@@ -3938,7 +3941,8 @@ def test_materializer_does_not_publish_stale_ensemble_as_live_probability(
     assert result.ok is False
     assert "CAPTURE:CURRENT_EVIDENCE_NOT_LIVE" in result.reason_codes
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM readiness_state ORDER BY rowid")) == producer_readiness
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state WHERE strategy_key!='producer_readiness'").fetchone()[0] == 0
 
 
 @pytest.mark.usefixtures("_hko_source_surface")
