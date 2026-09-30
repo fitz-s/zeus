@@ -2354,31 +2354,48 @@ def test_live_input_hwm_considers_only_newer_current_covered_ensemble(
 def test_live_reader_does_not_serve_uncurrent_or_uncovered_bound_ensemble(
     bound_evidence: str,
     expected_reason: str,
+    _shanghai_reader_current_certificate,
 ) -> None:
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
-    if bound_evidence == "retired":
-        conn.execute(
-            "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = 1",
-            ("ecmwf_opendata_mx2t3_local_calendar_day_max",),
-        )
-    else:
-        conn.execute(
-            "DELETE FROM source_run_coverage WHERE source_run_id = 'ens-run-1'"
-        )
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
-    )
+    normal = _shanghai_reader_current_certificate
+    purpose = ReplacementForecastAuthorityPurpose.HELD_REDECISION
+    assert read_replacement_forecast_bundle(normal.conn,**normal.kwargs,authority_purpose=purpose).ok
+    snapshot_id = json.loads(normal.row["dependency_source_run_ids_json"])["current_ensemble_snapshot"]
+    immutable = {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}"))
+        for table in ("ensemble_snapshots","source_run","source_run_coverage")}
+    calls = []
+    class FaultCursor:
+        def __init__(self,cursor): self.cursor = cursor
+        def fetchone(self):
+            row = self.cursor.fetchone()
+            assert row is not None
+            calls.append(bound_evidence)
+            if bound_evidence == "retired":
+                assert row[0] == normal.request.baseline_data_version
+                return ("ecmwf_opendata_mx2t3_local_calendar_day_max",*row[1:])
+            return None
+        def __getattr__(self,name): return getattr(self.cursor,name)
+    class FaultRead:
+        def execute(self,sql,parameters=()):
+            cursor = normal.conn.execute(sql,parameters)
+            query = " ".join(sql.upper().split())
+            identity_query = query.startswith("SELECT DATASET_ID, SOURCE_ID, CITY, TARGET_DATE, TEMPERATURE_METRIC FROM ENSEMBLE_SNAPSHOTS")
+            coverage_query = (query.startswith("SELECT 1 FROM ENSEMBLE_SNAPSHOTS AS ENSEMBLE_SNAPSHOT")
+                and "SOURCE_RUN_COVERAGE" in query)
+            if bound_evidence == "retired" and identity_query:
+                assert tuple(parameters) == (snapshot_id,)
+                return FaultCursor(cursor)
+            if bound_evidence == "missing_coverage" and coverage_query:
+                assert tuple(parameters[:4]) == (snapshot_id,normal.row["city"],
+                    normal.row["target_date"],normal.row["temperature_metric"])
+                return FaultCursor(cursor)
+            return cursor
+        def __getattr__(self,name): return getattr(normal.conn,name)
+    result = read_replacement_forecast_bundle(FaultRead(),**normal.kwargs,authority_purpose=purpose)
     assert result.ok is False
     assert result.reason_code == expected_reason
+    assert calls == [bound_evidence]
+    assert {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}"))
+        for table in immutable} == immutable
 
 
 def _readiness(*, posterior_id: int, baseline_run_id: str = "b0-run", posterior_available_at: datetime | None = None):
