@@ -8,7 +8,7 @@ import logging
 import sqlite3
 import time
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -1194,6 +1194,28 @@ def discover_replacement_forecast_materialization_seeds(
                     )
             openmeteo_payload = _manifest_path_value(openmeteo, "openmeteo_payload_json") or openmeteo.artifact_path
             precision_metadata = _manifest_path_value(openmeteo, "precision_metadata_json")
+            local_proof = None
+            from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof
+            original = conn.execute("""SELECT artifact_id FROM raw_forecast_artifacts
+                WHERE source_id=? AND product_id=? AND data_version=? AND source_cycle_time=? AND sha256=?""",
+                (openmeteo.source_id,openmeteo.product_id,openmeteo.data_version,
+                 openmeteo.source_cycle_time.isoformat(),openmeteo.sha256)).fetchone()
+            if original is not None:
+                try:
+                    local_proof = read_anchor_local_proof(conn,int(original[0]),city=city,
+                        target_date=target_date,metric=metric,decision_at=computed)
+                except (ValueError,OSError):
+                    failed.append(target_key)
+                    reasons.append("REPLACEMENT_SEED_DISCOVERY_ANCHOR_LOCAL_PROOF_INVALID")
+                    continue
+            if local_proof is not None:
+                from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
+                if computed >= replacement_readiness_expires_at(_dt(
+                    local_proof.original_body_artifact["source_cycle_time"],field_name="source_cycle_time")):
+                    failed.append(target_key)
+                    reasons.append("REPLACEMENT_SEED_DISCOVERY_ORIGINAL_ANCHOR_EXPIRED")
+                    continue
+                openmeteo_payload = str(local_proof.owned_body["path"])
             if not openmeteo_payload or not precision_metadata:
                 failed.append(target_key)
                 reasons.append("REPLACEMENT_SEED_DISCOVERY_MANIFEST_METADATA_INCOMPLETE")
@@ -1250,6 +1272,19 @@ def discover_replacement_forecast_materialization_seeds(
                 failed.append(target_key)
                 reasons.extend(seed_result.reason_codes)
                 continue
+            if local_proof is not None:
+                # Only the new decision uses this independently possessed copy.
+                # The immutable body retains its original availability and age;
+                # local verification is not another provider publication.
+                seed = dict(seed_result.seed)
+                seed["openmeteo_anchor_artifact_id"] = local_proof.original_body_artifact["artifact_id"]
+                seed["openmeteo_source_available_at"] = local_proof.original_body_artifact["source_available_at"]
+                seed["openmeteo_anchor_local_proof_artifact_id"] = local_proof.proof_artifact_id
+                seed["openmeteo_anchor_local_proof_sha256"] = local_proof.proof_sha256
+                original_expiry = replacement_readiness_expires_at(_dt(
+                    local_proof.original_body_artifact["source_cycle_time"],field_name="source_cycle_time"))
+                seed["expires_at"] = min(_dt(seed["expires_at"],field_name="expires_at"),original_expiry).isoformat()
+                seed_result = replace(seed_result,seed=seed)
             if _seed_awaits_current_ensemble_hwm(
                 seed=seed_result.seed,
                 forecast_db=forecast_db,

@@ -225,6 +225,9 @@ class _OpenMeteoManifest:
     captured_at: str
     sha256: str | None = None
     byte_size: int | None = None
+    local_precision: Mapping[str, object] | None = None
+    local_proof_dependency: Mapping[str, object] | None = None
+    station_ground_evidence: Mapping[str, object] | None = None
 
 
 def _table_names(conn: sqlite3.Connection) -> set[str]:
@@ -472,12 +475,14 @@ def _load_openmeteo_manifest_index(
     identities: set[tuple[str, str, str]],
     cities: set[str],
     minimum_source_cycle_time: str | None = None,
+    decision_time: datetime | None = None,
+    deadline_monotonic: float | None = None,
 ) -> dict[tuple[str, str, str], tuple[_OpenMeteoManifest, ...]]:
     if metadata_column is None or not identities or not cities:
         return {}
     optional_columns = [
         col
-        for col in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at", "sha256", "byte_size")
+        for col in ("artifact_id", "source_cycle_time", "source_available_at", "captured_at", "recorded_at", "sha256", "byte_size")
         if col in raw_artifact_columns
     ]
     select_optional = "".join(f", {col}" for col in optional_columns)
@@ -533,10 +538,45 @@ def _load_openmeteo_manifest_index(
     ).fetchall()
     index: dict[tuple[str, str, str], list[_OpenMeteoManifest]] = {}
     for row in rows:
+        _check_target_plan_deadline(deadline_monotonic)
         artifact_path = str(row["artifact_path"] or "")
+        metadata = _json_object(row["metadata_json"])
+        local_precision = local_dependency = ground_entity = None
+        if decision_time is not None and "artifact_id" in raw_artifact_columns:
+            from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof, ANCHOR_LOCAL_PROOF_REVISION
+            aid = int(row["artifact_id"])
+            # This is only a structural candidate check. The strict typed
+            # reader below owns full prefix, request, bytes and clock proof.
+            candidate = conn.execute("""SELECT 1 FROM raw_forecast_artifacts
+                WHERE data_version=? AND ((json_valid(artifact_metadata_json)
+                  AND json_extract(artifact_metadata_json,'$.original_artifact_id')=?)
+                  OR artifact_path GLOB ?) LIMIT 1""",
+                (ANCHOR_LOCAL_PROOF_REVISION,aid,f"*/openmeteo_anchor_local_proof_{aid}_*.json")).fetchone()
+            if candidate is not None:
+                try:
+                    local = read_anchor_local_proof(conn,aid,city=str(metadata["city"]),
+                        target_date=str(metadata["target_date"]),metric=str(metadata["metric"]),
+                        decision_at=decision_time,deadline_monotonic=deadline_monotonic)
+                    if local is not None:
+                        from src.data.station_ground_evidence import forecast_db_from_connection, read_current_station_ground_evidence
+                        from src.data.replacement_forecast_cycle_policy import anchor_local_proof_dependency, replacement_readiness_expires_at
+                        namespace = forecast_db_from_connection(conn)
+                        if namespace is None or decision_time >= replacement_readiness_expires_at(datetime.fromisoformat(
+                            str(local.original_body_artifact["source_cycle_time"]).replace("Z","+00:00"))):
+                            continue
+                        ground_entity = read_current_station_ground_evidence(namespace,city=str(metadata["city"]),decision_at=decision_time)
+                        from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
+                        if ground_entity is None or station_ground_target_coverage_for_city(ground_entity,
+                            city=str(metadata["city"]),target_date=metadata["target_date"],decision_at=decision_time)["status"] != "VERIFIED":
+                            continue
+                        artifact_path = str(local.owned_body["path"])
+                        metadata = {**metadata,"openmeteo_payload_json":artifact_path}
+                        local_precision = local.precision_metadata
+                        local_dependency = anchor_local_proof_dependency(local,forecast_db=namespace)
+                except (ValueError,KeyError,TypeError,OSError):
+                    continue  # Invalid latest cannot fall back to the old body/sidecar.
         if not artifact_path or not os.path.exists(artifact_path):
             continue
-        metadata = _json_object(row["metadata_json"])
         manifest_cities = {str(metadata.get("city") or "").strip()}
         raw_cities = metadata.get("cities")
         if isinstance(raw_cities, list):
@@ -575,6 +615,8 @@ def _load_openmeteo_manifest_index(
             captured_at=captured_at,
             sha256=(str(row["sha256"]) if "sha256" in raw_artifact_columns else None),
             byte_size=(int(row["byte_size"]) if "byte_size" in raw_artifact_columns else None),
+            local_precision=local_precision,local_proof_dependency=local_dependency,
+            station_ground_evidence=ground_entity,
         )
         source_id = str(row["source_id"])
         data_version = str(row["data_version"])
@@ -592,6 +634,7 @@ def _openmeteo_manifest_coverage(
     minimum_source_cycle_time: str | None = None,
     payload_coverage_cache: dict[tuple[str, str, str], bool] | None = None,
     deadline_monotonic: float | None = None,
+    decision_time: datetime | None = None,
 ) -> tuple[int, str | None, str | None]:
     candidates: list[tuple[tuple[str, str, str, str], str | None]] = []
     for manifest in manifests:
@@ -617,7 +660,22 @@ def _openmeteo_manifest_coverage(
             cache=payload_coverage_cache,
         ):
             continue
-        if required_source_cycle_time is not None:
+        if manifest.local_precision is not None:
+            from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata,evaluate_openmeteo_ecmwf_ifs9_precision_guard
+            try:
+                raw = Path(manifest.artifact_path).read_bytes()
+                if (decision_time is None or len(raw) != manifest.byte_size or hashlib.sha256(raw).hexdigest() != manifest.sha256
+                    or str(manifest.local_precision["target_local_date"]) != target_date
+                    or not evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+                        OpenMeteoIfs9PrecisionMetadata(**manifest.local_precision),raw_payload_bytes=raw,
+                        decision_at=decision_time,station_ground_evidence=manifest.station_ground_evidence,
+                    ).passable_for_live_materialization):
+                    continue
+            except (ValueError,KeyError,TypeError,OSError):
+                continue
+        elif required_source_cycle_time is not None:
+            if decision_time is None:
+                continue
             _check_target_plan_deadline(deadline_monotonic)
             # A current-cycle raw file alone is not a valid anchor certificate:
             # old synthetic precision sidecars must drain through the downloader.
@@ -643,6 +701,7 @@ def _openmeteo_manifest_coverage(
                 Path(manifest.artifact_path), precision_path,
                 expected_sha256=manifest.sha256,
                 expected_byte_size=manifest.byte_size,
+                decision_time=decision_time,
             ):
                 continue
             _check_target_plan_deadline(deadline_monotonic)
@@ -3030,6 +3089,7 @@ def build_replacement_forecast_current_target_plan(
             and len(baseline_cycles) == len(rows)
         ):
             manifest_cycle_floor = min(baseline_cycles)
+        evaluation_now_utc = _ref_clock
         openmeteo_manifest_index = _load_openmeteo_manifest_index(
             conn,
             raw_artifact_columns=raw_artifact_columns,
@@ -3044,9 +3104,9 @@ def build_replacement_forecast_current_target_plan(
             },
             cities={str(row["city"]) for row in rows},
             minimum_source_cycle_time=manifest_cycle_floor,
+            decision_time=evaluation_now_utc,deadline_monotonic=deadline_monotonic,
         )
         payload_coverage_cache: dict[tuple[str, str, str], bool] = {}
-        evaluation_now_utc = (now_utc or datetime.now(tz=timezone.utc)).astimezone(timezone.utc)
         if not conn.in_transaction:
             conn.execute("BEGIN")
         release_input_hwm = prime_frozen_replacement_artifact_hwm(
@@ -3088,6 +3148,7 @@ def build_replacement_forecast_current_target_plan(
                     ),
                     payload_coverage_cache=payload_coverage_cache,
                     deadline_monotonic=deadline_monotonic,
+                    decision_time=evaluation_now_utc,
                 )
             else:
                 coverage = (1, None, None) if not require_raw_artifacts else (0, None, None)

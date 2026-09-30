@@ -366,6 +366,343 @@ def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric, *, city_name="Hong K
     return bound,raw_path,cut,scope
 
 
+def _normal_localproof_recovery(tmp_path, monkeypatch, metric):
+    import scripts.download_replacement_forecast_current_targets as producer
+    from src.config import runtime_cities_by_name
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db, read_anchor_local_proof
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest
+
+    bound, source_path, _, scope = _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric)
+    from src.data import openmeteo_ecmwf_ifs9_bucket_transport as transport
+    prerequisite = transport.source_geometry_static_prerequisite_reason
+    # The prerequisite's definition-time default names the live-relative file.
+    # Keep its real decoder, supplying this test's actual whole O1280 entity.
+    monkeypatch.setattr(transport, "source_geometry_static_prerequisite_reason",
+        lambda: prerequisite(local_cache=transport.HSURF_LOCAL_CACHE))
+    original_anchor = bound.provider_geometry_audit["anchor_raw_artifact"]
+    cycle = datetime.fromisoformat(original_anchor["source_cycle_time"])
+    city = runtime_cities_by_name()[scope["city"]]
+    output = tmp_path / "normal-anchor-inputs"
+    raw_dir = output / cycle.strftime("%Y%m%dT%H%M%SZ")
+    raw_dir.mkdir(parents=True)
+    owned_path = raw_dir / f"openmeteo_{producer._safe_name(city.name)}_{scope['target_date']}_{metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
+    producer._write_json(owned_path, producer._current_target_scoped_payload(
+        json.loads(source_path.read_bytes()), city=city.name, target_date=scope["target_date"], metric=metric,
+    ))
+    old_path = tmp_path / "first-owned-body.json"
+    old_path.write_bytes(owned_path.read_bytes())
+    request = producer.build_anchor_request(latitude=city.lat, longitude=city.lon, run=cycle,
+        timezone_name=city.timezone, forecast_hours=120, past_hours=producer.CURRENT_RUN_CONTEXT_HOURS)
+    original = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(old_path, request=request, metric=metric,
+        source_available_at=original_anchor["source_available_at"], captured_at=original_anchor["captured_at"],
+        product_metadata={"city":city.name,"target_date":scope["target_date"],
+            "openmeteo_payload_json":str(old_path),"precision_metadata_json":str(tmp_path/"missing-precision.json")})
+    with sqlite3.connect(scope["forecast_db"]) as conn:
+        aid = write_manifest_to_db(conn, original)
+        conn.commit()
+        original_row = tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (aid,)).fetchone())
+    old_path.unlink()  # A real same-SHA owned copy remains; do not repair this historical path/row.
+    before = datetime.now(UTC)
+    from src.data.replacement_forecast_production import _critical_scopes_missing_current_anchor
+    actual_family = (city.name, scope["target_date"], metric)
+    assert _critical_scopes_missing_current_anchor(scope["forecast_db"], [actual_family], cycle, decision_time=before) == (actual_family,)
+    from src.data.replacement_forecast_current_target_plan import _load_openmeteo_manifest_index, _openmeteo_manifest_coverage
+    def actual_coverage(cut):
+        with sqlite3.connect(scope["forecast_db"]) as conn:
+            conn.row_factory = sqlite3.Row
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(raw_forecast_artifacts)")}
+            identity = (original.source_id, original.product_id, original.data_version)
+            index = _load_openmeteo_manifest_index(conn, raw_artifact_columns=columns,
+                metadata_column="artifact_metadata_json", identities={identity}, cities={city.name}, decision_time=cut)
+            return _openmeteo_manifest_coverage(index.get((identity[0], identity[2], city.name), ()),
+                target_date=scope["target_date"], city_timezone=city.timezone,
+                required_source_cycle_time=cycle.isoformat(), decision_time=cut)
+    assert actual_coverage(before)[0] == 0
+    monkeypatch.setattr("src.data.replacement_forecast_seed_discovery.held_position_family_priorities", lambda: {})
+    def no_network(*args, **kwargs):
+        raise AssertionError("normal same-byte local proof recovery must not fetch HTTP")
+    monkeypatch.setattr(producer, "_resolve_anchor_payload", no_network)
+    monkeypatch.setattr(producer, "_fetch_run_pinned_anchor_wave", no_network)
+    monkeypatch.setattr(producer, "_fetch_meta_stamped_anchor_wave", no_network)
+    args = dict(forecast_db=scope["forecast_db"], output_dir=output, cycle=cycle, limit=None,
+        write_db=True,release_lag_hours=0.,anchor_sigma_c=3.,
+        required_scopes=[(city.name,scope["target_date"],metric)],expand_metric_siblings=False)
+    report = producer.download_current_target_raw_inputs(**args)
+    assert report["db_artifact_ids"] == [aid], json.dumps(report, default=str)
+    assert report["downloaded"]["openmeteo_transport_fetch_count"] == 0
+    assert len(report["local_proof_artifact_ids"]) == 1
+    with sqlite3.connect(scope["forecast_db"]) as conn:
+        assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (aid,)).fetchone()) == original_row
+        assert read_anchor_local_proof(conn,aid,city=city.name,target_date=scope["target_date"],metric=metric,
+            decision_at=before) is None
+        evidence = read_anchor_local_proof(conn,aid,city=city.name,target_date=scope["target_date"],metric=metric,
+            decision_at=datetime.now(UTC))
+        assert evidence is not None and evidence.proof_artifact_id == report["local_proof_artifact_ids"][0]
+        assert evidence.original_body_artifact["artifact_path"] == str(old_path)
+        resolved_path = Path(evidence.owned_body["path"])
+        assert resolved_path.parent == raw_dir and resolved_path.read_bytes() == owned_path.read_bytes()
+        assert evidence.precision_metadata["source_geometry_proof"]["raw_payload_sha256"] == original.sha256
+        assert not old_path.exists()
+        from src.data.replacement_current_value_serving import _ARTIFACT_IDENTITY_JSON_SQL
+        from src.data.replacement_forecast_cycle_policy import _anchor_ifs9_response_has_authority, anchor_local_proof_dependency
+        from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
+        from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata
+        from src.data.station_ground_evidence import forecast_db_from_connection
+        namespace = forecast_db_from_connection(conn)
+        artifact = {**json.loads(conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE artifact_id=?",
+            (aid,)).fetchone()[0]),"forecast_db":str(namespace)}
+        new_cut = datetime.now(UTC)
+        resolved = _bind_provider_geometry_identity(replace(bound,shape_hash="same-physical-input"),{},
+            anchor_metadata=OpenMeteoIfs9PrecisionMetadata(**evidence.precision_metadata),decision_at=new_cut,
+            station_ground_evidence=bound.provider_geometry_audit["anchor_station_ground"],
+            anchor_raw_artifact=artifact,anchor_local_proof=anchor_local_proof_dependency(evidence,forecast_db=namespace))
+        assert resolved.provider_geometry_identity_hash == bound.provider_geometry_identity_hash
+        actual_scope = dict(city=city.name,target_date=scope["target_date"],metric=metric,
+            expected_anchor_artifact_id=aid,request_anchor_artifact_id=aid,forecast_db=namespace)
+        assert _anchor_ifs9_response_has_authority(resolved.provider_geometry_evidence,resolved.provider_geometry_audit,
+            materialized_at=new_cut,**actual_scope)
+        assert not _anchor_ifs9_response_has_authority(resolved.provider_geometry_evidence,resolved.provider_geometry_audit,
+            materialized_at=before,**actual_scope)
+        no_dependency = dict(resolved.provider_geometry_audit)
+        no_dependency.pop("anchor_local_proof")
+        assert not _anchor_ifs9_response_has_authority(resolved.provider_geometry_evidence,no_dependency,
+            materialized_at=new_cut,**actual_scope)
+        from src.data.replacement_input_hwm import _exact_consumed_anchor_artifact_cycle
+        provenance = {"openmeteo_anchor_artifact_id": aid, "bayes_precision_fusion": {
+            "current_evidence_shape": {"provider_geometry_audit": resolved.provider_geometry_audit}}}
+        conn.row_factory = sqlite3.Row
+        lag, consumed_cycle = _exact_consumed_anchor_artifact_cycle(conn, city=city.name,
+            target_date=scope["target_date"], metric=metric, decision_time=new_cut,
+            posterior_computed_at=new_cut, provenance=provenance)
+        assert lag is None and consumed_cycle == cycle
+        old_lag, _ = _exact_consumed_anchor_artifact_cycle(conn, city=city.name,
+            target_date=scope["target_date"], metric=metric, decision_time=new_cut,
+            posterior_computed_at=before, provenance=provenance)
+        assert old_lag == "basis=anchor_local_proof_identity_unverifiable"
+    assert actual_coverage(before)[0] == 0  # Late possession cannot revive the old seed.
+    assert actual_coverage(datetime.now(UTC))[0] == 1
+    assert _critical_scopes_missing_current_anchor(scope["forecast_db"], [actual_family], cycle, decision_time=before) == (actual_family,)
+    assert _critical_scopes_missing_current_anchor(scope["forecast_db"], [actual_family], cycle, decision_time=datetime.now(UTC)) == ()
+    assert _critical_scopes_missing_current_anchor(scope["forecast_db"], [actual_family], cycle, decision_time=None) is None
+    again = producer.download_current_target_raw_inputs(**args)
+    assert again["local_proof_artifact_ids"] == []
+    assert again["reused_canonical_artifact_ids"] == [aid]
+    assert again["downloaded"]["openmeteo_transport_fetch_count"] == 0
+    assert _critical_scopes_missing_current_anchor(scope["forecast_db"], [actual_family], cycle, decision_time=datetime.now(UTC)) == ()
+    return SimpleNamespace(city=city, scope=scope, cycle=cycle, output=output, original=original,
+        aid=aid, original_row=original_row, before=before, report=report, bound=resolved)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_anchor_producer_appends_local_proof_for_same_bytes_without_rewriting_original(tmp_path, monkeypatch, metric):
+    _normal_localproof_recovery(tmp_path, monkeypatch, metric)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_anchor_preflight_keeps_ordinary_owned_body_when_no_local_proof_is_needed(tmp_path, monkeypatch, metric):
+    """Normal manifest writer, real own precision; no local/HTTP receipt invented."""
+    from src.data.replacement_forecast_production import _critical_scopes_missing_current_anchor
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db, read_anchor_local_proof
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest
+    import scripts.download_replacement_forecast_current_targets as producer
+    from src.config import runtime_cities_by_name
+    bound, path, _, scope = _normal_anchor_only_ifs9(tmp_path,monkeypatch,metric)
+    city = runtime_cities_by_name()[scope["city"]]
+    original = bound.provider_geometry_audit["anchor_raw_artifact"]
+    cycle = datetime.fromisoformat(original["source_cycle_time"])
+    payload = producer._current_target_scoped_payload(json.loads(path.read_bytes()),city=city.name,
+        target_date=scope["target_date"],metric=metric)
+    raw = (json.dumps(payload,indent=2)+"\n").encode()
+    owned = tmp_path/"ordinary-owned-body.json"
+    owned.write_bytes(raw)
+    cut = datetime.now(UTC)
+    precision = producer._precision_metadata(city.name,scope["target_date"],anchor_sigma_c=3.,raw_payload_bytes=raw,analysis_at=cut)
+    precision_path = tmp_path/"ordinary-precision.json"
+    precision_path.write_text(json.dumps(precision,default=str))
+    request = producer.build_anchor_request(latitude=city.lat,longitude=city.lon,run=cycle,
+        timezone_name=city.timezone,forecast_hours=120,past_hours=producer.CURRENT_RUN_CONTEXT_HOURS)
+    manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(owned,request=request,metric=metric,
+        source_available_at=cut,captured_at=cut,product_metadata={"city":city.name,"target_date":scope["target_date"],
+            "openmeteo_payload_json":str(owned),"precision_metadata_json":str(precision_path)})
+    with sqlite3.connect(scope["forecast_db"]) as conn:
+        aid = write_manifest_to_db(conn,manifest)
+        conn.commit()
+        assert read_anchor_local_proof(conn,aid,city=city.name,target_date=scope["target_date"],metric=metric,
+            decision_at=datetime.now(UTC)) is None
+    family = (city.name,scope["target_date"],metric)
+    assert _critical_scopes_missing_current_anchor(scope["forecast_db"],[family],cycle,decision_time=datetime.now(UTC)) == ()
+
+
+@pytest.mark.parametrize("variant", ("date_objects", "utc_z", "same_offset", "different_instant", "foreign_day", "naive", "unknown_type"))
+def test_frozen_precision_identity_normalizes_only_explicit_same_date_and_instant(tmp_path, monkeypatch, variant):
+    from src.data.replacement_forecast_cycle_policy import anchor_precision_metadata_identity
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata
+    from datetime import date
+    bound,_,_,_ = _normal_anchor_only_ifs9(tmp_path,monkeypatch,"low")
+    metadata = OpenMeteoIfs9PrecisionMetadata(**bound.provider_geometry_audit["anchor_precision_metadata"])
+    start = datetime.fromisoformat(metadata.local_day_start_utc)
+    changed = metadata
+    if variant == "date_objects":
+        changed = replace(metadata,target_local_date=date.fromisoformat(metadata.target_local_date),
+            local_day_start_utc=start,local_day_end_utc=datetime.fromisoformat(metadata.local_day_end_utc))
+    elif variant == "utc_z":
+        changed = replace(metadata,local_day_start_utc=start.isoformat().replace("+00:00","Z"))
+    elif variant == "same_offset":
+        changed = replace(metadata,local_day_start_utc=start.astimezone(__import__("zoneinfo").ZoneInfo("Asia/Hong_Kong")).isoformat())
+    elif variant == "different_instant":
+        changed = replace(metadata,local_day_start_utc=(start+timedelta(microseconds=1)).isoformat(),
+            local_day_end_utc=(datetime.fromisoformat(metadata.local_day_end_utc)+timedelta(microseconds=1)).isoformat())
+    elif variant == "foreign_day":
+        changed = replace(metadata,target_local_date=(date.fromisoformat(metadata.target_local_date)+timedelta(days=1)).isoformat())
+    elif variant == "naive":
+        with pytest.raises(ValueError,match="timezone-aware"):
+            replace(metadata,local_day_start_utc=start.replace(tzinfo=None))
+        return
+    else:
+        changed = replace(metadata,target_local_date=SimpleNamespace())
+    if variant in ("naive","unknown_type"):
+        with pytest.raises(ValueError):
+            anchor_precision_metadata_identity(changed)
+    else:
+        assert (anchor_precision_metadata_identity(metadata)==anchor_precision_metadata_identity(changed)) == (
+            variant in ("date_objects","utc_z","same_offset"))
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_path, monkeypatch, metric):
+    """Real local acquisition/seed/public chain; controlled 51 ENS, not GRIB."""
+    from src.data import bayes_precision_fusion_download as dl
+    from tests.test_replacement_forecast_materializer import _low_revision_authority_conn, _bins, _BaselineBundle, _Evidence
+    from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
+    from src.data.replacement_forecast_seed_discovery import discover_replacement_forecast_materialization_seeds
+    from src.data.replacement_forecast_live_materialization_queue import _prepare_seed_requests_with_connection
+    from src.data.replacement_forecast_materialization_request_builder import build_materialize_request_dataclass
+    from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
+    from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle, ReplacementForecastAuthorityPurpose
+    from src.data.replacement_forecast_readiness import ReplacementForecastReadinessDecision
+    from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
+
+    context = _normal_localproof_recovery(tmp_path, monkeypatch, metric)
+    city, cycle, db = context.city, context.cycle, context.scope["forecast_db"]
+    target = datetime.fromisoformat(context.scope["target_date"]).date()
+    conn = _low_revision_authority_conn(db, include_legacy_provider_fixtures=False,
+        include_retired_incumbent=False, city_name=city.name, target_date=target, source_cycle=cycle)
+    conn.execute("UPDATE source_run_coverage SET city_id=?", (city.name.upper().replace(" ", "_"),))
+    # Test-only controlled member input is built before any licensed posterior.
+    # Both metrics use their real source roles, not a LOW shape relabeled at read.
+    if metric == "high":
+        expected = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"]
+        for table in ("source_run", "source_run_coverage", "ensemble_snapshots"):
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            replacements = {"temperature_metric":metric, "physical_quantity":expected.physical_quantity,
+                "observation_field":expected.observation_field, "dataset_id":expected.data_version,
+                "data_version":expected.data_version, "track":"mx2t6_high_short_horizon",
+                "release_calendar_key":"ecmwf_open_data:mx2t6_high_short_horizon"}
+            fields = {key:value for key,value in replacements.items() if key in columns}
+            conn.execute(f"UPDATE {table} SET " + ",".join(f"{key}=?" for key in fields), tuple(fields.values()))
+    for item in _bins():
+        conn.execute("""INSERT INTO market_events(market_slug,city,target_date,temperature_metric,
+            condition_id,token_id,range_label,range_low,range_high) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (f"controlled-localproof-{metric}-{item.bin_id}", city.name, target.isoformat(), metric,
+                f"controlled-{item.bin_id}", f"controlled-{item.bin_id}", item.bin_id, item.lower_c, item.upper_c))
+    conn.commit()
+    def fetch(url, params, **kwargs):
+        selected = _selected_test_cell(params["models"], city.lat, city.lon)
+        body = (json.dumps({"latitude":selected[0],"longitude":selected[1],"elevation":32.,
+            "timezone":city.timezone,"utc_offset_seconds":28800,"hourly_units":{"temperature_2m":"°C"},
+            "hourly":{"time":[f"{target.isoformat()}T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m":[22. if params["models"]=="icon_global" else 24.]*24}})+"\n").encode()
+        capture = datetime.now(UTC).timestamp()
+        kwargs["capture_entity_body"](body, capture)
+        kwargs["capture_network_response"](body, capture, {"content-type":"application/json"})
+        return json.loads(body)
+    monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
+    downloaded = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=cycle,
+        targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,metric=metric,target_date=target.isoformat(),
+            lead_days=1,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone)],
+        models=("icon_global","ukmo_global_deterministic_10km"),include_previous_runs=False,prune_after=False)
+    cut = datetime.now(UTC)
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    assert {"icon_global", "ukmo_global_deterministic_10km"} <= set(read_current_instrument_values(
+        conn,city=city.name,metric=metric,target_date=target.isoformat(),source_cycle_time_iso=cycle.isoformat(),
+        include_station_sources=True,decision_time_iso=cut.isoformat())), downloaded
+    def normal_materialize(at, label):
+        seed_dir, request_dir = tmp_path/f"seeds-{label}", tmp_path/f"requests-{label}"
+        report = discover_replacement_forecast_materialization_seeds(forecast_db=db,raw_manifest_dir=context.output,
+            seed_dir=seed_dir,request_dir=request_dir,computed_at=at,limit=1)
+        assert report.discovered_count == 1, report
+        seed = json.loads(next(seed_dir.glob("*.json")).read_text())
+        assert seed["openmeteo_anchor_artifact_id"] == context.aid
+        assert seed["openmeteo_source_available_at"] == context.original.source_available_at.isoformat()
+        assert datetime.fromisoformat(seed["expires_at"]) <= replacement_readiness_expires_at(cycle)
+        processed,failed,reasons = _prepare_seed_requests_with_connection(seed_dir=seed_dir,
+            seed_processed_dir=tmp_path/f"processed-{label}",seed_failed_dir=tmp_path/f"failed-{label}",request_dir=request_dir,
+            forecast_db=db,forecast_conn=None,limit=1)
+        assert len(processed)==1 and not failed, (processed,failed,reasons)
+        request = build_materialize_request_dataclass(json.loads(next(request_dir.glob("*.json")).read_text()),base_dir=request_dir)
+        assert request.computed_at == at
+        result = materialize_replacement_forecast_live(conn,request)
+        conn.commit()
+        assert result.ok, result.reason_codes
+        posterior = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(result.posterior_id,)).fetchone()
+        cert = conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?",(result.readiness_id,)).fetchone()
+        readiness = ReplacementForecastReadinessDecision(readiness_id=cert["readiness_id"],status=cert["status"],
+            reason_codes=tuple(json.loads(cert["reason_codes_json"])),dependency_json=json.loads(cert["dependency_json"]),
+            provenance_json=json.loads(cert["provenance_json"]),expires_at=datetime.fromisoformat(cert["expires_at"]))
+        return request,result,posterior,readiness
+    request,result,posterior,readiness = normal_materialize(cut,"first")
+    provenance = json.loads(posterior["provenance_json"])
+    audit = provenance["bayes_precision_fusion"]["current_evidence_shape"]["provider_geometry_audit"]
+    assert audit["anchor_local_proof"]["artifact_id"] == context.report["local_proof_artifact_ids"][0]
+    assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(context.aid,)).fetchone()) == context.original_row
+    def public(row, cert, at):
+        return [read_replacement_forecast_bundle(conn,baseline_bundle=_BaselineBundle(_Evidence("new12")),
+            readiness=cert,city=city.name,target_date=target,temperature_metric=metric,
+            decision_time=at.isoformat(),current_bin_topology_hash=row["bin_topology_hash"],
+            enforce_raw_input_hwm=True,authority_purpose=purpose) for purpose in ReplacementForecastAuthorityPurpose]
+    for served in public(posterior,readiness,cut):
+        assert served.ok, served.reason_code
+        assert served.bundle.posterior_id == result.posterior_id
+
+    # A corrupt latest dependency cannot fall back to the original missing
+    # path, but a new actual local verification drains it through normal APIs.
+    proof_path = Path(conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?",
+        (context.report["local_proof_artifact_ids"][0],)).fetchone()[0])
+    proof_path.write_bytes(proof_path.read_bytes()+b" ")
+    from src.data.replacement_forecast_production import _critical_scopes_missing_current_anchor
+    family = (city.name,target.isoformat(),metric)
+    assert _critical_scopes_missing_current_anchor(db,[family],cycle,decision_time=datetime.now(UTC)) == (family,)
+    assert not any(item.ok for item in public(posterior,readiness,datetime.now(UTC)))
+    import scripts.download_replacement_forecast_current_targets as producer
+    recovered = producer.download_current_target_raw_inputs(forecast_db=db,output_dir=context.output,cycle=cycle,
+        limit=None,write_db=True,release_lag_hours=0.,anchor_sigma_c=3.,
+        required_scopes=[(city.name,target.isoformat(),metric)],expand_metric_siblings=False)
+    assert recovered["db_artifact_ids"] == [context.aid]
+    assert recovered["local_proof_artifact_ids"] and recovered["local_proof_artifact_ids"] != context.report["local_proof_artifact_ids"]
+    reset_cut = datetime.now(UTC)
+    assert _critical_scopes_missing_current_anchor(db,[family],cycle,decision_time=reset_cut) == ()
+    reset_request,reset_result,reset_posterior,reset_readiness = normal_materialize(reset_cut,"reset")
+    assert reset_result.posterior_id != result.posterior_id
+    assert reset_posterior["q_json"] == posterior["q_json"]
+    reset_shape = json.loads(reset_posterior["provenance_json"])["bayes_precision_fusion"]["current_evidence_shape"]
+    assert reset_shape["provider_geometry_identity_hash"] == provenance["bayes_precision_fusion"]["current_evidence_shape"]["provider_geometry_identity_hash"]
+    for served in public(reset_posterior,reset_readiness,reset_cut):
+        assert served.ok, served.reason_code
+        assert served.bundle.posterior_id == reset_result.posterior_id
+    expiry = replacement_readiness_expires_at(cycle)
+    assert _critical_scopes_missing_current_anchor(db,[family],cycle,decision_time=expiry+timedelta(microseconds=1)) == (family,)
+    foreign = (city.name,(target+timedelta(days=1)).isoformat(),metric)
+    assert _critical_scopes_missing_current_anchor(db,[foreign],cycle,decision_time=reset_cut) == (foreign,)
+    count = conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0]
+    stale = materialize_replacement_forecast_live(conn,replace(reset_request,computed_at=expiry+timedelta(microseconds=1),
+        expires_at=expiry+timedelta(minutes=1)))
+    assert not stale.ok and "REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TOO_STALE" in stale.reason_codes
+    assert conn.execute("SELECT count(*) FROM forecast_posteriors").fetchone()[0] == count
+    assert not any(item.ok for item in public(reset_posterior,reset_readiness,expiry+timedelta(microseconds=1)))
+    assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(context.aid,)).fetchone()) == context.original_row
+    conn.close()
+
+
 @pytest.mark.parametrize("metric",("high","low"))
 @pytest.mark.parametrize("damage",("missing","cell","request","static","body","scope","model","old_cut","none_cut","borrowed_cell"))
 def test_anchor_only_ifs9_replays_its_own_normal_body_request_cell_and_cut(tmp_path,monkeypatch,metric,damage):

@@ -63,6 +63,7 @@ from src.data.raw_forecast_artifact_manifest import (  # noqa: E402
     repin_manifest_from_file,
     write_manifest,
     write_manifest_to_db,
+    write_anchor_local_proof,
 )
 from src.data.replacement_forecast_current_target_plan import (  # noqa: E402
     ReplacementForecastCurrentTargetPlan,
@@ -699,6 +700,7 @@ def _current_target_artifact_source_proof(
     city: str, target_date: str, metric: str,
     payload_path: Path, precision_path: Path,
     *, expected_sha256: str, expected_byte_size: int,
+    decision_time: datetime | None = None,
 ) -> bool:
     """Validate one DB artifact and its precision witness before coverage counts.
 
@@ -707,6 +709,8 @@ def _current_target_artifact_source_proof(
     by the guard, while every other source-cell field must still reproduce.
     """
     try:
+        if decision_time is None or decision_time.tzinfo is None or decision_time.utcoffset() is None:
+            return False
         raw = payload_path.read_bytes()
         if len(raw) != expected_byte_size or hashlib.sha256(raw).hexdigest() != expected_sha256:
             return False
@@ -734,7 +738,7 @@ def _current_target_artifact_source_proof(
             return False
         return evaluate_openmeteo_ecmwf_ifs9_precision_guard(
             OpenMeteoIfs9PrecisionMetadata(**stored), raw_payload_bytes=raw,
-            decision_at=datetime.now(tz=UTC),
+            decision_at=decision_time,
         ).passable_for_live_materialization
     except (OSError, TypeError, ValueError, KeyError, ImportError, AttributeError):
         return False
@@ -832,6 +836,8 @@ def _canonical_current_target_reuse(
     targets: Sequence[object],
     raw_dir: Path,
     anchor_sigma_c: float,
+    decision_time: datetime,
+    deadline_monotonic: float | None = None,
 ) -> dict[tuple[str, str, str], int]:
     """Return exact canonical artifacts whose immutable bytes already exist.
 
@@ -855,7 +861,7 @@ def _canonical_current_target_reuse(
         rows = conn.execute(
             """
             SELECT artifact_id, data_version, artifact_path, sha256, byte_size,
-                   artifact_metadata_json
+                   artifact_metadata_json, source_cycle_time
             FROM raw_forecast_artifacts
             WHERE source_id = ?
               AND product_id = ?
@@ -871,6 +877,42 @@ def _canonical_current_target_reuse(
                 OPENMETEO_LOW_DATA_VERSION,
             ),
         ).fetchall()
+        local_proofs = {}
+        from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof
+        from src.data.station_ground_evidence import read_current_station_ground_evidence
+        from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
+        from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
+        for row in rows:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("canonical anchor reuse deadline exceeded")
+            try:
+                metadata = json.loads(str(row["artifact_metadata_json"] or "{}"))
+                key = (str(metadata.get("city") or ""), str(metadata.get("target_date") or ""), str(metadata.get("metric") or ""))
+                if key not in wanted:
+                    continue
+                local = read_anchor_local_proof(conn, int(row["artifact_id"]), city=key[0], target_date=key[1],
+                    metric=key[2], decision_at=decision_time, deadline_monotonic=deadline_monotonic)
+                if local is None:
+                    continue
+                local_proofs[int(row["artifact_id"])] = False
+                if decision_time >= replacement_readiness_expires_at(cycle):
+                    continue
+                ground = read_current_station_ground_evidence(forecast_db, city=key[0], decision_at=decision_time)
+                if ground is None or station_ground_target_coverage_for_city(ground, city=key[0],
+                    target_date=key[1], decision_at=decision_time)["status"] != "VERIFIED":
+                    continue
+                raw = Path(local.owned_body["path"]).read_bytes()
+                if (not evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+                    OpenMeteoIfs9PrecisionMetadata(**local.precision_metadata), raw_payload_bytes=raw,
+                    decision_at=decision_time, station_ground_evidence=ground,
+                ).passable_for_live_materialization or not _current_target_payload_materializable(
+                    json.loads(raw), city_timezone=cities_by_name[key[0]].timezone, target_date=key[1], cycle=cycle)):
+                    continue
+                local_proofs[int(row["artifact_id"])] = local
+            except (OSError, TypeError, ValueError, KeyError, UnicodeError):
+                # A damaged latest local proof is not replaced by an older
+                # sidecar. It remains normal producer repair debt.
+                local_proofs[int(row["artifact_id"])] = False
     except (OSError, sqlite3.Error):
         return {}
     finally:
@@ -889,6 +931,12 @@ def _canonical_current_target_reuse(
             if key not in wanted or key in reused:
                 continue
             city, target_date, metric = key
+            local = local_proofs.get(int(row["artifact_id"]))
+            if local is False:
+                continue
+            if local is not None:
+                reused[key] = int(row["artifact_id"])
+                continue
             expected_path = raw_dir / (
                 f"openmeteo_{_safe_name(city)}_{target_date}_{metric}_"
                 f"{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
@@ -922,6 +970,7 @@ def _canonical_current_target_reuse(
                 city, target_date, metric, payload_path, precision_path,
                 expected_sha256=str(row["sha256"]),
                 expected_byte_size=int(row["byte_size"]),
+                decision_time=decision_time,
             ):
                 continue
             raw = payload_path.read_bytes()
@@ -1944,6 +1993,12 @@ def download_current_target_raw_inputs(
     targets = rotated_rows[:limit] if limit is not None else rotated_rows
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True, exist_ok=True)
+    deadline_monotonic = (
+        time.monotonic() + max(0.0, float(max_wall_clock_seconds))
+        if max_wall_clock_seconds is not None
+        else None
+    )
+    reuse_decision_time = datetime.now(tz=UTC)
     canonical_reuse = (
         _canonical_current_target_reuse(
             forecast_db,
@@ -1951,6 +2006,8 @@ def download_current_target_raw_inputs(
             targets=targets,
             raw_dir=raw_dir,
             anchor_sigma_c=anchor_sigma_c,
+            decision_time=reuse_decision_time,
+            deadline_monotonic=deadline_monotonic,
         )
         if write_db
         else {}
@@ -1969,11 +2026,6 @@ def download_current_target_raw_inputs(
         "openmeteo_intra_wave_fanout_count": 0,
         "openmeteo_single_runs_location_batch_count": 0,
     }
-    deadline_monotonic = (
-        time.monotonic() + max(0.0, float(max_wall_clock_seconds))
-        if max_wall_clock_seconds is not None
-        else None
-    )
     bucket_fallback_reserve_seconds = _bucket_fallback_reserve_seconds(
         max_wall_clock_seconds
     )
@@ -2379,6 +2431,7 @@ def download_current_target_raw_inputs(
 
     written_manifests: list[str] = []
     db_artifact_ids: list[int] = []
+    local_proof_artifact_ids: list[int] = []
     conn = None
     if write_db:
         conn = _connect(forecast_db, write_class="live")
@@ -2403,9 +2456,31 @@ def download_current_target_raw_inputs(
             manifest_path = _write_manifest_file(output_dir, manifest)
             written_manifests.append(str(manifest_path))
             if conn is not None:
-                db_artifact_ids.append(
-                    write_manifest_to_db(conn, manifest, verify_artifact=True, repin_on_drift=True)
+                artifact_id = write_manifest_to_db(
+                    conn, manifest, verify_artifact=True, repin_on_drift=True,
                 )
+                db_artifact_ids.append(artifact_id)
+                # A same-byte row retains its original path, metadata and first
+                # clocks. Freeze this actual producer's independently possessed
+                # body/precision as a separate local dependency, never as HTTP
+                # freshness or an UPDATE of the original artifact.
+                precision = json.loads(Path(str(manifest.product_metadata["precision_metadata_json"])).read_bytes())
+                raw = Path(manifest.artifact_path).read_bytes()
+                cut = datetime.now(tz=UTC)
+                guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+                    OpenMeteoIfs9PrecisionMetadata(**precision), raw_payload_bytes=raw, decision_at=cut,
+                )
+                if not guard.passable_for_live_materialization:
+                    raise ValueError("anchor local proof precision invalid: " + ";".join(guard.reason_codes))
+                extract_openmeteo_ecmwf_ifs9_localday_anchor(
+                    json.loads(raw), city_timezone=precision["timezone_name"],
+                    target_local_date=date.fromisoformat(precision["target_local_date"]),
+                    source_cycle_time=manifest.source_cycle_time, require_full_localday=True,
+                )
+                local_proof_artifact_ids.append(write_anchor_local_proof(
+                    conn, artifact_id, manifest, precision_metadata=precision,
+                    deadline_monotonic=deadline_monotonic,
+                ))
         if conn is not None:
             conn.commit()
     except Exception:
@@ -2464,6 +2539,7 @@ def download_current_target_raw_inputs(
         "written_manifests": written_manifests,
         "write_db": write_db,
         "db_artifact_ids": db_artifact_ids,
+        "local_proof_artifact_ids": local_proof_artifact_ids,
         "reused_canonical_artifact_count": len(canonical_reuse),
         "reused_canonical_artifact_ids": list(canonical_reuse.values()),
         "sibling_payload_reuse_count": sibling_payload_reuse_count,

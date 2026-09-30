@@ -707,7 +707,7 @@ def _critical_scopes_missing_current_anchor(
     forecast_db: Path,
     scopes: Sequence[tuple[str, str, str]],
     cycle: datetime,
-    *, deadline_monotonic: float | None = None,
+    *, decision_time: datetime | None = None, deadline_monotonic: float | None = None,
 ) -> tuple[tuple[str, str, str], ...] | None:
     """Return exact scoped targets without materializable canonical raw at ``cycle``."""
 
@@ -720,6 +720,8 @@ def _critical_scopes_missing_current_anchor(
     )
     from src.config import cities_by_name  # noqa: PLC0415
     from src.state.db import _connect_read_only  # noqa: PLC0415
+    if decision_time is None or decision_time.tzinfo is None or decision_time.utcoffset() is None:
+        return None
 
     try:
         conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
@@ -739,7 +741,7 @@ def _critical_scopes_missing_current_anchor(
                 rows = conn.execute(
                     """
                     SELECT artifact_path, sha256, byte_size,
-                           artifact_metadata_json
+                           artifact_metadata_json, artifact_id
                     FROM raw_forecast_artifacts
                     WHERE source_id = ?
                       AND product_id = ?
@@ -769,6 +771,34 @@ def _critical_scopes_missing_current_anchor(
                     if city_config is None:
                         break
                     artifact_path = Path(str(row[0]))
+                    from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof
+                    try:
+                        local = read_anchor_local_proof(conn,int(row[4]),city=city,target_date=target_date,
+                            metric=metric,decision_at=decision_time,deadline_monotonic=deadline_monotonic)
+                    except (ValueError,OSError):
+                        continue  # A bad latest dependency never falls back to its original path.
+                    if local is not None:
+                        from src.data.station_ground_evidence import forecast_db_from_connection, read_current_station_ground_evidence
+                        from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
+                        from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
+                        from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata, evaluate_openmeteo_ecmwf_ifs9_precision_guard
+                        namespace = forecast_db_from_connection(conn)
+                        if namespace is None or decision_time >= replacement_readiness_expires_at(cycle):
+                            continue
+                        ground = read_current_station_ground_evidence(namespace,city=city,decision_at=decision_time)
+                        if ground is None or station_ground_target_coverage_for_city(ground,city=city,
+                            target_date=target_date,decision_at=decision_time)["status"] != "VERIFIED":
+                            continue
+                        artifact_path = Path(local.owned_body["path"])
+                        try:
+                            guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+                                OpenMeteoIfs9PrecisionMetadata(**local.precision_metadata),
+                                raw_payload_bytes=artifact_path.read_bytes(),decision_at=decision_time,
+                                station_ground_evidence=ground)
+                        except (ValueError,OSError,TypeError):
+                            continue
+                        if not guard.passable_for_live_materialization:
+                            continue
                     if not _current_target_payload_file_materializable(
                         artifact_path,
                         city_timezone=city_config.timezone,
@@ -778,6 +808,9 @@ def _critical_scopes_missing_current_anchor(
                         expected_byte_size=int(row[2]),
                     ):
                         continue
+                    if local is not None:
+                        covered = True
+                        break
                     try:
                         metadata = json.loads(str(row[3] or "{}"))
                     except (TypeError, ValueError):
@@ -793,6 +826,7 @@ def _critical_scopes_missing_current_anchor(
                     if _current_target_artifact_source_proof(
                         city, target_date, metric, artifact_path, precision_path,
                         expected_sha256=str(row[1]), expected_byte_size=int(row[2]),
+                        decision_time=decision_time,
                     ):
                         covered = True
                         break
@@ -870,6 +904,7 @@ def _download_replacement_forecast_current_targets_if_needed(
         if max_wall_clock_seconds is not None
         else None
     )
+    decision_time = datetime.now(timezone.utc)
     forecast_db = cfg.get("forecast_db")
     output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
     if forecast_db is None or output_dir is None:
@@ -940,7 +975,6 @@ def _download_replacement_forecast_current_targets_if_needed(
     if broad_scope_acquisition:
         # Raw acquisition needs the current market universe and exact-cycle raw
         # proof, not the posterior/readiness joins owned by materialization.
-        decision_time = datetime.now(timezone.utc)
         try:
             keys = replacement_forecast_current_target_keys(
                 Path(str(forecast_db)),
@@ -1048,6 +1082,7 @@ def _download_replacement_forecast_current_targets_if_needed(
         Path(str(forecast_db)),
         required_scopes,
         available_cycle,
+        decision_time=decision_time,
         **({"deadline_monotonic": deadline} if deadline is not None else {}),
     )
     _check_source_preflight_deadline(deadline)
@@ -4044,6 +4079,7 @@ def _held_common_cycle_anchor_gaps(
             forecast_db,
             scopes,
             cycle,
+            decision_time=decision_time,
         )
         if missing is None:
             return None
@@ -4158,6 +4194,7 @@ def _recover_held_common_cycle_anchors_if_needed(
                 forecast_db_path,
                 scopes,
                 cycle,
+                decision_time=now,
                 **deadline_kwargs,
             )
         except TimeoutError:
@@ -4238,6 +4275,7 @@ def _recover_held_common_cycle_anchors_if_needed(
                         forecast_db_path,
                         missing_before,
                         cycle,
+                        decision_time=datetime.now(timezone.utc),
                         **deadline_kwargs,
                     )
                 except TimeoutError:

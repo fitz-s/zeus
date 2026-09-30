@@ -271,6 +271,41 @@ def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: 
         return False
 
 
+def anchor_precision_metadata_identity(metadata: object) -> dict[str, object]:
+    """Compare the complete frozen proof across JSON/dataclass date adapters."""
+    from dataclasses import asdict
+    from datetime import date
+    values = asdict(metadata)
+    target = values["target_local_date"]
+    if isinstance(target, date) and not isinstance(target, datetime):
+        values["target_local_date"] = target.isoformat()
+    elif isinstance(target, str):
+        values["target_local_date"] = date.fromisoformat(target).isoformat()
+    else:
+        raise ValueError("precision target must be a local date")
+    for field in ("local_day_start_utc", "local_day_end_utc"):
+        value = values[field]
+        if isinstance(value, datetime):
+            stamp = value
+        elif isinstance(value, str):
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            raise ValueError("precision local-day window must be datetime or ISO text")
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            raise ValueError("precision local-day window must be aware")
+        values[field] = stamp.astimezone(UTC).isoformat()
+    return values
+
+
+def anchor_local_proof_dependency(evidence: object, *, forecast_db: object) -> dict[str, object]:
+    """Immutable local possession dependency; never forecast issue or physical geometry."""
+    return {"original_artifact_id": evidence.original_body_artifact["artifact_id"],
+        "artifact_id": evidence.proof_artifact_id, "sha256": evidence.proof_sha256,
+        "owned_body": dict(evidence.owned_body),
+        "local_possessed_at": evidence.local_possessed_at.isoformat(),
+        "recorded_at": evidence.recorded_at.isoformat(), "forecast_db": str(forecast_db)}
+
+
 def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: object, *, materialized_at: object,
         city: object = None, target_date: object = None, metric: object = None, expected_anchor_artifact_id: object = None,
         anchor_id: object = None, request_anchor_artifact_id: object = None, forecast_db: object = None) -> bool:
@@ -311,6 +346,7 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
         metadata = OpenMeteoIfs9PrecisionMetadata(**audit["anchor_precision_metadata"])
         anchor = geometry["providers"]["__anchor_ifs9__"]
         conn = _connect_read_only(canonical_db)
+        local_proof = None
         try:
             row = conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE a.artifact_id=?",
                 (artifact["artifact_id"],)).fetchone()
@@ -321,6 +357,16 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
                     return False
             elif request_anchor_artifact_id != artifact["artifact_id"]:
                 return False
+            claimed_local_proof = audit.get("anchor_local_proof")
+            if claimed_local_proof is not None:
+                from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof
+                local_proof = read_anchor_local_proof(conn, artifact["artifact_id"],
+                    city=str(city), target_date=str(target_date), metric=str(metric), decision_at=materialized_at)
+                if (local_proof is None
+                    or claimed_local_proof != anchor_local_proof_dependency(local_proof, forecast_db=canonical_db)
+                    or anchor_precision_metadata_identity(OpenMeteoIfs9PrecisionMetadata(**local_proof.precision_metadata))
+                        != anchor_precision_metadata_identity(metadata)):
+                    return False
         finally:
             conn.close()
         if row is None or json.loads(row[0]) != {key:value for key,value in artifact.items() if key != "forecast_db"}:
@@ -339,6 +385,8 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
         decision = datetime.fromisoformat(str(materialized_at).replace("Z", "+00:00"))
         if decision.tzinfo is None or not stamps[0] <= stamps[1] <= stamps[2] <= stamps[3] <= decision:
             return False
+        if local_proof is not None and decision >= replacement_readiness_expires_at(stamps[0]):
+            return False
         product = json.loads(artifact["metadata"])
         if (product["metric"] != metric or artifact["source_id"] != SOURCE_ID or artifact["product_id"] != PRODUCT_ID
             or artifact["data_version"] != (HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION)
@@ -352,7 +400,7 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
             or params["timezone"] != metadata.timezone_name
             or datetime.fromisoformat(str(params["run"])).replace(tzinfo=UTC) != stamps[0]):
             return False
-        path = Path(str(artifact["artifact_path"]))
+        path = Path(str(local_proof.owned_body["path"] if local_proof is not None else artifact["artifact_path"]))
         if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 8*1024*1024:
             return False
         body = path.read_bytes()

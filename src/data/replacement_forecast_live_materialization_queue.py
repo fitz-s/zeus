@@ -3049,6 +3049,17 @@ def _blocked_attempt_fingerprint(
                 for model, value in sorted(served.items())
                 if configured_models is None or model in configured_models
             }
+            anchor_local_proof_frontier = None
+            original_anchor_id = payload.get("openmeteo_anchor_artifact_id")
+            if original_anchor_id is not None:
+                from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof
+                from src.data.replacement_forecast_cycle_policy import anchor_local_proof_dependency
+                from src.data.station_ground_evidence import forecast_db_from_connection
+                local = read_anchor_local_proof(conn,int(original_anchor_id),city=scope[0],
+                    target_date=scope[1],metric=scope[2],decision_at=computed_at)
+                if local is not None:
+                    anchor_local_proof_frontier = anchor_local_proof_dependency(local,
+                        forecast_db=forecast_db_from_connection(conn))
             from src.data.station_ground_evidence import read_current_station_ground_evidence
             ground_entity = read_current_station_ground_evidence(
                 db_path, city=scope[0], decision_at=computed_at,
@@ -3152,6 +3163,7 @@ def _blocked_attempt_fingerprint(
                 "missing_configured_sources": missing_sources,
                 "source_clock_frontier": source_clock_frontier,
                 "physical_proof_frontier": physical_proof_frontier,
+                "anchor_local_proof_frontier": anchor_local_proof_frontier,
                 "station_ground_facts_frontier": ground_facts_frontier,
                 "station_ground_target_applicability": ground_target_frontier,
                 "eligible_ensemble_input_mark": eligible_ensemble_input_mark,

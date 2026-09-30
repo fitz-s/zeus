@@ -3340,6 +3340,7 @@ def _bind_provider_geometry_identity(
     station_ground_evidence: Mapping[str, object] | None = None,
     anchor_raw_artifact: Mapping[str, object] | None = None,
     station_ground_target_coverage: Mapping[str, object] | None = None,
+    anchor_local_proof: Mapping[str, object] | None = None,
 ) -> _CurrentEvidenceShape:
     """Stable actual provider geometry, independent of capture IDs/clocks/batch shape."""
     from dataclasses import replace
@@ -3354,6 +3355,8 @@ def _bind_provider_geometry_identity(
         metadata = asdict(anchor_metadata)
         audit["anchor_precision_metadata"] = metadata
         audit["anchor_raw_artifact"] = anchor_raw_artifact
+        if anchor_local_proof is not None:
+            audit["anchor_local_proof"] = dict(anchor_local_proof)
         audit["anchor_ifs9_role"] = "raw_ifs9_and_anchor" if "ecmwf_ifs" in served else "anchor_only"
         keys = ("city", "station_id", "station_lat", "station_lon", "requested_lat", "requested_lon", "nearest_grid_lat", "nearest_grid_lon",
                 "grid_elevation_m", "station_elevation_m", "timezone_name", "native_grid",
@@ -5217,6 +5220,7 @@ def _replacement_bayes_precision_fusion_override(
             return None
 
         anchor_raw_artifact = None
+        anchor_local_proof = None
         if conn is not None and request.anchor_artifact_id is not None:
             from src.data.replacement_current_value_serving import _ARTIFACT_IDENTITY_JSON_SQL
             anchor_row = conn.execute(
@@ -5225,6 +5229,25 @@ def _replacement_bayes_precision_fusion_override(
             ).fetchone()
             if anchor_row is not None and ground_db is not None:
                 anchor_raw_artifact = {**json.loads(anchor_row[0]), "forecast_db": str(ground_db)}
+                from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof
+                from src.data.replacement_forecast_cycle_policy import anchor_local_proof_dependency, anchor_precision_metadata_identity
+                try:
+                    local = read_anchor_local_proof(conn, request.anchor_artifact_id,
+                        city=request.city, target_date=str(request.target_date), metric=metric,
+                        decision_at=computed_at)
+                except (ValueError, OSError):
+                    return None
+                if local is not None:
+                    from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata
+                    from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
+                    metadata = getattr(request.openmeteo_precision_guard, "metadata", None)
+                    if (metadata is None or anchor_precision_metadata_identity(metadata)
+                        != anchor_precision_metadata_identity(OpenMeteoIfs9PrecisionMetadata(**local.precision_metadata))
+                        or request.openmeteo_raw_payload_bytes is None
+                        or hashlib.sha256(request.openmeteo_raw_payload_bytes).hexdigest() != anchor_raw_artifact["sha256"]
+                        or computed_at >= replacement_readiness_expires_at(_to_utc(local.original_body_artifact["source_cycle_time"],field_name="source_cycle_time"))):
+                        return None
+                    anchor_local_proof = anchor_local_proof_dependency(local, forecast_db=ground_db)
         _source_clock_current_shape = _bind_provider_geometry_identity(
             _source_clock_current_shape,
             {model: value for model, value in served_current.items()
@@ -5234,6 +5257,7 @@ def _replacement_bayes_precision_fusion_override(
             station_ground_evidence=ground_entity,
             anchor_raw_artifact=anchor_raw_artifact,
             station_ground_target_coverage=ground_target_coverage,
+            anchor_local_proof=anchor_local_proof,
         )
         if _source_clock_payload is not None:
             _source_clock_payload["current_evidence_shape"] = _source_clock_current_shape.as_payload()
@@ -8044,6 +8068,8 @@ def _compute_posterior_payload(
         ground_coverage = ground_audit.get("anchor_station_ground_target_coverage") if isinstance(ground_audit,Mapping) else None
         if isinstance(ground_coverage,Mapping):
             dependency_payload["station_ground_target_applicability"] = ground_coverage.get("applicability_identity")
+        if isinstance(ground_audit, Mapping) and isinstance(ground_audit.get("anchor_local_proof"), Mapping):
+            dependency_payload["anchor_local_proof"] = dict(ground_audit["anchor_local_proof"])
     dependency_hash = _json_hash(dependency_payload)
     posterior_config = {
         "posterior_method": "openmeteo_ecmwf_ifs9_bayes_fusion",

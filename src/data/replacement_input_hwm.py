@@ -1750,6 +1750,7 @@ def _exact_consumed_anchor_artifact_cycle(
     metric: str,
     decision_time: datetime,
     provenance: Mapping[str, object],
+    posterior_computed_at: datetime | None = None,
 ) -> tuple[str | None, datetime | None]:
     """Return the exact OpenMeteo artifact cycle consumed by a posterior.
 
@@ -1858,6 +1859,24 @@ def _exact_consumed_anchor_artifact_cycle(
         )
 
     artifact_path = Path(str(values["artifact_path"] or ""))
+    fusion = provenance.get("bayes_precision_fusion")
+    shape = fusion.get("current_evidence_shape") if isinstance(fusion,Mapping) else None
+    audit = shape.get("provider_geometry_audit") if isinstance(shape,Mapping) else None
+    claimed_local_proof = audit.get("anchor_local_proof") if isinstance(audit,Mapping) else None
+    if claimed_local_proof is not None:
+        from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof
+        from src.data.replacement_forecast_cycle_policy import anchor_local_proof_dependency
+        from src.data.station_ground_evidence import forecast_db_from_connection
+        try:
+            if posterior_computed_at is None:
+                return "basis=anchor_local_proof_cut_unavailable",None
+            local = read_anchor_local_proof(conn,artifact_id,city=city,target_date=str(target_date),
+                metric=normalized_metric,decision_at=posterior_computed_at)
+            if local is None or claimed_local_proof != anchor_local_proof_dependency(local,forecast_db=forecast_db_from_connection(conn)):
+                return "basis=anchor_local_proof_identity_unverifiable",None
+            artifact_path = Path(str(local.owned_body["path"]))
+        except (ValueError,OSError):
+            return "basis=anchor_local_proof_identity_unverifiable",None
     expected_sha = str(values["sha256"] or "").strip().lower()
     try:
         actual_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
@@ -1884,6 +1903,10 @@ def _exact_consumed_anchor_artifact_cycle(
             f"artifact_id={artifact_id}",
             None,
         )
+    if claimed_local_proof is not None:
+        # A derived read view retains original source identity/clocks. This
+        # owned copy is not a rewritten historical path or a fresh issue.
+        metadata = {**metadata,"openmeteo_payload_json":str(artifact_path)}
     artifact_row = {
         "artifact_city": metadata.get("city"),
         # One immutable Open-Meteo payload can cover several local days. Bind
@@ -1893,13 +1916,13 @@ def _exact_consumed_anchor_artifact_cycle(
         "artifact_target_date": str(target_date),
         "artifact_metric": metadata.get("metric"),
         "source_cycle_time": values["source_cycle_time"],
-        "artifact_path": values["artifact_path"],
+        "artifact_path": str(artifact_path),
         "metadata_type": "object",
         "payload_path_type": (
             "text" if isinstance(metadata.get("openmeteo_payload_json"), str) else ""
         ),
         "payload_path": metadata.get("openmeteo_payload_json"),
-        "artifact_metadata_json": values["artifact_metadata_json"],
+        "artifact_metadata_json": json.dumps(metadata),
     }
     key = (str(city), str(target_date), normalized_metric)
     validated_cycle = _artifact_cycles_from_rows(
@@ -2328,6 +2351,7 @@ def _replacement_live_input_lag_reason(
                 metric=metric,
                 decision_time=decision_time,
                 provenance=provenance,
+                posterior_computed_at=posterior_computed,
             )
         )
         if artifact_identity_lag is not None:
