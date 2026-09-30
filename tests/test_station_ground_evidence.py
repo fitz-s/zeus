@@ -20,6 +20,80 @@ from tests.test_replacement_forecast_materializer import _hko_native_surfaces, _
 UTC = timezone.utc
 
 
+@pytest.mark.parametrize("city_name", (
+    "Auckland", "Busan", "Chengdu", "Chongqing", "Guangzhou", "Istanbul",
+    "Jakarta", "Jinan", "Lagos", "Mexico City", "Munich", "Sao Paulo",
+    "Seoul", "Shenzhen", "Wellington", "Zhengzhou",
+))
+def test_explicit_international_homr_binding_normal_archive_first_cut_and_changed_facts(tmp_path, monkeypatch, city_name):
+    """Original metadata, actual private canonical INSERT; no forecast/q permission."""
+    from datetime import timedelta
+    import src.config as config
+    rows = json.loads((config.PROJECT_ROOT / "config/station_precise_coords.json").read_text())
+    original_rows = json.loads(json.dumps(rows))
+    city = config.runtime_cities_by_name()[city_name]
+    claim = rows[city_name]["station_ground_proof"]
+    source_body = config.PROJECT_ROOT / claim["artifact_ref"]
+    raw = source_body.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == claim["body_sha256"]
+    captured = datetime.fromisoformat(claim["checked_at"])
+    assert captured.date().isoformat() == claim["query_date"] == "2026-09-30"
+    assert datetime(2026, 9, 30, 14, 57, 48, tzinfo=UTC) <= captured < datetime(2026, 9, 30, 14, 57, 51, tzinfo=UTC)
+    official = tmp_path / source_body.name
+    official.write_bytes(raw)
+    registry = tmp_path / "station_precise_coords.json"
+    registry.write_text(json.dumps(rows))
+    (tmp_path / "cities.json").write_bytes((config.PROJECT_ROOT / "config/cities.json").read_bytes())
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(ground, "_store_root", lambda: tmp_path / "ground")
+    moment = [datetime(2026, 9, 30, 15, 10, tzinfo=UTC)]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment[0].astimezone(tz or UTC)
+    monkeypatch.setattr(ground, "datetime", Clock)
+    db = tmp_path / "ground-binding.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    first = _archive(db, city_name)
+    assert first["captured_at"] == captured.isoformat()
+    assert first["recorded_at"] == moment[0].isoformat()
+    assert first["facts"]["station_id"] == city.wu_station
+    assert first["facts"]["source_station_id"] == claim["source_station_id"]
+    assert first["facts"]["location_role"] == "station_ground_reference"
+    assert "temperature_station" not in first["facts"]
+    assert Path(first["body_path"]).read_bytes() == raw
+    # Capture is insufficient before canonical first INSERT; POR is not a clock.
+    for old in (captured - timedelta(microseconds=1), moment[0] - timedelta(microseconds=1)):
+        assert ground.read_frozen_station_ground_evidence(first, decision_at=old) is None
+        assert ground.read_current_station_ground_evidence(db, city=city_name, decision_at=old) is None
+    assert ground.read_current_station_ground_evidence(db, city=city_name, decision_at=moment[0]) == first
+    with sqlite3.connect(db) as conn:
+        original = tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (first["artifact_id"],)).fetchone())
+    moment[0] += timedelta(hours=1)
+    assert _archive(db, city_name) == first
+    # TEST_ONLY_SYNTHETIC_EXTERNAL_CONDITION: changed GROUND, not a field claim.
+    payload = json.loads(raw)
+    height = float(first["facts"]["elevation_m"]) + 1
+    quantity = next(x for x in payload["stationCollection"]["stations"][0]["location"]["elevations"] if x["elevationType"] == "GROUND")
+    quantity.update(elevationMeters=str(height), elevationFeet=f"{height/.3048:.1f}")
+    updated = (json.dumps(payload, sort_keys=True) + "\n").encode()
+    _update_official(registry, official, rows, updated, moment[0].isoformat(), city_name)
+    old_cut = moment[0] - timedelta(microseconds=1)
+    moment[0] += timedelta(seconds=30)
+    newer = _archive(db, city_name)
+    assert newer["facts_identity"] != first["facts_identity"]
+    assert newer["recorded_at"] == moment[0].isoformat()
+    assert ground.read_current_station_ground_evidence(db, city=city_name, decision_at=old_cut) == first
+    assert ground.read_frozen_station_ground_evidence(first, decision_at=old_cut) == first
+    assert ground.read_current_station_ground_evidence(db, city=city_name, decision_at=moment[0]) == newer
+    with sqlite3.connect(db) as conn:
+        assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (first["artifact_id"],)).fetchone()) == original
+    assert source_body.read_bytes() == raw
+    assert original_rows["Shanghai"] == json.loads((config.PROJECT_ROOT / "config/station_precise_coords.json").read_text())["Shanghai"]
+    assert original_rows["London"] == json.loads((config.PROJECT_ROOT / "config/station_precise_coords.json").read_text())["London"]
+
+
 @pytest.mark.parametrize("city_name", ("Shanghai", "London"))
 @pytest.mark.parametrize("metric", ("high", "low"))
 def test_international_homr_normal_metadata_seed_and_public_ground_scope(tmp_path, monkeypatch, _hko_source_surface, city_name, metric):

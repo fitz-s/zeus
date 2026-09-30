@@ -103,7 +103,25 @@
   "lat": "-37.01199",
   "lon": "174.786331",
   "source": "OurAirports",
-  "station": "NZAA"
+  "station": "NZAA",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "NZAA",
+   "source_station_id": "30151541",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 7.0,
+   "site_lat": -37.008056,
+   "site_lon": 174.791667,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_nzaa_station.json",
+   "body_sha256": "83de8d4727b83e85b43ea40834e919a53588ea10fdbab8ee2da38ee8cbc0dd05",
+   "checked_at": "2026-09-30T14:57:48.667921+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ANZAA&qidMod=is&phrData=false"
+  }
  },
  "Austin": {
   "distance_from_citiesjson_m": 2404,
@@ -183,7 +201,25 @@
   "lat": "35.179501",
   "lon": "128.938004",
   "source": "OurAirports",
-  "station": "RKPK"
+  "station": "RKPK",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "RKPK",
+   "source_station_id": "20029737",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 1.8,
+   "site_lat": 35.179528,
+   "site_lon": 128.938222,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_rkpk_station.json",
+   "body_sha256": "c9f445c707e4d4c14265da8e6541cf8c3511d9c4d18978a52e6a00ab10646e98",
+   "checked_at": "2026-09-30T14:57:48.659164+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ARKPK&qidMod=is&phrData=false"
+  }
  },
  "Cape Town": {
   "distance_from_citiesjson_m": 1027,
@@ -225,7 +261,25 @@
   "lat": "30.558257",
   "lon": "103.945966",
   "source": "OurAirports",
-  "station": "ZUUU"
+  "station": "ZUUU",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "ZUUU",
+   "source_station_id": "30137836",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 495.3,
+   "site_lat": 30.578528,
+   "site_lon": 103.947086,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_zuuu_station.json",
+   "body_sha256": "bc82750e0f117fad3fc651e55953610caf17b28a58d41fd8abdd22b9ae6651e4",
+   "checked_at": "2026-09-30T14:57:48.957947+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZUUU&qidMod=is&phrData=false"
+  }
  },
  "Chicago": {
   "distance_from_citiesjson_m": 3019,
@@ -263,7 +317,25 @@
   "lat": "29.712254",
   "lon": "106.651895",
   "source": "OurAirports",
-  "station": "ZUCK"
+  "station": "ZUCK",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "ZUCK",
+   "source_station_id": "30137833",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 416.1,
+   "site_lat": 29.719217,
+   "site_lon": 106.641678,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_zuck_station.json",
+   "body_sha256": "96c583e1ad102081501f006625d8f3d5f04fb222ea17cc8b2a87bec8d7f7e708",
+   "checked_at": "2026-09-30T14:57:49.001954+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZUCK&qidMod=is&phrData=false"
+  }
  },
  "Dallas": {
   "distance_from_citiesjson_m": 1314,
@@ -309,7 +381,25 @@
   "lat": "23.392401",
   "lon": "113.299004",
   "source": "OurAirports",
-  "station": "ZGGG"
+  "station": "ZGGG",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "ZGGG",
+   "source_station_id": "30137796",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 15.2,
+   "site_lat": 23.392436,
+   "site_lon": 113.298786,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_zggg_station.json",
+   "body_sha256": "c51fbafb899ae8c701f35199985a4dad10c46ab71f38b4cd848b126e8b0fd52c",
+   "checked_at": "2026-09-30T14:57:49.252629+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZGGG&qidMod=is&phrData=false"
+  }
  },
  "Helsinki": {
   "distance_from_citiesjson_m": 1022,
@@ -405,7 +495,25 @@
   "lat": "41.274874",
   "lon": "28.732136",
   "source": "OurAirports",
-  "station": "LTFM"
+  "station": "LTFM",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "LTFM",
+   "source_station_id": "30146057",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 99.0,
+   "site_lat": 41.275278,
+   "site_lon": 28.751944,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_ltfm_station.json",
+   "body_sha256": "170a429f0cc76ce748f5b4f157db4d494132dd6386912213348615431af10677",
+   "checked_at": "2026-09-30T14:57:49.248261+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ALTFM&qidMod=is&phrData=false"
+  }
  },
  "Jakarta": {
   "distance_from_citiesjson_m": 75,
@@ -413,7 +521,25 @@
   "lat": "-6.266989",
   "lon": "106.890318",
   "source": "OurAirports",
-  "station": "WIHH"
+  "station": "WIHH",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "WIHH",
+   "source_station_id": "30140750",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 25.6,
+   "site_lat": -6.266608,
+   "site_lon": 106.891117,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_wihh_station.json",
+   "body_sha256": "ca449d3a5ccc87b74787feadbf3e4e6f5bec8ade99e0372ce15ffebd49321f83",
+   "checked_at": "2026-09-30T14:57:49.580048+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AWIHH&qidMod=is&phrData=false"
+  }
  },
  "Jeddah": {
   "distance_from_citiesjson_m": 1031,
@@ -455,7 +581,25 @@
   "lat": "36.857201",
   "lon": "117.216003",
   "source": "OurAirports",
-  "station": "ZSJN"
+  "station": "ZSJN",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "ZSJN",
+   "source_station_id": "30137818",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 23.2,
+   "site_lat": 36.856561,
+   "site_lon": 117.215994,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_zsjn_station.json",
+   "body_sha256": "b7d432820e11e203bd0719bad9929bfa274cb77c2aacecf273ff96f8da75929d",
+   "checked_at": "2026-09-30T14:57:49.263832+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZSJN&qidMod=is&phrData=false"
+  }
  },
  "Karachi": {
   "distance_from_citiesjson_m": 2255,
@@ -531,7 +675,25 @@
   "lat": "6.57737",
   "lon": "3.32116",
   "source": "OurAirports",
-  "station": "DNMM"
+  "station": "DNMM",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "DNMM",
+   "source_station_id": "30152035",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 41.1,
+   "site_lat": 6.577369,
+   "site_lon": 3.321156,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_dnmm_station.json",
+   "body_sha256": "004f692e0947bae5079cdb2871e4221ef760b4e23575b8d7d0d620bc32949fc5",
+   "checked_at": "2026-09-30T14:57:49.588917+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ADNMM&qidMod=is&phrData=false"
+  }
  },
  "London": {
   "distance_from_citiesjson_m": 38,
@@ -697,7 +859,25 @@
   "lat": "19.435822",
   "lon": "-99.07033",
   "source": "OurAirports",
-  "station": "MMMX"
+  "station": "MMMX",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "MMMX",
+   "source_station_id": "30149753",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 2229.9,
+   "site_lat": 19.436303,
+   "site_lon": -99.072097,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_mmmx_station.json",
+   "body_sha256": "3323847fe9ab8f782655420985ff51cd499235233871931fb11170cc72dd0951",
+   "checked_at": "2026-09-30T14:57:49.587261+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AMMMX&qidMod=is&phrData=false"
+  }
  },
  "Miami": {
   "distance_from_citiesjson_m": 2860,
@@ -777,7 +957,25 @@
   "lat": "48.353802",
   "lon": "11.7861",
   "source": "OurAirports",
-  "station": "EDDM"
+  "station": "EDDM",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "EDDM",
+   "source_station_id": "30103328",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 453.2,
+   "site_lat": 48.35378,
+   "site_lon": 11.78608,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_eddm_station.json",
+   "body_sha256": "5b1a5c1ad390f1425938ee667c2d90164872fd06b7bdacdf4ead6f6d1c1d6971",
+   "checked_at": "2026-09-30T14:57:49.854424+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AEDDM&qidMod=is&phrData=false"
+  }
  },
  "NYC": {
   "distance_from_citiesjson_m": 693,
@@ -895,7 +1093,25 @@
   "lat": "-23.431274",
   "lon": "-46.469954",
   "source": "OurAirports",
-  "station": "SBGR"
+  "station": "SBGR",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "SBGR",
+   "source_station_id": "30134434",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 749.5,
+   "site_lat": -23.432075,
+   "site_lon": -46.469511,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_sbgr_station.json",
+   "body_sha256": "0fb3da415b2b21e00fe7849f3f35bd82ae8e70066a94f8ca8a0a8f41a00138f9",
+   "checked_at": "2026-09-30T14:57:50.081668+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ASBGR&qidMod=is&phrData=false"
+  }
  },
  "Seattle": {
   "distance_from_citiesjson_m": 479,
@@ -933,7 +1149,25 @@
   "lat": "37.469101",
   "lon": "126.450996",
   "source": "OurAirports",
-  "station": "RKSI"
+  "station": "RKSI",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "RKSI",
+   "source_station_id": "30150507",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 7.0,
+   "site_lat": 37.469075,
+   "site_lon": 126.450517,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_rksi_station.json",
+   "body_sha256": "97531f98c70c347b2843522b030c628272fc7888b0d457a4799f771804967441",
+   "checked_at": "2026-09-30T14:57:50.153178+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ARKSI&qidMod=is&phrData=false"
+  }
  },
  "Shanghai": {
   "distance_from_citiesjson_m": 0,
@@ -967,7 +1201,25 @@
   "lat": "22.639474",
   "lon": "113.803262",
   "source": "OurAirports",
-  "station": "ZGSZ"
+  "station": "ZGSZ",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "ZGSZ",
+   "source_station_id": "30137800",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 4.0,
+   "site_lat": 22.639258,
+   "site_lon": 113.810664,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_zgsz_station.json",
+   "body_sha256": "bad37dc5b9e611b34822901f7d22aa7c9f5512a79dff64716d219f457c5e628c",
+   "checked_at": "2026-09-30T14:57:50.328371+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZGSZ&qidMod=is&phrData=false"
+  }
  },
  "Singapore": {
   "distance_from_citiesjson_m": 2388,
@@ -1127,7 +1379,25 @@
   "lat": "-41.326839",
   "lon": "174.806862",
   "source": "OurAirports",
-  "station": "NZWN"
+  "station": "NZWN",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "NZWN",
+   "source_station_id": "30083512",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 7.0,
+   "site_lat": -41.3,
+   "site_lon": 174.8,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_nzwn_station.json",
+   "body_sha256": "83913a065eac88e27f00ed2950dd541a956c6b4c51741f84a06cfc2eec53b243",
+   "checked_at": "2026-09-30T14:57:50.425452+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3ANZWN&qidMod=is&phrData=false"
+  }
  },
  "Wuhan": {
   "distance_from_citiesjson_m": 1235,
@@ -1143,6 +1413,24 @@
   "lat": "34.526497",
   "lon": "113.849165",
   "source": "OurAirports",
-  "station": "ZHCC"
+  "station": "ZHCC",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "ZHCC",
+   "source_station_id": "30137802",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 150.9,
+   "site_lat": 34.519672,
+   "site_lon": 113.840889,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_zhcc_station.json",
+   "body_sha256": "b1947ff61d8cd45aedf7bef2bd735f82d7a70a7839f36b46a0a94f8e250b4f72",
+   "checked_at": "2026-09-30T14:57:50.594442+00:00",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?date=2026-09-30&current=true&qid=ICAO%3AZHCC&qidMod=is&phrData=false"
+  }
  }
 }
