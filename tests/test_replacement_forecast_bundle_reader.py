@@ -1411,91 +1411,79 @@ def _generic_reader_current_row(tmp_path,monkeypatch,request):
 
 
 def _reader_shanghai_native_high(conn, request, root, monkeypatch):
-    """Controlled extracted native windows -> ordinary collector/authority writer.
+    """Bind the shared normal native writer's first possession, never renew it.
 
-    Only download and GRIB extraction are skipped. No snapshot, coverage,
-    readiness result or current-shape reader is replaced.
+    External extracted windows are controlled; the collector/parser/authority
+    writer are real. The 00/12Z partial profile covers this complete target,
+    not every city/target in a globally completed cycle.
     """
     from src.config import runtime_cities_by_name, runtime_coordinate_manifest_json
     from src.data import ecmwf_open_data as native
-    from tests.test_opendata_writes_v2_table import _make_opendata_high_payload
-    from tests.test_replacement_forecast_materializer import _fixture_ens_surface_provenance
-    from src.state.db import init_schema_forecasts
-    from zoneinfo import ZoneInfo
+    from tests.test_replacement_forecast_materializer import _fixture_native_shape_identity
+    from pathlib import Path
+    from dataclasses import replace
     city = runtime_cities_by_name()[request.city]
-    init_schema_forecasts(conn)
     cycle = request.source_cycle_time
-    captured = cycle+timedelta(hours=8,minutes=5)
-    assert captured <= request.computed_at
-    start = datetime.combine(request.target_date,datetime.min.time(),tzinfo=ZoneInfo(city.timezone))
-    end = (start+timedelta(days=1)).astimezone(UTC)
-    start = start.astimezone(UTC)
-    selected = (round(city.lat*4)/4,round(city.lon*4)/4)
-    body = _make_opendata_high_payload(request.target_date.isoformat(),cycle.isoformat(),
-        local_day_start_iso=start.isoformat(),local_day_end_iso=end.isoformat(),
-        nearest_grid_lat=selected[0],nearest_grid_lon=selected[1])
-    grid = json.loads(_fixture_ens_surface_provenance(city_name=city.name,
-        cycle=cycle.isoformat(),selected_coords=selected,decision_at=captured))["grid_surface_evidence"]
-    grid["mask_source_fetched_at"] = captured.isoformat()
+    assert request.temperature_metric == "high"
     manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
     lead = (request.target_date-cycle.date()).days
-    body.update(city=city.name,lat=city.lat,lon=city.lon,timezone=city.timezone,unit=city.settlement_unit,lead_day=lead,
-        generated_at=captured.isoformat(),manifest_sha256=manifest_sha,manifest_hash=manifest_sha,
-        grid_surface_evidence=grid)
-    body["selected_step_ranges"] = body["selected_step_ranges_inner"]
-    for index,member in enumerate(body["members"]):
-        value = 25.+(index-25)*.02
-        member.update(value_native_unit=value,inner_max_native_unit=value,
-            boundary_max_native_unit=value-.2 if member["boundary_step_ranges"] else None)
-        for window in member["native_windows"]:
-            interval = f"{window['start_step_hours']}-{window['end_step_hours']}"
-            window["value_native_unit"] = value if interval in member["inner_step_ranges"] else value-.2
-    source_root = root/"native-ens"
+    source_root = Path(conn.execute("PRAGMA database_list").fetchone()[2]).parent/"controlled-native-ens"
+    assert source_root.resolve().is_relative_to(root.resolve())
     cycle_directory = native._cycle_extract_dir_name(run_date=cycle.date(),run_hour=cycle.hour)
-    directory = source_root/"raw"/"coordinate_manifests"/manifest_sha/"open_ens_mx2t6_localday_max"/"shanghai"/cycle_directory
-    directory.mkdir(parents=True)
+    directory = source_root/"raw"/"coordinate_manifests"/manifest_sha/"open_ens_mx2t6_localday_max"/city.name.lower().replace(" ","-")/cycle_directory
     path = directory/f"open_ens_mx2t6_localday_max_target_{request.target_date}_lead_{lead}.json"
-    path.write_text(json.dumps(body),encoding="utf-8")
-    builtin = sqlite3.connect(":memory:")
-    conn.create_function("strftime",2,lambda fmt,value: captured.isoformat(timespec="milliseconds")
-        if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
-    class ClockType(type):
-        def __instancecheck__(cls,value): return isinstance(value,datetime)
-    class NativeClock(datetime,metaclass=ClockType):
-        @classmethod
-        def now(cls,tz=None): return captured.astimezone(tz or UTC)
-    with monkeypatch.context() as ingress:
-        ingress.setattr(native,"datetime",NativeClock)
-        ingress.setattr(native._ingest_grib_module,"_now_utc_iso",lambda:captured.isoformat())
-        decision,release = native._select_cycle_for_track(track="mx2t6_high",now_utc=captured)
-        assert decision is native.FetchDecision.FETCH_ALLOWED
-        assert release["selected_cycle_time"] == cycle
-        assert release["horizon_profile"] == ("full" if cycle.hour in (0,12) else "short")
-        collected = native.collect_open_ens_cycle(track="mx2t6_high",skip_download=True,skip_extract=True,
-            grid_surface_source_evidence=grid,conn=conn,now_utc=captured,
-            _paths=native._resolve_opendata_paths(source_root=source_root,environ={}))
-    assert collected["status"]=="ok" and collected["snapshots_inserted"]==1,collected
-    assert collected["coverage_written"]==1 and collected["producer_readiness_written"]==1,collected
-    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=?",
-        (collected["source_run_id"],)).fetchone())
+    original_bytes = path.read_bytes() if path.exists() else None
+    tables = ("ensemble_snapshots","source_run","source_run_coverage")
+    original = {table:tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table}")) for table in tables}
+    existing = conn.execute("SELECT es.* FROM ensemble_snapshots es JOIN source_run sr ON sr.source_run_id=es.source_run_id "
+        "WHERE es.city=? AND es.target_date=? AND es.temperature_metric='high' AND es.source_cycle_time=? AND sr.manifest_hash=?",
+        (city.name,str(request.target_date),cycle.isoformat(),manifest_sha)).fetchall()
+    assert len(existing) <= 1
+    members = tuple(25.+(index-25)*.02 for index in range(51))
+    snapshot, surface_hash, actual_members = _fixture_native_shape_identity(conn,request,monkeypatch,members_c=members)
+    assert actual_members == pytest.approx(members)
+    if existing:
+        assert original_bytes is not None
+        assert snapshot == dict(existing[0])
+        assert path.read_bytes() == original_bytes
+        assert {table:tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table}")) for table in tables} == original
+    else:
+        assert len(conn.execute("SELECT * FROM ensemble_snapshots").fetchall()) == len(original["ensemble_snapshots"])+1
+        assert snapshot["snapshot_id"] not in {row[0] for row in original["ensemble_snapshots"]}
+    body = json.loads(path.read_bytes())
+    assert body["city"] == city.name and body["target_date_local"] == str(request.target_date)
+    assert body["manifest_sha256"] == manifest_sha and body["lead_day"] == lead
+    assert snapshot["source_cycle_time"] == cycle.isoformat()
     assert snapshot["city"]==city.name and snapshot["temperature_metric"]=="high"
     assert snapshot["target_date"]==request.target_date.isoformat()
-    assert snapshot["source_available_at"]==captured.isoformat()
+    assert snapshot["source_available_at"] == body["generated_at"]
+    assert datetime.fromisoformat(snapshot["source_available_at"]) <= datetime.fromisoformat(snapshot["recorded_at"]) <= request.computed_at
     assert snapshot["source_transport"]=="ensemble_snapshots_db_reader"
-    assert json.loads(snapshot["provenance_json"])["high_local_day_max_boundary_certificate"]["status"]=="EXACT"
+    proof = json.loads(snapshot["provenance_json"])
+    assert grid_surface_evidence_identity_hash(proof["grid_surface_evidence"]) == surface_hash
+    assert proof["grid_surface_evidence"] == body["grid_surface_evidence"]
+    assert proof["high_local_day_max_boundary_certificate"]["status"]=="EXACT"
+    run = conn.execute("SELECT * FROM source_run WHERE source_run_id=?",(snapshot["source_run_id"],)).fetchone()
+    assert run["manifest_hash"] == manifest_sha and run["dataset_id"] == snapshot["dataset_id"]
+    coverage = conn.execute("SELECT * FROM source_run_coverage WHERE source_run_id=? AND city=? "
+        "AND target_local_date=? AND temperature_metric='high'",
+        (snapshot["source_run_id"],city.name,str(request.target_date))).fetchall()
+    assert len(coverage) == 1
+    assert json.loads(coverage[0]["snapshot_ids_json"]) == [snapshot["snapshot_id"]]
+    assert coverage[0]["completeness_status"] == "COMPLETE" and coverage[0]["readiness_status"] == "LIVE_ELIGIBLE"
+    assert datetime.fromisoformat(coverage[0]["recorded_at"]) <= request.computed_at
     from src.data.executable_forecast_reader import read_executable_forecast
     city_id = city.name.upper().replace(" ","_")
     public = read_executable_forecast(conn,city_id=city_id,city_name=city.name,
         city_timezone=city.timezone,target_local_date=request.target_date,temperature_metric="high",
         source_id="ecmwf_open_data",source_transport=snapshot["source_transport"],
-        data_version=snapshot["dataset_id"],track=collected["forecast_track"],strategy_key="entry_forecast",
+        data_version=snapshot["dataset_id"],track=run["track"],strategy_key="entry_forecast",
         market_family="controlled-shanghai-high",condition_id="controlled-shanghai-high",
         decision_time=request.computed_at,require_entry_readiness=False)
     assert public.ok,public.reason_code
     assert public.bundle.snapshot.snapshot_id==snapshot["snapshot_id"]
-    from dataclasses import replace
-    return replace(request,city_id=city_id,baseline_source_run_id=collected["source_run_id"],
-        baseline_data_version=snapshot["dataset_id"],baseline_source_available_at=captured),snapshot,builtin
+    return replace(request,city_id=city_id,baseline_source_run_id=snapshot["source_run_id"],
+        baseline_data_version=snapshot["dataset_id"],baseline_source_available_at=datetime.fromisoformat(snapshot["source_available_at"])),snapshot,sqlite3.connect(":memory:")
 
 
 @pytest.fixture
@@ -1639,6 +1627,79 @@ def test_reader_initial_certificate_uses_owner_default_expiry(tmp_path,monkeypat
         next(world,None)
 
 
+def test_reader_native_first_write_and_repeat_keep_original_identity_and_bytes(tmp_path,monkeypatch):
+    from dataclasses import replace
+    from pathlib import Path
+    from src.data import ecmwf_open_data as native
+    collect = native.collect_open_ens_cycle
+    acquisitions = []
+    def observed_collect(*args,**kwargs):
+        result = collect(*args,**kwargs)
+        acquisitions.append(result)
+        return result
+    monkeypatch.setattr(native,"collect_open_ens_cycle",observed_collect)
+    world = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None)
+    normal = next(world)
+    try:
+        assert len(acquisitions) == 1
+        assert acquisitions[0]["status"] == "ok"
+        assert acquisitions[0]["snapshots_inserted"] == 1
+        assert acquisitions[0]["coverage_written"] == 1
+        assert acquisitions[0]["producer_readiness_written"] == 1
+        snapshot_id = json.loads(normal.row["dependency_source_run_ids_json"])["current_ensemble_snapshot"]
+        snapshot = dict(normal.conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=?",
+            (snapshot_id,)).fetchone())
+        tables = ("ensemble_snapshots","source_run","source_run_coverage")
+        original = {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}")) for table in tables}
+        native_root = Path(normal.conn.execute("PRAGMA database_list").fetchone()[2]).parent/"controlled-native-ens"
+        owned = {path:path.read_bytes() for path in native_root.rglob("*") if path.is_file()}
+        assert owned
+        repeated,actual,builtin = _reader_shanghai_native_high(normal.conn,
+            replace(normal.request,computed_at=normal.request.computed_at+timedelta(minutes=1)),
+            tmp_path.resolve(),monkeypatch)
+        builtin.close()
+        assert len(acquisitions) == 1  # Repeat is a read, never another collector/INSERT.
+        assert actual == snapshot
+        assert repeated.baseline_source_run_id == normal.request.baseline_source_run_id
+        assert repeated.baseline_data_version == normal.request.baseline_data_version
+        assert repeated.baseline_source_available_at == normal.request.baseline_source_available_at
+        assert {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}")) for table in tables} == original
+        assert {path:path.read_bytes() for path in native_root.rglob("*") if path.is_file()} == owned
+    finally:
+        next(world,None)
+
+
+def test_reader_native_repeat_rejects_foreign_owned_body(tmp_path,monkeypatch):
+    from pathlib import Path
+    from src.data import ecmwf_open_data as native
+    world = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None)
+    normal = next(world)
+    try:
+        native_root = Path(normal.conn.execute("PRAGMA database_list").fetchone()[2]).parent/"controlled-native-ens"
+        paths = tuple((native_root/"raw"/"coordinate_manifests").rglob("*_target_*.json"))
+        assert len(paths) == 1
+        path = paths[0]
+        original_bytes = path.read_bytes()
+        tables = ("ensemble_snapshots","source_run","source_run_coverage")
+        original = {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}")) for table in tables}
+        def forbidden_collect(*args,**kwargs):
+            pytest.fail("foreign owned input must be rejected before collector/INSERT")
+        monkeypatch.setattr(native,"collect_open_ens_cycle",forbidden_collect)
+        try:
+            # Negative-only private external body; never change a licensed row.
+            body = json.loads(original_bytes)
+            body["city"] = "Chicago"
+            path.write_text(json.dumps(body,sort_keys=True))
+            with pytest.raises(AssertionError,match="one issued native input cannot change with provider center"):
+                _reader_shanghai_native_high(normal.conn,normal.request,tmp_path.resolve(),monkeypatch)
+            assert {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}")) for table in tables} == original
+        finally:
+            path.write_bytes(original_bytes)
+        assert path.read_bytes() == original_bytes
+    finally:
+        next(world,None)
+
+
 def test_reader_day0_high_uses_normal_full_native_prior_and_owned_observation(tmp_path,monkeypatch):
     world = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None,
         target_date=date(2026,10,1),source_cycle_time=datetime(2026,9,30,12,tzinfo=UTC),
@@ -1649,7 +1710,9 @@ def test_reader_day0_high_uses_normal_full_native_prior_and_owned_observation(tm
     try:
         assert normal.request.day0_observed_extreme_c == 26.
         assert normal.request.day0_observed_extreme_source == "noaa_wrh_zspd"
-        assert normal.request.baseline_source_available_at == datetime(2026,9,30,20,5,tzinfo=UTC)
+        # The normal partial profile already possesses this complete target;
+        # the later reader must not renew it to its own 20:05 analysis clock.
+        assert normal.request.baseline_source_available_at == datetime(2026,9,30,18,41,tzinfo=UTC)
         assert normal.request.openmeteo_source_available_at == datetime(2026,9,30,15,tzinfo=UTC)
         proof = json.loads(normal.row["provenance_json"])
         assert proof["day0_conditioning"]["observed_extreme_c"] == 26.
