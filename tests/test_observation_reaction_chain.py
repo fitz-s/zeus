@@ -373,10 +373,16 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     seed.backup(conn);seed.close()
     trade=sqlite3.connect(trade_path);trade.row_factory=sqlite3.Row
     trade_schema.backup(trade)
-    world=sqlite3.connect(world_path);ensure_table(world)
+    world=sqlite3.connect(world_path)
+    world.execute('PRAGMA journal_mode=WAL')
+    ensure_table(world)
     from src.state.ledger import apply_architecture_kernel_schema
     apply_architecture_kernel_schema(world);world.commit()
     monkeypatch.setattr('src.state.db.get_world_connection',
+        lambda *a,**kw: sqlite3.connect(world_path))
+    # control_plane can be imported before this test in the full suite; bind
+    # its imported factory to the same isolated DB, without bypassing its query.
+    monkeypatch.setattr('src.control.control_plane.get_world_connection',
         lambda *a,**kw: sqlite3.connect(world_path))
     # Production-like ownership: writes use distinct WORLD/FORECAST/TRADE files.
     # Only WORLD is attached read-only while preparing a posterior.
