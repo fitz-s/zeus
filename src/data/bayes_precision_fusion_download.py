@@ -1880,7 +1880,7 @@ def _bind_physical_response(
                    "timezone": str(clean_params["timezone"]).split(",")[index]}
                   for index, item in enumerate(items) if isinstance(item, Mapping)]
     if model == "ecmwf_ifs" and params.get("models") == "ecmwf_ifs":
-        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import capture_source_cell_geometry_proof
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import capture_source_cell_geometry_proof, same_grid_cell
         for geometry in geometries:
             try:
                 proof = capture_source_cell_geometry_proof(
@@ -1891,8 +1891,8 @@ def _bind_physical_response(
                     requested_longitude=float(geometry["requested_longitude"]))
             except FileNotFoundError:
                 continue  # No download or fabricated native proof.
-            selected_lon = (float(proof["selected_grid_lon"]) + 180) % 360 - 180
-            if not math.isclose(float(proof["selected_grid_lat"]), float(geometry["selected_latitude"]), abs_tol=1e-5) or not math.isclose(selected_lon, float(geometry["selected_longitude"]), abs_tol=1e-5):
+            if not same_grid_cell(float(proof["selected_grid_lat"]), float(proof["selected_grid_lon"]),
+                    float(geometry["selected_latitude"]), float(geometry["selected_longitude"])):
                 raise ValueError("actual IFS9 response does not match static selected grid")
             geometry["source_cell_geometry_proof"] = proof
             geometry["native_grid_elevation_m"] = proof["raw_grid_elevation_m"]

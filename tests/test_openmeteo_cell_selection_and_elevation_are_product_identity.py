@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Lifecycle: created=2026-06-08; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: BLOCKER 4 — cell_selection and elevation/downscaling are first-class product identity and must be persisted alongside every raw_model_forecasts row.
 # Reuse: Run with pytest; update if product-identity columns or cell_selection/elevation handling in the BAYES_PRECISION_FUSION downloader changes.
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-09-30
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 + Fitz Constraint #4. Open-Meteo's cell_selection
 #   (nearest vs land vs sea) and elevation/downscaling materially change the returned 2m
 #   temperature: the SAME lat/lon with cell_selection=land vs nearest can pick a DIFFERENT
@@ -292,6 +292,91 @@ def _normal_ifs9_owned_product(tmp_path, monkeypatch, metric, *, legacy=False):
         conn.commit()
     served = persist(0 if legacy else 1)
     return conn, served, persist, data, write, clock
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_float32_ifs9_cell_producer_guard_and_frozen_reader_keep_native_identity(tmp_path, monkeypatch, metric):
+    """Whole controlled native OM/ordinary HTTP producer, not field weather evidence."""
+    from copy import deepcopy
+    from src.config import runtime_cities_by_name
+    from tests.test_config import _official_us_ground_registry
+    from tests.test_openmeteo_ecmwf_ifs9_bucket_transport import _actual_o1280_static_fixture
+    from src.data import bayes_precision_fusion_download as dl, station_ground_evidence as ground
+    from src.data.replacement_current_value_serving import read_current_instrument_values, frozen_ifs9_response_has_authority, provider_geometry_projection
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata, evaluate_openmeteo_ecmwf_ifs9_precision_guard
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+    from scripts.download_replacement_forecast_current_targets import _precision_metadata
+
+    _official_us_ground_registry(tmp_path, monkeypatch, "NYC")
+    transport, path, _, _, clock, _ = _actual_o1280_static_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(transport, "HSURF_LOCAL_CACHE", str(path))
+    monkeypatch.setattr(ground, "_store_root", lambda:tmp_path/"ground")
+    monkeypatch.setattr("src.config.state_path", lambda filename:tmp_path/"state"/filename)
+    _download_time(monkeypatch, ground, clock[0])
+    _download_time(monkeypatch, dl, clock[0])
+    city = runtime_cities_by_name()["NYC"]
+    point = transport.select_terrain_optimised_point(city.lat, city.lon, 2.,
+        read_elevation=lambda index:32.)
+    assert point.flat_index == 992022
+    canonical = transport.capture_source_cell_geometry_proof(latitude=point.grid_latitude,
+        longitude=point.grid_longitude_east,target_elevation_m=2.,
+        requested_latitude=city.lat,requested_longitude=city.lon)
+    run = clock[0].replace(hour=0)
+    cut = clock[0]+timedelta(minutes=1)
+    payload = {"latitude":40.808434,"longitude":-73.89206,"elevation":2.,
+        "timezone":city.timezone,"utc_offset_seconds":-14400,
+        "hourly_units":{"temperature_2m":"°C"},
+        "hourly":{"time":[f"2026-10-01T{hour:02d}:00" for hour in range(24)],
+                  "temperature_2m":[20.]*24}}
+    body = (json.dumps(payload,sort_keys=True)+"\n").encode()
+    fetches=[]
+    def fetch(url, params, **kwargs):
+        fetches.append(dict(params))
+        assert params["models"] == "ecmwf_ifs"
+        assert float(params["latitude"]) == city.lat and float(params["longitude"]) == city.lon
+        kwargs["capture_entity_body"](body,clock[0].timestamp())
+        kwargs["capture_network_response"](body,clock[0].timestamp(),{"content-type":"application/json"})
+        return json.loads(body)
+    monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
+    db = _forecast_db(tmp_path)
+    evidence = ground.archive_station_ground_evidence(db,["NYC"])["archived"]["NYC"]
+    target=dl.BayesPrecisionFusionDownloadTarget(city="NYC",metric=metric,target_date="2026-10-01",
+        lead_days=1,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone)
+    report=dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=run,targets=[target],
+        models=("ecmwf_ifs",),include_previous_runs=False,prune_after=False)
+    assert len(fetches)==1,report
+    conn=sqlite3.connect(db)
+    served=read_current_instrument_values(conn,city="NYC",metric=metric,target_date=target.target_date,
+        source_cycle_time_iso=run.isoformat(),decision_time_iso=cut.isoformat())["ecmwf_ifs"]
+    proof=served.physical_response["source_cell_geometry_proof"]
+    assert proof == canonical
+    assert frozen_ifs9_response_has_authority(served.physical_response,
+        provider_geometry_projection(served.physical_response),decision_at=cut)
+    metadata=OpenMeteoIfs9PrecisionMetadata(**_precision_metadata("NYC",target.target_date,
+        anchor_sigma_c=3.,raw_payload_bytes=body,analysis_at=cut))
+    guard=evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata,raw_payload_bytes=body,
+        decision_at=cut,station_ground_evidence=evidence)
+    assert guard.status == "PASS",guard.reason_codes
+    assert metadata.source_geometry_proof["selected_flat_index"] == 992022
+    assert metadata.source_geometry_proof["selected_grid_lon"] == point.grid_longitude_east
+    assert (metadata.nearest_grid_lat,metadata.nearest_grid_lon)==(payload["latitude"],payload["longitude"])
+    before=conn.execute("SELECT * FROM raw_model_forecasts").fetchall()
+    neighbor=transport.om_get_coordinates(992023)
+    wrong={**payload,"latitude":neighbor.grid_latitude,"longitude":neighbor.grid_longitude_east}
+    wrong_body=(json.dumps(wrong,sort_keys=True)+"\n").encode()
+    with pytest.raises(ValueError,match="requested terrain selection"):
+        _precision_metadata("NYC",target.target_date,anchor_sigma_c=3.,raw_payload_bytes=wrong_body,analysis_at=cut)
+    with pytest.raises(ValueError,match="requested terrain selection"):
+        dl._bind_physical_response(wrong,model="ecmwf_ifs",url=SINGLE_RUNS_FORECAST_URL,params=fetches[0],run=run,
+            captures=[(wrong_body,clock[0].timestamp())],
+            network_captures=[(wrong_body,clock[0].timestamp(),{"content-type":"application/json"})])
+    bad=deepcopy(served.physical_response)
+    bad["source_cell_geometry_proof"]["selected_flat_index"]=992023
+    assert not frozen_ifs9_response_has_authority(bad,provider_geometry_projection(bad),decision_at=cut)
+    assert conn.execute("SELECT * FROM raw_model_forecasts").fetchall()==before
+    assert transport.capture_source_cell_geometry_proof(latitude=payload["latitude"],longitude=payload["longitude"],
+        target_elevation_m=2.,requested_latitude=city.lat,requested_longitude=city.lon)==canonical
+    conn.close()
 
 
 def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric, *, city_name="Hong Kong"):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-09-29
-# Lifecycle: created=2026-06-07; last_reviewed=2026-09-29; last_reused=2026-09-29
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-06-07; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits

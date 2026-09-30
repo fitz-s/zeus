@@ -1,5 +1,8 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-09-30
+# Lifecycle: created=2026-06-11; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Purpose: Exact-run bucket admission and original-request frozen O1280 identity replay.
+# Reuse: Inspect whole-byte native cell/index and local-possession contracts before running.
 # Authority basis: operator directive 2026-06-11 (~07:10Z) — rung-3 S3 bucket anchor
 #   transport. Relationship-first tests: admission rule, output-shape equivalence with the
 #   API payload (extractor consumes both identically), provenance completeness, ladder
@@ -46,6 +49,42 @@ from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
 )
 
 UTC = timezone.utc
+
+
+def test_frozen_o1280_api_float32_coordinate_is_representation_not_another_cell(tmp_path, monkeypatch):
+    from copy import deepcopy
+    from src.config import cities_by_name
+    transport, _, _, _, clock, kwargs = _actual_o1280_static_fixture(tmp_path, monkeypatch)
+    point = transport.om_get_coordinates(992022)
+    longitude = (point.grid_longitude_east + 180) % 360 - 180
+    kwargs.update(latitude=point.grid_latitude, longitude=longitude,
+        requested_latitude=point.grid_latitude, requested_longitude=longitude)
+    canonical = transport.capture_source_cell_geometry_proof(**kwargs)
+    api = {**kwargs, "latitude":40.808434, "longitude":-73.89206}
+    assert abs(api["longitude"] - longitude) > 1e-5
+    assert transport.same_grid_cell(api["latitude"], api["longitude"], point.grid_latitude, longitude)
+    proof = transport.capture_source_cell_geometry_proof(**api)
+    assert proof == canonical
+    assert proof["selected_flat_index"] == 992022
+    assert proof["selected_grid_lon"] == point.grid_longitude_east
+    args = {key:value for key,value in api.items() if key != "local_cache"}
+    assert transport.validate_source_cell_geometry_proof(proof, **args, decision_at=clock[0]) is None
+    assert transport.validate_source_cell_geometry_proof(proof, **args,
+        decision_at="2026-09-30T11:59:59Z") is not None
+    neighbor = transport.om_get_coordinates(992023)
+    city = cities_by_name["NYC"]
+    for lat, lon in ((neighbor.grid_latitude, neighbor.grid_longitude_east),
+            (city.lat, city.lon), (float("nan"), api["longitude"])):
+        with pytest.raises(ValueError):
+            transport.capture_source_cell_geometry_proof(**{**api, "latitude":lat, "longitude":lon})
+        assert transport.validate_source_cell_geometry_proof(proof,
+            **{**args, "latitude":lat, "longitude":lon}, decision_at=clock[0]) is not None
+    for key, value in (("selected_flat_index", 992023), ("selected_grid_lon", api["longitude"])):
+        altered = deepcopy(proof)
+        altered[key] = value
+        assert transport.validate_source_cell_geometry_proof(altered, **args, decision_at=clock[0]) is not None
+    clock[0] = datetime(2026, 9, 30, 13, tzinfo=UTC)
+    assert transport.capture_source_cell_geometry_proof(**api) == canonical
 
 
 def _actual_o1280_static_fixture(tmp_path, monkeypatch):

@@ -1120,8 +1120,8 @@ def capture_source_cell_geometry_proof(*, latitude: float, longitude: float,
         raise ValueError("O1280 local static size changed")
     geometry = _o1280_snapshot_cell(body, latitude=requested_latitude, longitude=requested_longitude,
         target_elevation_m=target_elevation_m)
-    if (not math.isclose(float(geometry["selected_grid_lat"]),latitude,abs_tol=1e-5)
-        or not math.isclose((float(geometry["selected_grid_lon"])+180)%360-180,(longitude+180)%360-180,abs_tol=1e-5)):
+    if not same_grid_cell(float(geometry["selected_grid_lat"]),
+            float(geometry["selected_grid_lon"]), latitude, longitude):
         raise ValueError("O1280 response cell does not match actual requested terrain selection")
     geometry.update(requested_latitude=requested_latitude,requested_longitude=requested_longitude)
     sha = hashlib.sha256(body).hexdigest()
@@ -1186,8 +1186,8 @@ def validate_source_cell_geometry_proof(proof: Mapping[str,object], *, latitude:
                     return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
             elif claimed!=value:
                 return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
-        grid_lon = (float(actual["selected_grid_lon"])+180)%360-180
-        if actual["cell_is_sea"] or not math.isclose(float(actual["selected_grid_lat"]),latitude,abs_tol=1e-5) or not math.isclose(grid_lon,(longitude+180)%360-180,abs_tol=1e-5):
+        if actual["cell_is_sea"] or not same_grid_cell(float(actual["selected_grid_lat"]),
+                float(actual["selected_grid_lon"]), latitude, longitude):
             return "OM9_FROZEN_SOURCE_SELECTED_CELL_MISMATCH"
         return None
     except (KeyError,IndexError,TypeError,ValueError,OSError,RuntimeError):
