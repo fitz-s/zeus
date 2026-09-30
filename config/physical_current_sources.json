@@ -27,73 +27,247 @@
         "latitude": 60.32937,
         "longitude": 24.97274
       },
-      "authority_note": "Value comparison, not missing instrument certificate: 18/25 exact, 7 mismatches. Retain physical-current only.",
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 37/49; no separate instrument certificate required.",
       "settlement_grade": false,
       "value_identity_proof": {
         "city": "Helsinki",
         "channel": "fmi",
-        "n_pairs": 25,
-        "n_exact": 18,
+        "n_pairs": 49,
+        "n_exact": 37,
         "mismatches": [
           {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
             "time": "2026-09-29T15:50:00+00:00",
-            "raw": 14.4,
-            "rounded": 14,
+            "candidate_raw": 14.4,
+            "candidate_unit": "C",
+            "candidate_contract": 14,
             "resolver_raw": 15.0,
-            "resolver_rounded": 15,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 15,
+            "match": false,
+            "candidate_versions": [
+              14
+            ],
+            "resolver_versions": [
+              15
+            ]
           },
           {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
             "time": "2026-09-29T16:20:00+00:00",
-            "raw": 14.5,
-            "rounded": 15,
+            "candidate_raw": 14.5,
+            "candidate_unit": "C",
+            "candidate_contract": 15,
             "resolver_raw": 14.0,
-            "resolver_rounded": 14,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 14,
+            "match": false,
+            "candidate_versions": [
+              15
+            ],
+            "resolver_versions": [
+              14
+            ]
           },
           {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
             "time": "2026-09-29T17:50:00+00:00",
-            "raw": 13.4,
-            "rounded": 13,
+            "candidate_raw": 13.4,
+            "candidate_unit": "C",
+            "candidate_contract": 13,
             "resolver_raw": 14.0,
-            "resolver_rounded": 14,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 14,
+            "match": false,
+            "candidate_versions": [
+              13
+            ],
+            "resolver_versions": [
+              14
+            ]
           },
           {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
             "time": "2026-09-29T18:20:00+00:00",
-            "raw": 13.3,
-            "rounded": 13,
+            "candidate_raw": 13.3,
+            "candidate_unit": "C",
+            "candidate_contract": 13,
             "resolver_raw": 14.0,
-            "resolver_rounded": 14,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 14,
+            "match": false,
+            "candidate_versions": [
+              13
+            ],
+            "resolver_versions": [
+              14
+            ]
           },
           {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
             "time": "2026-09-29T19:50:00+00:00",
-            "raw": 11.3,
-            "rounded": 11,
+            "candidate_raw": 11.3,
+            "candidate_unit": "C",
+            "candidate_contract": 11,
             "resolver_raw": 12.0,
-            "resolver_rounded": 12,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 12,
+            "match": false,
+            "candidate_versions": [
+              11
+            ],
+            "resolver_versions": [
+              12
+            ]
           },
           {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
             "time": "2026-09-29T22:20:00+00:00",
-            "raw": 11.6,
-            "rounded": 12,
+            "candidate_raw": 11.6,
+            "candidate_unit": "C",
+            "candidate_contract": 12,
             "resolver_raw": 11.0,
-            "resolver_rounded": 11,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 11,
+            "match": false,
+            "candidate_versions": [
+              12
+            ],
+            "resolver_versions": [
+              11
+            ]
           },
           {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
             "time": "2026-09-30T03:20:00+00:00",
-            "raw": 7.6,
-            "rounded": 8,
+            "candidate_raw": 7.6,
+            "candidate_unit": "C",
+            "candidate_contract": 8,
             "resolver_raw": 7.0,
-            "resolver_rounded": 7,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 7,
+            "match": false,
+            "candidate_versions": [
+              8
+            ],
+            "resolver_versions": [
+              7
+            ]
+          },
+          {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
+            "time": "2026-09-30T06:50:00+00:00",
+            "candidate_raw": 10.5,
+            "candidate_unit": "C",
+            "candidate_contract": 11,
+            "resolver_raw": 10.0,
+            "resolver_unit": "C",
+            "resolver_contract": 10,
+            "match": false,
+            "candidate_versions": [
+              11
+            ],
+            "resolver_versions": [
+              10
+            ]
+          },
+          {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
+            "time": "2026-09-30T08:20:00+00:00",
+            "candidate_raw": 12.5,
+            "candidate_unit": "C",
+            "candidate_contract": 13,
+            "resolver_raw": 12.0,
+            "resolver_unit": "C",
+            "resolver_contract": 12,
+            "match": false,
+            "candidate_versions": [
+              13
+            ],
+            "resolver_versions": [
+              12
+            ]
+          },
+          {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
+            "time": "2026-09-30T08:50:00+00:00",
+            "candidate_raw": 13.5,
+            "candidate_unit": "C",
+            "candidate_contract": 14,
+            "resolver_raw": 13.0,
+            "resolver_unit": "C",
+            "resolver_contract": 13,
+            "match": false,
+            "candidate_versions": [
+              14
+            ],
+            "resolver_versions": [
+              13
+            ]
+          },
+          {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
+            "time": "2026-09-30T10:50:00+00:00",
+            "candidate_raw": 15.2,
+            "candidate_unit": "C",
+            "candidate_contract": 15,
+            "resolver_raw": 16.0,
+            "resolver_unit": "C",
+            "resolver_contract": 16,
+            "match": false,
+            "candidate_versions": [
+              15
+            ],
+            "resolver_versions": [
+              16
+            ]
+          },
+          {
+            "city": "Helsinki",
+            "channel": "fmi",
+            "station": "EFHK",
+            "time": "2026-09-30T14:50:00+00:00",
+            "candidate_raw": 14.4,
+            "candidate_unit": "C",
+            "candidate_contract": 14,
+            "resolver_raw": 15.0,
+            "resolver_unit": "C",
+            "resolver_contract": 15,
+            "match": false,
+            "candidate_versions": [
+              14
+            ],
+            "resolver_versions": [
+              15
+            ]
           }
         ],
-        "latest": "2026-09-30T03:50:00+00:00"
-      }
+        "version_conflicts": [],
+        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
+      },
+      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking."
     },
     {
       "provider": "jma_amedas",
@@ -109,11 +283,16 @@
       },
       "settlement_grade": true,
       "value_identity_proof": {
-        "n_pairs": 20,
-        "n_exact": 20,
-        "mismatches": []
+        "city": "Tokyo",
+        "channel": "jma",
+        "n_pairs": 23,
+        "n_exact": 23,
+        "mismatches": [],
+        "version_conflicts": [],
+        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
-      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 23/23; no separate instrument certificate required."
     },
     {
       "provider": "eccc_swob",
@@ -129,11 +308,16 @@
       },
       "settlement_grade": true,
       "value_identity_proof": {
-        "n_pairs": 5,
-        "n_exact": 5,
-        "mismatches": []
+        "city": "Toronto",
+        "channel": "eccc",
+        "n_pairs": 6,
+        "n_exact": 6,
+        "mismatches": [],
+        "version_conflicts": [],
+        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
-      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 6/6; no separate instrument certificate required."
     },
     {
       "provider": "imgw_synop",
@@ -147,13 +331,38 @@
       "identity": {
         "provider_station": "12375"
       },
-      "settlement_grade": true,
+      "settlement_grade": false,
       "value_identity_proof": {
-        "n_pairs": 1,
+        "city": "Warsaw",
+        "channel": "imgw",
+        "n_pairs": 2,
         "n_exact": 1,
-        "mismatches": []
+        "mismatches": [
+          {
+            "city": "Warsaw",
+            "channel": "imgw",
+            "station": "EPWA",
+            "time": "2026-09-30T15:00:00+00:00",
+            "candidate_raw": 19.3,
+            "candidate_unit": "C",
+            "candidate_contract": 19,
+            "resolver_raw": 20.0,
+            "resolver_unit": "C",
+            "resolver_contract": 20,
+            "match": false,
+            "candidate_versions": [
+              19
+            ],
+            "resolver_versions": [
+              20
+            ]
+          }
+        ],
+        "version_conflicts": [],
+        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
-      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 1/2; no separate instrument certificate required."
     },
     {
       "provider": "dwd_cdc",
@@ -169,52 +378,283 @@
       },
       "settlement_grade": false,
       "value_identity_proof": {
-        "n_pairs": 24,
-        "n_exact": 19,
+        "city": "Munich",
+        "channel": "dwd",
+        "n_pairs": 48,
+        "n_exact": 34,
         "mismatches": [
           {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
             "time": "2026-09-29T15:50:00+00:00",
-            "raw": 22.4,
-            "rounded": 22,
+            "candidate_raw": 22.4,
+            "candidate_unit": "C",
+            "candidate_contract": 22,
             "resolver_raw": 23.0,
-            "resolver_rounded": 23,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 23,
+            "match": false,
+            "candidate_versions": [
+              22
+            ],
+            "resolver_versions": [
+              23
+            ]
           },
           {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
             "time": "2026-09-29T16:20:00+00:00",
-            "raw": 21.4,
-            "rounded": 21,
+            "candidate_raw": 21.4,
+            "candidate_unit": "C",
+            "candidate_contract": 21,
             "resolver_raw": 22.0,
-            "resolver_rounded": 22,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 22,
+            "match": false,
+            "candidate_versions": [
+              21
+            ],
+            "resolver_versions": [
+              22
+            ]
           },
           {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
             "time": "2026-09-29T16:50:00+00:00",
-            "raw": 19.4,
-            "rounded": 19,
+            "candidate_raw": 19.4,
+            "candidate_unit": "C",
+            "candidate_contract": 19,
             "resolver_raw": 20.0,
-            "resolver_rounded": 20,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 20,
+            "match": false,
+            "candidate_versions": [
+              19
+            ],
+            "resolver_versions": [
+              20
+            ]
           },
           {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
             "time": "2026-09-29T17:50:00+00:00",
-            "raw": 16.1,
-            "rounded": 16,
+            "candidate_raw": 16.1,
+            "candidate_unit": "C",
+            "candidate_contract": 16,
             "resolver_raw": 17.0,
-            "resolver_rounded": 17,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 17,
+            "match": false,
+            "candidate_versions": [
+              16
+            ],
+            "resolver_versions": [
+              17
+            ]
           },
           {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
             "time": "2026-09-30T01:20:00+00:00",
-            "raw": 6.5,
-            "rounded": 7,
+            "candidate_raw": 6.5,
+            "candidate_unit": "C",
+            "candidate_contract": 7,
             "resolver_raw": 6.0,
-            "resolver_rounded": 6,
-            "match": false
+            "resolver_unit": "C",
+            "resolver_contract": 6,
+            "match": false,
+            "candidate_versions": [
+              7
+            ],
+            "resolver_versions": [
+              6
+            ]
+          },
+          {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
+            "time": "2026-09-30T04:50:00+00:00",
+            "candidate_raw": 4.3,
+            "candidate_unit": "C",
+            "candidate_contract": 4,
+            "resolver_raw": 5.0,
+            "resolver_unit": "C",
+            "resolver_contract": 5,
+            "match": false,
+            "candidate_versions": [
+              4
+            ],
+            "resolver_versions": [
+              5
+            ]
+          },
+          {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
+            "time": "2026-09-30T08:50:00+00:00",
+            "candidate_raw": 16.2,
+            "candidate_unit": "C",
+            "candidate_contract": 16,
+            "resolver_raw": 17.0,
+            "resolver_unit": "C",
+            "resolver_contract": 17,
+            "match": false,
+            "candidate_versions": [
+              16
+            ],
+            "resolver_versions": [
+              17
+            ]
+          },
+          {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
+            "time": "2026-09-30T11:20:00+00:00",
+            "candidate_raw": 20.9,
+            "candidate_unit": "C",
+            "candidate_contract": 21,
+            "resolver_raw": 22.0,
+            "resolver_unit": "C",
+            "resolver_contract": 22,
+            "match": false,
+            "candidate_versions": [
+              21
+            ],
+            "resolver_versions": [
+              22
+            ]
+          },
+          {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
+            "time": "2026-09-30T11:50:00+00:00",
+            "candidate_raw": 21.9,
+            "candidate_unit": "C",
+            "candidate_contract": 22,
+            "resolver_raw": 23.0,
+            "resolver_unit": "C",
+            "resolver_contract": 23,
+            "match": false,
+            "candidate_versions": [
+              22
+            ],
+            "resolver_versions": [
+              23
+            ]
+          },
+          {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
+            "time": "2026-09-30T12:20:00+00:00",
+            "candidate_raw": 22.7,
+            "candidate_unit": "C",
+            "candidate_contract": 23,
+            "resolver_raw": 24.0,
+            "resolver_unit": "C",
+            "resolver_contract": 24,
+            "match": false,
+            "candidate_versions": [
+              23
+            ],
+            "resolver_versions": [
+              24
+            ]
+          },
+          {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
+            "time": "2026-09-30T13:20:00+00:00",
+            "candidate_raw": 22.9,
+            "candidate_unit": "C",
+            "candidate_contract": 23,
+            "resolver_raw": 24.0,
+            "resolver_unit": "C",
+            "resolver_contract": 24,
+            "match": false,
+            "candidate_versions": [
+              23
+            ],
+            "resolver_versions": [
+              24
+            ]
+          },
+          {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
+            "time": "2026-09-30T13:50:00+00:00",
+            "candidate_raw": 23.1,
+            "candidate_unit": "C",
+            "candidate_contract": 23,
+            "resolver_raw": 24.0,
+            "resolver_unit": "C",
+            "resolver_contract": 24,
+            "match": false,
+            "candidate_versions": [
+              23
+            ],
+            "resolver_versions": [
+              24
+            ]
+          },
+          {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
+            "time": "2026-09-30T14:50:00+00:00",
+            "candidate_raw": 23.6,
+            "candidate_unit": "C",
+            "candidate_contract": 24,
+            "resolver_raw": 25.0,
+            "resolver_unit": "C",
+            "resolver_contract": 25,
+            "match": false,
+            "candidate_versions": [
+              24
+            ],
+            "resolver_versions": [
+              25
+            ]
+          },
+          {
+            "city": "Munich",
+            "channel": "dwd",
+            "station": "EDDM",
+            "time": "2026-09-30T15:20:00+00:00",
+            "candidate_raw": 23.4,
+            "candidate_unit": "C",
+            "candidate_contract": 23,
+            "resolver_raw": 24.0,
+            "resolver_unit": "C",
+            "resolver_contract": 24,
+            "match": false,
+            "candidate_versions": [
+              23
+            ],
+            "resolver_versions": [
+              24
+            ]
           }
-        ]
+        ],
+        "version_conflicts": [],
+        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
-      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 34/48; no separate instrument certificate required."
     },
     {
       "provider": "knmi_observations",
@@ -230,11 +670,16 @@
       },
       "settlement_grade": false,
       "value_identity_proof": {
+        "city": "Amsterdam",
+        "channel": "knmi",
         "n_pairs": 0,
         "n_exact": 0,
-        "mismatches": []
+        "mismatches": [],
+        "version_conflicts": [],
+        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
-      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 0/0; no separate instrument certificate required."
     },
     {
       "provider": "wu_station_history",
@@ -250,11 +695,16 @@
       },
       "settlement_grade": true,
       "value_identity_proof": {
-        "n_pairs": 28,
-        "n_exact": 28,
-        "mismatches": []
+        "city": "Jinan",
+        "channel": "wu_station_history",
+        "n_pairs": 40,
+        "n_exact": 40,
+        "mismatches": [],
+        "version_conflicts": [],
+        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
-      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 40/40; no separate instrument certificate required."
     },
     {
       "provider": "wu_station_current",
@@ -270,11 +720,16 @@
       },
       "settlement_grade": false,
       "value_identity_proof": {
+        "city": "Jinan",
+        "channel": "wu_station_current",
         "n_pairs": 0,
         "n_exact": 0,
-        "mismatches": []
+        "mismatches": [],
+        "version_conflicts": [],
+        "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
-      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 0/0; no separate instrument certificate required."
     }
   ]
 }

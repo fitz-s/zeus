@@ -36,6 +36,22 @@ class PhysicalCurrentSource:
     settlement_grade: bool = False
 
 
+def _settlement_grade(row: dict[str, Any]) -> bool:
+    """One value-identity admission rule for every provider, including FMI."""
+    grade = row.get("settlement_grade", False)
+    if not isinstance(grade, bool):
+        raise ValueError("STATION_VALUE_IDENTITY_GRADE_INVALID")
+    if not grade:
+        return False
+    proof = row.get("value_identity_proof", {})
+    pairs, exact = proof.get("n_pairs"), proof.get("n_exact")
+    if not (type(pairs) is int and type(exact) is int and pairs > 0
+            and exact == pairs and proof.get("mismatches") == []
+            and not proof.get("version_conflicts", [])):
+        raise ValueError("STATION_VALUE_IDENTITY_NOT_PROVEN")
+    return True
+
+
 @lru_cache(maxsize=4)
 def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSource, ...], float]:
     data = json.loads(Path(path).read_text())
@@ -44,6 +60,7 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
     sources = []
     seen = set()
     for row in data["sources"]:
+        grade = _settlement_grade(row)
         if row["provider"] != "fmi_wfs":
             from src.data.station_temperature_adapters import CHANNELS
             identity = row["identity"]
@@ -57,12 +74,6 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
                 or not math.isfinite(seconds) or seconds < 60 or row["unit"] != "C"
                 or not kinds or any(t not in {"noaa", "wu_icao"} for t in kinds)):
                 raise ValueError("PHYSICAL_CURRENT_ADAPTER_INVALID")
-            proof = row.get("value_identity_proof", {})
-            grade = bool(row.get("settlement_grade", False))
-            if grade and not (proof.get("n_pairs", 0) > 0
-                and proof.get("n_exact") == proof.get("n_pairs")
-                and proof.get("mismatches") == []):
-                raise ValueError("STATION_VALUE_IDENTITY_NOT_PROVEN")
             sources.append(PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
                                                   kinds, "C", seconds, None, dict(identity), grade))
             seen.add(key)
@@ -84,7 +95,7 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
         station = FmiStation(row["station_id"], str(identity["fmisid"]), str(identity["wmo"]),
                              identity["name"], latitude, longitude)
         sources.append(PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
-                                              types, row["unit"], seconds, station))
+                                              types, row["unit"], seconds, station, dict(identity), grade))
     budget = data["providers"]["fmi_wfs"]
     fraction = float(budget["budget_fraction"])
     per_day, per_window = int(budget["requests_per_day"]), int(budget["requests_per_five_minutes"])

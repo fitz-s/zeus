@@ -1,0 +1,3012 @@
+{
+  "rule": "same configured station and exact UTC valid time; contract unit; floor(x+0.5)",
+  "scope": "Short sampled windows only; value equality does not prove every future value or publication latency.",
+  "excluded_latency_claims": [
+    "KNMI listing receipt is not observation download receipt",
+    "Initial positive observations are left-censored, not measured first-publication delays",
+    "Old JMA multi-resource polls do not prove a negative bound",
+    "WU history is the resolver endpoint itself, not an independent faster transport"
+  ],
+  "inputs": [
+    {
+      "path": "recovered/measurements_samples.json",
+      "sha256": "cb0bfd1154c03adb84d667c5669b86df4eda3da93fa76aac916acbfca96c29a5",
+      "sample_rows": 27328,
+      "first_receipt": "2026-09-30T03:47:41.704129+00:00",
+      "last_receipt": "2026-09-30T04:00:49.767204+00:00"
+    },
+    {
+      "path": "recovered/measurements_late_samples.json",
+      "sha256": "fffab75648f0eea805b7ec505df52f84f75372248b5840d45933eed49a3aa504",
+      "sample_rows": 19421,
+      "first_receipt": "2026-09-30T04:05:14.014454+00:00",
+      "last_receipt": "2026-09-30T04:14:15.400263+00:00"
+    },
+    {
+      "path": "resume_measurements/samples.json",
+      "sha256": "0204e498ecf47bb3aaa0d88bf15b82fbc642c1e3afb2138b652c35d0ba2be3af",
+      "sample_rows": 23914,
+      "first_receipt": "2026-09-30T15:49:16.556142+00:00",
+      "last_receipt": "2026-09-30T16:00:32.451108+00:00"
+    }
+  ],
+  "cities": [
+    {
+      "city": "Amsterdam",
+      "station": "EHAM",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 18,
+          "n_exact": 18,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        },
+        {
+          "channel": "knmi",
+          "n_pairs": 0,
+          "n_exact": 0,
+          "value_identity_proven": false,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Ankara",
+      "station": "LTAC",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 18,
+          "n_exact": 18,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Atlanta",
+      "station": "KATL",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 14,
+          "n_exact": 14,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Auckland",
+      "station": "NZAA",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        },
+        {
+          "channel": "wu_station_history",
+          "n_pairs": 96,
+          "n_exact": 96,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Austin",
+      "station": "KAUS",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 12,
+          "n_exact": 12,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Beijing",
+      "station": "ZBAA",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Buenos Aires",
+      "station": "SAEZ",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 10,
+          "n_exact": 10,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Busan",
+      "station": "RKPK",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 8,
+          "n_exact": 8,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Cape Town",
+      "station": "FACT",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Chengdu",
+      "station": "ZUUU",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Chicago",
+      "station": "KORD",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 21,
+          "n_exact": 19,
+          "value_identity_proven": false,
+          "bounded_transitions": 3
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Chongqing",
+      "station": "ZUCK",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Dallas",
+      "station": "KDAL",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 11,
+          "n_exact": 11,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Denver",
+      "station": "KBKF",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Guangzhou",
+      "station": "ZGGG",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Helsinki",
+      "station": "EFHK",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 18,
+          "n_exact": 18,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        },
+        {
+          "channel": "fmi",
+          "n_pairs": 49,
+          "n_exact": 37,
+          "value_identity_proven": false,
+          "bounded_transitions": 3
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Hong Kong",
+      "station": null,
+      "channels": [],
+      "status": "NO_COMPARISON_IN_THIS_EXPERIMENT"
+    },
+    {
+      "city": "Houston",
+      "station": "KHOU",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 10,
+          "n_exact": 10,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Istanbul",
+      "station": "LTFM",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Jinan",
+      "station": "ZSJN",
+      "channels": [
+        {
+          "channel": "wu_station_current",
+          "n_pairs": 0,
+          "n_exact": 0,
+          "value_identity_proven": false,
+          "bounded_transitions": 1
+        },
+        {
+          "channel": "wu_station_history",
+          "n_pairs": 40,
+          "n_exact": 40,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Jakarta",
+      "station": "WIHH",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 14,
+          "n_exact": 14,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        },
+        {
+          "channel": "wu_station_history",
+          "n_pairs": 81,
+          "n_exact": 81,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Jeddah",
+      "station": "OEJN",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Karachi",
+      "station": "OPKC",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Kuala Lumpur",
+      "station": "WMKK",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Lagos",
+      "station": "DNMM",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 5,
+          "n_exact": 5,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        },
+        {
+          "channel": "wu_station_history",
+          "n_pairs": 40,
+          "n_exact": 40,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "London",
+      "station": "EGLC",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 18,
+          "n_exact": 18,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Los Angeles",
+      "station": "KLAX",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 12,
+          "n_exact": 12,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Lucknow",
+      "station": "VILK",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Madrid",
+      "station": "LEMD",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Manila",
+      "station": "RPLL",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Mexico City",
+      "station": "MMMX",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Miami",
+      "station": "KMIA",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 10,
+          "n_exact": 10,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Milan",
+      "station": "LIMC",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 18,
+          "n_exact": 18,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Moscow",
+      "station": "UUWW",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Munich",
+      "station": "EDDM",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 18,
+          "n_exact": 18,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        },
+        {
+          "channel": "dwd",
+          "n_pairs": 48,
+          "n_exact": 34,
+          "value_identity_proven": false,
+          "bounded_transitions": 6
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "NYC",
+      "station": "KLGA",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Panama City",
+      "station": "MPMG",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Paris",
+      "station": "LFPB",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Qingdao",
+      "station": "ZSQD",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "San Francisco",
+      "station": "KSFO",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 10,
+          "n_exact": 10,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Sao Paulo",
+      "station": "SBGR",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Seattle",
+      "station": "KSEA",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 13,
+          "n_exact": 13,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Seoul",
+      "station": "RKSI",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Shanghai",
+      "station": "ZSPD",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Shenzhen",
+      "station": "ZGSZ",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Singapore",
+      "station": "WSSS",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Taipei",
+      "station": "RCSS",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 16,
+          "n_exact": 16,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        },
+        {
+          "channel": "wu_station_history",
+          "n_pairs": 83,
+          "n_exact": 83,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Tel Aviv",
+      "station": "LLBG",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 2
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Tokyo",
+      "station": "RJTT",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        },
+        {
+          "channel": "jma",
+          "n_pairs": 23,
+          "n_exact": 23,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Toronto",
+      "station": "CYYZ",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        },
+        {
+          "channel": "eccc",
+          "n_pairs": 6,
+          "n_exact": 6,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Warsaw",
+      "station": "EPWA",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 0
+        },
+        {
+          "channel": "imgw",
+          "n_pairs": 2,
+          "n_exact": 1,
+          "value_identity_proven": false,
+          "bounded_transitions": 0
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Wellington",
+      "station": "NZWN",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 17,
+          "n_exact": 17,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Wuhan",
+      "station": "ZHHH",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    },
+    {
+      "city": "Zhengzhou",
+      "station": "ZHCC",
+      "channels": [
+        {
+          "channel": "awc",
+          "n_pairs": 9,
+          "n_exact": 9,
+          "value_identity_proven": true,
+          "bounded_transitions": 1
+        }
+      ],
+      "status": "MEASURED"
+    }
+  ],
+  "comparisons": [
+    {
+      "city": "Amsterdam",
+      "station": "EHAM",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 18,
+      "n_exact": 18,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:55:00+00:00",
+      "latest_value": 23.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Amsterdam",
+      "station": "EHAM",
+      "channel": "knmi",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 12,
+      "unpaired_times": [
+        "2026-09-30T02:30:00+00:00",
+        "2026-09-30T02:40:00+00:00",
+        "2026-09-30T02:50:00+00:00",
+        "2026-09-30T03:00:00+00:00",
+        "2026-09-30T03:10:00+00:00",
+        "2026-09-30T03:20:00+00:00",
+        "2026-09-30T03:30:00+00:00",
+        "2026-09-30T03:40:00+00:00",
+        "2026-09-30T03:50:00+00:00",
+        "2026-09-30T04:00:00+00:00",
+        "2026-09-30T04:10:00+00:00",
+        "2026-09-30T15:40:00+00:00"
+      ],
+      "value_identity_proven": false,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:40:00+00:00",
+      "latest_value": 22.6,
+      "latest_receipt": "2026-09-30T15:49:35.560401+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Ankara",
+      "station": "LTAC",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 18,
+      "n_exact": 18,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:50:00+00:00",
+      "latest_value": 13.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Atlanta",
+      "station": "KATL",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 14,
+      "n_exact": 14,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:52:00+00:00",
+      "latest_value": 24.4,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Auckland",
+      "station": "NZAA",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 8,
+      "unpaired_times": [
+        "2026-09-30T12:00:00+00:00",
+        "2026-09-30T12:30:00+00:00",
+        "2026-09-30T13:00:00+00:00",
+        "2026-09-30T13:30:00+00:00",
+        "2026-09-30T14:00:00+00:00",
+        "2026-09-30T14:30:00+00:00",
+        "2026-09-30T15:00:00+00:00",
+        "2026-09-30T15:30:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 9.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Auckland",
+      "station": "NZAA",
+      "channel": "wu_station_history",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 96,
+      "n_exact": 96,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": true,
+      "latest_observed": "2026-09-30T10:30:00+00:00",
+      "latest_value": 11.0,
+      "latest_receipt": "2026-09-30T16:00:29.676680+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Austin",
+      "station": "KAUS",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 12,
+      "n_exact": 12,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:53:00+00:00",
+      "latest_value": 29.4,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Beijing",
+      "station": "ZBAA",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 16.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Buenos Aires",
+      "station": "SAEZ",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 10,
+      "n_exact": 10,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 16.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Busan",
+      "station": "RKPK",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 8,
+      "n_exact": 8,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 20.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Cape Town",
+      "station": "FACT",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 28.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Chengdu",
+      "station": "ZUUU",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 22.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Chicago",
+      "station": "KORD",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 21,
+      "n_exact": 19,
+      "mismatches": [
+        {
+          "city": "Chicago",
+          "channel": "awc",
+          "station": "KORD",
+          "time": "2026-09-30T15:40:00+00:00",
+          "candidate_raw": 16.7,
+          "candidate_unit": "C",
+          "candidate_contract": 62,
+          "resolver_raw": 62.6,
+          "resolver_unit": "F",
+          "resolver_contract": 63,
+          "match": false,
+          "candidate_versions": [
+            62
+          ],
+          "resolver_versions": [
+            63
+          ]
+        },
+        {
+          "city": "Chicago",
+          "channel": "awc",
+          "station": "KORD",
+          "time": "2026-09-30T15:30:00+00:00",
+          "candidate_raw": 16.7,
+          "candidate_unit": "C",
+          "candidate_contract": 62,
+          "resolver_raw": 62.6,
+          "resolver_unit": "F",
+          "resolver_contract": 63,
+          "match": false,
+          "candidate_versions": [
+            62
+          ],
+          "resolver_versions": [
+            63
+          ]
+        }
+      ],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": false,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:51:00+00:00",
+      "latest_value": 16.7,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 3
+    },
+    {
+      "city": "Chongqing",
+      "station": "ZUCK",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 23.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Dallas",
+      "station": "KDAL",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 11,
+      "n_exact": 11,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:53:00+00:00",
+      "latest_value": 28.9,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Denver",
+      "station": "KBKF",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T14:58:00+00:00",
+      "latest_value": 14.2,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Guangzhou",
+      "station": "ZGGG",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 31.0,
+      "latest_receipt": "2026-09-30T16:00:28.196382+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Helsinki",
+      "station": "EFHK",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 18,
+      "n_exact": 18,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:50:00+00:00",
+      "latest_value": 12.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Helsinki",
+      "station": "EFHK",
+      "channel": "fmi",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 49,
+      "n_exact": 37,
+      "mismatches": [
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T15:50:00+00:00",
+          "candidate_raw": 14.4,
+          "candidate_unit": "C",
+          "candidate_contract": 14,
+          "resolver_raw": 15.0,
+          "resolver_unit": "C",
+          "resolver_contract": 15,
+          "match": false,
+          "candidate_versions": [
+            14
+          ],
+          "resolver_versions": [
+            15
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T16:20:00+00:00",
+          "candidate_raw": 14.5,
+          "candidate_unit": "C",
+          "candidate_contract": 15,
+          "resolver_raw": 14.0,
+          "resolver_unit": "C",
+          "resolver_contract": 14,
+          "match": false,
+          "candidate_versions": [
+            15
+          ],
+          "resolver_versions": [
+            14
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T17:50:00+00:00",
+          "candidate_raw": 13.4,
+          "candidate_unit": "C",
+          "candidate_contract": 13,
+          "resolver_raw": 14.0,
+          "resolver_unit": "C",
+          "resolver_contract": 14,
+          "match": false,
+          "candidate_versions": [
+            13
+          ],
+          "resolver_versions": [
+            14
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T18:20:00+00:00",
+          "candidate_raw": 13.3,
+          "candidate_unit": "C",
+          "candidate_contract": 13,
+          "resolver_raw": 14.0,
+          "resolver_unit": "C",
+          "resolver_contract": 14,
+          "match": false,
+          "candidate_versions": [
+            13
+          ],
+          "resolver_versions": [
+            14
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T19:50:00+00:00",
+          "candidate_raw": 11.3,
+          "candidate_unit": "C",
+          "candidate_contract": 11,
+          "resolver_raw": 12.0,
+          "resolver_unit": "C",
+          "resolver_contract": 12,
+          "match": false,
+          "candidate_versions": [
+            11
+          ],
+          "resolver_versions": [
+            12
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-29T22:20:00+00:00",
+          "candidate_raw": 11.6,
+          "candidate_unit": "C",
+          "candidate_contract": 12,
+          "resolver_raw": 11.0,
+          "resolver_unit": "C",
+          "resolver_contract": 11,
+          "match": false,
+          "candidate_versions": [
+            12
+          ],
+          "resolver_versions": [
+            11
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T03:20:00+00:00",
+          "candidate_raw": 7.6,
+          "candidate_unit": "C",
+          "candidate_contract": 8,
+          "resolver_raw": 7.0,
+          "resolver_unit": "C",
+          "resolver_contract": 7,
+          "match": false,
+          "candidate_versions": [
+            8
+          ],
+          "resolver_versions": [
+            7
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T06:50:00+00:00",
+          "candidate_raw": 10.5,
+          "candidate_unit": "C",
+          "candidate_contract": 11,
+          "resolver_raw": 10.0,
+          "resolver_unit": "C",
+          "resolver_contract": 10,
+          "match": false,
+          "candidate_versions": [
+            11
+          ],
+          "resolver_versions": [
+            10
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T08:20:00+00:00",
+          "candidate_raw": 12.5,
+          "candidate_unit": "C",
+          "candidate_contract": 13,
+          "resolver_raw": 12.0,
+          "resolver_unit": "C",
+          "resolver_contract": 12,
+          "match": false,
+          "candidate_versions": [
+            13
+          ],
+          "resolver_versions": [
+            12
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T08:50:00+00:00",
+          "candidate_raw": 13.5,
+          "candidate_unit": "C",
+          "candidate_contract": 14,
+          "resolver_raw": 13.0,
+          "resolver_unit": "C",
+          "resolver_contract": 13,
+          "match": false,
+          "candidate_versions": [
+            14
+          ],
+          "resolver_versions": [
+            13
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T10:50:00+00:00",
+          "candidate_raw": 15.2,
+          "candidate_unit": "C",
+          "candidate_contract": 15,
+          "resolver_raw": 16.0,
+          "resolver_unit": "C",
+          "resolver_contract": 16,
+          "match": false,
+          "candidate_versions": [
+            15
+          ],
+          "resolver_versions": [
+            16
+          ]
+        },
+        {
+          "city": "Helsinki",
+          "channel": "fmi",
+          "station": "EFHK",
+          "time": "2026-09-30T14:50:00+00:00",
+          "candidate_raw": 14.4,
+          "candidate_unit": "C",
+          "candidate_contract": 14,
+          "resolver_raw": 15.0,
+          "resolver_unit": "C",
+          "resolver_contract": 15,
+          "match": false,
+          "candidate_versions": [
+            14
+          ],
+          "resolver_versions": [
+            15
+          ]
+        }
+      ],
+      "version_conflicts": [],
+      "n_unpaired_times": 96,
+      "unpaired_times": [
+        "2026-09-29T16:00:00+00:00",
+        "2026-09-29T16:10:00+00:00",
+        "2026-09-29T16:30:00+00:00",
+        "2026-09-29T16:40:00+00:00",
+        "2026-09-29T17:00:00+00:00",
+        "2026-09-29T17:10:00+00:00",
+        "2026-09-29T17:30:00+00:00",
+        "2026-09-29T17:40:00+00:00",
+        "2026-09-29T18:00:00+00:00",
+        "2026-09-29T18:10:00+00:00",
+        "2026-09-29T18:30:00+00:00",
+        "2026-09-29T18:40:00+00:00",
+        "2026-09-29T19:00:00+00:00",
+        "2026-09-29T19:10:00+00:00",
+        "2026-09-29T19:30:00+00:00",
+        "2026-09-29T19:40:00+00:00",
+        "2026-09-29T20:00:00+00:00",
+        "2026-09-29T20:10:00+00:00",
+        "2026-09-29T20:30:00+00:00",
+        "2026-09-29T20:40:00+00:00",
+        "2026-09-29T21:00:00+00:00",
+        "2026-09-29T21:10:00+00:00",
+        "2026-09-29T21:30:00+00:00",
+        "2026-09-29T21:40:00+00:00",
+        "2026-09-29T22:00:00+00:00",
+        "2026-09-29T22:10:00+00:00",
+        "2026-09-29T22:30:00+00:00",
+        "2026-09-29T22:40:00+00:00",
+        "2026-09-29T23:00:00+00:00",
+        "2026-09-29T23:10:00+00:00",
+        "2026-09-29T23:30:00+00:00",
+        "2026-09-29T23:40:00+00:00",
+        "2026-09-30T00:00:00+00:00",
+        "2026-09-30T00:10:00+00:00",
+        "2026-09-30T00:30:00+00:00",
+        "2026-09-30T00:40:00+00:00",
+        "2026-09-30T01:00:00+00:00",
+        "2026-09-30T01:10:00+00:00",
+        "2026-09-30T01:30:00+00:00",
+        "2026-09-30T01:40:00+00:00",
+        "2026-09-30T02:00:00+00:00",
+        "2026-09-30T02:10:00+00:00",
+        "2026-09-30T02:30:00+00:00",
+        "2026-09-30T02:40:00+00:00",
+        "2026-09-30T03:00:00+00:00",
+        "2026-09-30T03:10:00+00:00",
+        "2026-09-30T03:30:00+00:00",
+        "2026-09-30T03:40:00+00:00",
+        "2026-09-30T04:00:00+00:00",
+        "2026-09-30T04:10:00+00:00",
+        "2026-09-30T04:30:00+00:00",
+        "2026-09-30T04:40:00+00:00",
+        "2026-09-30T05:00:00+00:00",
+        "2026-09-30T05:10:00+00:00",
+        "2026-09-30T05:30:00+00:00",
+        "2026-09-30T05:40:00+00:00",
+        "2026-09-30T06:00:00+00:00",
+        "2026-09-30T06:10:00+00:00",
+        "2026-09-30T06:30:00+00:00",
+        "2026-09-30T06:40:00+00:00",
+        "2026-09-30T07:00:00+00:00",
+        "2026-09-30T07:10:00+00:00",
+        "2026-09-30T07:30:00+00:00",
+        "2026-09-30T07:40:00+00:00",
+        "2026-09-30T08:00:00+00:00",
+        "2026-09-30T08:10:00+00:00",
+        "2026-09-30T08:30:00+00:00",
+        "2026-09-30T08:40:00+00:00",
+        "2026-09-30T09:00:00+00:00",
+        "2026-09-30T09:10:00+00:00",
+        "2026-09-30T09:30:00+00:00",
+        "2026-09-30T09:40:00+00:00",
+        "2026-09-30T10:00:00+00:00",
+        "2026-09-30T10:10:00+00:00",
+        "2026-09-30T10:30:00+00:00",
+        "2026-09-30T10:40:00+00:00",
+        "2026-09-30T11:00:00+00:00",
+        "2026-09-30T11:10:00+00:00",
+        "2026-09-30T11:30:00+00:00",
+        "2026-09-30T11:40:00+00:00",
+        "2026-09-30T12:00:00+00:00",
+        "2026-09-30T12:10:00+00:00",
+        "2026-09-30T12:30:00+00:00",
+        "2026-09-30T12:40:00+00:00",
+        "2026-09-30T13:00:00+00:00",
+        "2026-09-30T13:10:00+00:00",
+        "2026-09-30T13:30:00+00:00",
+        "2026-09-30T13:40:00+00:00",
+        "2026-09-30T14:00:00+00:00",
+        "2026-09-30T14:10:00+00:00",
+        "2026-09-30T14:30:00+00:00",
+        "2026-09-30T14:40:00+00:00",
+        "2026-09-30T15:00:00+00:00",
+        "2026-09-30T15:10:00+00:00",
+        "2026-09-30T15:30:00+00:00",
+        "2026-09-30T15:40:00+00:00"
+      ],
+      "value_identity_proven": false,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:50:00+00:00",
+      "latest_value": 12.4,
+      "latest_receipt": "2026-09-30T16:00:30.722853+00:00",
+      "bounded_transitions": 3
+    },
+    {
+      "city": "Houston",
+      "station": "KHOU",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 10,
+      "n_exact": 10,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:53:00+00:00",
+      "latest_value": 31.7,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Istanbul",
+      "station": "LTFM",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 1,
+      "unpaired_times": [
+        "2026-09-30T02:20:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:50:00+00:00",
+      "latest_value": 19.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Jakarta",
+      "station": "WIHH",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 14,
+      "n_exact": 14,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 1,
+      "unpaired_times": [
+        "2026-09-30T15:30:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 27.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Jakarta",
+      "station": "WIHH",
+      "channel": "wu_station_history",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 81,
+      "n_exact": 81,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": true,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 27.0,
+      "latest_receipt": "2026-09-30T16:00:29.722281+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Jeddah",
+      "station": "OEJN",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 1,
+      "unpaired_times": [
+        "2026-09-30T16:00:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T16:00:00+00:00",
+      "latest_value": 32.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Jinan",
+      "station": "ZSJN",
+      "channel": "wu_station_current",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 0,
+      "n_exact": 0,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 2,
+      "unpaired_times": [
+        "2026-09-30T15:46:36+00:00",
+        "2026-09-30T15:56:38+00:00"
+      ],
+      "value_identity_proven": false,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:56:38+00:00",
+      "latest_value": 14.0,
+      "latest_receipt": "2026-09-30T16:00:32.451108+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Jinan",
+      "station": "ZSJN",
+      "channel": "wu_station_history",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 40,
+      "n_exact": 40,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": true,
+      "latest_observed": "2026-09-30T14:00:00+00:00",
+      "latest_value": 15.0,
+      "latest_receipt": "2026-09-30T16:00:29.696418+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Karachi",
+      "station": "OPKC",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 28.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Kuala Lumpur",
+      "station": "WMKK",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 25.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Lagos",
+      "station": "DNMM",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 5,
+      "n_exact": 5,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 1,
+      "unpaired_times": [
+        "2026-09-30T15:00:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 30.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Lagos",
+      "station": "DNMM",
+      "channel": "wu_station_history",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 40,
+      "n_exact": 40,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": true,
+      "latest_observed": "2026-09-30T14:00:00+00:00",
+      "latest_value": 31.0,
+      "latest_receipt": "2026-09-30T16:00:29.749926+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "London",
+      "station": "EGLC",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 18,
+      "n_exact": 18,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:50:00+00:00",
+      "latest_value": 23.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Los Angeles",
+      "station": "KLAX",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 12,
+      "n_exact": 12,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:53:00+00:00",
+      "latest_value": 22.2,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Lucknow",
+      "station": "VILK",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 27.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Madrid",
+      "station": "LEMD",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 28.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Manila",
+      "station": "RPLL",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 30.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Mexico City",
+      "station": "MMMX",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 1,
+      "unpaired_times": [
+        "2026-09-30T15:46:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:46:00+00:00",
+      "latest_value": 23.0,
+      "latest_receipt": "2026-09-30T16:00:28.391427+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Miami",
+      "station": "KMIA",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 10,
+      "n_exact": 10,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:53:00+00:00",
+      "latest_value": 26.7,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Milan",
+      "station": "LIMC",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 18,
+      "n_exact": 18,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:50:00+00:00",
+      "latest_value": 23.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Moscow",
+      "station": "UUWW",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 6,
+      "unpaired_times": [
+        "2026-09-30T02:26:00+00:00",
+        "2026-09-30T03:03:00+00:00",
+        "2026-09-30T03:17:00+00:00",
+        "2026-09-30T03:54:00+00:00",
+        "2026-09-30T13:19:00+00:00",
+        "2026-09-30T14:25:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 14.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Munich",
+      "station": "EDDM",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 18,
+      "n_exact": 18,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:50:00+00:00",
+      "latest_value": 23.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Munich",
+      "station": "EDDM",
+      "channel": "dwd",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 48,
+      "n_exact": 34,
+      "mismatches": [
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-29T15:50:00+00:00",
+          "candidate_raw": 22.4,
+          "candidate_unit": "C",
+          "candidate_contract": 22,
+          "resolver_raw": 23.0,
+          "resolver_unit": "C",
+          "resolver_contract": 23,
+          "match": false,
+          "candidate_versions": [
+            22
+          ],
+          "resolver_versions": [
+            23
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-29T16:20:00+00:00",
+          "candidate_raw": 21.4,
+          "candidate_unit": "C",
+          "candidate_contract": 21,
+          "resolver_raw": 22.0,
+          "resolver_unit": "C",
+          "resolver_contract": 22,
+          "match": false,
+          "candidate_versions": [
+            21
+          ],
+          "resolver_versions": [
+            22
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-29T16:50:00+00:00",
+          "candidate_raw": 19.4,
+          "candidate_unit": "C",
+          "candidate_contract": 19,
+          "resolver_raw": 20.0,
+          "resolver_unit": "C",
+          "resolver_contract": 20,
+          "match": false,
+          "candidate_versions": [
+            19
+          ],
+          "resolver_versions": [
+            20
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-29T17:50:00+00:00",
+          "candidate_raw": 16.1,
+          "candidate_unit": "C",
+          "candidate_contract": 16,
+          "resolver_raw": 17.0,
+          "resolver_unit": "C",
+          "resolver_contract": 17,
+          "match": false,
+          "candidate_versions": [
+            16
+          ],
+          "resolver_versions": [
+            17
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T01:20:00+00:00",
+          "candidate_raw": 6.5,
+          "candidate_unit": "C",
+          "candidate_contract": 7,
+          "resolver_raw": 6.0,
+          "resolver_unit": "C",
+          "resolver_contract": 6,
+          "match": false,
+          "candidate_versions": [
+            7
+          ],
+          "resolver_versions": [
+            6
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T04:50:00+00:00",
+          "candidate_raw": 4.3,
+          "candidate_unit": "C",
+          "candidate_contract": 4,
+          "resolver_raw": 5.0,
+          "resolver_unit": "C",
+          "resolver_contract": 5,
+          "match": false,
+          "candidate_versions": [
+            4
+          ],
+          "resolver_versions": [
+            5
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T08:50:00+00:00",
+          "candidate_raw": 16.2,
+          "candidate_unit": "C",
+          "candidate_contract": 16,
+          "resolver_raw": 17.0,
+          "resolver_unit": "C",
+          "resolver_contract": 17,
+          "match": false,
+          "candidate_versions": [
+            16
+          ],
+          "resolver_versions": [
+            17
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T11:20:00+00:00",
+          "candidate_raw": 20.9,
+          "candidate_unit": "C",
+          "candidate_contract": 21,
+          "resolver_raw": 22.0,
+          "resolver_unit": "C",
+          "resolver_contract": 22,
+          "match": false,
+          "candidate_versions": [
+            21
+          ],
+          "resolver_versions": [
+            22
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T11:50:00+00:00",
+          "candidate_raw": 21.9,
+          "candidate_unit": "C",
+          "candidate_contract": 22,
+          "resolver_raw": 23.0,
+          "resolver_unit": "C",
+          "resolver_contract": 23,
+          "match": false,
+          "candidate_versions": [
+            22
+          ],
+          "resolver_versions": [
+            23
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T12:20:00+00:00",
+          "candidate_raw": 22.7,
+          "candidate_unit": "C",
+          "candidate_contract": 23,
+          "resolver_raw": 24.0,
+          "resolver_unit": "C",
+          "resolver_contract": 24,
+          "match": false,
+          "candidate_versions": [
+            23
+          ],
+          "resolver_versions": [
+            24
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T13:20:00+00:00",
+          "candidate_raw": 22.9,
+          "candidate_unit": "C",
+          "candidate_contract": 23,
+          "resolver_raw": 24.0,
+          "resolver_unit": "C",
+          "resolver_contract": 24,
+          "match": false,
+          "candidate_versions": [
+            23
+          ],
+          "resolver_versions": [
+            24
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T13:50:00+00:00",
+          "candidate_raw": 23.1,
+          "candidate_unit": "C",
+          "candidate_contract": 23,
+          "resolver_raw": 24.0,
+          "resolver_unit": "C",
+          "resolver_contract": 24,
+          "match": false,
+          "candidate_versions": [
+            23
+          ],
+          "resolver_versions": [
+            24
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T14:50:00+00:00",
+          "candidate_raw": 23.6,
+          "candidate_unit": "C",
+          "candidate_contract": 24,
+          "resolver_raw": 25.0,
+          "resolver_unit": "C",
+          "resolver_contract": 25,
+          "match": false,
+          "candidate_versions": [
+            24
+          ],
+          "resolver_versions": [
+            25
+          ]
+        },
+        {
+          "city": "Munich",
+          "channel": "dwd",
+          "station": "EDDM",
+          "time": "2026-09-30T15:20:00+00:00",
+          "candidate_raw": 23.4,
+          "candidate_unit": "C",
+          "candidate_contract": 23,
+          "resolver_raw": 24.0,
+          "resolver_unit": "C",
+          "resolver_contract": 24,
+          "match": false,
+          "candidate_versions": [
+            23
+          ],
+          "resolver_versions": [
+            24
+          ]
+        }
+      ],
+      "version_conflicts": [],
+      "n_unpaired_times": 189,
+      "unpaired_times": [
+        "2026-09-29T00:00:00+00:00",
+        "2026-09-29T00:10:00+00:00",
+        "2026-09-29T00:20:00+00:00",
+        "2026-09-29T00:30:00+00:00",
+        "2026-09-29T00:40:00+00:00",
+        "2026-09-29T00:50:00+00:00",
+        "2026-09-29T01:00:00+00:00",
+        "2026-09-29T01:10:00+00:00",
+        "2026-09-29T01:20:00+00:00",
+        "2026-09-29T01:30:00+00:00",
+        "2026-09-29T01:40:00+00:00",
+        "2026-09-29T01:50:00+00:00",
+        "2026-09-29T02:00:00+00:00",
+        "2026-09-29T02:10:00+00:00",
+        "2026-09-29T02:20:00+00:00",
+        "2026-09-29T02:30:00+00:00",
+        "2026-09-29T02:40:00+00:00",
+        "2026-09-29T02:50:00+00:00",
+        "2026-09-29T03:00:00+00:00",
+        "2026-09-29T03:10:00+00:00",
+        "2026-09-29T03:20:00+00:00",
+        "2026-09-29T03:30:00+00:00",
+        "2026-09-29T03:40:00+00:00",
+        "2026-09-29T03:50:00+00:00",
+        "2026-09-29T04:00:00+00:00",
+        "2026-09-29T04:10:00+00:00",
+        "2026-09-29T04:20:00+00:00",
+        "2026-09-29T04:30:00+00:00",
+        "2026-09-29T04:40:00+00:00",
+        "2026-09-29T04:50:00+00:00",
+        "2026-09-29T05:00:00+00:00",
+        "2026-09-29T05:10:00+00:00",
+        "2026-09-29T05:20:00+00:00",
+        "2026-09-29T05:30:00+00:00",
+        "2026-09-29T05:40:00+00:00",
+        "2026-09-29T05:50:00+00:00",
+        "2026-09-29T06:00:00+00:00",
+        "2026-09-29T06:10:00+00:00",
+        "2026-09-29T06:20:00+00:00",
+        "2026-09-29T06:30:00+00:00",
+        "2026-09-29T06:40:00+00:00",
+        "2026-09-29T06:50:00+00:00",
+        "2026-09-29T07:00:00+00:00",
+        "2026-09-29T07:10:00+00:00",
+        "2026-09-29T07:20:00+00:00",
+        "2026-09-29T07:30:00+00:00",
+        "2026-09-29T07:40:00+00:00",
+        "2026-09-29T07:50:00+00:00",
+        "2026-09-29T08:00:00+00:00",
+        "2026-09-29T08:10:00+00:00",
+        "2026-09-29T08:20:00+00:00",
+        "2026-09-29T08:30:00+00:00",
+        "2026-09-29T08:40:00+00:00",
+        "2026-09-29T08:50:00+00:00",
+        "2026-09-29T09:00:00+00:00",
+        "2026-09-29T09:10:00+00:00",
+        "2026-09-29T09:20:00+00:00",
+        "2026-09-29T09:30:00+00:00",
+        "2026-09-29T09:40:00+00:00",
+        "2026-09-29T09:50:00+00:00",
+        "2026-09-29T10:00:00+00:00",
+        "2026-09-29T10:10:00+00:00",
+        "2026-09-29T10:20:00+00:00",
+        "2026-09-29T10:30:00+00:00",
+        "2026-09-29T10:40:00+00:00",
+        "2026-09-29T10:50:00+00:00",
+        "2026-09-29T11:00:00+00:00",
+        "2026-09-29T11:10:00+00:00",
+        "2026-09-29T11:20:00+00:00",
+        "2026-09-29T11:30:00+00:00",
+        "2026-09-29T11:40:00+00:00",
+        "2026-09-29T11:50:00+00:00",
+        "2026-09-29T12:00:00+00:00",
+        "2026-09-29T12:10:00+00:00",
+        "2026-09-29T12:20:00+00:00",
+        "2026-09-29T12:30:00+00:00",
+        "2026-09-29T12:40:00+00:00",
+        "2026-09-29T12:50:00+00:00",
+        "2026-09-29T13:00:00+00:00",
+        "2026-09-29T13:10:00+00:00",
+        "2026-09-29T13:20:00+00:00",
+        "2026-09-29T13:30:00+00:00",
+        "2026-09-29T13:40:00+00:00",
+        "2026-09-29T13:50:00+00:00",
+        "2026-09-29T14:00:00+00:00",
+        "2026-09-29T14:10:00+00:00",
+        "2026-09-29T14:20:00+00:00",
+        "2026-09-29T14:30:00+00:00",
+        "2026-09-29T14:40:00+00:00",
+        "2026-09-29T14:50:00+00:00",
+        "2026-09-29T15:00:00+00:00",
+        "2026-09-29T15:10:00+00:00",
+        "2026-09-29T15:20:00+00:00",
+        "2026-09-29T15:30:00+00:00",
+        "2026-09-29T15:40:00+00:00",
+        "2026-09-29T16:00:00+00:00",
+        "2026-09-29T16:10:00+00:00",
+        "2026-09-29T16:30:00+00:00",
+        "2026-09-29T16:40:00+00:00",
+        "2026-09-29T17:00:00+00:00",
+        "2026-09-29T17:10:00+00:00",
+        "2026-09-29T17:30:00+00:00",
+        "2026-09-29T17:40:00+00:00",
+        "2026-09-29T18:00:00+00:00",
+        "2026-09-29T18:10:00+00:00",
+        "2026-09-29T18:30:00+00:00",
+        "2026-09-29T18:40:00+00:00",
+        "2026-09-29T19:00:00+00:00",
+        "2026-09-29T19:10:00+00:00",
+        "2026-09-29T19:30:00+00:00",
+        "2026-09-29T19:40:00+00:00",
+        "2026-09-29T20:00:00+00:00",
+        "2026-09-29T20:10:00+00:00",
+        "2026-09-29T20:30:00+00:00",
+        "2026-09-29T20:40:00+00:00",
+        "2026-09-29T21:00:00+00:00",
+        "2026-09-29T21:10:00+00:00",
+        "2026-09-29T21:30:00+00:00",
+        "2026-09-29T21:40:00+00:00",
+        "2026-09-29T22:00:00+00:00",
+        "2026-09-29T22:10:00+00:00",
+        "2026-09-29T22:30:00+00:00",
+        "2026-09-29T22:40:00+00:00",
+        "2026-09-29T23:00:00+00:00",
+        "2026-09-29T23:10:00+00:00",
+        "2026-09-29T23:30:00+00:00",
+        "2026-09-29T23:40:00+00:00",
+        "2026-09-30T00:00:00+00:00",
+        "2026-09-30T00:10:00+00:00",
+        "2026-09-30T00:30:00+00:00",
+        "2026-09-30T00:40:00+00:00",
+        "2026-09-30T01:00:00+00:00",
+        "2026-09-30T01:10:00+00:00",
+        "2026-09-30T01:30:00+00:00",
+        "2026-09-30T01:40:00+00:00",
+        "2026-09-30T02:00:00+00:00",
+        "2026-09-30T02:10:00+00:00",
+        "2026-09-30T02:30:00+00:00",
+        "2026-09-30T02:40:00+00:00",
+        "2026-09-30T03:00:00+00:00",
+        "2026-09-30T03:10:00+00:00",
+        "2026-09-30T03:30:00+00:00",
+        "2026-09-30T03:40:00+00:00",
+        "2026-09-30T04:00:00+00:00",
+        "2026-09-30T04:10:00+00:00",
+        "2026-09-30T04:30:00+00:00",
+        "2026-09-30T04:40:00+00:00",
+        "2026-09-30T05:00:00+00:00",
+        "2026-09-30T05:10:00+00:00",
+        "2026-09-30T05:30:00+00:00",
+        "2026-09-30T05:40:00+00:00",
+        "2026-09-30T06:00:00+00:00",
+        "2026-09-30T06:10:00+00:00",
+        "2026-09-30T06:30:00+00:00",
+        "2026-09-30T06:40:00+00:00",
+        "2026-09-30T07:00:00+00:00",
+        "2026-09-30T07:10:00+00:00",
+        "2026-09-30T07:30:00+00:00",
+        "2026-09-30T07:40:00+00:00",
+        "2026-09-30T08:00:00+00:00",
+        "2026-09-30T08:10:00+00:00",
+        "2026-09-30T08:30:00+00:00",
+        "2026-09-30T08:40:00+00:00",
+        "2026-09-30T09:00:00+00:00",
+        "2026-09-30T09:10:00+00:00",
+        "2026-09-30T09:30:00+00:00",
+        "2026-09-30T09:40:00+00:00",
+        "2026-09-30T10:00:00+00:00",
+        "2026-09-30T10:10:00+00:00",
+        "2026-09-30T10:30:00+00:00",
+        "2026-09-30T10:40:00+00:00",
+        "2026-09-30T11:00:00+00:00",
+        "2026-09-30T11:10:00+00:00",
+        "2026-09-30T11:30:00+00:00",
+        "2026-09-30T11:40:00+00:00",
+        "2026-09-30T12:00:00+00:00",
+        "2026-09-30T12:10:00+00:00",
+        "2026-09-30T12:30:00+00:00",
+        "2026-09-30T12:40:00+00:00",
+        "2026-09-30T13:00:00+00:00",
+        "2026-09-30T13:10:00+00:00",
+        "2026-09-30T13:30:00+00:00",
+        "2026-09-30T13:40:00+00:00",
+        "2026-09-30T14:00:00+00:00",
+        "2026-09-30T14:10:00+00:00",
+        "2026-09-30T14:30:00+00:00",
+        "2026-09-30T14:40:00+00:00",
+        "2026-09-30T15:00:00+00:00",
+        "2026-09-30T15:10:00+00:00"
+      ],
+      "value_identity_proven": false,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:20:00+00:00",
+      "latest_value": 23.4,
+      "latest_receipt": "2026-09-30T16:00:31.208910+00:00",
+      "bounded_transitions": 6
+    },
+    {
+      "city": "NYC",
+      "station": "KLGA",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T14:51:00+00:00",
+      "latest_value": 19.4,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Panama City",
+      "station": "MPMG",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 30.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Paris",
+      "station": "LFPB",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 21.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Qingdao",
+      "station": "ZSQD",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 18.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "San Francisco",
+      "station": "KSFO",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 10,
+      "n_exact": 10,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:56:00+00:00",
+      "latest_value": 17.8,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Sao Paulo",
+      "station": "SBGR",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 1,
+      "unpaired_times": [
+        "2026-09-30T16:00:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T16:00:00+00:00",
+      "latest_value": 31.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Seattle",
+      "station": "KSEA",
+      "channel": "awc",
+      "unit": "F",
+      "page_view": "hourly",
+      "n_pairs": 13,
+      "n_exact": 13,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:53:00+00:00",
+      "latest_value": 12.2,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Seoul",
+      "station": "RKSI",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 19.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Shanghai",
+      "station": "ZSPD",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 23.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Shenzhen",
+      "station": "ZGSZ",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 30.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Singapore",
+      "station": "WSSS",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 25.0,
+      "latest_receipt": "2026-09-30T16:00:29.071778+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Taipei",
+      "station": "RCSS",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 16,
+      "n_exact": 16,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 2,
+      "unpaired_times": [
+        "2026-09-30T15:00:00+00:00",
+        "2026-09-30T15:30:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 27.0,
+      "latest_receipt": "2026-09-30T16:00:29.609919+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Taipei",
+      "station": "RCSS",
+      "channel": "wu_station_history",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 83,
+      "n_exact": 83,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": true,
+      "latest_observed": "2026-09-30T14:30:00+00:00",
+      "latest_value": 28.0,
+      "latest_receipt": "2026-09-30T16:00:29.766146+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Tel Aviv",
+      "station": "LLBG",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:50:00+00:00",
+      "latest_value": 26.0,
+      "latest_receipt": "2026-09-30T16:00:29.609919+00:00",
+      "bounded_transitions": 2
+    },
+    {
+      "city": "Tokyo",
+      "station": "RJTT",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 18.0,
+      "latest_receipt": "2026-09-30T16:00:29.609919+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Tokyo",
+      "station": "RJTT",
+      "channel": "jma",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 23,
+      "n_exact": 23,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 44,
+      "unpaired_times": [
+        "2026-09-29T18:10:00+00:00",
+        "2026-09-29T18:20:00+00:00",
+        "2026-09-29T18:40:00+00:00",
+        "2026-09-29T18:50:00+00:00",
+        "2026-09-29T19:10:00+00:00",
+        "2026-09-29T19:20:00+00:00",
+        "2026-09-29T19:40:00+00:00",
+        "2026-09-29T19:50:00+00:00",
+        "2026-09-29T20:10:00+00:00",
+        "2026-09-29T20:20:00+00:00",
+        "2026-09-29T20:40:00+00:00",
+        "2026-09-29T20:50:00+00:00",
+        "2026-09-29T21:10:00+00:00",
+        "2026-09-29T21:20:00+00:00",
+        "2026-09-29T21:40:00+00:00",
+        "2026-09-29T21:50:00+00:00",
+        "2026-09-29T22:10:00+00:00",
+        "2026-09-29T22:20:00+00:00",
+        "2026-09-29T22:40:00+00:00",
+        "2026-09-29T22:50:00+00:00",
+        "2026-09-29T23:10:00+00:00",
+        "2026-09-29T23:20:00+00:00",
+        "2026-09-29T23:40:00+00:00",
+        "2026-09-29T23:50:00+00:00",
+        "2026-09-30T00:10:00+00:00",
+        "2026-09-30T00:20:00+00:00",
+        "2026-09-30T00:40:00+00:00",
+        "2026-09-30T00:50:00+00:00",
+        "2026-09-30T01:10:00+00:00",
+        "2026-09-30T01:20:00+00:00",
+        "2026-09-30T01:40:00+00:00",
+        "2026-09-30T01:50:00+00:00",
+        "2026-09-30T02:10:00+00:00",
+        "2026-09-30T02:20:00+00:00",
+        "2026-09-30T02:40:00+00:00",
+        "2026-09-30T02:50:00+00:00",
+        "2026-09-30T03:10:00+00:00",
+        "2026-09-30T03:20:00+00:00",
+        "2026-09-30T03:40:00+00:00",
+        "2026-09-30T03:50:00+00:00",
+        "2026-09-30T15:10:00+00:00",
+        "2026-09-30T15:20:00+00:00",
+        "2026-09-30T15:40:00+00:00",
+        "2026-09-30T15:50:00+00:00"
+      ],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:50:00+00:00",
+      "latest_value": 18.1,
+      "latest_receipt": "2026-09-30T16:00:31.296562+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Toronto",
+      "station": "CYYZ",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 19.0,
+      "latest_receipt": "2026-09-30T16:00:29.609919+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Toronto",
+      "station": "CYYZ",
+      "channel": "eccc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 6,
+      "n_exact": 6,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 18.6,
+      "latest_receipt": "2026-09-30T16:00:31.780137+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Warsaw",
+      "station": "EPWA",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 19.0,
+      "latest_receipt": "2026-09-30T16:00:29.609919+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Warsaw",
+      "station": "EPWA",
+      "channel": "imgw",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 2,
+      "n_exact": 1,
+      "mismatches": [
+        {
+          "city": "Warsaw",
+          "channel": "imgw",
+          "station": "EPWA",
+          "time": "2026-09-30T15:00:00+00:00",
+          "candidate_raw": 19.3,
+          "candidate_unit": "C",
+          "candidate_contract": 19,
+          "resolver_raw": 20.0,
+          "resolver_unit": "C",
+          "resolver_contract": 20,
+          "match": false,
+          "candidate_versions": [
+            19
+          ],
+          "resolver_versions": [
+            20
+          ]
+        }
+      ],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": false,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 19.3,
+      "latest_receipt": "2026-09-30T16:00:32.436109+00:00",
+      "bounded_transitions": 0
+    },
+    {
+      "city": "Wellington",
+      "station": "NZWN",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 17,
+      "n_exact": 17,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:30:00+00:00",
+      "latest_value": 12.0,
+      "latest_receipt": "2026-09-30T16:00:29.609919+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Wuhan",
+      "station": "ZHHH",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 22.0,
+      "latest_receipt": "2026-09-30T16:00:29.609919+00:00",
+      "bounded_transitions": 1
+    },
+    {
+      "city": "Zhengzhou",
+      "station": "ZHCC",
+      "channel": "awc",
+      "unit": "C",
+      "page_view": "all",
+      "n_pairs": 9,
+      "n_exact": 9,
+      "mismatches": [],
+      "version_conflicts": [],
+      "n_unpaired_times": 0,
+      "unpaired_times": [],
+      "value_identity_proven": true,
+      "same_endpoint_as_resolver": false,
+      "latest_observed": "2026-09-30T15:00:00+00:00",
+      "latest_value": 16.0,
+      "latest_receipt": "2026-09-30T16:00:29.609919+00:00",
+      "bounded_transitions": 1
+    }
+  ]
+}

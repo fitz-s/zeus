@@ -1,0 +1,65 @@
+city,station,channel,n_pairs,n_exact,value_identity_proven,bounded_transitions,n_unpaired_times
+Amsterdam,EHAM,awc,18,18,True,2,0
+Amsterdam,EHAM,knmi,0,0,False,0,12
+Ankara,LTAC,awc,18,18,True,2,0
+Atlanta,KATL,awc,14,14,True,2,0
+Auckland,NZAA,awc,9,9,True,1,8
+Auckland,NZAA,wu_station_history,96,96,True,2,0
+Austin,KAUS,awc,12,12,True,2,0
+Beijing,ZBAA,awc,17,17,True,1,0
+Buenos Aires,SAEZ,awc,10,10,True,1,0
+Busan,RKPK,awc,8,8,True,0,0
+Cape Town,FACT,awc,9,9,True,1,0
+Chengdu,ZUUU,awc,9,9,True,1,0
+Chicago,KORD,awc,21,19,False,3,0
+Chongqing,ZUCK,awc,9,9,True,1,0
+Dallas,KDAL,awc,11,11,True,2,0
+Denver,KBKF,awc,9,9,True,1,0
+Guangzhou,ZGGG,awc,17,17,True,1,0
+Helsinki,EFHK,awc,18,18,True,2,0
+Helsinki,EFHK,fmi,49,37,False,3,96
+Houston,KHOU,awc,10,10,True,2,0
+Istanbul,LTFM,awc,17,17,True,2,1
+Jakarta,WIHH,awc,14,14,True,1,1
+Jakarta,WIHH,wu_station_history,81,81,True,2,0
+Jeddah,OEJN,awc,9,9,True,1,1
+Jinan,ZSJN,wu_station_current,0,0,False,1,2
+Jinan,ZSJN,wu_station_history,40,40,True,0,0
+Karachi,OPKC,awc,17,17,True,0,0
+Kuala Lumpur,WMKK,awc,17,17,True,1,0
+Lagos,DNMM,awc,5,5,True,0,1
+Lagos,DNMM,wu_station_history,40,40,True,0,0
+London,EGLC,awc,18,18,True,2,0
+Los Angeles,KLAX,awc,12,12,True,2,0
+Lucknow,VILK,awc,17,17,True,0,0
+Madrid,LEMD,awc,17,17,True,1,0
+Manila,RPLL,awc,9,9,True,1,0
+Mexico City,MMMX,awc,9,9,True,2,1
+Miami,KMIA,awc,10,10,True,2,0
+Milan,LIMC,awc,18,18,True,2,0
+Moscow,UUWW,awc,17,17,True,1,6
+Munich,EDDM,awc,18,18,True,2,0
+Munich,EDDM,dwd,48,34,False,6,189
+NYC,KLGA,awc,9,9,True,1,0
+Panama City,MPMG,awc,9,9,True,1,0
+Paris,LFPB,awc,17,17,True,0,0
+Qingdao,ZSQD,awc,9,9,True,1,0
+San Francisco,KSFO,awc,10,10,True,2,0
+Sao Paulo,SBGR,awc,9,9,True,2,1
+Seattle,KSEA,awc,13,13,True,2,0
+Seoul,RKSI,awc,17,17,True,1,0
+Shanghai,ZSPD,awc,17,17,True,0,0
+Shenzhen,ZGSZ,awc,9,9,True,1,0
+Singapore,WSSS,awc,17,17,True,0,0
+Taipei,RCSS,awc,16,16,True,2,2
+Taipei,RCSS,wu_station_history,83,83,True,0,0
+Tel Aviv,LLBG,awc,17,17,True,2,0
+Tokyo,RJTT,awc,17,17,True,0,0
+Tokyo,RJTT,jma,23,23,True,1,44
+Toronto,CYYZ,awc,9,9,True,1,0
+Toronto,CYYZ,eccc,6,6,True,0,0
+Warsaw,EPWA,awc,17,17,True,0,0
+Warsaw,EPWA,imgw,2,1,False,0,0
+Wellington,NZWN,awc,17,17,True,1,0
+Wuhan,ZHHH,awc,9,9,True,1,0
+Zhengzhou,ZHCC,awc,9,9,True,1,0

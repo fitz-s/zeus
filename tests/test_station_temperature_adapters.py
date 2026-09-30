@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-09-30
 # Authority: REQ-20260929-223929-bf51a2; recorded provider responses, 2026-09-30 UTC.
 """Real response shapes; wrong units/stations/time and false grade are rejected."""
 from dataclasses import replace
@@ -56,6 +56,33 @@ def test_systematic_mismatch_cannot_be_marked_settlement_grade(tmp_path):
     next(r for r in data["sources"] if r["provider"] == "dwd_cdc")["settlement_grade"] = True
     path=tmp_path/"registry.json";path.write_text(json.dumps(data))
     with pytest.raises(ValueError, match="NOT_PROVEN"): load_physical_current_sources(path)
+
+
+@pytest.mark.parametrize('provider',['fmi_wfs','jma_amedas','eccc_swob','imgw_synop','dwd_cdc','knmi_observations'])
+def test_same_value_rule_is_provider_independent(tmp_path, provider):
+    data=json.loads(REGISTRY_PATH.read_text())
+    row=next(r for r in data['sources'] if r['provider']==provider)
+    row['settlement_grade']=True
+    # Synthetic admission test only; this is not a measurement or production promotion.
+    row['value_identity_proof']={'n_pairs':8,'n_exact':8,'mismatches':[]}
+    path=tmp_path/'equal.json';path.write_text(json.dumps(data))
+    route=next(r for r in load_physical_current_sources(path)[0] if r.provider==provider)
+    assert route.settlement_grade is True
+    row['value_identity_proof']['n_exact']=7
+    bad=tmp_path/'different.json';bad.write_text(json.dumps(data))
+    with pytest.raises(ValueError,match='NOT_PROVEN'):load_physical_current_sources(bad)
+
+
+def test_every_configured_promotion_matches_committed_pair_evidence():
+    report=json.loads((REGISTRY_PATH.parents[1]/'artifacts/fast_obs_audit/source_identity_report.json').read_text())
+    measured={(r['station'],r['channel']):r for r in report['comparisons']}
+    for row in json.loads(REGISTRY_PATH.read_text())['sources']:
+        proof=row['value_identity_proof']
+        actual=measured[(row['station_id'],proof['channel'])]
+        assert (proof['n_pairs'],proof['n_exact'])==(actual['n_pairs'],actual['n_exact'])
+        assert row['settlement_grade']==actual['value_identity_proven']
+    imgw=next(r for r in load_physical_current_sources()[0] if r.provider=='imgw_synop')
+    assert imgw.settlement_grade is False  # Exact-time observed mismatch, not geography.
 
 
 def test_new_station_channel_reaches_causal_current_temperature_reader():

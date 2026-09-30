@@ -136,6 +136,11 @@ def parse_station_payload(route, body: bytes, *, received_at: datetime) -> tuple
 
 
 def valid_station_print(route, raw: str, *, observed_at: datetime, value: float) -> bool:
+    if not isinstance(observed_at, datetime) or observed_at.tzinfo is None:
+        return False
+    if route.provider == "fmi_wfs":
+        from src.data.fmi_airport_temperature import valid_ledger_print
+        return valid_ledger_print(raw, observed_at=observed_at, value=value, station=route.station)
     try:
         data = json.loads(raw)
         return (data["station_id"] == route.station_id

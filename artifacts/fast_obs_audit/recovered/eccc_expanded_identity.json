@@ -1,0 +1,42 @@
+{
+  "n_pairs": 5,
+  "n_exact": 5,
+  "mismatches": [],
+  "pairs": [
+    {
+      "time": "2026-09-30T00:00:00+00:00",
+      "candidate": 18.1,
+      "candidate_rounded": 18,
+      "resolver": 18.0,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T01:00:00+00:00",
+      "candidate": 17.9,
+      "candidate_rounded": 18,
+      "resolver": 18.0,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T02:00:00+00:00",
+      "candidate": 17.4,
+      "candidate_rounded": 17,
+      "resolver": 17.0,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T03:00:00+00:00",
+      "candidate": 17.6,
+      "candidate_rounded": 18,
+      "resolver": 18.0,
+      "match": true
+    },
+    {
+      "time": "2026-09-30T04:00:00+00:00",
+      "candidate": 16.6,
+      "candidate_rounded": 17,
+      "resolver": 17.0,
+      "match": true
+    }
+  ]
+}
