@@ -1070,6 +1070,84 @@
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
       "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "metaviatelecom_metar",
+      "source_channel": "metaviatelecom_metar_temperature",
+      "station_id": "UUWW",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "UUWW",
+        "display_id": "219"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 2,
+        "n_exact": 2,
+        "mismatches": [],
+        "city": "Moscow",
+        "channel": "metaviatelecom_display",
+        "report_path": "artifacts/fast_obs_audit/round4_moscow_proof.json"
+      },
+      "latency_evidence": {
+        "first_proven_lead": {
+          "observation": "2026-09-30T23:00:00+00:00",
+          "candidate": {
+            "city": "Moscow",
+            "station": "UUWW",
+            "channel": "metaviatelecom_display",
+            "observed_at": "2026-09-30T23:00:00+00:00",
+            "value": 8.0,
+            "unit": "C",
+            "negative_request_at": "2026-09-30T23:00:47.069972+00:00",
+            "positive_receipt_at": "2026-09-30T23:01:47.153364+00:00",
+            "lag_lower_ms": 47069.972,
+            "lag_upper_ms": 107153.364
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Moscow",
+                "station": "UUWW",
+                "channel": "awc",
+                "observed_at": "2026-09-30T23:00:00+00:00",
+                "value": 8.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:03:46.209315+00:00",
+                "positive_receipt_at": "2026-09-30T23:04:51.209997+00:00",
+                "lag_lower_ms": 226209.315,
+                "lag_upper_ms": 291209.997
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Moscow",
+                "station": "UUWW",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T23:00:00+00:00",
+                "value": 8.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:04:30.899696+00:00",
+                "positive_receipt_at": "2026-09-30T23:05:30.657554+00:00",
+                "lag_lower_ms": 270899.696,
+                "lag_upper_ms": 330657.554
+              }
+            }
+          ]
+        },
+        "scope": "Sample-specific first-availability; not a percentile or universal dominance."
+      },
+      "access": "free_public_no_account",
+      "transport_security": "PLAINTEXT_HTTP; HTTPS connection failed in this audit. Fixed host, no configured credentials, no redirects; station and source clocks are validated.",
+      "evidence": "artifacts/fast_obs_audit/round4_moscow_proof.json"
     }
   ]
 }

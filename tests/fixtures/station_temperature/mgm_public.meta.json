@@ -1,0 +1,8 @@
+{
+  "channel": "mgm_metar",
+  "url": "https://rasat.mgm.gov.tr/result",
+  "request_at": "2026-09-30T22:58:46.158058+00:00",
+  "receipt_at": "2026-09-30T22:58:48.911255+00:00",
+  "status": 200,
+  "sha256": "e87d5ddbb4f03de7f5718aa0e2364b9b4a6fd32b91388b7d6675b95d08eb18ad"
+}

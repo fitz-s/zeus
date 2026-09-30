@@ -15,6 +15,111 @@ from src.data.station_temperature_adapters import parse_station_payload, valid_s
 ROOT = Path(__file__).parent / "fixtures" / "station_temperature"
 NOW = datetime(2026, 9, 30, 5, tzinfo=timezone.utc)
 
+def _public_route(provider="mgm_metar", station="LTAC"):
+    from src.data.physical_current_sources import PhysicalCurrentSource
+    from src.data.station_temperature_adapters import CHANNELS
+    return PhysicalCurrentSource(provider, CHANNELS[provider], station, ("noaa",),
+        "C", 60., None, {"provider_station": station, "display_id": "219"}, True)
+
+
+def _public_fixture(name):
+    import gzip
+    body = gzip.decompress((ROOT/(name+".html.gz")).read_bytes())
+    meta = json.loads((ROOT/(name+".meta.json")).read_text())
+    return body, datetime.fromisoformat(meta["receipt_at"])
+
+
+@pytest.mark.parametrize("provider,station,name", [
+    ("mgm_metar", "LTAC", "mgm_public"),
+    ("metaviatelecom_metar", "UUWW", "metaviatelecom"),
+])
+def test_public_native_metar_real_response_reaches_current_reader(monkeypatch,provider,station,name):
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    route=_public_route(provider,station);body,receipt=_public_fixture(name)
+    samples=parse_station_payload(route,body,received_at=receipt)
+    assert samples and all(s.observed_at <= receipt for s in samples)
+    s=samples[-1]
+    assert valid_station_print(route,s.raw_report,observed_at=s.observed_at,value=s.value_native)
+    monkeypatch.setattr("src.data.physical_current_sources.physical_current_sources_for_city",lambda _:(route,))
+    city=SimpleNamespace(name="Ankara" if station=="LTAC" else "Moscow",timezone="UTC",
+        settlement_unit="C",settlement_source_type="noaa",wu_station=station)
+    conn=sqlite3.connect(":memory:");ensure_table(conn)
+    append_print(conn,city=city.name,station_id=station,source_channel=route.source_channel,
+        publish_ts_utc=s.observed_at.isoformat(),value_native=s.value_native,unit="C",
+        fetched_at_utc=receipt.isoformat(),raw_report=s.raw_report)
+    assert read_day0_current_temperature_state(conn=conn,city=city,
+        target_date=s.observed_at.date().isoformat(),decision_time=receipt-timedelta(microseconds=1)) is None
+    state=read_day0_current_temperature_state(conn=conn,city=city,
+        target_date=s.observed_at.date().isoformat(),decision_time=receipt)
+    assert state is not None and state.source==route.source_channel and state.value_native==s.value_native
+    conn.close()
+
+
+def _mgm_body(rows, station="LTAC"):
+    return ('<script id="__NEXT_DATA__">'+json.dumps({"props":{"pageProps":{"response":[
+        {"istInfo":{"icao":station},"data":rows}]}}})+'</script>').encode()
+
+
+def _mgm_row(raw="METAR LTAC 302220Z 05010KT CAVOK 12/10 Q1023",**changes):
+    d={"stationIcaoCode":"LTAC","observationText":raw,
+       "observationTimeNormal":"2026-09-30T22:20:00.500+00:00"}
+    d.update(changes);return d
+
+
+@pytest.mark.parametrize("change,error", [
+    ({"stationIcaoCode":"LTFM"},"STATION_ID_MISMATCH"),
+    ({"observationText":"METAR LTFM 302220Z 12/10 Q1023"},"STATION_CLOCK"),
+    ({"observationTimeNormal":"2026-09-30T22:50:00+00:00"},"CLOCK_MISMATCH"),
+    ({"observationTimeNormal":"2026-09-30T22:20:00"},"NAIVE"),
+])
+def test_mgm_identity_and_valid_clock_mismatch_reject(change,error):
+    with pytest.raises(ValueError,match=error):
+        parse_station_payload(_public_route(),_mgm_body([_mgm_row(**change)]),
+            received_at=datetime(2026,9,30,23,tzinfo=timezone.utc))
+
+
+def test_mgm_conflicting_same_clock_is_not_highest_value_wins():
+    rows=[_mgm_row(),_mgm_row(raw="METAR LTAC 302220Z 05010KT CAVOK 13/10 Q1023")]
+    with pytest.raises(ValueError,match="VERSION_CONFLICT"):
+        parse_station_payload(_public_route(),_mgm_body(rows),received_at=datetime(2026,9,30,23,tzinfo=timezone.utc))
+
+
+def test_mgm_future_or_nil_is_not_servable():
+    stamp=datetime(2026,9,30,22,tzinfo=timezone.utc)
+    assert parse_station_payload(_public_route(),_mgm_body([_mgm_row()]),received_at=stamp)==()
+    assert parse_station_payload(_public_route(),_mgm_body([_mgm_row(raw="METAR LTAC 302220Z NIL")]),
+        received_at=stamp+timedelta(hours=1))==()
+
+
+def test_public_metar_route_cannot_inject_host_or_path():
+    from src.data.station_temperature_adapters import fetch_station_temperature
+    route=replace(_public_route("metaviatelecom_metar","UUWW"),identity={"provider_station":"UUWW","display_id":"../secret"})
+    class Client:
+        def get(self,*a,**k):raise AssertionError("network must not be reached")
+    with pytest.raises(ValueError,match="DISPLAY_ID_INVALID"):
+        fetch_station_temperature(route,start=NOW,end=NOW,client=Client())
+
+
+def test_public_mgm_batch_never_exceeds_ten_stations(monkeypatch):
+    from src.data.station_temperature_adapters import _fetch_public_metar,_PUBLIC_METAR_CACHE
+    routes=tuple(_public_route(station="AA"+chr(65+i//26)+chr(65+i%26)) for i in range(21))
+    monkeypatch.setattr("src.data.physical_current_sources.load_physical_current_sources",lambda:(routes,60.))
+    _PUBLIC_METAR_CACHE.clear();calls=[]
+    class Response:
+        content=b'<html></html>'
+        def raise_for_status(self):pass
+    class Client:
+        def get(self,url,**kw):
+            calls.append(kw);assert url=="https://rasat.mgm.gov.tr/result"
+            assert sum(k=="stations" for k,v in kw["params"])<=10
+            assert kw["follow_redirects"] is False
+            return Response()
+    client=Client()
+    for route in routes:_fetch_public_metar(route,client)
+    assert len(calls)==3
+
+
 @pytest.mark.parametrize("provider", ["jma_amedas", "eccc_swob"])
 def test_promoted_origins_have_extended_identity_and_measured_latency_lead(provider):
     """A historical fetch proves equality, not publication latency; require both artifacts."""
