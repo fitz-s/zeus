@@ -290,6 +290,7 @@ def test_source_geometry_producer_uses_actual_response_and_precise_station(monke
     rows = json.loads((config.CONFIG_DIR / "station_precise_coords.json").read_text())
     rows["Manila"].pop("station_ground_proof", None)
     (tmp_path / "station_precise_coords.json").write_text(json.dumps(rows))
+    (tmp_path / "cities.json").write_bytes((config.CONFIG_DIR / "cities.json").read_bytes())
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
 
     requested = cities_by_name["Manila"]
