@@ -671,11 +671,12 @@ def test_day0_carrier_coverage_requires_complete_current_v2_pair() -> None:
         ),
     )
     for carrier, expected in cases:
-        # Current structural positives must also declare the current center
-        # construction; old zero/missing-policy rejection is tested separately.
+        # Current structural positives declare both constructor policies;
+        # missing-policy old constructions are rejected separately.
         if carrier and expected:
             carrier = {**carrier, "day0_remaining_center_policy": "unshifted_live_v1",
-                       "day0_remaining_center_bias_c": 0.0}
+                       "day0_remaining_center_bias_c": 0.0,
+                       "day0_probability_mixture_policy": "unmixed_live_v1"}
         conn.execute("DELETE FROM posterior")
         conn.execute(
             "INSERT INTO posterior VALUES (?, ?, ?)",
@@ -697,8 +698,11 @@ def test_live_unshifted_policy_python_and_sql_coverage_share_strict_types(monkey
         decision_time=request.computed_at,
     )
     current = {"day0_remaining_center_policy": "unshifted_live_v1",
-               "day0_remaining_center_bias_c": 0.0}
+               "day0_remaining_center_bias_c": 0.0,
+               "day0_probability_mixture_policy": "unmixed_live_v1"}
     cases = [({}, True), (current, True),
+             ({"day0_remaining_center_policy": "unshifted_live_v1",
+               "day0_remaining_center_bias_c": 0.0}, False),
              ({"day0_remaining_center_bias_c": 0.0}, False),
              ({"day0_remaining_center_policy": "unshifted_live_v1"}, False),
              ({**current, "day0_remaining_center_policy": "old-live-policy"}, False)]
