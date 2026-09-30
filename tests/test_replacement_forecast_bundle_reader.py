@@ -2853,33 +2853,17 @@ def test_replacement_bundle_reader_raw_input_hwm_default_is_byte_identical() -> 
     assert result.bundle.posterior_id == posterior_id
 
 
-def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve() -> None:
+def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve(
+    _shanghai_reader_current_certificate,
+) -> None:
     """W0.1: opting in must not block a posterior that is already the freshest input."""
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)  # source_cycle_time = 2026-06-06T00:00:00+00:00
-    for model in ("ecmwf_ifs", "gfs"):
-        _insert_raw_model_forecast(
-            conn,
-            model=model,
-            source_cycle_time=_dt(0),
-            captured_at=_dt(0, 5),
-            source_available_at=_dt(0, 5),
-        )
-
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        enforce_raw_input_hwm=True,
-    )
+    normal = _shanghai_reader_current_certificate
+    result = read_replacement_forecast_bundle(normal.conn,**normal.kwargs)
 
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+    assert result.bundle.posterior_id == normal.row["posterior_id"]
+    assert result.bundle.q == json.loads(normal.row["q_json"])
 
 
 def test_replacement_bundle_reader_hwm_budget_starts_at_hwm_stage(
@@ -4170,42 +4154,16 @@ def test_raw_hwm_unreadable_consumed_evidence_stays_superseded() -> None:
     assert "basis=used_raw_model_forecasts_superseded" in reason
 
 
-def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance() -> None:
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
-    _insert_raw_model_forecast(
-        conn,
-        model="gfs",
-        source_cycle_time=_dt(0),
-        captured_at=_dt(0, 5),
-        source_available_at=_dt(0, 5),
-    )
-    provenance = _with_current_value_serving(
-        {
-            "gfs": {
-                "raw_model_forecast_id": int(
-                    conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                ),
-                "served_via": "single_runs",
-            }
-        }
-    )
-    conn.execute(
-        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
-        (json.dumps(provenance), posterior_id),
-    )
-
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        enforce_raw_input_hwm=True,
-    )
+def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance(
+    _shanghai_reader_current_certificate,
+) -> None:
+    normal = _shanghai_reader_current_certificate
+    provenance = json.loads(normal.row["provenance_json"])
+    serving = provenance["bayes_precision_fusion"]["current_value_serving"]
+    model = next(iter(serving))
+    serving[model].pop("served_cycle")
+    result = read_replacement_forecast_bundle(_reader_with_posterior_fault(normal,
+        provenance_json=json.dumps(provenance)),**normal.kwargs)
 
     assert result.ok is False
     assert "current_value_serving_provenance_unverifiable" in result.reason_code
