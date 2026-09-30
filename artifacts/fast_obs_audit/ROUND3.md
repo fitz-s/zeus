@@ -16,3 +16,12 @@ Retain single probability/execution authority, K1 DB ownership and INV-37. Netwo
 
 ## Results
 In progress. Only executed measurements and tests will be recorded below.
+
+## Item 1a — exit safety (completed)
+Reproduced 18 exit-safety and 7 materializer-suite failures on rebased 514cdc7d9: 25 failed, 864 passed across the four modules. Exit safety now passes all 359 tests (40.16 s); the targeted RED handoff/B2/negative-authority subset passes 30. No skipped or xfailed tests were introduced.
+
+Real defects fixed: final SDK expiry recheck after client/certificate preparation; cycle-owned RED handoff accepted by protective SELL only after existing exact adjacent-event/hash verification; explicit outer transaction and rollback for atomic RED M/I/projection commit; existing canonical RED resting SELL adoption makes no new submission and no longer falls into a fresh-capital replacement path merely because POSTED retired the old submit handoff. Negative tests cover forged writer identity and append/commit failure.
+
+Fixture corrections: command execution atoms are distinct from position-level lifecycle telemetry; terminal cancellation following partial fill remains partial execution. Collateral tests now assert network -> pre-submit lease -> venue -> final SDK receipt lease -> ACK lease. RED scenarios use the actual cycle handoff writer and canonical chain fields; missing handoffs never mint execution authority. Snapshot/lease fixtures satisfy current APIs. A raw external order id without command/size binding does not close exposure on RED status alone.
+
+Validation: round3_exit_green.xml; round3_baseline_feature.xml/log. Baseline comparison reported by operator is confirmed at the same failure names on the newly fetched base; no additional baseline checkout was needed to establish that the old tests failed before these edits.

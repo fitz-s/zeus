@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -183,16 +183,17 @@ def _fresh_exit_collateral_payload(
     }
 
 
-def _execution_facts(conn, position_id: str) -> list[sqlite3.Row]:
+def _execution_facts(conn, position_id: str, *, command_id: str | None = None) -> list[sqlite3.Row]:
+    """Keep position-level lifecycle telemetry distinct from command execution."""
     return list(
         conn.execute(
             """
             SELECT venue_status, terminal_exec_status, fill_price, shares, command_id
             FROM execution_fact
-            WHERE position_id = ?
+            WHERE position_id = ? AND (? IS NULL OR command_id = ?)
             ORDER BY intent_id
             """,
-            (position_id,),
+            (position_id, command_id, command_id),
         ).fetchall()
     )
 
@@ -673,6 +674,55 @@ def _seed_red_monitor_provenance(
             ),
         ),
     )
+
+
+def _cycle_red_exit_intent(conn, position, context, *, intent=None):
+    """Use the same atomic handoff writer as CycleRuntime, never fake RED authority."""
+    import time
+    from src.execution import exit_lifecycle
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+
+    # These unit positions predate the canonical loader; load its chain fields
+    # instead of overwriting the seeded inventory with their default unknowns.
+    current = conn.execute("SELECT chain_shares,chain_state,shares FROM position_current WHERE position_id=?", (position.trade_id,)).fetchone()
+    assert current is not None
+    position.chain_shares = current[0] if current[0] is not None else current[2]
+    position.chain_state = current[1]
+    position.exit_reason = context.exit_reason
+    position.last_monitor_at = datetime.now(timezone.utc).isoformat()
+    built = exit_lifecycle.build_exit_intent(position, context)
+    intent = intent or built
+    if not intent.decision_id:
+        intent = replace(intent, decision_id=built.decision_id)
+    # Explicitly finish fixture setup, not an execution-side implicit commit.
+    conn.commit()
+    handoff = exit_lifecycle.recover_red_exit_handoff(conn, position)
+    if handoff is None:
+        handoff = exit_lifecycle.persist_red_exit_handoff(
+            conn, position, exit_intent=intent,
+            attestation=RiskAttestation(
+                RiskLevel.RED, "test-current-red", datetime.now(timezone.utc).isoformat(),
+                time.monotonic_ns(),
+            ),
+            attempt_id="round3-" + position.trade_id,
+        )
+    assert handoff is not None
+    return replace(intent, red_handoff=handoff.as_payload())
+
+
+def test_cycle_writer_name_alone_cannot_grant_protective_sell(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.riskguard import RiskLevel
+    _seed_canonical_red_intent(conn, position_id="unbound-cycle", token_id=YES_TOKEN, shares=10.0)
+    row = dict(conn.execute("SELECT * FROM position_events WHERE position_id='unbound-cycle' AND event_type='EXIT_INTENT'").fetchone())
+    row.update(event_id="unbound-cycle:forged-writer", sequence_no=row["sequence_no"] + 1,
+               idempotency_key="unbound-cycle:forged-writer", source_module="src.engine.cycle_runtime")
+    conn.execute(f"INSERT INTO position_events ({','.join(row)}) VALUES ({','.join('?' for _ in row)})", tuple(row.values()))
+    conn.commit()
+    monkeypatch.setattr("src.riskguard.riskguard.get_current_level", lambda: RiskLevel.RED)
+    assert exit_lifecycle._protective_sell_semantic_receipt(
+        conn, position_id="unbound-cycle", token_id=YES_TOKEN, shares=10.0, kind="RED_FORCE_EXIT",
+    ) is None
 
 
 def _seed_canonical_red_intent(
@@ -1645,7 +1695,7 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     assert position.nested_fills[-1]["filled_shares"] == pytest.approx(8.0)
     assert position.nested_fills[-1]["remaining_shares"] == pytest.approx(12.0)
     assert position.nested_fills[-1]["realized_pnl"] == pytest.approx(-0.48)
-    facts = _execution_facts(conn, position.trade_id)
+    facts = _execution_facts(conn, position.trade_id, command_id="cmd-partial-exit")
     assert len(facts) == 1
     assert facts[0]["venue_status"] == "PARTIALLY_MATCHED"
     assert facts[0]["terminal_exec_status"] == "PARTIALLY_MATCHED"
@@ -5782,7 +5832,7 @@ def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):
     assert stats["filled"] == 1
     assert stats["retried"] == 0
     assert len(stats["filled_positions"]) == 1
-    facts = _execution_facts(conn, position.trade_id)
+    facts = _execution_facts(conn, position.trade_id, command_id="cmd-full-exit")
     assert len(facts) == 1
     assert facts[0]["venue_status"] == "CONFIRMED"
     assert facts[0]["terminal_exec_status"] == "CONFIRMED"
@@ -6380,10 +6430,11 @@ def test_exit_lifecycle_cancel_after_partial_only_retries_remaining_exposure(con
     assert position.cost_basis_usd == pytest.approx(6.0)
     assert position.nested_fills[-1]["filled_shares"] == pytest.approx(8.0)
     assert position.nested_fills[-1]["remaining_shares"] == pytest.approx(12.0)
-    facts = _execution_facts(conn, position.trade_id)
+    facts = _execution_facts(conn, position.trade_id, command_id="cmd-partial-cancel")
     assert len(facts) == 1
     assert facts[0]["venue_status"] == "CANCELLED"
-    assert facts[0]["terminal_exec_status"] == "CANCELLED"
+    # Terminal remainder plus real fill is partial execution, not no-fill cancel.
+    assert facts[0]["terminal_exec_status"] == "partial"
     assert facts[0]["fill_price"] == pytest.approx(0.44)
     assert facts[0]["shares"] == pytest.approx(8.0)
     assert facts[0]["command_id"] == "cmd-partial-cancel"
@@ -6634,14 +6685,22 @@ def test_exit_collateral_network_fetch_precedes_lease_and_persists_atomically(co
             self.signed_identity_persister = persister
 
         def place_limit_order(self, **kwargs):
+            assert events == ["network", "exit_pre_submit_persist"]
+            events.append("venue")
             submitted.append(kwargs)
             return _fake_submit_result(self.bound_envelope, order_id="ord-prepared-collateral")
 
     @contextmanager
-    def recording_lease(lease_conn, **_kwargs):
-        assert events == ["network"]
+    def recording_lease(lease_conn, **kwargs):
+        owner = kwargs["owner"]
+        expected = {
+            "exit_pre_submit_persist": ["network"],
+            "final_sdk_receipt_persist": ["network", "exit_pre_submit_persist", "venue"],
+            "exit_post_submit_ack_persist": ["network", "exit_pre_submit_persist", "venue", "final_sdk_receipt_persist"],
+        }
+        assert events == expected[owner]
         lease_transaction_states.append(lease_conn.in_transaction)
-        events.append("lease")
+        events.append(owner)
         yield
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
@@ -6662,8 +6721,8 @@ def test_exit_collateral_network_fetch_precedes_lease_and_persists_atomically(co
         )
 
         assert result.status == "pending"
-        assert events == ["network", "lease"]
-        assert lease_transaction_states == [False]
+        assert events == ["network", "exit_pre_submit_persist", "venue", "final_sdk_receipt_persist", "exit_post_submit_ack_persist"]
+        assert lease_transaction_states == [False, False, False]
         assert submitted
         assert conn.execute("SELECT COUNT(*) FROM collateral_ledger_snapshots").fetchone()[0] == 2
         assert conn.execute(
@@ -9334,6 +9393,7 @@ def test_live_exit_snapshot_capture_exception_retries_after_intent(conn, monkeyp
         exit_context,
         clob=object(),
         conn=conn,
+        exit_intent=_cycle_red_exit_intent(conn, position, exit_context),
     )
 
     assert outcome == "exit_blocked: executable_snapshot_error"
@@ -10766,6 +10826,7 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
         exit_context,
         clob=object(),
         conn=conn,
+        exit_intent=_cycle_red_exit_intent(conn, position, exit_context),
     )
 
     assert outcome == f"sell_blocked_dust: {error}"
@@ -11581,6 +11642,7 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
         exit_context,
         clob=object(),
         conn=conn,
+        exit_intent=_cycle_red_exit_intent(conn, position, exit_context),
     )
 
     assert outcome == "sell_blocked_dust: executable_snapshot_gate: size 4.95 is below snapshot min_order_size 5"
@@ -11695,7 +11757,7 @@ def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypat
         exit_context,
         clob=None,
         conn=conn,
-        exit_intent=exit_intent,
+        exit_intent=_cycle_red_exit_intent(conn, position, exit_context, intent=exit_intent),
     )
 
     error = "executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5"
@@ -12428,6 +12490,7 @@ def test_red_stale_or_missing_monitor_quote_recaptures_snapshot_and_uses_fak(
         stale,
         clob=Clob(),
         conn=conn,
+        exit_intent=_cycle_red_exit_intent(conn, position, stale),
     )
     assert outcome.startswith("sell_pending: order=ord-red-protective")
     assert submitted["submit_order_type"] == "FAK"
@@ -12689,92 +12752,66 @@ def test_non_red_intent_persistence_failure_blocks_venue_sell(conn, monkeypatch)
     ).fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("failure", ("transition_false", "commit_exception"))
-def test_red_intent_persistence_failure_blocks_venue_sell(conn, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ("append_exception", "commit_exception"))
+def test_red_intent_persistence_failure_blocks_venue_sell(monkeypatch, failure):
+    """Failure in the actual cycle-owned M/I writer never grants live authority."""
+    import time
     from src.execution import exit_lifecycle
-    from src.riskguard.risk_level import RiskLevel
+    from src.riskguard.riskguard import RiskAttestation, RiskLevel
+    from src.state.db import init_schema_trade_only
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.projection import upsert_position_current
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
-    trade_id = f"pos-red-intent-persist-{failure}"
-    position = Position(
-        trade_id=trade_id,
-        market_id="condition-test",
-        condition_id="condition-test",
-        city="Kuala Lumpur",
-        cluster="Kuala Lumpur",
-        target_date="2026-07-08",
-        bin_label="33C",
-        direction="buy_yes",
-        token_id=YES_TOKEN,
-        no_token_id=NO_TOKEN,
-        entry_price=0.64,
-        size_usd=6.4,
-        shares=10.0,
-        chain_shares=10.0,
-        state="day0_window",
-        strategy_key="center_buy",
-        chain_state="synced",
-        env="live",
-        exit_reason="red_force_exit",
-    )
-    _seed_canonical_position_identity(
-        conn,
-        position_id=trade_id,
-        token_id=YES_TOKEN,
-        shares=10.0,
-    )
-    _seed_red_monitor_provenance(conn, position_id=trade_id)
-    monkeypatch.setattr(
-        "src.riskguard.riskguard.get_current_level",
-        lambda: RiskLevel.RED,
-    )
-    if failure == "transition_false":
-        monkeypatch.setattr(
-            exit_lifecycle,
-            "_dual_write_canonical_pending_exit_if_available",
-            lambda *_args, **_kwargs: False,
+    class CommitFailureConnection(sqlite3.Connection):
+        fail_commit = False
+        def commit(self):
+            if self.fail_commit:
+                raise sqlite3.OperationalError("injected handoff commit failure")
+            return super().commit()
+
+    conn = sqlite3.connect(":memory:", factory=CommitFailureConnection)
+    conn.row_factory = sqlite3.Row
+    try:
+        init_schema_trade_only(conn)
+        position = Position(
+            trade_id="red-persist-" + failure, market_id="condition-test",
+            condition_id="condition-test", city="Kuala Lumpur", cluster="asia",
+            target_date="2026-07-08", bin_label="33C", direction="buy_yes",
+            token_id=YES_TOKEN, no_token_id=NO_TOKEN, entry_price=0.64,
+            size_usd=6.4, shares=10.0, chain_shares=10.0, cost_basis_usd=6.4,
+            state="day0_window", strategy_key="center_buy", chain_state="synced",
+            env="live", exit_reason="red_force_exit", entered_at=_NOW.isoformat(),
         )
-    else:
-        real_commit = exit_lifecycle._commit_exit_write_boundary
-
-        def fail_intent_commit(boundary_conn, *, stage, deadline_monotonic=None):
-            if stage == "exit_intent":
-                raise RuntimeError("injected exit intent commit failure")
-            return real_commit(
-                boundary_conn,
-                stage=stage,
-                deadline_monotonic=deadline_monotonic,
-            )
-
-        monkeypatch.setattr(
-            exit_lifecycle,
-            "_commit_exit_write_boundary",
-            fail_intent_commit,
+        upsert_position_current(conn, build_position_current_projection(position))
+        conn.commit()
+        context = ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45,
+                              current_market_price_is_fresh=True, best_bid=0.45)
+        intent = exit_lifecycle.build_exit_intent(position, context)
+        if failure == "append_exception":
+            def failed_append(*_args, **_kwargs):
+                raise RuntimeError("injected handoff append failure")
+            monkeypatch.setattr("src.state.db.append_many_and_project", failed_append)
+        else:
+            conn.fail_commit = True
+        handoff = exit_lifecycle.persist_red_exit_handoff(
+            conn, position, exit_intent=intent,
+            attestation=RiskAttestation(RiskLevel.RED, "test-red", datetime.now(timezone.utc).isoformat(), time.monotonic_ns()),
+            attempt_id="failure-at-real-owner",
         )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "place_sell_order",
-        lambda **_kwargs: pytest.fail("failed EXIT_INTENT persistence reached venue"),
-    )
-
-    outcome = exit_lifecycle.execute_exit(
-        PortfolioState(positions=[position]),
-        position,
-        ExitContext(
-            exit_reason="RED_FORCE_EXIT",
-            current_market_price=0.45,
-            current_market_price_is_fresh=True,
-            best_bid=0.45,
-        ),
-        clob=object(),
-        conn=conn,
-    )
-
-    assert outcome == "exit_blocked: exit_intent_persistence_failed"
-    assert conn.execute(
-        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND side = 'SELL'",
-        (trade_id,),
-    ).fetchone()[0] == 0
+        assert handoff is None
+        assert conn.in_transaction is False
+        assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
+        assert conn.execute("SELECT phase FROM position_current WHERE position_id=?", (position.trade_id,)).fetchone()[0] == "day0_window"
+        monkeypatch.setattr(exit_lifecycle, "place_sell_order",
+                            lambda **_kw: pytest.fail("failed handoff reached venue"))
+        outcome = exit_lifecycle.execute_exit(
+            PortfolioState(positions=[position]), position, context, clob=object(), conn=conn,
+        )
+        assert outcome == "exit_deferred: red_handoff_required"
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize(
@@ -13331,11 +13368,13 @@ def test_repeated_red_execute_adopts_same_active_sell_without_duplicate(conn, mo
     )
 
     first = exit_lifecycle.execute_exit(
-        PortfolioState(positions=[position]), position, context, clob=None, conn=conn
+        PortfolioState(positions=[position]), position, context, clob=None, conn=conn,
+        exit_intent=_cycle_red_exit_intent(conn, position, context),
     )
     first_order = position.last_exit_order_id
     second = exit_lifecycle.execute_exit(
-        PortfolioState(positions=[position]), position, context, clob=None, conn=conn
+        PortfolioState(positions=[position]), position, context, clob=None, conn=conn,
+        exit_intent=_cycle_red_exit_intent(conn, position, context),
     )
 
     assert first.startswith("sell_pending: active_prior_exit_sell")
@@ -13710,9 +13749,14 @@ def test_market_closed_hold_canonical_write_retries_after_raw_sqlite_lock(
         before = copy.deepcopy(vars(position))
 
         @contextmanager
-        def monitored_lease(*_args, **_kwargs):
-            yield SimpleNamespace(
-                acquired_at=exit_lifecycle._time_module.monotonic(),
+        def monitored_lease(*_args, **kwargs):
+            from src.state.write_coordinator import (
+                DBIdentity, WriteClass, WriteLease, WritePriority, _LeaseMetrics,
+            )
+            yield WriteLease(
+                owner=kwargs["owner"], db_set=(DBIdentity.TRADE,), db_paths=(db_path,),
+                write_class=WriteClass.LIVE, priority=WritePriority.MONITOR,
+                acquired_at=exit_lifecycle._time_module.monotonic(), _metrics=_LeaseMetrics(),
             )
 
         monkeypatch.setattr(executor, "_canonical_trade_write_lease", monitored_lease)
@@ -16876,6 +16920,7 @@ def test_exit_preflight_uses_token_balance_not_pusd(conn, monkeypatch):
             raise AssertionError("CTF preflight must block venue submit")
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", ClientWithNoCtfInventory)
+    snapshot_id = _ensure_snapshot(conn, snapshot_id="snap-token-preflight")
     try:
         result = execute_exit_order(
             create_exit_order_intent(
@@ -16884,6 +16929,7 @@ def test_exit_preflight_uses_token_balance_not_pusd(conn, monkeypatch):
                 shares=5.0,
                 current_price=0.50,
                 best_bid=0.49,
+                executable_snapshot_id=snapshot_id,
             ),
             conn=conn,
             decision_id="token-block",
@@ -17787,17 +17833,20 @@ def test_execute_exit_preserves_adopted_order_when_bid_is_sub_floor(
         },
     )
 
+    context = ExitContext(
+        exit_reason=reason, current_market_price=0.02,
+        current_market_price_is_fresh=True, best_bid=0.01,
+        position_state="pending_exit",
+    )
+    if authority_path == "red":
+        _seed_canonical_position_identity(conn, position_id=pos.trade_id,
+                                          token_id=YES_TOKEN, shares=pos.effective_shares)
+        exit_intent = _cycle_red_exit_intent(conn, pos, context, intent=exit_intent)
     portfolio = PortfolioState(positions=[pos])
     result = execute_exit(
         portfolio,
         pos,
-        ExitContext(
-            exit_reason=reason,
-            current_market_price=0.02,
-            current_market_price_is_fresh=True,
-            best_bid=0.01,
-            position_state="pending_exit",
-        ),
+        context,
         clob=FakeClob(),
         conn=conn,
         exit_intent=exit_intent,
@@ -17837,6 +17886,12 @@ def test_execute_exit_preserves_adopted_order_when_bid_is_sub_floor(
         assert stats["filled"] == 0
         assert pos.state == "pending_exit"
         assert pos.exit_state == "retry_pending"
+    elif authority_path == "red":
+        # This fixture has only an unbound external order id, not a command or
+        # an adopted-order size witness. A RED handoff is not fill attribution.
+        assert stats["filled"] == 0
+        assert stats["exit_intent_authority_missing"] == 1
+        assert pos.state == "pending_exit"
     else:
         assert stats["filled"] == 1
         assert pos.state == "economically_closed"

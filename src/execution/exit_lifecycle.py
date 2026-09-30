@@ -3018,9 +3018,18 @@ def _protective_sell_semantic_receipt(
         return None
     if row is None or current is None:
         return None
+    source_module = str(row["source_module"] or "")
+    if source_module == "src.engine.cycle_runtime" and kind == "RED_FORCE_EXIT":
+        # Current RED M/I is cycle-owned. A writer name alone cannot sponsor a
+        # SELL: revalidate its adjacent events, content hashes and exact lineage.
+        from types import SimpleNamespace
+        handoff = recover_red_exit_handoff(conn, SimpleNamespace(trade_id=position_id))
+        if handoff is None or handoff.exit_intent_event_id != str(row["event_id"]):
+            return None
+    elif source_module != "src.execution.exit_lifecycle":
+        return None
     if (
-        str(row["source_module"] or "") != "src.execution.exit_lifecycle"
-        or str(row["env"] or "") != "live"
+        str(row["env"] or "") != "live"
         or str(row["phase_after"] or "") in _RED_TERMINAL_PHASES
         or str(current["phase"] or "") in _RED_TERMINAL_PHASES
     ):
@@ -7383,10 +7392,15 @@ def persist_red_exit_handoff(
         projection = build_position_current_projection(projected)
         projection["phase"] = "pending_exit"
         from src.state.db import append_many_and_project
+        # Own the outer transaction: releasing append_many's SAVEPOINT must not
+        # commit M/I before this writer's explicit durability boundary.
+        conn.execute("BEGIN IMMEDIATE")
         append_many_and_project(conn, [monitor_event, intent_event], projection)
         conn.commit()
         return handoff
-    except Exception as exc:  # noqa: BLE001 - SAVEPOINT rolls back both rows.
+    except Exception as exc:  # noqa: BLE001 - roll back M/I and its projection together.
+        if conn.in_transaction:
+            conn.rollback()
         logger.warning("RED M/I atomic persistence failed: %s", exc)
         return None
 
@@ -7837,6 +7851,22 @@ def execute_exit(
             # CycleRuntime is the sole RED handoff writer.  The execution
             # boundary must never read A, mint an attempt, or synthesize M/I.
             return "exit_deferred: red_handoff_required"
+    if (
+        red_handoff is not None
+        and str(exit_context.exit_reason or "").upper() == _RED_FORCE_EXIT
+        and _red_runtime_position_open(conn, position, require_canonical=True)
+    ):
+        # A later POSTED fact retires submission authority, not the real order.
+        # Adopting an existing command makes no new venue side effect and must
+        # not demand permission to submit a duplicate. Cancel/replace still
+        # requires a new current handoff when no active command remains.
+        standing_exit = _active_exit_sell_command(
+            conn, position_id=position.trade_id, token_id=exit_intent.token_id,
+        )
+        if standing_exit is not None:
+            _adopt_active_exit_sell(position, standing_exit, conn=conn,
+                                   reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]")
+            return "sell_pending: active_prior_exit_sell"
     is_red_force_exit = _red_force_exit_authorized(
         position,
         exit_context,
