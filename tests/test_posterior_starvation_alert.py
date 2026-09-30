@@ -704,3 +704,112 @@ def test_threshold_reads_ops_config(monkeypatch):
     finally:
         settings._data.clear()
         settings._data.update(original)
+
+
+
+# ---------------------------------------------------------------------------
+# Producer stuck on the same blocked input since the family's last posterior
+# ---------------------------------------------------------------------------
+
+
+def _write_blocked_receipt(
+    sd: Path, *, city: str, target_date: str, metric: str, computed_at: str,
+    reason_codes: list[str],
+) -> None:
+    receipt_dir = sd / "replacement_forecast_live" / "blocked_latest"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    (receipt_dir / f"{city.replace(' ', '_')}.{target_date}.{metric}.json").write_text(
+        json.dumps(
+            {
+                "city": city,
+                "target_date": target_date,
+                "temperature_metric": metric,
+                "status": "BLOCKED_MISSING_PROBABILITY_AUTHORITY",
+                "computed_at": computed_at,
+                "reason_codes": reason_codes,
+            }
+        )
+    )
+
+
+def test_producer_blocked_since_posterior_is_named(tmp_path, caplog):
+    """A family blocked on every attempt since its last posterior is visible.
+
+    Live 2026-09-30: Los Angeles 10-01 high served nothing new for 4h while the
+    producer retried every few minutes (CAPTURE_MISSING); under the 12h
+    starvation threshold that state logged nothing.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime(2026, 9, 30, 13, 10, tzinfo=timezone.utc)
+    stuck = ("Los Angeles", "2026-10-01", "high")
+    healthy = ("Chicago", "2026-10-01", "high")
+    for city, target_date, metric in (stuck, healthy):
+        _write_market_events(
+            sd, city=city, target_date=target_date, metric=metric,
+            token_id=f"tok-{city}", created_at=_now_iso(now, -24.0),
+        )
+    _write_forecast_posterior(
+        sd, city=stuck[0], target_date=stuck[1], metric=stuck[2],
+        runtime_layer="live", computed_at=_now_iso(now, -4.0),
+    )
+    # Recovered 3h ago: older than the one-cycle grace, so only the
+    # attempt-after-posterior ordering keeps it out.
+    _write_forecast_posterior(
+        sd, city=healthy[0], target_date=healthy[1], metric=healthy[2],
+        runtime_layer="live", computed_at=_now_iso(now, -3.0),
+    )
+    _write_blocked_receipt(
+        sd, city=stuck[0], target_date=stuck[1], metric=stuck[2],
+        computed_at=_now_iso(now, -0.5),
+        reason_codes=[
+            "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_BLOCKED_INPUT",
+            "Q_MODE:BAYES_PRECISION_FUSION_CAPTURE_MISSING",
+        ],
+    )
+    # Blocked before its newest posterior: already recovered, not stuck.
+    _write_blocked_receipt(
+        sd, city=healthy[0], target_date=healthy[1], metric=healthy[2],
+        computed_at=_now_iso(now, -3.5),
+        reason_codes=["DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING"],
+    )
+
+    with caplog.at_level(logging.ERROR, logger="src.control.live_health"):
+        result = _posterior_starvation_surface(sd, now)
+
+    assert result["ok"] is False
+    assert "PRODUCER_BLOCKED_SINCE_POSTERIOR:n=1" in result["issue"]
+    assert [
+        (item["city"], item["target_date"], item["metric"])
+        for item in result["producer_blocked_sample"]
+    ] == [stuck]
+    lines = [
+        r.getMessage() for r in caplog.records
+        if "ZEUS_PRODUCER_BLOCKED_SINCE_POSTERIOR" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    assert "city=Los Angeles" in lines[0]
+    assert "BAYES_PRECISION_FUSION_CAPTURE_MISSING" in lines[0]
+
+
+def test_producer_blocked_within_one_cycle_is_in_flight(tmp_path):
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime(2026, 9, 30, 13, 10, tzinfo=timezone.utc)
+    _write_market_events(
+        sd, city="Chicago", target_date="2026-10-01", metric="high",
+        token_id="tok", created_at=_now_iso(now, -24.0),
+    )
+    _write_forecast_posterior(
+        sd, city="Chicago", target_date="2026-10-01", metric="high",
+        runtime_layer="live", computed_at=_now_iso(now, -0.5),
+    )
+    _write_blocked_receipt(
+        sd, city="Chicago", target_date="2026-10-01", metric="high",
+        computed_at=_now_iso(now, -0.1), reason_codes=["X"],
+    )
+
+    result = _posterior_starvation_surface(sd, now)
+
+    assert result["producer_blocked_count"] == 0
+    assert result["ok"] is True

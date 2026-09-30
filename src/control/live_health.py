@@ -6961,6 +6961,79 @@ def _posterior_starvation_newest_blocked_reason(
     ).get(key)
 
 
+_PRODUCER_BLOCKED_RECEIPT_NAME = re.compile(
+    r"^(?P<city>.+)\.(?P<target>\d{4}-\d{2}-\d{2})\.(?P<metric>high|low)\.json$"
+)
+# One hourly provider cycle: a family whose producer has failed every attempt
+# for longer than the cadence of its fastest input is stuck, not in flight.
+PRODUCER_BLOCKED_ALERT_HOURS = 1.0
+
+
+def _producer_blocked_since_posterior(
+    state_dir: Path,
+    newest_posterior_by_scope: Mapping[tuple[str, str, str], datetime | None],
+    now: datetime,
+) -> list[dict]:
+    """Families whose latest producer attempt BLOCKED after their newest live posterior.
+
+    The starvation threshold (hours) is sized for a dark producer; this names the
+    other stuck state: the producer runs every few minutes, fails on the same input
+    every time, and the family serves nothing new for hours while each attempt looks
+    routine.  Reads the one compact per-family receipt the live queue keeps
+    (``blocked_latest``); best-effort, never a gate.
+    """
+
+    try:
+        receipt_dir = state_dir / "replacement_forecast_live" / "blocked_latest"
+        if not receipt_dir.is_dir():
+            return []
+        by_name = {
+            (city.replace(" ", "_"), target, metric): (city, target, metric)
+            for city, target, metric in newest_posterior_by_scope
+        }
+        out: list[dict] = []
+        with os.scandir(receipt_dir) as entries:
+            for entry in entries:
+                match = _PRODUCER_BLOCKED_RECEIPT_NAME.match(entry.name)
+                if match is None:
+                    continue
+                scope = by_name.get(
+                    (match.group("city"), match.group("target"), match.group("metric"))
+                )
+                if scope is None:
+                    continue
+                receipt = _read_json(Path(entry.path))
+                if not isinstance(receipt, dict):
+                    continue
+                attempted_at = _parse_iso_utc(receipt.get("computed_at"))
+                newest = newest_posterior_by_scope[scope]
+                if attempted_at is None or (
+                    newest is not None and attempted_at <= newest
+                ):
+                    continue
+                age_h = (
+                    None
+                    if newest is None
+                    else max(0.0, (now - newest).total_seconds() / 3600.0)
+                )
+                if age_h is not None and age_h <= PRODUCER_BLOCKED_ALERT_HOURS:
+                    continue
+                codes = receipt.get("reason_codes")
+                out.append(
+                    {
+                        "city": scope[0],
+                        "target_date": scope[1],
+                        "metric": scope[2],
+                        "posterior_age_h": age_h,
+                        "last_attempt_at": attempted_at.isoformat(),
+                        "reason_codes": list(codes) if isinstance(codes, list) else [],
+                    }
+                )
+        return sorted(out, key=lambda item: (item["city"], item["target_date"], item["metric"]))
+    except Exception:  # noqa: BLE001 - enrichment; the alert never blocks.
+        return []
+
+
 def _posterior_starvation_newest_blocked_reasons(
     state_dir: Path,
     scopes: tuple[tuple[str, str, str], ...],
@@ -7416,17 +7489,62 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
             reason or "unknown",
         )
 
+    producer_blocked = _producer_blocked_since_posterior(
+        state_dir,
+        {
+            (
+                str(row.get("city") or ""),
+                str(row.get("target_date") or ""),
+                str(row.get("metric") or ""),
+            ): _parse_iso_utc(row.get("newest_live_posterior_at"))
+            for row in family_rows
+            if not _target_local_day_complete(
+                str(row.get("city") or ""),
+                str(row.get("target_date") or ""),
+                now_utc,
+            )
+        },
+        now_utc,
+    )
+    for item in producer_blocked:
+        logger.error(
+            "ZEUS_PRODUCER_BLOCKED_SINCE_POSTERIOR city=%s target=%s metric=%s "
+            "posterior_age_h=%s last_attempt_at=%s reason_codes=%s",
+            item["city"],
+            item["target_date"],
+            item["metric"],
+            "none"
+            if item["posterior_age_h"] is None
+            else f"{item['posterior_age_h']:.2f}",
+            item["last_attempt_at"],
+            ",".join(str(code) for code in item["reason_codes"]) or "unknown",
+        )
+
     detail = {
         "evaluated": True,
         "threshold_hours": threshold_hours,
         "checked_family_count": len(family_rows),
         "starved_count": len(starved),
         "starved_sample": starved,
+        "producer_blocked_count": len(producer_blocked),
+        "producer_blocked_sample": producer_blocked[:20],
         "day0_authority_ready_count": len(day0_authority_ready),
         "day0_authority_ready_sample": day0_authority_ready[:10],
     }
-    if starved:
-        return {"ok": False, "issue": f"POSTERIOR_STARVATION:n={len(starved)}", **detail}
+    issues = [
+        issue
+        for issue in (
+            f"POSTERIOR_STARVATION:n={len(starved)}" if starved else None,
+            (
+                f"PRODUCER_BLOCKED_SINCE_POSTERIOR:n={len(producer_blocked)}"
+                if producer_blocked
+                else None
+            ),
+        )
+        if issue
+    ]
+    if issues:
+        return {"ok": False, "issue": ";".join(issues), **detail}
     return {"ok": True, "issue": None, **detail}
 
 
