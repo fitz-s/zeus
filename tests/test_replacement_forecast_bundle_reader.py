@@ -3773,37 +3773,50 @@ def test_raw_hwm_lookup_binds_exact_same_cycle_materialization(tmp_path) -> None
     assert "consumed_anchor_cycle=2026-06-06T03:00:00+00:00" in reason
 
 
-def test_raw_hwm_lookup_rejects_ambiguous_timestamp_spellings() -> None:
-    conn = _conn()
-    first_id = _insert_posterior(conn, computed_at=_dt(3, 10))
-    second_id = _insert_posterior(conn, computed_at=_dt(3, 11))
-    conn.execute(
-        """
-        UPDATE forecast_posteriors
-           SET computed_at = ?, provenance_json = ?
-         WHERE posterior_id = ?
-        """,
-        ("2026-06-06T03:10:00Z", '{"row":"z"}', first_id),
-    )
-    conn.execute(
-        """
-        UPDATE forecast_posteriors
-           SET computed_at = ?, provenance_json = ?
-         WHERE posterior_id = ?
-        """,
-        ("2026-06-06T03:10:00+00:00", '{"row":"offset"}', second_id),
-    )
-
-    provenance = _posterior_provenance_for_cycle(
-        conn,
-        city="Shanghai",
-        target_date="2026-06-07",
-        metric="high",
-        posterior_source_cycle_time=_dt(0),
-        posterior_computed_at="2026-06-06T03:10:00Z",
-    )
-
+def test_raw_hwm_lookup_rejects_ambiguous_timestamp_spellings(
+    _shanghai_reader_current_certificate,
+) -> None:
+    normal = _shanghai_reader_current_certificate
+    lookup = dict(city=normal.row["city"],target_date=normal.row["target_date"],
+        metric=normal.row["temperature_metric"],
+        posterior_source_cycle_time=normal.row["source_cycle_time"],
+        posterior_computed_at=normal.row["computed_at"])
+    assert _posterior_provenance_for_cycle(normal.conn,**lookup) == json.loads(normal.row["provenance_json"])
+    calls = []
+    class AmbiguousCursor:
+        def __init__(self,cursor): self.cursor = cursor
+        def fetchall(self):
+            rows = self.cursor.fetchall()
+            result = []
+            matches = 0
+            for row in rows:
+                if (row[0] == normal.row["provenance_json"]
+                    and datetime.fromisoformat(row[1]) == normal.request.computed_at):
+                    matches += 1
+                    # Negative-only lookup view: two spellings name the same
+                    # materialization time; neither can be selected uniquely.
+                    result.extend(((row[0],normal.request.computed_at.isoformat().replace("+00:00","Z")),
+                        (row[0],normal.request.computed_at.isoformat())))
+                else:
+                    result.append(row)
+            assert matches == 1
+            return result
+        def __getattr__(self,name): return getattr(self.cursor,name)
+    class AmbiguousRead:
+        def execute(self,sql,parameters=()):
+            cursor = normal.conn.execute(sql,parameters)
+            query = " ".join(sql.upper().split())
+            if query.startswith("SELECT PROVENANCE_JSON, COMPUTED_AT FROM FORECAST_POSTERIORS"):
+                assert tuple(parameters) == (lookup["city"],lookup["target_date"],lookup["metric"],lookup["posterior_source_cycle_time"])
+                calls.append(tuple(parameters))
+                return AmbiguousCursor(cursor)
+            return cursor
+        def __getattr__(self,name): return getattr(normal.conn,name)
+    provenance = _posterior_provenance_for_cycle(AmbiguousRead(),**lookup)
     assert provenance is None
+    assert len(calls) == 1
+    assert dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (normal.row["posterior_id"],)).fetchone()) == normal.row
 
 
 @pytest.mark.parametrize(
