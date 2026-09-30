@@ -240,7 +240,9 @@ def build_replacement_forecast_readiness(
     unavailable_roles: list[str] = []
     blocked_roles: list[str] = []
     identity_mismatch_roles: list[str] = []
-    expected_identity = expected_replacement_dependency_identity_by_role(temperature_metric)
+    baseline = by_role.get("baseline_b0")
+    expected_identity = expected_replacement_dependency_identity_by_role(temperature_metric,
+        city=city, baseline_data_version=baseline.data_version if baseline is not None else None)
     for role in required:
         dependency = by_role[role]
         expected = expected_identity.get(role)

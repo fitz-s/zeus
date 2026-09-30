@@ -418,7 +418,7 @@ def _held_pinned_carrier_claimed(provenance: Mapping[str, Any]) -> bool:
 
 
 def _wu_fast_pinned_carrier_reason(
-    provenance: Mapping[str, Any],
+    provenance: Mapping[str, Any] | None = None,
     *,
     city: str,
     target_date: date | str,
@@ -837,8 +837,10 @@ def _held_pinned_carrier_fields_reason(
         not witness.get(field) for field in required_witness
     ):
         return "REPLACEMENT_PINNED_DAY0_VECTOR_WITNESS_INCOMPLETE"
-    fusion = provenance.get("bayes_precision_fusion")
+    fusion = provenance.get("bayes_precision_fusion") if isinstance(provenance, Mapping) else None
     shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
+    if not isinstance(shape, Mapping) or shape.get("snapshot_id") != snapshot_id:
+        return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
     serving = fusion.get("current_value_serving") if isinstance(fusion, Mapping) else None
     if not isinstance(shape, Mapping) or not isinstance(serving, Mapping):
         return "REPLACEMENT_PINNED_DAY0_SOURCE_CLOCK_WITNESS_INCOMPLETE"
@@ -985,6 +987,7 @@ def _current_ensemble_snapshot_identity_reason(
     city: str,
     target_date: str,
     metric: str,
+    provenance: Mapping[str, Any],
 ) -> str | None:
     """Require the posterior's current ENS snapshot to be current and target-covered.
 
@@ -996,10 +999,7 @@ def _current_ensemble_snapshot_identity_reason(
     city/date/metric; DRAIN is the next source-run coverage publication; RESET is
     a current target-local-day coverage row that is LIVE_ELIGIBLE before expiry.
     """
-    expected = expected_replacement_dependency_identity_by_role(metric).get(
-        "baseline_b0"
-    )
-    expected_dataset_id = expected.data_version if expected is not None else None
+    expected_dataset_id = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version
     if (
         not isinstance(expected_dataset_id, str)
         or split_coordinate_bound_data_version(expected_dataset_id) is None
@@ -1024,13 +1024,19 @@ def _current_ensemble_snapshot_identity_reason(
     if row is None:
         return "REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_MISSING"
     if (
-        row[0] != expected_dataset_id
-        or row[1] != "ecmwf_open_data"
+        row[1] != "ecmwf_open_data"
         or row[2] != city
         or row[3] != target_date
         or row[4] != metric
     ):
         return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
+    from src.data.replacement_forecast_source_run_identity import native_coordinate_certificate_reason
+    fusion = provenance.get("bayes_precision_fusion")
+    shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
+    compatibility_reason = native_coordinate_certificate_reason(conn, shape=shape,
+        city=city, target_date=target_date, metric=metric)
+    if compatibility_reason is not None:
+        return compatibility_reason
 
     decision_time = datetime.now(timezone.utc)
     try:
@@ -1623,6 +1629,7 @@ def read_replacement_forecast_bundle(
         city=city,
         target_date=target_date_text,
         metric=metric,
+        provenance=_json_mapping(row_map["provenance_json"], field_name="provenance_json"),
     )
     if current_snapshot_reason is not None:
         return ReplacementForecastBundleReadResult("BLOCKED", current_snapshot_reason)

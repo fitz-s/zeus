@@ -2135,6 +2135,7 @@ def _latest_eligible_ensemble_input_mark(
     if "dataset_id" in columns:
         from src.data.replacement_forecast_source_run_identity import (  # noqa: PLC0415
             expected_replacement_dependency_identity_by_role,
+            register_native_coordinate_compatibility_sql,
         )
 
         expected_dataset = expected_replacement_dependency_identity_by_role(metric)[
@@ -2142,8 +2143,8 @@ def _latest_eligible_ensemble_input_mark(
         ].data_version
         if expected_dataset is None:
             return None
-        predicates.append("dataset_id = ?")
-        params.append(expected_dataset)
+        register_native_coordinate_compatibility_sql(conn)
+        predicates.append("native_coordinate_inputs_current(city, temperature_metric, dataset_id) = 1")
     if "source_run_id" in columns:
         source_authority = ensemble_source_authority_predicate(
             conn,

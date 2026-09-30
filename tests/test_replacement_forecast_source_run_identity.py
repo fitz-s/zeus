@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-23
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Protect replacement source_run/source_run_coverage identity from cross-product lineage drift.
 # Reuse: Run before writing or reading replacement source_run dependencies, readiness rows, or replay provenance.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + Bayes fusion live integration.
@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import copy
+import json
 
 import pytest
 
@@ -108,6 +110,154 @@ def test_baseline_identity_rejects_a_prior_coordinate_manifest() -> None:
 
     assert decision.valid is False
     assert "REPLACEMENT_SOURCE_RUN_DATA_VERSION_MISMATCH" in decision.reason_codes
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_owned_legacy_manifest_same_city_inputs_preserve_actual_source_identity(tmp_path, monkeypatch, metric):
+    """Protocol proof only; actual native/public authority is tested separately."""
+    import src.config as config
+    from src.data.ecmwf_open_data import _write_runtime_coordinate_manifest
+    from src.data.replacement_forecast_source_run_identity import native_coordinate_manifest_compatibility
+
+    current = {"coordinate_basis": "runtime_settlement_station", "cities": [{
+        "city": "Hong Kong", "lat": 22.3022, "lon": 114.1742, "timezone": "Asia/Hong_Kong", "unit": "C",
+        "station_geometry": {"station_id": "HKO_HQ", "lat": 22.3022, "lon": 114.1742, "validity_reason": None}}]}
+    original = copy.deepcopy(current)
+    original["cities"][0]["station_geometry"].update(elevation_m=32.0, station_surface="land")
+    encoded = json.dumps(original, sort_keys=True, separators=(",", ":"))
+    owned = _write_runtime_coordinate_manifest(tmp_path, manifest_json=encoded)
+    monkeypatch.setenv("ZEUS_51_SOURCE_ROOT", str(tmp_path))
+    monkeypatch.setattr(config, "runtime_coordinate_manifest_json", lambda: json.dumps(current, sort_keys=True, separators=(",", ":")))
+    base = ECMWF_OPENDATA_HIGH_DATA_VERSION if metric == "high" else ECMWF_OPENDATA_LOW_DATA_VERSION
+    version = coordinate_bound_data_version(base, sha256(encoded.encode()).hexdigest())
+    source = _source_run("baseline_b0", metric, dataset_id=version, manifest_hash=sha256(encoded.encode()).hexdigest())
+    coverage = _coverage("baseline_b0", metric, city="Hong Kong", data_version=version)
+    before = copy.deepcopy((source, coverage, owned.read_bytes()))
+    proof = native_coordinate_manifest_compatibility("Hong Kong", metric, version)
+    assert proof is not None and proof["source_manifest_sha256"] == sha256(encoded.encode()).hexdigest()
+    decision = validate_replacement_source_run_identity(role="baseline_b0", temperature_metric=metric,
+        source_run=source, coverage=coverage)
+    assert decision.valid, decision.reason_codes
+    assert (source, coverage, owned.read_bytes()) == before
+
+
+@pytest.mark.parametrize("axis", ("lat", "lon", "timezone", "unit", "station_id", "station_lat", "extra", "surface", "height"))
+def test_owned_coordinate_compatibility_rejects_changed_scope_and_unknown_fields(tmp_path, monkeypatch, axis):
+    import src.config as config
+    from src.data.ecmwf_open_data import _write_runtime_coordinate_manifest
+    from src.data.replacement_forecast_source_run_identity import native_coordinate_manifest_compatibility
+    current = {"coordinate_basis": "runtime_settlement_station", "cities": [{
+        "city": "Hong Kong", "lat": 22.3022, "lon": 114.1742, "timezone": "Asia/Hong_Kong", "unit": "C",
+        "station_geometry": {"station_id": "HKO_HQ", "lat": 22.3022, "lon": 114.1742, "validity_reason": None}}]}
+    old = copy.deepcopy(current)
+    old["cities"][0]["station_geometry"].update(elevation_m=32.0, station_surface="land")
+    if axis == "extra": old["cities"][0]["station_geometry"]["unknown_retired_field"] = 0
+    elif axis == "surface": old["cities"][0]["station_geometry"]["station_surface"] = "sea"
+    elif axis == "height": old["cities"][0]["station_geometry"]["elevation_m"] = True
+    elif axis == "station_id": current["cities"][0]["station_geometry"]["station_id"] = "OTHER"
+    elif axis == "station_lat": current["cities"][0]["station_geometry"]["lat"] += .001
+    elif axis in ("lat", "lon"): current["cities"][0][axis] += .001
+    else: current["cities"][0][axis] = "F" if axis == "unit" else "UTC"
+    encoded = json.dumps(old, sort_keys=True, separators=(",", ":"))
+    _write_runtime_coordinate_manifest(tmp_path, manifest_json=encoded)
+    monkeypatch.setenv("ZEUS_51_SOURCE_ROOT", str(tmp_path))
+    monkeypatch.setattr(config, "runtime_coordinate_manifest_json", lambda: json.dumps(current))
+    version = coordinate_bound_data_version(ECMWF_OPENDATA_HIGH_DATA_VERSION, sha256(encoded.encode()).hexdigest())
+    assert native_coordinate_manifest_compatibility("Hong Kong", "high", version) is None
+
+
+def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sources(tmp_path, monkeypatch):
+    """Normal native/HTTP writers; controlled input, not a live GRIB capture."""
+    import sqlite3
+    from dataclasses import replace
+    from datetime import timedelta
+    import src.config as config
+    from src.contracts import ensemble_snapshot_provenance as provenance_contract
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data.replacement_forecast_materialization_seed_builder import latest_baseline_coverage_for_replacement_seed
+    from tests.integration import test_w3_solve_seam_g3 as normal
+    from tests import test_replacement_forecast_materializer as raw_inputs
+
+    static = normal._noaa_native_sources.__wrapped__(tmp_path, monkeypatch)
+    next(static)
+    fixture = None
+    try:
+        city = config.runtime_cities_by_name()["Chicago"]
+        station = config.runtime_station_geometry_for_city(city)
+        current = {"coordinate_basis": "runtime_settlement_station", "cities": [{
+            "city": city.name, "lat": city.lat, "lon": city.lon, "timezone": city.timezone, "unit": city.settlement_unit,
+            "station_geometry": {key: station[key] for key in ("station_id", "lat", "lon", "validity_reason")}}]}
+        original = copy.deepcopy(current)
+        old_geometry = original["cities"][0]["station_geometry"]
+        old_geometry.update(elevation_m=station["ground_elevation_m"], station_surface="land")
+        original_text = json.dumps(original, sort_keys=True, separators=(",", ":"))
+        current_text = json.dumps(current, sort_keys=True, separators=(",", ":"))
+        profile = [original_text]
+        monkeypatch.setattr(config, "runtime_coordinate_manifest_json", lambda: profile[0])
+        from src.data import ecmwf_open_data as native
+        monkeypatch.setattr(native, "runtime_coordinate_manifest_json", lambda: profile[0])
+        # skip_extract supplies a controlled extraction, so persist its real
+        # original manifest with the ordinary owner API before ingest.
+        native._write_runtime_coordinate_manifest(tmp_path / "native-ens", manifest_json=original_text)
+        monkeypatch.setenv("ZEUS_51_SOURCE_ROOT", str(tmp_path / "native-ens"))
+        ordinary_input = raw_inputs._fixture_ens_surface_provenance
+        original_hash = provenance_contract.grid_surface_evidence_identity_hash
+
+        def extracted_input(**kwargs):
+            body = json.loads(ordinary_input(**kwargs))
+            # Original extractor copied precisely its manifest's station fields.
+            body["grid_surface_evidence"]["station_geometry"] = dict(old_geometry)
+            return json.dumps(body)
+
+        with monkeypatch.context() as old_producer:
+            old_producer.setattr(raw_inputs, "_fixture_ens_surface_provenance", extracted_input)
+            old_producer.setattr(provenance_contract, "grid_surface_evidence_identity_hash",
+                lambda proof, **kwargs: original_hash(proof, legacy_station_schema=True))
+            fixture = normal._kord_normal_prior_fixture(tmp_path, monkeypatch)
+            normal._kord_public_bundles(fixture, monkeypatch, at=fixture.cut)
+        immutable = {table: tuple(tuple(row) for row in fixture.conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
+            for table in ("source_run", "source_run_coverage", "ensemble_snapshots", "raw_model_forecasts", "raw_forecast_artifacts")}
+        old_row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone())
+        old_shape = json.loads(old_row["provenance_json"])["bayes_precision_fusion"]["current_evidence_shape"]
+        original_version = fixture.request.baseline_data_version
+        profile[0] = current_text
+        seed = {"city":city.name,"target_date":str(fixture.request.target_date),"temperature_metric":"low",
+            "baseline_source_run_id":fixture.request.baseline_source_run_id,
+            "openmeteo_source_run_id":fixture.request.openmeteo_source_run_id,"computed_at":fixture.cut.isoformat()}
+        assert not queue._seed_already_covered(forecast_db=fixture.db, forecast_conn=fixture.conn, seed=seed)
+        coverage = latest_baseline_coverage_for_replacement_seed(fixture.conn, city=city.name,
+            target_date=seed["target_date"], temperature_metric="low", not_after_source_cycle_time=fixture.request.source_cycle_time,
+            as_of_time=fixture.cut)
+        assert coverage is not None and coverage["data_version"] == original_version
+        # The queue's read API deliberately makes its connection query-only.
+        fixture.conn.execute("PRAGMA query_only=OFF")
+        new_cut = fixture.cut + timedelta(minutes=1)
+        fixture.sql_clock[0] = new_cut
+        request = replace(fixture.request, computed_at=new_cut)
+        new = materializer.materialize_replacement_forecast_live(fixture.conn, request)
+        assert new.ok, new.reason_codes
+        fixture.conn.commit()
+        assert new.posterior_id != fixture.result.posterior_id
+        fresh = json.loads(fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+            (new.posterior_id,)).fetchone()[0])["bayes_precision_fusion"]["current_evidence_shape"]
+        assert fresh["native_coordinate_compatibility"]["original_grid_surface_evidence_identity_hash"] == old_shape["grid_surface_evidence_identity_hash"]
+        assert fresh["grid_surface_evidence_identity_hash"] != old_shape["grid_surface_evidence_identity_hash"]
+        assert json.loads(old_row["q_json"]) == json.loads(fixture.conn.execute(
+            "SELECT q_json FROM forecast_posteriors WHERE posterior_id=?", (new.posterior_id,)).fetchone()[0])
+        fixture.request, fixture.result = request, new
+        assert len(normal._kord_public_bundles(fixture, monkeypatch, at=new_cut)) == 2
+        seed["computed_at"] = new_cut.isoformat()
+        assert queue._seed_already_covered(forecast_db=fixture.db, forecast_conn=fixture.conn, seed=seed)
+        assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (old_row["posterior_id"],)).fetchone()) == old_row
+        assert {table: tuple(tuple(row) for row in fixture.conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
+            for table in immutable} == immutable
+    finally:
+        if fixture is not None:
+            fixture.conn.close()
+            fixture.builtin.close()
+        next(static, None)
 
 
 def test_low_baseline_rejects_uncertified_same_cycle_dataset() -> None:

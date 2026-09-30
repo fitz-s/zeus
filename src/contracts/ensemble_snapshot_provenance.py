@@ -86,7 +86,7 @@ ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_w
 GRID_SURFACE_EVIDENCE_REVISION = "ecmwf_ens_land_cell_selection_v1"
 
 
-def grid_surface_evidence_identity_hash(proof: Mapping[str, object]) -> str:
+def grid_surface_evidence_identity_hash(proof: Mapping[str, object], *, legacy_station_schema: bool = False) -> str:
     """Stable selected physical grid identity, excluding fetch/transport clocks.
 
     The whole-file registry hash is audit-only: changing an unrelated city's
@@ -101,7 +101,9 @@ def grid_surface_evidence_identity_hash(proof: Mapping[str, object]) -> str:
         "request": {key: proof[key] for key in ("request_lat", "request_lon")},
         # ENS cell eligibility is proved by the actual matching model LSM.
         # Airport reference height and unproved station surface are not inputs.
-        "station": {key: station[key] for key in ("station_id", "lat", "lon")},
+        "station": {key: station[key] for key in (
+            ("station_id", "lat", "lon", "elevation_m", "station_surface")
+            if legacy_station_schema else ("station_id", "lat", "lon"))},
         "selected": {key: proof[key] for key in (
             "selected_flat_index", "selected_lat", "selected_lon", "selected_land_fraction",
         )},

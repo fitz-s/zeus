@@ -3140,6 +3140,16 @@ def _blocked_attempt_fingerprint(
                     "source_cycle_time": ensemble_mark[1].isoformat(),
                 }
             )
+            from src.data.replacement_forecast_source_run_identity import (
+                NATIVE_COORDINATE_SEMANTIC_ROUTE, native_coordinate_manifest_compatibility,
+            )
+            coordinate_dependency = None
+            version = payload.get("baseline_data_version")
+            if isinstance(version, str):
+                compatible = native_coordinate_manifest_compatibility(scope[0], scope[2], version)
+                coordinate_dependency = {"revision": NATIVE_COORDINATE_SEMANTIC_ROUTE,
+                    "data_version": version,
+                    "city_inputs_sha256": None if compatible is None else compatible["city_inputs_sha256"]}
             day0_hourly_frontier: dict[str, dict[str, object]] | None = None
             try:
                 rows = conn.execute(
@@ -3220,6 +3230,7 @@ def _blocked_attempt_fingerprint(
                 "station_ground_facts_frontier": ground_facts_frontier,
                 "station_ground_target_applicability": ground_target_frontier,
                 "eligible_ensemble_input_mark": eligible_ensemble_input_mark,
+                "native_coordinate_inputs": coordinate_dependency,
                 "day0_hourly_frontier": day0_hourly_frontier,
             },
             "logic": logic_revisions,

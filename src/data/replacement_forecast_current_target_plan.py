@@ -29,7 +29,10 @@ from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_
 from src.data.replacement_input_hwm import (
     prime_frozen_replacement_artifact_hwm,
 )
-from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
+from src.data.replacement_forecast_source_run_identity import (
+    expected_replacement_dependency_identity_by_role,
+    register_native_coordinate_compatibility_sql,
+)
 from src.engine.time_context import has_city_local_day_ended, has_city_local_day_started
 from src.state.db import _connect_read_only
 
@@ -536,13 +539,20 @@ def _load_openmeteo_manifest_index(
         """,
         (*identity_params, *cycle_params, *city_params, *city_params),
     ).fetchall()
+    from src.data.raw_forecast_artifact_manifest import ANCHOR_LOCAL_PROOF_REVISION
+    # Once per read run. A database with no local proof must not be scanned
+    # anew for every ordinary body while native compatibility drains scopes.
+    local_proofs_present = decision_time is not None and "artifact_id" in raw_artifact_columns and conn.execute(
+        "SELECT 1 FROM raw_forecast_artifacts WHERE data_version=? LIMIT 1",
+        (ANCHOR_LOCAL_PROOF_REVISION,),
+    ).fetchone() is not None
     index: dict[tuple[str, str, str], list[_OpenMeteoManifest]] = {}
     for row in rows:
         _check_target_plan_deadline(deadline_monotonic)
         artifact_path = str(row["artifact_path"] or "")
         metadata = _json_object(row["metadata_json"])
         local_precision = local_dependency = ground_entity = None
-        if decision_time is not None and "artifact_id" in raw_artifact_columns:
+        if local_proofs_present:
             from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof, ANCHOR_LOCAL_PROOF_REVISION
             aid = int(row["artifact_id"])
             # This is only a structural candidate check. The strict typed
@@ -2466,6 +2476,7 @@ def replacement_forecast_current_target_keys(
         )
     try:
         conn.execute("PRAGMA query_only=ON")
+        register_native_coordinate_compatibility_sql(conn, deadline_monotonic=deadline_monotonic)
         tables = _table_names(conn)
         if "market_events" not in tables:
             return ()
@@ -2541,10 +2552,7 @@ def replacement_forecast_current_target_keys(
                 FROM source_run_coverage c
                 WHERE c.source_id = ?
                   AND c.target_local_date >= ?
-                  AND (
-                      (c.temperature_metric = 'high' AND c.data_version = ?)
-                      OR (c.temperature_metric = 'low' AND c.data_version = ?)
-                  )
+                  AND native_coordinate_inputs_current(c.city, c.temperature_metric, c.data_version) = 1
                   AND EXISTS (
                       SELECT 1
                       FROM market_events m
@@ -2561,8 +2569,6 @@ def replacement_forecast_current_target_keys(
                 (
                     expected_high.source_id,
                     minimum_target_date,
-                    expected_high.data_version,
-                    expected_low.data_version,
                 ),
             ).fetchall()
         else:
@@ -2719,6 +2725,7 @@ def build_replacement_forecast_current_target_plan(
             observation_conn = None
     try:
         conn.execute("PRAGMA query_only=ON")
+        register_native_coordinate_compatibility_sql(conn, deadline_monotonic=deadline_monotonic)
         tables = _table_names(conn)
         required = {"market_events", "forecast_posteriors", "readiness_state"}
         if require_raw_artifacts:
@@ -2919,10 +2926,8 @@ def build_replacement_forecast_current_target_plan(
                     LEFT JOIN source_run sr ON sr.source_run_id = c.source_run_id
                     WHERE c.source_id = ?
                       AND c.target_local_date >= ?
-                      AND (
-                          (c.temperature_metric = 'high' AND c.data_version = ?)
-                          OR (c.temperature_metric = 'low' AND c.data_version = ?)
-                      )
+                      AND native_coordinate_inputs_current(c.city, c.temperature_metric, c.data_version) = 1
+                      AND sr.dataset_id = c.data_version
                       AND EXISTS (
                           SELECT 1
                           FROM market_events m
@@ -2975,8 +2980,6 @@ def build_replacement_forecast_current_target_plan(
                 (
                     expected_high.source_id,
                     minimum_target_date,
-                    expected_high.data_version,
-                    expected_low.data_version,
                     *coverage_params,
                 ),
             ).fetchall()

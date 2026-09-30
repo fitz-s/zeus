@@ -206,7 +206,8 @@ def build_replacement_forecast_materialization_seed(
     if not settlement_unit:
         raise ValueError("settlement unit is required")
     rounding_rule = SettlementSemantics.for_city(city_config).rounding_rule
-    expected = expected_replacement_dependency_identity_by_role(metric)
+    expected = expected_replacement_dependency_identity_by_role(metric, city=city_name,
+        baseline_data_version=baseline_coverage.get("data_version"))
     baseline_expected = expected["baseline_b0"]
     computed = _dt(computed_at, field_name="computed_at")
     reasons: list[str] = []
@@ -351,7 +352,10 @@ def latest_baseline_coverage_for_replacement_seed(
     temperature_metric: str,
     not_after_source_cycle_time: datetime | str,
     as_of_time: datetime | str,
+    deadline_monotonic: float | None = None,
 ) -> Mapping[str, object] | None:
+    from src.data.replacement_forecast_source_run_identity import register_native_coordinate_compatibility_sql
+    register_native_coordinate_compatibility_sql(conn, deadline_monotonic=deadline_monotonic)
     expected = expected_replacement_dependency_identity_by_role(temperature_metric)["baseline_b0"]
     causal_bound = _dt(
         not_after_source_cycle_time,
@@ -381,7 +385,8 @@ def latest_baseline_coverage_for_replacement_seed(
           AND c.target_local_date = ?
           AND c.temperature_metric = ?
           AND c.source_id = ?
-          AND c.data_version = ?
+          AND native_coordinate_inputs_current(c.city, c.temperature_metric, c.data_version) = 1
+          AND sr.dataset_id = c.data_version
           AND c.completeness_status = 'COMPLETE'
           AND c.readiness_status = 'LIVE_ELIGIBLE'
           AND c.expires_at IS NOT NULL
@@ -402,7 +407,6 @@ def latest_baseline_coverage_for_replacement_seed(
             target_date,
             temperature_metric,
             expected.source_id,
-            expected.data_version,
             as_of,
             as_of,
             causal_bound,

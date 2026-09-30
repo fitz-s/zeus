@@ -2268,7 +2268,8 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         ("baseline_b0", _to_utc(request.baseline_source_available_at, field_name="baseline_source_available_at")),
         ("openmeteo_ifs9_anchor", _to_utc(request.openmeteo_source_available_at, field_name="openmeteo_source_available_at")),
     ]
-    expected = expected_replacement_dependency_identity_by_role(metric)
+    expected = expected_replacement_dependency_identity_by_role(metric, city=request.city,
+        baseline_data_version=request.baseline_data_version)
     if not str(getattr(request, "baseline_source_run_id", "") or "").strip():
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_SOURCE_RUN_ID_MISSING")
     if not str(request.openmeteo_source_run_id or "").strip():
@@ -3303,6 +3304,7 @@ class _CurrentEvidenceShape:
     between_cohort_status: str
     grid_surface_evidence_revision: str | None = None
     grid_surface_evidence_identity_hash: str | None = None
+    native_coordinate_compatibility: Mapping[str, object] | None = None
     # Between-spread freshest-coherent-cohort provenance (consult v2 (b), 2026-07-17):
     # populated only when the ±3h cohort filter excludes a provider from the between term.
     # The status is always persisted and is part of the shape_hash identity.
@@ -3333,6 +3335,8 @@ class _CurrentEvidenceShape:
             payload.pop("grid_surface_evidence_revision", None)
         if self.grid_surface_evidence_identity_hash is None:
             payload.pop("grid_surface_evidence_identity_hash", None)
+        if self.native_coordinate_compatibility is None:
+            payload.pop("native_coordinate_compatibility", None)
         if payload.get("interval_censored_member_count") is None:
             payload.pop("interval_censored_member_count", None)
         if payload.get("stale_shape_reused") is False:
@@ -3498,6 +3502,7 @@ def _current_evidence_shape_from_values(
     shape_age_gamma_c2_per_6h: float = 0.0,
     grid_surface_evidence_revision: str | None = None,
     grid_surface_evidence_identity_hash: str | None = None,
+    native_coordinate_compatibility: Mapping[str, object] | None = None,
 ) -> _CurrentEvidenceShape:
     """Compose current ensemble and provider disagreement without a fitted floor.
 
@@ -3689,6 +3694,8 @@ def _current_evidence_shape_from_values(
     if grid_surface_evidence_revision is not None and grid_surface_evidence_identity_hash is not None:
         identity["grid_surface_evidence_revision"] = grid_surface_evidence_revision
         identity["grid_surface_evidence_identity_hash"] = grid_surface_evidence_identity_hash
+    if native_coordinate_compatibility is not None:
+        identity["native_coordinate_compatibility"] = native_coordinate_compatibility
     if stale_shape_reused:
         identity["stale_shape_reused"] = True
     member_values_hash = str(identity["member_values_hash"])
@@ -3716,6 +3723,7 @@ def _current_evidence_shape_from_values(
         between_cohort_status=BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
         grid_surface_evidence_revision=grid_surface_evidence_revision,
         grid_surface_evidence_identity_hash=grid_surface_evidence_identity_hash,
+        native_coordinate_compatibility=native_coordinate_compatibility,
         # Cohort membership is diagnostic provenance; the status and filtered between
         # value above are the identity-bearing proof.
         between_cohort_models=between_cohort_models,
@@ -3806,6 +3814,7 @@ class CurrentEvidenceSnapshotIdentity:
     grid_surface_evidence_identity_hash: str
     # Native-unit per-member bounds when the row is interval-censored, else None.
     member_bounds: tuple[tuple[float, float], ...] | None = None
+    native_coordinate_compatibility: Mapping[str, object] | None = None
 
 
 def _current_evidence_snapshot_row(
@@ -3818,7 +3827,8 @@ def _current_evidence_snapshot_row(
 ) -> sqlite3.Row | tuple[object, ...] | None:
     """Run the one canonical causal target ENS selector."""
 
-    expected = expected_replacement_dependency_identity_by_role(metric)
+    expected = expected_replacement_dependency_identity_by_role(metric, city=request.city,
+        baseline_data_version=request.baseline_data_version)
     baseline_data_version = expected["baseline_b0"].data_version
     if (
         baseline_data_version is None
@@ -3937,7 +3947,7 @@ def read_current_evidence_snapshot_identity(
                       COALESCE(source_cycle_time, issue_time),
                       COALESCE(source_available_at, available_at), members_unit,
                       forecast_window_attribution_status, dataset_id,
-                      provenance_json""",
+                      provenance_json, source_run_id""",
     )
     if row is None:
         return None
@@ -3958,6 +3968,17 @@ def read_current_evidence_snapshot_identity(
         # ingest writes a land-grid proof; the ordinary seed loop recomputes.
         # RESET: this same selector verifies its exact selected row's proof.
         return None
+    compatibility = None
+    current_version = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version
+    if row[7] != current_version:
+        from src.data.replacement_forecast_source_run_identity import native_coordinate_snapshot_compatibility
+        compatibility = native_coordinate_snapshot_compatibility(surface_row, metric=metric)
+        if compatibility is None:
+            return None
+        original_run = conn.execute("SELECT manifest_hash FROM source_run WHERE source_run_id=?",
+            (row[9],)).fetchone()
+        if original_run is None or original_run[0] != compatibility["source_manifest_sha256"]:
+            return None
     try:
         provenance = json.loads(row[8])
         surface_proof = provenance["grid_surface_evidence"]
@@ -3991,6 +4012,7 @@ def read_current_evidence_snapshot_identity(
         grid_surface_evidence_revision=surface_revision,
         grid_surface_evidence_identity_hash=surface_hash,
         member_bounds=member_bounds,
+        native_coordinate_compatibility=compatibility,
     )
 
 
@@ -4077,6 +4099,7 @@ def _read_current_evidence_shape(
             source_available_at=snapshot.source_available_at,
             grid_surface_evidence_revision=snapshot.grid_surface_evidence_revision,
             grid_surface_evidence_identity_hash=snapshot.grid_surface_evidence_identity_hash,
+            native_coordinate_compatibility=snapshot.native_coordinate_compatibility,
             provider_values_c=provider_values_c,
             provider_weights=provider_weights,
             center_c=center_c,

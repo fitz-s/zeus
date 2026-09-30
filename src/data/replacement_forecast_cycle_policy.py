@@ -527,6 +527,18 @@ def _current_evidence_shape_has_probability_authority(
         return False
     if not city or not target_date or metric not in ("high","low") or not forecast_db:
         return False
+    try:
+        from src.state.db import _connect_read_only
+        from src.data.replacement_forecast_source_run_identity import native_coordinate_certificate_reason
+        native_conn = _connect_read_only(forecast_db)
+        try:
+            if native_coordinate_certificate_reason(native_conn, shape=shape,
+                    city=city, target_date=target_date, metric=metric) is not None:
+                return False
+        finally:
+            native_conn.close()
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return False
     if current_evidence_shape_source_cycle_time(provenance) is None:
         return False
     shape_lag_hours = shape.get("shape_lag_hours")
