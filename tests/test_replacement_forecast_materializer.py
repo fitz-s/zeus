@@ -149,7 +149,7 @@ def _hko_native_surfaces(tmp_path, monkeypatch, request=None):
     frontier = request is not None and "_target_frontier_native_surfaces" in request.fixturenames
     models = (("icon_global", "ukmo_global_deterministic_10km") if frontier else
               ("icon_global", "ukmo_global_deterministic_10km", "gfs_hrrr", "ncep_nbm_conus",
-               "icon_d2", "meteofrance_arome_france_hd"))
+               "icon_d2", "meteofrance_arome_france_hd", "ukmo_uk_deterministic_2km"))
     for model in models:
         profile = surface._profile(model)
         domain, shape = profile["domain"], (profile["ny"], profile["nx"])
@@ -562,7 +562,7 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 params["run"] = run.strftime("%Y-%m-%dT%H:%M")
             variable = params["hourly"]
             grid_lat, grid_lon = (31.14, 121.80) if model == "ecmwf_ifs" and old["city"].casefold() == "shanghai" else (city.lat, city.lon)
-            if old["city"] in {"Los Angeles", "Milan"}:
+            if old["city"] in {"Los Angeles", "Milan", "London"}:
                 from src.config import runtime_station_geometry_for_city
                 station = runtime_station_geometry_for_city(city, effective_at=datetime.fromisoformat(captured))
                 assert station["ground_status"] == "VERIFIED"
@@ -574,9 +574,21 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                             "gfs_hrrr": (33.94541, -118.40222),
                             "ncep_nbm_conus": (33.94122, -118.38857)}
                 grid_lat, grid_lon = selected.get(model, (grid_lat, grid_lon))
-                if old["city"] == "Milan" and model != "ecmwf_ifs":
-                    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
-                    grid_lat, grid_lon = _selected_test_cell(model, city.lat, city.lon)
+                if old["city"] in {"Milan", "London"} and model != "ecmwf_ifs":
+                    if model == "ukmo_uk_deterministic_2km":
+                        from src.data.openmeteo_model_surface import _profile, _project, _float32
+                        profile = _profile(model)
+                        px,py = _project(profile,latitude=city.lat,longitude=city.lon)
+                        axes = [_float32(_float32(value-profile[f"origin_{axis}"])/profile["dx"])
+                                for value,axis in ((px,"x"),(py,"y"))]
+                        indices = [math.floor(q+.5) if q >= 0 else math.ceil(q-.5) for q in axes]
+                        grid_lat,grid_lon = _project(profile,
+                            x=_float32(_float32(_float32(indices[0])*profile["dx"])+profile["origin_x"]),
+                            y=_float32(_float32(_float32(indices[1])*profile["dy"])+profile["origin_y"]))
+                        grid_lon = _float32(math.fmod(_float32(grid_lon+180),360)-180)
+                    else:
+                        from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+                        grid_lat, grid_lon = _selected_test_cell(model, city.lat, city.lon)
                 if model == "ecmwf_ifs":
                     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
                     cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
@@ -592,7 +604,7 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 "timezone": city.timezone, "hourly_units": {variable: "°C"},
                 "hourly": {"time": [f"{old['target_date']}T{hour:02d}:00" for hour in range(24)],
                            variable: [old["forecast_value_c"]] * 24}}
-            if old["city"] in {"Los Angeles", "Milan"}:
+            if old["city"] in {"Los Angeles", "Milan", "London"}:
                 from zoneinfo import ZoneInfo
                 local_start = datetime.combine(date.fromisoformat(old["target_date"]),
                                                datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
@@ -613,7 +625,7 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 captures=[(body, datetime.fromisoformat(captured).timestamp())],
                 network_captures=[(body, datetime.fromisoformat(captured).timestamp(),
                                    {"content-type": "application/json"})]
-                    if old["city"] in {"Los Angeles", "Milan"} or frontier else ())
+                    if old["city"] in {"Los Angeles", "Milan", "London"} or frontier else ())
             raw = {key: old[key] for key in ("model", "city", "target_date", "metric", "source_cycle_time",
                 "source_available_at", "lead_days", "forecast_value_c", "endpoint")}
             raw.update(captured_at=captured, **identity, _physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY])
@@ -1561,29 +1573,36 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
     from src.config import runtime_cities_by_name
     from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
 
-    if city == "Milan":
-        request.getfixturevalue("_hko_source_surface")
-    conn = _conn()
+    request.getfixturevalue("_hko_source_surface")
+    if city == "London":
+        from tests.test_config import _official_international_homr_registry
+        _official_international_homr_registry(request.getfixturevalue("tmp_path"),monkeypatch,city)
+    conn = _conn(archive_ground=False)
     city_cfg = runtime_cities_by_name()[city]
-    run = datetime(2026, 9, 23, 0, tzinfo=UTC)
-    if city == "Milan":
-        # Actual WMDR + AWC bytes were first captured after Sep30 00:21Z.
-        # Keep both original possession clocks; only these controlled forecasts
-        # move together to a later run/target/cut, with the same D2/D1 geometry.
+    if city in {"Milan", "London"}:
+        # Retained Milan WMDR/AWC and London HOMR bodies have distinct real
+        # Sep30 capture clocks. Preserve them; move each controlled forecast
+        # run/target/cut together after possession, keeping D2/D1 geometry.
         from src.data import station_ground_evidence as ground
         class GroundClock(datetime):
             @classmethod
             def now(cls, tz=None):
-                return _hko_dt(0, 30).astimezone(tz or UTC)
+                recorded = _hko_dt(0,30) if city == "Milan" else _hko_dt(23)
+                return recorded.astimezone(tz or UTC)
         monkeypatch.setattr(ground, "datetime", GroundClock)
         conn.commit()
         db = ground.forecast_db_from_connection(conn)
         assert ground.archive_station_ground_evidence(db, [city])["status"] == "GROUND_SOURCE_ARCHIVED"
-        entity = ground.read_current_station_ground_evidence(db, city=city, decision_at=_hko_dt(1))
-        assert len(entity["input_bodies"]) == 2
-        assert entity["facts"]["elevation_m"] == 234.
-        run = _hko_dt(0)
-    far_target = date(2026, 10, 2) if city == "Milan" else date(2026, 9, 25)
+        run = _hko_dt(0) if city == "Milan" else datetime(2026,10,1,tzinfo=UTC)
+        entity = ground.read_current_station_ground_evidence(db, city=city, decision_at=run+timedelta(hours=1))
+        if city == "Milan":
+            assert len(entity["input_bodies"]) == 2
+        else:
+            from src.config import HOMR_INTERNATIONAL_GROUND_SOURCE_KIND
+            assert entity["source_kind"] == HOMR_INTERNATIONAL_GROUND_SOURCE_KIND
+        assert entity["facts"]["elevation_m"] == (234. if city == "Milan" else 5.8)
+        assert datetime.fromisoformat(entity["recorded_at"]) < run+timedelta(minutes=40 if city == "Milan" else 5)
+    far_target = date(2026, 10, 2) if city == "Milan" else date(2026, 10, 3)
     near_target = far_target - timedelta(days=1)
     models = tuple(dict.fromkeys((
         "ecmwf_ifs", "icon_d2", "icon_global", "ukmo_global_deterministic_10km",
@@ -1647,7 +1666,7 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
     for target, d2_eligible in ((far_target, False), (near_target, True)):
         # The physical target changes; copy the raw evidence to that exact natural key.
         if d2_eligible:
-            if city == "Milan":
+            if city in {"Milan", "London"}:
                 # Different target, different normal entity. Do not relabel
                 # already licensed D2 raw rows or their immutable body metadata.
                 far_rows = [tuple(row) for row in conn.execute(
@@ -1674,15 +1693,15 @@ def test_source_clock_scheme_rejects_possessed_d2_at_d2_lead_but_keeps_global(
             target_date=target, source_cycle_time=run,
             computed_at=run + timedelta(hours=4 if d2_newer else 1),
         )
-        if city == "Milan":
+        if city in {"Milan", "London"}:
             request = _la_current_physical_request(conn, metric=metric, cycle=run,
                 decision=request.computed_at, city_name=city, target=target)
-        _qualify_raw_fixture_rows(conn, rebuild=d2_eligible and city != "Milan")
+        _qualify_raw_fixture_rows(conn)
         override = materializer_mod._replacement_bayes_precision_fusion_override(
             request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
         )
         assert override is not None
-        if city == "Milan" and d2_eligible:
+        if city in {"Milan", "London"} and d2_eligible:
             assert far_rows == [tuple(row) for row in conn.execute(
                 "SELECT * FROM raw_model_forecasts WHERE city=? AND target_date=? ORDER BY raw_model_forecast_id",
                 (city, far_target.isoformat()))]
@@ -1708,10 +1727,11 @@ def _la_current_physical_request(conn, *, metric, cycle, decision, city_name="Lo
     from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
     from zoneinfo import ZoneInfo
     city = runtime_cities_by_name()[city_name]
-    assert city_name in {"Los Angeles", "Milan"}
+    assert city_name in {"Los Angeles", "Milan", "London"}
     station = runtime_station_geometry_for_city(city, effective_at=decision)
     assert station["ground_status"] == "VERIFIED"
-    assert station["ground_elevation_m"] == pytest.approx(29.7 if city_name == "Los Angeles" else 234.)
+    assert station["ground_elevation_m"] == pytest.approx(
+        {"Los Angeles":29.7,"Milan":234.,"London":5.8}[city_name])
     cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
                                      target_elevation_m=station["ground_elevation_m"])
     lon = cell["selected_grid_lon"] - 360. if cell["selected_grid_lon"] > 180. else cell["selected_grid_lon"]
