@@ -275,7 +275,6 @@ def build_replacement_forecast_materialization_request(
     }
     for optional_key in (
         "openmeteo_source_cycle_time",
-        "openmeteo_manifest_json",
         "openmeteo_anchor_artifact_id",
         "latitude",
         "longitude",
@@ -296,6 +295,10 @@ def build_replacement_forecast_materialization_request(
     ):
         if optional_key in payload:
             request[optional_key] = payload[optional_key]
+    if "openmeteo_manifest_json" in payload:
+        request["openmeteo_manifest_json"] = _existing_path(
+            payload, "openmeteo_manifest_json", base_dir=base_path,
+        )
     # BOUNDARY CONTRACT (2026-06-10): validate the assembled request against the
     # shared producer⇄consumer schema BEFORE returning it READY. This is the
     # producer half of the contract: a request that passes here is guaranteed to

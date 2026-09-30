@@ -169,13 +169,22 @@ def test_owned_coordinate_compatibility_rejects_changed_scope_and_unknown_fields
 def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sources(tmp_path, monkeypatch):
     """Normal native/HTTP writers; controlled input, not a live GRIB capture."""
     import sqlite3
-    from dataclasses import replace
-    from datetime import timedelta
+    import inspect
+    import subprocess
+    from pathlib import Path
+    from dataclasses import asdict, replace
+    from datetime import date, datetime, timedelta
     import src.config as config
     from src.contracts import ensemble_snapshot_provenance as provenance_contract
     from src.data import replacement_forecast_materializer as materializer
     from src.data import replacement_forecast_live_materialization_queue as queue
     from src.data.replacement_forecast_materialization_seed_builder import latest_baseline_coverage_for_replacement_seed
+    from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
+    from src.data.replacement_forecast_seed_discovery import discover_replacement_forecast_materialization_seeds
+    from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, write_manifest
+    from src.data.replacement_forecast_materialization_request_builder import build_materialize_request_dataclass
+    from src.state.db_writer_lock import db_writer_lock, WriteClass
+    from scripts import materialize_replacement_forecast_live as cli
     from tests.integration import test_w3_solve_seam_g3 as normal
     from tests import test_replacement_forecast_materializer as raw_inputs
 
@@ -214,7 +223,24 @@ def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sour
             old_producer.setattr(raw_inputs, "_fixture_ens_surface_provenance", extracted_input)
             old_producer.setattr(provenance_contract, "grid_surface_evidence_identity_hash",
                 lambda proof, **kwargs: original_hash(proof, legacy_station_schema=True))
-            fixture = normal._kord_normal_prior_fixture(tmp_path, monkeypatch)
+            # The small public fixture omits transport lineage. Supply the
+            # normal producer's actual request run ID before its original
+            # manifest INSERT, never by changing a sealed artifact afterward.
+            anchor_inputs = dict(vars(raw_inputs))
+            anchor_source = inspect.getsource(raw_inputs._hko_request_with_owned_anchor).replace(
+                'product_metadata={"city":city.name,"target_date":request.target_date.isoformat()}',
+                'product_metadata={"city":city.name,"target_date":request.target_date.isoformat(),'
+                '"source_run_id":request.openmeteo_source_run_id}')
+            exec(compile(anchor_source, raw_inputs.__file__, "exec"), anchor_inputs)
+            old_producer.setattr(raw_inputs, "_hko_request_with_owned_anchor", anchor_inputs["_hko_request_with_owned_anchor"])
+            source = inspect.getsource(normal._kord_normal_prior_fixture).replace(
+                "target, cycle = date(2026, 10, 1)", "target, cycle = date(2026, 10, 2)").replace(
+                "day0_observation_state=DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS", "day0_observation_state=None")
+            inputs = dict(vars(normal))
+            exec(compile(source, normal.__file__, "exec"), inputs)
+            fixture = inputs["_kord_normal_prior_fixture"](tmp_path, monkeypatch)
+            assert fixture.request.target_date == date(2026, 10, 2)
+            assert fixture.request.source_cycle_time == datetime(2026, 10, 1, tzinfo=fixture.cut.tzinfo)
             normal._kord_public_bundles(fixture, monkeypatch, at=fixture.cut)
         immutable = {table: tuple(tuple(row) for row in fixture.conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
             for table in ("source_run", "source_run_coverage", "ensemble_snapshots", "raw_model_forecasts", "raw_forecast_artifacts")}
@@ -222,6 +248,25 @@ def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sour
             (fixture.result.posterior_id,)).fetchone())
         old_shape = json.loads(old_row["provenance_json"])["bayes_precision_fusion"]["current_evidence_shape"]
         original_version = fixture.request.baseline_data_version
+        # Export only mutable transport from the actually owned canonical
+        # artifact. Its request/body/source clocks and DB descriptor stay put.
+        transport = tmp_path / "normal-transport"
+        transport.mkdir()
+        precision_path = transport / "precision.json"
+        precision_path.write_text(json.dumps(asdict(fixture.request.openmeteo_precision_guard.metadata), default=str))
+        original_anchor = dict(fixture.conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",
+            (fixture.request.anchor_artifact_id,)).fetchone())
+        manifest_path = transport / "anchor.manifest.json"
+        manifest = RawForecastArtifactManifest(**{key: original_anchor[key] for key in (
+            "source_id", "product_id", "data_version", "artifact_path", "sha256", "byte_size", "source_cycle_time",
+            "source_available_at", "captured_at", "request_url")},
+            request_params=json.loads(original_anchor["request_params_json"]), product_metadata={
+                **json.loads(original_anchor["artifact_metadata_json"]), "artifact_id":fixture.request.anchor_artifact_id,
+                "source_run_id":fixture.request.openmeteo_source_run_id,
+                "openmeteo_payload_json":original_anchor["artifact_path"],
+                "precision_metadata_json":str(precision_path),"manifest_json":str(manifest_path)})
+        manifest.verify_artifact()
+        write_manifest(manifest, manifest_path)
         profile[0] = current_text
         seed = {"city":city.name,"target_date":str(fixture.request.target_date),"temperature_metric":"low",
             "baseline_source_run_id":fixture.request.baseline_source_run_id,
@@ -232,14 +277,41 @@ def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sour
             as_of_time=fixture.cut)
         assert coverage is not None and coverage["data_version"] == original_version
         # The queue's read API deliberately makes its connection query-only.
-        fixture.conn.execute("PRAGMA query_only=OFF")
         new_cut = fixture.cut + timedelta(minutes=1)
         fixture.sql_clock[0] = new_cut
-        request = replace(fixture.request, computed_at=new_cut)
-        new = materializer.materialize_replacement_forecast_live(fixture.conn, request)
-        assert new.ok, new.reason_codes
-        fixture.conn.commit()
-        assert new.posterior_id != fixture.result.posterior_id
+        plan = build_replacement_forecast_current_target_plan(fixture.db, now_utc=new_cut)
+        assert plan.target_count == plan.can_seed_count == 1, plan
+        seed_dir, request_dir = transport / "seeds", transport / "requests"
+        discovery = discover_replacement_forecast_materialization_seeds(forecast_db=fixture.db,
+            raw_manifest_dir=transport, seed_dir=seed_dir, request_dir=request_dir, computed_at=new_cut, limit=1)
+        assert discovery.discovered_count == 1, discovery
+        processed, failed, reasons = queue._prepare_seed_requests_with_connection(seed_dir=seed_dir,
+            seed_processed_dir=transport/"seeds-processed",seed_failed_dir=transport/"seeds-failed",
+            request_dir=request_dir,forecast_db=fixture.db,forecast_conn=None,limit=1)
+        assert len(processed) == 1 and not failed, (processed,failed,reasons)
+        queued = tuple(request_dir.glob("*.json"))
+        assert len(queued) == 1
+        queued_payload = json.loads(queued[0].read_text())
+        assert Path(queued_payload["openmeteo_manifest_json"]).is_absolute()
+        request = build_materialize_request_dataclass(queued_payload, base_dir=request_dir)
+        assert request.baseline_data_version == original_version
+        calls = []
+        def actor(command):
+            path = Path(command[command.index("--input-json")+1])
+            calls.append(path)
+            fixture.conn.execute("PRAGMA query_only=OFF")
+            code, stdout, stderr = cli._run_one(path, commit=True, init_schema=False,
+                conn=fixture.conn, publish_wake=False, schema_ready=True,
+                writer_lock=lambda: db_writer_lock(fixture.db, WriteClass.LIVE, blocking=False))
+            return subprocess.CompletedProcess(command, code, stdout, stderr)
+        executed = queue.process_replacement_forecast_live_materialization_queue(request_dir=request_dir,
+            processed_dir=transport/"processed",failed_dir=transport/"failed",forecast_db=fixture.db,
+            runner=actor,discover=False,limit=1)
+        assert len(calls) == 1 and executed.failed_count == 0, executed
+        latest = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id DESC LIMIT 1").fetchone())
+        assert latest["posterior_id"] != fixture.result.posterior_id
+        from types import SimpleNamespace
+        new = SimpleNamespace(posterior_id=latest["posterior_id"])
         fresh = json.loads(fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
             (new.posterior_id,)).fetchone()[0])["bayes_precision_fusion"]["current_evidence_shape"]
         assert fresh["native_coordinate_compatibility"]["original_grid_surface_evidence_identity_hash"] == old_shape["grid_surface_evidence_identity_hash"]
@@ -250,6 +322,11 @@ def test_native_old_manifest_normal_certificate_rebuilds_without_relabeling_sour
         assert len(normal._kord_public_bundles(fixture, monkeypatch, at=new_cut)) == 2
         seed["computed_at"] = new_cut.isoformat()
         assert queue._seed_already_covered(forecast_db=fixture.db, forecast_conn=fixture.conn, seed=seed)
+        repeat_plan = build_replacement_forecast_current_target_plan(fixture.db, now_utc=new_cut)
+        assert repeat_plan.covered_count == 1, tuple(row.as_dict() for row in repeat_plan.rows)
+        repeat = discover_replacement_forecast_materialization_seeds(forecast_db=fixture.db,
+            raw_manifest_dir=transport,seed_dir=transport/"repeat-seeds",computed_at=new_cut,limit=1)
+        assert repeat.discovered_count == 0 and repeat.failed_count == 0, repeat
         assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (old_row["posterior_id"],)).fetchone()) == old_row
         assert {table: tuple(tuple(row) for row in fixture.conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
             for table in immutable} == immutable
