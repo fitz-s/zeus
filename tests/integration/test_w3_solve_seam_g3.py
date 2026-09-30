@@ -49385,6 +49385,7 @@ def _kord_public_bundles(fixture,monkeypatch,*,at):
     assert dependencies["baseline_b0"]["source_run_id"] == fixture.request.baseline_source_run_id
     assert dependencies["baseline_b0"]["source_available_at"] == fixture.request.baseline_source_available_at.isoformat()
     assert dependencies["soft_anchor_posterior"]["posterior_id"] == fixture.result.posterior_id
+    assert ready.expires_at == fixture.request.expires_at
     clocks_before = [tuple(row) for row in fixture.conn.execute(
         "SELECT source_cycle_time,source_available_at,captured_at,recorded_at FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
     class ClockType(type):
@@ -49579,7 +49580,7 @@ def test_noaa_kord_product_minus_fast_v2_enters_normal_public_certificate(tmp_pa
         assert likelihood["settlement_extreme_c"] == pytest.approx(14)
         assert likelihood["residual_weights_c"][0]["residual_c"] == pytest.approx(-.4)
         assert _dt.datetime.fromisoformat(new["recorded_at"]) == _dt.datetime.fromisoformat(new["computed_at"]) == cut
-        for field in ("source_cycle_time","source_available_at","expires_at"):
+        for field in ("source_cycle_time","source_available_at"):
             assert new[field] == original[field]
         fixture.result,fixture.request = result,request
         bundles = _kord_public_bundles(fixture,monkeypatch,at=cut)
