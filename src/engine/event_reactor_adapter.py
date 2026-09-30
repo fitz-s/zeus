@@ -14059,7 +14059,6 @@ def _global_sell_candidate_from_raw_book(
         raise ValueError("GLOBAL_SELL_JIT_ASK_LEVEL_INVALID") from exc
     if len(ask_levels) != len(raw_asks or ()):
         raise ValueError("GLOBAL_SELL_JIT_ASK_LEVEL_INVALID")
-    best_ask = ask_levels[0].price if ask_levels else None
     selected_curve = getattr(candidate, "executable_sell_curve", None)
     if selected_curve is None:
         raise ValueError("GLOBAL_SELL_SELECTED_CURVE_MISSING")
@@ -14171,7 +14170,6 @@ def _global_sell_candidate_from_raw_book(
                 required_mode="MAKER_REST",
                 maker_fill_witness=selected_witness,
                 maker_limit=selected_witness.limit_price,
-                best_ask=best_ask,
             )
             if current_proposal is None:
                 raise ValueError("current_limit_or_cashflow_changed")
@@ -14240,7 +14238,6 @@ def _global_sell_candidate_from_raw_book(
         maker_limit=(
             maker_fill_witness.limit_price if maker_fill_witness is not None else None
         ),
-        best_ask=best_ask,
     )
     if proposal is None or execution_mode != selected_execution_mode:
         raise ValueError(
@@ -16723,6 +16720,7 @@ def _global_preflight_candidate_mode_receipt(
             raise ValueError("selected maker limit missing")
         assert_live_order_unit_price(selected_limit)
         violation = resting_limit_violation(
+            "BUY",
             selected_limit,
             best_bid=fresh_best_bid,
             best_ask=fresh_best_ask,
@@ -26273,6 +26271,7 @@ def _assert_final_resting_limit_valid(
     if payload.get("post_only") is not True:
         return
     violation = resting_limit_violation(
+        str(payload["side"]),
         payload["limit_price"],
         best_bid=witness.current_best_bid,
         best_ask=witness.current_best_ask,

@@ -314,12 +314,10 @@ def passive_sell_proposal_curve(
     *,
     capacity: Decimal,
     limit: Decimal | None = None,
-    best_ask: Decimal | None = None,
 ) -> ExecutableSellCurve | None:
     """Rest one post-only SELL at ``limit`` (default: one tick above the bid).
 
-    ``resting_limit_violation`` is the single book law; an unknown ask is an
-    open bound.
+    ``resting_limit_violation`` is the single book law.
     """
 
     requested_capacity = Decimal(capacity)
@@ -332,7 +330,7 @@ def passive_sell_proposal_curve(
     )
     if (
         not bounded_capacity.is_finite()
-        or resting_limit_violation(maker_price, best_bid=best_bid, best_ask=best_ask)
+        or resting_limit_violation("SELL", maker_price, best_bid=best_bid)
         is not None
     ):
         return None
@@ -386,7 +384,7 @@ def passive_buy_proposal_at_limit(
     best_ask = Decimal(curve.levels[0].price) if curve.levels else None
     proposal_capacity = current_precliff_liquidation_capacity(bids)
     if (
-        resting_limit_violation(limit, best_bid=best_bid, best_ask=best_ask)
+        resting_limit_violation("BUY", limit, best_bid=best_bid, best_ask=best_ask)
         is not None
         or not proposal_capacity.is_finite()
         or proposal_capacity < Decimal(curve.min_order_size)
@@ -680,7 +678,6 @@ def global_sell_execution_terms(
     required_mode: Literal["MAKER_REST", "TAKER_LIMIT"] | None = None,
     maker_fill_witness: CurrentMakerFillWitness | None = None,
     maker_limit: Decimal | None = None,
-    best_ask: Decimal | None = None,
 ) -> tuple[
     ExecutableSellCurve | None,
     Literal["MAKER_REST", "TAKER_LIMIT"],
@@ -694,7 +691,7 @@ def global_sell_execution_terms(
         raise ValueError("global SELL execution mode is invalid")
     if required_mode == "MAKER_REST":
         maker = passive_sell_proposal_curve(
-            curve, capacity=capacity, limit=maker_limit, best_ask=best_ask
+            curve, capacity=capacity, limit=maker_limit
         )
         if maker is not None and maker_fill_witness is not None:
             return (
@@ -2624,7 +2621,6 @@ def global_sell_candidate_from_holding(
         capacity=sellable_shares,
         required_mode=execution_mode,
         maker_fill_witness=maker_fill_witness,
-        best_ask=native_ask_levels[0].price if native_ask_levels else None,
     )
     if proposal is None:
         # INV-47 SCOPE: this held token's SELL candidate only.

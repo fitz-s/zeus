@@ -14,7 +14,7 @@ import json
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 
 _DECIMAL_FIELDS = {"tick_size", "min_order_size", "price", "size"}
@@ -41,19 +41,24 @@ def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
 
 
 def resting_limit_violation(
+    side: Literal["BUY", "SELL"],
     limit: Decimal | str | float,
     *,
     best_bid: Decimal | str | float | None,
-    best_ask: Decimal | str | float | None,
+    best_ask: Decimal | str | float | None = None,
 ) -> str | None:
     """The book law for a resting (post-only) limit; ``None`` means it is valid.
 
-    A resting limit is valid against a book iff it lies in the inclusive live
-    band and strictly inside the spread: above the best bid (otherwise it is
-    not top of book, outside the population a maker fill witness samples) and
-    below the best ask (otherwise it crosses). An absent side is an open bound.
+    Every resting limit lies in the inclusive live band and strictly above the
+    best bid. For a SELL that is exactly the non-crossing condition; at or
+    above the ask it joins the ask queue, which leaves its cashflow (the limit)
+    and its pooled fill witness unchanged. For a BUY, strictly above the bid is
+    the bid improvement its fill witness sampled, and strictly below the ask is
+    the non-crossing condition. An absent side is an open bound.
     """
 
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"resting limit side must be BUY or SELL, got {side!r}")
     try:
         value = Decimal(str(limit))
         bid = None if best_bid is None else Decimal(str(best_bid))
@@ -61,14 +66,14 @@ def resting_limit_violation(
     except Exception:  # noqa: BLE001 - any unparsable price is not a valid limit
         return "price_invalid"
     if not value.is_finite() or any(
-        side is not None and not side.is_finite() for side in (bid, ask)
+        price is not None and not price.is_finite() for price in (bid, ask)
     ):
         return "price_invalid"
     if not LIVE_ORDER_MIN_UNIT_PRICE <= value <= LIVE_ORDER_MAX_UNIT_PRICE:
         return "outside_live_band"
     if bid is not None and value <= bid:
         return "at_or_below_best_bid"
-    if ask is not None and value >= ask:
+    if side == "BUY" and ask is not None and value >= ask:
         return "at_or_above_best_ask"
     return None
 

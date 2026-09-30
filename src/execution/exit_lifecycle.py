@@ -3429,12 +3429,7 @@ class GlobalSellExecutionAuthority:
             ) from exc
         from src.contracts.venue_submission_envelope import resting_limit_violation
 
-        asks = tuple(getattr(candidate, "native_ask_levels", ()) or ())
-        violation = resting_limit_violation(
-            bounded,
-            best_bid=best_bid,
-            best_ask=asks[0].price if asks else None,
-        )
+        violation = resting_limit_violation("SELL", bounded, best_bid=best_bid)
         if violation is not None:
             raise ValueError(f"GLOBAL_SELL_MAKER_PRICE_NOT_PASSIVE:{violation}")
         return bounded

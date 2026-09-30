@@ -42544,7 +42544,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                 }
             }
             if type(self).fail_metadata:
-                book["yes-token"]["asks"] = [{"price": "0.62", "size": "10"}]
+                book["yes-token"]["asks"] = [{"price": "0.61", "size": "10"}]
             return book
 
         def get_held_clob_market_info(self, condition_id, *, timeout=None):
@@ -42606,7 +42606,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                     {"price": price, "size": size}
                     for price, size in bid_levels
                 ],
-                "asks": [{"price": "0.62", "size": "10"}],
+                "asks": [{"price": "0.61", "size": "10"}],
             }
         else:
             assert kwargs["global_sell_prefetched_orderbook"] == {
@@ -42737,7 +42737,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert metadata_fallback.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
     assert metadata_fallback.proof_accepted is True
     assert metadata_fallback.global_jit_candidate.raw_book["asks"] == [
-        {"price": "0.62", "size": "10"}
+        {"price": "0.61", "size": "10"}
     ]
     Clob.ctf_units = 0
     blocked = era._submit_current_global_sell(
@@ -42798,7 +42798,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                             {"price": price, "size": size}
                             for price, size in bid_levels
                         ],
-                        "asks": [{"price": "0.62", "size": "10"}],
+                        "asks": [{"price": "0.61", "size": "10"}],
                     }
                 ),
                 _dt.datetime.now(_dt.timezone.utc).isoformat(), 1,
@@ -43553,11 +43553,13 @@ def _maker_sell_jit(bids, asks):
     (
         (("0.58",), ("0.70",)),  # bid retreat
         (("0.60",), ("0.64",)),  # ask flicker down, still above the limit
+        (("0.60",), ("0.61",)),  # 1-tick spread: limit == ask joins the ask queue
+        (("0.58",), ("0.60",)),  # ask flickers below: rests behind it, same cashflow
         (("0.60",), ()),  # ask vanished: open upper bound
     ),
-    ids=("bid-retreat", "ask-flicker", "ask-absent"),
+    ids=("bid-retreat", "ask-flicker", "one-tick-spread", "behind-ask", "ask-absent"),
 )
-def test_global_sell_jit_keeps_selected_maker_limit_inside_spread(bids, asks):
+def test_global_sell_jit_keeps_selected_maker_limit_above_bid(bids, asks):
     selected, rebound = _maker_sell_jit(bids, asks)
 
     assert rebound.execution_mode == "MAKER_REST"
@@ -43576,13 +43578,12 @@ def test_global_sell_jit_keeps_selected_maker_limit_inside_spread(bids, asks):
 @pytest.mark.parametrize(
     ("bids", "asks"),
     (
-        (("0.61",), ("0.70",)),  # bid rises to the limit
+        (("0.61",), ("0.70",)),  # bid rises to the limit: the SELL would cross
         (("0.63",), ("0.70",)),  # bid rises through the limit
-        (("0.58",), ("0.61",)),  # ask falls to the limit
     ),
-    ids=("bid-at-limit", "bid-above-limit", "ask-at-limit"),
+    ids=("bid-at-limit", "bid-above-limit"),
 )
-def test_global_sell_jit_maker_limit_outside_current_spread_rejects(bids, asks):
+def test_global_sell_jit_maker_limit_at_or_below_bid_rejects(bids, asks):
     with pytest.raises(ValueError) as exc_info:
         _maker_sell_jit(bids, asks)
 

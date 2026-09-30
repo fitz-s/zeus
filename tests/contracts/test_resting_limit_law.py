@@ -25,26 +25,62 @@ from src.solve.solver import passive_buy_proposal_at_limit, passive_buy_proposal
 
 
 @pytest.mark.parametrize(
-    ("limit", "bid", "ask", "expected"),
+    ("side", "limit", "bid", "ask", "expected"),
     (
-        ("0.27", "0.24", "0.30", None),  # HK low: bid retreated, limit kept
-        ("0.27", "0.26", "0.30", None),
-        ("0.27", "0.27", "0.30", "at_or_below_best_bid"),
-        ("0.25", "0.26", "0.30", "at_or_below_best_bid"),  # cut 7615
-        ("0.27", "0.24", "0.27", "at_or_above_best_ask"),
-        ("0.27", "0.24", "0.26", "at_or_above_best_ask"),
-        ("0.27", None, "0.30", None),
-        ("0.27", "0.24", None, None),
-        # Band edges: inclusive [0.05, 0.95].
-        ("0.05", "0.04", "0.06", None),
-        ("0.049", "0.04", "0.06", "outside_live_band"),
-        ("0.95", "0.94", "0.96", None),
-        ("0.951", "0.94", "0.96", "outside_live_band"),
-        ("nan", "0.24", "0.30", "price_invalid"),
+        ("BUY", "0.27", "0.24", "0.30", None),  # HK low: bid retreated, limit kept
+        ("BUY", "0.27", "0.26", "0.30", None),
+        ("BUY", "0.27", "0.27", "0.30", "at_or_below_best_bid"),
+        ("BUY", "0.25", "0.26", "0.30", "at_or_below_best_bid"),  # cut 7615
+        ("BUY", "0.27", "0.24", "0.27", "at_or_above_best_ask"),
+        ("BUY", "0.27", "0.24", "0.26", "at_or_above_best_ask"),
+        ("BUY", "0.27", None, "0.30", None),
+        ("BUY", "0.27", "0.24", None, None),
+        # SELL crosses only at or below the bid; at/behind the ask it rests.
+        ("SELL", "0.61", "0.60", "0.61", None),  # 1-tick spread default bid+tick
+        ("SELL", "0.61", "0.58", "0.60", None),
+        ("SELL", "0.61", "0.61", "0.70", "at_or_below_best_bid"),
+        ("SELL", "0.61", "0.63", "0.70", "at_or_below_best_bid"),
+        ("SELL", "0.61", None, None, None),
+        # Band edges: inclusive [0.05, 0.95], both sides.
+        ("BUY", "0.05", "0.04", "0.06", None),
+        ("BUY", "0.049", "0.04", "0.06", "outside_live_band"),
+        ("BUY", "0.95", "0.94", "0.96", None),
+        ("BUY", "0.951", "0.94", "0.96", "outside_live_band"),
+        ("SELL", "0.05", "0.04", "0.06", None),
+        ("SELL", "0.049", "0.04", "0.06", "outside_live_band"),
+        ("SELL", "0.95", "0.94", "0.95", None),
+        ("SELL", "0.951", "0.94", "0.96", "outside_live_band"),
+        ("BUY", "nan", "0.24", "0.30", "price_invalid"),
     ),
 )
-def test_resting_limit_violation(limit, bid, ask, expected):
-    assert resting_limit_violation(limit, best_bid=bid, best_ask=ask) == expected
+def test_resting_limit_violation(side, limit, bid, ask, expected):
+    assert (
+        resting_limit_violation(side, limit, best_bid=bid, best_ask=ask) == expected
+    )
+
+
+def test_resting_limit_violation_requires_a_side():
+    with pytest.raises(ValueError):
+        resting_limit_violation("HOLD", "0.27", best_bid="0.24", best_ask="0.30")
+
+
+def test_one_tick_spread_sell_default_is_a_valid_maker_rest():
+    from src.solve.solver import ExecutableSellCurve, passive_sell_proposal_curve
+
+    curve = ExecutableSellCurve(
+        token_id="tok",
+        side="YES",
+        snapshot_id="snap",
+        book_hash="hash",
+        levels=(BidBookLevel(price=Decimal("0.60"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=timedelta(seconds=30),
+    )
+    proposal = passive_sell_proposal_curve(curve, capacity=Decimal("10"))
+    assert proposal is not None
+    assert proposal.levels[0].price == Decimal("0.61")
 
 
 def _curve(ask: str) -> ExecutableCostCurve:
@@ -103,7 +139,7 @@ def test_final_submit_gate_refuses_limit_at_or_below_bid():
         _submit_price_moved_abort_reason,
     )
 
-    maker = {"post_only": True, "limit_price": 0.25}
+    maker = {"post_only": True, "side": "BUY", "limit_price": 0.25}
     with pytest.raises(ValueError, match="MAKER_LIMIT_SUPERSEDED:at_or_below_best_bid") as exc:
         _assert_final_resting_limit_valid(maker, _witness(0.26, 0.30))
     assert _submit_price_moved_abort_reason(exc.value).startswith(
@@ -116,7 +152,7 @@ def test_final_submit_gate_refuses_limit_at_or_below_bid():
     _assert_final_resting_limit_valid(maker, _witness(0.24, 0.30))
     # A taker crosses by design; the resting law does not apply.
     _assert_final_resting_limit_valid(
-        {"post_only": False, "limit_price": 0.30}, _witness(0.29, 0.30)
+        {"post_only": False, "side": "BUY", "limit_price": 0.30}, _witness(0.29, 0.30)
     )
 
 
@@ -164,7 +200,7 @@ def test_final_sell_maker_limit_uses_the_same_law():
     # Bid retreated below the selected limit: no longer bid+tick, still valid.
     assert limit_of(_sell_authority("0.58", "0.70")) == Decimal("0.61")
     assert limit_of(_sell_authority("0.60", None)) == Decimal("0.61")
+    # 1-tick spread: limit == ask rests in the ask queue.
+    assert limit_of(_sell_authority("0.60", "0.61")) == Decimal("0.61")
     with pytest.raises(ValueError, match="at_or_below_best_bid"):
         limit_of(_sell_authority("0.61", "0.70"))
-    with pytest.raises(ValueError, match="at_or_above_best_ask"):
-        limit_of(_sell_authority("0.58", "0.61"))

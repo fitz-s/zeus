@@ -6773,6 +6773,7 @@ def _recapture_fresh_entry_snapshot_if_needed(
     _is_maker_rest = bool(getattr(final_intent, "post_only", False))
     if _is_maker_rest:
         violation = resting_limit_violation(
+            "BUY",
             fresh_limit_price,
             best_bid=fresh.orderbook_top_bid,
             best_ask=fresh.orderbook_top_ask,
