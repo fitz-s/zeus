@@ -1,0 +1,1379 @@
+[
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:03:25.376256+00:00",
+    "receipt_at": "2026-09-30T23:03:27.861639+00:00",
+    "status": 200,
+    "sha256": "43a70dc91342ee4ea2b21f132f32eaff63c4a9f17827723f19bd0b8fe5c6e75d"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:03:27.916139+00:00",
+    "receipt_at": "2026-09-30T23:03:28.727490+00:00",
+    "status": 200,
+    "sha256": "2e5a817268566c023ebb4bc9e6dc82e19ee08dc814aacc32030df8f2e0b8d95f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:03:28.789662+00:00",
+    "receipt_at": "2026-09-30T23:03:29.388027+00:00",
+    "status": 200,
+    "sha256": "6e71081b9bfacb60600c089c0d61f0a0a2d2d89bcb5efe574e33f44a90a9f809"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:03:29.451982+00:00",
+    "receipt_at": "2026-09-30T23:03:30.103140+00:00",
+    "status": 200,
+    "sha256": "097e5823fd60a25fa8c467ccc87baaf952457384c8c991960cbc47d6b0a4a520"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:03:30.160396+00:00",
+    "receipt_at": "2026-09-30T23:03:30.634671+00:00",
+    "status": 200,
+    "sha256": "5ed8472994acd3e3c5f8a21130792fae8fa261659e1f43eec0a9ffb0ce58edb1"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:03:30.691238+00:00",
+    "receipt_at": "2026-09-30T23:03:31.114214+00:00",
+    "status": 200,
+    "sha256": "f01003d0e6e095b5a4873a478a63649ef3d2f50d6057375323eed67a7b5db3f0"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:03:31.160386+00:00",
+    "receipt_at": "2026-09-30T23:03:31.242423+00:00",
+    "status": 200,
+    "sha256": "b0125d606ea52cb192a1ea0e2182c6f6f128ecdad48ea53c20b9db4007b6499b"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:03:31.371435+00:00",
+    "receipt_at": "2026-09-30T23:03:32.076590+00:00",
+    "status": 200,
+    "sha256": "e1c6d9fcbfc03627d71d4e474826684be63792de6408cee9464d169ae766078d"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:04:25.387401+00:00",
+    "receipt_at": "2026-09-30T23:04:27.600788+00:00",
+    "status": 200,
+    "sha256": "1b6bdd050c6fc491a935654c80e77029a1ac67cf2055a201e40b622457a3b148"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:04:27.659262+00:00",
+    "receipt_at": "2026-09-30T23:04:28.842978+00:00",
+    "status": 200,
+    "sha256": "ed1732c0880aaa423afe2cfb1211b57a2050a24dcae711bf58304916ce4be24f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:04:28.905404+00:00",
+    "receipt_at": "2026-09-30T23:04:29.516492+00:00",
+    "status": 200,
+    "sha256": "eb71ad345858dd253de4a727aa8e6d8a49de2154542d8113ba42b39cde5ff9a5"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:04:29.622180+00:00",
+    "receipt_at": "2026-09-30T23:04:30.203021+00:00",
+    "status": 200,
+    "sha256": "e1a8800a3224c6ff575b16bdf5da6c43761c0e16ffeda1c3864f3b330d39dd45"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:04:30.258533+00:00",
+    "receipt_at": "2026-09-30T23:04:30.650382+00:00",
+    "status": 200,
+    "sha256": "f01003d0e6e095b5a4873a478a63649ef3d2f50d6057375323eed67a7b5db3f0"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:04:30.693359+00:00",
+    "receipt_at": "2026-09-30T23:04:30.825105+00:00",
+    "status": 200,
+    "sha256": "b0125d606ea52cb192a1ea0e2182c6f6f128ecdad48ea53c20b9db4007b6499b"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:04:30.899696+00:00",
+    "receipt_at": "2026-09-30T23:04:31.617572+00:00",
+    "status": 200,
+    "sha256": "1af6f8da8435d22c39d96430c2d76baa5c65baf192f28f1e52796c939212e3eb"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:04:31.697601+00:00",
+    "receipt_at": "2026-09-30T23:04:32.274245+00:00",
+    "status": 200,
+    "sha256": "7778821377f9a84d16cf40d1c24fbd2671aaeda4f269bef7b7832ce7b672f804"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:05:25.398152+00:00",
+    "receipt_at": "2026-09-30T23:05:27.647811+00:00",
+    "status": 200,
+    "sha256": "ed1732c0880aaa423afe2cfb1211b57a2050a24dcae711bf58304916ce4be24f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:05:27.706583+00:00",
+    "receipt_at": "2026-09-30T23:05:28.583528+00:00",
+    "status": 200,
+    "sha256": "5e3ea261e6bb688c0459d54498c8106b0e13b31d331c4ef90291bd5a7361d743"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:05:28.643567+00:00",
+    "receipt_at": "2026-09-30T23:05:29.121816+00:00",
+    "status": 200,
+    "sha256": "e1a8800a3224c6ff575b16bdf5da6c43761c0e16ffeda1c3864f3b330d39dd45"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:05:29.181269+00:00",
+    "receipt_at": "2026-09-30T23:05:29.623437+00:00",
+    "status": 200,
+    "sha256": "f01003d0e6e095b5a4873a478a63649ef3d2f50d6057375323eed67a7b5db3f0"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:05:29.664282+00:00",
+    "receipt_at": "2026-09-30T23:05:29.805035+00:00",
+    "status": 200,
+    "sha256": "1647d2f17a58f55ef0f725e88176bf5a98106c82dcafdb4153d54fb314c4d902"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:05:29.883608+00:00",
+    "receipt_at": "2026-09-30T23:05:30.657554+00:00",
+    "status": 200,
+    "sha256": "38f825ce3b354c01f9ad29f812e29d663c898b5d9c668bd93c99c61937ad6419"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:05:30.734481+00:00",
+    "receipt_at": "2026-09-30T23:05:31.421270+00:00",
+    "status": 200,
+    "sha256": "7778821377f9a84d16cf40d1c24fbd2671aaeda4f269bef7b7832ce7b672f804"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:05:31.479921+00:00",
+    "receipt_at": "2026-09-30T23:05:32.131927+00:00",
+    "status": 200,
+    "sha256": "1b6bdd050c6fc491a935654c80e77029a1ac67cf2055a201e40b622457a3b148"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:06:25.408945+00:00",
+    "receipt_at": "2026-09-30T23:06:27.505120+00:00",
+    "status": 200,
+    "sha256": "a332dc99a540bbefea392fe20adaf064b1031675488ae3740f04a602e3dd9594"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:06:27.558796+00:00",
+    "receipt_at": "2026-09-30T23:06:28.292739+00:00",
+    "status": 200,
+    "sha256": "e1a8800a3224c6ff575b16bdf5da6c43761c0e16ffeda1c3864f3b330d39dd45"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:06:28.350266+00:00",
+    "receipt_at": "2026-09-30T23:06:28.948361+00:00",
+    "status": 200,
+    "sha256": "f01003d0e6e095b5a4873a478a63649ef3d2f50d6057375323eed67a7b5db3f0"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:06:28.989158+00:00",
+    "receipt_at": "2026-09-30T23:06:29.330099+00:00",
+    "status": 200,
+    "sha256": "d2a3a6f4ecbdfd53f50e02ea1f765b8eb5481ce4af67794af06e1452405a7862"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:06:29.403748+00:00",
+    "receipt_at": "2026-09-30T23:06:30.117976+00:00",
+    "status": 200,
+    "sha256": "0e238c479da7984f8583a55f462929603d1a9ea0ee6abece377174fd399204f0"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:06:30.194414+00:00",
+    "receipt_at": "2026-09-30T23:06:30.972529+00:00",
+    "status": 200,
+    "sha256": "7778821377f9a84d16cf40d1c24fbd2671aaeda4f269bef7b7832ce7b672f804"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:06:31.029774+00:00",
+    "receipt_at": "2026-09-30T23:06:31.738181+00:00",
+    "status": 200,
+    "sha256": "1b6bdd050c6fc491a935654c80e77029a1ac67cf2055a201e40b622457a3b148"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:06:31.797469+00:00",
+    "receipt_at": "2026-09-30T23:06:32.566512+00:00",
+    "status": 200,
+    "sha256": "ed1732c0880aaa423afe2cfb1211b57a2050a24dcae711bf58304916ce4be24f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:07:25.419212+00:00",
+    "receipt_at": "2026-09-30T23:07:27.680856+00:00",
+    "status": 200,
+    "sha256": "e1a8800a3224c6ff575b16bdf5da6c43761c0e16ffeda1c3864f3b330d39dd45"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:07:27.742316+00:00",
+    "receipt_at": "2026-09-30T23:07:28.335624+00:00",
+    "status": 200,
+    "sha256": "f01003d0e6e095b5a4873a478a63649ef3d2f50d6057375323eed67a7b5db3f0"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:07:28.379307+00:00",
+    "receipt_at": "2026-09-30T23:07:28.507217+00:00",
+    "status": 200,
+    "sha256": "d2a3a6f4ecbdfd53f50e02ea1f765b8eb5481ce4af67794af06e1452405a7862"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:07:28.584170+00:00",
+    "receipt_at": "2026-09-30T23:07:29.288675+00:00",
+    "status": 200,
+    "sha256": "b136f12931dd13263e8af9e77fd1eaa18d7afd28a322b08120175c21e1f6ff74"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:07:29.370597+00:00",
+    "receipt_at": "2026-09-30T23:07:30.167390+00:00",
+    "status": 200,
+    "sha256": "7778821377f9a84d16cf40d1c24fbd2671aaeda4f269bef7b7832ce7b672f804"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:07:30.225947+00:00",
+    "receipt_at": "2026-09-30T23:07:30.879357+00:00",
+    "status": 200,
+    "sha256": "1b6bdd050c6fc491a935654c80e77029a1ac67cf2055a201e40b622457a3b148"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:07:30.936968+00:00",
+    "receipt_at": "2026-09-30T23:07:31.583444+00:00",
+    "status": 200,
+    "sha256": "ed1732c0880aaa423afe2cfb1211b57a2050a24dcae711bf58304916ce4be24f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:07:31.641424+00:00",
+    "receipt_at": "2026-09-30T23:07:32.295346+00:00",
+    "status": 200,
+    "sha256": "a332dc99a540bbefea392fe20adaf064b1031675488ae3740f04a602e3dd9594"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:08:25.429132+00:00",
+    "receipt_at": "2026-09-30T23:08:27.311734+00:00",
+    "status": 200,
+    "sha256": "f01003d0e6e095b5a4873a478a63649ef3d2f50d6057375323eed67a7b5db3f0"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:08:27.348278+00:00",
+    "receipt_at": "2026-09-30T23:08:27.416830+00:00",
+    "status": 200,
+    "sha256": "ccfd540b93e662d8c6777a02ee702e9c033ca59fa06ce59edbcd17bd44b2ecf7"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:08:27.484857+00:00",
+    "receipt_at": "2026-09-30T23:08:28.834394+00:00",
+    "status": 200,
+    "sha256": "80d082fa2206bab37e2f582771aa4413c2a8da7b2a9d1886b45a45ecaa17ddf6"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:08:28.909597+00:00",
+    "receipt_at": "2026-09-30T23:08:29.816133+00:00",
+    "status": 200,
+    "sha256": "7778821377f9a84d16cf40d1c24fbd2671aaeda4f269bef7b7832ce7b672f804"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:08:29.868973+00:00",
+    "receipt_at": "2026-09-30T23:08:30.582768+00:00",
+    "status": 200,
+    "sha256": "1b6bdd050c6fc491a935654c80e77029a1ac67cf2055a201e40b622457a3b148"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:08:30.638730+00:00",
+    "receipt_at": "2026-09-30T23:08:31.304666+00:00",
+    "status": 200,
+    "sha256": "ed1732c0880aaa423afe2cfb1211b57a2050a24dcae711bf58304916ce4be24f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:08:31.359554+00:00",
+    "receipt_at": "2026-09-30T23:08:31.993849+00:00",
+    "status": 200,
+    "sha256": "a332dc99a540bbefea392fe20adaf064b1031675488ae3740f04a602e3dd9594"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:08:32.049969+00:00",
+    "receipt_at": "2026-09-30T23:08:32.568798+00:00",
+    "status": 200,
+    "sha256": "e1a8800a3224c6ff575b16bdf5da6c43761c0e16ffeda1c3864f3b330d39dd45"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:09:25.429687+00:00",
+    "receipt_at": "2026-09-30T23:09:25.561291+00:00",
+    "status": 200,
+    "sha256": "ccfd540b93e662d8c6777a02ee702e9c033ca59fa06ce59edbcd17bd44b2ecf7"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:09:25.638396+00:00",
+    "receipt_at": "2026-09-30T23:09:26.211566+00:00",
+    "status": 200,
+    "sha256": "7aa04ae0b49bb5b8367eef0cca28fb30b91867944f95edb1b1d9c4aa1a72ebd0"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:09:26.293672+00:00",
+    "receipt_at": "2026-09-30T23:09:28.295650+00:00",
+    "status": 200,
+    "sha256": "49f0d2a24e01cd75e9fa311ce6b9ebcf43e63a6ba9faea328bc42f2ee7967246"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:09:28.359664+00:00",
+    "receipt_at": "2026-09-30T23:09:29.240725+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:09:29.297484+00:00",
+    "receipt_at": "2026-09-30T23:09:29.819169+00:00",
+    "status": 200,
+    "sha256": "b1b71e8fb7adb7f053a568fd0e3a6053c54136cf0e7d555e2340491e3ed8b7de"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:09:29.876703+00:00",
+    "receipt_at": "2026-09-30T23:09:30.507286+00:00",
+    "status": 200,
+    "sha256": "d1665166f32f74cf0cbbc3f15bad49b9ce7a12ef05098d7e8bdacb14c3f28934"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:09:30.622058+00:00",
+    "receipt_at": "2026-09-30T23:09:31.207124+00:00",
+    "status": 200,
+    "sha256": "391c38f8f7ed09a3249dc7315142e77047e994e7c49de4c254fb97e7ef5439ec"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:09:31.264845+00:00",
+    "receipt_at": "2026-09-30T23:09:31.642591+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:10:25.434799+00:00",
+    "receipt_at": "2026-09-30T23:10:25.684040+00:00",
+    "status": 429,
+    "sha256": "4cfd7987114ec06be279ff859b62cc28636242a4a47fd279ad2f590e88ad9cae"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:10:25.434799+00:00",
+    "error": "HTTPStatusError"
+  },
+  {
+    "job": "<lambda>",
+    "error": "HTTPStatusError",
+    "at": "2026-09-30T23:10:25.684657+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:10:25.684725+00:00",
+    "receipt_at": "2026-09-30T23:10:27.877443+00:00",
+    "status": 200,
+    "sha256": "f0becb245eed849033414c4a83d1d1064b81f62fe9d5bc20de13ec0ed7b344bf"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:10:27.945358+00:00",
+    "receipt_at": "2026-09-30T23:10:28.665421+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:10:28.722536+00:00",
+    "receipt_at": "2026-09-30T23:10:29.231186+00:00",
+    "status": 200,
+    "sha256": "b1b71e8fb7adb7f053a568fd0e3a6053c54136cf0e7d555e2340491e3ed8b7de"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:10:29.289037+00:00",
+    "receipt_at": "2026-09-30T23:10:29.921563+00:00",
+    "status": 200,
+    "sha256": "c3e33e9e557a8ea8dd91946e1963bd7f972186db4950e0d47c26857e02559f46"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:10:29.981526+00:00",
+    "receipt_at": "2026-09-30T23:10:30.434954+00:00",
+    "status": 200,
+    "sha256": "391c38f8f7ed09a3249dc7315142e77047e994e7c49de4c254fb97e7ef5439ec"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:10:30.492131+00:00",
+    "receipt_at": "2026-09-30T23:10:30.866267+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:10:30.906847+00:00",
+    "receipt_at": "2026-09-30T23:10:31.351732+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:11:25.442322+00:00",
+    "receipt_at": "2026-09-30T23:11:27.687359+00:00",
+    "status": 200,
+    "sha256": "f0becb245eed849033414c4a83d1d1064b81f62fe9d5bc20de13ec0ed7b344bf"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:11:27.765704+00:00",
+    "receipt_at": "2026-09-30T23:11:28.443291+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:11:28.500574+00:00",
+    "receipt_at": "2026-09-30T23:11:29.293008+00:00",
+    "status": 200,
+    "sha256": "b1b71e8fb7adb7f053a568fd0e3a6053c54136cf0e7d555e2340491e3ed8b7de"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:11:29.347306+00:00",
+    "receipt_at": "2026-09-30T23:11:29.994622+00:00",
+    "status": 200,
+    "sha256": "a349355e9e96606b7803d7796540c9cd78f5cb15dc4d768696f6688c86e14fce"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:11:30.055258+00:00",
+    "receipt_at": "2026-09-30T23:11:30.568684+00:00",
+    "status": 200,
+    "sha256": "391c38f8f7ed09a3249dc7315142e77047e994e7c49de4c254fb97e7ef5439ec"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:11:30.624321+00:00",
+    "receipt_at": "2026-09-30T23:11:30.996533+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:11:31.048643+00:00",
+    "receipt_at": "2026-09-30T23:11:31.253028+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:11:31.330597+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:12:25.452298+00:00",
+    "receipt_at": "2026-09-30T23:12:28.077445+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:12:28.137349+00:00",
+    "receipt_at": "2026-09-30T23:12:29.335900+00:00",
+    "status": 200,
+    "sha256": "b1b71e8fb7adb7f053a568fd0e3a6053c54136cf0e7d555e2340491e3ed8b7de"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:12:29.390298+00:00",
+    "receipt_at": "2026-09-30T23:12:30.101031+00:00",
+    "status": 200,
+    "sha256": "a349355e9e96606b7803d7796540c9cd78f5cb15dc4d768696f6688c86e14fce"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:12:30.159064+00:00",
+    "receipt_at": "2026-09-30T23:12:30.740296+00:00",
+    "status": 200,
+    "sha256": "391c38f8f7ed09a3249dc7315142e77047e994e7c49de4c254fb97e7ef5439ec"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:12:30.808116+00:00",
+    "receipt_at": "2026-09-30T23:12:31.212863+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:12:31.256255+00:00",
+    "receipt_at": "2026-09-30T23:12:31.320988+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:12:31.392911+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:12:31.392917+00:00",
+    "receipt_at": "2026-09-30T23:12:32.014737+00:00",
+    "status": 200,
+    "sha256": "f0becb245eed849033414c4a83d1d1064b81f62fe9d5bc20de13ec0ed7b344bf"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:13:25.462265+00:00",
+    "receipt_at": "2026-09-30T23:13:27.596821+00:00",
+    "status": 200,
+    "sha256": "b1b71e8fb7adb7f053a568fd0e3a6053c54136cf0e7d555e2340491e3ed8b7de"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:13:27.650994+00:00",
+    "receipt_at": "2026-09-30T23:13:28.458369+00:00",
+    "status": 200,
+    "sha256": "a349355e9e96606b7803d7796540c9cd78f5cb15dc4d768696f6688c86e14fce"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:13:28.516578+00:00",
+    "receipt_at": "2026-09-30T23:13:29.031483+00:00",
+    "status": 200,
+    "sha256": "391c38f8f7ed09a3249dc7315142e77047e994e7c49de4c254fb97e7ef5439ec"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:13:29.080585+00:00",
+    "receipt_at": "2026-09-30T23:13:29.476945+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:13:29.516648+00:00",
+    "receipt_at": "2026-09-30T23:13:29.734983+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:13:29.803740+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:13:29.803746+00:00",
+    "receipt_at": "2026-09-30T23:13:30.481185+00:00",
+    "status": 200,
+    "sha256": "f0becb245eed849033414c4a83d1d1064b81f62fe9d5bc20de13ec0ed7b344bf"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:13:30.534015+00:00",
+    "receipt_at": "2026-09-30T23:13:31.104963+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:14:25.465304+00:00",
+    "receipt_at": "2026-09-30T23:14:27.687856+00:00",
+    "status": 200,
+    "sha256": "73a06435fbb13bafc55900b3ea9cc7c5ebaf9c2d8d4e53dc1f6c16555d59248f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:14:27.751164+00:00",
+    "receipt_at": "2026-09-30T23:14:28.383011+00:00",
+    "status": 200,
+    "sha256": "38661d266618b13215e3c7489a73148dcaa0ea4caae58be4d7968c93de7f3648"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:14:28.439766+00:00",
+    "receipt_at": "2026-09-30T23:14:29.237880+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:14:29.280719+00:00",
+    "receipt_at": "2026-09-30T23:14:29.415389+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:14:29.493703+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:14:29.493711+00:00",
+    "receipt_at": "2026-09-30T23:14:30.073372+00:00",
+    "status": 200,
+    "sha256": "570674ccc90c1f22dd5021e60b7177916c268494f2987f6013c54b30bb8c8a24"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:14:30.133834+00:00",
+    "receipt_at": "2026-09-30T23:14:30.892925+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:14:30.959223+00:00",
+    "receipt_at": "2026-09-30T23:14:31.451078+00:00",
+    "status": 200,
+    "sha256": "ecffe3d988e1649232f3170b52c16ecd270503684014e5dcb3c7117ce1bdfbf8"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:15:25.475979+00:00",
+    "receipt_at": "2026-09-30T23:15:27.464714+00:00",
+    "status": 200,
+    "sha256": "38661d266618b13215e3c7489a73148dcaa0ea4caae58be4d7968c93de7f3648"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:15:27.530076+00:00",
+    "receipt_at": "2026-09-30T23:15:28.083197+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:15:28.196626+00:00",
+    "receipt_at": "2026-09-30T23:15:28.324967+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:15:28.396759+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:15:28.396765+00:00",
+    "receipt_at": "2026-09-30T23:15:29.261016+00:00",
+    "status": 200,
+    "sha256": "570674ccc90c1f22dd5021e60b7177916c268494f2987f6013c54b30bb8c8a24"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:15:29.319354+00:00",
+    "receipt_at": "2026-09-30T23:15:30.020416+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:15:30.076460+00:00",
+    "receipt_at": "2026-09-30T23:15:30.827488+00:00",
+    "status": 200,
+    "sha256": "ecffe3d988e1649232f3170b52c16ecd270503684014e5dcb3c7117ce1bdfbf8"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:15:30.885980+00:00",
+    "receipt_at": "2026-09-30T23:15:31.749988+00:00",
+    "status": 200,
+    "sha256": "58287d2cfcd4a4665a57fb58b7f89dae6ed87caee87788110d2cf3a0012462c3"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:16:25.475748+00:00",
+    "receipt_at": "2026-09-30T23:16:27.595760+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:16:27.638698+00:00",
+    "receipt_at": "2026-09-30T23:16:28.060574+00:00",
+    "status": 200,
+    "sha256": "382c76c2b142fbe48bbe484d63ad4e7ce6ae428cbb7d106879108e2429735a1a"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:16:28.142231+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:16:28.142237+00:00",
+    "receipt_at": "2026-09-30T23:16:29.083333+00:00",
+    "status": 200,
+    "sha256": "570674ccc90c1f22dd5021e60b7177916c268494f2987f6013c54b30bb8c8a24"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:16:29.146205+00:00",
+    "receipt_at": "2026-09-30T23:16:30.004605+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:16:30.074718+00:00",
+    "receipt_at": "2026-09-30T23:16:30.738362+00:00",
+    "status": 200,
+    "sha256": "ecffe3d988e1649232f3170b52c16ecd270503684014e5dcb3c7117ce1bdfbf8"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:16:30.793732+00:00",
+    "receipt_at": "2026-09-30T23:16:31.458802+00:00",
+    "status": 200,
+    "sha256": "73a06435fbb13bafc55900b3ea9cc7c5ebaf9c2d8d4e53dc1f6c16555d59248f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:16:31.519912+00:00",
+    "receipt_at": "2026-09-30T23:16:32.097751+00:00",
+    "status": 200,
+    "sha256": "38661d266618b13215e3c7489a73148dcaa0ea4caae58be4d7968c93de7f3648"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:17:25.479408+00:00",
+    "receipt_at": "2026-09-30T23:17:25.855947+00:00",
+    "status": 200,
+    "sha256": "103b5268dcaeb1aa0f2eb70e11435f9d90e201960c6f37c18c41d88f8fd4b5b4"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:17:25.925500+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:17:25.925539+00:00",
+    "receipt_at": "2026-09-30T23:17:28.342292+00:00",
+    "status": 200,
+    "sha256": "570674ccc90c1f22dd5021e60b7177916c268494f2987f6013c54b30bb8c8a24"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:17:28.394619+00:00",
+    "receipt_at": "2026-09-30T23:17:29.195565+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:17:29.248347+00:00",
+    "receipt_at": "2026-09-30T23:17:30.074045+00:00",
+    "status": 200,
+    "sha256": "ecffe3d988e1649232f3170b52c16ecd270503684014e5dcb3c7117ce1bdfbf8"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:17:30.125027+00:00",
+    "receipt_at": "2026-09-30T23:17:30.968341+00:00",
+    "status": 200,
+    "sha256": "73a06435fbb13bafc55900b3ea9cc7c5ebaf9c2d8d4e53dc1f6c16555d59248f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:17:31.024735+00:00",
+    "receipt_at": "2026-09-30T23:17:32.015494+00:00",
+    "status": 200,
+    "sha256": "38661d266618b13215e3c7489a73148dcaa0ea4caae58be4d7968c93de7f3648"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:17:32.066589+00:00",
+    "receipt_at": "2026-09-30T23:17:32.749789+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:18:25.492262+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:18:25.492439+00:00",
+    "receipt_at": "2026-09-30T23:18:27.740472+00:00",
+    "status": 200,
+    "sha256": "570674ccc90c1f22dd5021e60b7177916c268494f2987f6013c54b30bb8c8a24"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:18:27.799465+00:00",
+    "receipt_at": "2026-09-30T23:18:28.586559+00:00",
+    "status": 200,
+    "sha256": "702119e2e7870fb1166a518ad25a764939f3ffc7db6f37e59aee9828894d02e7"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:18:28.648579+00:00",
+    "receipt_at": "2026-09-30T23:18:29.302350+00:00",
+    "status": 200,
+    "sha256": "ecffe3d988e1649232f3170b52c16ecd270503684014e5dcb3c7117ce1bdfbf8"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:18:29.357752+00:00",
+    "receipt_at": "2026-09-30T23:18:30.133412+00:00",
+    "status": 200,
+    "sha256": "73a06435fbb13bafc55900b3ea9cc7c5ebaf9c2d8d4e53dc1f6c16555d59248f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:18:30.192610+00:00",
+    "receipt_at": "2026-09-30T23:18:30.794330+00:00",
+    "status": 200,
+    "sha256": "4abc9b3b0a68d13066b894d2e9d67a65856fb5bcbc4fdfdbe0cb126169b05670"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:18:30.853505+00:00",
+    "receipt_at": "2026-09-30T23:18:31.287817+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:18:31.330409+00:00",
+    "receipt_at": "2026-09-30T23:18:31.575679+00:00",
+    "status": 200,
+    "sha256": "45ffc38bc39e72af6a0f1e9f92ab79f1c7f82d8b0a8f4c9c430df42876d3eb3b"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:19:25.494379+00:00",
+    "receipt_at": "2026-09-30T23:19:27.745014+00:00",
+    "status": 200,
+    "sha256": "570674ccc90c1f22dd5021e60b7177916c268494f2987f6013c54b30bb8c8a24"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:19:27.797213+00:00",
+    "receipt_at": "2026-09-30T23:19:28.540876+00:00",
+    "status": 200,
+    "sha256": "726fd64a2fdf7c112580bc634006834e4a8f4f6fc30459bbdc14b19e6f5c93b6"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:19:28.601653+00:00",
+    "receipt_at": "2026-09-30T23:19:29.126364+00:00",
+    "status": 200,
+    "sha256": "ecffe3d988e1649232f3170b52c16ecd270503684014e5dcb3c7117ce1bdfbf8"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:19:29.184014+00:00",
+    "receipt_at": "2026-09-30T23:19:29.830776+00:00",
+    "status": 200,
+    "sha256": "73a06435fbb13bafc55900b3ea9cc7c5ebaf9c2d8d4e53dc1f6c16555d59248f"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:19:29.894931+00:00",
+    "receipt_at": "2026-09-30T23:19:30.569941+00:00",
+    "status": 200,
+    "sha256": "0aad66b04077020535c0c8aec946a9c0a657f8322240e616aec8f7c326c84ea2"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:19:30.627923+00:00",
+    "receipt_at": "2026-09-30T23:19:31.075223+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:19:31.119241+00:00",
+    "receipt_at": "2026-09-30T23:19:31.420525+00:00",
+    "status": 200,
+    "sha256": "45ffc38bc39e72af6a0f1e9f92ab79f1c7f82d8b0a8f4c9c430df42876d3eb3b"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:19:31.499134+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:20:25.504311+00:00",
+    "receipt_at": "2026-09-30T23:20:27.656084+00:00",
+    "status": 200,
+    "sha256": "76310c2728ae9c2c0d453d44d0f9ee193431d2ed3a668429d6768462e44137ea"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:20:27.718041+00:00",
+    "receipt_at": "2026-09-30T23:20:28.441434+00:00",
+    "status": 200,
+    "sha256": "b436ad8bfce3f4d0a9724d4831d29c128516c922057c99c49607bc620ce9e070"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:20:28.499198+00:00",
+    "receipt_at": "2026-09-30T23:20:29.599066+00:00",
+    "status": 200,
+    "sha256": "b6d9362f73e0c763b8a9fdaa8d577fbdcca94f2c8ec4cd57b1796daa264bf8c2"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:20:29.654970+00:00",
+    "receipt_at": "2026-09-30T23:20:30.275976+00:00",
+    "status": 200,
+    "sha256": "b488ca479d43ca07429ab3c9c554e6b4aa000ebf9f5cac40a85769fff2ca2fa9"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:20:30.331797+00:00",
+    "receipt_at": "2026-09-30T23:20:30.747513+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:20:30.865966+00:00",
+    "receipt_at": "2026-09-30T23:20:31.054285+00:00",
+    "status": 200,
+    "sha256": "45ffc38bc39e72af6a0f1e9f92ab79f1c7f82d8b0a8f4c9c430df42876d3eb3b"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:20:31.123537+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:20:31.123543+00:00",
+    "receipt_at": "2026-09-30T23:20:31.722909+00:00",
+    "status": 200,
+    "sha256": "24365ccfa68c56fe80caf631a845f3a58d3510073b8655ad7c909c5a7e7a1763"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:21:25.514458+00:00",
+    "receipt_at": "2026-09-30T23:21:27.554432+00:00",
+    "status": 200,
+    "sha256": "b436ad8bfce3f4d0a9724d4831d29c128516c922057c99c49607bc620ce9e070"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:21:27.612403+00:00",
+    "receipt_at": "2026-09-30T23:21:28.496505+00:00",
+    "status": 200,
+    "sha256": "3aea749922393446bb4d2189118603de5381b8f5dbc672d4f5ea7f3a64efef49"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:21:28.556665+00:00",
+    "receipt_at": "2026-09-30T23:21:29.214049+00:00",
+    "status": 200,
+    "sha256": "b488ca479d43ca07429ab3c9c554e6b4aa000ebf9f5cac40a85769fff2ca2fa9"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:21:29.270969+00:00",
+    "receipt_at": "2026-09-30T23:21:29.705810+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:21:29.746548+00:00",
+    "receipt_at": "2026-09-30T23:21:29.909117+00:00",
+    "status": 200,
+    "sha256": "cf1c3901fdf64d8ad95b7876251598dde3dbe74fed830b989d28bdd4dd14301b"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:21:29.983422+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:21:29.983428+00:00",
+    "receipt_at": "2026-09-30T23:21:30.648525+00:00",
+    "status": 200,
+    "sha256": "24365ccfa68c56fe80caf631a845f3a58d3510073b8655ad7c909c5a7e7a1763"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:21:30.706039+00:00",
+    "receipt_at": "2026-09-30T23:21:31.298579+00:00",
+    "status": 200,
+    "sha256": "76310c2728ae9c2c0d453d44d0f9ee193431d2ed3a668429d6768462e44137ea"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:22:25.515389+00:00",
+    "receipt_at": "2026-09-30T23:22:28.573701+00:00",
+    "status": 200,
+    "sha256": "3aea749922393446bb4d2189118603de5381b8f5dbc672d4f5ea7f3a64efef49"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:22:28.632413+00:00",
+    "receipt_at": "2026-09-30T23:22:30.375294+00:00",
+    "status": 200,
+    "sha256": "b488ca479d43ca07429ab3c9c554e6b4aa000ebf9f5cac40a85769fff2ca2fa9"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:22:30.428376+00:00",
+    "receipt_at": "2026-09-30T23:22:31.976886+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:22:32.019901+00:00",
+    "receipt_at": "2026-09-30T23:22:32.062432+00:00",
+    "status": 200,
+    "sha256": "4d26e7d00e0ff7a536fb83d8e8f3338a2eec09a72d657430182b9ddf44036577"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:22:32.129673+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:22:32.129680+00:00",
+    "receipt_at": "2026-09-30T23:22:33.557952+00:00",
+    "status": 200,
+    "sha256": "24365ccfa68c56fe80caf631a845f3a58d3510073b8655ad7c909c5a7e7a1763"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:22:33.616389+00:00",
+    "receipt_at": "2026-09-30T23:22:34.881247+00:00",
+    "status": 200,
+    "sha256": "76310c2728ae9c2c0d453d44d0f9ee193431d2ed3a668429d6768462e44137ea"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:22:34.941052+00:00",
+    "receipt_at": "2026-09-30T23:22:35.862296+00:00",
+    "status": 200,
+    "sha256": "b436ad8bfce3f4d0a9724d4831d29c128516c922057c99c49607bc620ce9e070"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:23:25.520689+00:00",
+    "receipt_at": "2026-09-30T23:23:28.033816+00:00",
+    "status": 200,
+    "sha256": "b488ca479d43ca07429ab3c9c554e6b4aa000ebf9f5cac40a85769fff2ca2fa9"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:23:28.093009+00:00",
+    "receipt_at": "2026-09-30T23:23:28.915791+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:23:28.956835+00:00",
+    "receipt_at": "2026-09-30T23:23:29.054605+00:00",
+    "status": 200,
+    "sha256": "4d26e7d00e0ff7a536fb83d8e8f3338a2eec09a72d657430182b9ddf44036577"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:23:29.120965+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:23:29.120971+00:00",
+    "receipt_at": "2026-09-30T23:23:30.487191+00:00",
+    "status": 200,
+    "sha256": "24365ccfa68c56fe80caf631a845f3a58d3510073b8655ad7c909c5a7e7a1763"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:23:30.551440+00:00",
+    "receipt_at": "2026-09-30T23:23:31.838863+00:00",
+    "status": 200,
+    "sha256": "76310c2728ae9c2c0d453d44d0f9ee193431d2ed3a668429d6768462e44137ea"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:23:31.898220+00:00",
+    "receipt_at": "2026-09-30T23:23:33.735447+00:00",
+    "status": 200,
+    "sha256": "b436ad8bfce3f4d0a9724d4831d29c128516c922057c99c49607bc620ce9e070"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:23:33.807911+00:00",
+    "receipt_at": "2026-09-30T23:23:35.606395+00:00",
+    "status": 200,
+    "sha256": "3aea749922393446bb4d2189118603de5381b8f5dbc672d4f5ea7f3a64efef49"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:24:25.525845+00:00",
+    "receipt_at": "2026-09-30T23:24:27.874427+00:00",
+    "status": 200,
+    "sha256": "7fa2b1203eee4b568fcc9be590f0b18cabdc7ac00c449b9c16bf1cc30080752a"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:24:27.910717+00:00",
+    "receipt_at": "2026-09-30T23:24:28.007849+00:00",
+    "status": 200,
+    "sha256": "20f80134d75f5b9e9fcb08178052ab378e813aaa3a90bfd19f520f8e180ef43f"
+  },
+  {
+    "job": "<lambda>",
+    "error": "RuntimeError",
+    "at": "2026-09-30T23:24:28.076326+00:00"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:24:28.076333+00:00",
+    "receipt_at": "2026-09-30T23:24:29.935458+00:00",
+    "status": 200,
+    "sha256": "513165246a05e8fd6b86908f2cc20313a5fd0589d7b2c268e873176e34ea51a5"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:24:30.000450+00:00",
+    "receipt_at": "2026-09-30T23:24:32.197103+00:00",
+    "status": 200,
+    "sha256": "7ec0ae4d96ae83cb4dddd3a01ba53282853fc8df3d025615f5f6a5d502eb49ec"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:24:32.255792+00:00",
+    "receipt_at": "2026-09-30T23:24:34.044368+00:00",
+    "status": 200,
+    "sha256": "b436ad8bfce3f4d0a9724d4831d29c128516c922057c99c49607bc620ce9e070"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:24:34.100418+00:00",
+    "receipt_at": "2026-09-30T23:24:35.117651+00:00",
+    "status": 200,
+    "sha256": "066d94054422a8b848c1a2df41d8513ad39c84a6032aaa6a53fd4bbe6b8faba8"
+  },
+  {
+    "channel": "mgm_metar",
+    "url": "https://rasat.mgm.gov.tr/result",
+    "request_at": "2026-09-30T23:24:35.179236+00:00",
+    "receipt_at": "2026-09-30T23:24:36.614530+00:00",
+    "status": 200,
+    "sha256": "12424f360c0bdf4eb8bd76ecf3d3f1c10e29453186c48c04d5c162ecbe2dd64c"
+  }
+]

@@ -1,0 +1,1010 @@
+[
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:10:58.347716+00:00",
+    "receipt_at": "2026-09-30T23:10:58.425257+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:10:58Z/2026-09-30T23:10:58Z",
+    "request_at": "2026-09-30T23:10:58.426247+00:00",
+    "receipt_at": "2026-09-30T23:10:59.183140+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:10:59Z/2026-09-30T23:10:59Z",
+    "request_at": "2026-09-30T23:10:59.185735+00:00",
+    "receipt_at": "2026-09-30T23:10:59.348646+00:00",
+    "status": 200,
+    "sha256": "fc6f5aaca3288df281dd6d33b639383cbf148832f5c9ad0db2abcb97e2a4fa6d"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:10:59.350940+00:00",
+    "receipt_at": "2026-09-30T23:11:00.704114+00:00",
+    "status": 200,
+    "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:11:00.709697+00:00",
+    "receipt_at": "2026-09-30T23:11:00.895605+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:11:00.896313+00:00",
+    "receipt_at": "2026-09-30T23:11:00.993650+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:11:01.148569+00:00",
+    "receipt_at": "2026-09-30T23:11:01.895246+00:00",
+    "status": 200,
+    "sha256": "bd3a008b397f1b0603d04568d450a39f30f7599236809c4f0a8443395607e5e9"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:11:58Z/2026-09-30T23:11:58Z",
+    "request_at": "2026-09-30T23:11:58.359342+00:00",
+    "receipt_at": "2026-09-30T23:11:59.093637+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:11:59Z/2026-09-30T23:11:59Z",
+    "request_at": "2026-09-30T23:11:59.100575+00:00",
+    "receipt_at": "2026-09-30T23:11:59.252543+00:00",
+    "status": 200,
+    "sha256": "fc6f5aaca3288df281dd6d33b639383cbf148832f5c9ad0db2abcb97e2a4fa6d"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:11:59.258181+00:00",
+    "receipt_at": "2026-09-30T23:11:59.826797+00:00",
+    "status": 200,
+    "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:11:59.828589+00:00",
+    "receipt_at": "2026-09-30T23:12:00.023109+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:12:00.025940+00:00",
+    "receipt_at": "2026-09-30T23:12:00.086488+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:12:00.162585+00:00",
+    "receipt_at": "2026-09-30T23:12:00.928138+00:00",
+    "status": 200,
+    "sha256": "b4eff9015e38280bce4669199d83482c597d64b2c48802eef4e72e6119d09ed0"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:12:01.010304+00:00",
+    "receipt_at": "2026-09-30T23:12:01.066862+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:12:58Z/2026-09-30T23:12:58Z",
+    "request_at": "2026-09-30T23:12:58.360557+00:00",
+    "receipt_at": "2026-09-30T23:12:59.089257+00:00",
+    "status": 200,
+    "sha256": "fc6f5aaca3288df281dd6d33b639383cbf148832f5c9ad0db2abcb97e2a4fa6d"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:12:59.093928+00:00",
+    "receipt_at": "2026-09-30T23:13:00.245916+00:00",
+    "status": 200,
+    "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:13:00.247961+00:00",
+    "receipt_at": "2026-09-30T23:13:00.439387+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:13:00.443389+00:00",
+    "receipt_at": "2026-09-30T23:13:00.502104+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:13:00.584073+00:00",
+    "receipt_at": "2026-09-30T23:13:01.170413+00:00",
+    "status": 200,
+    "sha256": "9d40448dc1e1a8e6763d5cff99ac9ab879564863bd37a46d5ffb66195a76c341"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:13:01.252912+00:00",
+    "receipt_at": "2026-09-30T23:13:01.312926+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:13:01Z/2026-09-30T23:13:01Z",
+    "request_at": "2026-09-30T23:13:01.317644+00:00",
+    "receipt_at": "2026-09-30T23:13:01.472786+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:13:58.372391+00:00",
+    "receipt_at": "2026-09-30T23:13:59.232625+00:00",
+    "status": 200,
+    "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:13:59.234656+00:00",
+    "receipt_at": "2026-09-30T23:13:59.420428+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:13:59.421470+00:00",
+    "receipt_at": "2026-09-30T23:13:59.685380+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:13:59.763124+00:00",
+    "receipt_at": "2026-09-30T23:14:00.364702+00:00",
+    "status": 200,
+    "sha256": "cc5158390ba8f4c748c7a1ba89d349991d9ef7715d8095082db6823feb5653ed"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:14:00.443689+00:00",
+    "receipt_at": "2026-09-30T23:14:00.501862+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:14:00Z/2026-09-30T23:14:00Z",
+    "request_at": "2026-09-30T23:14:00.502555+00:00",
+    "receipt_at": "2026-09-30T23:14:01.243947+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:14:01Z/2026-09-30T23:14:01Z",
+    "request_at": "2026-09-30T23:14:01.247309+00:00",
+    "receipt_at": "2026-09-30T23:14:01.416327+00:00",
+    "status": 200,
+    "sha256": "fc6f5aaca3288df281dd6d33b639383cbf148832f5c9ad0db2abcb97e2a4fa6d"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:14:58.383758+00:00",
+    "receipt_at": "2026-09-30T23:14:58.564582+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:14:58.641471+00:00",
+    "receipt_at": "2026-09-30T23:14:59.387236+00:00",
+    "status": 200,
+    "sha256": "8e5684891cabf54b4fd8793a09b29acf4b7530b6d964c05ef800d669076436ee"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:14:59.469610+00:00",
+    "receipt_at": "2026-09-30T23:14:59.527946+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:14:59Z/2026-09-30T23:14:59Z",
+    "request_at": "2026-09-30T23:14:59.528915+00:00",
+    "receipt_at": "2026-09-30T23:15:00.394950+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:15:00Z/2026-09-30T23:15:00Z",
+    "request_at": "2026-09-30T23:15:00.398928+00:00",
+    "receipt_at": "2026-09-30T23:15:00.561631+00:00",
+    "status": 200,
+    "sha256": "fc6f5aaca3288df281dd6d33b639383cbf148832f5c9ad0db2abcb97e2a4fa6d"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:15:00.563528+00:00",
+    "receipt_at": "2026-09-30T23:15:01.456722+00:00",
+    "status": 200,
+    "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:15:01.457519+00:00",
+    "receipt_at": "2026-09-30T23:15:01.698181+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:15:58.393981+00:00",
+    "receipt_at": "2026-09-30T23:16:01.062265+00:00",
+    "status": 200,
+    "sha256": "83261d9a931b85f8209ee3583322ab4cd7a6a8bc929f4af1a4d7620931d0a720"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:16:01.139826+00:00",
+    "receipt_at": "2026-09-30T23:16:01.227875+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:16:01Z/2026-09-30T23:16:01Z",
+    "request_at": "2026-09-30T23:16:01.228599+00:00",
+    "receipt_at": "2026-09-30T23:16:02.094894+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:16:02Z/2026-09-30T23:16:02Z",
+    "request_at": "2026-09-30T23:16:02.096851+00:00",
+    "receipt_at": "2026-09-30T23:16:02.255408+00:00",
+    "status": 200,
+    "sha256": "fc6f5aaca3288df281dd6d33b639383cbf148832f5c9ad0db2abcb97e2a4fa6d"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:16:02.257304+00:00",
+    "receipt_at": "2026-09-30T23:16:03.402118+00:00",
+    "status": 200,
+    "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:16:03.403348+00:00",
+    "receipt_at": "2026-09-30T23:16:03.605830+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:16:03.606679+00:00",
+    "receipt_at": "2026-09-30T23:16:03.672193+00:00",
+    "status": 200,
+    "sha256": "382c76c2b142fbe48bbe484d63ad4e7ce6ae428cbb7d106879108e2429735a1a"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:16:58.396598+00:00",
+    "receipt_at": "2026-09-30T23:16:58.475435+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:16:58Z/2026-09-30T23:16:58Z",
+    "request_at": "2026-09-30T23:16:58.477179+00:00",
+    "receipt_at": "2026-09-30T23:16:59.310835+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:16:59Z/2026-09-30T23:16:59Z",
+    "request_at": "2026-09-30T23:16:59.313870+00:00",
+    "receipt_at": "2026-09-30T23:16:59.508545+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:16:59.510310+00:00",
+    "receipt_at": "2026-09-30T23:17:00.948537+00:00",
+    "status": 200,
+    "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:17:00.950876+00:00",
+    "receipt_at": "2026-09-30T23:17:01.150927+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:17:01.151696+00:00",
+    "receipt_at": "2026-09-30T23:17:01.497451+00:00",
+    "status": 200,
+    "sha256": "103b5268dcaeb1aa0f2eb70e11435f9d90e201960c6f37c18c41d88f8fd4b5b4"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:17:01.574488+00:00",
+    "receipt_at": "2026-09-30T23:17:03.226123+00:00",
+    "status": 200,
+    "sha256": "646205da84c13957cd0f338058a60278523e9af2ec2d8f2a54dbea2cfddc31c3"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:17:58Z/2026-09-30T23:17:58Z",
+    "request_at": "2026-09-30T23:17:58.409381+00:00",
+    "receipt_at": "2026-09-30T23:17:59.148482+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:17:59Z/2026-09-30T23:17:59Z",
+    "request_at": "2026-09-30T23:17:59.152394+00:00",
+    "receipt_at": "2026-09-30T23:17:59.307972+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:17:59.309790+00:00",
+    "receipt_at": "2026-09-30T23:18:00.769829+00:00",
+    "status": 200,
+    "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:18:00.771788+00:00",
+    "receipt_at": "2026-09-30T23:18:00.970215+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:18:00.971588+00:00",
+    "receipt_at": "2026-09-30T23:18:01.127088+00:00",
+    "status": 200,
+    "sha256": "7f0c2a9fbdc9ff58ec13fbbe715f02ca00686ce779dee8be04db65a7fabd32e7"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:18:01.205167+00:00",
+    "receipt_at": "2026-09-30T23:18:01.832327+00:00",
+    "status": 200,
+    "sha256": "6c5693263f468a5a9efeb380a0fb5c7352bbec058576842aab1e7faeaba5d91a"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:18:01.918048+00:00",
+    "receipt_at": "2026-09-30T23:18:01.971734+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:18:58Z/2026-09-30T23:18:58Z",
+    "request_at": "2026-09-30T23:18:58.417402+00:00",
+    "receipt_at": "2026-09-30T23:18:59.151073+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:18:59.152776+00:00",
+    "receipt_at": "2026-09-30T23:18:59.845416+00:00",
+    "status": 200,
+    "sha256": "fbf8b9373df179a6175c7149602adcbe609b97164c92a62310c81a4861b08fbd"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:18:59.846273+00:00",
+    "receipt_at": "2026-09-30T23:19:00.027751+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:19:00.028630+00:00",
+    "receipt_at": "2026-09-30T23:19:00.335236+00:00",
+    "status": 200,
+    "sha256": "45ffc38bc39e72af6a0f1e9f92ab79f1c7f82d8b0a8f4c9c430df42876d3eb3b"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:19:00.410864+00:00",
+    "receipt_at": "2026-09-30T23:19:01.003413+00:00",
+    "status": 200,
+    "sha256": "a436badaa937c35515f1d42993f9dca8f7e79ecc97d43b24df2ac091084cde28"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:19:01.084768+00:00",
+    "receipt_at": "2026-09-30T23:19:01.145914+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:19:01Z/2026-09-30T23:19:01Z",
+    "request_at": "2026-09-30T23:19:01.146558+00:00",
+    "receipt_at": "2026-09-30T23:19:01.304653+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:19:58.427497+00:00",
+    "receipt_at": "2026-09-30T23:19:59.009312+00:00",
+    "status": 200,
+    "sha256": "fbf8b9373df179a6175c7149602adcbe609b97164c92a62310c81a4861b08fbd"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:19:59.010924+00:00",
+    "receipt_at": "2026-09-30T23:19:59.204971+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:19:59.205699+00:00",
+    "receipt_at": "2026-09-30T23:19:59.347261+00:00",
+    "status": 200,
+    "sha256": "45ffc38bc39e72af6a0f1e9f92ab79f1c7f82d8b0a8f4c9c430df42876d3eb3b"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:19:59.429589+00:00",
+    "receipt_at": "2026-09-30T23:20:00.282162+00:00",
+    "status": 200,
+    "sha256": "6d850f2fa568d2b99ea03de123cb4c8ef3b0f5a8c29ba8dbb57ba9dd6e292555"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:20:00.363398+00:00",
+    "receipt_at": "2026-09-30T23:20:00.581093+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:20:00Z/2026-09-30T23:20:00Z",
+    "request_at": "2026-09-30T23:20:00.583554+00:00",
+    "receipt_at": "2026-09-30T23:20:01.436875+00:00",
+    "status": 200,
+    "sha256": "dbd7beb81ee04729af7e60bb4cffc604066030dc664cab8ef4e34d16fec8796c"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:20:01Z/2026-09-30T23:20:01Z",
+    "request_at": "2026-09-30T23:20:01.439461+00:00",
+    "receipt_at": "2026-09-30T23:20:01.589119+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:20:58.437692+00:00",
+    "receipt_at": "2026-09-30T23:20:58.771057+00:00",
+    "status": 200,
+    "sha256": "cf1c3901fdf64d8ad95b7876251598dde3dbe74fed830b989d28bdd4dd14301b"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:20:58.844778+00:00",
+    "receipt_at": "2026-09-30T23:20:59.540892+00:00",
+    "status": 200,
+    "sha256": "cb7f9b5433bdc30f39209b2fd22f4e3315b02f060c73866f534bec4450bd7c26"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:20:59.617315+00:00",
+    "receipt_at": "2026-09-30T23:20:59.679214+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:20:59Z/2026-09-30T23:20:59Z",
+    "request_at": "2026-09-30T23:20:59.679938+00:00",
+    "receipt_at": "2026-09-30T23:21:00.286281+00:00",
+    "status": 200,
+    "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:21:00Z/2026-09-30T23:21:00Z",
+    "request_at": "2026-09-30T23:21:00.287669+00:00",
+    "receipt_at": "2026-09-30T23:21:00.443721+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:21:00.445257+00:00",
+    "receipt_at": "2026-09-30T23:21:02.261523+00:00",
+    "status": 200,
+    "sha256": "fbf8b9373df179a6175c7149602adcbe609b97164c92a62310c81a4861b08fbd"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:21:02.262769+00:00",
+    "receipt_at": "2026-09-30T23:21:02.670158+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:21:58.448786+00:00",
+    "receipt_at": "2026-09-30T23:21:59.805249+00:00",
+    "status": 200,
+    "sha256": "173e3f44a0f9ae82f16ead7fe083c856a8bf598c2a56d5f1c7e165d8ee0cf1d2"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:21:59.887598+00:00",
+    "receipt_at": "2026-09-30T23:22:00.023494+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:22:00Z/2026-09-30T23:22:00Z",
+    "request_at": "2026-09-30T23:22:00.024883+00:00",
+    "receipt_at": "2026-09-30T23:22:00.906308+00:00",
+    "status": 200,
+    "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:22:00Z/2026-09-30T23:22:00Z",
+    "request_at": "2026-09-30T23:22:00.908610+00:00",
+    "receipt_at": "2026-09-30T23:22:01.073082+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:22:01.074514+00:00",
+    "receipt_at": "2026-09-30T23:22:01.855198+00:00",
+    "status": 200,
+    "sha256": "fbf8b9373df179a6175c7149602adcbe609b97164c92a62310c81a4861b08fbd"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:22:01.856487+00:00",
+    "receipt_at": "2026-09-30T23:22:02.132451+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:22:02.133293+00:00",
+    "receipt_at": "2026-09-30T23:22:03.369915+00:00",
+    "status": 200,
+    "sha256": "4d26e7d00e0ff7a536fb83d8e8f3338a2eec09a72d657430182b9ddf44036577"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:22:58.458909+00:00",
+    "receipt_at": "2026-09-30T23:22:58.552850+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:22:58Z/2026-09-30T23:22:58Z",
+    "request_at": "2026-09-30T23:22:58.576738+00:00",
+    "receipt_at": "2026-09-30T23:22:59.451138+00:00",
+    "status": 200,
+    "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:22:59Z/2026-09-30T23:22:59Z",
+    "request_at": "2026-09-30T23:22:59.453222+00:00",
+    "receipt_at": "2026-09-30T23:22:59.608801+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:22:59.610286+00:00",
+    "receipt_at": "2026-09-30T23:23:01.006910+00:00",
+    "status": 200,
+    "sha256": "fbf8b9373df179a6175c7149602adcbe609b97164c92a62310c81a4861b08fbd"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:23:01.007835+00:00",
+    "receipt_at": "2026-09-30T23:23:01.207014+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:23:01.207729+00:00",
+    "receipt_at": "2026-09-30T23:23:01.320338+00:00",
+    "status": 200,
+    "sha256": "4d26e7d00e0ff7a536fb83d8e8f3338a2eec09a72d657430182b9ddf44036577"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:23:01.396945+00:00",
+    "receipt_at": "2026-09-30T23:23:02.838358+00:00",
+    "status": 200,
+    "sha256": "a4c20ac0a30dc2f63e03b90b422d571d65b7c290f497fb7c704b12cba48b0abf"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:23:58Z/2026-09-30T23:23:58Z",
+    "request_at": "2026-09-30T23:23:58.459885+00:00",
+    "receipt_at": "2026-09-30T23:23:59.390181+00:00",
+    "status": 200,
+    "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:23:59Z/2026-09-30T23:23:59Z",
+    "request_at": "2026-09-30T23:23:59.392146+00:00",
+    "receipt_at": "2026-09-30T23:23:59.546696+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:23:59.550430+00:00",
+    "receipt_at": "2026-09-30T23:24:00.237997+00:00",
+    "status": 200,
+    "sha256": "fbf8b9373df179a6175c7149602adcbe609b97164c92a62310c81a4861b08fbd"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:24:00.238831+00:00",
+    "receipt_at": "2026-09-30T23:24:00.422558+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:24:00.423498+00:00",
+    "receipt_at": "2026-09-30T23:24:00.859043+00:00",
+    "status": 200,
+    "sha256": "20f80134d75f5b9e9fcb08178052ab378e813aaa3a90bfd19f520f8e180ef43f"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:24:00.932965+00:00",
+    "receipt_at": "2026-09-30T23:24:01.651663+00:00",
+    "status": 200,
+    "sha256": "383a0f6365b1506cfb2c4cc3f69ca403a63b5df59a951e6a984dfe7a1fbaeed6"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:24:01.729718+00:00",
+    "receipt_at": "2026-09-30T23:24:01.837591+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:24:58Z/2026-09-30T23:24:58Z",
+    "request_at": "2026-09-30T23:24:58.466244+00:00",
+    "receipt_at": "2026-09-30T23:24:59.335849+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:24:59.359678+00:00",
+    "receipt_at": "2026-09-30T23:25:00.076634+00:00",
+    "status": 200,
+    "sha256": "fbf8b9373df179a6175c7149602adcbe609b97164c92a62310c81a4861b08fbd"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:25:00.077804+00:00",
+    "receipt_at": "2026-09-30T23:25:00.264208+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:25:00.265307+00:00",
+    "receipt_at": "2026-09-30T23:25:00.527445+00:00",
+    "status": 200,
+    "sha256": "20f80134d75f5b9e9fcb08178052ab378e813aaa3a90bfd19f520f8e180ef43f"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:25:00.602152+00:00",
+    "receipt_at": "2026-09-30T23:25:01.452432+00:00",
+    "status": 200,
+    "sha256": "3356cd91ea4af9e3758513700eb8787afad095818c61fb38a7fc7f6d812b68c3"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:25:01.532961+00:00",
+    "receipt_at": "2026-09-30T23:25:01.646028+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:25:01Z/2026-09-30T23:25:01Z",
+    "request_at": "2026-09-30T23:25:01.646820+00:00",
+    "receipt_at": "2026-09-30T23:25:01.804391+00:00",
+    "status": 200,
+    "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:25:58.470427+00:00",
+    "receipt_at": "2026-09-30T23:25:59.206427+00:00",
+    "status": 200,
+    "sha256": "fbf8b9373df179a6175c7149602adcbe609b97164c92a62310c81a4861b08fbd"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:25:59.207600+00:00",
+    "receipt_at": "2026-09-30T23:25:59.400569+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:25:59.401358+00:00",
+    "receipt_at": "2026-09-30T23:25:59.505231+00:00",
+    "status": 200,
+    "sha256": "c60614ea013a4fef42e0d682fee4f34c0a61eaeb367e4164cb1e24bc4447e8ab"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:25:59.584179+00:00",
+    "receipt_at": "2026-09-30T23:26:00.420758+00:00",
+    "status": 200,
+    "sha256": "20ce6420c22c2ffeda42e16da4ecc587476c722c308bc37e857535505cfe5e8b"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:26:00.515667+00:00",
+    "receipt_at": "2026-09-30T23:26:00.644964+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:26:00Z/2026-09-30T23:26:00Z",
+    "request_at": "2026-09-30T23:26:00.645819+00:00",
+    "receipt_at": "2026-09-30T23:26:01.569338+00:00",
+    "status": 200,
+    "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:26:01Z/2026-09-30T23:26:01Z",
+    "request_at": "2026-09-30T23:26:01.571009+00:00",
+    "receipt_at": "2026-09-30T23:26:01.742597+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:26:58.473245+00:00",
+    "receipt_at": "2026-09-30T23:26:58.869210+00:00",
+    "status": 200,
+    "sha256": "b2a83f3241e8e47297509099658029f18ee6ed8effc805ed922f6c519c76f45c"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:26:58.945134+00:00",
+    "receipt_at": "2026-09-30T23:26:59.821486+00:00",
+    "status": 200,
+    "sha256": "846cffc696b34bfbca0fbeae8e24fc38a060ddae756f07f67596c97be638d2ab"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:26:59.901268+00:00",
+    "receipt_at": "2026-09-30T23:26:59.968986+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:26:59Z/2026-09-30T23:26:59Z",
+    "request_at": "2026-09-30T23:26:59.969691+00:00",
+    "receipt_at": "2026-09-30T23:27:00.686357+00:00",
+    "status": 200,
+    "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:27:00Z/2026-09-30T23:27:00Z",
+    "request_at": "2026-09-30T23:27:00.691213+00:00",
+    "receipt_at": "2026-09-30T23:27:00.843900+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:27:00.846584+00:00",
+    "receipt_at": "2026-09-30T23:27:01.565570+00:00",
+    "status": 200,
+    "sha256": "fbf8b9373df179a6175c7149602adcbe609b97164c92a62310c81a4861b08fbd"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:27:01.567131+00:00",
+    "receipt_at": "2026-09-30T23:27:01.759126+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:27:58.479363+00:00",
+    "receipt_at": "2026-09-30T23:27:59.130246+00:00",
+    "status": 200,
+    "sha256": "850cea77b7fe52a6a7688910ea18c8af89beb60514290b7e369882a904a75b85"
+  },
+  {
+    "channel": "aemet_station_xml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:27:59.216031+00:00",
+    "receipt_at": "2026-09-30T23:27:59.281294+00:00",
+    "status": 200,
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-29T23:27:59Z/2026-09-30T23:27:59Z",
+    "request_at": "2026-09-30T23:27:59.282009+00:00",
+    "receipt_at": "2026-09-30T23:27:59.903405+00:00",
+    "status": 200,
+    "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/SBGR/2026-09-29T23:27:59Z/2026-09-30T23:27:59Z",
+    "request_at": "2026-09-30T23:27:59.909691+00:00",
+    "receipt_at": "2026-09-30T23:28:00.091172+00:00",
+    "status": 200,
+    "sha256": "849f730730f8890b2f0ac8a2e97c11abb15d0f65671fcc93946bc460dcb1dfa3"
+  },
+  {
+    "channel": "hko_native_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:28:00.094184+00:00",
+    "receipt_at": "2026-09-30T23:28:00.926730+00:00",
+    "status": 200,
+    "sha256": "d8876f77b38a1b07e75ac212304177b6544c2a1612af90b7a7676a3c981158ca"
+  },
+  {
+    "channel": "hko_rhr_json",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php",
+    "request_at": "2026-09-30T23:28:00.928968+00:00",
+    "receipt_at": "2026-09-30T23:28:01.113087+00:00",
+    "status": 200,
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:28:01.114033+00:00",
+    "receipt_at": "2026-09-30T23:28:01.854828+00:00",
+    "status": 200,
+    "sha256": "5e44d10b6aa4f292bcac188d09bbbae29258ab77a4b0e341d7cf4db45c0b8565"
+  }
+]

@@ -1,0 +1,34 @@
+[
+  {
+    "channel": "knmi_public_metar",
+    "url": "https://www.knmi.nl/nederland-nu/luchtvaart/vliegveldwaarnemingen",
+    "request_at": "2026-09-30T23:28:18.998977+00:00",
+    "receipt_at": "2026-09-30T23:28:19.064185+00:00",
+    "status": 200,
+    "sha256": "866017895875068891a7004350f4c5aa8fadf9ffcb4f7b22fb73ea235bb21eb5"
+  },
+  {
+    "channel": "meteoam_metar",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/MMMX/2026-09-29T23:28:19Z/2026-09-30T23:28:19Z",
+    "request_at": "2026-09-30T23:28:19.077134+00:00",
+    "receipt_at": "2026-09-30T23:28:20.101332+00:00",
+    "status": 200,
+    "sha256": "c568508f4728021d35d8255dd509013940dd31373ac2d5bc99554dae4233dad6"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:28:20.103474+00:00",
+    "receipt_at": "2026-09-30T23:28:20.177641+00:00",
+    "status": 200,
+    "sha256": "5e44d10b6aa4f292bcac188d09bbbae29258ab77a4b0e341d7cf4db45c0b8565"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:28:20.416103+00:00",
+    "receipt_at": "2026-09-30T23:28:21.011736+00:00",
+    "status": 200,
+    "sha256": "21e4ace7e6e7feedb2d582a7e59adb5c7980cc9c18341a32a1dbe152668d66f7"
+  }
+]

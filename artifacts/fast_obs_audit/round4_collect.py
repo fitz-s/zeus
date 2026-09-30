@@ -97,7 +97,7 @@ def raw_metar(raw,station,receipt):
     if not re.match(r'^(?:(?:METAR|SPECI)\s+)?(?:COR\s+)?'+re.escape(station)+r'\s',raw): return None
     m=re.search(r'\b(\d{6})Z\b',raw);v=metar_temperature_c(raw)
     if not m or v is None: return None
-    d=_kma_observation_time(m[1],as_of=receipt)
+    d=_kma_observation_time(m[1]+'Z',as_of=receipt)
     return (d,v) if d else None
 
 def awc():

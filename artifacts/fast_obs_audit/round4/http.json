@@ -1,0 +1,2839 @@
+[
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T22:54:42.191649+00:00",
+    "receipt_at": "2026-09-30T22:54:42.402302+00:00",
+    "status": 200,
+    "sha256": "1f19ad1c02e317bc317afa7a9fbb9f2220f38c0855e9eb1a2edda1309facaf6a"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T22:54:42.191208+00:00",
+    "receipt_at": "2026-09-30T22:54:42.428371+00:00",
+    "status": 200,
+    "sha256": "4457849080c5a152a8eb0beb42ba74e84341cc38356fb99446e0efbee8e7e01e"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:54:42.560962+00:00",
+    "receipt_at": "2026-09-30T22:54:43.172678+00:00",
+    "status": 200,
+    "sha256": "f9214f2a4e98edfce1bab089f68fab4e8c11ee84c9e4197b5a2758b37b5f3adf"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T22:54:42.191830+00:00",
+    "receipt_at": "2026-09-30T22:54:43.260568+00:00",
+    "status": 200,
+    "sha256": "613966b7d101aefecd04bc29367c5170863e6bc0d3e631323a36e3dc28addcf7"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/NZAA:9:NZ/observations/historical.json",
+    "request_at": "2026-09-30T22:54:43.471270+00:00",
+    "receipt_at": "2026-09-30T22:54:43.503386+00:00",
+    "status": 200,
+    "sha256": "112b8c6c3a0a29495cf7f662fc5e47157b46bec190e69e38a64e5ed56d1550c2"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/ZSJN:9:CN/observations/historical.json",
+    "request_at": "2026-09-30T22:54:43.504731+00:00",
+    "receipt_at": "2026-09-30T22:54:43.511492+00:00",
+    "status": 200,
+    "sha256": "782b335b66968e3f89c777e5b491fdffe6629d6766d220abf5ef27c89e81e26c"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/WIHH:9:ID/observations/historical.json",
+    "request_at": "2026-09-30T22:54:43.512179+00:00",
+    "receipt_at": "2026-09-30T22:54:43.520473+00:00",
+    "status": 200,
+    "sha256": "40a32669a28c9b69fb891ef02c033b3dee8a5c841ce81c0279cdb74efdddf0cc"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/DNMM:9:NG/observations/historical.json",
+    "request_at": "2026-09-30T22:54:43.521341+00:00",
+    "receipt_at": "2026-09-30T22:54:43.528318+00:00",
+    "status": 200,
+    "sha256": "b02c288ef00cf4c442103114243f4a3d266d9c0faeb957c61006979dca01ac6f"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/RCSS:9:TW/observations/historical.json",
+    "request_at": "2026-09-30T22:54:43.529170+00:00",
+    "receipt_at": "2026-09-30T22:54:43.536067+00:00",
+    "status": 200,
+    "sha256": "1e8849abe8eaa30e8c9105d4501faa863db4a0b9420eaa84fcd28b2603e9e38b"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:54:42.561587+00:00",
+    "receipt_at": "2026-09-30T22:54:43.568824+00:00",
+    "status": 200,
+    "sha256": "531a7b5d97e45670197dbc1ade5315be67c599144afab6d2da5afeb5eb79f21b"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T22:54:43.536819+00:00",
+    "receipt_at": "2026-09-30T22:54:44.004198+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T22:54:43.335978+00:00",
+    "receipt_at": "2026-09-30T22:54:44.014616+00:00",
+    "status": 200,
+    "sha256": "4545f64430f64d1f02403724c00e0bc3e0804c5b76e5ad4d053a00d23147e66d"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:54:42.192139+00:00",
+    "receipt_at": "2026-09-30T22:54:44.330802+00:00",
+    "status": 200,
+    "sha256": "78d7acd385e18183bdc486add06a41203b0db7647acea59b5af2de7e75b2ff64"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T22:54:43.735858+00:00",
+    "receipt_at": "2026-09-30T22:54:44.348559+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:54:44.334522+00:00",
+    "receipt_at": "2026-09-30T22:54:44.976161+00:00",
+    "status": 200,
+    "sha256": "284f0d1e2c9ace566a699dd1bdff65a6849c609cfee8b731a0211ba6198cde33"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T22:54:44.013394+00:00",
+    "receipt_at": "2026-09-30T22:54:45.480006+00:00",
+    "status": 200,
+    "sha256": "7c953013385aaa46ac789b5b227774ebbd4763eb1df87be2849d17f3062986e4"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T22:54:45.480006+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "7c953013385aaa46ac789b5b227774ebbd4763eb1df87be2849d17f3062986e4"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T22:54:44.018497+00:00",
+    "error": "ReadTimeout"
+  },
+  {
+    "job": "<lambda>",
+    "error": "ReadTimeout",
+    "at": "2026-09-30T22:54:56.235788+00:00"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T22:55:42.204912+00:00",
+    "receipt_at": "2026-09-30T22:55:42.318687+00:00",
+    "status": 200,
+    "sha256": "4457849080c5a152a8eb0beb42ba74e84341cc38356fb99446e0efbee8e7e01e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T22:55:42.210611+00:00",
+    "receipt_at": "2026-09-30T22:55:42.365578+00:00",
+    "status": 200,
+    "sha256": "613966b7d101aefecd04bc29367c5170863e6bc0d3e631323a36e3dc28addcf7"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T22:55:42.462942+00:00",
+    "receipt_at": "2026-09-30T22:55:43.010036+00:00",
+    "status": 200,
+    "sha256": "ad2881099075bc1c5c26d56a5e06fd5566e42529bd72df9401576bdf1111d85c"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:55:42.211936+00:00",
+    "receipt_at": "2026-09-30T22:55:43.152966+00:00",
+    "status": 200,
+    "sha256": "9d4b85b8bc5771d8b65d565d8a4b198a0ee8a65b7b95b5e888a5a15e79c2a87f"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:55:42.320811+00:00",
+    "receipt_at": "2026-09-30T22:55:43.244253+00:00",
+    "status": 200,
+    "sha256": "ab810157d0dfe25708b69043beb9c2f23e4dff434dc63db3f4e06e4c608be09e"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:55:42.209880+00:00",
+    "receipt_at": "2026-09-30T22:55:43.499686+00:00",
+    "status": 200,
+    "sha256": "78d7acd385e18183bdc486add06a41203b0db7647acea59b5af2de7e75b2ff64"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:55:43.501480+00:00",
+    "receipt_at": "2026-09-30T22:55:43.905185+00:00",
+    "status": 200,
+    "sha256": "284f0d1e2c9ace566a699dd1bdff65a6849c609cfee8b731a0211ba6198cde33"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T22:55:43.410298+00:00",
+    "receipt_at": "2026-09-30T22:55:43.940870+00:00",
+    "status": 200,
+    "sha256": "3f81b74d74dfc6f6c4be48893eca70432bfd3860320e027086689ad9e3060b42"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T22:55:43.940870+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "3f81b74d74dfc6f6c4be48893eca70432bfd3860320e027086689ad9e3060b42"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T22:55:43.912306+00:00",
+    "receipt_at": "2026-09-30T22:55:43.980340+00:00",
+    "status": 200,
+    "sha256": "1f19ad1c02e317bc317afa7a9fbb9f2220f38c0855e9eb1a2edda1309facaf6a"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T22:55:43.040670+00:00",
+    "receipt_at": "2026-09-30T22:55:44.045791+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T22:55:43.232297+00:00",
+    "receipt_at": "2026-09-30T22:55:44.770908+00:00",
+    "status": 200,
+    "sha256": "f8730189ea510270ad114d6ef232dd5973b97ebd69780b181ed54f3168003555"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T22:55:44.770908+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "f8730189ea510270ad114d6ef232dd5973b97ebd69780b181ed54f3168003555"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T22:56:42.217519+00:00",
+    "receipt_at": "2026-09-30T22:56:42.687386+00:00",
+    "status": 200,
+    "sha256": "97f1c86a177a30d49efc5faf33543a9dd6c6544feac329e20e03eda5da08d4e1"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:56:42.221560+00:00",
+    "receipt_at": "2026-09-30T22:56:43.102264+00:00",
+    "status": 200,
+    "sha256": "d4c4c68ad01559249c05df2e9441fde57da59e9fcf968693f62f9f27c3d42a36"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:56:42.222425+00:00",
+    "receipt_at": "2026-09-30T22:56:43.554825+00:00",
+    "status": 200,
+    "sha256": "9dd95d0006f615a14217925a8d2ff480944e4f0ce23cafd4b5a8e42cc9c55453"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T22:56:42.773623+00:00",
+    "receipt_at": "2026-09-30T22:56:43.574976+00:00",
+    "status": 200,
+    "sha256": "86b03bdd5cd1a42de99f2a5ce419373f1afa77219b7c3d16c272f2f94bfd5ba1"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T22:56:43.186581+00:00",
+    "receipt_at": "2026-09-30T22:56:43.646165+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:56:42.215529+00:00",
+    "receipt_at": "2026-09-30T22:56:43.898599+00:00",
+    "status": 200,
+    "sha256": "78d7acd385e18183bdc486add06a41203b0db7647acea59b5af2de7e75b2ff64"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T22:56:43.688997+00:00",
+    "receipt_at": "2026-09-30T22:56:44.365448+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T22:56:44.366233+00:00",
+    "receipt_at": "2026-09-30T22:56:44.448704+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T22:56:44.451950+00:00",
+    "receipt_at": "2026-09-30T22:56:44.554081+00:00",
+    "status": 200,
+    "sha256": "4457849080c5a152a8eb0beb42ba74e84341cc38356fb99446e0efbee8e7e01e"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:56:43.900171+00:00",
+    "receipt_at": "2026-09-30T22:56:44.702740+00:00",
+    "status": 200,
+    "sha256": "284f0d1e2c9ace566a699dd1bdff65a6849c609cfee8b731a0211ba6198cde33"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T22:56:43.696877+00:00",
+    "receipt_at": "2026-09-30T22:56:45.205553+00:00",
+    "status": 200,
+    "sha256": "758b213ac019231f1598edebb6f71b365e777119675a6d729dc97e26493447a0"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T22:56:45.205553+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "758b213ac019231f1598edebb6f71b365e777119675a6d729dc97e26493447a0"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T22:56:43.739375+00:00",
+    "error": "ReadTimeout"
+  },
+  {
+    "job": "<lambda>",
+    "error": "ReadTimeout",
+    "at": "2026-09-30T22:56:55.926141+00:00"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T22:57:42.218102+00:00",
+    "receipt_at": "2026-09-30T22:57:42.456089+00:00",
+    "status": 200,
+    "sha256": "97f1c86a177a30d49efc5faf33543a9dd6c6544feac329e20e03eda5da08d4e1"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T22:57:42.227840+00:00",
+    "receipt_at": "2026-09-30T22:57:43.023647+00:00",
+    "status": 200,
+    "sha256": "9c8a0d2338672e88546ddb56534bc350eb9cbd77f83a508b52179a431c22bad1"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:57:42.224084+00:00",
+    "receipt_at": "2026-09-30T22:57:43.090687+00:00",
+    "status": 200,
+    "sha256": "c33b58e1f73f22fbd2038b19987de29af9e8fbf8db5e4443bf51775763c1b42f"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:57:42.224943+00:00",
+    "receipt_at": "2026-09-30T22:57:43.233754+00:00",
+    "status": 200,
+    "sha256": "77a2b9b5b6c2d893b47df515377cb51d6b60586711894643c8fee4b3bf32fd93"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T22:57:43.171623+00:00",
+    "receipt_at": "2026-09-30T22:57:43.694845+00:00",
+    "status": 200,
+    "sha256": "764374187e4b164f5ae1a7d40524019816491c719b38cf5328c87648b381fb85"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T22:57:43.694845+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "764374187e4b164f5ae1a7d40524019816491c719b38cf5328c87648b381fb85"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T22:57:43.400512+00:00",
+    "receipt_at": "2026-09-30T22:57:43.771205+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T22:57:43.708014+00:00",
+    "receipt_at": "2026-09-30T22:57:43.812805+00:00",
+    "status": 200,
+    "sha256": "4457849080c5a152a8eb0beb42ba74e84341cc38356fb99446e0efbee8e7e01e"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T22:57:42.537554+00:00",
+    "receipt_at": "2026-09-30T22:57:43.878866+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T22:57:43.030062+00:00",
+    "receipt_at": "2026-09-30T22:57:44.429091+00:00",
+    "status": 200,
+    "sha256": "245261dc43e15a5d6f0ba4224b33f52e797bd6d3199a422913c54b85cd3adaef"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T22:57:44.429091+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "245261dc43e15a5d6f0ba4224b33f52e797bd6d3199a422913c54b85cd3adaef"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:57:43.772708+00:00",
+    "receipt_at": "2026-09-30T22:57:45.410701+00:00",
+    "status": 200,
+    "sha256": "78d7acd385e18183bdc486add06a41203b0db7647acea59b5af2de7e75b2ff64"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:57:45.414667+00:00",
+    "receipt_at": "2026-09-30T22:57:45.886604+00:00",
+    "status": 200,
+    "sha256": "284f0d1e2c9ace566a699dd1bdff65a6849c609cfee8b731a0211ba6198cde33"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T22:58:42.230329+00:00",
+    "receipt_at": "2026-09-30T22:58:42.874564+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:58:42.226613+00:00",
+    "receipt_at": "2026-09-30T22:58:42.932037+00:00",
+    "status": 200,
+    "sha256": "bccead4659956ccdcee5f505c5b9bc04b9364d445c3b7a365f99470d4e72817e"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T22:58:42.230783+00:00",
+    "receipt_at": "2026-09-30T22:58:43.016855+00:00",
+    "status": 200,
+    "sha256": "00d7ae318bc2c825ef79a2421a051271aea1fb36c383bf79ba05056db1c9a65b"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T22:58:42.883588+00:00",
+    "receipt_at": "2026-09-30T22:58:43.510304+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:58:42.229731+00:00",
+    "receipt_at": "2026-09-30T22:58:43.643897+00:00",
+    "status": 200,
+    "sha256": "260c68eec854674abe3a79675597b8774190e09243289ea8c046f5cf99bd12ad"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T22:58:43.821757+00:00",
+    "receipt_at": "2026-09-30T22:58:43.916261+00:00",
+    "status": 200,
+    "sha256": "4457849080c5a152a8eb0beb42ba74e84341cc38356fb99446e0efbee8e7e01e"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T22:58:43.511046+00:00",
+    "receipt_at": "2026-09-30T22:58:44.050457+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T22:58:44.051734+00:00",
+    "receipt_at": "2026-09-30T22:58:44.356518+00:00",
+    "status": 200,
+    "sha256": "1d066be6f5098dea6defcad10e4d776d5ebe01c2640686068b5383807dbbb242"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:58:43.916887+00:00",
+    "receipt_at": "2026-09-30T22:58:45.091585+00:00",
+    "status": 200,
+    "sha256": "78d7acd385e18183bdc486add06a41203b0db7647acea59b5af2de7e75b2ff64"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:58:45.094939+00:00",
+    "receipt_at": "2026-09-30T22:58:45.452862+00:00",
+    "status": 200,
+    "sha256": "284f0d1e2c9ace566a699dd1bdff65a6849c609cfee8b731a0211ba6198cde33"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T22:58:43.019551+00:00",
+    "receipt_at": "2026-09-30T22:58:50.616400+00:00",
+    "status": 200,
+    "sha256": "79e96faceb5ed9a6072b016872f566ba61f0a5fb32c5e2bf529e5a809352438d"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T22:58:50.616400+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "79e96faceb5ed9a6072b016872f566ba61f0a5fb32c5e2bf529e5a809352438d"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T22:58:43.016634+00:00",
+    "receipt_at": "2026-09-30T22:58:51.034557+00:00",
+    "status": 200,
+    "sha256": "bed0e85d7746f1a30e57adb0d3480a736057949fc10858c2dda0a1181bfdb7ca"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T22:58:51.034557+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "bed0e85d7746f1a30e57adb0d3480a736057949fc10858c2dda0a1181bfdb7ca"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/NZAA:9:NZ/observations/historical.json",
+    "request_at": "2026-09-30T22:59:42.239066+00:00",
+    "receipt_at": "2026-09-30T22:59:43.394224+00:00",
+    "status": 200,
+    "sha256": "112b8c6c3a0a29495cf7f662fc5e47157b46bec190e69e38a64e5ed56d1550c2"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/ZSJN:9:CN/observations/historical.json",
+    "request_at": "2026-09-30T22:59:43.399688+00:00",
+    "receipt_at": "2026-09-30T22:59:43.423052+00:00",
+    "status": 200,
+    "sha256": "782b335b66968e3f89c777e5b491fdffe6629d6766d220abf5ef27c89e81e26c"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/WIHH:9:ID/observations/historical.json",
+    "request_at": "2026-09-30T22:59:43.428778+00:00",
+    "receipt_at": "2026-09-30T22:59:43.443266+00:00",
+    "status": 200,
+    "sha256": "40a32669a28c9b69fb891ef02c033b3dee8a5c841ce81c0279cdb74efdddf0cc"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/DNMM:9:NG/observations/historical.json",
+    "request_at": "2026-09-30T22:59:43.445411+00:00",
+    "receipt_at": "2026-09-30T22:59:43.466756+00:00",
+    "status": 200,
+    "sha256": "b02c288ef00cf4c442103114243f4a3d266d9c0faeb957c61006979dca01ac6f"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/RCSS:9:TW/observations/historical.json",
+    "request_at": "2026-09-30T22:59:43.468728+00:00",
+    "receipt_at": "2026-09-30T22:59:43.478977+00:00",
+    "status": 200,
+    "sha256": "1e8849abe8eaa30e8c9105d4501faa863db4a0b9420eaa84fcd28b2603e9e38b"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T22:59:42.244992+00:00",
+    "receipt_at": "2026-09-30T22:59:44.113923+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T22:59:42.244614+00:00",
+    "receipt_at": "2026-09-30T22:59:44.258057+00:00",
+    "status": 200,
+    "sha256": "f0b6ade0b59dd4a8fd370d621d7bc3c88e922cb9bbc368ad75bc8cdfd9fa25d3"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:59:42.243866+00:00",
+    "receipt_at": "2026-09-30T22:59:44.429254+00:00",
+    "status": 200,
+    "sha256": "1bffa6c3297c59f0a9b9dfc67b00e709b57ab20a17c28f3f776a982a69f23b45"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T22:59:44.610935+00:00",
+    "receipt_at": "2026-09-30T22:59:44.712715+00:00",
+    "status": 200,
+    "sha256": "4457849080c5a152a8eb0beb42ba74e84341cc38356fb99446e0efbee8e7e01e"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T22:59:44.265110+00:00",
+    "receipt_at": "2026-09-30T22:59:44.790130+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T22:59:43.483806+00:00",
+    "receipt_at": "2026-09-30T22:59:45.375362+00:00",
+    "status": 200,
+    "sha256": "0d85eb983f6be21e6b942a58a7a93dcaf39e4ea911a5e4958f077e7d906e88b2"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T22:59:45.375362+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "0d85eb983f6be21e6b942a58a7a93dcaf39e4ea911a5e4958f077e7d906e88b2"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T22:59:44.114971+00:00",
+    "receipt_at": "2026-09-30T22:59:45.675252+00:00",
+    "status": 200,
+    "sha256": "bccceaf0415946e954f8bccb30c087540ccc9ce56c7e99fc7cac9e1414fd78ab"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T22:59:45.675252+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "bccceaf0415946e954f8bccb30c087540ccc9ce56c7e99fc7cac9e1414fd78ab"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T22:59:44.796699+00:00",
+    "receipt_at": "2026-09-30T22:59:45.722593+00:00",
+    "status": 200,
+    "sha256": "1f1973ff9336fc42807ef3befac11cff33423cc906e488ca92eef22cfd3b108a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T22:59:45.408233+00:00",
+    "receipt_at": "2026-09-30T22:59:47.908531+00:00",
+    "status": 200,
+    "sha256": "aa0539756d0133072e78cbbcee98382f6b058b3d92189bf08e7b76260d0c2616"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:59:44.716063+00:00",
+    "receipt_at": "2026-09-30T22:59:48.334060+00:00",
+    "status": 200,
+    "sha256": "78d7acd385e18183bdc486add06a41203b0db7647acea59b5af2de7e75b2ff64"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T22:59:48.335501+00:00",
+    "receipt_at": "2026-09-30T22:59:48.698518+00:00",
+    "status": 200,
+    "sha256": "284f0d1e2c9ace566a699dd1bdff65a6849c609cfee8b731a0211ba6198cde33"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:00:42.245329+00:00",
+    "receipt_at": "2026-09-30T23:00:42.753511+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:00:42.245917+00:00",
+    "receipt_at": "2026-09-30T23:00:42.904116+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:00:42.239152+00:00",
+    "receipt_at": "2026-09-30T23:00:42.954650+00:00",
+    "status": 200,
+    "sha256": "e3d037a81734a6a8206b4d5a6ee88983fb166c32fdcf1bfbe414b500976cc837"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:00:42.905082+00:00",
+    "receipt_at": "2026-09-30T23:00:42.968427+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:00:42.966473+00:00",
+    "receipt_at": "2026-09-30T23:00:43.059717+00:00",
+    "status": 200,
+    "sha256": "4457849080c5a152a8eb0beb42ba74e84341cc38356fb99446e0efbee8e7e01e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:00:43.080563+00:00",
+    "receipt_at": "2026-09-30T23:00:43.222450+00:00",
+    "status": 200,
+    "sha256": "1f1973ff9336fc42807ef3befac11cff33423cc906e488ca92eef22cfd3b108a"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:00:42.246109+00:00",
+    "receipt_at": "2026-09-30T23:00:43.745888+00:00",
+    "status": 200,
+    "sha256": "2d21393a3b8236dadf669fe9e9539422ce28cd1d804e024380764d69208d0173"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:00:43.745888+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "2d21393a3b8236dadf669fe9e9539422ce28cd1d804e024380764d69208d0173"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:00:42.969940+00:00",
+    "receipt_at": "2026-09-30T23:00:43.896086+00:00",
+    "status": 200,
+    "sha256": "6aa0613e37dcd727279d42f97914685ba12e1fe1191dce51c63173eb8d2f07a9"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:00:43.301217+00:00",
+    "receipt_at": "2026-09-30T23:00:44.012209+00:00",
+    "status": 200,
+    "sha256": "2c9d72e57d36808ab6f8dcaf78a1f27e17af6518c0b7c91ee9fdfdee5797e25a"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:00:43.899186+00:00",
+    "receipt_at": "2026-09-30T23:00:44.263127+00:00",
+    "status": 200,
+    "sha256": "284f0d1e2c9ace566a699dd1bdff65a6849c609cfee8b731a0211ba6198cde33"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:00:43.785784+00:00",
+    "receipt_at": "2026-09-30T23:00:44.627286+00:00",
+    "status": 200,
+    "sha256": "369877e04da66bd75cb007f7c852885a50832766371e815bd6c3e19828a43dda"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:00:42.761480+00:00",
+    "receipt_at": "2026-09-30T23:00:52.415982+00:00",
+    "status": 200,
+    "sha256": "27d608dbe2221beafd1ae606b0fd665a5cfb3dbfd182f8c2b13bace1273a17c5"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:00:52.415982+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "27d608dbe2221beafd1ae606b0fd665a5cfb3dbfd182f8c2b13bace1273a17c5"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:01:42.250616+00:00",
+    "receipt_at": "2026-09-30T23:01:42.390824+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:01:42.394968+00:00",
+    "receipt_at": "2026-09-30T23:01:42.488792+00:00",
+    "status": 200,
+    "sha256": "4457849080c5a152a8eb0beb42ba74e84341cc38356fb99446e0efbee8e7e01e"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:01:42.250258+00:00",
+    "receipt_at": "2026-09-30T23:01:42.814241+00:00",
+    "status": 200,
+    "sha256": "05754e57947622f31ea55622ee2b3f4b572098bf7717b532164d2df37ca91da1"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:01:42.814241+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "05754e57947622f31ea55622ee2b3f4b572098bf7717b532164d2df37ca91da1"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:01:42.826418+00:00",
+    "receipt_at": "2026-09-30T23:01:42.895826+00:00",
+    "status": 200,
+    "sha256": "88fee37b09df6840ea6bb704bc07ebcd11087354525d084366aa602148656cca"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:01:42.247657+00:00",
+    "receipt_at": "2026-09-30T23:01:42.976994+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:01:42.976608+00:00",
+    "receipt_at": "2026-09-30T23:01:43.848872+00:00",
+    "status": 200,
+    "sha256": "5b9c47bfd0bb5e7d6f4e92681ea716ef0c80ff44a460534dd2153beaf04d83a8"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:01:42.490780+00:00",
+    "receipt_at": "2026-09-30T23:01:43.935004+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:01:42.977739+00:00",
+    "receipt_at": "2026-09-30T23:01:44.096078+00:00",
+    "status": 200,
+    "sha256": "a9a3d70d2cd21df1f0d4870510a9d30f8059954779da037a894aad56f2ad3ed1"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:01:43.945940+00:00",
+    "receipt_at": "2026-09-30T23:01:44.341355+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:01:43.933966+00:00",
+    "receipt_at": "2026-09-30T23:01:44.771159+00:00",
+    "status": 200,
+    "sha256": "8103ae867bdcfc847c4dcdb2a150322214316a5fde689e84e2d7b4827709f3c2"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:01:42.249887+00:00",
+    "receipt_at": "2026-09-30T23:01:45.767013+00:00",
+    "status": 200,
+    "sha256": "b86468d569432c63ae32d38896fdd5587861a107d7391c8b1a24d2a8adfeb469"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:01:45.767013+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "b86468d569432c63ae32d38896fdd5587861a107d7391c8b1a24d2a8adfeb469"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:02:42.253324+00:00",
+    "receipt_at": "2026-09-30T23:02:42.333393+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:02:42.336322+00:00",
+    "receipt_at": "2026-09-30T23:02:42.450746+00:00",
+    "status": 200,
+    "sha256": "abb483a97d5f5c8838a086544467adfc821deb6fc6024cf3b13643bbb5855c38"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:02:42.250193+00:00",
+    "receipt_at": "2026-09-30T23:02:42.908046+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:02:42.909058+00:00",
+    "receipt_at": "2026-09-30T23:02:43.284362+00:00",
+    "status": 200,
+    "sha256": "b0125d606ea52cb192a1ea0e2182c6f6f128ecdad48ea53c20b9db4007b6499b"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:02:42.252399+00:00",
+    "receipt_at": "2026-09-30T23:02:43.839243+00:00",
+    "status": 200,
+    "sha256": "b1e10a4a69dafb1748d1a00e2e8b30de648d858b91578e3c3e0048a1b22a46d9"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:02:43.839243+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "b1e10a4a69dafb1748d1a00e2e8b30de648d858b91578e3c3e0048a1b22a46d9"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:02:43.361701+00:00",
+    "receipt_at": "2026-09-30T23:02:44.084432+00:00",
+    "status": 200,
+    "sha256": "ba3ef2d25a3521e54ba67ef7411d814ccc28b578fcfaae2233ee3195b9945322"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:02:42.453224+00:00",
+    "receipt_at": "2026-09-30T23:02:44.213666+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:02:44.171080+00:00",
+    "receipt_at": "2026-09-30T23:02:44.721997+00:00",
+    "status": 200,
+    "sha256": "a2702b9e8f7181a04671c193d1dfcf1f3501b3f9ebc3ea2231168a1682946a49"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:02:44.215364+00:00",
+    "receipt_at": "2026-09-30T23:02:44.818103+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:02:43.875266+00:00",
+    "receipt_at": "2026-09-30T23:02:44.926565+00:00",
+    "status": 200,
+    "sha256": "721b7ba47aa04cb900907c9e3120f97d0c0da7f13decafc44e0abf7c788ceb19"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:02:44.735557+00:00",
+    "receipt_at": "2026-09-30T23:02:45.219613+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:02:42.252865+00:00",
+    "receipt_at": "2026-09-30T23:02:52.961473+00:00",
+    "status": 200,
+    "sha256": "9866675faeb8d9645e5590929956fd295464c8128d1099d0d08be2fc1db305e8"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:02:52.961473+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "9866675faeb8d9645e5590929956fd295464c8128d1099d0d08be2fc1db305e8"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:03:42.264872+00:00",
+    "receipt_at": "2026-09-30T23:03:42.368990+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:03:42.265282+00:00",
+    "receipt_at": "2026-09-30T23:03:42.394343+00:00",
+    "status": 200,
+    "sha256": "abb483a97d5f5c8838a086544467adfc821deb6fc6024cf3b13643bbb5855c38"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:03:42.371283+00:00",
+    "receipt_at": "2026-09-30T23:03:42.440209+00:00",
+    "status": 200,
+    "sha256": "b0125d606ea52cb192a1ea0e2182c6f6f128ecdad48ea53c20b9db4007b6499b"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:03:42.262104+00:00",
+    "receipt_at": "2026-09-30T23:03:42.823709+00:00",
+    "status": 200,
+    "sha256": "ee45f1cb23fb3bf9bffa673ecc4cf8bc64c04978b28376b2b6465b3dc1f85aed"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:03:42.823709+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "ee45f1cb23fb3bf9bffa673ecc4cf8bc64c04978b28376b2b6465b3dc1f85aed"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:03:42.397392+00:00",
+    "receipt_at": "2026-09-30T23:03:43.183203+00:00",
+    "status": 200,
+    "sha256": "125a9c6fae73532b61073787d98276f02d19197368ef6561c752986489a561e3"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:03:42.265596+00:00",
+    "receipt_at": "2026-09-30T23:03:43.385263+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:03:42.879752+00:00",
+    "receipt_at": "2026-09-30T23:03:43.551920+00:00",
+    "status": 200,
+    "sha256": "36c33c4fa12f7166c235d4fba34504e19053162bd2ed67a30c5cc64458d6a15e"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:03:42.516556+00:00",
+    "receipt_at": "2026-09-30T23:03:43.825296+00:00",
+    "status": 200,
+    "sha256": "34f4385ba0361023c3723ff31a469b4e8910179acb756d0f592981a815c5f1f8"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:03:43.386972+00:00",
+    "receipt_at": "2026-09-30T23:03:43.902819+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:03:43.267011+00:00",
+    "receipt_at": "2026-09-30T23:03:44.264103+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:03:43.557957+00:00",
+    "receipt_at": "2026-09-30T23:03:46.991356+00:00",
+    "status": 200,
+    "sha256": "fe2a6a557d294546eed6d9f664ed5663464deb2fc3f4fcb7216feb3be08f89d4"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:03:46.991356+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "fe2a6a557d294546eed6d9f664ed5663464deb2fc3f4fcb7216feb3be08f89d4"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:04:42.274946+00:00",
+    "receipt_at": "2026-09-30T23:04:42.384611+00:00",
+    "status": 200,
+    "sha256": "abb483a97d5f5c8838a086544467adfc821deb6fc6024cf3b13643bbb5855c38"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:04:42.274226+00:00",
+    "receipt_at": "2026-09-30T23:04:42.808310+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:04:42.809987+00:00",
+    "receipt_at": "2026-09-30T23:04:42.941787+00:00",
+    "status": 200,
+    "sha256": "b0125d606ea52cb192a1ea0e2182c6f6f128ecdad48ea53c20b9db4007b6499b"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:04:42.386443+00:00",
+    "receipt_at": "2026-09-30T23:04:43.597982+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:04:42.271841+00:00",
+    "receipt_at": "2026-09-30T23:04:43.781026+00:00",
+    "status": 200,
+    "sha256": "d00872cfd91fa21543890ec3158e537091d60c982d7a3721a9e5fdc0adb8e1b2"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:04:43.781026+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "d00872cfd91fa21543890ec3158e537091d60c982d7a3721a9e5fdc0adb8e1b2"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:04:43.599835+00:00",
+    "receipt_at": "2026-09-30T23:04:44.292884+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/NZAA:9:NZ/observations/historical.json",
+    "request_at": "2026-09-30T23:04:44.297325+00:00",
+    "receipt_at": "2026-09-30T23:04:44.374073+00:00",
+    "status": 200,
+    "sha256": "112b8c6c3a0a29495cf7f662fc5e47157b46bec190e69e38a64e5ed56d1550c2"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/ZSJN:9:CN/observations/historical.json",
+    "request_at": "2026-09-30T23:04:44.376728+00:00",
+    "receipt_at": "2026-09-30T23:04:44.386834+00:00",
+    "status": 200,
+    "sha256": "0042ae8afd51aa9951a88192ebeea2b2ec2b00b7573e0e0a607c408ae47c30c1"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/WIHH:9:ID/observations/historical.json",
+    "request_at": "2026-09-30T23:04:44.388828+00:00",
+    "receipt_at": "2026-09-30T23:04:44.398302+00:00",
+    "status": 200,
+    "sha256": "40a32669a28c9b69fb891ef02c033b3dee8a5c841ce81c0279cdb74efdddf0cc"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/DNMM:9:NG/observations/historical.json",
+    "request_at": "2026-09-30T23:04:44.400098+00:00",
+    "receipt_at": "2026-09-30T23:04:44.408034+00:00",
+    "status": 200,
+    "sha256": "24184dad398c41b49346e1a5871b88ffa9474b3f89de3e8adc24d9c2e92f312e"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/RCSS:9:TW/observations/historical.json",
+    "request_at": "2026-09-30T23:04:44.409632+00:00",
+    "receipt_at": "2026-09-30T23:04:44.415783+00:00",
+    "status": 200,
+    "sha256": "76826186237f770190a7af525b0a89a790805f6e8a867628a265cbb9f0923941"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:04:43.018083+00:00",
+    "receipt_at": "2026-09-30T23:04:45.043673+00:00",
+    "status": 200,
+    "sha256": "8afa7ab5878b57d41dfc646fbe98813019de6cbebb19dddb1fda504ba7acb302"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:04:44.417771+00:00",
+    "receipt_at": "2026-09-30T23:04:45.122568+00:00",
+    "status": 200,
+    "sha256": "e62a0afb3c2ad7a17a3e23cbc6f3467dddacebaf8b2fd26cc6c0d5a27cd5e524"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:04:43.807487+00:00",
+    "receipt_at": "2026-09-30T23:04:45.269390+00:00",
+    "status": 200,
+    "sha256": "97263a25380b54c0d7e7f319bc0a7b09f5b594518af1bf6e3f78b1239defecdc"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:04:45.121451+00:00",
+    "receipt_at": "2026-09-30T23:04:45.592169+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:04:45.124690+00:00",
+    "receipt_at": "2026-09-30T23:04:45.769667+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:04:42.274581+00:00",
+    "error": "ReadTimeout"
+  },
+  {
+    "job": "<lambda>",
+    "error": "ReadTimeout",
+    "at": "2026-09-30T23:04:54.483404+00:00"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:05:42.282060+00:00",
+    "receipt_at": "2026-09-30T23:05:42.334418+00:00",
+    "status": 200,
+    "sha256": "1647d2f17a58f55ef0f725e88176bf5a98106c82dcafdb4153d54fb314c4d902"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:05:42.280317+00:00",
+    "receipt_at": "2026-09-30T23:05:42.408605+00:00",
+    "status": 200,
+    "sha256": "abb483a97d5f5c8838a086544467adfc821deb6fc6024cf3b13643bbb5855c38"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:05:42.282517+00:00",
+    "receipt_at": "2026-09-30T23:05:43.015218+00:00",
+    "status": 200,
+    "sha256": "573907674bcc58ef364efc52d5bc869715cfc9cccb76d35853abd4acd4d34313"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:05:42.409544+00:00",
+    "receipt_at": "2026-09-30T23:05:43.106628+00:00",
+    "status": 200,
+    "sha256": "d33035748c9dcf561149475851c91e5802a68aa2cc720b8e2b047086cf6d36d2"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:05:42.281748+00:00",
+    "receipt_at": "2026-09-30T23:05:43.273994+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:05:42.405449+00:00",
+    "receipt_at": "2026-09-30T23:05:43.589099+00:00",
+    "status": 200,
+    "sha256": "6712daba40909bd1f1b8b9cef52bed702afd9ec21f4f6c532b5fb3f866f7aa1e"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:05:43.275891+00:00",
+    "receipt_at": "2026-09-30T23:05:43.631776+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:05:43.096684+00:00",
+    "receipt_at": "2026-09-30T23:05:43.755299+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:05:43.754948+00:00",
+    "receipt_at": "2026-09-30T23:05:43.828606+00:00",
+    "status": 200,
+    "sha256": "fa82808c0e39556e6d1bea8ef837e85dfa7c7be31efcbb36f78905a919e3aa1e"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:05:43.109292+00:00",
+    "receipt_at": "2026-09-30T23:05:44.591839+00:00",
+    "status": 200,
+    "sha256": "d44cc906ec35e57cf2025bc9cb6b85b4f0b877393da06818498adef0559327fa"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:05:44.591839+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "d44cc906ec35e57cf2025bc9cb6b85b4f0b877393da06818498adef0559327fa"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:05:43.698502+00:00",
+    "receipt_at": "2026-09-30T23:05:45.272768+00:00",
+    "status": 200,
+    "sha256": "436c74d9ffdc8974d53d276d5ec7dd6027761bec285006a004247557725d6647"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:05:45.272768+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "436c74d9ffdc8974d53d276d5ec7dd6027761bec285006a004247557725d6647"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:06:42.289090+00:00",
+    "receipt_at": "2026-09-30T23:06:42.374827+00:00",
+    "status": 200,
+    "sha256": "d2a3a6f4ecbdfd53f50e02ea1f765b8eb5481ce4af67794af06e1452405a7862"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:06:42.287224+00:00",
+    "receipt_at": "2026-09-30T23:06:42.434349+00:00",
+    "status": 200,
+    "sha256": "abb483a97d5f5c8838a086544467adfc821deb6fc6024cf3b13643bbb5855c38"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:06:42.289922+00:00",
+    "receipt_at": "2026-09-30T23:06:42.915134+00:00",
+    "status": 200,
+    "sha256": "e63fb68b197dcbae11d4a264681370952cb95283f7e17d553bcecbd0db94c2fa"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:06:42.459113+00:00",
+    "receipt_at": "2026-09-30T23:06:43.302869+00:00",
+    "status": 200,
+    "sha256": "6a50ce1ef25aa4e8da80907bffde570e316f39512cdf9cfce64d3a58f0f5bea5"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:06:42.993161+00:00",
+    "receipt_at": "2026-09-30T23:06:43.492004+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:06:42.450051+00:00",
+    "receipt_at": "2026-09-30T23:06:43.634532+00:00",
+    "status": 200,
+    "sha256": "2a49402729484feca46cbf35191e5eb5beae5288ce938b294e4576d8335f7824"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:06:42.288513+00:00",
+    "receipt_at": "2026-09-30T23:06:43.970659+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:06:43.972437+00:00",
+    "receipt_at": "2026-09-30T23:06:44.391882+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:06:43.308288+00:00",
+    "receipt_at": "2026-09-30T23:06:44.422974+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:06:44.396106+00:00",
+    "receipt_at": "2026-09-30T23:06:44.481161+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:06:43.499032+00:00",
+    "receipt_at": "2026-09-30T23:06:45.048694+00:00",
+    "status": 200,
+    "sha256": "f389a1c57387a1eb57e8550d9efa9470728454f7b8be3c62aaee97a6ec8227a7"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:06:45.048694+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "f389a1c57387a1eb57e8550d9efa9470728454f7b8be3c62aaee97a6ec8227a7"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:06:43.808088+00:00",
+    "receipt_at": "2026-09-30T23:06:48.354512+00:00",
+    "status": 200,
+    "sha256": "fa80c00a466ee12bbc90ec5eb1f9c517affc4c8b2f0ac3112e53042dd314bbff"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:06:48.354512+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "fa80c00a466ee12bbc90ec5eb1f9c517affc4c8b2f0ac3112e53042dd314bbff"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:07:42.301398+00:00",
+    "receipt_at": "2026-09-30T23:07:42.761236+00:00",
+    "status": 200,
+    "sha256": "ccfd540b93e662d8c6777a02ee702e9c033ca59fa06ce59edbcd17bd44b2ecf7"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:07:42.308870+00:00",
+    "receipt_at": "2026-09-30T23:07:43.116264+00:00",
+    "status": 200,
+    "sha256": "3518064f4a909c9e00ae13e790bb4a04aa200d44ef74e23c4707f31ccd46e159"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:07:42.307699+00:00",
+    "receipt_at": "2026-09-30T23:07:43.233356+00:00",
+    "status": 200,
+    "sha256": "9dbb5778fdd8639bcbcd64340f0063419ff7f8c6bb7a7a17129bed5f35a01cd8"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:07:42.305427+00:00",
+    "receipt_at": "2026-09-30T23:07:43.328225+00:00",
+    "status": 200,
+    "sha256": "47b9e2bc634e97a5fb5dfc3a35f849d42f62bf7893750d8d9ec0bfa973cd1d30"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:07:42.852650+00:00",
+    "receipt_at": "2026-09-30T23:07:43.518653+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:07:43.517694+00:00",
+    "receipt_at": "2026-09-30T23:07:43.609471+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:07:43.520759+00:00",
+    "receipt_at": "2026-09-30T23:07:43.613482+00:00",
+    "status": 200,
+    "sha256": "abb483a97d5f5c8838a086544467adfc821deb6fc6024cf3b13643bbb5855c38"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:07:43.610123+00:00",
+    "receipt_at": "2026-09-30T23:07:44.959453+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:07:44.964844+00:00",
+    "receipt_at": "2026-09-30T23:07:45.335077+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:07:43.127087+00:00",
+    "receipt_at": "2026-09-30T23:07:50.971517+00:00",
+    "status": 200,
+    "sha256": "68830d8607054c834aaad56f1b6549f3d95192b29590528868b65329c9859363"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:07:50.971517+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "68830d8607054c834aaad56f1b6549f3d95192b29590528868b65329c9859363"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:07:43.498998+00:00",
+    "error": "ReadTimeout"
+  },
+  {
+    "job": "<lambda>",
+    "error": "ReadTimeout",
+    "at": "2026-09-30T23:07:55.692995+00:00"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:08:42.294753+00:00",
+    "receipt_at": "2026-09-30T23:08:42.362407+00:00",
+    "status": 200,
+    "sha256": "ccfd540b93e662d8c6777a02ee702e9c033ca59fa06ce59edbcd17bd44b2ecf7"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:08:42.440888+00:00",
+    "receipt_at": "2026-09-30T23:08:42.884099+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:08:42.297604+00:00",
+    "receipt_at": "2026-09-30T23:08:42.943490+00:00",
+    "status": 200,
+    "sha256": "7031772c6b664f197a821634846be3b34d97dc0b52daa9ab0c766cc8af485eba"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:08:42.298916+00:00",
+    "receipt_at": "2026-09-30T23:08:43.099126+00:00",
+    "status": 200,
+    "sha256": "6174df6c99edc368d96dabb7811d8174518ea8f19abadec7b246422532e1fe47"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:08:42.298324+00:00",
+    "receipt_at": "2026-09-30T23:08:43.440175+00:00",
+    "status": 200,
+    "sha256": "e1b5910b03860dfb98f3b0f0dd59a65787e580002598e81cf01a1d18932c6957"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:08:42.890647+00:00",
+    "receipt_at": "2026-09-30T23:08:43.944255+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:08:43.945412+00:00",
+    "receipt_at": "2026-09-30T23:08:44.034890+00:00",
+    "status": 200,
+    "sha256": "abb483a97d5f5c8838a086544467adfc821deb6fc6024cf3b13643bbb5855c38"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:08:43.613118+00:00",
+    "receipt_at": "2026-09-30T23:08:44.092445+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:08:44.036416+00:00",
+    "receipt_at": "2026-09-30T23:08:45.149777+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:08:45.155522+00:00",
+    "receipt_at": "2026-09-30T23:08:45.724210+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:08:43.023381+00:00",
+    "receipt_at": "2026-09-30T23:08:46.516582+00:00",
+    "status": 200,
+    "sha256": "0cb1ece14327a157d48e3c401e3e0f7ab6cc84491fe61c45864a65c5f3e32c9e"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:08:46.516582+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "0cb1ece14327a157d48e3c401e3e0f7ab6cc84491fe61c45864a65c5f3e32c9e"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:08:43.101590+00:00",
+    "receipt_at": "2026-09-30T23:08:53.745854+00:00",
+    "status": 200,
+    "sha256": "79e12c9f69122c49a3c087b8d7a3baae20549010c21f3c82c97426d002ad0151"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:08:53.745854+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "79e12c9f69122c49a3c087b8d7a3baae20549010c21f3c82c97426d002ad0151"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/NZAA:9:NZ/observations/historical.json",
+    "request_at": "2026-09-30T23:09:42.301544+00:00",
+    "receipt_at": "2026-09-30T23:09:42.345563+00:00",
+    "status": 200,
+    "sha256": "112b8c6c3a0a29495cf7f662fc5e47157b46bec190e69e38a64e5ed56d1550c2"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/ZSJN:9:CN/observations/historical.json",
+    "request_at": "2026-09-30T23:09:42.349825+00:00",
+    "receipt_at": "2026-09-30T23:09:42.364492+00:00",
+    "status": 200,
+    "sha256": "0042ae8afd51aa9951a88192ebeea2b2ec2b00b7573e0e0a607c408ae47c30c1"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/WIHH:9:ID/observations/historical.json",
+    "request_at": "2026-09-30T23:09:42.366842+00:00",
+    "receipt_at": "2026-09-30T23:09:42.396141+00:00",
+    "status": 200,
+    "sha256": "8e145c8935e7268c51fbf5186174684f435755811df9bf74949df6c075981a13"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/DNMM:9:NG/observations/historical.json",
+    "request_at": "2026-09-30T23:09:42.399515+00:00",
+    "receipt_at": "2026-09-30T23:09:42.407825+00:00",
+    "status": 200,
+    "sha256": "24184dad398c41b49346e1a5871b88ffa9474b3f89de3e8adc24d9c2e92f312e"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/RCSS:9:TW/observations/historical.json",
+    "request_at": "2026-09-30T23:09:42.409260+00:00",
+    "receipt_at": "2026-09-30T23:09:42.418100+00:00",
+    "status": 200,
+    "sha256": "76826186237f770190a7af525b0a89a790805f6e8a867628a265cbb9f0923941"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:09:42.302012+00:00",
+    "receipt_at": "2026-09-30T23:09:42.852514+00:00",
+    "status": 200,
+    "sha256": "10548518dcd78d2a04b63afa088939a50761235c016cf1815bde9540cd608d7f"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:09:42.296768+00:00",
+    "receipt_at": "2026-09-30T23:09:42.919890+00:00",
+    "status": 200,
+    "sha256": "97b359e8e3d989d077088063d6de294915c7b7235c15a3e79b4f97e9f6ae1d24"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:09:42.300803+00:00",
+    "receipt_at": "2026-09-30T23:09:43.304403+00:00",
+    "status": 200,
+    "sha256": "645626afdc4ba82df8138322babe9da27247a75461af28d6f7cfc283147b30e2"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:09:42.422299+00:00",
+    "receipt_at": "2026-09-30T23:09:43.461644+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:09:43.005750+00:00",
+    "receipt_at": "2026-09-30T23:09:43.507970+00:00",
+    "status": 200,
+    "sha256": "a6d277d3d5d3366908a257326439e172bd405ddd8caba5d5bd8479f0a9ed4657"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:09:43.507970+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "a6d277d3d5d3366908a257326439e172bd405ddd8caba5d5bd8479f0a9ed4657"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:09:43.462640+00:00",
+    "receipt_at": "2026-09-30T23:09:43.560505+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:09:43.489231+00:00",
+    "receipt_at": "2026-09-30T23:09:43.580045+00:00",
+    "status": 200,
+    "sha256": "abb483a97d5f5c8838a086544467adfc821deb6fc6024cf3b13643bbb5855c38"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:09:43.561155+00:00",
+    "receipt_at": "2026-09-30T23:09:43.600212+00:00",
+    "status": 200,
+    "sha256": "69acd44733bbdeb696d552b124c91f41b1112263c5db0905a38250c6f450730a"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:09:42.858907+00:00",
+    "receipt_at": "2026-09-30T23:09:44.534761+00:00",
+    "status": 200,
+    "sha256": "880cc843f4a63b54af8771c4e0e739f19e115a754a51964613421346d1c9be98"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:09:44.534761+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "880cc843f4a63b54af8771c4e0e739f19e115a754a51964613421346d1c9be98"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:09:43.511958+00:00",
+    "receipt_at": "2026-09-30T23:09:44.779580+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:09:44.783769+00:00",
+    "receipt_at": "2026-09-30T23:09:45.195504+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:10:42.309499+00:00",
+    "receipt_at": "2026-09-30T23:10:42.833132+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:10:42.309767+00:00",
+    "receipt_at": "2026-09-30T23:10:43.017935+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:10:42.309041+00:00",
+    "receipt_at": "2026-09-30T23:10:43.069077+00:00",
+    "status": 200,
+    "sha256": "eb7f61dd4467be782a41f5c95080b15393fb314ae911741d288e66df87789363"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:10:43.078262+00:00",
+    "receipt_at": "2026-09-30T23:10:43.147477+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:10:43.149432+00:00",
+    "receipt_at": "2026-09-30T23:10:43.244142+00:00",
+    "status": 200,
+    "sha256": "0505d11f75744ff7186df3c5fb050a25ba9e29a61eb4a20e58c8ccaa23001bf1"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:10:43.018958+00:00",
+    "receipt_at": "2026-09-30T23:10:43.530095+00:00",
+    "status": 200,
+    "sha256": "5f41a9e9d417098e4512ae236f9c3320aefce374b3b19e8f707997615b9a3dc1"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:10:43.530095+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "5f41a9e9d417098e4512ae236f9c3320aefce374b3b19e8f707997615b9a3dc1"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:10:43.540398+00:00",
+    "receipt_at": "2026-09-30T23:10:43.684882+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:10:42.306333+00:00",
+    "receipt_at": "2026-09-30T23:10:44.037128+00:00",
+    "status": 200,
+    "sha256": "fe71a57fd4864fa0595087857b9e95214758d411c93ceee54972011a3387f12b"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:10:43.246472+00:00",
+    "receipt_at": "2026-09-30T23:10:44.351841+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:10:43.773435+00:00",
+    "receipt_at": "2026-09-30T23:10:44.372056+00:00",
+    "status": 200,
+    "sha256": "c045882a135c8c8e6c5c9aca7c32b09557d5cc4e6ae399c8478ff637ee99e4cc"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:10:44.353878+00:00",
+    "receipt_at": "2026-09-30T23:10:44.916092+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:10:42.839361+00:00",
+    "receipt_at": "2026-09-30T23:10:50.239795+00:00",
+    "status": 200,
+    "sha256": "df412cf8961bc8ab4ac03fb350827bb7699a1d5c225839d7233d41bcdde852c9"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:10:50.239795+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "df412cf8961bc8ab4ac03fb350827bb7699a1d5c225839d7233d41bcdde852c9"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:11:42.325595+00:00",
+    "receipt_at": "2026-09-30T23:11:42.388706+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:11:42.395567+00:00",
+    "receipt_at": "2026-09-30T23:11:42.482664+00:00",
+    "status": 200,
+    "sha256": "0505d11f75744ff7186df3c5fb050a25ba9e29a61eb4a20e58c8ccaa23001bf1"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:11:42.322321+00:00",
+    "receipt_at": "2026-09-30T23:11:42.713970+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:11:42.716317+00:00",
+    "receipt_at": "2026-09-30T23:11:43.061159+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:11:43.139971+00:00",
+    "receipt_at": "2026-09-30T23:11:43.694098+00:00",
+    "status": 200,
+    "sha256": "b5ccc19ebad85cf8a1ff151e5ea7ef04f005758f37957da2fdc7c1b6276a335b"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:11:42.484906+00:00",
+    "receipt_at": "2026-09-30T23:11:43.836404+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:11:42.325061+00:00",
+    "receipt_at": "2026-09-30T23:11:43.900236+00:00",
+    "status": 200,
+    "sha256": "19bf6b9a583e5b6967648bb8a475bd6639e6c7a514b369deeead6627083f17be"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:11:43.900236+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "19bf6b9a583e5b6967648bb8a475bd6639e6c7a514b369deeead6627083f17be"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:11:43.846366+00:00",
+    "receipt_at": "2026-09-30T23:11:44.204134+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:11:43.783168+00:00",
+    "receipt_at": "2026-09-30T23:11:44.371291+00:00",
+    "status": 200,
+    "sha256": "6ad34a6262c9663e22d2f118ab6fe11c1e73a225429ad762dc876557dd5ebe00"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:11:43.923529+00:00",
+    "receipt_at": "2026-09-30T23:11:44.590537+00:00",
+    "status": 200,
+    "sha256": "5d0d3c09b7bad3833926e9ab3a706089b3b2a899473ab638e824b5816fdde169"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:11:42.325345+00:00",
+    "receipt_at": "2026-09-30T23:11:45.852054+00:00",
+    "status": 200,
+    "sha256": "6e32423dee3851088ffacb77d8574e796318c63d20593013d80280ae9114532b"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:11:45.852054+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "6e32423dee3851088ffacb77d8574e796318c63d20593013d80280ae9114532b"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:12:42.327198+00:00",
+    "receipt_at": "2026-09-30T23:12:42.818589+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:12:42.825627+00:00",
+    "receipt_at": "2026-09-30T23:12:42.909088+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:12:42.329333+00:00",
+    "receipt_at": "2026-09-30T23:12:42.973438+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:12:42.911446+00:00",
+    "receipt_at": "2026-09-30T23:12:43.005545+00:00",
+    "status": 200,
+    "sha256": "0505d11f75744ff7186df3c5fb050a25ba9e29a61eb4a20e58c8ccaa23001bf1"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:12:43.007622+00:00",
+    "receipt_at": "2026-09-30T23:12:43.351737+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:12:42.329882+00:00",
+    "receipt_at": "2026-09-30T23:12:43.885200+00:00",
+    "status": 200,
+    "sha256": "3db9d0f130200009f6ae453eedcd353315cd7004c81b0c93aeb979339930bdc8"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:12:43.885200+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "3db9d0f130200009f6ae453eedcd353315cd7004c81b0c93aeb979339930bdc8"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:12:43.429278+00:00",
+    "receipt_at": "2026-09-30T23:12:44.066820+00:00",
+    "status": 200,
+    "sha256": "52d77c769f68dc12e7bc833c50fbf08d898f3c5b0dfbac1de7a7c7fd02b59083"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:12:42.974351+00:00",
+    "receipt_at": "2026-09-30T23:12:44.244203+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:12:44.246110+00:00",
+    "receipt_at": "2026-09-30T23:12:44.654938+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:12:44.147118+00:00",
+    "receipt_at": "2026-09-30T23:12:44.813910+00:00",
+    "status": 200,
+    "sha256": "e958f085744b7fa70342e3898f675ed67e891af3c2ec2b660b394f5111432adc"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:12:43.917889+00:00",
+    "receipt_at": "2026-09-30T23:12:45.131053+00:00",
+    "status": 200,
+    "sha256": "72e2ffbfeedc76702ee1296d1d680cb7604e8fa697910ad9be3d0f1ac4d637fa"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:12:42.330237+00:00",
+    "error": "ReadTimeout"
+  },
+  {
+    "job": "<lambda>",
+    "error": "ReadTimeout",
+    "at": "2026-09-30T23:12:54.519403+00:00"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:13:42.340185+00:00",
+    "receipt_at": "2026-09-30T23:13:42.407019+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:13:42.341000+00:00",
+    "receipt_at": "2026-09-30T23:13:42.431128+00:00",
+    "status": 200,
+    "sha256": "0505d11f75744ff7186df3c5fb050a25ba9e29a61eb4a20e58c8ccaa23001bf1"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:13:42.409936+00:00",
+    "receipt_at": "2026-09-30T23:13:42.570218+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:13:42.337370+00:00",
+    "receipt_at": "2026-09-30T23:13:42.891597+00:00",
+    "status": 200,
+    "sha256": "30515b131bbe7b7602cae058cc420fbdfce92e1ab118f1db3bc000243403814b"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:13:42.891597+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "30515b131bbe7b7602cae058cc420fbdfce92e1ab118f1db3bc000243403814b"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:13:42.432813+00:00",
+    "receipt_at": "2026-09-30T23:13:42.984735+00:00",
+    "status": 200,
+    "sha256": "4159a821452496600ddf25cb8cceea9f56ed2f572632e8548a2774e1538fb2a5"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:13:42.901704+00:00",
+    "receipt_at": "2026-09-30T23:13:43.590189+00:00",
+    "status": 200,
+    "sha256": "f2a1b706d1c4189afe23c7d7882dffb0174b048481d8e3ac9d805ac671401654"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:13:42.341641+00:00",
+    "receipt_at": "2026-09-30T23:13:43.759860+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:13:42.646913+00:00",
+    "receipt_at": "2026-09-30T23:13:43.854668+00:00",
+    "status": 200,
+    "sha256": "c0c5aef14a375d06938ea7e2ff1fed09a2a0db8f0002e4ee35e1afcbd84c6dc6"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:13:43.066312+00:00",
+    "receipt_at": "2026-09-30T23:13:44.058442+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:13:43.765521+00:00",
+    "receipt_at": "2026-09-30T23:13:44.126011+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:13:43.598581+00:00",
+    "receipt_at": "2026-09-30T23:13:47.851864+00:00",
+    "status": 200,
+    "sha256": "acb0fed45358fbe57fcdb65a2bb5c35253a26dfbcf1a7100e1487b4ba6d067e6"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:13:47.851864+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "acb0fed45358fbe57fcdb65a2bb5c35253a26dfbcf1a7100e1487b4ba6d067e6"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:14:42.352242+00:00",
+    "receipt_at": "2026-09-30T23:14:42.743862+00:00",
+    "status": 200,
+    "sha256": "dabbfd8abe7c5cfc482c74ec1f6f9de6baa93aa3fbf17f006c7b036d478c4f83"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:14:42.745244+00:00",
+    "receipt_at": "2026-09-30T23:14:42.809355+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:14:42.349735+00:00",
+    "receipt_at": "2026-09-30T23:14:42.862531+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:14:42.813026+00:00",
+    "receipt_at": "2026-09-30T23:14:42.903506+00:00",
+    "status": 200,
+    "sha256": "0505d11f75744ff7186df3c5fb050a25ba9e29a61eb4a20e58c8ccaa23001bf1"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:14:42.905528+00:00",
+    "receipt_at": "2026-09-30T23:14:42.984319+00:00",
+    "status": 200,
+    "sha256": "16e9d15bdbd839cb1abe86233da6684d4069aac4db1f4f774dc3d2de0b93850a"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:14:42.352965+00:00",
+    "receipt_at": "2026-09-30T23:14:43.062732+00:00",
+    "status": 200,
+    "sha256": "c8f97d2ea58861a780bec071d2ba065f3ae9defc67edfc7d9b95caf9b1780b4f"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:14:43.062732+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "c8f97d2ea58861a780bec071d2ba065f3ae9defc67edfc7d9b95caf9b1780b4f"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:14:42.352682+00:00",
+    "receipt_at": "2026-09-30T23:14:43.969155+00:00",
+    "status": 200,
+    "sha256": "374701e71ec0595c90fee2059e12c9340a461bd57e66735dfe9cbc800b618a1c"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:14:43.969155+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "374701e71ec0595c90fee2059e12c9340a461bd57e66735dfe9cbc800b618a1c"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/NZAA:9:NZ/observations/historical.json",
+    "request_at": "2026-09-30T23:14:43.999377+00:00",
+    "receipt_at": "2026-09-30T23:14:44.029722+00:00",
+    "status": 200,
+    "sha256": "112b8c6c3a0a29495cf7f662fc5e47157b46bec190e69e38a64e5ed56d1550c2"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/ZSJN:9:CN/observations/historical.json",
+    "request_at": "2026-09-30T23:14:44.031044+00:00",
+    "receipt_at": "2026-09-30T23:14:44.039558+00:00",
+    "status": 200,
+    "sha256": "0042ae8afd51aa9951a88192ebeea2b2ec2b00b7573e0e0a607c408ae47c30c1"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/WIHH:9:ID/observations/historical.json",
+    "request_at": "2026-09-30T23:14:44.040544+00:00",
+    "receipt_at": "2026-09-30T23:14:44.047885+00:00",
+    "status": 200,
+    "sha256": "8e145c8935e7268c51fbf5186174684f435755811df9bf74949df6c075981a13"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/DNMM:9:NG/observations/historical.json",
+    "request_at": "2026-09-30T23:14:44.049050+00:00",
+    "receipt_at": "2026-09-30T23:14:44.055596+00:00",
+    "status": 200,
+    "sha256": "24184dad398c41b49346e1a5871b88ffa9474b3f89de3e8adc24d9c2e92f312e"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.weather.com/v1/location/RCSS:9:TW/observations/historical.json",
+    "request_at": "2026-09-30T23:14:44.056234+00:00",
+    "receipt_at": "2026-09-30T23:14:44.061834+00:00",
+    "status": 200,
+    "sha256": "76826186237f770190a7af525b0a89a790805f6e8a867628a265cbb9f0923941"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:14:42.872193+00:00",
+    "receipt_at": "2026-09-30T23:14:44.162612+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:14:44.062652+00:00",
+    "receipt_at": "2026-09-30T23:14:44.730611+00:00",
+    "status": 200,
+    "sha256": "fce5065dc247d26d805136c41a09fc2db850bb23d1f8cda256348f30c14f05f7"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:14:44.168124+00:00",
+    "receipt_at": "2026-09-30T23:14:44.739351+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:14:43.067190+00:00",
+    "receipt_at": "2026-09-30T23:14:45.286290+00:00",
+    "status": 200,
+    "sha256": "8f9ff803c88e74b4e9245a316aea8407c1eea0cb15b7c38892890170dc6f9ff2"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:14:43.061860+00:00",
+    "error": "ReadTimeout"
+  },
+  {
+    "job": "<lambda>",
+    "error": "ReadTimeout",
+    "at": "2026-09-30T23:14:55.209990+00:00"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:15:42.364558+00:00",
+    "receipt_at": "2026-09-30T23:15:42.467245+00:00",
+    "status": 200,
+    "sha256": "0505d11f75744ff7186df3c5fb050a25ba9e29a61eb4a20e58c8ccaa23001bf1"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:15:42.368980+00:00",
+    "receipt_at": "2026-09-30T23:15:42.749897+00:00",
+    "status": 200,
+    "sha256": "382c76c2b142fbe48bbe484d63ad4e7ce6ae428cbb7d106879108e2429735a1a"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:15:42.827509+00:00",
+    "receipt_at": "2026-09-30T23:15:43.501915+00:00",
+    "status": 200,
+    "sha256": "8c117d78a46f73f900929d91c8ad9667d592b3576c360d9960e898121742bd12"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:15:42.368648+00:00",
+    "receipt_at": "2026-09-30T23:15:43.842079+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:15:43.510679+00:00",
+    "receipt_at": "2026-09-30T23:15:44.163467+00:00",
+    "status": 200,
+    "sha256": "6d911e7967072f9e39d7da8b21215caa6677a2eebd4d43ec8b710eea065763e5"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:15:43.849834+00:00",
+    "receipt_at": "2026-09-30T23:15:44.452576+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:15:42.369414+00:00",
+    "receipt_at": "2026-09-30T23:15:44.602734+00:00",
+    "status": 200,
+    "sha256": "efd463dc8c89863b49b1b8c39706d08dd81989bd08b19b494d7624f1a1cde4f8"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:15:44.686256+00:00",
+    "receipt_at": "2026-09-30T23:15:44.758860+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:15:44.457835+00:00",
+    "receipt_at": "2026-09-30T23:15:45.009122+00:00",
+    "status": 200,
+    "sha256": "7e056510fcbd1fed863f8a9eb0bd3d71b4c991869fa02c822d15fc7dbf9f9e09"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:15:45.009122+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "7e056510fcbd1fed863f8a9eb0bd3d71b4c991869fa02c822d15fc7dbf9f9e09"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:15:44.164413+00:00",
+    "receipt_at": "2026-09-30T23:15:45.711269+00:00",
+    "status": 200,
+    "sha256": "b761f78a109ccd3d0a1756f7af25f65add79d2ec60228597ef59b9a40583d1a1"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:15:45.711269+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "b761f78a109ccd3d0a1756f7af25f65add79d2ec60228597ef59b9a40583d1a1"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:15:42.470225+00:00",
+    "receipt_at": "2026-09-30T23:15:47.324042+00:00",
+    "status": 200,
+    "sha256": "3b3ee934de22353933aa7f0d9b725d5df2bd7fcf8c4edf55721072fc49aad361"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:16:42.367024+00:00",
+    "receipt_at": "2026-09-30T23:16:42.470051+00:00",
+    "status": 200,
+    "sha256": "0505d11f75744ff7186df3c5fb050a25ba9e29a61eb4a20e58c8ccaa23001bf1"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:16:42.368121+00:00",
+    "receipt_at": "2026-09-30T23:16:42.520400+00:00",
+    "status": 200,
+    "sha256": "382c76c2b142fbe48bbe484d63ad4e7ce6ae428cbb7d106879108e2429735a1a"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:16:42.366280+00:00",
+    "receipt_at": "2026-09-30T23:16:42.614623+00:00",
+    "status": 200,
+    "sha256": "3e500f07bf9d2d0278cd8213416654dad3512ab15ca845a5d757f4a2649bff8e"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:16:42.615483+00:00",
+    "receipt_at": "2026-09-30T23:16:43.285826+00:00",
+    "status": 200,
+    "sha256": "b8bc5c29be8c03d6e51cfd5615a1c048374e1d5910848acb8c3dc551c369b7a7"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:16:42.367590+00:00",
+    "receipt_at": "2026-09-30T23:16:43.356951+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:16:42.471847+00:00",
+    "receipt_at": "2026-09-30T23:16:43.358009+00:00",
+    "status": 200,
+    "sha256": "02bd6b3765ccb15f93030fdad2e529ca17e7ab06ac11ffd3500548d807805fc5"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:16:43.361604+00:00",
+    "receipt_at": "2026-09-30T23:16:43.731358+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:16:43.294661+00:00",
+    "receipt_at": "2026-09-30T23:16:43.794803+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:16:43.437352+00:00",
+    "receipt_at": "2026-09-30T23:16:44.066720+00:00",
+    "status": 200,
+    "sha256": "6d911e7967072f9e39d7da8b21215caa6677a2eebd4d43ec8b710eea065763e5"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:16:43.803051+00:00",
+    "receipt_at": "2026-09-30T23:16:44.358085+00:00",
+    "status": 200,
+    "sha256": "f1411c6ff3fba78a27712570fa401a259a03fbbddb913306e620c03a2fd219a9"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:16:44.358085+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "f1411c6ff3fba78a27712570fa401a259a03fbbddb913306e620c03a2fd219a9"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:16:42.597378+00:00",
+    "receipt_at": "2026-09-30T23:16:44.627856+00:00",
+    "status": 200,
+    "sha256": "ae7816a84eb6a315921fe1daf5b977e247a7c3bb3517160468e842b35ca96098"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:16:43.735424+00:00",
+    "receipt_at": "2026-09-30T23:16:47.985318+00:00",
+    "status": 200,
+    "sha256": "72f351c00690bdf14dee22be47a6afd29742ac3ba94124e41b393c3cb58e8b83"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:16:47.985318+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "72f351c00690bdf14dee22be47a6afd29742ac3ba94124e41b393c3cb58e8b83"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:17:42.371022+00:00",
+    "receipt_at": "2026-09-30T23:17:43.077396+00:00",
+    "status": 200,
+    "sha256": "46850b1e3c4146956e295a84bf5163ac8aa77270a6f97854955c9a5d03a08329"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:17:42.371925+00:00",
+    "receipt_at": "2026-09-30T23:17:43.165805+00:00",
+    "status": 200,
+    "sha256": "bdc379ed58749a22f62a84d86e3cd0c61925413d9e632d902eab9330775d6189"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:17:42.369752+00:00",
+    "receipt_at": "2026-09-30T23:17:43.206871+00:00",
+    "status": 200,
+    "sha256": "7f0c2a9fbdc9ff58ec13fbbe715f02ca00686ce779dee8be04db65a7fabd32e7"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:17:43.160325+00:00",
+    "receipt_at": "2026-09-30T23:17:43.875133+00:00",
+    "status": 200,
+    "sha256": "6d911e7967072f9e39d7da8b21215caa6677a2eebd4d43ec8b710eea065763e5"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:17:43.876179+00:00",
+    "receipt_at": "2026-09-30T23:17:43.958692+00:00",
+    "status": 200,
+    "sha256": "c17d1ca7da82f45380e64d3504be005ed11f918fdaed144e374f207a59d007ee"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:17:43.960437+00:00",
+    "receipt_at": "2026-09-30T23:17:44.126480+00:00",
+    "status": 200,
+    "sha256": "55b4b7a621e26938597d9f017573612a9ff2bf1bde7f441ae8e1aeaac934dfa3"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:17:42.371450+00:00",
+    "receipt_at": "2026-09-30T23:17:44.174076+00:00",
+    "status": 200,
+    "sha256": "744a90cc6d406fb33e9763f040cb4b5d538c17a5113888e483ac5e2938635e88"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:17:43.168077+00:00",
+    "receipt_at": "2026-09-30T23:17:44.813863+00:00",
+    "status": 200,
+    "sha256": "e2ab5a5028adf842a9600983f38bd4e562bca9a2eb840f428749615a2d37d566"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:17:44.813863+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "e2ab5a5028adf842a9600983f38bd4e562bca9a2eb840f428749615a2d37d566"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:17:43.275790+00:00",
+    "receipt_at": "2026-09-30T23:17:45.004269+00:00",
+    "status": 200,
+    "sha256": "8fc22173b900f460a01a63885da617c7259128b181b3d9b7c05c6b51b56e4664"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:17:45.004269+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "8fc22173b900f460a01a63885da617c7259128b181b3d9b7c05c6b51b56e4664"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:17:44.127926+00:00",
+    "receipt_at": "2026-09-30T23:17:45.452830+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:17:45.458281+00:00",
+    "receipt_at": "2026-09-30T23:17:45.984753+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "awc",
+    "url": "https://aviationweather.gov/api/data/metar",
+    "request_at": "2026-09-30T23:18:42.376997+00:00",
+    "receipt_at": "2026-09-30T23:18:42.476462+00:00",
+    "status": 200,
+    "sha256": "7f0c2a9fbdc9ff58ec13fbbe715f02ca00686ce779dee8be04db65a7fabd32e7"
+  },
+  {
+    "channel": "fmi_wfs",
+    "url": "https://opendata.fmi.fi/wfs",
+    "request_at": "2026-09-30T23:18:42.552122+00:00",
+    "receipt_at": "2026-09-30T23:18:43.222331+00:00",
+    "status": 200,
+    "sha256": "cfef153bc425a785326a9a0ad57dc6785dc7c17a707394cc89d3b834c8a9f55a"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:18:42.378358+00:00",
+    "receipt_at": "2026-09-30T23:18:43.237400+00:00",
+    "status": 200,
+    "sha256": "ecb0ab41ab6720ab0e0c6ae53aeb56e79facf57e42db341faea7893bc8ed5cf7"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:18:42.375129+00:00",
+    "receipt_at": "2026-09-30T23:18:43.402816+00:00",
+    "status": 200,
+    "sha256": "bac508a02a7748f50d50a6fda8061d64cb6628b9db27012c9dc5274c208fa0df"
+  },
+  {
+    "channel": "resolver",
+    "url": "https://api.synopticdata.com/v2/stations/timeseries",
+    "request_at": "2026-09-30T23:18:42.377759+00:00",
+    "receipt_at": "2026-09-30T23:18:43.405169+00:00",
+    "status": 200,
+    "sha256": "5cf8e5fa6611692c7a967fac197ab28f335badbf5b5d7c123fee71f2b7f32404"
+  },
+  {
+    "channel": "dwd_cdc",
+    "url": "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/air_temperature/now/10minutenwerte_TU_01262_now.zip",
+    "request_at": "2026-09-30T23:18:43.234093+00:00",
+    "receipt_at": "2026-09-30T23:18:43.703419+00:00",
+    "status": 200,
+    "sha256": "4f8880959c2186c3725b2a0d58d616539c8987ccda05b2c2cf2333a28cce7978"
+  },
+  {
+    "channel": "kma_amo_raw_metar",
+    "url": "https://global.amo.go.kr/observation/PkObsMetarList.do",
+    "request_at": "2026-09-30T23:18:43.404322+00:00",
+    "receipt_at": "2026-09-30T23:18:43.760286+00:00",
+    "status": 200,
+    "sha256": "a98d67be123f24aec9d53266331f3b4cfefffce5edb933eb0a313ec04108ad29"
+  },
+  {
+    "channel": "jma_amedas",
+    "url": "https://www.jma.go.jp/bosai/amedas/data/point/44166/20261001_06.json",
+    "request_at": "2026-09-30T23:18:43.765253+00:00",
+    "receipt_at": "2026-09-30T23:18:43.907191+00:00",
+    "status": 200,
+    "sha256": "c17d1ca7da82f45380e64d3504be005ed11f918fdaed144e374f207a59d007ee"
+  },
+  {
+    "channel": "eccc_swob",
+    "url": "https://dd.weather.gc.ca/today/observations/swob-ml/latest/CYYZ-MAN-swob.xml",
+    "request_at": "2026-09-30T23:18:43.908789+00:00",
+    "receipt_at": "2026-09-30T23:18:43.999818+00:00",
+    "status": 200,
+    "sha256": "55b4b7a621e26938597d9f017573612a9ff2bf1bde7f441ae8e1aeaac934dfa3"
+  },
+  {
+    "channel": "aac_metar",
+    "url": "https://www.aeronautica.gob.pa/met/met.php",
+    "request_at": "2026-09-30T23:18:43.714880+00:00",
+    "receipt_at": "2026-09-30T23:18:44.244781+00:00",
+    "status": 200,
+    "sha256": "1f16ff7239741ab82580a1b8ff9511b218d192338d13905ff88fdb422da514c0"
+  },
+  {
+    "channel": "aac_metar",
+    "station": "MPMG",
+    "receipt_at": "2026-09-30T23:18:44.244781+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "1f16ff7239741ab82580a1b8ff9511b218d192338d13905ff88fdb422da514c0"
+  },
+  {
+    "channel": "imgw_synop",
+    "url": "https://danepubliczne.imgw.pl/api/data/synop/id/12375",
+    "request_at": "2026-09-30T23:18:43.402569+00:00",
+    "receipt_at": "2026-09-30T23:18:44.384471+00:00",
+    "status": 200,
+    "sha256": "6d911e7967072f9e39d7da8b21215caa6677a2eebd4d43ec8b710eea065763e5"
+  },
+  {
+    "channel": "pagasa_metar",
+    "url": "https://www.pagasa.dost.gov.ph/aviation/metar",
+    "request_at": "2026-09-30T23:18:43.476075+00:00",
+    "receipt_at": "2026-09-30T23:18:45.080613+00:00",
+    "status": 200,
+    "sha256": "598dee2dba2021822c4340a4663ec309fdc4dff0ca1f0d05879e2468d8348f3f"
+  },
+  {
+    "channel": "pagasa_metar",
+    "station": "RPLL",
+    "receipt_at": "2026-09-30T23:18:45.080613+00:00",
+    "status": "NO_PARSED_STATION_OBSERVATIONS",
+    "sha256": "598dee2dba2021822c4340a4663ec309fdc4dff0ca1f0d05879e2468d8348f3f"
+  }
+]
