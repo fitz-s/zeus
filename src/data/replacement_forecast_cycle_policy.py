@@ -303,14 +303,13 @@ def _current_evidence_shape_has_probability_authority(
             model not in geometry["providers"] and model != "ecmwf_ifs" for model in used
         ):
             return False
-        from src.data.replacement_current_value_serving import _is_station_model
+        from src.data.replacement_current_value_serving import _is_station_model, frozen_ifs9_response_has_authority
         from src.data.openmeteo_model_surface import validate_model_surface_witness, model_surface_stable_projection
         for model, physical_geometry in geometry["providers"].items():
             if model == "__anchor_ifs9__" or _is_station_model(str(model)):
                 continue
             if model == "ecmwf_ifs":
-                proof = physical_geometry.get("source_cell_geometry_proof")
-                if not isinstance(proof, Mapping) or proof.get("revision") != "openmeteo_ifs9_o1280_source_cell_v1" or proof.get("cell_is_sea") is not False:
+                if not frozen_ifs9_response_has_authority(serving[model]["physical_response"], physical_geometry, decision_at=materialized_at):
                     return False
                 continue
             physical = serving[model]["physical_response"]

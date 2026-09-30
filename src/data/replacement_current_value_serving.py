@@ -630,6 +630,7 @@ def _resolve_http_capture_receipt(row: Mapping[str, object]) -> dict[str, object
             "metadata": json.dumps({"physical_response": proof}),
             "capture_receipt_artifact_id": artifact["artifact_id"], "capture_receipt_sha256": artifact["sha256"]}
         result = {**row, "physical_artifact": normalized, "revalidated_physical_capture": True,
+            "frozen_http_capture_receipt":artifact,
             "recorded_body_artifact_id": row.get("artifact_id"), "recorded_raw_sha256": row.get("raw_sha256")}
         if row.get("artifact_id") is not None or row.get("elevation_param") == "default_90m_dem":
             result.update(artifact_id=body["artifact_id"], raw_sha256=body["sha256"])
@@ -1017,6 +1018,10 @@ def physical_source_proof_dependency(proof: object) -> Mapping[str, object] | No
     if isinstance(surface, Mapping) and isinstance(surface.get("asset_audit"), Mapping):
         result["model_surface_asset"] = {key: surface["asset_audit"].get(key) for key in
             ("whole_sha256", "manifest_sha256", "etag", "last_modified", "s3_version_id")}
+    if isinstance(surface, Mapping) and isinstance(surface.get("geometry"), Mapping):
+        audit = surface["geometry"].get("static_asset_audit")
+        if isinstance(audit, Mapping):
+            result["ifs9_static_asset"] = {key:audit.get(key) for key in ("whole_sha256","manifest_sha256")}
     return result
 
 
@@ -1028,11 +1033,16 @@ def _current_model_surface_witness(row: Mapping[str, object], geometry: Mapping[
         proof = geometry.get("source_cell_geometry_proof")
         if not isinstance(proof, Mapping) or proof.get("revision") != "openmeteo_ifs9_o1280_source_cell_v1" or proof.get("cell_is_sea") is not False:
             return None
-        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import validate_source_cell_geometry_proof
         try:
-            actual = source_cell_geometry_proof(latitude=float(geometry["selected_latitude"]),
-                longitude=float(geometry["selected_longitude"]), target_elevation_m=float(geometry["target_dem_elevation_m"]))
-            return {"revision": "openmeteo_ifs9_o1280_source_cell_v1", "status": "VERIFIED", "geometry": actual} if actual == proof else None
+            if row.get("physical_proof_cutoff") is None or validate_source_cell_geometry_proof(proof,
+                latitude=float(geometry["selected_latitude"]), longitude=float(geometry["selected_longitude"]),
+                target_elevation_m=float(geometry["target_dem_elevation_m"]),
+                requested_latitude=float(row["latitude_requested"]),requested_longitude=float(row["longitude_requested"]),
+                decision_at=row["physical_proof_cutoff"]) is not None:
+                return None
+            return {"revision": "openmeteo_ifs9_o1280_source_cell_v1", "status": "VERIFIED",
+                "geometry":{**proof,"native_surface":"LAND","native_grid_elevation_m":proof["raw_grid_elevation_m"]}}
         except (OSError, ValueError, TypeError):
             return None
     cutoff = row.get("physical_proof_cutoff")
@@ -1100,7 +1110,68 @@ def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, obj
         "native_grid_elevation_m": None, "native_surface": "UNKNOWN",
         "representativeness_status": "UNPROVEN", **metadata["locations"][index],
         "model_surface_witness": surface,
+        **({"frozen_product_identity":{key:row[key] for key in _PRODUCT_IDENTITY_COLUMNS},
+            "frozen_entity_body":dict(row.get("frozen_http_capture_receipt") or artifact)} if row["model"]=="ecmwf_ifs" else {}),
         **{key: surface_geometry[key] for key in ("native_surface", "native_grid_elevation_m") if key in surface_geometry}}
+
+
+def provider_geometry_projection(proof: Mapping[str, object]) -> dict[str, object]:
+    """Local physical facts only; immutable entity/event hashes remain audit dependencies."""
+    keys = (
+        "revision", "model", "product_id", "requested_latitude", "requested_longitude",
+        "timezone", "cell_selection", "elevation_param", "downscaling_policy",
+        "native_variable", "temperature_unit", "aggregation", "selected_latitude",
+        "selected_longitude", "target_dem_elevation_m", "native_grid_elevation_m",
+        "native_surface", "representativeness_status", "source_cell_geometry_proof",
+        "city", "station_id", "quantity", "selection",
+    )
+    stable = {key: proof[key] for key in keys if key in proof}
+    if isinstance(stable.get("source_cell_geometry_proof"), Mapping):
+        stable["source_cell_geometry_proof"] = {key: value for key, value in stable["source_cell_geometry_proof"].items()
+            if key not in ("static_hsurf_sha256", "static_asset_audit")}
+    stable["product_id"] = str(stable.get("product_id", "")).split("::run=")[0]
+    witness = proof.get("model_surface_witness")
+    if isinstance(witness, Mapping) and isinstance(witness.get("geometry"), Mapping):
+        stable["model_surface_geometry"] = {key: value for key, value in witness["geometry"].items()
+            if key not in ("static_hsurf_sha256", "static_asset_audit")}
+    if isinstance(stable.get("selection"), Mapping):
+        stable["selection"] = {key: value for key, value in stable["selection"].items() if key != "forecast_date"}
+    return stable
+
+
+def frozen_ifs9_response_has_authority(physical: Mapping[str,object], geometry: Mapping[str,object], *, decision_at: object) -> bool:
+    """The used IFS instrument must replay its own request/body/cell, not its anchor's cell."""
+    try:
+        row = {**physical["frozen_product_identity"], "physical_artifact":physical["frozen_entity_body"],
+               "physical_proof_cutoff":str(decision_at)}
+        if row["model"]!="ecmwf_ifs" or physical["model"]!="ecmwf_ifs" or row["raw_model_forecast_id"]!=physical["raw_model_forecast_id"]:
+            return False
+        if geometry != provider_geometry_projection(physical):
+            return False
+        resolved = _revalidated_legacy_product_row(row)
+        if resolved is None:
+            return False
+        metadata = json.loads(str(resolved["physical_artifact"]["metadata"]))["physical_response"]
+        params = metadata["request_params"]
+        matches = [i for i,(lat,lon,tz) in enumerate(zip(str(params["latitude"]).split(","),
+            str(params["longitude"]).split(","),str(params["timezone"]).split(","),strict=True))
+            if float(lat)==float(row["latitude_requested"]) and float(lon)==float(row["longitude_requested"]) and tz==row["timezone_requested"]]
+        if len(matches)!=1:
+            return False
+        location = metadata["locations"][matches[0]]
+        proof = physical["source_cell_geometry_proof"]
+        if proof!=location["source_cell_geometry_proof"]:
+            return False
+        stable = {key:value for key,value in proof.items() if key not in ("static_hsurf_sha256","static_asset_audit")}
+        if geometry["source_cell_geometry_proof"]!=stable:
+            return False
+        if any(geometry[key]!=location[key] for key in ("selected_latitude","selected_longitude","target_dem_elevation_m")):
+            return False
+        if physical != _physical_response_provenance(row):
+            return False
+        return _source_clock_product_has_authority(json.dumps(row),lead_days=int(row["lead_days"]))
+    except (KeyError,IndexError,TypeError,ValueError,OSError):
+        return False
 
 
 def _served_source_clock_row(

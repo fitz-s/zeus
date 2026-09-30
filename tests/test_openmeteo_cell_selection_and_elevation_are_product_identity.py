@@ -232,6 +232,152 @@ def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, m
     return int(row["artifact_id"])
 
 
+def _normal_ifs9_owned_product(tmp_path, monkeypatch, metric):
+    """Ordinary body/raw writer with actual full O1280 decoding, not a proof stub."""
+    from tests.test_openmeteo_ecmwf_ifs9_bucket_transport import _actual_o1280_static_fixture
+    from src.config import runtime_cities_by_name
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+
+    transport, path, data, write, clock, _ = _actual_o1280_static_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(transport, "HSURF_LOCAL_CACHE", str(path))
+    monkeypatch.setattr("src.config.state_path", lambda filename: tmp_path / "state" / filename)
+    city = runtime_cities_by_name()["Hong Kong"]
+    points, _, center = transport.om_get_surrounding_gridpoints(float(city.lat), float(city.lon))
+    selected = transport.om_get_coordinates(points[center])
+    run = datetime(2026, 9, 30, tzinfo=UTC)
+    target = dl.BayesPrecisionFusionDownloadTarget(city="Hong Kong", metric=metric,
+        target_date="2026-10-01", lead_days=1, latitude=float(city.lat), longitude=float(city.lon),
+        timezone_name=str(city.timezone))
+    params = {"latitude": target.latitude, "longitude": target.longitude, "timezone": target.timezone_name,
+        "models": "ecmwf_ifs", "hourly": "temperature_2m", "temperature_unit": "celsius",
+        "cell_selection": "land", "run": run.replace(tzinfo=None).isoformat()}
+    day = datetime(2026, 10, 1)
+    payload = {"latitude": selected.grid_latitude, "longitude": selected.grid_longitude_east, "elevation": 32.,
+        "timezone": target.timezone_name, "utc_offset_seconds": 28800,
+        "hourly_units": {"temperature_2m": "°C"},
+        "hourly": {"time": [(day + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
+                   "temperature_2m": [20.] * 24}}
+    db = _forecast_db(tmp_path)
+    conn = sqlite3.connect(db)
+    def persist(expected_written):
+        _download_time(monkeypatch, dl, clock[0])
+        body = (json.dumps(payload, indent=2) + "\n").encode()
+        bound = dl._bind_physical_response(json.loads(body), model="ecmwf_ifs", url=SINGLE_RUNS_FORECAST_URL,
+            params=params, run=run, captures=[(body, clock[0].timestamp())],
+            network_captures=[(body, clock[0].timestamp(), {"content-type": "application/json"})])
+        row = dict(model="ecmwf_ifs", city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time=run.isoformat(), source_available_at=clock[0].isoformat(), captured_at=clock[0].isoformat(),
+            lead_days=1, forecast_value_c=20., endpoint="single_runs",
+            _physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY],
+            **dl._bayes_precision_fusion_product_identity("ecmwf_ifs", "single_runs", target))
+        assert dl._persist_rows(conn, [row]) == expected_written
+        conn.commit()
+        return read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time_iso=run.isoformat(), decision_time_iso=(clock[0] + timedelta(minutes=1)).isoformat())["ecmwf_ifs"]
+    served = persist(1)
+    return conn, served, persist, data, write, clock
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("damage", ("two_fields", "missing_index", "index", "native_height", "effective_height",
+    "sea", "request", "selected", "model", "body_hash", "static_bytes", "old_cut",
+    "surface_projection", "surface_witness", "geometry_request", "unit"))
+def test_used_ifs9_frozen_response_replays_its_own_complete_request_body_and_cell(tmp_path, monkeypatch, metric, damage):
+    from copy import deepcopy
+    from dataclasses import dataclass
+    from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
+    from src.data.replacement_current_value_serving import frozen_ifs9_response_has_authority, provider_geometry_projection
+    @dataclass(frozen=True)
+    class Shape:
+        shape_hash: str = "current-shape"
+        provider_geometry_evidence: object = None
+        provider_geometry_identity_hash: object = None
+        provider_geometry_audit: object = None
+
+    conn, served, _, _, _, clock = _normal_ifs9_owned_product(tmp_path, monkeypatch, metric)
+    cut = (clock[0] + timedelta(minutes=1)).isoformat()
+    physical = deepcopy(served.physical_response)
+    bound = _bind_provider_geometry_identity(Shape(), {"ecmwf_ifs": served}, decision_at=cut)
+    geometry = deepcopy(bound.provider_geometry_evidence["providers"]["ecmwf_ifs"])
+    assert frozen_ifs9_response_has_authority(physical, geometry, decision_at=cut)
+    proof = physical["source_cell_geometry_proof"]
+    if damage == "two_fields":
+        physical["source_cell_geometry_proof"] = {"revision": proof["revision"], "cell_is_sea": False}
+        geometry["source_cell_geometry_proof"] = deepcopy(physical["source_cell_geometry_proof"])
+    elif damage == "missing_index":
+        del proof["selected_flat_index"]
+    elif damage == "index":
+        proof["selected_flat_index"] += 1
+    elif damage == "native_height":
+        proof["raw_grid_elevation_m"] += 1
+    elif damage == "effective_height":
+        proof["effective_grid_elevation_m"] += 1
+    elif damage == "sea":
+        proof["cell_is_sea"] = True
+    elif damage == "request":
+        physical["frozen_product_identity"]["latitude_requested"] = 0.
+    elif damage == "selected":
+        geometry["selected_latitude"] += .01
+    elif damage == "model":
+        physical["frozen_product_identity"]["model_name"] = "ecmwf_ifs025"
+    elif damage == "body_hash":
+        physical["frozen_entity_body"]["body_artifact"]["sha256"] = "0" * 64
+    elif damage == "static_bytes":
+        Path(proof["static_asset_audit"]["asset_path"]).unlink()
+    elif damage == "surface_projection":
+        geometry["model_surface_geometry"]["native_grid_elevation_m"] += 1
+    elif damage == "surface_witness":
+        physical["model_surface_witness"]["geometry"]["native_grid_elevation_m"] += 1
+        geometry = provider_geometry_projection(physical)
+    elif damage == "geometry_request":
+        geometry["requested_latitude"] = 0.
+    elif damage == "unit":
+        physical["temperature_unit"] = "fahrenheit"
+        geometry = provider_geometry_projection(physical)
+    else:
+        cut = (clock[0] - timedelta(microseconds=1)).isoformat()
+    assert not frozen_ifs9_response_has_authority(physical, geometry, decision_at=cut)
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_ifs9_static_whole_body_is_audit_dependency_not_local_geometry(tmp_path, monkeypatch, metric):
+    from dataclasses import dataclass
+    from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
+    from src.data.replacement_current_value_serving import physical_source_proof_dependency, frozen_ifs9_response_has_authority
+    @dataclass(frozen=True)
+    class Shape:
+        shape_hash: str = "current-shape"
+        provider_geometry_evidence: object = None
+        provider_geometry_identity_hash: object = None
+        provider_geometry_audit: object = None
+    conn, a, persist, data, write, clock = _normal_ifs9_owned_product(tmp_path, monkeypatch, metric)
+    raw = conn.execute("SELECT * FROM raw_model_forecasts").fetchall()
+    bound_a = _bind_provider_geometry_identity(Shape(), {"ecmwf_ifs": a}, decision_at=clock[0].isoformat())
+    data[0, 0] += 1  # Another cell, never this request's physical product.
+    write()
+    clock[0] += timedelta(minutes=2)
+    b = persist(0)
+    bound_b = _bind_provider_geometry_identity(Shape(), {"ecmwf_ifs": b}, decision_at=clock[0].isoformat())
+    assert bound_a.provider_geometry_identity_hash == bound_b.provider_geometry_identity_hash
+    assert bound_a.shape_hash == bound_b.shape_hash
+    assert physical_source_proof_dependency(a.physical_response) != physical_source_proof_dependency(b.physical_response)
+    assert frozen_ifs9_response_has_authority(a.physical_response,
+        bound_a.provider_geometry_evidence["providers"]["ecmwf_ifs"], decision_at="2026-09-30T12:01:00Z")
+    own_index = a.physical_response["source_cell_geometry_proof"]["selected_flat_index"]
+    data[0, own_index] += 1
+    write()
+    clock[0] += timedelta(minutes=2)
+    c = persist(0)
+    bound_c = _bind_provider_geometry_identity(Shape(), {"ecmwf_ifs": c}, decision_at=clock[0].isoformat())
+    assert bound_c.provider_geometry_identity_hash != bound_b.provider_geometry_identity_hash
+    assert bound_c.shape_hash != bound_b.shape_hash
+    assert conn.execute("SELECT * FROM raw_model_forecasts").fetchall() == raw
+    conn.close()
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize("debt", (None, "ENTITY_BODY_MISSING", "HTTP_CAPTURE_RECEIPT_MISSING", "MODEL_SURFACE_EPOCH_AFTER_BODY"))
 def test_physical_capture_debt_uses_exact_causal_raw_and_actual_land_product(tmp_path, monkeypatch, metric, debt):

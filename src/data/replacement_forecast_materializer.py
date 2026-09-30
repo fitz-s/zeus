@@ -3342,26 +3342,11 @@ def _bind_provider_geometry_identity(
     from dataclasses import replace
     projection: dict[str, object] = {}
     audit: dict[str, object] = {"decision_at": decision_at.isoformat() if isinstance(decision_at, datetime) else decision_at}
-    stable_keys = (
-        "revision", "model", "product_id", "requested_latitude", "requested_longitude",
-        "timezone", "cell_selection", "elevation_param", "downscaling_policy",
-        "native_variable", "temperature_unit", "aggregation", "selected_latitude",
-        "selected_longitude", "target_dem_elevation_m", "native_grid_elevation_m",
-        "native_surface", "representativeness_status", "source_cell_geometry_proof",
-        "city", "station_id", "quantity", "selection",
-    )
+    from src.data.replacement_current_value_serving import provider_geometry_projection
     for model, value in sorted(served.items()):
         proof = getattr(value, "physical_response", None)
         if isinstance(proof, Mapping):
-            stable = {key: proof[key] for key in stable_keys if key in proof}
-            stable["product_id"] = str(stable.get("product_id", "")).split("::run=")[0]
-            if isinstance(proof.get("model_surface_witness"), Mapping):
-                witness = proof["model_surface_witness"]
-                stable["model_surface_geometry"] = witness.get("geometry")
-            if isinstance(stable.get("selection"), Mapping):
-                stable["selection"] = {key: value for key, value in stable["selection"].items()
-                    if key != "forecast_date"}
-            projection[str(model)] = stable
+            projection[str(model)] = provider_geometry_projection(proof)
     if anchor_metadata is not None:
         metadata = asdict(anchor_metadata)
         keys = ("city", "station_id", "station_lat", "station_lon", "requested_lat", "requested_lon", "nearest_grid_lat", "nearest_grid_lon",
@@ -3370,8 +3355,9 @@ def _bind_provider_geometry_identity(
         anchor = {key: metadata[key] for key in keys if key in metadata}
         proof = anchor.get("source_geometry_proof")
         if isinstance(proof, Mapping):
+            audit["anchor_source_geometry_proof"] = dict(proof)
             anchor["source_geometry_proof"] = {key: value for key, value in proof.items()
-                if key != "station_registry_sha256" and not any(clock in key for clock in ("fetched", "captured", "payload_sha", "manifest_sha", "recorded", "cycle", "available"))}
+                if key not in ("station_registry_sha256","static_hsurf_sha256","static_asset_audit") and not any(clock in key for clock in ("fetched", "captured", "payload_sha", "manifest_sha", "recorded", "cycle", "available"))}
             ground = anchor["source_geometry_proof"].get("station_ground_proof")
             if isinstance(ground, Mapping):
                 # Frozen official entity has its own original source capture and
