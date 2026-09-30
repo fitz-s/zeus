@@ -1635,6 +1635,129 @@ def test_geoblock_proof_fails_closed_on_venue_order_evidence(mem_db, kwargs):
     assert result.get("terminal_no_fill_redecision_proof") != "geoblock"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Local journal outcome: no venue verdict on the request at all.
+        {
+            "reason": "pre_venue_intent_abandoned_before_submit",
+            "proof_class": "local_command_journal_no_submit_boundary",
+            "venue_order_created": False,
+        },
+        # Host signing key refused: a fact about the host, not the price.
+        {
+            "reason": "venue_auth_invalid_signature_400",
+            "proof_class": "deterministic_venue_auth_signature_400",
+            "venue_order_created": False,
+            "exception_message": (
+                "PolyApiException[status_code=400, error_message={'error': "
+                "'invalid POLY_GNOSIS_SAFE signature'}]"
+            ),
+        },
+        {
+            "reason": "venue_rejected_400",
+            "detail": (
+                "PolyApiException[status_code=400, error_message={'error': "
+                "'invalid POLY_GNOSIS_SAFE signature'}]"
+            ),
+        },
+    ],
+)
+def test_rejection_without_a_price_fact_is_bounded_by_the_cooldown(mem_db, payload):
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-host', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, NULL, 'REJECTED',
+                   '2026-06-18T09:58:00+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-host', 'cmd-host', 3, 'SUBMIT_REJECTED',
+                   '2026-06-18T09:59:00+00:00', ?, 'REJECTED')""",
+        (json.dumps(payload),),
+    )
+    mem_db.commit()
+
+    def at(clock):
+        return _entry_same_token_cooldown_component(
+            mem_db,
+            token_id=TOKEN_X,
+            candidate_position_id="fresh-candidate",
+            limit_price=0.73,
+            shares=12.7,
+            now=datetime.fromisoformat(clock),
+        )
+
+    assert at("2026-06-18T10:00:00+00:00")["reason"] == (
+        "same_token_terminal_no_fill_cooling_down"
+    )
+    after = at("2026-06-18T10:01:01+00:00")
+    assert after["allowed"] is True
+    assert after["reason"] == "allowed_terminal_no_fill_no_exposure_cooldown_elapsed"
+
+
+def test_deterministic_request_400_still_requires_reprice_long_after_cooldown(mem_db):
+    """The venue validated this exact request and refused it; the identical
+    request is refused again at any age, so the price must differ."""
+
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-400', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, NULL, 'REJECTED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-400', 'cmd-400', 3, 'SUBMIT_REJECTED',
+                   '2026-06-18T09:59:00+00:00', ?, 'REJECTED')""",
+        (
+            json.dumps(
+                {
+                    "reason": "venue_rejected_400",
+                    "proof_class": "deterministic_venue_400",
+                    "venue_order_created": False,
+                    "exception_message": (
+                        "PolyApiException[status_code=400, error_message="
+                        "{'error': 'invalid post-only order: order crosses book'}]"
+                    ),
+                }
+            ),
+        ),
+    )
+    mem_db.commit()
+
+    same = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T12:00:00+00:00"),
+    )
+    repriced = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.72,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T12:00:00+00:00"),
+    )
+
+    assert same["allowed"] is False
+    assert same["reason"] == "same_token_terminal_no_fill_requires_reprice"
+    assert repriced["allowed"] is True
+
+
 def test_terminal_fak_no_match_redecision_allows_same_price_after_cooldown(mem_db):
     venue_order_id = "0x" + "8e" * 32
     mem_db.execute(

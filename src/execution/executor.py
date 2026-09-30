@@ -305,6 +305,21 @@ _ENTRY_INCREMENTABLE_POSITION_PHASES = frozenset(
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
 _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS = 2 * 60
 _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK = Decimal("0.001")
+_ENTRY_HOST_LEVEL_REJECTION_PROOF_CLASSES = frozenset(
+    {"deterministic_venue_geoblock_403", "deterministic_venue_auth_signature_400"}
+)
+# Venue 400s that validate the request itself (price, amount, book crossing,
+# fill-or-kill); the identical request is rejected again.
+_ENTRY_REQUEST_REJECTION_REASONS = frozenset(
+    {
+        "venue_rejected_400",
+        "venue_rejected_invalid_amount_400",
+        "venue_fok_not_fully_filled_400",
+        "venue_rejected_fok_killed_400",
+        "venue_fak_no_match_400",
+        "venue_rejected_fak_no_match_400",
+    }
+)
 _ENTRY_REPRICE_CANCEL_REASONS = frozenset(
     {"BOOK_MOVED", "CONFIRMED_VALUE_REFRESH", "FAMILY_OPTIMUM_SHIFT"}
 )
@@ -595,6 +610,58 @@ def _entry_terminal_no_fill_redecision_proof(
     ):
         return "fok"
     return None
+
+
+def _entry_rejection_binds_request_price(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+) -> bool:
+    """Whether the prior rejection is a fact about the request's price.
+
+    Only a typed deterministic venue rejection of the request itself says the
+    identical request is rejected again, so only it requires a different price
+    after the cooldown. Host-level rejections (region, signing key) and untyped
+    or local outcomes carry no fact about the price; the cooldown bounds them.
+    """
+
+    if not command_id or not _table_exists(conn, "venue_command_events"):
+        return False
+    order_column = "rowid"
+    if "sequence_no" in _table_column_names(conn, "venue_command_events"):
+        order_column = "sequence_no"
+    row = conn.execute(
+        f"""
+        SELECT payload_json
+          FROM venue_command_events
+         WHERE command_id = ?
+           AND event_type = 'SUBMIT_REJECTED'
+         ORDER BY {order_column} DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        payload = json.loads(str(row[0] or "{}"))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    message = str(payload.get("detail") or payload.get("exception_message") or "")
+    if _is_polymarket_geoblock_403_message(message) or (
+        "invalid POLY_GNOSIS_SAFE signature" in message
+    ):
+        return False
+    proof_class = str(payload.get("proof_class") or "")
+    return (
+        str(payload.get("reason") or "") in _ENTRY_REQUEST_REJECTION_REASONS
+        or (
+            proof_class.startswith("deterministic_venue_")
+            and proof_class not in _ENTRY_HOST_LEVEL_REJECTION_PROOF_CLASSES
+        )
+    )
 
 
 def _entry_geoblock_no_fill_proof(
@@ -2741,11 +2808,9 @@ def _entry_same_token_cooldown_component(
             "candidate_price": str(limit_price or ""),
             "candidate_shares": str(shares or ""),
         }
-    terminal_order_fact_proven = (
-        terminal_no_fill
-        and _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
-    )
-    if terminal_no_fill and not terminal_order_fact_proven:
+    if terminal_no_fill and _entry_rejection_binds_request_price(
+        conn, command_id=command_id
+    ):
         existing_price = _decimal_or_none(prior_price)
         candidate_price = _decimal_or_none(limit_price)
         if existing_price is None or candidate_price is None:
