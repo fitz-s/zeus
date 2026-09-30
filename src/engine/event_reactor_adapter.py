@@ -45263,7 +45263,7 @@ def _day0_diurnal_mixture_for_family(
         unit=str(unit or "").strip().upper(),
         decision_time=probability_time,
         timezone_name=str(getattr(city, "timezone", "") or ""),
-        running_extreme=_day0_probability_boundary_native(payload, metric),
+        running_extreme=_day0_probability_boundary_native(payload, metric, city=city, unit=unit),
         bin_bounds=[
             (
                 None if bin_.low is None else float(bin_.low),
@@ -45563,17 +45563,20 @@ def _make_day0_bootstrap_sampler(
             payload,
             metric=metric,
             unit=unit,
+            city=runtime_cities_by_name().get(str(family.city)),
         )
         if finality in DAY0_ABSORBING_FINALITIES:
             probability_boundary = _day0_probability_boundary_native(
                 payload,
                 metric,
+                city=runtime_cities_by_name().get(str(family.city)), unit=unit,
             )
             boundary_survival_probability = 1.0
         elif finality == "PROVISIONAL_CURRENT_SNAPSHOT":
             probability_boundary = _day0_probability_boundary_native(
                 payload,
                 metric,
+                city=runtime_cities_by_name().get(str(family.city)), unit=unit,
             )
             boundary_survival_probability = float(
                 payload[
@@ -45662,6 +45665,8 @@ def _day0_analysis_rng_seed(
                 or getattr(family, "metric", "")
                 or ""
             ),
+            city=runtime_cities_by_name().get(str(getattr(family, "city", "") or "")),
+            unit=getattr(runtime_cities_by_name().get(str(getattr(family, "city", "") or "")), "settlement_unit", None),
         ),
         "observation_time": payload.get("observation_time"),
         "member_values": [float(value) for value in member_values],
@@ -46965,7 +46970,8 @@ def _day0_remaining_p_raw_vector(
     fast_residual_mixture = (
         "_edli_day0_fast_residual_probability_update" in payload
     )
-    probability_boundary = _day0_probability_boundary_native(payload, metric)
+    probability_boundary = _day0_probability_boundary_native(payload, metric,
+        city=city, unit=getattr(city, "settlement_unit", None))
     from src.events.day0_authority import day0_evidence_finality
 
     finality = day0_evidence_finality(payload)
@@ -47193,6 +47199,7 @@ def _day0_remaining_p_raw_vector(
                 payload,
                 metric=metric,
                 unit=str(getattr(city, "settlement_unit", "") or ""),
+                city=city,
             )
         native_scale = 1.0 if carrier_unit == "C" else 9.0 / 5.0
         native_offset = 0.0 if carrier_unit == "C" else 32.0
@@ -47397,6 +47404,7 @@ def _day0_remaining_p_raw_vector(
         payload,
         metric=metric,
         unit=str(getattr(city, "settlement_unit", "") or ""),
+        city=city,
     )
     peak_set_probability = _day0_peak_set_probability_for_distribution(
         payload=payload,
@@ -47857,8 +47865,91 @@ def _observed_day0_extreme_native(
 def _day0_probability_boundary_native(
     payload: Mapping[str, object],
     metric: str,
+    *,
+    city: object | None = None,
+    unit: str | None = None,
 ) -> float | None:
     """Return the physical bound for statistical q without promoting payoff truth."""
+
+    source = _day0_probability_conditioning_source(payload).strip().lower()
+    if source.startswith("hko") and source != "hko_hourly_accumulator" and not source.startswith("hko_daily_api"):
+        # CURRENT_ONLY temperature and agency final-day forecasts have no
+        # running-extreme role, even when their numeric values coincide.
+        return None
+    if source.startswith("hko_hourly_accumulator"):
+        # SCOPE: this HKO family/point kernel, not the settlement projection.
+        # DRAIN: normal qualified observation/seed redecision. RESET: a native
+        # running extreme with causal source clocks and independent city/unit.
+        # The complete probability binding is an OUTPUT of some early callers;
+        # it cannot grant input authority, but if present it must agree.
+        from src.events.day0_authority import (
+            Day0AuthorityError, assert_live_day0_payload_authority,
+            day0_evidence_finality,
+        )
+        from src.events.triggers.day0_extreme_updated import _expected_station_for_city
+
+        if (
+            source != "hko_hourly_accumulator"
+            or city is None
+            or str(getattr(city, "settlement_source_type", "")).lower() != "hko"
+            or getattr(city, "settlement_unit", None) != "C"
+            or unit != "C"
+            or payload.get("settlement_unit") != "C"
+            or metric not in {"high", "low"}
+            or day0_evidence_finality(payload) != "PROVISIONAL_CURRENT_SNAPSHOT"
+        ):
+            return None
+        try:
+            assert_live_day0_payload_authority(payload)
+        except Day0AuthorityError:
+            return None
+        expected_station = _expected_station_for_city(city)
+        if not expected_station or any(
+            str(payload.get(key) or "").strip().upper() != expected_station
+            for key in ("station_id", "configured_station_id")
+        ):
+            return None
+        declared_metric = payload.get("metric") or payload.get("temperature_metric")
+        if declared_metric and str(declared_metric).strip().lower() != metric:
+            return None
+        raw = payload.get("high_so_far" if metric == "high" else "low_so_far")
+        value = _optional_float(raw)
+        if isinstance(raw, (bool, np.bool_)) or value is None or not math.isfinite(value):
+            return None
+        if not re.fullmatch(r"[0-9a-f]{64}", str(payload.get("raw_payload_sha256") or "")):
+            return None
+        try:
+            observed = datetime.fromisoformat(str(payload["observation_time"]).replace("Z", "+00:00"))
+            available = datetime.fromisoformat(str(payload["observation_available_at"]).replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError):
+            return None
+        if observed.tzinfo is None or available.tzinfo is None or observed > available:
+            return None
+        binding = payload.get("_edli_global_day0_binding")
+        if isinstance(binding, Mapping):
+            bound_raw = binding.get("observed_extreme_native")
+            bound_value = _optional_float(bound_raw)
+            if (
+                isinstance(bound_raw, (bool, np.bool_))
+                or bound_value is None or not math.isfinite(bound_value)
+                or not math.isclose(value, bound_value, rel_tol=0, abs_tol=1e-9)
+                or binding.get("city") != getattr(city, "name", None)
+                or binding.get("metric") != metric
+                or any(binding.get(key) != payload.get(key) for key in (
+                    "observation_time", "observation_available_at", "station_id",
+                    "configured_station_id", "settlement_source", "settlement_unit", "raw_payload_sha256",
+                ))
+            ):
+                return None
+        marker = payload.get("_edli_day0_probability_boundary_native")
+        if marker is not None:
+            physical = _optional_float(marker)
+            if isinstance(marker, (bool, np.bool_)) or physical is None or not math.isfinite(physical):
+                return None
+            if (metric == "high" and physical >= value-1e-9) or (metric == "low" and physical <= value+1e-9):
+                return physical
+            return None
+        return value
 
     settlement_boundary = _optional_float(payload.get("rounded_value"))
     physical_boundary = _optional_float(
@@ -47881,6 +47972,7 @@ def _day0_probability_boundary_scenarios_native(
     *,
     metric: str,
     unit: str,
+    city: object | None = None,
 ) -> tuple[tuple[float, float], ...]:
     """Return the current fast-residual boundary mixture in settlement units.
 
@@ -47902,6 +47994,7 @@ def _day0_probability_boundary_scenarios_native(
     default_boundary = _day0_probability_boundary_native(
         payload,
         normalized_metric,
+        city=city, unit=normalized_unit,
     )
     if default_boundary is None:
         raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_MISSING")
@@ -48846,6 +48939,7 @@ def _rebuild_decision_time_day0_carrier(
         probability_boundary = _day0_probability_boundary_native(
             payload,
             str(family.metric).strip().lower(),
+            city=city, unit=carrier_unit,
         )
         if probability_boundary is None:
             raise ValueError("DAY0_HELD_SHARED_CARRIER_BOUNDARY_MISSING")
@@ -48858,6 +48952,7 @@ def _rebuild_decision_time_day0_carrier(
             payload,
             metric=str(family.metric).strip().lower(),
             unit=carrier_unit,
+            city=city,
         )
     cutoff = decision_time.astimezone(UTC).isoformat()
     identity_inputs = day0_remaining_carrier_identity_inputs(
@@ -48908,7 +49003,7 @@ def _rebuild_decision_time_day0_carrier(
         # The resolver-graded composition conditions on the single possessed
         # boundary; the survival/fast-residual scenario mixture is not applied.
         boundary = _day0_probability_boundary_native(
-            payload, str(family.metric).strip().lower()
+            payload, str(family.metric).strip().lower(), city=city, unit=carrier_unit,
         )
         if boundary is None:
             raise ValueError("DAY0_HELD_SHARED_CARRIER_BOUNDARY_MISSING")
@@ -49838,7 +49933,8 @@ def _build_direct_current_day0_causal_bundle(
         or ""
     ).strip()
     observed_extreme = _observed_day0_extreme_native(payload, metric)
-    probability_boundary = _day0_probability_boundary_native(payload, metric)
+    probability_boundary = _day0_probability_boundary_native(payload, metric,
+        city=runtime_cities_by_name().get(str(getattr(family, "city", "") or "")), unit=unit)
     normalized_unit = str(
         payload.get("settlement_unit") or unit or ""
     ).strip().upper()
@@ -50565,6 +50661,7 @@ def _day0_remaining_day_members(
         probability_boundary = _day0_probability_boundary_native(
             payload,
             metric,
+            city=runtime_cities_by_name().get(str(family.city)), unit=unit,
         )
         from src.events.day0_authority import (
             DAY0_ABSORBING_FINALITIES,

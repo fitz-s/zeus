@@ -14193,6 +14193,10 @@ def test_latest_causal_day0_family_event_respects_all_three_clocks():
     "day0_resolver_terminal_composition_v27_smooth_center_bias_v1",
     "day0_settlement_channel_revision_model_v29_smooth_center_bias_observation_clock_v1",
     "day0_resolver_terminal_composition_v28_smooth_center_bias_observation_clock_v1",
+    "day0_settlement_channel_revision_model_v29_instrument_variance_owner_v1",
+    "day0_resolver_terminal_composition_v28_instrument_variance_owner_v1",
+    "day0_settlement_channel_revision_model_v30_smooth_center_bias_observation_clock_city_instrument_variance_v1",
+    "day0_resolver_terminal_composition_v29_smooth_center_bias_observation_clock_city_instrument_variance_v1",
 ])
 def test_probability_cache_requires_current_day0_geometry_revision(
     monkeypatch, probability_use, retired,
@@ -48606,7 +48610,8 @@ def test_global_batch_original_exception_is_not_masked_by_a_failing_flush(monkey
         trade_conn.close()
 
 
-def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, prior_hour=12):
+def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, prior_hour=12,
+                                           observed_extreme_native=None, shuffled_conditions=False):
     """Normal writers + controlled source receipts; no probability authority mock.
 
     The 51-member GRIB/land-mask input is a causal toy receipt, not a claim of
@@ -48646,6 +48651,8 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     cut = datetime(2026, 9, 30, 6, 20, tzinfo=utc)
     target = date(2026, 9, 30)
     city = runtime_cities_by_name()["Hong Kong"]
+    if observed_extreme_native is None:
+        observed_extreme_native = 32.9 if metric == "high" else 27.0
     city_id = city.name.upper().replace(" ","_")
     station = runtime_station_geometry_for_city(city)
     db = tmp_path / f"hko-{metric}.db"
@@ -48777,8 +48784,11 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
         fetch.setattr(daily_obs_append.httpx,"get",lambda *_a,**_k: SpotResponse())
         fetch.setattr(daily_obs_append,"datetime",SpotClock)
         assert daily_obs_append._accumulate_hko_reading(conn)
-    for clock, high, low in (("2026-09-30T00:10:00+00:00",30.1,27.2),
-                              ("2026-09-30T06:10:00+00:00",32.9,27.0)):
+    first_low = observed_extreme_native+.2 if metric == "low" else 27.2
+    final_high = observed_extreme_native if metric == "high" else 32.9
+    final_low = observed_extreme_native if metric == "low" else 27.0
+    for clock, high, low in (("2026-09-30T00:10:00+00:00",30.1,first_low),
+                              ("2026-09-30T06:10:00+00:00",final_high,final_low)):
         stamp = datetime.fromisoformat(clock)
         fetched = (stamp+timedelta(seconds=5)).isoformat()
         csv_body = ("Date time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),"
@@ -48878,7 +48888,8 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     bins = (_TemperatureBin(f"{point-1}C or below",upper_c=point-1,center_c=point-2,rounding_rule="oracle_truncate"),
             _TemperatureBin(f"{point}C",lower_c=point,upper_c=point,center_c=point,rounding_rule="oracle_truncate"),
             _TemperatureBin(f"{point+1}C or above",lower_c=point+1,center_c=point+2,rounding_rule="oracle_truncate"))
-    for i, item in enumerate(bins):
+    market_bins = (bins[2], bins[0], bins[1]) if shuffled_conditions else bins
+    for i, item in enumerate(market_bins):
         condition = "0x"+f"{i+1:064x}"
         conn.execute("""INSERT INTO market_events (market_slug,city,target_date,temperature_metric,
             condition_id,token_id,range_label,range_low,range_high,created_at,recorded_at)
@@ -48890,7 +48901,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
         openmeteo_source_available_at=captured,bins=bins,source_cycle_time=cycle,computed_at=cut,
         expires_at=cut+timedelta(hours=1),openmeteo_precision_guard=guard,openmeteo_raw_payload_bytes=raw_bytes,
         anchor_artifact_id=artifact_id,
-        day0_observed_extreme_c=32.9 if metric=="high" else 27.0,day0_observed_extreme_source="hko_hourly_accumulator",
+        day0_observed_extreme_c=observed_extreme_native,day0_observed_extreme_source="hko_hourly_accumulator",
         day0_observed_extreme_observation_time="2026-09-30T06:10:00+00:00",
         day0_observed_extreme_sample_count=2,day0_observed_extreme_unit="C")
     result = materialize_replacement_forecast_live(conn,request)
@@ -49965,3 +49976,134 @@ def test_day0_conditional_high_keeps_its_existing_extra_variance(unit, scale):
         decision_time=None) == pytest.approx(.8*scale, abs=1e-12)
     assert era._day0_extra_member_sigma_native(payload=payload, family=family, unit=unit,
         decision_time=None) == pytest.approx(.6*scale, abs=1e-12)
+
+
+@pytest.mark.parametrize("metric,raw", (("high", 32.9), ("low", 27.4)))
+def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, monkeypatch, metric, raw):
+    """Real writers/authority; controlled HTTP/51-ENS inputs, no q override."""
+    from src.data import day0_hourly_vectors as hourly
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION, day0_probability_semantics_revision,
+    )
+    calls = []
+    actual_builder = hourly.build_day0_remaining_probability_carrier
+    signature = inspect.signature(actual_builder)
+    def observe(**kwargs):
+        # Observer forwards unchanged and grants no readiness/probability power.
+        result = actual_builder(**kwargs)
+        bound = signature.bind(**kwargs)
+        bound.apply_defaults()
+        calls.append((copy.deepcopy(bound.arguments), result))
+        return result
+    monkeypatch.setattr(hourly, "build_day0_remaining_probability_carrier", observe)
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric,
+        observed_extreme_native=raw, shuffled_conditions=True)
+    try:
+        producer, producer_result = calls[-1]
+        source_calls = len(calls)
+        assert producer["boundary_scenarios"][0][0] == raw
+        assert producer["final_extreme_centers_c"] == (33.0 if metric == "high" else 27.0,)
+        assert producer["identity_inputs"]["city"] == "Hong Kong"
+        assert producer["identity_inputs"]["unit"] == "C"
+        observed = dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1"
+        ).fetchone())
+        observation = observation_instant_row_to_day0_observation(observed, metric=metric)
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),
+            decision_time=fixture.cut, received_at=fixture.cut.isoformat())
+        q_json, provenance_json = fixture.conn.execute(
+            "SELECT q_json,provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,),
+        ).fetchone()
+        q, provenance = json.loads(q_json), json.loads(provenance_json)
+        prepared_by_use = []
+        for use in (era._CurrentProbabilityUse.ENTRY, era._CurrentProbabilityUse.HELD_MONITOR):
+            payload = {}
+            prepared = era._prepare_current_global_probability_family(event,
+                forecast_conn=fixture.conn, topology_conn=fixture.conn,
+                observation_conn=fixture.conn, decision_time=fixture.cut,
+                max_age=_dt.timedelta(seconds=30), allow_provisional_day0_replacement=True,
+                probability_use=use, raw_input_hwm_conn=fixture.conn, day0_payload_out=payload)
+            consumer, consumer_result = calls[-1]
+            assert len(calls) > source_calls
+            for key in ("future_extremes_c", "final_extreme_centers_c", "boundary_scenarios",
+                        "metric", "path_error_sigma_c", "instrument_sigma_c", "bin_bounds_c",
+                        "operator", "n_point", "n_samples", "remaining_center_bias_native",
+                        "settlement_semantics", "resolver_terminal"):
+                assert consumer[key] == producer[key], key
+            # Clock/source/current state identities are separate from the
+            # mathematical kernel and must also match, not merely its hash.
+            assert consumer["identity_inputs"] == producer["identity_inputs"]
+            binding = payload["_edli_global_day0_binding"]
+            assert binding["observed_extreme_native"] == raw
+            assert binding["rounded_value"] == math.trunc(raw)
+            assert binding["settlement_source"] == "hko_hourly_accumulator"
+            assert binding["settlement_unit"] == "C" and binding["metric"] == metric
+            assert binding["observation_time"] == provenance["day0_provisional_observation"]["observation_time"]
+            current = provenance["day0_current_temperature_state"]
+            for field, payload_key in (("value_native", "_edli_day0_current_temperature_native"),
+                                      ("observed_at_utc", "_edli_day0_current_temperature_observed_at_utc"),
+                                      ("source", "_edli_day0_current_temperature_source")):
+                assert payload[payload_key] == current[field]
+            witness = prepared.probability_witness
+            assert day0_probability_semantics_revision(witness.q_version) == DAY0_PROBABILITY_SEMANTICS_REVISION
+            expected = [q[fixture.conn.execute("SELECT range_label FROM market_events WHERE condition_id=?",
+                (item.condition_id,)).fetchone()[0]] for item in witness.bindings]
+            np.testing.assert_allclose(witness.yes_point_q, expected, rtol=0, atol=1e-12)
+            np.testing.assert_array_equal(consumer_result["q"], producer_result["q"])
+            np.testing.assert_array_equal(consumer_result["samples"], producer_result["samples"])
+            # Early statistical calls possess sourced observations, not the
+            # yet-to-be-built complete probability output binding.
+            early = {key:value for key,value in payload.items() if key != "_edli_global_day0_binding"}
+            assert era._day0_probability_boundary_native(early, metric, city=fixture.city, unit="C") == raw
+            assert era._day0_probability_boundary_native(early, metric, city=None, unit="C") is None
+            for changed in ({"settlement_unit":"F"}, {"station_id":"HKO_FND"},
+                            {"settlement_source":"hko_current_1min_mean"},
+                            {"settlement_source":"hko_rhrread_spot"},
+                            {"settlement_source":"hko_fnd_high"},
+                            {"observation_time":"2026-09-30T06:10:00"},
+                            {"high_so_far" if metric == "high" else "low_so_far": True},
+                            {"high_so_far" if metric == "high" else "low_so_far": float("nan")}):
+                assert era._day0_probability_boundary_native({**early,**changed}, metric,
+                    city=fixture.city, unit="C") is None
+            mismatched = copy.deepcopy(payload)
+            mismatched["_edli_global_day0_binding"]["observed_extreme_native"] = raw+.1
+            assert era._day0_probability_boundary_native(mismatched, metric, city=fixture.city, unit="C") is None
+            assert era._day0_probability_boundary_native(early, metric,
+                city=era.runtime_cities_by_name()["Paris"], unit="C") is None
+            prepared_by_use.append(prepared)
+        entry, held = (item.probability_witness for item in prepared_by_use)
+        np.testing.assert_array_equal(entry.yes_point_q, held.yes_point_q)
+        np.testing.assert_array_equal(entry.yes_q_samples, held.yes_q_samples)
+        from src.engine.monitor_refresh import _current_global_held_point_probability
+        for item in entry.bindings:
+            for side,direction in (("YES","buy_yes"),("NO","buy_no")):
+                position = SimpleNamespace(condition_id=item.condition_id,direction=direction)
+                assert _current_global_held_point_probability(position, held) == pytest.approx(
+                    family_payoff_point_q(entry, bin_id=item.bin_id, side=side), abs=1e-12)
+        old_version = "day0-semrev:day0_settlement_channel_revision_model_v30_smooth_center_bias_observation_clock_city_instrument_variance_v1:old-cache"
+        obsolete = replace(prepared_by_use[0], probability_witness=replace(entry,q_version=old_version))
+        namespace = "normal-hko-physical-boundary-reset"
+        era._store_global_probability_family_cache(namespace,family_key=entry.family_key,
+            event_id=event.event_id,family_binding_hash=entry.family_binding_identity,
+            prepared=obsolete,probability_use=era._CurrentProbabilityUse.ENTRY)
+        assert era._probe_global_probability_family_cache(namespace,family_key=entry.family_key,
+            event_id=event.event_id,causal_snapshot_id=event.causal_snapshot_id,
+            captured_at_utc=fixture.cut,probability_use=era._CurrentProbabilityUse.ENTRY) is None
+        regenerated = era._prepare_current_global_probability_family(event, forecast_conn=fixture.conn,
+            topology_conn=fixture.conn, observation_conn=fixture.conn, decision_time=fixture.cut,
+            max_age=_dt.timedelta(seconds=30), allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.ENTRY, raw_input_hwm_conn=fixture.conn)
+        assert regenerated.probability_witness.q_version == entry.q_version
+        assert regenerated.probability_witness.witness_identity == entry.witness_identity
+        assert obsolete.probability_witness.q_version == old_version
+        # Recompute from normal immutable source facts, never edit an old row.
+        assert fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone()[0] == provenance_json
+    finally:
+        fixture.conn.close()

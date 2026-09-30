@@ -33,6 +33,10 @@ def test_hko_observation_clock_revision_does_not_relabel_old_certificates():
         "day0_resolver_terminal_composition_v27_smooth_center_bias_v1",
         "day0_settlement_channel_revision_model_v29_smooth_center_bias_observation_clock_v1",
         "day0_resolver_terminal_composition_v28_smooth_center_bias_observation_clock_v1",
+        "day0_settlement_channel_revision_model_v29_instrument_variance_owner_v1",
+        "day0_resolver_terminal_composition_v28_instrument_variance_owner_v1",
+        "day0_settlement_channel_revision_model_v30_smooth_center_bias_observation_clock_city_instrument_variance_v1",
+        "day0_resolver_terminal_composition_v29_smooth_center_bias_observation_clock_city_instrument_variance_v1",
     ):
         old = f"day0-semrev:{previous}:immutable-entry-certificate"
         assert day0_probability_semantics_revision(old) != DAY0_PROBABILITY_SEMANTICS_REVISION
