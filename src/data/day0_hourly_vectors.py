@@ -2550,28 +2550,45 @@ def _new_ensemble_run_due_for_refresh(
         conn = get_forecasts_connection_read_only()
         expected = day0_source_clock_ensemble_member_models()
         for target_date in target_dates:
-            vectors = read_freshest_day0_hourly_vectors(
-                city=city, target_date=str(target_date), now=decision_time,
-                expected_models=expected, require_expected=False,
-                max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-                remaining_window_start=remaining_window_starts.get(str(target_date)),
-                require_complete_remaining_window=True,
-                conn=conn, raise_on_db_error=True,
-            )
-            # Cost recovery only needs causal exact-scope evidence of an older
-            # run. Missing old members cannot suppress acquisition of new51.
-            if not vectors:
+            if _current_ensemble_bundle_already_persisted(
+                city=city, target_dates=(str(target_date),), run_hwm=hwm,
+                decision_time=decision_time,
+                remaining_window_starts=remaining_window_starts,
+            ):
                 continue
-            identities = [
-                _provider_run_identity_from_meta(
-                    json.loads(vector.source_run_meta_json or "{}"),
-                    expected_model=vector.model,
-                )
-                for vector in vectors
-            ]
-            if all(identity is not None for identity in identities):
-                runs = [identity[0] for identity in identities]
-                if max(runs) <= hwm.run_initialisation_time and min(runs) < hwm.run_initialisation_time:
+            # Cost evidence is an exact-scope causal run identity, not the old
+            # member values' freshness/completeness permission to compute q.
+            rows = conn.execute(
+                """SELECT model, captured_at, source_run_meta_json, request_hash
+                     FROM day0_hourly_vectors
+                    WHERE city=? AND target_date=? AND provider='openmeteo'
+                      AND julianday(captured_at) <= julianday(?)
+                    ORDER BY captured_at DESC""",
+                (city, str(target_date), decision_time.isoformat()),
+            )
+            for model, captured_text, raw_meta, request_hash in rows:
+                if str(model) not in expected or not str(request_hash or "").strip():
+                    continue
+                try:
+                    meta = json.loads(raw_meta or "{}")
+                    if not isinstance(meta, Mapping):
+                        continue
+                    params = json.loads(meta.get("request_params_json") or "{}")
+                    if not isinstance(params, Mapping):
+                        continue
+                    identity = _provider_run_identity_from_meta(meta, expected_model=str(model))
+                    captured = _day0_parse_aware_clock(captured_text, field_name="cost_capture")
+                    started = _day0_parse_aware_clock(meta["fetch_started_at"], field_name="cost_fetch_started")
+                    finished = _day0_parse_aware_clock(meta["fetch_finished_at"], field_name="cost_fetch_finished")
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if (
+                    identity is not None
+                    and params.get("metadata_model") == DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL
+                    and identity[0] < hwm.run_initialisation_time
+                    and identity[0] <= identity[1] <= finished <= decision_time
+                    and captured <= started <= finished
+                ):
                     return True
         return False
     except (OSError, sqlite3.Error, RuntimeError, TypeError, ValueError):

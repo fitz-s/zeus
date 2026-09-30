@@ -341,7 +341,11 @@ def _strict_deterministic_vectors(
 
 
 @pytest.mark.parametrize(
-    "barrier", ("none", "old_missing_member", "retry", "future", "unusable", "quota", "late_record", "incomplete")
+    "barrier", (
+        "none", "old_missing_member", "old_overage", "old_incomplete_window",
+        "no_old_identity", "invalid_old_run", "future_old_capture", "foreign_old_model",
+        "retry", "future", "unusable", "quota", "late_record", "incomplete",
+    )
 )
 def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_deterministic(
     monkeypatch: pytest.MonkeyPatch, tmp_path, barrier: str,
@@ -400,15 +404,20 @@ def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_determini
             result.append(replace(vector, source_run_meta_json=_json.dumps(meta)))
         return result
 
-    old_vectors = vectors(old_run, old_available, decision - timedelta(minutes=15))
+    old_capture = decision - (
+        timedelta(hours=2, minutes=59, seconds=30)
+        if barrier == "old_overage" else timedelta(minutes=15)
+    )
+    old_vectors = vectors(old_run, old_available, old_capture)
     assert original_persist(old_vectors, target_date=target, conn=conn,
                             request_hash="sha256:old", endpoint=day0.OPENMETEO_ENSEMBLE_URL,
                             now=decision) == 51
     det_vectors = []
     for model in models:
-        det_meta = _json.loads(old_vectors[0].source_run_meta_json)
+        det_base = vectors(old_run, old_available, decision - timedelta(minutes=15))[0]
+        det_meta = _json.loads(det_base.source_run_meta_json)
         det_meta.update(model=model, provider_run_id=f"openmeteo:{model}:{old_run.isoformat()}")
-        det_vectors.append(replace(old_vectors[0], model=model, source_run_meta_json=_json.dumps(det_meta)))
+        det_vectors.append(replace(det_base, model=model, source_run_meta_json=_json.dumps(det_meta)))
     targets = day0.day0_hourly_target_dates_for_refresh(city=city, decision_time=decision)
     for date_text in targets:
         assert original_persist(det_vectors, target_date=date_text, conn=conn,
@@ -457,6 +466,32 @@ def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_determini
                 (city.name, target, members[0]),
             )
             conn.commit()
+        elif barrier == "old_incomplete_window":
+            conn.execute(
+                "UPDATE day0_hourly_vectors SET times_json='[]', temps_c_json='[]' WHERE city=? AND target_date=? AND model=?",
+                (city.name, target, members[0]),
+            )
+            conn.commit()
+        elif barrier == "no_old_identity":
+            conn.executemany(
+                "DELETE FROM day0_hourly_vectors WHERE city=? AND target_date=? AND model=?",
+                ((city.name, target, member) for member in members),
+            )
+            conn.commit()
+        elif barrier in {"invalid_old_run", "future_old_capture", "foreign_old_model"}:
+            for vector in old_vectors:
+                meta = _json.loads(vector.source_run_meta_json)
+                if barrier == "invalid_old_run":
+                    meta["provider_source_cycle_time_utc"] = "invalid"
+                elif barrier == "future_old_capture":
+                    meta["fetch_finished_at"] = (decision + timedelta(hours=1)).isoformat()
+                else:
+                    meta["model"] = "icon_global"
+                conn.execute(
+                    "UPDATE day0_hourly_vectors SET source_run_meta_json=? WHERE city=? AND target_date=? AND model=?",
+                    (_json.dumps(meta), city.name, target, vector.model),
+                )
+            conn.commit()
         moment.update(now=decision + timedelta(minutes=1), run=new_run, available=new_run + timedelta(hours=9))
         if barrier == "future":
             moment.update(run=moment["now"] + timedelta(hours=1))
@@ -468,10 +503,10 @@ def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_determini
             city=city.name, target_dates=(target,), run_hwm=hwm,
             decision_time=moment["now"], remaining_window_starts={target: moment["now"]},
         )
-        if barrier in {"none", "old_missing_member"}:
+        if barrier in {"none", "old_missing_member", "old_overage", "old_incomplete_window"}:
             reason = (
                 "DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE"
-                if barrier == "old_missing_member"
+                if barrier != "none"
                 else "DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED"
             )
             with pytest.raises(ValueError, match=reason):
@@ -499,7 +534,7 @@ def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_determini
             retry = day0.maybe_refresh_day0_hourly_vectors([city], decision_time=moment["now"], **kwargs)
             assert retry.cities_skipped_throttle == 1 and fetches == [new_run]
             return
-        if barrier not in {"none", "old_missing_member"}:
+        if barrier not in {"none", "old_missing_member", "old_overage", "old_incomplete_window"}:
             assert fetches == [] and refreshed.vectors_written == 0
             if barrier == "quota":
                 assert refreshed.cities_skipped_quota == 1
