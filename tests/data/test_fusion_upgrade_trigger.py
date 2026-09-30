@@ -2892,7 +2892,7 @@ def test_same_cycle_same_extreme_new_current_temperature_revisions_reseed(
     forecast.execute("UPDATE forecast_posteriors SET provenance_json = ? WHERE city = 'Helsinki'",
                      (json.dumps({"bayes_precision_fusion": {"used_models": [_DWD]}}),))
     forecast.commit()
-    assert verdict(now)["input_revision_changed"] is False  # no physical-path carrier to refresh
+    assert verdict(now)["input_revision_changed"] is True  # bootstrap a missing physical-path carrier
     # A committed posterior that consumed the same physical sample resets the
     # revision even if its Day0 running maximum has not moved.
     posterior_provenance = {
@@ -2927,7 +2927,7 @@ def test_same_cycle_same_extreme_new_current_temperature_revisions_reseed(
         ("Hong Kong", "low", "HKO", "hko_rhrread_spot", "C", 23.0, 24.0),
     ),
 )
-def test_non_helsinki_current_state_revisions_reseed_only_consuming_posterior(
+def test_non_helsinki_current_state_revisions_bootstrap_and_refresh_posterior(
     tmp_path, monkeypatch, city, metric, station, source, unit, old, new,
 ) -> None:
     """A new physical level changes a consumed Day0 path without an extreme change."""
@@ -2978,13 +2978,13 @@ def test_non_helsinki_current_state_revisions_reseed_only_consuming_posterior(
     revision = changed["changed_input_revisions"]["day0_current_temperature_state"]
     assert revision == {"source": source, "observed_at_utc": "2026-09-27T12:20:00+00:00",
                         "value_native": new}
-    # No carrier means this posterior did not consume current state; merely
-    # stamping q_shape=fast-residual cannot create remaining-path authority.
+    # No carrier means current evidence has NOT been consumed: it creates
+    # delivery debt. Recomputing still has to pass the real carrier proof.
     forecast.execute("UPDATE forecast_posteriors SET provenance_json = ?",
                      (json.dumps({"bayes_precision_fusion": {"used_models": [_DWD]},
                                   "q_shape": "fused_day0_fast_residual_likelihood"}),))
     forecast.commit()
-    assert verdict(forecast)["input_revision_changed"] is False
+    assert verdict(forecast)["input_revision_changed"] is True
     forecast.execute("UPDATE forecast_posteriors SET provenance_json = ?",
                      (json.dumps({"bayes_precision_fusion": {"used_models": [_DWD]},
                                   "q_shape": "fused_day0_fast_residual_likelihood",

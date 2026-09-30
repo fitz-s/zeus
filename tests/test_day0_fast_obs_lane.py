@@ -774,6 +774,7 @@ def _tokyo():
     return SimpleNamespace(
         name="Tokyo", timezone="Asia/Tokyo", settlement_unit="C",
         wu_station="RJTT", settlement_source_type="wu_icao",
+        lat=35.549678, lon=139.786958,
     )
 
 
@@ -785,12 +786,12 @@ def _london():
 
 
 def _scheduler_hourly_vector(city, model, decision_time, *, omit_local_time=None):
-    from src.data.day0_hourly_vectors import Day0HourlyVector
+    from src.data.day0_hourly_vectors import Day0HourlyVector, DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL
 
     local_day = decision_time.astimezone(ZoneInfo(city.timezone)).date()
     times = [
         f"{(local_day + timedelta(days=offset)).isoformat()}T{hour:02d}:00"
-        for offset in (0, 1)
+        for offset in (0, 1, 2)
         for hour in range(24)
     ]
     if omit_local_time in times:
@@ -803,6 +804,15 @@ def _scheduler_hourly_vector(city, model, decision_time, *, omit_local_time=None
         captured_at=decision_time.isoformat(),
         times=tuple(times),
         temps_c=tuple(18.0 + index * 0.1 for index in range(len(times))),
+        source_run_meta_json=json.dumps({
+            "fetch_started_at": decision_time.isoformat(),
+            "fetch_finished_at": decision_time.isoformat(),
+            "request_params_json": json.dumps({"metadata_model": DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL}),
+            "provider_source_cycle_time_utc": (decision_time.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)).isoformat(),
+            "provider_source_available_at_utc": (decision_time - timedelta(minutes=1)).isoformat(),
+            "request_hash": "scheduler-ensemble" if model.startswith("ecmwf_ifs025_member") else "scheduler-" + model,
+            "provider_run_id": "scheduler-ensemble" if model.startswith("ecmwf_ifs025_member") else "scheduler-" + model,
+        }),
     )
 
 
@@ -867,8 +877,15 @@ def _install_scheduler_forecast_db(monkeypatch, tmp_path, city, *, authorized_fa
     monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", connect)
     monkeypatch.setattr(db_module, "get_world_connection_read_only", connect)
     monkeypatch.setattr(vectors_module, "in_domain_models_for_city", lambda _city, **_kw: [])
+    def ensemble_fetch(city, *, now, **_kwargs):
+        return ([_scheduler_hourly_vector(city, model, now)
+                 for model in vectors_module.day0_source_clock_ensemble_member_models()],
+                "sha256:scheduler-ensemble")
+    monkeypatch.setattr(vectors_module, "fetch_day0_source_clock_ensemble_vectors", ensemble_fetch)
+    monkeypatch.setattr(vectors_module, "_probe_day0_source_clock_ensemble_run_hwm", lambda **_: None)
     vectors_module._LAST_REFRESH_MONOTONIC.clear()
     vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    vectors_module._INCOMPLETE_RETRY_STREAK.clear()
     return db_path, target_date
 
 
@@ -1850,12 +1867,20 @@ class TestEmitterMonotone:
         assert all(p["settlement_source"] == "aviationweather_metar" for p in payloads)
         assert all(p["live_authority_status"] == "live" for p in payloads)
 
-    def test_noaa_print_advances_before_slower_ogimet_mirror(self):
+    def test_noaa_print_advances_before_slower_ogimet_mirror(self, monkeypatch):
         """Istanbul loss replay: direct LTFM 32C must wake redecision even
         while the canonical Ogimet hourly mirror still ends at 31C."""
         conn = _world_conn()
         first = datetime(2026, 7, 27, 12, 50, tzinfo=UTC)
         latest = datetime(2026, 7, 27, 13, 20, tzinfo=UTC)
+        clock = [first + timedelta(minutes=3)]
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock[0].astimezone(tz or UTC)
+        monkeypatch.setattr("src.data.day0_fast_obs.datetime", Clock)
+        monkeypatch.setattr("src.events.triggers.day0_extreme_updated.runtime_cities_by_name",
+                            lambda: {"Istanbul": _istanbul()})
         reports = [
             _report("LTFM", first, 31.0, t_group=False, receipt_offset_min=2.0)
         ]
@@ -1876,10 +1901,8 @@ class TestEmitterMonotone:
         reports.append(
             _report("LTFM", latest, 32.0, t_group=False, receipt_offset_min=2.0)
         )
-        second_decision = max(
-            latest + timedelta(minutes=3),
-            datetime.now(UTC) + timedelta(minutes=1),
-        )
+        second_decision = latest + timedelta(minutes=3)
+        clock[0] = second_decision
         traced: list[str] = []
         conn.set_trace_callback(traced.append)
         assert emitter.emit_events(
@@ -3575,7 +3598,7 @@ class TestMutexNoHttpSplit:
 
         assert [name for name, _models in fetches] == ["Tokyo"]
         conn = sqlite3.connect(db_path)
-        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors WHERE model NOT LIKE 'ecmwf_ifs025_member%'").fetchone()[0] == 6
         conn.close()
 
     def test_hourly_refresh_reserves_strict_bundle_priority_slot_while_trading(
@@ -3628,9 +3651,9 @@ class TestMutexNoHttpSplit:
 
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
         conn = sqlite3.connect(db_path)
-        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors WHERE model NOT LIKE 'ecmwf_ifs025_member%' AND target_date = ?", (target_date,)).fetchone()[0] == 0
         conn.close()
-        refresh_key = f"Tokyo|{target_date}"
+        refresh_key = f"Tokyo|{target_date}|ens={target_date}"
         assert vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] == (
             clock["now"] + vectors_module.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
         )
@@ -3640,7 +3663,9 @@ class TestMutexNoHttpSplit:
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
         conn = sqlite3.connect(db_path)
-        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
+        # Tomorrow's complete bundle may already have committed on the first
+        # attempt. Append-only recapture is another version, not another model.
+        assert conn.execute("SELECT COUNT(DISTINCT model || '|' || target_date) FROM day0_hourly_vectors WHERE model NOT LIKE 'ecmwf_ifs025_member%'").fetchone()[0] == 6
         conn.close()
         probe = reactor_module._edli_day0_hourly_refresh_due_families(
             cities=[tokyo], decision_time=datetime.now(UTC)
@@ -3702,7 +3727,7 @@ class TestMutexNoHttpSplit:
 
         assert fetches == ["Tokyo"]
         conn = sqlite3.connect(db_path)
-        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors WHERE model NOT LIKE 'ecmwf_ifs025_member%'").fetchone()[0] == 6
         conn.close()
 
     def test_hourly_refresh_cursor_advances_across_full_held_segment_when_throttled(

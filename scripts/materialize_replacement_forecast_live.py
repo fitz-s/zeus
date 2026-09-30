@@ -1248,6 +1248,9 @@ def _materialize(
                 stage_receipt.mark("wake")
                 stage_receipt.require_budget()
                 wake_published = _publish_materialization_wake(request)
+            if result.ok and result.posterior_id is not None:
+                from src.runtime.observation_reaction_trace import emit_posterior_ready
+                emit_posterior_ready(conn, result.posterior_id, wake_published=wake_published)
         else:
             if anchor_artifact_id is not None:
                 request = replace(request, anchor_artifact_id=anchor_artifact_id)
@@ -1396,7 +1399,36 @@ def _print_batch_envelope(
     )
 
 
+def _resident_worker() -> int:
+    """Private queue transport: reuse imports/caches, never reuse a transaction."""
+    import contextlib
+    import os
+    allowed = {"--input-json", "--batch-input-json", "--deadline-utc", "--commit"}
+    for line in iter(lambda: sys.stdin.readline(1024 * 1024 + 1), ""):
+        if len(line) > 1024 * 1024:
+            return 2
+        message = json.loads(line)
+        arguments = message["argv"]
+        if (not isinstance(arguments, list) or not all(isinstance(x, str) for x in arguments)
+            or "--commit" not in arguments
+            or any(x.startswith("--") and x not in allowed for x in arguments)):
+            return 2
+        output, errors = StringIO(), StringIO()
+        try:
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                returncode = main(arguments)
+        except Exception as exc:
+            returncode = 2
+            errors.write(json.dumps({"status": "ERROR", "error_type": type(exc).__name__}))
+        print(json.dumps({"request_id": message["request_id"], "returncode": returncode,
+                          "stdout": output.getvalue(), "stderr": errors.getvalue(),
+                          "worker_pid": os.getpid()}), flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    if list(sys.argv[1:] if argv is None else argv) == ["--resident-worker"]:
+        return _resident_worker()
     parser = argparse.ArgumentParser(
         description="Materialize replacement forecast live posterior"
     )

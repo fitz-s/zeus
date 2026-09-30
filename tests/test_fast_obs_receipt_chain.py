@@ -128,7 +128,7 @@ def test_station_route_not_city_name_and_shared_budget(tmp_path):
     assert physical_current_sources_for_city(alias) == ()
     data = json.loads(REGISTRY_PATH.read_text())
     other = dict(data["sources"][0], station_id="TEST")
-    data["sources"].append(other)
+    data["sources"] = [data["sources"][0], other]
     path = tmp_path/"two_stations.json"
     path.write_text(json.dumps(data))
     routes, period = load_physical_current_sources(path)
@@ -205,3 +205,19 @@ def test_both_settlement_writers_keep_hko_identity_separate_from_airport(module_
     assert module._station_matches_city("HKO", city)
     assert not module._station_matches_city("VHHH", city)
     assert not module._station_matches_city(None, city)
+
+
+def test_faithfulness_import_failure_is_physical_evidence_not_zero_divergence(monkeypatch):
+    import src.data.day0_oracle_anomaly as anomaly
+    from src.data.day0_fast_obs import fast_obs_source_for_city, fast_obs_to_day0_observation, running_extremes_for_local_day
+    monkeypatch.delattr(anomaly, "metar_margin_units_for_city")
+    now=datetime(2026,9,29,12,tzinfo=UTC)
+    city=SimpleNamespace(name="test-city",wu_station="TEST",settlement_source_type="noaa",settlement_unit="C",timezone="UTC")
+    source=fast_obs_source_for_city(city,target_date="2026-09-29")
+    assert source is not None and source.faithfulness_known is False
+    report=MetarReport("TEST",now-timedelta(minutes=1),now,15.0,"METAR","TEST 291159Z 00000KT 15/10")
+    extrema=running_extremes_for_local_day([report],city=city,target_date="2026-09-29",as_of=now)
+    obs=fast_obs_to_day0_observation(city=city,extremes=extrema,metric="high",source=source)
+    assert obs["source_authorized_status"]=="UNAUTHORIZED"
+    assert obs["live_authority_status"]=="blocked"
+    assert obs["current_observation_temp_c"]==15.0

@@ -18704,3 +18704,30 @@ def test_live_exit_snapshot_denial_deadline_reaches_monitor_retry(
     assert position.next_exit_retry_at == expected.isoformat()
     clock[0] = denied_until + timedelta(seconds=1)
     assert exit_lifecycle.is_exit_cooldown_active(position) is (not typed_denial)
+
+
+@pytest.mark.parametrize("exit_state", ["backoff_exhausted", "retry_pending", "exit_intent"])
+@pytest.mark.parametrize("missing", ["rpc", "funder"])
+def test_unknown_chain_absence_never_admin_closes_exposure(conn, monkeypatch, exit_state, missing):
+    """REQ round2: failure to observe a balance is not zero exposure."""
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+    position = Position(
+        trade_id="unknown-chain-exit", market_id="condition-test", condition_id="condition-test",
+        city="Seoul",cluster="asia",target_date="2026-09-29",bin_label="28C",
+        direction="buy_yes",token_id=YES_TOKEN,no_token_id=NO_TOKEN,
+        entry_price=0.51,size_usd=5.1,shares=10.0,cost_basis_usd=5.1,
+        state="pending_exit",pre_exit_state="day0_window",exit_state=exit_state,
+        order_status=exit_state,chain_state="exit_pending_missing",exit_retry_count=5,
+        strategy_key="forecast_qkernel_entry",env="live")
+    portfolio = PortfolioState(positions=[position])
+    monkeypatch.delenv("POLYMARKET_FUNDER_ADDRESS", raising=False)
+    monkeypatch.delenv("POLYMARKET_PROXY_ADDRESS", raising=False)
+    monkeypatch.setattr("src.data.polymarket_client.resolve_funder_address", lambda: "" if missing=="funder" else "0x"+"1"*40)
+    monkeypatch.setattr(exit_lifecycle,"_query_ctf_balance",lambda *_a,**_k:None)
+    result=exit_lifecycle.handle_exit_pending_missing(portfolio,position,conn)
+    assert position in portfolio.positions
+    assert position.state=="pending_exit"
+    assert result["action"]=="skip"
+    assert portfolio.recent_exits==[]
+    assert conn.execute("SELECT COUNT(*) FROM review_work_items WHERE subject_id=? AND status='OPEN'",(position.trade_id,)).fetchone()[0]==1

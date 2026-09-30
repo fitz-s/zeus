@@ -253,6 +253,22 @@ class_defaults:
     required_tests: []
 
 scripts:
+  backfill_noaa_wrh.py:
+    class: etl_writer
+    status: active
+    lifecycle: long_lived
+    authority_scope: settlement_page_observation_backfill
+    canonical_command: "python3 scripts/backfill_noaa_wrh.py --start YYYY-MM-DD --end YYYY-MM-DD"
+    read_targets: [config/cities.json, observations, source_run, source_run_coverage]
+    write_targets: [observations, observation_prints, data_coverage, daily_observation_revisions]
+    dry_run_default: true
+    apply_flag: --apply
+    target_db: state/zeus-forecasts.db
+    external_inputs: [NOAA_WRH_Synoptic_settlement_page]
+    dangerous_if_run: true
+    promotion_barrier: "No resolver changes; --apply requires explicit operator authorization and coordinated FORECAST/WORLD ownership."
+    required_helpers: [get_forecasts_connection_with_world, _write_atom_with_coverage]
+    required_tests: [tests/test_noaa_wrh_settlement_product.py]
   validate_source_clock_probabilities.py: {class: read_only_inspection, dangerous_if_run: false, target_db: state/zeus-forecasts.db, read_targets: [state/zeus-forecasts.db, state/zeus-family-book-evidence.db, config/cities.json], write_targets: [], authority_scope: offline_probability_validation, reuse_when: "Compare current-resolver day-ahead source combinations using actual possession times and production probability math.", do_not_use_when: "Do not infer market or execution superiority without contemporaneous complete market evidence; never activates weights.", canonical_command: "python3 scripts/validate_source_clock_probabilities.py --forecasts PATH --as-of ISO8601 --start-date YYYY-MM-DD [--market-evidence PATH]", required_tests: [tests/scripts/test_validate_source_clock_probabilities.py, tests/forecast/test_probability_validation.py, tests/data/test_current_settlement_history.py]}
   _build_pm_truth.py: {class: config_writer, write_targets: [data/pm_settlements_full.json], target_db: data/pm_settlements_full.json, external_inputs: [Polymarket Gamma API], apply_flag: implicit, unguarded_write_rationale: "Existing packet-generated builder writes a data artifact directly; output is evidence and must be reviewed before promotion.", promotion_barrier: "Generated PM settlement export is evidence and must not become canonical truth without a dedicated settlement authority packet."}
   _yaml_bootstrap.py: {class: utility}

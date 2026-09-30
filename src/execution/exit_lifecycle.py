@@ -6379,7 +6379,7 @@ def handle_exit_pending_missing(
     Polygon CTF ERC-1155 contract for the actual on-chain balance:
       - balance == 0 → position is sold on-chain; mark voided
       - balance > 0  → position still held; re-queue for exit retry
-      - RPC failure  → fail-open, fall through to existing logic (no destructive action)
+      - RPC/funder failure → preserve exposure and record retryable review debt
     """
 
     raw_chain_state = getattr(position, "chain_state", "") or ""
@@ -6533,52 +6533,29 @@ def handle_exit_pending_missing(
                     position.exit_state = ""
                 _release_pending_exit(position)
                 return {"action": "evaluate", "position": position}
-        # on_chain_balance is None → RPC failure; fall through to legacy logic
-        logger.warning(
-            "CHAIN_TRUTH_RPC_FAIL %s: RPC unreachable, falling back to legacy exit_state logic",
-            position.trade_id,
-        )
-    # ── Legacy exit_state branch logic ───────────────────────────────────────
-    _mark_pending_exit(position)
-    # FIX 2a (2026-06-20): the canonical payload's exit_reason is
-    # `position.exit_reason or reason` (see canonical_write.transition_phase), so
-    # dedupe against that effective value — NOT the bare `reason` arg — or the
-    # epoch check would never match when a prior exit_reason is set.
-    _legacy_reject_reason = str(getattr(position, "exit_reason", "") or "EXIT_CHAIN_MISSING")
-    if not _latest_exit_reject_is_identical(conn, position, reason=_legacy_reject_reason):
-        _dual_write_canonical_pending_exit_if_available(
-            conn,
-            position,
-            reason="EXIT_CHAIN_MISSING",
-            error=getattr(position, "last_exit_error", "") or "exit_pending_missing",
-            event_type="EXIT_ORDER_REJECTED",
-        )
-    if position.exit_state == "backoff_exhausted":
-        closed = mark_admin_closed(portfolio, position.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
-        if closed is not None:
-            _dual_write_canonical_admin_close_if_available(
-                conn,
-                closed,
-                phase_before="pending_exit",
-                reason="EXIT_CHAIN_MISSING_REVIEW_REQUIRED",
-                error=getattr(position, "last_exit_error", "") or "exit_pending_missing",
+        logger.warning("CHAIN_TRUTH_RPC_FAIL %s: absence unconfirmed; exposure retained", position.trade_id)
+    # Missing funder/token or a failed RPC is UNKNOWN, never absence. Neither a
+    # retry budget nor an in-memory display phase can close real exposure.
+    if conn is not None:
+        try:
+            from src.contracts.review_work_item import ReviewReasonCode
+            from src.state.review_work_items import open_work_item, family_key_for_condition_or_token
+            open_work_item(
+                conn, owner_domain="trade", owner_table="position_current",
+                subject_id=position.trade_id,
+                reason_code=ReviewReasonCode.TIMEOUT_ABSENCE_UNCONFIRMED,
+                evidence_refs=(position.trade_id, str(asset_id)),
+                family_key=family_key_for_condition_or_token(
+                    conn, condition_id=str(getattr(position, "condition_id", "") or ""),
+                    token_id=str(asset_id),
+                ),
+                exposure_bound_usd=None, unbounded=True,
+                last_error_class="CHAIN_ABSENCE_UNCONFIRMED",
+                last_error_detail="No current on-chain absence proof; retain exposure and order ownership.",
             )
-            return {"action": "closed", "position": closed}
-        return {"action": "skip", "position": None}
-    if position.exit_state in EXIT_LIFECYCLE_RECOVERY_STATES:
-        # DELIBERATE in-memory-only close (antibody
-        # test_recoverable_exit_pending_missing_does_not_persist_admin_close):
-        # a recoverable state must keep its pending_exit projection so the next
-        # cycle retries — persisting admin_closed here would hide real on-chain
-        # exposure. The loop TERMINATES through the chain-truth gate above
-        # (funder now resolves from Keychain, 2026-06-12) whose retries are
-        # bounded by the persisted exit_retry_count → backoff_exhausted →
-        # persisted admin close.
-        closed = mark_admin_closed(portfolio, position.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
-        return {"action": "closed", "position": closed}
-    if position.exit_state in EXIT_LIFECYCLE_OWNED_STATES:
-        return {"action": "skip", "position": None}
-    return {"action": "ignore", "position": None}
+        except Exception:
+            logger.exception("exit chain review bookkeeping failed for %s", position.trade_id)
+    return {"action": "skip", "position": position, "reason": "CHAIN_ABSENCE_UNCONFIRMED"}
 
 
 def _void_chain_confirmed_zero(

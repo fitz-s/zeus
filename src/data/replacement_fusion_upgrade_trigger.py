@@ -658,6 +658,30 @@ def scope_capture_offers_larger_provider_set(
         legacy_wu_fast_residual,
         source_clock_scheme,
     ) = _latest_posterior_inputs(conn, city=city, target_date=target_date, metric=metric)
+    requested_sources = (
+        None if changed_sources is None
+        else frozenset(str(source).strip() for source in changed_sources if str(source).strip())
+    )
+    current_requested = requested_sources is None or _DAY0_CURRENT_TEMPERATURE_SOURCE in requested_sources
+    current_state = None
+    if current_requested and decision_time is not None:
+        try:
+            current_state = _capturable_current_temperature_state(
+                city=city, target_date=target_date, decision_time=decision_time,
+            )
+        except (OSError, sqlite3.Error):
+            _LOG.warning("current-temperature revision read unavailable for %s/%s", city, target_date, exc_info=True)
+    if source_cycle_iso is None and current_state is not None:
+        # A first posterior has no incumbent cycle to reuse. Only the existing
+        # family-scoped, causally eligible ENS carrier can supply that identity.
+        from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
+
+        carrier = latest_eligible_ensemble_input_cycle(
+            conn, city=city, target_date=target_date, metric=metric,
+            decision_time=decision_time,
+        )
+        if carrier is not None:
+            source_cycle_iso = carrier.astimezone(UTC).isoformat()
     if source_cycle_iso is None:
         return {
             "is_upgrade": False,
@@ -719,11 +743,7 @@ def scope_capture_offers_larger_provider_set(
     # to grow (the single-anchor fallback is a separate concern handled by the missing-capture gate).
     family_upgrade = bool(served) and bool(new_families) and served.issubset(capturable_expected)
     relevant_sources = (configured_sources or frozenset(consumed_inputs)) | station_sources
-    requested_sources = None
-    if changed_sources is not None:
-        requested_sources = frozenset(
-            str(source).strip() for source in changed_sources if str(source).strip()
-        )
+    if requested_sources is not None:
         relevant_sources &= requested_sources
     changed_inputs = sorted(
         source
@@ -786,24 +806,12 @@ def scope_capture_offers_larger_provider_set(
             changed_revisions[_DAY0_CAUSAL_BUNDLE_SOURCE] = (
                 current_day0_vector_revision
             )
-    current_requested = requested_sources is None or _DAY0_CURRENT_TEMPERATURE_SOURCE in requested_sources
-    if (
-        current_requested
-        and (consumed_current_temperature_carrier or legacy_wu_fast_residual)
-    ):
-        try:
-            current_state = _capturable_current_temperature_state(
-                city=city, target_date=target_date, decision_time=decision_time,
-            )
-        except (OSError, sqlite3.Error):
-            current_state = None
-        if (
-            current_state is not None
-            and current_state != consumed_current_temperature_state
-        ):
-            changed_inputs.append(_DAY0_CURRENT_TEMPERATURE_SOURCE)
-            changed_inputs.sort()
-            changed_revisions[_DAY0_CURRENT_TEMPERATURE_SOURCE] = current_state
+    # Input possession, not the previous posterior's shape, creates the debt.
+    # Durable consumed identity closes it; an enqueue or process-local hint does not.
+    if current_state is not None and current_state != consumed_current_temperature_state:
+        changed_inputs.append(_DAY0_CURRENT_TEMPERATURE_SOURCE)
+        changed_inputs.sort()
+        changed_revisions[_DAY0_CURRENT_TEMPERATURE_SOURCE] = current_state
     input_revision_changed = bool(changed_inputs)
     return {
         "is_upgrade": family_upgrade or input_revision_changed,
@@ -1765,6 +1773,7 @@ def enqueue_fusion_upgrade_reseeds(
             )
             station_input_revision = revision_update and any(
                 str(source).startswith(("hko_", "cwa_"))
+                or source == _DAY0_CURRENT_TEMPERATURE_SOURCE
                 for source in verdict["changed_input_sources"]
             )
             if station_input_revision:

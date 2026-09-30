@@ -435,13 +435,9 @@ def _materialization_subprocess_timeout_seconds() -> float:
 
 
 def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(argv),
-        cwd=PROJECT_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=_materialization_subprocess_timeout_seconds(),
+    from src.runtime.warm_materializer import run_warm_materialization
+    return run_warm_materialization(
+        argv, timeout=_materialization_subprocess_timeout_seconds(),
     )
 
 

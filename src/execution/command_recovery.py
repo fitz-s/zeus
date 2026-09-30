@@ -31019,6 +31019,8 @@ def _reconcile_passes_inline(
     terminal no-fill projection so late venue fills cannot be voided by an older
     cancel/expire terminal row.
     """
+    from src.execution.review_work_delivery import reconcile_review_work_items
+    summary["review_work_retry"] = reconcile_review_work_items(conn)
     if True:  # preserve original indentation of the extracted body verbatim
         edli_confirmed_command_summary = reconcile_edli_confirmed_legacy_command_repairs(conn)
         summary["edli_confirmed_legacy_command_repair"] = edli_confirmed_command_summary
@@ -35002,6 +35004,9 @@ def _reconcile_passes_short_conn(
                 result,
             )
         return result
+
+    from src.execution.review_work_delivery import reconcile_review_work_items
+    _db_pass("review_work_retry", reconcile_review_work_items, "review_work_retry")
 
     if scope == "boot_fast":
         # Boot recovery must not perform account-wide or per-order venue reads.

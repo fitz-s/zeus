@@ -4001,7 +4001,7 @@ def day0_current_temperature_channels(city: Any) -> tuple[str, tuple[str, ...]] 
     elif source_type == "hko":
         channels = ("hko_rhrread_spot",)
     elif source_type == "noaa":
-        channels = (f"ogimet_metar_{station.lower()}", "aviationweather_metar")
+        channels = (f"noaa_wrh_{station.lower()}", f"ogimet_metar_{station.lower()}", "aviationweather_metar")
     else:
         return None
     from src.data.physical_current_sources import physical_current_sources_for_city
@@ -4118,6 +4118,15 @@ def read_day0_current_temperature_state(
         if published > decision_utc or fetched > decision_utc:
             continue
         observation_time = published
+        from src.data.station_temperature_adapters import CHANNELS, valid_station_print
+        if channel in CHANNELS.values():
+            from src.data.physical_current_sources import physical_current_sources_for_city
+            route = next((r for r in physical_current_sources_for_city(city)
+                          if r.source_channel == channel and r.station_id == station_raw), None)
+            if route is None or not valid_station_print(
+                route, str(raw_report or ""), observed_at=published, value=value
+            ):
+                continue
         if channel == "fmi_airport_temperature":
             from src.data.fmi_airport_temperature import valid_ledger_print
             from src.data.physical_current_sources import physical_current_sources_for_city
@@ -4128,8 +4137,9 @@ def read_day0_current_temperature_state(
                 route is None
                 or str(unit_raw or "").strip().upper() != "C"
                 or fetched < published
-                or decision_utc - fetched > timedelta(minutes=25)
-                or decision_utc - published > timedelta(minutes=25)
+                or (target == decision_utc.astimezone(tz).date()
+                    and (decision_utc - fetched > timedelta(minutes=25)
+                         or decision_utc - published > timedelta(minutes=25)))
                 or not valid_ledger_print(str(raw_report or ""), observed_at=published,
                                           value=value, station=route.station)
             ):

@@ -1561,6 +1561,13 @@ def _k2_daily_obs_tick():
             return
         with get_forecasts_connection_with_world(write_class="bulk") as conn:
             result = daily_tick(conn, hko_accumulator_schema="world")
+        # The fallback may perform HTTP; the cross-DB writer flocks above must
+        # be released first. Coverage witnesses, not this call's success, own debt.
+        try:
+            from src.data.settlement_observation_selection import collect_due_noaa_fallbacks
+            result["contract_fallback"] = collect_due_noaa_fallbacks()
+        except Exception as exc:
+            logger.warning("NOAA_CONTRACT_FALLBACK_DEFERRED error=%s", type(exc).__name__)
     logger.info("K2 daily_obs_tick: %s", result)
 
 
@@ -2070,6 +2077,22 @@ def _physical_current_poll_seconds() -> float:
 
 
 _physical_current_pending_wakes: set[tuple[str, str, str]] = set()
+_physical_source_next_poll: dict[tuple[str, str, str], float] = {}
+
+
+@_scheduler_job("ingest_current_temperature_delivery")
+def _current_temperature_delivery_tick() -> dict[str, object]:
+    """Boot/periodic recovery is independent of HTTP success and process hints."""
+    from src.config import runtime_cities
+    from src.data.physical_current_delivery import reconcile_current_temperature_delivery
+    from src.data.replacement_forecast_production import _replacement_forecast_live_materialization_queue_config
+    try:
+        return reconcile_current_temperature_delivery(
+            _replacement_forecast_live_materialization_queue_config(), cities=runtime_cities(),
+        )
+    except Exception as exc:  # one replay turn must not stop acquisition/serving
+        logger.warning("CURRENT_TEMPERATURE_DELIVERY_DEFERRED error=%s", type(exc).__name__)
+        return {"status": "DELIVERY_DEFERRED", "error_class": type(exc).__name__}
 
 
 @_scheduler_job("ingest_day0_fmi_temperature")
@@ -2082,8 +2105,19 @@ def _day0_fmi_temperature_tick() -> dict[str, object]:
     # One physical request per station per round, even if multiple city aliases
     # own different market families for that station. Failures are shared too.
     fetch_cache: dict[tuple[str, str, str], tuple[tuple, str]] = {}
+    round_now = time.monotonic()
+    admitted = set()
     for city in runtime_cities_by_name().values():
         for route in physical_current_sources_for_city(city):
+            key = (route.provider, route.station_id, route.source_channel)
+            if key not in admitted:
+                if round_now < _physical_source_next_poll.get(key, 0):
+                    continue
+                admitted.add(key)
+                # The scheduler already owns the fastest provider interval.
+                # Slower sources keep their own clock, including on failure.
+                if route.minimum_poll_seconds > _physical_current_poll_seconds():
+                    _physical_source_next_poll[key] = round_now + route.minimum_poll_seconds
             reports.append(_day0_current_temperature_source_tick(city, route, fetch_cache=fetch_cache))
     if not reports:
         return {"status": "STATION_NOT_CONFIGURED"}
@@ -2092,7 +2126,7 @@ def _day0_fmi_temperature_tick() -> dict[str, object]:
 
 def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> dict[str, object]:
     """HTTP before WORLD lease; committed physical evidence before any reseed."""
-    from src.data.fmi_airport_temperature import fetch_temperature
+    from src.data.station_temperature_adapters import fetch_station_temperature
     from src.state.db import get_world_connection, world_write_mutex
     from src.state.schema.observation_prints_schema import append_print
     from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
@@ -2112,7 +2146,7 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         source_received_ns = time.monotonic_ns()
     else:
         try:
-            prints = fetch_temperature(start=now - timedelta(hours=2), end=now, station=route.station)
+            prints = fetch_station_temperature(route, start=now - timedelta(hours=2), end=now)
             source_received_ns = time.monotonic_ns()
             if fetch_cache is not None:
                 fetch_cache[cache_key] = (prints, "")
@@ -2192,10 +2226,11 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         # The existing fusion input-revision marker owns durable per-family
         # publication and periodic catch-up if this immediate scoped pass fails.
         decision_time = datetime.now(timezone.utc)
-        local_day = decision_time.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+        from src.data.physical_current_delivery import current_temperature_delivery_scopes
+        affected_scopes = current_temperature_delivery_scopes((city,), now=decision_time)
         report = _enqueue_fusion_upgrade_reseeds_if_needed(
             _replacement_forecast_live_materialization_queue_config(),
-            scopes=((city.name, local_day, "high"), (city.name, local_day, "low")),
+            scopes=affected_scopes,
             changed_sources=("day0_current_temperature_state",),
             computed_at=decision_time,
         )
@@ -2220,6 +2255,13 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         "q_served_at_ms": None,  # Asynchronous producer owns this later fact.
         "venue_ack_at_ms": None,  # Enqueue is not a market reaction.
     }
+    if advanced:
+        from src.runtime.observation_reaction_trace import emit_stage
+        emit_stage("SOURCE_COMMITTED", city=city.name, station_id=station_id,
+            input_identity={"source": source_channel, "observed_at_utc": sample.observed_at.isoformat(),
+                            "value_native": sample.temperature_c},
+            response_received_at_ms=trace["response_received_at_ms"],
+            world_committed_at_ms=world_committed_at_ms)
     if advanced or wake_status != "NO_NEW_SOURCE_REVISION":
         logger.info("PHYSICAL_CURRENT_CHAIN_TRACE %s", json.dumps(trace, sort_keys=True))
     return {"status": "COMMITTED", "inserted": inserted, "advanced": advanced, "clock_trace": trace}
@@ -5658,6 +5700,9 @@ def _ingest_main_job_specs() -> list[tuple]:
             id="ingest_day0_metar_source_clock", max_instances=1, coalesce=True,
             misfire_grace_time=max(5, int(day0_metar_poll_seconds * 2)),
             next_run_time=now)),
+        (_current_temperature_delivery_tick, "interval", dict(seconds=1,
+            id="ingest_current_temperature_delivery", max_instances=1, coalesce=True,
+            misfire_grace_time=5, next_run_time=now)),
         (_day0_fmi_temperature_tick, "interval", dict(seconds=_physical_current_poll_seconds(),
             id="ingest_day0_fmi_temperature", max_instances=1, coalesce=True,
             misfire_grace_time=120, next_run_time=now)),

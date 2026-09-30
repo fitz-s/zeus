@@ -1666,6 +1666,8 @@ def read_replacement_forecast_bundle(
         dependency_hash=str(row_map["dependency_hash"]),
         posterior_config_hash=str(row_map["posterior_config_hash"]),
     )
+    from src.runtime.observation_reaction_trace import emit_q_served
+    emit_q_served(bundle)
     return ReplacementForecastBundleReadResult(READY_STATUS, "REPLACEMENT_POSTERIOR_READY", bundle)
 
 

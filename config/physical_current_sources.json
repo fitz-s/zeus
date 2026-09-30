@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "role": "physical_current_only",
+  "role": "station_temperature_observations",
   "providers": {
     "fmi_wfs": {
       "requests_per_poll": 2,
@@ -14,7 +14,9 @@
       "provider": "fmi_wfs",
       "source_channel": "fmi_airport_temperature",
       "station_id": "EFHK",
-      "settlement_source_types": ["noaa"],
+      "settlement_source_types": [
+        "noaa"
+      ],
       "unit": "C",
       "minimum_poll_seconds": 1,
       "native_cadence_seconds": 600,
@@ -25,7 +27,254 @@
         "latitude": 60.32937,
         "longitude": 24.97274
       },
-      "authority_note": "Existing physical-current mapping only. Not proof that the WFS sensor is the NOAA resolver sensor. No settlement promotion."
+      "authority_note": "Value comparison, not missing instrument certificate: 18/25 exact, 7 mismatches. Retain physical-current only.",
+      "settlement_grade": false,
+      "value_identity_proof": {
+        "city": "Helsinki",
+        "channel": "fmi",
+        "n_pairs": 25,
+        "n_exact": 18,
+        "mismatches": [
+          {
+            "time": "2026-09-29T15:50:00+00:00",
+            "raw": 14.4,
+            "rounded": 14,
+            "resolver_raw": 15.0,
+            "resolver_rounded": 15,
+            "match": false
+          },
+          {
+            "time": "2026-09-29T16:20:00+00:00",
+            "raw": 14.5,
+            "rounded": 15,
+            "resolver_raw": 14.0,
+            "resolver_rounded": 14,
+            "match": false
+          },
+          {
+            "time": "2026-09-29T17:50:00+00:00",
+            "raw": 13.4,
+            "rounded": 13,
+            "resolver_raw": 14.0,
+            "resolver_rounded": 14,
+            "match": false
+          },
+          {
+            "time": "2026-09-29T18:20:00+00:00",
+            "raw": 13.3,
+            "rounded": 13,
+            "resolver_raw": 14.0,
+            "resolver_rounded": 14,
+            "match": false
+          },
+          {
+            "time": "2026-09-29T19:50:00+00:00",
+            "raw": 11.3,
+            "rounded": 11,
+            "resolver_raw": 12.0,
+            "resolver_rounded": 12,
+            "match": false
+          },
+          {
+            "time": "2026-09-29T22:20:00+00:00",
+            "raw": 11.6,
+            "rounded": 12,
+            "resolver_raw": 11.0,
+            "resolver_rounded": 11,
+            "match": false
+          },
+          {
+            "time": "2026-09-30T03:20:00+00:00",
+            "raw": 7.6,
+            "rounded": 8,
+            "resolver_raw": 7.0,
+            "resolver_rounded": 7,
+            "match": false
+          }
+        ],
+        "latest": "2026-09-30T03:50:00+00:00"
+      }
+    },
+    {
+      "provider": "jma_amedas",
+      "source_channel": "jma_amedas_temperature",
+      "station_id": "RJTT",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "44166"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 20,
+        "n_exact": 20,
+        "mismatches": []
+      },
+      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+    },
+    {
+      "provider": "eccc_swob",
+      "source_channel": "eccc_swob_temperature",
+      "station_id": "CYYZ",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "CYYZ"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 5,
+        "n_exact": 5,
+        "mismatches": []
+      },
+      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+    },
+    {
+      "provider": "imgw_synop",
+      "source_channel": "imgw_synop_temperature",
+      "station_id": "EPWA",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "12375"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 1,
+        "n_exact": 1,
+        "mismatches": []
+      },
+      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+    },
+    {
+      "provider": "dwd_cdc",
+      "source_channel": "dwd_cdc_temperature",
+      "station_id": "EDDM",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "01262"
+      },
+      "settlement_grade": false,
+      "value_identity_proof": {
+        "n_pairs": 24,
+        "n_exact": 19,
+        "mismatches": [
+          {
+            "time": "2026-09-29T15:50:00+00:00",
+            "raw": 22.4,
+            "rounded": 22,
+            "resolver_raw": 23.0,
+            "resolver_rounded": 23,
+            "match": false
+          },
+          {
+            "time": "2026-09-29T16:20:00+00:00",
+            "raw": 21.4,
+            "rounded": 21,
+            "resolver_raw": 22.0,
+            "resolver_rounded": 22,
+            "match": false
+          },
+          {
+            "time": "2026-09-29T16:50:00+00:00",
+            "raw": 19.4,
+            "rounded": 19,
+            "resolver_raw": 20.0,
+            "resolver_rounded": 20,
+            "match": false
+          },
+          {
+            "time": "2026-09-29T17:50:00+00:00",
+            "raw": 16.1,
+            "rounded": 16,
+            "resolver_raw": 17.0,
+            "resolver_rounded": 17,
+            "match": false
+          },
+          {
+            "time": "2026-09-30T01:20:00+00:00",
+            "raw": 6.5,
+            "rounded": 7,
+            "resolver_raw": 6.0,
+            "resolver_rounded": 6,
+            "match": false
+          }
+        ]
+      },
+      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+    },
+    {
+      "provider": "knmi_observations",
+      "source_channel": "knmi_station_temperature",
+      "station_id": "EHAM",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "06240"
+      },
+      "settlement_grade": false,
+      "value_identity_proof": {
+        "n_pairs": 0,
+        "n_exact": 0,
+        "mismatches": []
+      },
+      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+    },
+    {
+      "provider": "wu_station_history",
+      "source_channel": "wu_station_history_temperature",
+      "station_id": "ZSJN",
+      "settlement_source_types": [
+        "wu_icao"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZSJN:9:CN"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 28,
+        "n_exact": 28,
+        "mismatches": []
+      },
+      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
+    },
+    {
+      "provider": "wu_station_current",
+      "source_channel": "wu_station_current_temperature",
+      "station_id": "ZSJN",
+      "settlement_source_types": [
+        "wu_icao"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZSJN:9:CN"
+      },
+      "settlement_grade": false,
+      "value_identity_proof": {
+        "n_pairs": 0,
+        "n_exact": 0,
+        "mismatches": []
+      },
+      "proof_scope": "Same UTC valid-time pairs under contract unit/WMO half-up law; no nearest-time matching; no promise of all future equality."
     }
   ]
 }

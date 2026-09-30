@@ -17,6 +17,36 @@ in_scope:
 - tests/test_order_truth_reducer.py
 - tests/test_fmi_airport_temperature.py
 - tests/test_fast_obs_receipt_chain.py
+- src/data/replacement_fusion_upgrade_trigger.py
+- src/data/replacement_forecast_production.py
+- src/data/replacement_forecast_live_materialization_queue.py
+- src/data/replacement_forecast_materializer.py
+- scripts/materialize_replacement_forecast_live.py
+- src/main.py
+- src/runtime/observation_reaction_trace.py
+- src/data/physical_current_delivery.py
+- src/data/station_temperature_adapters.py
+- src/runtime/warm_materializer.py
+- src/execution/exit_lifecycle.py
+- src/state/review_work_items.py
+- src/execution/command_recovery.py
+- tests/test_current_temperature_delivery.py
+- tests/test_station_temperature_adapters.py
+- tests/test_day0_fast_obs_lane.py
+- tests/test_noaa_wrh_settlement_product.py
+- tests/test_exit_safety.py
+- tests/test_review_work_delivery.py
+- architecture/script_manifest.yaml
+- architecture/db_table_ownership.yaml
+- src/data/settlement_observation_selection.py
+- src/execution/review_work_delivery.py
+- tests/test_observation_reaction_chain.py
+- tests/test_settlement_fallback_hierarchy.py
+- tests/test_warm_materializer.py
+- src/data/daily_obs_append.py
+- src/data/replacement_forecast_bundle_reader.py
+- src/state/venue_command_repo.py
+- tests/data/test_fusion_upgrade_trigger.py
 allow_companions:
 - config/AGENTS.md
 - architecture/source_rationale.yaml
@@ -30,5 +60,5 @@ out_of_scope:
 - live branch
 - production DB writes
 - daemon deployment
-- settlement-source promotion
 - probability formula changes
+- promotion without exact station/time rounded-value evidence

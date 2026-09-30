@@ -63,7 +63,7 @@ import logging
 import math
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
@@ -150,6 +150,7 @@ class WuDailyFetchResult:
     retryable: bool = False
     auth_failed: bool = False
     error: str | None = None
+    extreme_times: dict[str, tuple[datetime, datetime]] = field(default_factory=dict)
 
     @property
     def failed(self) -> bool:
@@ -163,6 +164,7 @@ def _fetch_wu_icao_daily_highs_lows(
     end_date: date,
     unit: str,
     timezone_name: str,
+    *, require_station_identity: bool = False,
 ) -> WuDailyFetchResult:
     """Fetch local-date (high, low) from the WU ICAO history endpoint.
 
@@ -230,12 +232,17 @@ def _fetch_wu_icao_daily_highs_lows(
                 error=f"json parse failed: {e}",
             )
         observations = body.get("observations", [])
+        if require_station_identity and any(str(obs.get("obs_id", "")).upper() != icao.upper() for obs in observations):
+            return WuDailyFetchResult(payload={}, failure_reason=CoverageReason.PARSE_ERROR,
+                                      error="WU station identity mismatch")
         if not observations:
             return WuDailyFetchResult(payload={})
 
         tz = ZoneInfo(timezone_name)
         highs: dict[str, float] = {}
         lows: dict[str, float] = {}
+        high_times: dict[str, datetime] = {}
+        low_times: dict[str, datetime] = {}
         for obs in observations:
             temp = obs.get("temp")
             epoch = obs.get("valid_time_gmt")
@@ -246,6 +253,11 @@ def _fetch_wu_icao_daily_highs_lows(
                 continue
             key = local_date.isoformat()
             t = float(temp)
+            if not math.isfinite(t):
+                continue
+            stamp = datetime.fromtimestamp(int(epoch), timezone.utc).astimezone(tz)
+            if t > highs.get(key, float("-inf")): high_times[key] = stamp
+            if t < lows.get(key, float("inf")): low_times[key] = stamp
             highs[key] = max(highs.get(key, float("-inf")), t)
             lows[key] = min(lows.get(key, float("inf")), t)
 
@@ -261,7 +273,7 @@ def _fetch_wu_icao_daily_highs_lows(
                 retryable=True,
                 error="WU response had observations but no usable temp/valid_time_gmt pairs",
             )
-        return WuDailyFetchResult(payload=payload)
+        return WuDailyFetchResult(payload=payload, extreme_times={key: (high_times[key], low_times[key]) for key in payload})
     except (httpx.HTTPError, httpx.RequestError) as e:
         # S3 fix: warning not debug — programmer errors (KeyError on
         # response shape, attribute errors) should surface in production
@@ -1345,6 +1357,8 @@ def append_wu_city(
     conn,
     *,
     rebuild_run_id: str,
+    resolver_fallback: dict | None = None,
+    prefetched_result: WuDailyFetchResult | None = None,
 ) -> dict:
     """Fetch and write a specific date set for one WU ICAO city.
 
@@ -1377,8 +1391,9 @@ def append_wu_city(
     # WU historical supports date ranges natively. Fetch the bounding
     # window [min..max] in one call, then filter to requested dates.
     start_d, end_d = dates[0], dates[-1]
-    fetch_result = _fetch_wu_icao_daily_highs_lows(
-        icao, cc, start_d, end_d, unit, city_cfg.timezone,
+    fetch_kwargs = {"require_station_identity": True} if resolver_fallback else {}
+    fetch_result = prefetched_result or _fetch_wu_icao_daily_highs_lows(
+        icao, cc, start_d, end_d, unit, city_cfg.timezone, **fetch_kwargs,
     )
     if fetch_result.failed:
         reason = fetch_result.failure_reason or CoverageReason.NETWORK_ERROR
@@ -1442,6 +1457,10 @@ def append_wu_city(
             continue
 
         high_val, low_val = pair
+        times = fetch_result.extreme_times.get(target_str, (None, None))
+        if resolver_fallback and (times[0] is None or times[1] is None):
+            stats["guard_rejected"] += 1
+            continue  # Do not synthesize a fallback extreme observation instant.
         try:
             atom_high, atom_low = _build_atom_pair(
                 city_name=city_name,
@@ -1461,7 +1480,9 @@ def append_wu_city(
                     "icao": icao,
                     "cc": cc,
                     "fetched_range": f"{start_d.isoformat()}..{end_d.isoformat()}",
+                    **({"resolver_fallback": resolver_fallback} if resolver_fallback else {}),
                 },
+                high_local_time=times[0], low_local_time=times[1],
             )
         except IngestionRejected as e:
             stats["guard_rejected"] += 1
@@ -2127,6 +2148,16 @@ def append_noaa_wrh_city(
                 "noaa_wrh %s/%s: no %s-view rows; leaving the day unwritten",
                 city_name, target_d, view,
             )
+            from src.data.settlement_observation_selection import fallback_deadline, EMPTY_AFTER_DEADLINE
+            # Only a successful station-validated empty reply enters this branch;
+            # a timeout, refused credential, or malformed response never does.
+            if datetime.now(timezone.utc) >= fallback_deadline(target_d):
+                record_failed(conn, data_table=DataTable.OBSERVATIONS, city=city_name,
+                              data_source=source_tag, target_date=target_d,
+                              reason=EMPTY_AFTER_DEADLINE, retry_after=_retry_embargo(hours=1))
+                conn.commit()
+                # The caller may own FORECAST/WORLD flocks even after commit.
+                # The separate post-lease pass fetches WU and rechecks this debt.
             continue
 
         fetch_utc = datetime.now(timezone.utc)

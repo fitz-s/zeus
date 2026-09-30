@@ -4513,10 +4513,14 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
     if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
         return None
     try:
-        snapshot_at, manifests = _prepared_reseed_manifests(
-            raw_manifest_dir,
-            manifest_snapshot,
-        )
+        # Scoped observation delivery must not scan the global raw tree before
+        # the existing per-family DB manifest lookup. The producer owns that read.
+        if scopes is not None and manifest_snapshot is None:
+            snapshot_at, manifests = datetime.now(timezone.utc), None
+        else:
+            snapshot_at, manifests = _prepared_reseed_manifests(
+                raw_manifest_dir, manifest_snapshot,
+            )
         from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
             enqueue_fusion_upgrade_reseeds,
         )

@@ -1,13 +1,14 @@
 # Created: 2026-09-29
 # Last reused/audited: 2026-09-29
-"""Optional station-bound physical channels; never settlement authority.
+"""Station-bound current observations and measured settlement-value equality.
 
 Adapters own fixed endpoints. Configuration cannot inject URLs, SQL, or code.
 A shared request budget scales with station count, not with city-name branches.
+Settlement-grade samples remain distinct from final daily resolver publication.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 import json
 import logging
@@ -30,17 +31,42 @@ class PhysicalCurrentSource:
     settlement_source_types: tuple[str, ...]
     unit: str
     minimum_poll_seconds: float
-    station: FmiStation
+    station: FmiStation | None
+    identity: dict[str, Any] = field(default_factory=dict)
+    settlement_grade: bool = False
 
 
 @lru_cache(maxsize=4)
 def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSource, ...], float]:
     data = json.loads(Path(path).read_text())
-    if data.get("schema_version") != 1 or data.get("role") != "physical_current_only":
+    if data.get("schema_version") != 1 or data.get("role") != "station_temperature_observations":
         raise ValueError("PHYSICAL_CURRENT_REGISTRY_ROLE")
     sources = []
     seen = set()
     for row in data["sources"]:
+        if row["provider"] != "fmi_wfs":
+            from src.data.station_temperature_adapters import CHANNELS
+            identity = row["identity"]
+            native_id = str(identity["provider_station"])
+            key = (row["station_id"], row["source_channel"])
+            seconds = float(row["minimum_poll_seconds"])
+            kinds = tuple(row["settlement_source_types"])
+            if (row["source_channel"] != CHANNELS.get(row["provider"])
+                or key in seen or not re.fullmatch(r"[A-Z]{4}", row["station_id"])
+                or not re.fullmatch(r"[A-Za-z0-9:]+", native_id)
+                or not math.isfinite(seconds) or seconds < 60 or row["unit"] != "C"
+                or not kinds or any(t not in {"noaa", "wu_icao"} for t in kinds)):
+                raise ValueError("PHYSICAL_CURRENT_ADAPTER_INVALID")
+            proof = row.get("value_identity_proof", {})
+            grade = bool(row.get("settlement_grade", False))
+            if grade and not (proof.get("n_pairs", 0) > 0
+                and proof.get("n_exact") == proof.get("n_pairs")
+                and proof.get("mismatches") == []):
+                raise ValueError("STATION_VALUE_IDENTITY_NOT_PROVEN")
+            sources.append(PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
+                                                  kinds, "C", seconds, None, dict(identity), grade))
+            seen.add(key)
+            continue
         if row["provider"] != "fmi_wfs" or row["source_channel"] != SOURCE_CHANNEL or row["unit"] != "C":
             raise ValueError("PHYSICAL_CURRENT_ADAPTER_UNKNOWN")
         key = (row["station_id"], row["source_channel"])
@@ -65,10 +91,11 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
     requests = int(budget["requests_per_poll"])
     if not 0 < fraction <= 0.8 or not 0 < per_day <= 20000 or not 0 < per_window <= 600 or requests < 2:
         raise ValueError("PHYSICAL_CURRENT_PROVIDER_BUDGET_INVALID")
-    period = max([1.0] + [s.minimum_poll_seconds for s in sources] + [
-        math.ceil(requests * len(sources) * 86400 / (per_day * fraction)),
-        math.ceil(requests * len(sources) * 300 / (per_window * fraction))])
-    return tuple(sources), period
+    fmi_sources = [s for s in sources if s.provider == "fmi_wfs"]
+    period = max([1.0] + [s.minimum_poll_seconds for s in fmi_sources] + [
+        math.ceil(requests * len(fmi_sources) * 86400 / (per_day * fraction)),
+        math.ceil(requests * len(fmi_sources) * 300 / (per_window * fraction))])
+    return tuple(sources), min([period] + [s.minimum_poll_seconds for s in sources if s.provider != "fmi_wfs"]) if fmi_sources else min([s.minimum_poll_seconds for s in sources] or [300.0])
 
 
 @lru_cache(maxsize=4)

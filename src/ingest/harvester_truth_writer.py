@@ -259,12 +259,15 @@ def _lookup_settlement_obs(
         "SELECT * FROM observations WHERE city = ? AND target_date = ?",
         (city.name, target_date),
     ).fetchall()
-    candidates: list[tuple[int, object, str]] = []
+    candidates: list[tuple[int, object, str, dict]] = []
     for r in rows:
         if not isinstance(r, (sqlite3.Row, dict)):
             r = dict(zip(column_names, r))
         src = str(_row_value(r, "source") or "")
-        if not _source_matches_settlement_family(src, st):
+        from src.data.settlement_observation_selection import observation_selection
+        selection = observation_selection(conn, city, target_date, src, row=r,
+                                          metric=temperature_metric)
+        if selection is None:
             continue
         if "authority" in columns and str(_row_value(r, "authority") or "").upper() != "VERIFIED":
             continue
@@ -272,10 +275,9 @@ def _lookup_settlement_obs(
             continue
         if _row_value(r, metric_field) is None:
             continue
-        rank = _noaa_source_rank(src) if st == "noaa" else 0
-        candidates.append((rank if rank is not None else 0, r, src))
+        candidates.append((selection[0], r, src, selection[1]))
 
-    for _rank, r, src in sorted(candidates, key=lambda item: item[0]):
+    for _rank, r, src, selection_witness in sorted(candidates, key=lambda item: item[0]):
         return {
             "id": _row_value(r, "id"),
             "source": src,
@@ -287,7 +289,9 @@ def _lookup_settlement_obs(
             "authority": _row_value(r, "authority"),
             "observation_field": metric_field,
             "observed_temp": _row_value(r, metric_field),
-            "data_version": _noaa_settlement_data_version(src),
+            "data_version": ("wu_icao_contract_fallback_v1" if selection_witness.get("selected") == "FALLBACK_WU"
+                             else _noaa_settlement_data_version(src)),
+            "resolver_selection": selection_witness,
         }
     return None
 
@@ -766,6 +770,7 @@ def _write_settlement_truth(
         "truth_revision": _SETTLEMENT_TRUTH_REVISION,
         "source_family": db_source_type,
         "obs_source": obs_row.get("source") if obs_row else None,
+        "resolver_selection": obs_row.get("resolver_selection") if obs_row else None,
         "obs_id": obs_row.get("id") if obs_row else None,
         "decision_time_snapshot_id": obs_row.get("fetched_at") if obs_row else None,
         "rounding_rule": rounding_rule,

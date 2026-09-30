@@ -362,6 +362,7 @@ def due_work(
     *,
     now: Optional[str] = None,
     limit: int = 50,
+    owner_domains: tuple[str, ...] = (),
 ) -> list[ReviewWorkItem]:
     """Return OPEN items due for another attempt, priority-then-time ordered.
 
@@ -369,11 +370,12 @@ def due_work(
     """
 
     at = now or _now_iso()
+    owner_filter = " AND owner_domain IN (" + ",".join("?" for _ in owner_domains) + ")" if owner_domains else ""
     rows = conn.execute(
         f"SELECT {_SELECT_COLUMNS_SQL} FROM review_work_items "
-        "WHERE status = 'OPEN' AND next_attempt_at <= ? "
-        "ORDER BY priority ASC, next_attempt_at ASC LIMIT ?",
-        (at, int(limit)),
+        "WHERE status = 'OPEN' AND next_attempt_at <= ? " + owner_filter +
+        " ORDER BY priority ASC, next_attempt_at ASC LIMIT ?",
+        (at, *owner_domains, int(limit)),
     ).fetchall()
     return [_row_to_work_item(row) for row in rows]
 
@@ -527,3 +529,20 @@ __all__ = [
     "open_unbounded_count",
     "blocked_family_keys",
 ]
+
+
+def record_work_attempt(conn: sqlite3.Connection, *, work_id: str, authority_revision: int,
+                        expected_attempt_count: int, at: str, retry_at: str,
+                        error_class: str = "REVIEW_EVIDENCE_STILL_UNRESOLVED") -> bool:
+    """CAS claim within the caller's owner-local transaction; no extra connection.
+
+    Competing workers cannot charge the same attempt. New authority revisions
+    and resolved rows are never mutated by an older retry result.
+    """
+    return conn.execute(
+        "UPDATE review_work_items SET attempt_count=attempt_count+1, next_attempt_at=?, "
+        "last_seen_at=?, updated_at=?, last_error_class=? "
+        "WHERE work_id=? AND authority_revision=? AND attempt_count=? "
+        "AND status='OPEN' AND next_attempt_at<=?",
+        (retry_at,at,at,error_class,work_id,int(authority_revision),int(expected_attempt_count),at),
+    ).rowcount==1

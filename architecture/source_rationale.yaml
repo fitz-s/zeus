@@ -308,6 +308,42 @@ package_defaults:
     - NO_WRITE_PATH
     gates: []
 files:
+  src/data/physical_current_delivery.py:
+    zone: K1_truth
+    authority_role: current_observation_revision_delivery
+    why: Compares WORLD evidence with FORECAST consumed identity through the existing materializer; fair source-independent retry includes missing-incumbent and ended
+      held scopes. Cursor is a scheduling hint, never delivery authority.
+    downstream: []
+  src/data/station_temperature_adapters.py:
+    zone: K1_truth
+    authority_role: station_temperature_provider_adapter
+    why: Fixed-endpoint station clients preserve native values, QC, observation and actual receipt clocks. Reviewed exact-value equality is registry metadata; no fabricated
+      publisher timestamp or final daily value.
+    downstream: []
+  src/data/settlement_observation_selection.py:
+    zone: K1_truth
+    authority_role: contract_named_observation_selection
+    why: Both harvesters share WRH-primary and deadline-bound WU fallback selection. Only successful exact-station empty-page evidence can authorize fallback; Ogimet
+      and transport failures cannot.
+    downstream: []
+  src/execution/review_work_delivery.py:
+    zone: K2_runtime
+    authority_role: owner_local_review_delivery
+    why: TRADE-owned bounded due-work retry with authority-revision and attempt CAS. Only a matching native settlement resolves absence debt; unrelated review reasons
+      remain open for native owners.
+    downstream: []
+  src/runtime/observation_reaction_trace.py:
+    zone: K2_runtime
+    authority_role: observation_reaction_telemetry
+    why: Logs actual source commit, completed posterior, served q and observed venue ack. Strict identity joins leave missing stages unknown; logs are not canonical
+      proof or trading authority.
+    downstream: []
+  src/runtime/warm_materializer.py:
+    zone: K2_runtime
+    authority_role: resident_materialization_transport
+    why: One resident interpreter executes the existing CLI request pipeline and deadlines. Durable queue and posterior identities remain authority; timeout or reply
+      loss closes the process and leaves retry to the queue.
+    downstream: []
   src/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -342,7 +378,7 @@ files:
   src/data/physical_current_sources.py:
     zone: K1_truth
     authority_role: physical_current_station_route_registry
-    why: Loads a process-lifetime typed station/provider/identity registry and computes one bounded provider-wide polling period. No city-name dispatch, arbitrary URL, code import, settlement promotion, or belief-serving dependency is introduced. Optional configuration errors keep the existing belief serving and identify unavailable evidence. The registry and scheduler restart together so adding stations cannot inherit an over-budget cadence.
+    why: Loads a process-lifetime typed station/provider/identity registry and computes one bounded provider-wide polling period. No city-name dispatch, arbitrary URL, executable import, or belief-serving dependency is introduced. Reviewed same-station/time value equality permits settlement-grade fast observations; final daily authority remains separate. Optional configuration errors keep the existing belief serving and identify unavailable evidence. The registry and scheduler restart together so adding stations cannot inherit an over-budget cadence.
     downstream:
     - src/ingest_main.py
     - src/data/day0_hourly_vectors.py

@@ -541,8 +541,12 @@ def test_settled_at_replay_seattle_09_13_lands_before_09z_not_18z(module_path, t
     "module_path",
     ["src.execution.harvester", "src.ingest.harvester_truth_writer"],
 )
-def test_ogimet_row_still_settles_when_no_page_row_exists(module_path, tmp_path):
-    """The page feed can refuse or find no rows; the mirror must still settle."""
+def test_ogimet_row_cannot_replace_the_contract_named_fallback(module_path, tmp_path):
+    """A missing local page row is not authority to settle from Ogimet.
+
+    The observed market contracts name WU after an explicit ET deadline;
+    tests/test_settlement_fallback_hierarchy.py protects that positive route.
+    """
     import importlib
 
     module = importlib.import_module(module_path)
@@ -555,9 +559,7 @@ def test_ogimet_row_still_settles_when_no_page_row_exists(module_path, tmp_path)
     obs = module._lookup_settlement_obs(
         conn, cities_by_name["NYC"], "2026-09-11", temperature_metric="high",
     )
-    assert obs is not None
-    assert obs["source"] == "ogimet_metar_klga"
-    assert obs["data_version"] == "ogimet_metar"
+    assert obs is None
     conn.close()
 
 

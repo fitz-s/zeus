@@ -3031,6 +3031,9 @@ def append_event(
 
             release_exit_mutex_for_command_state(conn, command_id, state_after)
 
+    if event_type == "SUBMIT_ACKED":
+        from src.runtime.observation_reaction_trace import emit_venue_ack
+        emit_venue_ack(conn, command_id=command_id, event_id=event_id, occurred_at=occurred_at)
     return event_id
 
 

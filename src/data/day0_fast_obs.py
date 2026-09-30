@@ -403,6 +403,7 @@ class FastObsSource:
     #: station with an adequate sample (Seoul/RKSI class — see
     #: day0_oracle_anomaly.metar_margin_units_for_city). Never negative.
     margin_units: float = 0.0
+    faithfulness_known: bool = True
 
 
 @dataclass(frozen=True)
@@ -1012,6 +1013,7 @@ def fast_obs_source_for_city(
         # by scripts/measure_settlement_page_metar_divergence.py the measured allowance
         # applies. The fix and the refit are a pair: either alone changes nothing.
         margin_units = 0.0
+        faithfulness_known = True
         try:
             from src.data.day0_oracle_anomaly import metar_margin_units_for_city
 
@@ -1029,7 +1031,10 @@ def fast_obs_source_for_city(
                 return None
             margin_units = margin
         except ImportError:
-            pass  # faithfulness model unavailable -> registry behaves as before (margin 0)
+            # Preserve acquisition/current-temperature evidence, but do not let
+            # unavailable faithfulness evidence masquerade as zero divergence.
+            faithfulness_known = False
+            logger.error("FAST_OBS_FAITHFULNESS_UNAVAILABLE station=%s role=physical_current_only", station)
         return FastObsSource(
             source_id=FAST_OBS_SOURCE_ID,
             station_id=station,
@@ -1037,6 +1042,7 @@ def fast_obs_source_for_city(
             settlement_source_type="noaa",
             notes="same physical NOAA settlement station; direct NOAA/NWS distribution",
             margin_units=margin_units,
+            faithfulness_known=faithfulness_known,
         )
     if source_type == "wu_icao" and station:
         # SETTLEMENT-FAITHFULNESS MARGIN (operator correction 2026-06-10,
@@ -1057,6 +1063,7 @@ def fast_obs_source_for_city(
         # monotone-safe direction when there is truly no calibration to lean
         # on. Lazy import avoids a module cycle.
         margin_units = 0.0
+        faithfulness_known = True
         try:
             from src.data.day0_oracle_anomaly import metar_margin_units_for_city
 
@@ -1072,7 +1079,10 @@ def fast_obs_source_for_city(
                 return None
             margin_units = margin
         except ImportError:
-            pass  # faithfulness model unavailable -> registry behaves as before (margin 0)
+            # Preserve acquisition/current-temperature evidence, but do not let
+            # unavailable faithfulness evidence masquerade as zero divergence.
+            faithfulness_known = False
+            logger.error("FAST_OBS_FAITHFULNESS_UNAVAILABLE station=%s role=physical_current_only", station)
         return FastObsSource(
             source_id=FAST_OBS_SOURCE_ID,
             station_id=station,
@@ -1080,6 +1090,7 @@ def fast_obs_source_for_city(
             settlement_source_type="wu_icao",
             notes="same physical settlement station as WU; NOAA/NWS distribution",
             margin_units=margin_units,
+            faithfulness_known=faithfulness_known,
         )
     return None
 
@@ -2347,6 +2358,8 @@ def fast_obs_to_day0_observation(
         "AUTHORIZED"
         if (
             source_match == "MATCH"
+            and source.faithfulness_known
+            and expected_source is not None and expected_source.faithfulness_known
             and station_match == "MATCH"
             and rounding_status == "MATCH"
             and extremes.sample_count > 0
@@ -2444,7 +2457,7 @@ def read_noaa_fast_obs_context_from_ledger(
     ):
         return None
     source = fast_obs_source_for_city(city, target_date=target_date)
-    if source is None or source.source_id != FAST_OBS_SOURCE_ID:
+    if source is None or not source.faithfulness_known or source.source_id != FAST_OBS_SOURCE_ID:
         return None
     city_name = str(getattr(city, "name", "") or "").strip()
     timezone_name = str(getattr(city, "timezone", "") or "").strip()
