@@ -1353,22 +1353,47 @@ def _live_provenance() -> dict[str, object]:
     }
 
 
+@pytest.fixture
+def _generic_reader_current_row(tmp_path,monkeypatch):
+    """Normal source authority for generic reader-format faults, not a city contract.
+
+    The underlying HKO writer uses retained official ground bytes, ordinary
+    controlled whole-OM/native captures and a declared toy 51-member receipt.
+    Never use this fixture to replace Shanghai/NOAA/WU source-specific tests.
+    """
+    from tests.integration.test_w3_solve_seam_g3 import (
+        _hko_clock_native_sources,_hko_clock_normal_materializer_fixture,
+    )
+    from src.data.station_ground_evidence import forecast_db_from_connection
+    source = _hko_clock_native_sources.__wrapped__(tmp_path,monkeypatch)
+    next(source)
+    try:
+        normal = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high")
+        try:
+            row = dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                (normal.result.posterior_id,)).fetchone())
+            namespace = forecast_db_from_connection(normal.conn)
+            for purpose in ReplacementForecastAuthorityPurpose:
+                assert reader._live_grade_provenance(row,authority_purpose=purpose,forecast_db=namespace) is not None
+            yield row,namespace
+        finally:
+            normal.conn.close()
+    finally:
+        next(source,None)
+
+
 @pytest.mark.parametrize("purpose", tuple(ReplacementForecastAuthorityPurpose))
 def test_live_reader_rejects_missing_grid_surface_identity(
-    purpose: ReplacementForecastAuthorityPurpose,
+    purpose: ReplacementForecastAuthorityPurpose,_generic_reader_current_row,
 ) -> None:
-    provenance = _live_provenance()
-    row = {
-        "runtime_layer": LIVE_RUNTIME_LAYER,
-        "q_lcb_json": '{"cold":0.1,"warm":0.7}',
-        "q_ucb_json": '{"cold":0.3,"warm":0.9}',
-        "provenance_json": json.dumps(provenance),
-    }
-    assert reader._live_grade_provenance(row, authority_purpose=purpose) is not None
+    original,namespace = _generic_reader_current_row
+    row = dict(original)
+    provenance = json.loads(row["provenance_json"])
+    assert reader._live_grade_provenance(row,authority_purpose=purpose,forecast_db=namespace) is not None
     shape = provenance["bayes_precision_fusion"]["current_evidence_shape"]
     del shape["grid_surface_evidence_identity_hash"]
     row["provenance_json"] = json.dumps(provenance)
-    assert reader._live_grade_provenance(row, authority_purpose=purpose) is None
+    assert reader._live_grade_provenance(row,authority_purpose=purpose,forecast_db=namespace) is None
 
 
 @pytest.mark.parametrize("raw_provenance", ('{"incomplete":', "[]"))
