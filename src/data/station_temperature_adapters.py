@@ -9,6 +9,9 @@ claim. A decimal physical observation is not implicitly a daily extreme.
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
@@ -31,7 +34,74 @@ CHANNELS = {
     "knmi_observations": "knmi_station_temperature",
     "wu_station_current": "wu_station_current_temperature",
     "wu_station_history": "wu_station_history_temperature",
+    "noaa_wrh": "noaa_wrh_temperature",
 }
+
+
+@dataclass(frozen=True)
+class StationTemperaturePrint:
+    observed_at: datetime
+    fetched_at: datetime
+    value_native: float
+    unit: str
+    raw_report: str
+
+    @property
+    def temperature_c(self) -> float:
+        return self.value_native if self.unit == "C" else (self.value_native - 32.0) / 1.8
+
+
+def native_sample_value(sample, unit: str) -> float:
+    """Preserve resolver-native Fahrenheit; only legacy FMI prints need conversion."""
+    if hasattr(sample, "value_native"):
+        if sample.unit != unit:
+            raise ValueError("STATION_NATIVE_UNIT_MISMATCH")
+        return float(sample.value_native)
+    return float(sample.temperature_c) if unit == "C" else float(sample.temperature_c) * 1.8 + 32.0
+
+
+_WRH_BATCH_LOCK = threading.Lock()
+_WRH_BATCH_CACHE: dict[tuple, tuple[float, dict, datetime, str | None]] = {}
+
+
+def _fetch_wrh_batch(route, client):
+    """One bounded request per unit/registered station-set per minute, not per city.
+
+    This is the existing resolver product, not a promotion of a slower substitute
+    for AWC. The physical METAR lane continues independently. Errors are cached
+    as errors, never as source-empty evidence, and credentials never enter prints.
+    """
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.data.physical_current_sources import load_physical_current_sources
+    ids = tuple(sorted({r.station_id for r in load_physical_current_sources()[0]
+                        if r.provider == "noaa_wrh" and r.unit == route.unit} | {route.station_id}))
+    key = (route.unit, ids, id(client))
+    with _WRH_BATCH_LOCK:
+        now = time.monotonic()
+        cached = _WRH_BATCH_CACHE.get(key)
+        if cached is not None and now < cached[0]:
+            if cached[3]:
+                raise ValueError("WRH_CURRENT_TRANSPORT_DEFERRED:" + cached[3])
+            return cached[1], cached[2]
+        try:
+            response = client.get(wrh.WRH_TIMESERIES_URL,
+                params=wrh._query_params(",".join(ids),unit=route.unit,start_utc=None,end_utc=None,
+                                         recent_minutes=180,token=wrh.fetch_wrh_token()),
+                headers=wrh._page_headers(ids[0]),timeout=6)
+            response.raise_for_status()
+            receipt = datetime.now(UTC)
+            payload = response.json()
+            if len(response.content) > 10_000_000:
+                raise ValueError("WRH_CURRENT_RESPONSE_TOO_LARGE")
+            _WRH_BATCH_CACHE[key] = (now + 60.0, payload, receipt, None)
+            return payload, receipt
+        except Exception as exc:
+            delay = 60.0
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                try: delay = max(delay, float(exc.response.headers.get("Retry-After", "300")))
+                except ValueError: delay = 300.0
+            _WRH_BATCH_CACHE[key] = (now + delay, {}, datetime.now(UTC), type(exc).__name__)
+            raise ValueError("WRH_CURRENT_TRANSPORT_DEFERRED:" + type(exc).__name__) from None
 
 
 def _utc(value: str) -> datetime:
@@ -42,30 +112,41 @@ def _utc(value: str) -> datetime:
 
 
 def _sample(route, observed: datetime, value, receipt: datetime, digest: str,
-            published: datetime | None = None) -> FmiTemperaturePrint | None:
+            published: datetime | None = None) -> StationTemperaturePrint | None:
     value = float(value)
     if not math.isfinite(value) or value == -999 or observed > receipt:
         return None
     payload = {
         "station_id": route.station_id, "source_channel": route.source_channel,
-        "provider_station": route.identity["provider_station"], "unit": "C",
+        "provider_station": route.identity["provider_station"], "unit": route.unit,
         "value_native": value, "observed_at": observed.isoformat(),
         "provider_observed_at_ms": int(observed.timestamp() * 1000),
         "provider_published_at_ms": None if published is None else int(published.timestamp() * 1000),
         "received_at_ms": int(receipt.timestamp() * 1000), "payload_sha256": digest,
     }
-    return FmiTemperaturePrint(observed, receipt, value,
-                               json.dumps(payload, sort_keys=True, allow_nan=False))
+    return StationTemperaturePrint(observed, receipt, value, route.unit,
+                                   json.dumps(payload, sort_keys=True, allow_nan=False))
 
 
-def parse_station_payload(route, body: bytes, *, received_at: datetime) -> tuple[FmiTemperaturePrint, ...]:
+def parse_station_payload(route, body: bytes, *, received_at: datetime) -> tuple[StationTemperaturePrint, ...]:
     if received_at.tzinfo is None:
         raise ValueError("STATION_RECEIPT_NAIVE")
     provider = route.provider
     expected = str(route.identity["provider_station"])
     digest = hashlib.sha256(body).hexdigest()
     values = []
-    if provider == "jma_amedas":
+    if provider == "noaa_wrh":
+        from src.data.noaa_wrh_timeseries import rows_from_payload
+        payload = json.loads(body)
+        if payload.get("UNITS", {}).get("air_temp") != {"C":"Celsius", "F":"Fahrenheit"}[route.unit]:
+            raise ValueError("STATION_UNIT_OR_QC_INVALID")
+        view = route.identity["resolver_view"]
+        for row in rows_from_payload(payload, route.station_id):
+            if view == "all" or row.is_official_report:
+                # air_temp_set_1 is the page's numeric value. Raw METAR body vs
+                # T-group is not an interchangeable reconstruction of that field.
+                values.append((row.utc, row.air_temp, None))
+    elif provider == "jma_amedas":
         # The station is bound by the fixed station-specific resource path.
         zone = timezone(timedelta(hours=9))
         for stamp, row in json.loads(body).items():
@@ -146,7 +227,7 @@ def valid_station_print(route, raw: str, *, observed_at: datetime, value: float)
         return (data["station_id"] == route.station_id
                 and data["source_channel"] == route.source_channel
                 and data["provider_station"] == route.identity["provider_station"]
-                and data["unit"] == "C" and float(data["value_native"]) == value
+                and data["unit"] == route.unit and float(data["value_native"]) == value
                 and _utc(data["observed_at"]) == observed_at.astimezone(UTC))
     except (ValueError, TypeError, KeyError):
         return False
@@ -156,6 +237,12 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
     if route.provider == "fmi_wfs":
         from src.data.fmi_airport_temperature import fetch_temperature
         return fetch_temperature(start=start, end=end, station=route.station, client=client)
+    if route.provider == "noaa_wrh":
+        payload, received = _fetch_wrh_batch(route, client)
+        stations = [s for s in payload.get("STATION", []) if s.get("STID") == route.station_id]
+        station_payload = {"UNITS": payload.get("UNITS", {}), "STATION": stations}
+        return tuple(s for s in parse_station_payload(route,json.dumps(station_payload).encode(),received_at=received)
+                     if start <= s.observed_at <= min(end,received))
     station = route.identity["provider_station"]
     params, headers = {}, {"User-Agent": "zeus-station-observation/2"}
     if route.provider == "jma_amedas":

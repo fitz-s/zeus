@@ -1,0 +1,112 @@
+[
+  {
+    "city": "Atlanta",
+    "station": "KATL",
+    "n_pairs": 76,
+    "body": 48,
+    "t_group": 75,
+    "conditional": 76,
+    "raw_slp": 76,
+    "type": 76
+  },
+  {
+    "city": "Austin",
+    "station": "KAUS",
+    "n_pairs": 83,
+    "body": 43,
+    "t_group": 82,
+    "conditional": 82,
+    "raw_slp": 82,
+    "type": 82
+  },
+  {
+    "city": "Chicago",
+    "station": "KORD",
+    "n_pairs": 90,
+    "body": 55,
+    "t_group": 83,
+    "conditional": 85,
+    "raw_slp": 85,
+    "type": 85
+  },
+  {
+    "city": "Dallas",
+    "station": "KDAL",
+    "n_pairs": 76,
+    "body": 44,
+    "t_group": 76,
+    "conditional": 74,
+    "raw_slp": 74,
+    "type": 74
+  },
+  {
+    "city": "Denver",
+    "station": "KBKF",
+    "n_pairs": 76,
+    "body": 43,
+    "t_group": 71,
+    "conditional": 71,
+    "raw_slp": 71,
+    "type": 76
+  },
+  {
+    "city": "Houston",
+    "station": "KHOU",
+    "n_pairs": 72,
+    "body": 44,
+    "t_group": 72,
+    "conditional": 72,
+    "raw_slp": 72,
+    "type": 72
+  },
+  {
+    "city": "Los Angeles",
+    "station": "KLAX",
+    "n_pairs": 75,
+    "body": 46,
+    "t_group": 75,
+    "conditional": 75,
+    "raw_slp": 75,
+    "type": 75
+  },
+  {
+    "city": "Miami",
+    "station": "KMIA",
+    "n_pairs": 77,
+    "body": 46,
+    "t_group": 76,
+    "conditional": 76,
+    "raw_slp": 76,
+    "type": 76
+  },
+  {
+    "city": "NYC",
+    "station": "KLGA",
+    "n_pairs": 94,
+    "body": 63,
+    "t_group": 86,
+    "conditional": 90,
+    "raw_slp": 90,
+    "type": 90
+  },
+  {
+    "city": "San Francisco",
+    "station": "KSFO",
+    "n_pairs": 77,
+    "body": 43,
+    "t_group": 77,
+    "conditional": 75,
+    "raw_slp": 75,
+    "type": 75
+  },
+  {
+    "city": "Seattle",
+    "station": "KSEA",
+    "n_pairs": 85,
+    "body": 58,
+    "t_group": 83,
+    "conditional": 78,
+    "raw_slp": 78,
+    "type": 78
+  }
+]

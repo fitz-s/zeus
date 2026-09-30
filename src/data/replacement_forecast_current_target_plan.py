@@ -1343,6 +1343,10 @@ def _latest_authorized_day0_fact(
                 station_routes_by_channel = {
                     route.source_channel: route
                     for route in physical_current_sources_for_city(city_obj)
+                    # Existing resolver-channel rows predate the optional adapter
+                    # JSON envelope and carry raw METAR text. Their native unit,
+                    # station and view were validated by the canonical writer.
+                    if route.provider != "noaa_wrh"
                 }
             except Exception:
                 # Optional fast-source registry failure cannot remove the base

@@ -10,10 +10,12 @@
 A METAR body carries whole-degree Celsius in the temp/dewpoint group
 (``28/17``). US ASOS stations also emit a remarks T-group (``T02830167``):
 tenths-Celsius, first digit of each half is a sign bit (1 = negative), the
-remaining three digits are the magnitude in tenths. NOAA settlement pages
-resolve bin ties from the tenths value, so the T-group must be preferred
-whenever present; the body group is only a fallback for stations/reports
-that omit remarks.
+remaining three digits are the magnitude in tenths. Prefer that precision for
+physical evidence. It is NOT a reconstruction certificate for a resolver's
+published air_temp_set_1: a 72-hour, 11-US-station comparison found both body-
+precision and T-group-precision SPECI values on WRH. The native resolver field,
+view and unit remain authoritative for settlement; report type alone cannot
+choose an equivalent decoder.
 """
 from __future__ import annotations
 

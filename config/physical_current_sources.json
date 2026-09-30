@@ -730,6 +730,248 @@
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
       "authority_note": "Exact same-station/UTC-time rounded value comparison: 0/0; no separate instrument certificate required."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_katl",
+      "station_id": "KATL",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KATL",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 76,
+        "n_exact": 76,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_kaus",
+      "station_id": "KAUS",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KAUS",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 83,
+        "n_exact": 83,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_kord",
+      "station_id": "KORD",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KORD",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 90,
+        "n_exact": 90,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_kdal",
+      "station_id": "KDAL",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KDAL",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 76,
+        "n_exact": 76,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_kbkf",
+      "station_id": "KBKF",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KBKF",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 76,
+        "n_exact": 76,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_khou",
+      "station_id": "KHOU",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KHOU",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 72,
+        "n_exact": 72,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_klax",
+      "station_id": "KLAX",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KLAX",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 75,
+        "n_exact": 75,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_kmia",
+      "station_id": "KMIA",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KMIA",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 77,
+        "n_exact": 77,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_klga",
+      "station_id": "KLGA",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KLGA",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 94,
+        "n_exact": 94,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_ksfo",
+      "station_id": "KSFO",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KSFO",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 77,
+        "n_exact": 77,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_ksea",
+      "station_id": "KSEA",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "F",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "KSEA",
+        "resolver_view": "hourly"
+      },
+      "settlement_grade": true,
+      "value_identity_proof": {
+        "n_pairs": 85,
+        "n_exact": 85,
+        "mismatches": [],
+        "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
+      },
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
     }
   ]
 }

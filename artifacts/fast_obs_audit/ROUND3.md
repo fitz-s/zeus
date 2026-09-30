@@ -30,3 +30,26 @@ Validation: round3_exit_green.xml; round3_baseline_feature.xml/log. Baseline com
 All 531 tests pass (31.93 s), including all seven reproduced baseline failures. Production math and migration code unchanged. Three old migration tests assumed the retired trade_authority_status label should be translated to runtime authority or physically dropped. Current migration preserves obsolete schema columns but retires rows with no current runtime_layer; the tests now assert that behavior and explicit legacy constraints. Four Day0 cases now provide a real current observation plus complete causal provider/ENS vectors and a content-hashed typed residual, rather than assuming an old SimpleNamespace residual alone can sponsor a current carrier. The original owner, source/clock override, and no-likelihood-recompute-under-writer assertions remain.
 
 Item 1 total: 359 exit-safety tests and 531 materializer/reader/command tests pass (890 combined test cases across separate suite runs). No xfail/skip/production-law relaxation was added.
+
+## Item 4 — US native resolver precision (completed with explicit latency boundary)
+A 72-hour comparison across all eleven configured US cities produced 881 exact-time pairs. T-group-only decoding disagreed or lacked a value in 25 pairs; whole-degree body decoding disagreed in many more. Chicago's 15:30/15:40 UTC SPECI reports have body 17C and T0167: AWC gives 16.7C -> 62.06F -> bin62 while WRH's published air_temp_set_1 is 62.6F -> bin63. However Seattle/other SPECI rows use the T-group value. Choosing body for every SPECI, choosing by SLP, or a city literal is not a universal resolver reconstruction.
+
+The physical METAR T-group parser remains unchanged. The universal station registry now acquires the actual existing WRH native numeric field for all 11 US F-settled stations as one batched station-set/unit request per minute, preserving hourly/SPECI view membership. The generic ingest writer and trace preserve native Fahrenheit without F->C->F roundtrip; exact-station/unit validation and receipt clocks remain mandatory. It is an acceleration of the existing resolver acquisition, not a claim that WRH beats AWC or an alternative-feed promotion. AWC continues independently; no model gate or blanket uncertainty shrink was introduced.
+
+The optional route shares the existing canonical noaa_wrh_<station> ledger channel. Old daily-writer raw METAR rows remain readable; no JSON-envelope migration is required. Optional HTTP/auth/quota failure remains a deferred source fetch, never proof of source absence. One-minute per-process batch/error cache avoids eleven-fold request amplification; 429 Retry-After is honored. Aggregate quota with unrelated processes remains outside this cache's authority.
+
+Executed: 352 passed, 1 optional netCDF4 skip across station adapters/receipt/WRH product/observation ledger/current delivery/FMI/Day0/ingest modules. The new all-city tests replay every native field and assert strict station/view/native-unit handling; a committed-world-to-reseed integration proves 62.6F stays 62.6F. Raw measurement pairs are retained in tests/fixtures/station_temperature/us_resolver_precision.json.gz; script and numerical comparison under round3_us/.
+
+|City|Pairs|Body matches|T-group matches|METAR-vs-SPECI heuristic matches|
+|---|---:|---:|---:|---:|
+|Atlanta|76|48|75|76|
+|Austin|83|43|82|82|
+|Chicago|90|55|83|85|
+|Dallas|76|44|76|74|
+|Denver|76|43|71|76|
+|Houston|72|44|72|72|
+|Los Angeles|75|46|75|75|
+|Miami|77|46|76|76|
+|NYC|94|63|86|90|
+|San Francisco|77|43|77|75|
+|Seattle|85|58|83|78|

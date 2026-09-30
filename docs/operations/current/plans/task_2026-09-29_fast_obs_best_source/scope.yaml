@@ -56,6 +56,8 @@ in_scope:
 - tests/test_replacement_forecast_bundle_reader.py
 - tests/test_venue_command_repo.py
 - artifacts/fast_obs_audit/ROUND3.md
+- src/data/metar_temperature.py
+- tests/fixtures/station_temperature/us_resolver_precision.json.gz
 allow_companions:
 - config/AGENTS.md
 - architecture/source_rationale.yaml

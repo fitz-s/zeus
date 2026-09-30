@@ -68,14 +68,20 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
             key = (row["station_id"], row["source_channel"])
             seconds = float(row["minimum_poll_seconds"])
             kinds = tuple(row["settlement_source_types"])
-            if (row["source_channel"] != CHANNELS.get(row["provider"])
+            expected_channel = (f"noaa_wrh_{row['station_id'].lower()}" if row["provider"] == "noaa_wrh"
+                                else CHANNELS.get(row["provider"]))
+            unit = row["unit"]
+            if (row["source_channel"] != expected_channel
                 or key in seen or not re.fullmatch(r"[A-Z]{4}", row["station_id"])
                 or not re.fullmatch(r"[A-Za-z0-9:]+", native_id)
-                or not math.isfinite(seconds) or seconds < 60 or row["unit"] != "C"
+                or not math.isfinite(seconds) or seconds < 60
+                or unit not in ({"C", "F"} if row["provider"] == "noaa_wrh" else {"C"})
+                or (row["provider"] == "noaa_wrh" and
+                    (native_id != row["station_id"] or identity.get("resolver_view") not in {"hourly", "all"}))
                 or not kinds or any(t not in {"noaa", "wu_icao"} for t in kinds)):
                 raise ValueError("PHYSICAL_CURRENT_ADAPTER_INVALID")
             sources.append(PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
-                                                  kinds, "C", seconds, None, dict(identity), grade))
+                                                  kinds, unit, seconds, None, dict(identity), grade))
             seen.add(key)
             continue
         if row["provider"] != "fmi_wfs" or row["source_channel"] != SOURCE_CHANNEL or row["unit"] != "C":

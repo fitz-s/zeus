@@ -2126,7 +2126,7 @@ def _day0_fmi_temperature_tick() -> dict[str, object]:
 
 def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> dict[str, object]:
     """HTTP before WORLD lease; committed physical evidence before any reseed."""
-    from src.data.station_temperature_adapters import fetch_station_temperature
+    from src.data.station_temperature_adapters import fetch_station_temperature, native_sample_value
     from src.state.db import get_world_connection, world_write_mutex
     from src.state.schema.observation_prints_schema import append_print
     from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
@@ -2183,15 +2183,16 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
                 conn.execute("BEGIN IMMEDIATE")
                 for sample in prints:
                     clock = sample.observed_at.isoformat()
+                    native_value = native_sample_value(sample, route.unit)
                     if append_print(
                         conn, city=city.name, station_id=station_id,
                         source_channel=source_channel, publish_ts_utc=clock,
-                        value_native=sample.temperature_c, unit="C",
+                        value_native=native_value, unit=route.unit,
                         fetched_at_utc=sample.fetched_at.isoformat(),
                         raw_report=sample.raw_report,
                     ):
                         inserted += 1
-                        if clock > newest or (clock == newest and sample.temperature_c != newest_value):
+                        if clock > newest or (clock == newest and native_value != newest_value):
                             advanced = True
                 started = time.monotonic()
                 conn.commit()
@@ -2244,7 +2245,7 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
     input_identity = {
         "source": source_channel,
         "observed_at_utc": sample.observed_at.isoformat(),
-        "value_native": sample.temperature_c,
+        "value_native": native_sample_value(sample, route.unit),
     }
     trace = {
         "city": city.name, "station_id": station_id, "source_channel": source_channel,

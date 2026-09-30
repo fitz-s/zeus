@@ -78,6 +78,14 @@ def test_every_configured_promotion_matches_committed_pair_evidence():
     measured={(r['station'],r['channel']):r for r in report['comparisons']}
     for row in json.loads(REGISTRY_PATH.read_text())['sources']:
         proof=row['value_identity_proof']
+        if row['provider'] == 'noaa_wrh':
+            import gzip
+            native_rows=json.loads(gzip.decompress((ROOT/'us_resolver_precision.json.gz').read_bytes()))
+            n=sum(r['station']==row['station_id'] for r in native_rows)
+            assert proof['n_pairs']==proof['n_exact']==n
+            assert row['settlement_grade'] and row['unit']=='F'
+            assert row['source_channel']=='noaa_wrh_'+row['station_id'].lower()
+            continue  # Existing native resolver, not an alternate-channel promotion.
         actual=measured[(row['station_id'],proof['channel'])]
         assert (proof['n_pairs'],proof['n_exact'])==(actual['n_pairs'],actual['n_exact'])
         assert row['settlement_grade']==actual['value_identity_proven']
@@ -173,3 +181,153 @@ def test_noaa_resolver_row_outranks_same_time_physical_only_fmi():
     assert state.source == "noaa_wrh_efhk"
     assert state.value_native == 7.0
     conn.close()
+
+
+@pytest.mark.parametrize("city", [
+    "Atlanta", "Austin", "Chicago", "Dallas", "Denver", "Houston",
+    "Los Angeles", "Miami", "NYC", "San Francisco", "Seattle",
+])
+def test_us_resolver_precision_is_native_for_every_city(city):
+    import gzip
+    from src.config import cities_by_name
+    from src.data.station_temperature_adapters import native_sample_value
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    from zoneinfo import ZoneInfo
+
+    cfg = cities_by_name[city]
+    route = next(r for r in load_physical_current_sources()[0]
+                 if r.provider == "noaa_wrh" and r.station_id == cfg.wu_station)
+    pairs = [r for r in json.loads(gzip.decompress((ROOT/"us_resolver_precision.json.gz").read_bytes()))
+             if r["city"] == city]
+    assert len(pairs) >= 48
+    conn = sqlite3.connect(":memory:"); conn.row_factory = sqlite3.Row; ensure_table(conn)
+    for pair in pairs:
+        observed = datetime.fromisoformat(pair["observed_at"])
+        receipt = observed + timedelta(minutes=5)
+        payload = {"UNITS":{"air_temp":"Fahrenheit"},"STATION":[{
+            "STID":cfg.wu_station,"OBSERVATIONS":{
+                "date_time":[observed.strftime("%Y-%m-%dT%H:%M:%S%z")],
+                "air_temp_set_1":[pair["resolver_f"]],
+                "sea_level_pressure_set_1":[1013 if pair["routine"] else None],
+                "metar_set_1":[pair["resolver_raw"]],
+            }}]}
+        samples = parse_station_payload(route, json.dumps(payload).encode(), received_at=receipt)
+        assert len(samples) == 1
+        sample = samples[0]
+        assert sample.unit == "F"
+        assert native_sample_value(sample, "F") == pair["resolver_f"]
+        assert valid_station_print(route, sample.raw_report, observed_at=observed, value=pair["resolver_f"])
+        assert append_print(conn,city=city,station_id=cfg.wu_station,source_channel=route.source_channel,
+            publish_ts_utc=observed.isoformat(),value_native=sample.value_native,unit="F",
+            fetched_at_utc=receipt.isoformat(),raw_report=sample.raw_report)
+    last = max(pairs,key=lambda r:r["observed_at"])
+    observed = datetime.fromisoformat(last["observed_at"])
+    at = observed + timedelta(minutes=6)
+    day = observed.astimezone(ZoneInfo(cfg.timezone)).date().isoformat()
+    state = read_day0_current_temperature_state(conn=conn,city=cfg,target_date=day,decision_time=at)
+    assert state and state.source == route.source_channel
+    assert state.value_native == last["resolver_f"]
+    fact = _latest_authorized_day0_fact(conn,city=city,target_date=day,temperature_metric="high",
+                                       decision_time=at,require_settlement_channel=True)
+    assert fact is not None
+    conn.close()
+
+
+def test_us_speci_type_does_not_select_resolver_precision():
+    import gzip
+    pairs = json.loads(gzip.decompress((ROOT/"us_resolver_precision.json.gz").read_bytes()))
+    chicago = next(p for p in pairs if p["city"] == "Chicago" and p["observed_at"] == "2026-09-30T15:30:00+00:00")
+    from src.data.metar_temperature import metar_t_group_temperature_c
+    assert metar_t_group_temperature_c(chicago["raw"]) == 16.7
+    assert chicago["resolver_f"] == 62.6
+    # Same report class, different upstream precision: no per-city or SPECI heuristic.
+    precise_specials = [p for p in pairs if p["city"] == "Seattle" and p["awc_type"] == "SPECI"
+                        and p["t_group_match"] and not p["body_match"]]
+    assert precise_specials
+
+
+def test_wrh_batch_shares_acquisition_across_registered_us_stations(monkeypatch):
+    import httpx
+    from src.data import station_temperature_adapters as adapters
+    from src.data import noaa_wrh_timeseries as wrh
+    routes = [r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh"]
+    calls = []
+    class Client:
+        def get(self,url,**kwargs):
+            calls.append(kwargs)
+            return httpx.Response(200,json={"UNITS":{"air_temp":"Fahrenheit"},"STATION":[]},request=httpx.Request("GET",url))
+    monkeypatch.setattr(wrh,"fetch_wrh_token",lambda:"test-token-not-persisted")
+    adapters._WRH_BATCH_CACHE.clear(); client=Client()
+    for route in routes:
+        data, receipt = adapters._fetch_wrh_batch(route,client)
+        assert receipt.tzinfo is not None and data["STATION"] == []
+    assert len(calls) == 1
+    assert set(calls[0]["params"]["STID"].split(",")) == {r.station_id for r in routes}
+    adapters._WRH_BATCH_CACHE.clear()
+
+
+def test_wrh_rate_limit_is_deferred_without_secret_in_error(monkeypatch):
+    import httpx
+    from src.data import station_temperature_adapters as adapters
+    from src.data import noaa_wrh_timeseries as wrh
+    route=next(r for r in load_physical_current_sources()[0] if r.provider=="noaa_wrh")
+    calls=[]
+    class Client:
+        def get(self,url,**kwargs):
+            calls.append(1)
+            return httpx.Response(429,headers={"Retry-After":"600"},request=httpx.Request("GET",url,params={"token":"private-test-value"}))
+    monkeypatch.setattr(wrh,"fetch_wrh_token",lambda:"private-test-value")
+    adapters._WRH_BATCH_CACHE.clear(); client=Client()
+    for _ in range(2):
+        with pytest.raises(ValueError,match="TRANSPORT_DEFERRED") as exc:
+            adapters._fetch_wrh_batch(route,client)
+        assert "private-test-value" not in str(exc.value)
+    assert len(calls)==1
+    adapters._WRH_BATCH_CACHE.clear()
+
+
+def test_native_fahrenheit_ingest_reseeds_after_durable_world_commit(monkeypatch,tmp_path):
+    import threading
+    from src.config import cities_by_name
+    from src.data import station_temperature_adapters as adapters
+    from src.data import replacement_forecast_production as production
+    from src.state import db, write_coordinator as coordinator
+    from src.state.schema.observation_prints_schema import ensure_table
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    import src.ingest_main as ingest
+    from zoneinfo import ZoneInfo
+    city=cities_by_name['Chicago']
+    route=next(r for r in load_physical_current_sources()[0] if r.provider=='noaa_wrh' and r.station_id==city.wu_station)
+    now=datetime.now(timezone.utc);observed=now-timedelta(minutes=2)
+    sample=adapters._sample(route,observed,62.6,now,'a'*64)
+    path=tmp_path/'world.sqlite'
+    with sqlite3.connect(path) as conn:ensure_table(conn)
+    class Lease:
+        def __enter__(self):return self
+        def __exit__(self,*_):return False
+        def record_commit(self,**kw):assert kw['rows_changed']==1
+    monkeypatch.setattr(adapters,'fetch_station_temperature',lambda *args,**kw:(sample,))
+    monkeypatch.setattr(db,'world_write_mutex',lambda:threading.Lock())
+    monkeypatch.setattr(db,'get_world_connection',lambda **kw:sqlite3.connect(path))
+    monkeypatch.setattr(coordinator,'default_runtime_write_coordinator',lambda:SimpleNamespace(lease=lambda *a,**kw:Lease()))
+    monkeypatch.setattr(production,'_replacement_forecast_live_materialization_queue_config',lambda:{})
+    monkeypatch.setattr('src.data.physical_current_delivery.current_temperature_priority_families',lambda:{})
+    calls=[]
+    def enqueue(cfg,**kw):
+        with sqlite3.connect(path) as check:
+            row=check.execute('SELECT value_native,unit FROM observation_prints').fetchone()
+            assert row==(62.6,'F')
+        calls.append(kw)
+        return {'status':'FUSION_UPGRADE_TRIGGER'}
+    monkeypatch.setattr(production,'_enqueue_fusion_upgrade_reseeds_if_needed',enqueue)
+    monkeypatch.setattr(ingest,'_physical_current_pending_wakes',set())
+    result=ingest._day0_current_temperature_source_tick(city,route)
+    assert result['status']=='COMMITTED' and result['advanced']
+    assert result['clock_trace']['input_identity']['value_native']==62.6
+    assert len(calls)==1
+    day=observed.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    with sqlite3.connect(path) as conn:
+        state=read_day0_current_temperature_state(conn=conn,city=city,target_date=day,decision_time=datetime.now(timezone.utc))
+    assert state and state.value_native==62.6
