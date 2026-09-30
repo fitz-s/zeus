@@ -783,6 +783,8 @@ def _homr_international_ground_facts(raw: bytes, station_id: str) -> dict[str, o
         raise ValueError("HOMR snapshot must contain one station")
     station = stations[0]
     identifiers, location = station["identifiers"], station["location"]
+    if station.get("locations"):
+        raise ValueError("multiple location representation requires explicit validation")
     reject_periods(identifiers)
     reject_periods(location)
     ids = {}
@@ -808,6 +810,10 @@ def _homr_international_ground_facts(raw: bytes, station_id: str) -> dict[str, o
         raise ValueError("official station coordinate invalid")
     if lat != number(station["header"]["latitude_dec"]) or lon != number(station["header"]["longitude_dec"]):
         raise ValueError("header and station coordinate differ")
+    for field, coordinate, expected in (("latitudes", "latitude_dec", lat), ("longitudes", "longitude_dec", lon)):
+        representations = location[field]
+        if not isinstance(representations, list) or len(representations) != 1 or number(representations[0][coordinate]) != expected:
+            raise ValueError("official location coordinate representations differ")
     elevations = [row for row in location["elevations"] if row.get("elevationType") == "GROUND"]
     if len(elevations) != 1:
         raise ValueError("official station ground missing or ambiguous")

@@ -806,6 +806,7 @@ def _official_international_homr_registry(tmp_path, monkeypatch, name="Shanghai"
 @pytest.mark.parametrize("mutation", (
     "foreign_icao", "station_namespace", "location_namespace", "geo_namespace", "nws_namespace",
     "duplicate_icao", "multiple_station", "multiple_coordinates", "header_mismatch",
+    "multiple_locations", "multiple_latitudes", "longitude_mismatch",
     "ground_airport", "ground_barometric", "duplicate_ground", "units", "boolean_height",
     "nonfinite", "coordinate_boolean", "known_location_period", "known_identifier_period", "closed", "definition",
 ))
@@ -835,6 +836,12 @@ def test_international_homr_rejects_foreign_ambiguous_quantity_and_unsupported_p
         collection["stations"].append(station.copy())
     elif mutation == "multiple_coordinates":
         location["latLonPairs"].append(location["latLonPairs"][0].copy())
+    elif mutation == "multiple_locations":
+        station["locations"] = [location.copy(), location.copy()]
+    elif mutation == "multiple_latitudes":
+        location["latitudes"].append(location["latitudes"][0].copy())
+    elif mutation == "longitude_mismatch":
+        location["longitudes"][0]["longitude_dec"] = "0"
     elif mutation == "header_mismatch":
         station["header"]["latitude_dec"] = "0"
     elif mutation in {"ground_airport", "ground_barometric"}:
