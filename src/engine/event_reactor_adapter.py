@@ -22769,16 +22769,17 @@ class _SubmitAbortedModeFlipped(ValueError):
     """
 
 
-_TAKER_TOUCH_RESERVATION_RACE_PREFIXES = (
+_FINAL_BOOK_PRICE_RACE_PREFIXES = (
     "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION",
     "TAKER_SELL_TOUCH_BELOW_RESERVATION",
+    "MAKER_LIMIT_SUPERSEDED",
 )
 
 
 def _submit_price_moved_abort_reason(exc: BaseException) -> str | None:
-    """Map final taker touch/reservation races to the first-class price-moved abort.
+    """Map final touch/reservation and maker-limit races to the price-moved abort.
 
-    The fresh JIT book can make the selected taker leg no longer executable at its
+    The fresh JIT book can make the selected leg no longer executable at its
     admitted reservation before any venue POST occurs. That is the same transient
     stale-decision-vs-fresh-book family as submit recapture PRICE_MOVED, not a
     structural certificate-build failure.
@@ -22787,7 +22788,7 @@ def _submit_price_moved_abort_reason(exc: BaseException) -> str | None:
     message = str(exc)
     if any(
         message.startswith(prefix) or f":{prefix}" in message
-        for prefix in _TAKER_TOUCH_RESERVATION_RACE_PREFIXES
+        for prefix in _FINAL_BOOK_PRICE_RACE_PREFIXES
     ):
         return f"{_PRICE_MOVED_ABORT_PREFIX}:{message}"
     return None
@@ -24664,6 +24665,12 @@ def _build_live_execution_command_certificates(
                 and str(order_mode).strip().upper() == "MAKER"
                 else None
             ),
+            exact_maker_limit_price=(
+                str(global_decision.limit_price)
+                if global_decision is not None
+                and str(order_mode).strip().upper() == "MAKER"
+                else None
+            ),
             executable_market_context=executable_market_context,
             taker_quality_proof=taker_quality_proof,
         )
@@ -24677,6 +24684,10 @@ def _build_live_execution_command_certificates(
         _assert_final_jit_witness_revalidates_intent(
             provisional=authority_witness,
             final=final_authority_witness,
+        )
+        _assert_final_resting_limit_valid(
+            final_intent.payload,
+            final_authority_witness,
         )
         authority_witness = final_authority_witness
         # Persist the FINAL exact side/limit/size JIT observation, not the
@@ -26244,6 +26255,27 @@ def _require_pre_submit_authority_witness(
     if missing:
         raise ValueError("PRE_SUBMIT_AUTHORITY_PROVENANCE_REQUIRED:" + ",".join(missing))
     return witness
+
+
+def _assert_final_resting_limit_valid(
+    payload: Mapping[str, object],
+    witness: SealedBookEvidence,
+) -> None:
+    """Apply the JIT preflight's resting-limit law to the final submit book."""
+
+    if payload.get("post_only") is not True:
+        return
+    violation = resting_limit_violation(
+        payload["limit_price"],
+        best_bid=witness.current_best_bid,
+        best_ask=witness.current_best_ask,
+    )
+    if violation is not None:
+        raise ValueError(
+            f"MAKER_LIMIT_SUPERSEDED:{violation}:"
+            f"limit={payload['limit_price']}:"
+            f"bid={witness.current_best_bid}:ask={witness.current_best_ask}"
+        )
 
 
 def _assert_final_jit_witness_revalidates_intent(

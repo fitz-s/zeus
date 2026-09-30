@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-09-12
+# Last reused or audited: 2026-09-30 (exact maker limit binding)
 # Authority basis: EDLI_EXECUTION_STRATEGY_DESIGN_2026_05_31.md §4 items 1,2,3,7 +
 #   §6.1 test-first relationship test (governor-TAKER -> 3-layer FOK acceptance + submittable).
 """Relationship tests for the EDLI taker execution spine.
@@ -92,6 +92,7 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
                  exact_taker_shares: str | None = None,
                  exact_taker_limit_price: str | None = None,
                  exact_maker_shares: str | None = None,
+                 exact_maker_limit_price: str | None = None,
                  order_type: str | None = None,
                  time_in_force: str | None = None,
                  fee_rate: float = 0.0,
@@ -248,6 +249,7 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         exact_taker_shares=exact_taker_shares,
         exact_taker_limit_price=exact_taker_limit_price,
         exact_maker_shares=exact_maker_shares,
+        exact_maker_limit_price=exact_maker_limit_price,
         taker_quality_proof=taker_quality_proof,
     )
     if return_parents:
@@ -365,6 +367,7 @@ def test_global_maker_preserves_selected_terminal_shares_at_better_price():
         actionable_overrides={"live_cap_reserved_notional_usd": 4.97516},
         quote_overrides={"best_bid": 0.59, "best_ask": 0.61},
         exact_maker_shares="8.00",
+        exact_maker_limit_price="0.50",
     )
 
     assert final_intent.payload["post_only"] is True
@@ -372,11 +375,36 @@ def test_global_maker_preserves_selected_terminal_shares_at_better_price():
     assert final_intent.payload["size"] == pytest.approx(8.0)
 
 
+def test_global_maker_keeps_selected_limit_after_bid_retreat():
+    """The selected maker limit is the witnessed price, not a bid+tick recompute."""
+
+    _, _, final_intent = _taker_chain(
+        order_mode="MAKER",
+        quote_overrides={"best_bid": 0.40, "best_ask": 0.61},
+        exact_maker_shares="8.00",
+        exact_maker_limit_price="0.45",
+    )
+
+    assert final_intent.payload["post_only"] is True
+    assert final_intent.payload["limit_price"] == pytest.approx(0.45)
+    assert final_intent.payload["size"] == pytest.approx(8.0)
+
+
+def test_global_maker_limit_cannot_exceed_reservation():
+    with pytest.raises(ValueError, match="EXACT_MAKER_LIMIT_EXCEEDS_RESERVATION"):
+        _taker_chain(
+            order_mode="MAKER",
+            exact_maker_shares="8.00",
+            exact_maker_limit_price="0.51",
+        )
+
+
 def test_exact_maker_shares_cannot_be_reused_by_taker_mode():
     with pytest.raises(ValueError, match="EXACT_MAKER_SHARES_REQUIRES_MAKER_MODE"):
         _taker_chain(
             order_mode="TAKER",
             exact_maker_shares="8.00",
+            exact_maker_limit_price="0.50",
         )
 
 

@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-07-14
+# Last reused or audited: 2026-09-30 (resting-limit law: bid side, cut 7615)
 # Authority basis: live incident 2026-06-12T02:16:49Z (Helsinki POST_ONLY
 #   219.77@0.14 PRE_SUBMIT_ERROR 'depth_status=DEPTH_INSUFFICIENT') + the
 #   taker-shaped-check-strangles-maker family (WALL #1 passive_maker_context,
@@ -107,7 +107,7 @@ def _buy_fak_economics(*, shares=Decimal("10"), limit=Decimal("0.14")):
     }
 
 
-def _fresh_snapshot(*, top_ask, provenance_source=None, depth_json="{}"):
+def _fresh_snapshot(*, top_ask, top_bid=None, provenance_source=None, depth_json="{}"):
     return SimpleNamespace(
         snapshot_id="snap-fresh",
         executable_snapshot_hash="hash-fresh",
@@ -117,6 +117,7 @@ def _fresh_snapshot(*, top_ask, provenance_source=None, depth_json="{}"):
         min_order_size=5.0,
         fee_details={"fee_rate_fraction": "0.05"},
         neg_risk=False,
+        orderbook_top_bid=top_bid,
         orderbook_top_ask=top_ask,
         yes_token_id="tok-yes",
         no_token_id="tok-no",
@@ -189,6 +190,9 @@ def _patched_recapture(monkeypatch):
     monkeypatch.setattr(scanner, "capture_executable_market_snapshot", fake_capture)
 
     class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
         def __enter__(self):
             return self
 
@@ -222,7 +226,7 @@ def test_maker_rest_crossing_fresh_ask_raises(_patched_recapture):
     from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
 
     _patched_recapture["fresh"] = _fresh_snapshot(top_ask=Decimal("0.12"))
-    with pytest.raises(ValueError, match="would cross fresh ask"):
+    with pytest.raises(ValueError, match="at_or_above_best_ask"):
         _recapture_fresh_entry_snapshot_if_needed(
             _LegacyIntent(),
             _final_intent(post_only=True, limit=0.14),
@@ -236,6 +240,39 @@ def test_maker_rest_empty_fresh_ask_is_bid_establishing(_patched_recapture):
     from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
 
     _patched_recapture["fresh"] = _fresh_snapshot(top_ask=None)
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(),
+        _final_intent(post_only=True, limit=0.14),
+        conn=object(),
+        submitted_shares=219.77,
+    )
+    assert out.executable_snapshot_id == "snap-fresh"
+
+
+@pytest.mark.parametrize("fresh_bid", (Decimal("0.14"), Decimal("0.16")))
+def test_maker_rest_at_or_below_fresh_bid_is_refused(_patched_recapture, fresh_bid):
+    """Cut 7615: a limit at or below the fresh best bid is not top of book and
+    must not be posted, even though it does not cross the ask."""
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot(
+        top_ask=Decimal("0.20"), top_bid=fresh_bid
+    )
+    with pytest.raises(ValueError, match="at_or_below_best_bid"):
+        _recapture_fresh_entry_snapshot_if_needed(
+            _LegacyIntent(),
+            _final_intent(post_only=True, limit=0.14),
+            conn=object(),
+            submitted_shares=219.77,
+        )
+
+
+def test_maker_rest_above_retreated_fresh_bid_passes(_patched_recapture):
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot(
+        top_ask=Decimal("0.20"), top_bid=Decimal("0.11")
+    )
     out = _recapture_fresh_entry_snapshot_if_needed(
         _LegacyIntent(),
         _final_intent(post_only=True, limit=0.14),

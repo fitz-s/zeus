@@ -72,6 +72,7 @@ def build_final_intent_certificate_from_actionable(
     exact_taker_shares: float | str | Decimal | None = None,
     exact_taker_limit_price: float | str | Decimal | None = None,
     exact_maker_shares: float | str | Decimal | None = None,
+    exact_maker_limit_price: float | str | Decimal | None = None,
     executable_market_context: Mapping[str, object] | None = None,
     taker_quality_proof: Mapping[str, object] | None = None,
 ) -> DecisionCertificate:
@@ -90,7 +91,9 @@ def build_final_intent_certificate_from_actionable(
     exact_taker = (exact_taker_shares is not None) or (
         exact_taker_limit_price is not None
     )
-    exact_maker = exact_maker_shares is not None
+    exact_maker = (exact_maker_shares is not None) or (
+        exact_maker_limit_price is not None
+    )
     if exact_taker and exact_maker:
         raise ValueError("EXACT_ORDER_SHARES_MODE_AMBIGUOUS")
     if exact_taker and (
@@ -99,6 +102,10 @@ def build_final_intent_certificate_from_actionable(
         raise ValueError("EXACT_TAKER_ORDER_REQUIRES_SHARES_AND_LIMIT")
     if exact_maker and order_spec.mode != "MAKER":
         raise ValueError("EXACT_MAKER_SHARES_REQUIRES_MAKER_MODE")
+    if exact_maker and (
+        exact_maker_shares is None or exact_maker_limit_price is None
+    ):
+        raise ValueError("EXACT_MAKER_ORDER_REQUIRES_SHARES_AND_LIMIT")
     if exact_taker:
         if order_spec.mode != "TAKER":
             raise ValueError("EXACT_TAKER_ORDER_REQUIRES_TAKER_MODE")
@@ -110,6 +117,15 @@ def build_final_intent_certificate_from_actionable(
             best_ask=best_ask,
             tick_size=float(tick_size),
         )
+    elif exact_maker:
+        # The selected maker limit is the price its fill witness sampled; the
+        # book law for it is enforced against the final JIT witness.
+        limit_price = float(Decimal(str(exact_maker_limit_price)))
+        if limit_price > reservation + 1e-9:
+            raise ValueError(
+                "EXACT_MAKER_LIMIT_EXCEEDS_RESERVATION:"
+                f"limit={limit_price:.6g}:reservation={reservation:.6g}"
+            )
     else:
         limit_price = _branch_limit_price(
             side=_side_for_direction(str(action["direction"])),

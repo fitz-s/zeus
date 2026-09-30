@@ -51,6 +51,7 @@ from src.contracts.venue_submission_envelope import (
     LIVE_ORDER_MIN_UNIT_PRICE,
     assert_live_order_size,
     assert_live_order_unit_price,
+    resting_limit_violation,
 )
 from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
 from src.contracts.position_truth import (
@@ -6765,17 +6766,22 @@ def _recapture_fresh_entry_snapshot_if_needed(
     # check killed every resting maker whose elected snapshot went stale before
     # the executor ran (fourth instance of a taker-shaped check strangling the
     # maker lane; same family as WALL #1 passive_maker_context). Maker
-    # economics depend only on the rest still being NON-CROSSING on the fresh
-    # book: if the fresh ask moved through our limit the post_only premise is
-    # gone and the abort is correct; an empty fresh ask is a bid-establishing
-    # rest and stands.
+    # economics depend only on the resting-limit law on the fresh book: the
+    # limit stays strictly inside the spread (an absent side is open) and in
+    # the live band; otherwise the post_only premise is gone and the abort is
+    # correct.
     _is_maker_rest = bool(getattr(final_intent, "post_only", False))
     if _is_maker_rest:
-        fresh_ask = fresh.orderbook_top_ask
-        if fresh_ask is not None and Decimal(str(fresh_limit_price)) >= Decimal(str(fresh_ask)):
+        violation = resting_limit_violation(
+            fresh_limit_price,
+            best_bid=fresh.orderbook_top_bid,
+            best_ask=fresh.orderbook_top_ask,
+        )
+        if violation is not None:
             raise ValueError(
                 "recaptured executable snapshot changed final-intent economics: "
-                f"post_only limit {fresh_limit_price} would cross fresh ask {fresh_ask}"
+                f"post_only limit {fresh_limit_price} {violation}: "
+                f"fresh bid={fresh.orderbook_top_bid} ask={fresh.orderbook_top_ask}"
             )
     else:
         if fak_prefix_authorized:
