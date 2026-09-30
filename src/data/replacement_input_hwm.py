@@ -1442,6 +1442,30 @@ def _provenance_has_current_value_serving(
     return isinstance(serving, dict) and bool(serving)
 
 
+def _served_row_evidence(
+    conn: sqlite3.Connection, raw_model_forecast_id: int
+) -> tuple[float, int | None] | None:
+    """The (value_c, lead_days) a consumed raw row fed into the posterior.
+
+    ``None`` when the row cannot be read: unknown evidence never matches, so
+    the caller keeps the fail-closed superseded verdict.
+    """
+    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
+    if table_ref is None:
+        return None
+    try:
+        row = conn.execute(
+            f"SELECT forecast_value_c, lead_days FROM {table_ref}"
+            " WHERE raw_model_forecast_id = ?",
+            (int(raw_model_forecast_id),),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(exc, basis="consumed_raw_row_read_unavailable")
+    if row is None or row[0] is None:
+        return None
+    return float(row[0]), None if row[1] is None else int(row[1])
+
+
 def _exact_current_value_serving_lag(
     conn: sqlite3.Connection,
     *,
@@ -1589,9 +1613,18 @@ def _exact_current_value_serving_lag(
                 )
             continue
         if current_cycle > consumed_cycle:
-            newer_cycle_changes.append(
-                (model, latest_id, consumed_id, current_cycle, consumed_cycle)
-            )
+            # A newer cycle supersedes only by carrying different evidence.
+            # An hourly provider (NBM, ICON, UKMO...) often republishes the
+            # exact value and lead bucket the posterior already consumed; that
+            # relabel leaves every consumed input current, so it must not turn
+            # each hourly arrival into a probability outage.
+            if _served_row_evidence(conn, consumed_id) != (
+                float(current.value_c),
+                current.lead_days,
+            ):
+                newer_cycle_changes.append(
+                    (model, latest_id, consumed_id, current_cycle, consumed_cycle)
+                )
             continue
         return (
             True,

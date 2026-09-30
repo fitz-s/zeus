@@ -1770,6 +1770,7 @@ def _insert_raw_model_forecast(
     target_date: str = "2026-06-07",
     metric: str = "high",
     endpoint: str = "single_runs",
+    forecast_value_c: float = 28.0,
 ) -> None:
     conn.execute(
         """
@@ -1788,7 +1789,7 @@ def _insert_raw_model_forecast(
             source_available_at.isoformat(),
             captured_at.isoformat(),
             1,
-            28.0,
+            forecast_value_c,
             endpoint,
             "COVERED",
         ),
@@ -3449,6 +3450,7 @@ def test_raw_hwm_blocks_when_exact_consumed_model_is_superseded() -> None:
         source_cycle_time=_dt(3),
         captured_at=_dt(3, 5),
         source_available_at=_dt(3, 5),
+        forecast_value_c=29.0,
     )
 
     result = read_replacement_forecast_bundle(
@@ -3570,6 +3572,7 @@ def test_raw_hwm_marks_isolated_used_provider_revision_unconsumed() -> None:
         source_cycle_time=_dt(6),
         captured_at=_dt(6, 5),
         source_available_at=_dt(6, 5),
+        forecast_value_c=29.0,
     )
 
     reason = replacement_live_input_lag_reason(
@@ -3586,6 +3589,94 @@ def test_raw_hwm_marks_isolated_used_provider_revision_unconsumed() -> None:
     assert reason is not None
     assert "basis=used_raw_model_forecasts_superseded" in reason
     assert "model=icon_eu" in reason
+
+
+def _hourly_relabel_reason(
+    *,
+    newer_value_c: float,
+    newer_lead_days: int | None = None,
+    consumed_row_present: bool = True,
+) -> str | None:
+    """One consumed NBM row, then the next hourly cycle of the same provider."""
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    consumed: dict[str, dict[str, object]] = {}
+    for model in ("ecmwf_ifs", "ncep_nbm_conus"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(0),
+            captured_at=_dt(0, 5),
+            source_available_at=_dt(0, 5),
+        )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(0).isoformat(),
+            "captured_at": _dt(0, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
+    )
+    if not consumed_row_present:
+        conn.execute(
+            "DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id = ?",
+            (consumed["ncep_nbm_conus"]["raw_model_forecast_id"],),
+        )
+    _insert_raw_model_forecast(
+        conn,
+        model="ncep_nbm_conus",
+        source_cycle_time=_dt(1),
+        captured_at=_dt(1, 5),
+        source_available_at=_dt(1, 5),
+        forecast_value_c=newer_value_c,
+    )
+    if newer_lead_days is not None:
+        conn.execute(
+            "UPDATE raw_model_forecasts SET lead_days = ?"
+            " WHERE raw_model_forecast_id = last_insert_rowid()",
+            (newer_lead_days,),
+        )
+    return replacement_live_input_lag_reason(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(2),
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at=_dt(0, 10),
+        posterior_provenance=_with_current_value_serving(consumed),
+    )
+
+
+def test_raw_hwm_hourly_cycle_relabel_of_consumed_evidence_stays_current() -> None:
+    """A newer hourly cycle carrying the consumed value+lead is not new evidence.
+
+    Live 2026-09-30: 141/377 NBM and 91/454 icon_global supersession blocks
+    were exact relabels; each turned an hourly arrival into a family outage.
+    """
+    assert _hourly_relabel_reason(newer_value_c=28.0) is None
+
+
+def test_raw_hwm_hourly_cycle_with_changed_value_or_lead_supersedes() -> None:
+    changed_value = _hourly_relabel_reason(newer_value_c=28.3)
+    assert changed_value is not None
+    assert "basis=used_raw_model_forecasts_superseded" in changed_value
+    assert "model=ncep_nbm_conus" in changed_value
+
+    changed_lead = _hourly_relabel_reason(newer_value_c=28.0, newer_lead_days=0)
+    assert changed_lead is not None
+    assert "basis=used_raw_model_forecasts_superseded" in changed_lead
+
+
+def test_raw_hwm_unreadable_consumed_evidence_stays_superseded() -> None:
+    """Unknown consumed evidence can never prove a relabel (fail closed)."""
+    reason = _hourly_relabel_reason(newer_value_c=28.0, consumed_row_present=False)
+    assert reason is not None
+    assert "basis=used_raw_model_forecasts_superseded" in reason
 
 
 def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance() -> None:
