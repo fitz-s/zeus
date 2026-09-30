@@ -418,7 +418,7 @@ def _held_pinned_carrier_claimed(provenance: Mapping[str, Any]) -> bool:
 
 
 def _wu_fast_pinned_carrier_reason(
-    provenance: Mapping[str, Any] | None = None,
+    provenance: Mapping[str, Any],
     *,
     city: str,
     target_date: date | str,
@@ -837,10 +837,8 @@ def _held_pinned_carrier_fields_reason(
         not witness.get(field) for field in required_witness
     ):
         return "REPLACEMENT_PINNED_DAY0_VECTOR_WITNESS_INCOMPLETE"
-    fusion = provenance.get("bayes_precision_fusion") if isinstance(provenance, Mapping) else None
+    fusion = provenance.get("bayes_precision_fusion")
     shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
-    if not isinstance(shape, Mapping) or shape.get("snapshot_id") != snapshot_id:
-        return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
     serving = fusion.get("current_value_serving") if isinstance(fusion, Mapping) else None
     if not isinstance(shape, Mapping) or not isinstance(serving, Mapping):
         return "REPLACEMENT_PINNED_DAY0_SOURCE_CLOCK_WITNESS_INCOMPLETE"
@@ -987,7 +985,7 @@ def _current_ensemble_snapshot_identity_reason(
     city: str,
     target_date: str,
     metric: str,
-    provenance: Mapping[str, Any],
+    provenance: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Require the posterior's current ENS snapshot to be current and target-covered.
 
@@ -1031,8 +1029,10 @@ def _current_ensemble_snapshot_identity_reason(
     ):
         return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
     from src.data.replacement_forecast_source_run_identity import native_coordinate_certificate_reason
-    fusion = provenance.get("bayes_precision_fusion")
+    fusion = provenance.get("bayes_precision_fusion") if isinstance(provenance, Mapping) else None
     shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
+    if not isinstance(shape, Mapping) or shape.get("snapshot_id") != snapshot_id:
+        return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
     compatibility_reason = native_coordinate_certificate_reason(conn, shape=shape,
         city=city, target_date=target_date, metric=metric)
     if compatibility_reason is not None:
