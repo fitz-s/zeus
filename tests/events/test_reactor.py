@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-09-27
-# Lifecycle: created=2026-05-24; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-05-24; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -3706,6 +3706,14 @@ def test_reauction_exhaustion_reasons_are_terminal(caplog, reason):
         "GLOBAL_REAUCTION_EPOCH_EXPIRED",
         "GLOBAL_PREFLIGHT_BATCH_BLOCKED:GLOBAL_BOOK_RESPONSE_INCOMPLETE",
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:would_cross_book:passive price crossed",
+        # A market-authority-superseded cut ends and requeues; the stricter
+        # winner-target predicate must re-arm the carrier, not dead-letter it.
+        (
+            "GLOBAL_REAUCTION_MARKET_AUTHORITY_REQUEUED:"
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+            "ValueError:current_limit_or_cashflow_changed"
+        ),
     ),
 )
 def test_explicitly_transient_predicate_matches_registered_transient(reason):

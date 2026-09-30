@@ -411,6 +411,14 @@ _GLOBAL_BOOK_METADATA_REFRESH_LOCK = threading.Lock()
 _GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE: str | None = None
 _GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY: dict[str, datetime] = {}
 
+# Families whose Gamma/CLOB market authority a preflight proved superseded.
+# The superseded cut ends and its work is requeued, so the demand must outlive
+# that cut's adapter: the next cut refreshes these families before selection
+# and clears each one when its fresh book epoch publishes.
+_GLOBAL_MARKET_AUTHORITY_REFRESH_LOCK = threading.Lock()
+_GLOBAL_MARKET_AUTHORITY_REFRESH_NAMESPACE: str | None = None
+_GLOBAL_MARKET_AUTHORITY_REFRESH_FAMILY_KEYS: set[str] = set()
+
 
 _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK = threading.Lock()
 _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE: str | None = None
@@ -2455,6 +2463,21 @@ def _global_book_metadata_refresh_hwm(
             _GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY.clear()
             _GLOBAL_BOOK_METADATA_REFRESH_NAMESPACE = namespace
         return dict(_GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY)
+
+
+def _global_market_authority_refresh_family_keys(
+    trade_conn: sqlite3.Connection,
+) -> set[str]:
+    """Return the pending refresh set for this trade DB, shared across cuts."""
+
+    global _GLOBAL_MARKET_AUTHORITY_REFRESH_NAMESPACE
+
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    with _GLOBAL_MARKET_AUTHORITY_REFRESH_LOCK:
+        if _GLOBAL_MARKET_AUTHORITY_REFRESH_NAMESPACE != namespace:
+            _GLOBAL_MARKET_AUTHORITY_REFRESH_FAMILY_KEYS.clear()
+            _GLOBAL_MARKET_AUTHORITY_REFRESH_NAMESPACE = namespace
+        return _GLOBAL_MARKET_AUTHORITY_REFRESH_FAMILY_KEYS
 
 
 def _record_global_book_metadata_refresh_hwm(
@@ -9928,7 +9951,9 @@ def event_bound_live_adapter_from_trade_conn(
         speculative_book_metadata_by_key: dict[
             tuple[str, str], Mapping[str, object]
         ] = {}
-        market_authority_refresh_family_keys: set[str] = set()
+        market_authority_refresh_family_keys = (
+            _global_market_authority_refresh_family_keys(trade_conn)
+        )
         reduce_only_book_tokens: frozenset[str] | None = None
         held_tokens_by_family: dict[str, set[str]] = {}
 

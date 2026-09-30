@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-09-03; last_reused=2026-09-03
+# Lifecycle: created=2026-03-31; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-09-08
+# Last reused/audited: 2026-09-30
 # Authority basis: held-monitor canonical append liveness and atomicity incidents
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -8373,6 +8373,33 @@ def test_non_day0_scalar_monitor_requests_full_family_reauction_without_fake_q_i
     assert request.held_best_bid is None
     assert request.bid_observed_at == ""
     assert request.probability_observed_at == ""
+
+
+def test_market_authority_refresh_demand_outlives_the_superseded_cut(
+    monkeypatch, tmp_path
+):
+    """A market-authority-superseded cut ends and requeues, so the forced
+    refresh it records must reach the next cycle's adapter over the same
+    trade DB, and must not leak to a different trade DB."""
+    from src.engine import event_reactor_adapter as era
+
+    monkeypatch.setattr(era, "_GLOBAL_MARKET_AUTHORITY_REFRESH_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_MARKET_AUTHORITY_REFRESH_FAMILY_KEYS", set())
+    trade = sqlite3.connect(tmp_path / "trade.db")
+    other = sqlite3.connect(tmp_path / "other.db")
+    try:
+        superseded_cut = era._global_market_authority_refresh_family_keys(trade)
+        superseded_cut.add("family-superseded")
+        next_cut = era._global_market_authority_refresh_family_keys(trade)
+        assert next_cut == {"family-superseded"}
+        # The next cut's published fresh epoch clears the demand.
+        next_cut.difference_update({"family-superseded"})
+        assert era._global_market_authority_refresh_family_keys(trade) == set()
+        next_cut.add("family-superseded")
+        assert era._global_market_authority_refresh_family_keys(other) == set()
+    finally:
+        trade.close()
+        other.close()
 
 
 def test_market_authority_refresh_extends_delta_scope_but_preserves_full_refresh():

@@ -8312,7 +8312,6 @@ def process_current_global_batch(
     ]
     | None = None,
     _probability_supersession_reauction_count: int = 0,
-    _market_authority_supersession_reauction_count: int = 0,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -11082,28 +11081,16 @@ def process_current_global_batch(
                         "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
                         f"{preflight.reason or preflight.status}"
                     )
-                if preflight.status in {
-                    "PROBABILITY_SUPERSEDED",
-                    "MARKET_AUTHORITY_SUPERSEDED",
-                }:
-                    market_authority_superseded = (
-                        preflight.status == "MARKET_AUTHORITY_SUPERSEDED"
-                    )
-                    reauction_count = (
-                        _market_authority_supersession_reauction_count
-                        if market_authority_superseded
-                        else _probability_supersession_reauction_count
-                    )
-                    if reauction_count >= _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS:
-                        unstable_prefix = (
-                            "GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE:"
-                            if market_authority_superseded
-                            else "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
-                        )
-                        return reject(
-                            f"{unstable_prefix}{preflight.reason or preflight.status}"
-                        )
-                    if market_authority_superseded and market_authority_refresh is not None:
+                if preflight.status == "MARKET_AUTHORITY_SUPERSEDED":
+                    # SCOPE: the winner's Gamma/CLOB/raw-book market authority
+                    # changed, so this cut's frozen objective is no longer
+                    # comparable. DRAIN: record the winner family for a forced
+                    # market-authority refresh, end this cut and requeue its
+                    # events; the next cycle runs one complete cut on a fresh
+                    # work budget. An inline child inherits this cut's nearly
+                    # spent deadline and dies before its receipt.
+                    # RESET: only that fresh cut may actuate.
+                    if market_authority_refresh is not None:
                         selected_candidate = getattr(selected.decision, "candidate", None)
                         refresh_family_key = str(
                             getattr(selected_candidate, "family_key", "") or ""
@@ -11121,18 +11108,36 @@ def process_current_global_batch(
                                 "GLOBAL_REAUCTION_MARKET_AUTHORITY_REFRESH_FAILED:"
                                 f"{type(exc).__name__}:{exc}"
                             )
-                    # SCOPE: either the winner's q proof or its Gamma/CLOB/raw
-                    # book market authority changed. Both invalidate
+                    _LOG.warning(
+                        "global batch market authority superseded; ending cut and "
+                        "requeueing for a fresh current-state auction: event=%s "
+                        "reason=%s",
+                        winner_id,
+                        preflight.reason,
+                    )
+                    return reject(
+                        "GLOBAL_REAUCTION_MARKET_AUTHORITY_REQUEUED:"
+                        f"{preflight.reason or preflight.status}"
+                    )
+                if preflight.status == "PROBABILITY_SUPERSEDED":
+                    if (
+                        _probability_supersession_reauction_count
+                        >= _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS
+                    ):
+                        return reject(
+                            "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
+                            f"{preflight.reason or preflight.status}"
+                        )
+                    # SCOPE: the winner's q proof changed, which invalidates
                     # comparability of the frozen global objective. DRAIN: one
                     # bounded cut rebuilds every Gamma+CLOB+raw book, q/wealth,
                     # BUY/SELL/HOLD/CASH input.
                     # RESET: only that fresh cut may actuate; repeat drift is
                     # fail-closed for the next wake.
                     _LOG.warning(
-                        "global batch %s superseded; rebuilding full current-state "
-                        "auction: attempt=%d event=%s reason=%s",
-                        "market authority" if market_authority_superseded else "probability",
-                        reauction_count + 1,
+                        "global batch probability superseded; rebuilding full "
+                        "current-state auction: attempt=%d event=%s reason=%s",
+                        _probability_supersession_reauction_count + 1,
                         winner_id,
                         preflight.reason,
                     )
@@ -11184,12 +11189,7 @@ def process_current_global_batch(
                         required_held_family_keys=required_held_family_keys,
                         restrict_to_family_keys=restrict_to_family_keys,
                         _probability_supersession_reauction_count=(
-                            _probability_supersession_reauction_count
-                            + (0 if market_authority_superseded else 1)
-                        ),
-                        _market_authority_supersession_reauction_count=(
-                            _market_authority_supersession_reauction_count
-                            + (1 if market_authority_superseded else 0)
+                            _probability_supersession_reauction_count + 1
                         ),
                     )
                 if preflight.status == "CANDIDATE_BLOCKED":

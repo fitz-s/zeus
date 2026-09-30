@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-27
+# Last reused/audited: 2026-09-30
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -75,7 +75,10 @@ from src.events.day0_authority import (
 )
 from src.contracts.family_fault_scope import GlobalValueFault
 from src.contracts.payoff_q_correction import CalibrationPolicySpec, PayoffQCorrection
-from src.events.reactor import EventSubmissionReceipt
+from src.events.reactor import (
+    EventSubmissionReceipt,
+    _is_explicitly_transient_money_path_reason,
+)
 from src.solve.solver import (
     BinaryTerminalWealthCertificate,
     CurrentExecutionAuthority,
@@ -38043,26 +38046,48 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(
             assert not conn.in_transaction
             conn.close()
 
+    if supersession_status == "MARKET_AUTHORITY_SUPERSEDED":
+        # The child cut would inherit this cut's spent work budget, so the cut
+        # ends on its outcome, carries a forced refresh of the winner family,
+        # and requeues every event for a complete cut next cycle.
+        assert calls["prepare"] == 2
+        assert calls["books"] == 1
+        assert calls["preflight"] == ["stale-sell"]
+        assert calls["snapshot_release"] == [1]
+        assert calls["scope_scan"] == 1
+        assert calls["market_refresh"] == [frozenset({sell_family})]
+        assert calls["venue"] == []
+        assert result.winner_event_id is None
+        assert result.venue_submit_count == 0
+        assert result.economic_cut_completed is False
+        assert result.next_claim_event is None
+        expected_reason = (
+            "GLOBAL_REAUCTION_MARKET_AUTHORITY_REQUEUED:" + supersession_reason
+        )
+        assert {
+            event_id: receipt.reason
+            for event_id, receipt in result.receipts.items()
+        } == {
+            sell_event.event_id: expected_reason,
+            buy_event.event_id: expected_reason,
+        }
+        assert all(
+            _is_explicitly_transient_money_path_reason(receipt.reason)
+            for receipt in result.receipts.values()
+        )
+        return
     assert calls["prepare"] == 4
     assert calls["books"] == 2
     assert calls["preflight"] == ["stale-sell", "current-positive-buy"]
     assert calls["snapshot_release"] == [1, 1]
     assert calls["scope_scan"] == 2
-    assert calls["market_refresh"] == (
-        [frozenset({sell_family})]
-        if supersession_status == "MARKET_AUTHORITY_SUPERSEDED"
-        else []
-    )
+    assert calls["market_refresh"] == []
     if second_probability_drift:
         assert calls["venue"] == []
         assert result.winner_event_id is None
         assert result.venue_submit_count == 0
         assert all(
-            receipt.reason.startswith(
-                "GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE:"
-                if supersession_status == "MARKET_AUTHORITY_SUPERSEDED"
-                else "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
-            )
+            receipt.reason.startswith("GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:")
             for receipt in result.receipts.values()
         )
     else:

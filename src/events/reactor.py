@@ -5143,6 +5143,11 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # a new cut with fresh q/book/wealth truth; terminalizing would consume a
     # still-live opportunity, while replaying the expired cut is forbidden.
     "GLOBAL_REAUCTION_EPOCH_EXPIRED",
+    # Preflight proved the winner's market authority superseded before any venue
+    # call. The cut ends on its recorded outcome and the adapter carries a forced
+    # refresh of that family; the requeued events meet a complete fresh cut next
+    # cycle instead of an inline child on this cut's spent deadline.
+    "GLOBAL_REAUCTION_MARKET_AUTHORITY_REQUEUED",
     # Forecast-source re-ingested AFTER this cycle's decision moment.
     "SOURCE_CAPTURED_AFTER_DECISION_TIME",
     # Replacement posterior substrate is missing/stale relative to live inputs.
@@ -5494,6 +5499,9 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # in a complete current q/book/wealth auction without weakening the fence.
     "GLOBAL_WINNER_CLAIM_FENCE_LOST",
     "global_increment_binding",
+    # (MARKET_AUTHORITY_UNSTABLE has no producer since market-authority
+    # supersession requeues instead of reauctioning inline; it stays registered
+    # so a carrier already stamped with it still classifies terminal.)
     # SCOPE: a winner carrier whose in-batch bounded reauction (market-
     # authority or probability supersession, global_batch_runtime.py's
     # _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS) exhausted its attempt
