@@ -8288,6 +8288,8 @@ def process_current_global_batch(
     | None = None,
     proof_candidate_policy_rejection_resolver: Callable[[object], str | None]
     | None = None,
+    selected_order_rejection_resolver: Callable[[object, datetime], str | None]
+    | None = None,
     calibration_scope_resolver: Callable[[object, object], object | None] | None = None,
     buy_candidates_enabled: bool = True,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
@@ -10078,6 +10080,7 @@ def process_current_global_batch(
                 family_joint_plan_cache=family_joint_plan_cache,
                 current_capital_limit_resolver=current_capital_limit_resolver,
                 candidate_policy_rejection_resolver=candidate_policy,
+                selected_order_rejection_resolver=selected_order_rejection_resolver,
                 preflight_excluded_by_family=preflight_excluded_by_family,
                 buy_disabled_family_keys=frozenset(
                     held_only_family_keys.intersection(attempt_probabilities)
@@ -10121,6 +10124,9 @@ def process_current_global_batch(
                     current_capital_limit_resolver=current_capital_limit_resolver,
                     candidate_policy_rejection_resolver=(
                         proof_candidate_policy
+                    ),
+                    selected_order_rejection_resolver=(
+                        selected_order_rejection_resolver
                     ),
                     preflight_excluded_by_family=(
                         preflight_excluded_by_family
@@ -11161,6 +11167,9 @@ def process_current_global_batch(
                         ),
                         proof_candidate_policy_rejection_resolver=(
                             proof_candidate_policy_rejection_resolver
+                        ),
+                        selected_order_rejection_resolver=(
+                            selected_order_rejection_resolver
                         ),
                         calibration_scope_resolver=calibration_scope_resolver,
                         buy_candidates_enabled=buy_candidates_enabled,

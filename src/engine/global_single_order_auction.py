@@ -825,6 +825,10 @@ def select_prepared_global_auction(
         [GlobalSingleOrderAnyCandidate], str | None
     ]
     | None = None,
+    selected_order_rejection_resolver: Callable[
+        [GlobalSingleOrderDecision, datetime], str | None
+    ]
+    | None = None,
     preflight_excluded_by_family: Mapping[str, str] | None = None,
     buy_disabled_family_keys: frozenset[str] | None = None,
     payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
@@ -1597,6 +1601,7 @@ def select_prepared_global_auction(
         candidate_policy_rejection_resolver=_candidate_policy_rejection,
         payoff_q_correction_resolver=payoff_q_correction_resolver,
         buy_probability_rejection_resolver=_buy_probability_rejection,
+        selected_order_rejection_resolver=selected_order_rejection_resolver,
         cancelled=cancelled,
     )
     if (

@@ -1591,6 +1591,7 @@ def _global_select(
     resolution_hours_by_family=None,
     cancelled=None,
     family_joint_plan_cache=None,
+    selected_order_rejection_resolver=None,
 ):
     candidates = tuple(candidates)
     if probability_witnesses is None:
@@ -1657,6 +1658,7 @@ def _global_select(
         family_joint_plan_cache=family_joint_plan_cache,
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
         payoff_q_correction_resolver=payoff_q_correction_resolver,
+        selected_order_rejection_resolver=selected_order_rejection_resolver,
         cancelled=cancelled,
     )
 
@@ -9340,3 +9342,194 @@ def test_maker_winner_on_thin_ask_is_admissible_and_min_lot_above_depth_is_not()
     assert S.single_order_share_infeasibility(
         passive, Decimal("4"), execution_mode="MAKER_REST"
     ) == "share size is below the executable minimum"
+
+
+# --- 2026-09-29: the same-token re-post law is one predicate for selector and submit ---
+
+
+def _cooldown_trade_db(token_id, *, price, rejection_payload, updated_at):
+    import json
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY, position_id TEXT NOT NULL,
+            token_id TEXT NOT NULL, intent_kind TEXT NOT NULL, side TEXT NOT NULL,
+            size REAL, price REAL, venue_order_id TEXT, state TEXT NOT NULL,
+            envelope_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE venue_command_events (
+            event_id TEXT PRIMARY KEY, command_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL, event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}',
+            state_after TEXT);
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY, venue_order_id TEXT NOT NULL,
+            command_id TEXT NOT NULL, state TEXT NOT NULL, remaining_size TEXT,
+            matched_size TEXT, source TEXT NOT NULL, observed_at TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY, trade_id TEXT NOT NULL,
+            venue_order_id TEXT NOT NULL, command_id TEXT NOT NULL,
+            state TEXT NOT NULL, filled_size TEXT NOT NULL DEFAULT '0',
+            observed_at TEXT NOT NULL, local_sequence INTEGER NOT NULL DEFAULT 1);
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES ('cmd-prior', 'pos-prior', ?, 'ENTRY', "
+        "'BUY', 5, ?, NULL, 'REJECTED', NULL, ?, ?)",
+        (token_id, price, updated_at, updated_at),
+    )
+    conn.execute(
+        "INSERT INTO venue_command_events VALUES ('evt-prior', 'cmd-prior', 3, "
+        "'SUBMIT_REJECTED', ?, ?, 'REJECTED')",
+        (updated_at, json.dumps(rejection_payload)),
+    )
+    conn.commit()
+    return conn
+
+
+_REQUEST_400 = {
+    "reason": "venue_rejected_400",
+    "proof_class": "deterministic_venue_400",
+    "venue_order_created": False,
+    "exception_message": (
+        "PolyApiException[status_code=400, error_message={'error': "
+        "'invalid post-only order: order crosses book'}]"
+    ),
+}
+
+
+def _selector_with_trade_db(candidates, conn):
+    from src.engine.event_reactor_adapter import (
+        global_selected_order_same_token_rejection,
+    )
+
+    return _global_select(
+        candidates,
+        cap="20",
+        resolution_hours_by_family={c.family_key: 24.0 for c in candidates},
+        selected_order_rejection_resolver=(
+            lambda score, at: global_selected_order_same_token_rejection(
+                score, at, trade_conn=conn
+            )
+        ),
+    )
+
+
+def test_selector_skips_the_winner_the_submit_law_refuses_and_picks_the_runner_up():
+    """Live 2026-09-29: the auction re-picked a token whose identical limit the
+    same-token law refuses at submit, burning the cut. The selector now asks the
+    same law on the exact proposal; the base winner is rejected with the submit
+    reason and the runner-up is selected."""
+
+    from src.execution.executor import _entry_same_token_cooldown_component
+
+    best = _global_candidate(
+        candidate_id="cooldown-best", family="cooldown-a", side="YES", q=0.85,
+        levels=(("0.40", "100"),),
+    )
+    runner = _global_candidate(
+        candidate_id="cooldown-runner", family="cooldown-b", side="YES", q=0.70,
+        levels=(("0.40", "100"),),
+    )
+    base = _global_select(
+        (best, runner), cap="20",
+        resolution_hours_by_family={best.family_key: 24.0, runner.family_key: 24.0},
+    )
+    assert base.candidate.candidate_id == best.candidate_id
+
+    conn = _cooldown_trade_db(
+        best.token_id,
+        price=float(base.limit_price),
+        rejection_payload=_REQUEST_400,
+        updated_at=(_DECISION_AT - timedelta(hours=2)).isoformat(),
+    )
+    decision = _selector_with_trade_db((best, runner), conn)
+
+    assert decision.candidate.candidate_id == runner.candidate_id
+    assert decision.rejection_reasons[best.candidate_id] == (
+        "entry_cooldown:same_token_terminal_no_fill_requires_reprice"
+    )
+    # Parity: the submit boundary refuses exactly the order the selector skipped.
+    submit = _entry_same_token_cooldown_component(
+        conn,
+        token_id=best.token_id,
+        candidate_position_id="submit-attempt",
+        limit_price=float(base.limit_price),
+        shares=float(base.shares),
+        now=_DECISION_AT,
+    )
+    assert submit["allowed"] is False
+    assert submit["reason"] == "same_token_terminal_no_fill_requires_reprice"
+
+
+def test_selector_keeps_a_winner_whose_predecessor_was_geoblocked():
+    geoblock_detail = (
+        "PolyApiException[status_code=403, error_message={'error': 'Trading "
+        "restricted in your region, please refer to available regions - "
+        "https://docs.polymarket.com/developers/CLOB/geoblock'}]"
+    )
+    best = _global_candidate(
+        candidate_id="geo-best", family="geo-a", side="YES", q=0.85,
+        levels=(("0.40", "100"),),
+    )
+    runner = _global_candidate(
+        candidate_id="geo-runner", family="geo-b", side="YES", q=0.70,
+        levels=(("0.40", "100"),),
+    )
+    conn = _cooldown_trade_db(
+        best.token_id,
+        price=0.40,
+        rejection_payload={"reason": "venue_rejected_geoblock_403", "detail": geoblock_detail},
+        updated_at=(_DECISION_AT - timedelta(seconds=30)).isoformat(),
+    )
+    decision = _selector_with_trade_db((best, runner), conn)
+
+    assert decision.candidate.candidate_id == best.candidate_id
+
+
+def test_same_token_repost_law_is_one_predicate_for_selector_submit_and_cleanup(
+    monkeypatch,
+):
+    """Structural antibody: the selector hook, ``_live_order`` and the resting
+    order cleanup all call the executor's one same-token law; cleanup keeps no
+    tick constant of its own."""
+
+    import inspect
+
+    import src.engine.cycle_runtime as cycle_runtime
+    import src.engine.event_reactor_adapter as era
+    import src.execution.executor as executor
+
+    law = "_entry_same_token_cooldown_component("
+    assert law in inspect.getsource(era.global_selected_order_same_token_rejection)
+    assert law in inspect.getsource(executor._live_order)
+    assert law in inspect.getsource(
+        cycle_runtime._same_token_terminal_no_fill_reprice_block_detail
+    )
+    assert not hasattr(cycle_runtime, "_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK")
+    assert not hasattr(cycle_runtime, "_ENTRY_TERMINAL_NO_FILL_REPRICE_LOOKBACK_SECONDS")
+    assert "selected_order_rejection_resolver(" in inspect.getsource(
+        S.select_global_single_order
+    )
+
+    # Parity spy: whatever the law refuses, the selector never selects.
+    calls = []
+
+    def refuse(conn, **kwargs):
+        calls.append(kwargs["limit_price"])
+        return {"allowed": False, "reason": "spy_refusal"}
+
+    monkeypatch.setattr(executor, "_entry_same_token_cooldown_component", refuse)
+    only = _global_candidate(
+        candidate_id="spy-only", family="spy", side="YES", q=0.85,
+        levels=(("0.40", "100"),),
+    )
+    decision = _selector_with_trade_db((only,), object())
+
+    assert calls
+    assert decision.candidate is None
+    assert decision.rejection_reasons[only.candidate_id] == "entry_cooldown:spy_refusal"

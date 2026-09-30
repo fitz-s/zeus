@@ -6583,6 +6583,37 @@ def _event_bound_effective_live_quality_floors(
     }
 
 
+def global_selected_order_same_token_rejection(
+    score: object,
+    decided_at: datetime,
+    *,
+    trade_conn: sqlite3.Connection | None,
+) -> str | None:
+    """Selection-time half of the executor's one same-token re-post law.
+
+    Evaluated on the scored proposal's exact limit price and shares, at the
+    decision instant, so the auction never selects an order ``_live_order``
+    refuses with ``entry_cooldown``; the runner-up competes instead.
+    """
+
+    from src.execution.executor import _entry_same_token_cooldown_component
+
+    candidate = getattr(score, "candidate", None)
+    if trade_conn is None or str(getattr(candidate, "action", "BUY")).upper() != "BUY":
+        return None
+    verdict = _entry_same_token_cooldown_component(
+        trade_conn,
+        token_id=str(getattr(candidate, "token_id", "") or ""),
+        candidate_position_id=f"global-selection:{getattr(candidate, 'candidate_id', '')}",
+        limit_price=getattr(score, "limit_price", None),
+        shares=getattr(score, "shares", None),
+        now=decided_at,
+    )
+    if verdict.get("allowed"):
+        return None
+    return f"entry_cooldown:{verdict.get('reason') or 'same_token_entry_cooldown'}"
+
+
 def _global_active_entry_duplicate_reason(
     candidate: object,
     *,
@@ -12218,6 +12249,11 @@ def event_bound_live_adapter_from_trade_conn(
                 # preflight. SELL remains eligible in reduce-only operation.
                 candidate_policy_rejection_resolver=(
                     _current_entry_candidate_policy
+                ),
+                selected_order_rejection_resolver=(
+                    lambda score, at: global_selected_order_same_token_rejection(
+                        score, at, trade_conn=trade_conn
+                    )
                 ),
                 proof_candidate_policy_rejection_resolver=(
                     lambda candidate: _current_entry_candidate_policy(

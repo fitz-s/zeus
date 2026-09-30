@@ -58,7 +58,11 @@ from src.contracts.decision_evidence import DecisionEvidence
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.time_context import lead_days_to_date_start
 from src.engine.evaluator import EdgeDecision, MarketCandidate
-from src.execution.executor import OrderResult, create_execution_intent
+from src.execution.executor import (
+    _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS,
+    OrderResult,
+    create_execution_intent,
+)
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.exceptions import ObservationUnavailableError
 import src.state.db as db_module
@@ -3971,7 +3975,7 @@ def test_entry_order_cleanup_recent_same_token_exit_cooldown_expires(monkeypatch
     ("prior_age_seconds", "expected_cancelled"),
     [
         (0, 1),
-        (cycle_runtime._ENTRY_TERMINAL_NO_FILL_REPRICE_LOOKBACK_SECONDS + 1, 0),
+        (_ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS + 1, 0),
     ],
 )
 def test_entry_order_cleanup_terminal_no_fill_repost_cooldown_expires(

@@ -2527,6 +2527,12 @@ def _parse_sqlite_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def entry_price_repeats(existing_price: Decimal, candidate_price: Decimal) -> bool:
+    """A limit within one minimum reprice tick of the failed one is the same order."""
+
+    return abs(candidate_price - existing_price) < _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK
+
+
 def _entry_same_token_cooldown_component(
     conn: sqlite3.Connection,
     *,
@@ -2536,7 +2542,16 @@ def _entry_same_token_cooldown_component(
     shares: float | None = None,
     now: datetime | None = None,
 ) -> dict:
-    """Throttle repeated ENTRY attempts for a top-ranked token."""
+    """THE same-token entry re-post law: one function for every consumer.
+
+    Called by global candidate eligibility before ranking (on the exact proposal
+    limit), by ``_live_order`` at submit, and by the resting-order cleanup, so a
+    winner is refused at submit only when the fact it was selected on changed.
+    A terminal no-fill predecessor imposes a 120 s cooldown unless a named
+    no-exposure proof waives it; a reprice is required within the cooldown after
+    a book-moved/refresh rest pull, and beyond it only for a deterministic
+    venue rejection of the request itself.
+    """
 
     token = str(token_id or "").strip()
     if not token:
@@ -2696,7 +2711,7 @@ def _entry_same_token_cooldown_component(
                 "rest_pull_cancel_reason": reprice_cancel_reason,
             }
         reprice_delta = abs(candidate_price - existing_price)
-        if reprice_delta < _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK:
+        if entry_price_repeats(existing_price, candidate_price):
             return {
                 "component": "entry_same_token_cooldown",
                 "allowed": False,
@@ -2832,7 +2847,7 @@ def _entry_same_token_cooldown_component(
                 "min_reprice_tick": str(_ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK),
             }
         reprice_delta = abs(candidate_price - existing_price)
-        if reprice_delta < _ENTRY_TERMINAL_NO_FILL_MIN_REPRICE_TICK:
+        if entry_price_repeats(existing_price, candidate_price):
             return {
                 "component": "entry_same_token_cooldown",
                 "allowed": False,

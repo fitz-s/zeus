@@ -7456,6 +7456,10 @@ def select_global_single_order(
         [GlobalSingleOrderCandidate, float], str | None
     ]
     | None = None,
+    selected_order_rejection_resolver: Callable[
+        [GlobalSingleOrderDecision, datetime], str | None
+    ]
+    | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> GlobalSingleOrderDecision:
     """Select one current executable order across every family and native side.
@@ -8612,6 +8616,38 @@ def select_global_single_order(
                     )
                 )
 
+    if selected_order_rejection_resolver is not None:
+        # The submit boundary's order-level laws (e.g. the same-token terminal
+        # no-fill reprice law) are evaluated here on the exact proposal they
+        # would judge, so a winner is never one its own submit refuses. A
+        # refused proposal is a rejection, not a scored row.
+        refused_order_ids: set[str] = set()
+        for score in scored:
+            if (
+                not isinstance(score.candidate, GlobalSingleOrderCandidate)
+                or score.candidate.candidate_id in rejections
+            ):
+                continue
+            try:
+                order_reason = selected_order_rejection_resolver(
+                    score, decision_at_utc
+                )
+            except Exception:  # noqa: BLE001 - lost order authority invalidates the epoch
+                return superseded_decision(
+                    score.candidate.candidate_id,
+                    "SELECTED_ORDER_AUTHORITY_UNAVAILABLE",
+                )
+            if order_reason is not None:
+                refused_order_ids.add(score.candidate.candidate_id)
+                rejections[score.candidate.candidate_id] = (
+                    str(order_reason).strip() or "SELECTED_ORDER_AUTHORITY_INVALID"
+                )
+        scored = [
+            score
+            for score in scored
+            if score.candidate is None
+            or score.candidate.candidate_id not in refused_order_ids
+        ]
     positive_scored = tuple(
         score
         for score in scored
