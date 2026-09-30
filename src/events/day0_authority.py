@@ -122,11 +122,36 @@ def current_day0_remaining_center_policy_has_authority(
                     else "day0_remaining_carrier_content_identity")
     operator_key = ("_edli_day0_probability_operator" if edli
                     else "day0_remaining_carrier_operator")
+    operator_declared = operator_key in provenance
+    carrier_fields = (identity_key,)
+    if edli:
+        from src.data.day0_hourly_vectors import (
+            DAY0_REMAINING_CARRIER_OPERATOR_V2,
+            DAY0_REMAINING_CARRIER_OPERATOR_V3,
+            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        )
+
+        # EDLI's operator slot also contains ordinary analytic/peak telemetry.
+        # V1 shares its name with ordinary MC; its source-specific complete
+        # carrier checks still own that distinction, never this policy gate.
+        operator = provenance.get(operator_key)
+        operator_declared = isinstance(operator, str) and operator in {
+            DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3,
+            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        }
+        carrier_fields += (
+            "_edli_day0_remaining_carrier_q", "_edli_day0_remaining_probability_samples",
+            "_edli_day0_remaining_probability_sample_count",
+            "_edli_day0_remaining_carrier_probability_cutoff_utc",
+            "_edli_day0_remaining_carrier_future_extremes_c",
+            "_edli_day0_remaining_carrier_final_extremes_c",
+            "_edli_day0_remaining_carrier_path_error_sigma_c",
+        )
     shape = provenance.get("q_shape")
     declared = any(key in provenance for key in (
-        identity_key, operator_key, policy_key, bias_key,
+        *carrier_fields, policy_key, bias_key,
         prefix + "day0_remaining_bias_status", prefix + "day0_remaining_bias_artifact",
-    )) or isinstance(shape, str) and shape in {
+    )) or operator_declared or isinstance(shape, str) and shape in {
         "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2",
         "day0_remaining_shared_carrier_v3", "day0_remaining_shared_carrier_resolver_v1",
         "fused_day0_fast_residual_likelihood",

@@ -531,6 +531,36 @@ def test_current_replay_rejects_malformed_or_shifted_declared_carrier(tmp_path, 
         )
 
 
+@pytest.mark.parametrize("city_name", ("Helsinki", "Atlanta"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_ordinary_analytic_telemetry_repeats_without_becoming_a_shared_carrier(city_name, metric):
+    """Real ordinary kernel, same inputs twice; telemetry grants no new policy."""
+    import src.engine.event_reactor_adapter as era
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_ANALYTIC_OPERATOR
+    from src.types.market import Bin
+
+    city = runtime_cities_by_name()[city_name]
+    unit = city.settlement_unit
+    scale, offset = (1.0, 0.0) if unit == "C" else (1.8, 32.0)
+    boundary = 29.0 * scale + offset
+    bounds = BOUNDS_F if unit == "F" else [(None, 25), *[(v, v) for v in range(26, 36)], (36, None)]
+    bins = [Bin(low, high, unit, f"bin-{i}") for i, (low, high) in enumerate(bounds)]
+    payload = {"metric": metric, "target_date": "2026-09-24",
+               "settlement_source": f"noaa_wrh_{city.wu_station.lower()}",
+               "rounded_value": int(SettlementSemantics.for_city(city).round_single(boundary)),
+               ("high_so_far" if metric == "high" else "low_so_far"): boundary}
+    kwargs = dict(city=city, settlement_semantics=SettlementSemantics.for_city(city),
+                  bins=bins, payload=payload, extra_member_sigma=0.4, decision_time=DECISION)
+    first = era._day0_remaining_p_raw_vector(np.asarray(FUTURE_C) * scale + offset, **kwargs)
+    assert np.isfinite(first).all() and first.sum() == pytest.approx(1.0)
+    assert payload["_edli_day0_probability_operator"] == DAY0_REMAINING_ANALYTIC_OPERATOR
+    assert "_edli_day0_remaining_content_identity" not in payload
+    assert "_edli_day0_remaining_center_policy" not in payload
+    second = era._day0_remaining_p_raw_vector(np.asarray(FUTURE_C) * scale + offset, **kwargs)
+    np.testing.assert_array_equal(first, second)
+    assert "_edli_day0_remaining_center_policy" not in payload
+
+
 # (e) ---------------------------------------------------------------------------
 
 

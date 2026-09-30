@@ -97,6 +97,19 @@ def test_old_zero_carrier_is_not_restamped_and_noncarrier_remains_ordinary():
     assert old == original
 
 
+@pytest.mark.parametrize("partial", (
+    {"_edli_day0_remaining_content_identity": "old-shared-content"},
+    {"_edli_day0_probability_operator": "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2"},
+    {"_edli_day0_probability_operator": "typed_remaining_and_final_extreme_gaussian_v3"},
+    {"_edli_day0_probability_operator": "resolver_graded_terminal_composition_v1"},
+    {"_edli_day0_remaining_carrier_q": [0.5, 0.5]},
+))
+def test_partial_shared_carriers_still_require_current_unshifted_policy(partial):
+    from src.events.day0_authority import current_day0_remaining_center_policy_has_authority
+
+    assert not current_day0_remaining_center_policy_has_authority(partial, edli=True)
+
+
 def _forecast(**overrides):
     values = dict(
         cycle_hour=0,
