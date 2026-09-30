@@ -51186,3 +51186,228 @@ def test_hko_context_loss_is_typed_family_unavailable_in_actual_batch(tmp_path, 
             trade.close()
     test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_token_binding(
         tmp_path,monkeypatch,"high","none",_hko_clock_native_sources,inspect_cut=inspect_cut)
+
+
+def test_missing_station_ground_family_keeps_qualified_held_taker_and_resets_normally(
+    tmp_path, monkeypatch, _noaa_native_sources, record_property,
+):
+    """Two actual private namespaces -> real batch isolation, not one DB ingestion.
+
+    Controlled forecast/native extracted inputs use normal writers and public
+    authority. A missing owned ground manifest is a real unavailable dependency;
+    books/wealth are explicit test inputs. No risk sweep or venue is invoked.
+    """
+    from pathlib import Path
+    import src.config as config
+    from src.data import station_ground_evidence as ground
+    from src.data import replacement_forecast_materializer as materializer
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+    from src.state.db import init_schema_trade_only, init_schema_world_only
+    from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+    from tests.test_replacement_forecast_bundle_reader import _shanghai_reader_certificate
+    from tests.test_replacement_forecast_materializer import _TemperatureBin
+
+    at = _dt.datetime(2026,10,1,8,15,tzinfo=_dt.timezone.utc)
+    healthy = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    shanghai = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None,
+        computed_at=at,first_compute_at=at-_dt.timedelta(minutes=10))
+    affected = next(shanghai)
+    # The reader fixture's broad 'warm' interval is a source component, not
+    # an executable Celsius market. Build a new certificate through the normal
+    # materializer for actual one-degree outcome tokens; keep its old row.
+    affected.request = replace(affected.request,bins=(
+        _TemperatureBin("25C or below",upper_c=25.,center_c=24.),
+        _TemperatureBin("26C",lower_c=26.,upper_c=26.,center_c=26.),
+        _TemperatureBin("27C or above",lower_c=27.,center_c=28.)))
+    legal = materializer.materialize_replacement_forecast_live(affected.conn,affected.request)
+    assert legal.ok,legal.reason_codes
+    affected.conn.commit()
+    affected.row = dict(affected.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (legal.posterior_id,)).fetchone())
+    init_schema_world_only(affected.conn)
+    for index,item in enumerate(affected.request.bins):
+        affected.conn.execute("""INSERT INTO market_events
+            (market_slug,city,target_date,temperature_metric,condition_id,token_id,
+             range_label,range_low,range_high,created_at,recorded_at)
+            VALUES (?,'Shanghai','2026-10-02','high',?,?,?,?,?,?,?)""",
+            (f"isolation-shanghai-{index}","0x"+f"{index+501:064x}",f"shanghai-yes-{index}",
+             item.bin_id,item.lower_c,item.upper_c,at.isoformat(),at.isoformat()))
+    affected.conn.commit()
+    # The private Shanghai registry retains all configured rows. Its KORD
+    # official input is copied byte-for-byte, never borrowed Shanghai ground.
+    claim = json.loads((config.PROJECT_ROOT/"config/station_precise_coords.json").read_text())["Chicago"]["station_ground_proof"]
+    input_path = Path(claim["artifact_ref"])
+    (config.CONFIG_DIR/input_path.name).write_bytes((config.PROJECT_ROOT/input_path).read_bytes())
+    assert ground.forecast_db_from_connection(healthy.conn) != ground.forecast_db_from_connection(affected.conn)
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    init_schema_trade_only(trade)
+    try:
+        events, callbacks = {}, {}
+        actual_batch = global_batch_runtime.process_current_global_batch
+        for name,normal in (("Chicago",healthy),("Shanghai",affected)):
+            request = normal.request
+            row = dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                ((healthy.result.posterior_id if name=="Chicago" else affected.row["posterior_id"]),)).fetchone())
+            payload = asdict(ForecastSnapshotReadyPayload(city=name,target_date=str(request.target_date),
+                metric=request.temperature_metric,source_id="replacement_0_1",source_run_id=row["posterior_identity_hash"],
+                cycle=request.source_cycle_time.isoformat(),track="replacement_0_1_openmeteo_bayes_fusion",
+                snapshot_id=f"posterior-{row['posterior_id']}-{name}",snapshot_hash=row["posterior_identity_hash"],
+                captured_at=at.isoformat(),available_at=at.isoformat(),required_fields_present=True,
+                required_steps_present=True,member_count=51,min_members_floor=51,completeness_status="COMPLETE",
+                required_steps=[],observed_steps=[],expected_members=51,source_run_status="COMPLETE",
+                source_run_completeness_status="COMPLETE",coverage_completeness_status="COMPLETE",
+                coverage_readiness_status="LIVE_ELIGIBLE"))
+            payload["city_timezone"] = config.runtime_cities_by_name()[name].timezone
+            event = make_opportunity_event(event_type="FORECAST_SNAPSHOT_READY",
+                entity_key=f"{name}|{request.target_date}|{request.temperature_metric}",source="normal-isolation-fixture",
+                observed_at=at.isoformat(),available_at=at.isoformat(),received_at=at.isoformat(),
+                payload=payload,causal_snapshot_id=payload["snapshot_id"])
+            events[name] = event
+            captured_hooks = []
+            with monkeypatch.context() as composition:
+                composition.setattr(global_batch_runtime,"process_current_global_batch",
+                    lambda values,**hooks:captured_hooks.append(hooks) or
+                        SimpleNamespace(events=tuple(values),winner_event_id=None,receipts={}))
+                adapter = era.event_bound_live_adapter_from_trade_conn(trade,
+                    get_current_level=lambda:era.RiskLevel.GREEN,forecast_conn=normal.conn,
+                    topology_conn=normal.conn,calibration_conn=normal.conn)
+                adapter.process_global_batch((event,),at)
+            callbacks[name] = captured_hooks[-1]
+        def prepare(event,cut,*,held=False):
+            name = json.loads(event.payload_json)["city"]
+            return callbacks[name]["prepare_held_event" if held else "prepare_event"](event,cut)
+        for name,event in events.items():
+            for held in (False,True):
+                positive = prepare(event,at,held=held)
+                assert positive.prepared_global_family is not None,positive.reason
+        healthy_row = dict(healthy.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (healthy.result.posterior_id,)).fetchone())
+        affected_row = dict(affected.row)
+        raw_before = [tuple(row) for row in affected.conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
+        evidence = ground.read_current_station_ground_evidence(ground.forecast_db_from_connection(affected.conn),
+            city="Shanghai",decision_at=at)
+        path = Path(evidence["manifest_path"])
+        quarantined = path.with_suffix(path.suffix+".test-quarantine")
+        path.rename(quarantined)  # Exact private owned file; keep the original bytes.
+        assert ground.read_current_station_ground_evidence(ground.forecast_db_from_connection(affected.conn),
+            city="Shanghai",decision_at=at) is None
+        era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+        era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
+        bad = prepare(events["Shanghai"],at)
+        assert bad.prepared_global_family is None and not bad.proof_accepted
+        assert global_batch_runtime._current_probability_ineligible(bad),bad.reason
+        record_property("missing_ground_family_reason",bad.reason)
+        good = prepare(events["Chicago"],at,held=True)
+        assert good.prepared_global_family is not None,good.reason
+        probability = good.prepared_global_family.probability_witness
+        token_map = {b.condition_id:(b.yes_token_id,f"isolation-no-{i}") for i,b in enumerate(probability.bindings)}
+        probability = _rebind_probability_witness_tokens(probability,token_map_by_condition=token_map,
+            required_token_ids=frozenset(t for pair in token_map.values() for t in pair))
+        binding = min(probability.bindings,key=lambda b:family_payoff_point_q(probability,bin_id=b.bin_id,side="YES"))
+        position = SimpleNamespace(trade_id="isolation-held",position_id="isolation-held",
+            condition_id=binding.condition_id,direction="buy_yes",token_id=binding.yes_token_id,
+            no_token_id=binding.no_token_id,shares=Decimal("10"),chain_shares=Decimal("10"),cost_basis_usd=Decimal("5"),
+            city="Chicago",target_date="2026-10-02",temperature_metric="low",bin_label=binding.bin_id)
+        trade.execute("""INSERT INTO position_current (
+            position_id,trade_id,market_id,phase,city,cluster,target_date,temperature_metric,
+            bin_label,direction,token_id,no_token_id,condition_id,shares,size_usd,cost_basis_usd,
+            entry_price,chain_shares,chain_avg_price,chain_cost_basis_usd,chain_seen_at,
+            chain_state,fill_authority,strategy_key,updated_at,unit)
+            VALUES ('isolation-held','isolation-held',?,'active','Chicago','US','2026-10-02','low',
+            ?,'buy_yes',?,?,?,10,5,5,.5,10,.5,5,?,'synced','venue_confirmed_full','forecast_qkernel_entry',?,'F')""",
+            (binding.condition_id,binding.bin_id,binding.yes_token_id,binding.no_token_id,
+             binding.condition_id,at.isoformat(),at.isoformat()))
+        trade.commit()
+        position_before = tuple(trade.execute("SELECT * FROM position_current").fetchone())
+        portfolio = PortfolioState(positions=[position],authority="canonical_db",authority_scope="runtime_exposure")
+        wealth = _test_wealth_witness(ledger_snapshot_id="isolation-ledger",position_set_hash="isolation-holding",
+            wealth_floor_usd=Decimal("1000"),wealth_ceiling_usd=Decimal("1010"),spendable_cash_usd=Decimal("1000"),
+            reservations_usd=Decimal("0"),collateral_authority="CHAIN",captured_at_utc=at,
+            max_age=_dt.timedelta(seconds=30),native_holdings_micro=((binding.yes_token_id,10000000),),native_commitments_micro=())
+        curve = ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="isolation-book",
+            book_hash="isolation-book-hash",levels=(BidBookLevel(price=Decimal(".94"),size=Decimal("10")),),
+            fee_model=FeeModel(fee_rate=Decimal("0")),min_tick=Decimal(".01"),min_order_size=Decimal("1"),
+            quote_ttl=_dt.timedelta(seconds=30))
+        states = tuple((probability.family_key,b.bin_id,b.condition_id,side,token,"NO_ASK",curve.book_hash,
+            events["Chicago"].event_id,f"gamma-{b.condition_id}","False") for b in probability.bindings
+            for side,token in (("YES",b.yes_token_id),("NO",b.no_token_id)))
+        book = CurrentGlobalBookEpoch(assets=(),sell_assets=(CurrentGlobalSellAsset(family_key=probability.family_key,
+            bin_id=binding.bin_id,condition_id=binding.condition_id,gamma_market_id=f"gamma-{binding.condition_id}",
+            market_event_id=events["Chicago"].event_id,side="YES",token_id=binding.yes_token_id,curve=curve,
+            captured_at_utc=at,neg_risk=False),),asset_states=states,captured_at_utc=at,
+            max_age=_dt.timedelta(seconds=30),witness_identity=current_global_book_epoch_identity(asset_states=states,captured_at_utc=at))
+        scope = current_global_auction_scope_from_events(tuple(events.values()),captured_at_utc=at)
+        def current_book(probabilities,cut):
+            return {key:_rebind_probability_witness_tokens(witness,token_map_by_condition=token_map,
+                required_token_ids=frozenset(t for pair in token_map.values() for t in pair))
+                for key,witness in probabilities.items()},book
+        selections = []
+        with monkeypatch.context() as inputs:
+            inputs.setattr(global_batch_runtime,"scan_current_global_auction_scope",lambda **_:scope)
+            inputs.setattr(global_batch_runtime,"current_portfolio_wealth_witness",lambda *_a,**_kw:wealth)
+            inputs.setattr(global_batch_runtime,"current_venue_auction_identity",lambda *_a,**_kw:book.witness_identity)
+            result = actual_batch(tuple(events.values()),decision_time=at,world_conn=healthy.conn,
+                forecast_conn=healthy.conn,trade_conn=trade,payload_reader=lambda e:json.loads(e.payload_json),
+                prepare_event=prepare,prepare_held_event=lambda e,c:prepare(e,c,held=True),
+                actuate_winner=lambda *_:pytest.fail("no venue or risk sweep in the test"),
+                stamp_receipt=lambda receipt:receipt,venue_submit_count=lambda:0,current_execution=lambda *_:None,
+                current_time_provider=lambda:at,portfolio_state_provider=lambda:portfolio,current_book_epoch_provider=current_book,
+                current_capital_limit_resolver=lambda *_:Decimal("100"),
+                preflight_winner=lambda *_:global_batch_runtime.GlobalWinnerPreflight(status="BATCH_BLOCKED",reason="TEST_ONLY_NO_VENUE"),
+                selection_telemetry_observer=lambda p,b,f,s,c:selections.append((set(p),s)))
+        assert selections and result.venue_submit_count == 0,{key:value.reason for key,value in result.receipts.items()}
+        qualified,ranked = selections[-1]
+        missing_family = era.weather_family_id(city="Shanghai",target_date="2026-10-02",metric="high")
+        summary = json.loads(trade.execute("SELECT artifact_json FROM decision_log ORDER BY id DESC LIMIT 1").fetchone()[0])["summary"]
+        assert set(summary["probability_ineligible_by_family"]) == {missing_family}
+        assert qualified == {probability.family_key}
+        selected = ranked.decision.candidate
+        assert isinstance(selected,GlobalSingleOrderSellCandidate) and selected.execution_mode == "TAKER_LIMIT"
+        assert selected.position_id == position.position_id and selected.family_key == probability.family_key
+        assert selected.probability_witness_identity == probability.witness_identity
+        assert ranked.decision.expected_terminal_wealth.expected_ev_usd > 0
+        assert ranked.decision.expected_terminal_wealth.expected_delta_log_wealth > 0
+        market = _jit_market_authority(selected,tick=".01",min_order_size="1")
+        market = replace(market,snapshot=replace(market.snapshot,captured_at=at,freshness_deadline=at+_dt.timedelta(seconds=30)))
+        rebound = era._global_sell_candidate_from_raw_book(selected,{"asset_id":selected.token_id,
+            "tick_size":".01","min_order_size":"1","bids":[{"price":".94","size":"10"}],"asks":[]},
+            captured_at_utc=at,market_authority=market)
+        authority = GlobalSellExecutionAuthority.from_current(actuation=ranked.actuation,jit_candidate=rebound)
+        assert rebound.execution_mode == "TAKER_LIMIT" and authority.limit_price() == Decimal(".94")
+        assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+        assert tuple(trade.execute("SELECT * FROM position_current").fetchone()) == position_before
+        # Real normal archive restores the owned missing manifest; no source
+        # issue/fetch or forecast raw tuple is renewed for this possession repair.
+        later = at+_dt.timedelta(seconds=5)
+        class GroundClock(_dt.datetime):
+            @classmethod
+            def now(cls,tz=None): return later.astimezone(tz or _dt.timezone.utc)
+        monkeypatch.setattr(ground,"datetime",GroundClock)
+        archived = ground.archive_station_ground_evidence(ground.forecast_db_from_connection(affected.conn),["Shanghai"])
+        assert "Shanghai" in archived["archived"],archived
+        recovered = ground.read_current_station_ground_evidence(ground.forecast_db_from_connection(affected.conn),city="Shanghai",decision_at=later)
+        assert recovered is not None and recovered["captured_at"] == evidence["captured_at"]
+        assert recovered["recorded_at"] == evidence["recorded_at"]
+        assert path.read_bytes() == quarantined.read_bytes()
+        builtin = sqlite3.connect(":memory:")
+        affected.conn.create_function("strftime",2,lambda fmt,value:later.isoformat(timespec="milliseconds")
+            if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+        new = materializer.materialize_replacement_forecast_live(affected.conn,replace(affected.request,computed_at=later))
+        assert new.ok,new.reason_codes
+        assert new.posterior_id != affected_row["posterior_id"]
+        affected.conn.commit()
+        era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+        era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
+        for held in (False,True):
+            restored = prepare(events["Shanghai"],later,held=held)
+            assert restored.prepared_global_family is not None,restored.reason
+            assert restored.prepared_global_family.posterior_id == new.posterior_id
+        assert [tuple(row) for row in affected.conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == raw_before
+        assert dict(healthy.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(healthy.result.posterior_id,)).fetchone()) == healthy_row
+        assert dict(affected.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(affected_row["posterior_id"],)).fetchone()) == affected_row
+    finally:
+        trade.close()
+        next(shanghai,None)
+        healthy.conn.close()
+        healthy.builtin.close()
