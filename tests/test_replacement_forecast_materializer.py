@@ -1008,6 +1008,7 @@ def _install_hko_live_fusion(monkeypatch, **kwargs):
     """Lawful ground/geometry write seam; not a claim of normal provider capture."""
     request = kwargs.pop("request", None) or _hko_request(source_cycle_time=_hko_dt(6), computed_at=_hko_dt(10), expires_at=_hko_dt(12))
     conn = kwargs.pop("conn",None)
+    selected_cells = kwargs.pop("selected_cells", None)
     kwargs.setdefault("shape_cycle_time", request.source_cycle_time)
     if conn is not None:
         request = _hko_request_with_owned_anchor(conn,request)
@@ -1019,7 +1020,7 @@ def _install_hko_live_fusion(monkeypatch, **kwargs):
     within = sum((value-25.0)**2 for value in members)/len(members)
     delta = math.sqrt(original.predictive_sigma_c**2-within)
     values = {"icon_global":25.0-delta,"ukmo_global_deterministic_10km":25.0+delta}
-    served = _hko_current_provider_inputs(request,values,conn=conn)
+    served = _hko_current_provider_inputs(request,values,conn=conn,selected_cells=selected_cells)
     shape = materializer_mod._current_evidence_shape_from_values(
         snapshot_id=kwargs.get("snapshot_id",9001),source_cycle_time=kwargs["shape_cycle_time"].isoformat(),
         source_available_at=(request.source_cycle_time+timedelta(hours=1)).isoformat(),members_c=members,
@@ -1095,7 +1096,7 @@ def _hko_request_with_owned_anchor(conn,request):
         openmeteo_precision_guard=guard)
 
 
-def _hko_current_provider_inputs(request,values,*,conn):
+def _hko_current_provider_inputs(request,values,*,conn,selected_cells=None):
     """Prior 2ab writer seam with current actual body/capture/native proof."""
     from unittest.mock import patch
     from src.config import runtime_cities_by_name
@@ -1114,6 +1115,8 @@ def _hko_current_provider_inputs(request,values,*,conn):
         params = json.loads(identity["request_params_json"])
         params["run"] = request.source_cycle_time.strftime("%Y-%m-%dT%H:%M")
         lat,lon = (22.25,114.125) if model=="icon_global" else (22.3125,114.1875)
+        if selected_cells is not None:
+            lat,lon = selected_cells[model]
         payload = {"latitude":lat,"longitude":lon,"elevation":32.0,"timezone":city.timezone,"utc_offset_seconds":28800,
             "hourly_units":{"temperature_2m":"°C"},"hourly":{"time":[f"{request.target_date}T{hour:02d}:00" for hour in range(24)],
             "temperature_2m":[value]*24}}
@@ -2564,20 +2567,91 @@ def test_missing_day0_hourly_carrier_is_a_blocked_input(
     )
 
 
+def _shanghai_current_owner_request(tmp_path, monkeypatch):
+    """Normal owned ground/anchor/provider proof with controlled ENS/math inputs.
+
+    The actual HOMR body was captured Sep30. Move the entire external forecast
+    condition to Oct1 -> Oct2, not that evidence's possession back to June.
+    """
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    from src.data import station_ground_evidence as ground
+    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+    from tests.test_config import _official_international_homr_registry
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+
+    _official_international_homr_registry(tmp_path, monkeypatch, "Shanghai")
+    cycle = datetime(2026, 10, 1, 0, tzinfo=UTC)
+    computed = cycle + timedelta(hours=18)
+    target = date(2026, 10, 2)
+    class GroundClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (cycle-timedelta(hours=1)).astimezone(tz or UTC)
+    monkeypatch.setattr(ground, "datetime", GroundClock)
+    conn = _conn(archive_ground=False)
+    db = ground.forecast_db_from_connection(conn)
+    assert ground.archive_station_ground_evidence(db, ["Shanghai"])["status"] == "GROUND_SOURCE_ARCHIVED"
+    evidence = ground.read_current_station_ground_evidence(db, city="Shanghai", decision_at=computed)
+    captured = datetime.fromisoformat(evidence["captured_at"].replace("Z", "+00:00"))
+    recorded = datetime.fromisoformat(evidence["recorded_at"])
+    assert captured == datetime(2026, 9, 30, 12, 52, 1, tzinfo=UTC)
+    assert captured <= recorded == cycle-timedelta(hours=1) <= cycle <= computed
+    city = runtime_cities_by_name()["Shanghai"]
+    station = runtime_station_geometry_for_city(city, effective_at=computed)
+    cell = source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,target_elevation_m=station["ground_elevation_m"])
+    lon = cell["selected_grid_lon"] - 360 if cell["selected_grid_lon"] > 180 else cell["selected_grid_lon"]
+    body = json.dumps({"latitude":cell["selected_grid_lat"],"longitude":lon,
+        "elevation":station["ground_elevation_m"],"timezone":city.timezone,"utc_offset_seconds":28800,
+        "hourly_units":{"temperature_2m":"°C"},
+        "hourly":{"time":[f"{target}T{hour:02d}:00" for hour in range(24)],
+                  "temperature_2m":[27. if hour==12 else 18.5 for hour in range(24)]},
+        "_zeus_current_target_scope":{"city":city.name,"target_date":str(target),"metric":"high"}},sort_keys=True).encode()
+    anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(body),city_timezone=city.timezone,
+        target_local_date=target,source_cycle_time=cycle)
+    assert cycle <= anchor.contributing_valid_times_utc[0] < computed
+    request = replace(_request(openmeteo_precision_guard=None),target_date=target,
+        source_cycle_time=cycle,computed_at=computed,expires_at=computed+timedelta(hours=8),
+        openmeteo_source_available_at=cycle+timedelta(hours=3),baseline_source_available_at=cycle+timedelta(hours=2),
+        openmeteo_anchor=anchor,openmeteo_raw_payload_bytes=body,
+        day0_observed_extreme_c=26.,day0_observed_extreme_source="noaa_wrh_zspd",
+        day0_observed_extreme_observation_time=(computed-timedelta(minutes=5)).isoformat(),
+        day0_observed_extreme_sample_count=12,day0_observed_extreme_unit="C")
+    cells = {model:_selected_test_cell(model,city.lat,city.lon)
+             for model in ("icon_global","ukmo_global_deterministic_10km")}
+    assert all(abs(lat-city.lat)<.2 and abs(lon-city.lon)<.2 for lat,lon in cells.values())
+    request = _install_hko_live_fusion(monkeypatch,conn=conn,request=request,selected_cells=cells)
+    assert request.city == "Shanghai" and request.openmeteo_precision_guard.passable_for_live_materialization
+    _append_shanghai_owner_prints(conn,request)
+    return conn,request
+
+
+def _append_shanghai_owner_prints(conn,request):
+    """Controlled WRH body through its ordinary native-product print writer."""
+    from src.data.noaa_wrh_timeseries import rows_from_payload
+    from src.data.daily_obs_append import _append_noaa_wrh_prints
+    from src.state.schema.observation_prints_schema import ensure_table
+    ensure_table(conn)
+    observed = datetime.fromisoformat(request.day0_observed_extreme_observation_time)
+    instants = [observed-timedelta(minutes=11-index) for index in range(12)]
+    values = [25.+index*.05 for index in range(11)]+[request.day0_observed_extreme_c]
+    body = {"STATION":[{"STID":"ZSPD","OBSERVATIONS":{
+        "date_time":[at.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M:%S%z") for at in instants],
+        "air_temp_set_1":values,"sea_level_pressure_set_1":[1010]*12,
+        "metar_set_1":[f"ZSPD {at:%d%H%M}Z 26/20 T02600200" for at in instants]}}]}
+    rows = rows_from_payload(body,station="ZSPD")
+    assert len(rows)==request.day0_observed_extreme_sample_count==12
+    _append_noaa_wrh_prints(conn,city_name=request.city,station="ZSPD",unit="C",rows=rows,
+        target_date_local=request.target_date,view="all",fetch_utc=request.computed_at-timedelta(minutes=1))
+    conn.commit()
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_day0_owner_witness_allows_current_owner_posterior_write(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unchanged Day0 owner survives final-write revalidation and writes a posterior."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    request = _request(
-        computed_at=_dt(18),
-        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-        day0_observed_extreme_c=26.0,
-        day0_observed_extreme_source="wu_icao_history",
-        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        day0_observed_extreme_sample_count=12,
-    )
+    """Unchanged owner writes once; current NOAA fixture is not June WU licensing."""
+    conn, request = _shanghai_current_owner_request(tmp_path,monkeypatch)
     witness = _day0_owner_witness(request, seed_file=tmp_path / "owner-a.json")
     _record_day0_owner(conn, request, witness)
     prepared = _prepare_for_final_write(
@@ -3042,20 +3116,12 @@ def test_stronger_absorbing_frontier_after_prepare_invalidates_fast_owner(
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 2
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_day0_owner_witness_blocks_swapped_owner_before_posterior_insert(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A swap after read preparation blocks A, while the current B witness can write."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    owner_a = _request(
-        computed_at=_dt(18),
-        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-        day0_observed_extreme_c=26.0,
-        day0_observed_extreme_source="wu_icao_history",
-        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
-        day0_observed_extreme_sample_count=12,
-    )
+    conn, owner_a = _shanghai_current_owner_request(tmp_path,monkeypatch)
     witness_a = _day0_owner_witness(owner_a, seed_file=tmp_path / "owner-a.json")
     _record_day0_owner(conn, owner_a, witness_a)
     prepared_a = _prepare_for_final_write(
@@ -3064,10 +3130,21 @@ def test_day0_owner_witness_blocks_swapped_owner_before_posterior_insert(
 
     owner_b = replace(
         owner_a,
-        computed_at=_dt(18, 1),
+        computed_at=owner_a.computed_at+timedelta(minutes=1),
         day0_observed_extreme_c=26.25,
-        day0_observed_extreme_source="wu_api_same_time_revision",
+        day0_observed_extreme_source="noaa_wrh_zspd",
     )
+    from src.config import runtime_cities_by_name
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    city = runtime_cities_by_name()[owner_b.city]
+    old_entities = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    old_raw = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id"))
+    owner_b = _install_hko_live_fusion(monkeypatch,conn=conn,request=owner_b,
+        selected_cells={model:_selected_test_cell(model,city.lat,city.lon)
+                        for model in ("icon_global","ukmo_global_deterministic_10km")})
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == old_entities
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")) == old_raw
+    _append_shanghai_owner_prints(conn,owner_b)
     witness_b = _day0_owner_witness(owner_b, seed_file=tmp_path / "owner-b.json")
     assert cycle_advance._record_enqueue(
         conn,
