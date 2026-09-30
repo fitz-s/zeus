@@ -15,6 +15,7 @@ import math
 import os
 import re
 import tempfile
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -534,12 +535,20 @@ STATION_GROUND_PROOF_REVISION = "station_ground_roles_v1"
 HKO_GROUND_SOURCE_URL = "https://www.hko.gov.hk/en/cis/stn.htm"
 HKO_GROUND_QUANTITY = "Elevation of ground above mean sea-level (metres)"
 HOMR_GROUND_SOURCE_URL = "https://www.ncei.noaa.gov/access/homr/services/station/search"
+OSCAR_WMD_SOURCE_KIND = "wmo_wmd_awc_station_snapshot_v1"
+OSCAR_WMD_SOURCE_URL = "https://oscar.wmo.int/surface/rest/api/wmd/download/"
+AWC_STATION_IDENTITY_SOURCE_URL = "https://aviationweather.gov/api/data/stationinfo"
 STATION_GROUND_SOURCE_ARTIFACTS = {
     "hko_station_table_v1": "config/hko_station_metadata.html",
     "noaa_homr_primary_dcp_snapshot_v1": "config/noaa_homr_kord_station.json",
 }
+_STATION_GROUND_SOURCE_KINDS = frozenset({*STATION_GROUND_SOURCE_ARTIFACTS, OSCAR_WMD_SOURCE_KIND})
 _HOMR_PRIMARY_DCP_STATIONS = frozenset({
     "KATL", "KAUS", "KORD", "KDAL", "KBKF", "KHOU", "KLAX", "KMIA", "KLGA", "KSFO", "KSEA",
+})
+_OSCAR_WMD_STATIONS = frozenset({
+    "CYYZ", "EFHK", "EHAM", "EPWA", "FACT", "LEMD", "LFPB", "LIMC", "LTAC",
+    "OEJN", "OPKC", "RJTT", "RPLL", "SAEZ", "VILK", "WMKK", "WSSS",
 })
 
 
@@ -549,6 +558,14 @@ def station_ground_source_artifact_ref(*, source_kind: str, station_id: str) -> 
         return STATION_GROUND_SOURCE_ARTIFACTS[source_kind]
     if source_kind == "noaa_homr_primary_dcp_snapshot_v1" and station_id in _HOMR_PRIMARY_DCP_STATIONS:
         return f"config/noaa_homr_{station_id.lower()}_station.json"
+    if source_kind == OSCAR_WMD_SOURCE_KIND and station_id in _OSCAR_WMD_STATIONS:
+        return f"config/wmo_wmd_{station_id.lower()}_station.xml"
+    return None
+
+
+def station_ground_identity_bridge_artifact_ref(*, source_kind: str, station_id: str) -> str | None:
+    if source_kind == OSCAR_WMD_SOURCE_KIND and station_id in _OSCAR_WMD_STATIONS:
+        return "config/awc_stationinfo_53_station.json"
     return None
 
 
@@ -718,8 +735,151 @@ def _homr_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
     }
 
 
+def _oscar_wmd_ground_facts(
+    raw: bytes, station_id: str, identity_bridge_bytes: bytes, effective_at: datetime,
+) -> dict[str, object]:
+    """Bind a fixed-land site's 3-07 ground to its current METAR station ID.
+
+    Facility position is ground; nested equipment positions and AWC elevation
+    are different quantities. Explicit periods constrain the captured current
+    snapshot, without requiring an extra sensor installation history or AGL.
+    """
+    if effective_at.tzinfo is None or effective_at.utcoffset() is None:
+        raise ValueError("station snapshot needs aware possession time")
+    at = effective_at.astimezone(timezone.utc)
+    bridge = json.loads(identity_bridge_bytes)
+    if not isinstance(bridge, list):
+        raise ValueError("AWC station identity entity is not a list")
+    matches = [row for row in bridge if row.get("icaoId") == station_id]
+    if len(matches) != 1:
+        raise ValueError("AWC ICAO identity ambiguous or missing")
+    identity = matches[0]
+    wmo_id = identity.get("wmoId")
+    if (identity.get("id") != station_id or not isinstance(wmo_id, str)
+            or re.fullmatch(r"\d{5}", wmo_id) is None
+            or not isinstance(identity.get("siteType"), list) or "METAR" not in identity["siteType"]):
+        raise ValueError("current meteorological station identity unavailable")
+    for key, limit in (("lat", 90), ("lon", 180)):
+        value = identity[key]
+        if isinstance(value, bool) or not math.isfinite(float(value)) or abs(float(value)) > limit:
+            raise ValueError("AWC identity coordinate invalid")
+    if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+        raise ValueError("external or expanded XML entities are unsupported")
+    ns = {"w": "http://def.wmo.int/wmdr/2017", "g": "http://www.opengis.net/gml/3.2"}
+    href = "{http://www.w3.org/1999/xlink}href"
+    root = ET.fromstring(raw)
+    if root.tag != "{http://def.wmo.int/wmdr/2017}WIGOSMetadataRecord":
+        raise ValueError("official WMDR namespace unavailable")
+    facilities = root.findall("w:facility/w:ObservingFacility", ns)
+    if len(facilities) != 1:
+        raise ValueError("WMDR station ambiguous")
+    facility = facilities[0]
+    identifiers = facility.findall("g:identifier", ns)
+    if len(identifiers) != 1:
+        raise ValueError("WMDR station identity ambiguous")
+    ids = [value.strip() for value in (identifiers[0].text or "").split(",")]
+    matched_id = f"0-20000-0-{wmo_id}"
+    if len(set(ids)) != len(ids) or ids.count(matched_id) != 1:
+        raise ValueError("WMDR station differs from current ICAO/WMO bridge")
+    types = facility.findall("w:facilityType", ns)
+    if len(types) != 1 or types[0].get(href) != "http://codes.wmo.int/wmdr/FacilityType/landFixed":
+        raise ValueError("station elevation is not fixed-land ground")
+
+    def period(node: ET.Element) -> tuple[datetime | None, datetime | None]:
+        periods = node.findall("w:validPeriod/g:TimePeriod", ns)
+        if len(periods) > 1:
+            raise ValueError("station validity period ambiguous")
+        if not periods:
+            return None, None  # Current official snapshot, not an invented old interval.
+        def boundary(name: str) -> datetime | None:
+            elements = periods[0].findall("g:" + name, ns)
+            if len(elements) > 1:
+                raise ValueError("station validity boundary ambiguous")
+            if elements and (elements[0].get("indeterminatePosition") or elements[0].get("nilReason")):
+                raise ValueError("station validity boundary indeterminate")
+            value = (elements[0].text or "").strip() if elements else ""
+            if not value:
+                return None
+            stripped = value.removesuffix("Z")
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", stripped):
+                return datetime.combine(date.fromisoformat(stripped), datetime.min.time(), timezone.utc)
+            result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if result.tzinfo is None or result.utcoffset() is None:
+                raise ValueError("station validity clock has no timezone")
+            return result.astimezone(timezone.utc)
+        start, end = boundary("beginPosition"), boundary("endPosition")
+        if start is not None and end is not None and end <= start:
+            raise ValueError("station validity interval invalid")
+        return start, end
+
+    def active(node: ET.Element) -> bool:
+        start, end = period(node)
+        return (start is None or start <= at) and (end is None or at < end)
+
+    statuses = facility.findall("w:programAffiliation/w:ProgramAffiliation/w:reportingStatus/w:ReportingStatus", ns)
+    if not any(active(status) and any(e.get(href) == "http://codes.wmo.int/wmdr/ReportingStatus/operational"
+                                    for e in status.findall("w:reportingStatus", ns)) for status in statuses):
+        raise ValueError("current station is not operational")
+    location_history = [(node, *period(node)) for node in facility.findall("w:geospatialLocation/w:GeospatialLocation", ns)]
+    if len(location_history) > 1:
+        if any(start is None for _, start, _ in location_history):
+            raise ValueError("station ground history has undated versions")
+        location_history.sort(key=lambda item: item[1])
+        starts = [start for _, start, _ in location_history]
+        if len(set(starts)) != len(starts):
+            raise ValueError("station ground history has tied versions")
+    locations = []
+    for index, (node, start, end) in enumerate(location_history):
+        following = location_history[index + 1][1] if index + 1 < len(location_history) else None
+        # WMDR GeospatialLocationType defines a from-date record's implicit
+        # exclusive end as the next location's begin. A future version does not
+        # invalidate the current interval. Explicit overlaps remain malformed.
+        if end is not None and following is not None and end > following:
+            raise ValueError("station ground history explicitly overlaps")
+        interval_end = end if end is not None else following
+        if (start is None or start <= at) and (interval_end is None or at < interval_end):
+            locations.append(node)
+    if len(locations) != 1:
+        raise ValueError("current station ground position ambiguous or unavailable")
+    points = locations[0].findall("w:geoLocation/g:Point", ns)
+    if len(points) != 1:
+        raise ValueError("station ground point ambiguous")
+    positions = points[0].findall("g:pos", ns)
+    if len(positions) != 1:
+        raise ValueError("station ground coordinate unavailable")
+    position = positions[0]
+    if position.get("srsDimension", "3") != "3":
+        raise ValueError("station ground dimensionality differs")
+    units = position.get("uomLabels") or points[0].get("uomLabels")
+    if units is not None and units.split() != ["deg", "deg", "m"]:
+        raise ValueError("station ground units differ from WMDR coordinate contract")
+    values = (position.text or "").split()
+    if len(values) != 3:
+        raise ValueError("station ground coordinate must include elevation")
+    lat, lon, height = map(float, values)
+    if not all(math.isfinite(value) for value in (lat, lon, height)) or abs(lat) > 90 or abs(lon) > 180:
+        raise ValueError("station ground coordinate invalid")
+    a = math.sin(math.radians(lat - float(identity["lat"])) / 2) ** 2 + math.cos(math.radians(lat)) * math.cos(
+        math.radians(float(identity["lat"]))
+    ) * math.sin(math.radians(lon - float(identity["lon"])) / 2) ** 2
+    # Existing 5 km identity screen is necessary, not proof by proximity:
+    # the independent exact WMO/METAR/fixed-land/current-role bindings above
+    # must all be present. Known other-site matches cannot borrow this ground.
+    if 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a))) > 5:
+        raise ValueError("ground facility differs from current source site")
+    return {
+        "revision": STATION_GROUND_PROOF_REVISION, "source_kind": OSCAR_WMD_SOURCE_KIND,
+        "station_id": station_id, "source_station_id": matched_id, "wmo_station_id": wmo_id,
+        "height_role": "ground_msl", "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+        "elevation_m": height, "site_lat": lat, "site_lon": lon,
+        "location_role": "fixed_land_station_ground_reference", "source_url": OSCAR_WMD_SOURCE_URL + matched_id,
+        "identity_bridge_source_url": AWC_STATION_IDENTITY_SOURCE_URL,
+    }
+
+
 def station_ground_facts_from_bytes(
     *, source_kind: str, station_id: str, raw_body: bytes,
+    identity_bridge_bytes: bytes | None = None, effective_at: datetime | None = None,
 ) -> dict[str, object] | None:
     """Replay supported official entities without I/O, clocks or self-claims.
 
@@ -734,8 +894,13 @@ def station_ground_facts_from_bytes(
     try:
         if source_kind == "hko_station_table_v1":
             return _hko_ground_facts(raw_body, station_id)
+        if source_kind == OSCAR_WMD_SOURCE_KIND:
+            if (not isinstance(identity_bridge_bytes, bytes) or len(identity_bridge_bytes) > 256 * 1024
+                    or not isinstance(effective_at, datetime)):
+                return None
+            return _oscar_wmd_ground_facts(raw_body, station_id, identity_bridge_bytes, effective_at)
         return _homr_ground_facts(raw_body, station_id)
-    except (ValueError, TypeError, KeyError, IndexError, AttributeError, UnicodeError, ArithmeticError):
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError, UnicodeError, ArithmeticError, ET.ParseError):
         return None
 
 
@@ -749,7 +914,7 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
         return result
     try:
         kind = claim.get("source_kind")
-        if kind not in STATION_GROUND_SOURCE_ARTIFACTS or claim.get("revision") != STATION_GROUND_PROOF_REVISION:
+        if kind not in _STATION_GROUND_SOURCE_KINDS or claim.get("revision") != STATION_GROUND_PROOF_REVISION:
             raise ValueError("unsupported ground source/revision")
         checked = datetime.fromisoformat(str(claim["checked_at"]).replace("Z", "+00:00"))
         if checked.tzinfo is None or checked.utcoffset() is None:
@@ -767,10 +932,41 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
         raw = artifact.read_bytes()
         if hashlib.sha256(raw).hexdigest() != claim["body_sha256"]:
             raise ValueError("ground source body identity mismatch")
-        facts = station_ground_facts_from_bytes(source_kind=kind, station_id=station_id, raw_body=raw)
+        bridge_raw = None
+        bridge_audit = None
+        if kind == OSCAR_WMD_SOURCE_KIND:
+            bridge = claim.get("bridge")
+            bridge_ref = station_ground_identity_bridge_artifact_ref(source_kind=kind, station_id=station_id)
+            if (not isinstance(bridge, dict) or bridge_ref is None
+                    or bridge.get("source_kind") != "awc_stationinfo_v1"
+                    or bridge.get("source_url") != AWC_STATION_IDENTITY_SOURCE_URL
+                    or bridge.get("artifact_ref") != bridge_ref):
+                raise ValueError("station ground lacks its approved identity bridge")
+            bridge_asset = CONFIG_DIR / Path(bridge_ref).name
+            if (bridge_asset.is_symlink() or not bridge_asset.is_file()
+                    or bridge_asset.stat().st_size > 256 * 1024):
+                raise ValueError("identity bridge must be the bounded regular config entity")
+            bridge_raw = bridge_asset.read_bytes()
+            if hashlib.sha256(bridge_raw).hexdigest() != bridge.get("body_sha256"):
+                raise ValueError("identity bridge body identity differs")
+            source_checked = datetime.fromisoformat(str(claim["source_checked_at"]).replace("Z", "+00:00"))
+            bridge_checked = datetime.fromisoformat(str(bridge["checked_at"]).replace("Z", "+00:00"))
+            if any(time.tzinfo is None or time.utcoffset() is None for time in (source_checked, bridge_checked)):
+                raise ValueError("dual ground source possession must be timezone-aware")
+            if checked != max(source_checked, bridge_checked):
+                raise ValueError("ground possession must include both actual source entities")
+            bridge_audit = {key: bridge[key] for key in (
+                "source_kind", "artifact_ref", "body_sha256", "checked_at", "source_url",
+            )}
+        facts = station_ground_facts_from_bytes(
+            source_kind=kind, station_id=station_id, raw_body=raw,
+            identity_bridge_bytes=bridge_raw, effective_at=checked,
+        )
         if facts is None:
             raise ValueError("official ground source facts unavailable")
         audit_keys = ["artifact_ref", "body_sha256", "checked_at"]
+        if kind == OSCAR_WMD_SOURCE_KIND:
+            audit_keys.append("source_checked_at")
         if kind == "noaa_homr_primary_dcp_snapshot_v1":
             query_date = date.fromisoformat(claim["query_date"])
             queries = {
@@ -796,6 +992,8 @@ def _station_ground_for_entry(entry: dict, station_id: str) -> dict[str, object]
             ground_elevation_m=facts["elevation_m"], ground_facts=facts,
             ground_audit={key: claim.get(key) for key in audit_keys},
         )
+        if bridge_audit is not None:
+            result["ground_audit"]["bridge"] = bridge_audit
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, UnicodeError):
         result["ground_reason"] = "STATION_GROUND_PROOF_INVALID"
     return result

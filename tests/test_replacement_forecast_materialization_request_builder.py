@@ -277,6 +277,61 @@ def test_station_ground_us_normal_producer_request_recompute_reset(tmp_path, mon
     ]["audit"]["checked_at"] == "2026-09-29T23:30:00Z"
 
 
+@pytest.mark.parametrize("city_name", ["Paris", "Helsinki"])
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_station_ground_wmd_dual_entity_producer_request_reset(tmp_path, monkeypatch, city_name, metric):
+    import src.config as config
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as transport
+    from tests.test_config import _official_wmd_registry
+    registry, _, bridge, rows = _official_wmd_registry(tmp_path, monkeypatch, city_name)
+    city = config.cities_by_name[city_name]
+    height = rows[city_name]["station_ground_proof"]["elevation_m"]
+    payload = {
+        "latitude": city.lat, "longitude": city.lon, "elevation": height, "timezone": city.timezone,
+        "hourly_units": {"temperature_2m": "C"},
+        "hourly": {"time": [f"2026-09-30T{hour:02d}:00" for hour in range(24)],
+                   "temperature_2m": [15.0 + hour % 7 for hour in range(24)]},
+    }
+    raw = json.dumps(payload).encode()
+    # Controlled native geometry isolates the real dual-body ground loader and
+    # normal producer/builder relation; it is not official HSURF or public q proof.
+    cell = {
+        "revision": "openmeteo_ifs9_o1280_source_cell_v1", "static_hsurf_sha256": "controlled-static-v1",
+        "selected_flat_index": 12, "selected_grid_lat": city.lat, "selected_grid_lon": city.lon,
+        "raw_grid_elevation_m": height, "effective_grid_elevation_m": height,
+        "target_dem_elevation_m": height, "cell_is_sea": False, "cell_is_center": False, "nearby_sea": False,
+    }
+    monkeypatch.setattr(transport, "source_cell_geometry_proof", lambda **_kwargs: dict(cell))
+    seed = _write_inputs(tmp_path)
+    seed.update(city=city_name, target_date="2026-09-30", temperature_metric=metric,
+                source_cycle_time="2026-09-29T12:00:00+00:00", computed_at="2026-09-30T00:30:00+00:00",
+                expires_at="2026-09-30T01:30:00+00:00", baseline_source_available_at="2026-09-29T18:00:00+00:00",
+                openmeteo_source_available_at="2026-09-29T18:00:00+00:00")
+    (tmp_path / "openmeteo_payload.json").write_bytes(raw)
+
+    def recompute():
+        precision = dl._precision_metadata(city_name, "2026-09-30", anchor_sigma_c=3, raw_payload_bytes=raw)
+        (tmp_path / "precision_metadata.json").write_text(json.dumps(precision))
+        return build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+
+    original_bridge = bridge.read_bytes()
+    bridge.write_bytes(b"[]")
+    assert "OM9_STATION_GROUND_PROOF_UNPROVEN" in recompute().reason_codes
+    bridge.write_bytes(original_bridge)
+    ready = recompute()
+    assert ready.ok, ready.reason_codes
+    request = build_materialize_request_dataclass(ready.request, base_dir=tmp_path)
+    assert request.temperature_metric == metric
+    assert request.openmeteo_precision_guard.passable_for_live_materialization
+    proof = request.openmeteo_precision_guard.metadata.source_geometry_proof["station_ground_proof"]
+    assert proof["facts"]["station_id"] == city.wu_station
+    assert proof["facts"]["elevation_m"] == height
+    assert proof["audit"]["bridge"]["body_sha256"] == rows[city_name]["station_ground_proof"]["bridge"]["body_sha256"]
+    assert proof["audit"]["checked_at"] == "2026-09-30T00:15:00Z"
+    assert request.openmeteo_precision_guard.metadata.requested_lat == city.lat
+
+
 def test_shared_precision_metadata_rebinds_to_each_materialization_target(
     tmp_path,
 ) -> None:
