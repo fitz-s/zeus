@@ -707,7 +707,7 @@ def _station_response_has_authority(row: Mapping[str, object]) -> bool:
         return False
 
 
-def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
+def _physical_response_has_authority(row: Mapping[str, object], *, _require_surface: bool = True) -> bool:
     """Verify actual single-model product and exact hourly/local-day value, not request intention."""
     try:
         from pathlib import Path
@@ -803,9 +803,152 @@ def _physical_response_has_authority(row: Mapping[str, object]) -> bool:
         high_c, low_c = values[model]
         expected = high_c if row["metric"] == "high" else low_c if row["metric"] == "low" else None
         return (expected is not None and math.isclose(float(expected), float(row["forecast_value_c"]), abs_tol=1e-9)
-            and _current_model_surface_witness(row, geometry, artifact) is not None)
+            and (not _require_surface or _current_model_surface_witness(row, geometry, artifact) is not None))
     except (KeyError, IndexError, TypeError, ValueError, OSError, json.JSONDecodeError):
         return False
+
+
+def physical_capture_debt_reason(
+    conn: sqlite3.Connection, *, raw_model_forecast_id: int,
+    decision_time_iso: str, deadline_monotonic: float | None = None,
+) -> str | None:
+    """Classify one recoverable same-issued producer debt, never source authority.
+
+    SCOPE: this immutable raw ID and its exact model/run/request family. DRAIN:
+    the ordinary quota-bound producer obtains a real 200 entity. RESET requires
+    normal serving to accept that entity; a returned reason grants no q authority.
+    Ground, unsupported/sea cells, malformed products/clocks and intrinsic Day0
+    suffixes are not network-repairable and must not authorize forced polling.
+    """
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+    from src.config import runtime_cities_by_name
+    from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
+    from src.data.replacement_forecast_cycle_policy import cycle_age_outside_bound
+    from src.data.station_ground_evidence import read_current_station_ground_evidence
+    from src.data.openmeteo_model_surface import (
+        read_model_surface_capture, model_surface_witness, validate_model_surface_witness,
+    )
+
+    def stamp(value: object, *, sqlite_utc: bool = False) -> datetime:
+        result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if result.tzinfo is None and sqlite_utc:
+            result = result.replace(tzinfo=timezone.utc)
+        if result.tzinfo is None:
+            raise ValueError("unproven source clock")
+        return result.astimezone(timezone.utc)
+
+    if isinstance(raw_model_forecast_id, bool) or not isinstance(raw_model_forecast_id, int) or raw_model_forecast_id <= 0:
+        return None
+    try:
+        decision = stamp(decision_time_iso)
+        schema = current_value_serving_schema(conn)
+        if not schema.has_artifacts or set(_PRODUCT_IDENTITY_COLUMNS) - set(schema.product_identity_columns):
+            return None
+        cursor = conn.execute(
+            f"SELECT {_product_identity_select(schema, decision_iso=decision.isoformat())},coverage_status,training_allowed"
+            " FROM raw_model_forecasts WHERE raw_model_forecast_id=?", (raw_model_forecast_id,),
+        )
+        item = cursor.fetchone()
+        if item is None or item[1] != "COVERED" or item[2] != 0:
+            return None
+        raw = json.loads(str(item[0]))
+        model = str(raw["model"])
+        city = runtime_cities_by_name().get(str(raw["city"]))
+        if city is None or _is_station_model(model) or raw["metric"] not in ("high", "low") or raw["endpoint_mode"] != "single_runs":
+            return None
+        clocks = [stamp(raw[key], sqlite_utc=key == "recorded_at") for key in
+                  ("source_cycle_time", "source_available_at", "captured_at", "recorded_at")]
+        if not clocks[0] <= clocks[1] <= clocks[2] <= clocks[3] <= decision or cycle_age_outside_bound(decision, clocks[0]):
+            return None
+        # A source-clock suffix is not a full-day scalar, even if its body is
+        # now missing. Re-fetching the same late run cannot repair that product.
+        day_start = datetime.fromisoformat(str(raw["target_date"])).replace(tzinfo=ZoneInfo(str(city.timezone)))
+        if clocks[0] > day_start.astimezone(timezone.utc):
+            return None
+        view = dict(raw)
+        if raw["elevation_param"] == "requested" and raw["downscaling_policy"] == "none":
+            from src.data.bayes_precision_fusion_download import (
+                BAYES_PRECISION_FUSION_ELEVATION_PARAM, BAYES_PRECISION_FUSION_DOWNSCALING_POLICY, _model_domain_hash,
+            )
+            basis = dict(provider=str(raw["provider"]), model_name=str(raw["model_name"]),
+                         cell_selection=str(raw["cell_selection"]), endpoint_mode="single_runs")
+            if raw["model_domain_hash"] != _model_domain_hash(**basis, elevation_param="requested", downscaling_policy="none"):
+                return None
+            view.update(elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+                downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
+                model_domain_hash=_model_domain_hash(**basis, elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+                    downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY))
+        if not raw_product_matches_live_source(view, city, lead_days=int(raw["lead_days"])):
+            return None
+        db_path = next((str(row[2]) for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+        if not db_path or read_current_station_ground_evidence(Path(db_path), city=str(raw["city"]), decision_at=decision) is None:
+            return None
+        row = json.loads(_read_product_identity_at_cutoff(conn, item[0], deadline_monotonic=deadline_monotonic))
+        artifact = row.get("physical_artifact")
+        if not isinstance(artifact, Mapping):
+            # Only explicit supported domains may incur this one acquisition;
+            # absence is not a guessed grid/surface permission.
+            if model == "ecmwf_ifs":
+                from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_geometry_static_prerequisite_reason
+                return "ENTITY_BODY_MISSING" if source_geometry_static_prerequisite_reason() is None else None
+            asset = read_model_surface_capture(model, decision_at=decision)
+            return "ENTITY_BODY_MISSING" if asset.status == "READY" else None
+        row = _revalidated_legacy_product_row(row)
+        if row is None:
+            return None
+        artifact = row["physical_artifact"]
+        if not _physical_proof_clocks_have_authority(row, artifact):
+            return None
+        metadata = json.loads(str(artifact["metadata"]))["physical_response"]
+        params = json.loads(str(artifact["request_params_json"]))
+        from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+        from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+        if (artifact["data_version"] != "openmeteo_single_model_entity_body_v1"
+            or artifact["request_url"] != SINGLE_RUNS_FORECAST_URL
+            or metadata["model"] != model or metadata["request_params"] != params
+            or params["models"] != OPENMETEO_MODEL_IDS.get(model, model)
+            or any(artifact[key] != row[key] for key in ("source_id", "product_id", "source_cycle_time"))):
+            return None
+        indices = [i for i, (lat, lon, tz) in enumerate(zip(str(params["latitude"]).split(","),
+            str(params["longitude"]).split(","), str(params["timezone"]).split(","), strict=True))
+            if math.isclose(float(lat), float(city.lat), abs_tol=1e-6)
+            and math.isclose(float(lon), float(city.lon), abs_tol=1e-6) and tz == city.timezone]
+        if len(indices) != 1:
+            return None
+        geometry = metadata["locations"][indices[0]]
+        captured = stamp(artifact["captured_at"])
+        epoch_after_body = False
+        if model == "ecmwf_ifs":
+            if _current_model_surface_witness(row, geometry, artifact) is None:
+                return None
+        else:
+            asset = read_model_surface_capture(model, decision_at=decision)
+            if asset.status != "READY":
+                return None
+            epoch = stamp(asset.asset["last_modified"])
+            epoch_after_body = epoch > captured
+            # Verify this model's exact actual selected cell against the newly
+            # possessed version even when its epoch requires a fresh body.
+            prospective_capture = max(epoch, captured)
+            witness = model_surface_witness(model, selected_latitude=float(geometry["selected_latitude"]),
+                selected_longitude=float(geometry["selected_longitude"]), body_captured_at=prospective_capture,
+                asset_capture=asset)
+            if validate_model_surface_witness(witness, model=model,
+                selected_latitude=float(geometry["selected_latitude"]), selected_longitude=float(geometry["selected_longitude"]),
+                body_captured_at=prospective_capture, decision_at=decision) is not None:
+                return None
+        if not Path(str(artifact["artifact_path"])).exists():
+            return "ENTITY_BODY_MISSING"
+        if not _physical_response_has_authority(row, _require_surface=False):
+            return None
+        if epoch_after_body:
+            return "MODEL_SURFACE_EPOCH_AFTER_BODY"
+        if artifact.get("capture_receipt_artifact_id") is None:
+            return "HTTP_CAPTURE_RECEIPT_MISSING"
+        return None
+    except (KeyError, IndexError, TypeError, ValueError, OSError, json.JSONDecodeError):
+        return None
 
 
 def physical_source_proof_dependency(proof: object) -> Mapping[str, object] | None:

@@ -168,7 +168,7 @@ def _mock_single_model_http(monkeypatch, dl, *, value, network=False, hour_count
         day = datetime(2026, 6, 9 if hour_count == 24 else 8)
         latitude, longitude = _selected_test_cell(params["models"], float(params["latitude"]), float(params["longitude"]))
         payload = {"latitude": latitude, "longitude": longitude, "elevation": 123,
-            "timezone": "Europe/Paris", "hourly_units": {"temperature_2m": "°C"},
+            "timezone": "Europe/Paris", "utc_offset_seconds":7200, "hourly_units": {"temperature_2m": "°C"},
             "hourly": {"time": [(day + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(hour_count)],
                        "temperature_2m": [value] * hour_count}}
         body = (json.dumps(payload, indent=2) + "\n").encode()
@@ -206,8 +206,10 @@ def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, m
         "hourly":"temperature_2m", "temperature_unit":"celsius", "cell_selection":"land",
         "run":run.replace(tzinfo=None).isoformat()}
     day = datetime.fromisoformat(target_date)
+    from zoneinfo import ZoneInfo
+    offset = int(day.replace(tzinfo=ZoneInfo(target.timezone_name)).utcoffset().total_seconds())
     payload = {"latitude":target.latitude, "longitude":target.longitude, "elevation":45,
-        "timezone":target.timezone_name, "hourly_units":{"temperature_2m":"°C"},
+        "timezone":target.timezone_name, "utc_offset_seconds":offset, "hourly_units":{"temperature_2m":"°C"},
         "hourly":{"time":[(day+timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
                   "temperature_2m":[value]*24}}
     body = (json.dumps(payload, indent=2)+"\n").encode()
@@ -228,6 +230,68 @@ def _persist_exact_provider_body(conn, tmp_path, *, city, metric, target_date, m
             **dl._bayes_precision_fusion_product_identity(model,"single_runs",target))
         assert dl._persist_rows(conn, [row]) == expected_written
     return int(row["artifact_id"])
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("debt", (None, "ENTITY_BODY_MISSING", "HTTP_CAPTURE_RECEIPT_MISSING", "MODEL_SURFACE_EPOCH_AFTER_BODY"))
+def test_physical_capture_debt_uses_exact_causal_raw_and_actual_land_product(tmp_path, monkeypatch, metric, debt):
+    from tests.test_station_ground_evidence import _setup, _archive
+    from src.data import bayes_precision_fusion_download as dl, openmeteo_model_surface as surface
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    db, _, _, _, _ = _setup(tmp_path, monkeypatch)
+    _archive(db)
+    conn = sqlite3.connect(db)
+    cycle = "2026-09-29T12:00:00+00:00"
+    artifact_id = _persist_exact_provider_body(conn, tmp_path, city="Hong Kong", metric=metric,
+        target_date="2026-09-30", model="icon_global", cycle=cycle,
+        captured="2026-09-29T22:05:00+00:00", value=20,
+        network=debt != "HTTP_CAPTURE_RECEIPT_MISSING")
+    conn.commit()
+    raw_id = conn.execute("SELECT raw_model_forecast_id FROM raw_model_forecasts").fetchone()[0]
+    before = conn.execute("SELECT * FROM raw_model_forecasts").fetchall()
+    decision = "2026-09-29T23:30:00+00:00"
+    if debt == "ENTITY_BODY_MISSING":
+        path = conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()[0]
+        Path(path).unlink()
+    elif debt == "MODEL_SURFACE_EPOCH_AFTER_BODY":
+        body = _controlled_native_static_bytes("icon_global")
+        @contextmanager
+        def stream(method, url, **kwargs):
+            yield SimpleNamespace(status_code=200, headers={"etag":'"new-epoch"',
+                "last-modified":"Tue, 29 Sep 2026 23:00:00 GMT", "content-length":str(len(body))},
+                iter_raw=lambda **_kwargs:iter((body,)))
+        monkeypatch.setattr(surface.httpx, "stream", stream)
+        _download_time(monkeypatch, dl, datetime(2026,9,29,23,15,tzinfo=UTC))
+        assert surface.ensure_model_surface("icon_global").status == "READY"
+    assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id, decision_time_iso=decision) == debt
+    assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id, decision_time_iso="2026-09-29T21:59:59Z") is None
+    assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id, decision_time_iso="2026-10-02T00:00:00Z") is None
+    assert physical_capture_debt_reason(conn, raw_model_forecast_id=True, decision_time_iso=decision) is None
+    assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id+1000, decision_time_iso=decision) is None
+    assert conn.execute("SELECT * FROM raw_model_forecasts").fetchall() == before
+    conn.execute("UPDATE raw_model_forecasts SET product_id='foreign-product' WHERE raw_model_forecast_id=?", (raw_id,))
+    assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id, decision_time_iso=decision) is None
+    conn.close()
+
+
+@pytest.mark.parametrize("missing", ("ground", "surface"))
+def test_physical_capture_debt_does_not_force_missing_non_network_evidence(tmp_path, monkeypatch, missing):
+    from tests.test_station_ground_evidence import _setup, _archive
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    from src.data import openmeteo_model_surface as surface
+    db, _, _, _, _ = _setup(tmp_path, monkeypatch)
+    if missing != "ground":
+        _archive(db)
+    conn = sqlite3.connect(db)
+    _persist_exact_provider_body(conn, tmp_path, city="Hong Kong", metric="high", target_date="2026-09-30",
+        model="icon_global", cycle="2026-09-29T12:00:00+00:00", captured="2026-09-29T22:05:00+00:00", value=20)
+    conn.commit()
+    if missing == "surface":
+        for path in surface._cache_root().glob("*.manifest.json"):
+            path.unlink()
+    raw_id = conn.execute("SELECT raw_model_forecast_id FROM raw_model_forecasts").fetchone()[0]
+    assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id, decision_time_iso="2026-09-29T23:30:00Z") is None
+    conn.close()
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
@@ -877,7 +941,8 @@ def test_single_model_location_batch_persists_and_serves_second_city_both_metric
             if damage=="wrong_first_site" and tz=="Europe/Paris":
                 latitude,longitude=0,0
             payload.append({"latitude":latitude,"longitude":longitude,"elevation":100,
-                "timezone":tz,"hourly_units":{"temperature_2m":"°C"},
+                "timezone":tz,"utc_offset_seconds":7200 if tz=="Europe/Paris" else 3600,
+                "hourly_units":{"temperature_2m":"°C"},
                 "hourly":{"time":[(day+timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
                           "temperature_2m":[15+i%7 for i in range(24)]}})
         body=(json.dumps(payload,indent=2)+"\n").encode()
