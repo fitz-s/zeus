@@ -548,7 +548,8 @@ def _proof_original(conn: sqlite3.Connection, artifact_id: int) -> dict[str, Any
     if not rows:
         raise _proof_error("original_missing")
     body = rows[0]
-    from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID
+    from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SINGLE_RUNS_FORECAST_URL, SOURCE_ID
+    from src.data.bayes_precision_fusion_download import BAYES_PRECISION_FUSION_CELL_SELECTION
     if (body["source_id"], body["product_id"]) != (SOURCE_ID, PRODUCT_ID) or body["data_version"] not in {HIGH_DATA_VERSION, LOW_DATA_VERSION}:
         raise _proof_error("unsupported_original")
     try:
@@ -572,6 +573,9 @@ def _proof_original(conn: sqlite3.Connection, artifact_id: int) -> dict[str, Any
                 or date.fromisoformat(metadata["target_date"]).isoformat() != metadata["target_date"]
                 or metadata.get("metric") != expected_metric or body["training_allowed"] != 0
                 or clocks != sorted(clocks) or request_run.astimezone(UTC) != clocks[0]
+                or body["request_url"] != SINGLE_RUNS_FORECAST_URL
+                or params.get("temperature_unit") != "celsius"
+                or params.get("cell_selection") != BAYES_PRECISION_FUSION_CELL_SELECTION
                 or params.get("models") != "ecmwf_ifs" or not isinstance(params.get("timezone"), str)
                 or not params["timezone"] or "temperature_2m" not in str(params.get("hourly", "")).split(",")
                 or any(isinstance(params[key], bool) or not isinstance(params[key], (int, float))

@@ -18,7 +18,7 @@ import pytest
 
 import src.data.raw_forecast_artifact_manifest as manifest_module
 
-from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID
+from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SINGLE_RUNS_FORECAST_URL, SOURCE_ID
 from src.data.raw_forecast_artifact_manifest import (
     RawForecastArtifactManifest,
     UnsupportedRawForecastArtifactManifestFieldsError,
@@ -179,10 +179,10 @@ def _local_proof_case(tmp_path, data_version, *, response_scope_override=None):
         body, source_id=SOURCE_ID, product_id=PRODUCT_ID, data_version=data_version,
         source_cycle_time=run, source_available_at=run + timedelta(minutes=5),
         captured_at=run + timedelta(minutes=5),
-        request_url="https://customer-api.open-meteo.com/v1/single-runs",
+        request_url=SINGLE_RUNS_FORECAST_URL,
         request_params={"latitude": 24.9, "longitude": 67.1, "timezone": "Asia/Karachi",
                         "models": "ecmwf_ifs", "run": run.strftime("%Y-%m-%dT%H:%M"),
-                        "hourly": "temperature_2m", "cell_selection": "land"},
+                        "hourly": "temperature_2m", "temperature_unit": "celsius", "cell_selection": "land"},
         product_metadata={"city": "Karachi", "target_date": target, "metric": metric},
     )
     original_id = write_manifest_to_db(conn, original)
@@ -766,3 +766,32 @@ def test_frontier_deadline_in_second_page_never_returns_partial_commitment(tmp_p
         conn.set_trace_callback(None)
         conn.rollback()
         conn.close()
+
+
+@pytest.mark.parametrize("data_version", (HIGH_DATA_VERSION, LOW_DATA_VERSION))
+@pytest.mark.parametrize("fault", ("foreign_url", "foreign_unit", "foreign_cell"))
+def test_self_consistent_foreign_original_request_cannot_mint_local_proof(tmp_path, data_version, fault):
+    conn, original_id, original, candidate, precision = _local_proof_case(tmp_path, data_version)
+    conn.execute("BEGIN IMMEDIATE")
+    healthy_id = manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision)
+    conn.commit()
+    assert _read_local(conn, original_id, original, datetime.now(timezone.utc)).proof_artifact_id == healthy_id
+    if fault == "foreign_url":
+        candidate = replace(candidate, request_url="https://foreign.invalid/v1/forecast")
+        conn.execute("UPDATE raw_forecast_artifacts SET request_url=? WHERE artifact_id=?", (candidate.request_url, original_id))
+    else:
+        params = dict(candidate.request_params)
+        params["temperature_unit" if fault == "foreign_unit" else "cell_selection"] = "fahrenheit" if fault == "foreign_unit" else "nearest"
+        candidate = replace(candidate, request_params=params)
+        conn.execute("UPDATE raw_forecast_artifacts SET request_params_json=? WHERE artifact_id=?", (json.dumps(params, sort_keys=True), original_id))
+    conn.commit()
+    files = set(tmp_path.glob("openmeteo_anchor_local_proof_*.json"))
+    conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(ValueError, match="anchor_local_proof"):
+        manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision)
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 2
+    assert set(tmp_path.glob("openmeteo_anchor_local_proof_*.json")) == files
+    conn.rollback()
+    with pytest.raises(ValueError, match="anchor_local_proof"):
+        _read_local(conn, original_id, original, datetime.now(timezone.utc))
+    conn.close()
