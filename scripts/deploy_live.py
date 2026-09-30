@@ -3668,11 +3668,13 @@ def _ensure_restart_trade_schemas(conn: sqlite3.Connection) -> None:
     from src.state.schema.tier0_candidate_set_provenance_schema import (
         ensure_table as ensure_tier0_candidate_set_table,
     )
+    from src.state.day0_receipt_store import ensure_table as ensure_day0_receipt_blob
 
     conn.execute("BEGIN IMMEDIATE")
     try:
         ensure_tier0_auction_corpus_tables(conn)
         ensure_tier0_candidate_set_table(conn)
+        ensure_day0_receipt_blob(conn)
     except Exception:
         conn.rollback()
         raise
