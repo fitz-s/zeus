@@ -137,7 +137,7 @@ def _hko_source_surface(tmp_path, monkeypatch, _hko_native_surfaces):
 
 
 @pytest.fixture
-def _hko_native_surfaces(tmp_path, monkeypatch):
+def _hko_native_surfaces(tmp_path, monkeypatch, request):
     """Ordinary loopback whole-OM captures for explicit global and US domains."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -146,8 +146,10 @@ def _hko_native_surfaces(tmp_path, monkeypatch):
     from src.data import openmeteo_model_surface as surface
 
     bodies = {}
-    models = ("icon_global", "ukmo_global_deterministic_10km", "gfs_hrrr", "ncep_nbm_conus",
-              "icon_d2", "meteofrance_arome_france_hd")
+    frontier = "_target_frontier_native_surfaces" in request.fixturenames
+    models = (("icon_global", "ukmo_global_deterministic_10km") if frontier else
+              ("icon_global", "ukmo_global_deterministic_10km", "gfs_hrrr", "ncep_nbm_conus",
+               "icon_d2", "meteofrance_arome_france_hd"))
     for model in models:
         profile = surface._profile(model)
         domain, shape = profile["domain"], (profile["ny"], profile["nx"])
@@ -165,7 +167,8 @@ def _hko_native_surfaces(tmp_path, monkeypatch):
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("ETag", '"'+hashlib.sha256(body).hexdigest()+'"')
-            self.send_header("Last-Modified", "Tue, 29 Sep 2026 22:00:00 GMT")
+            self.send_header("Last-Modified", "Fri, 05 Jun 2026 22:00:00 GMT" if frontier
+                             else "Tue, 29 Sep 2026 22:00:00 GMT")
             self.end_headers()
             self.wfile.write(body)
         def log_message(self, *_args):
@@ -175,7 +178,7 @@ def _hko_native_surfaces(tmp_path, monkeypatch):
     thread.start()
     monkeypatch.setattr(surface, "_asset_url", lambda domain: f"http://127.0.0.1:{server.server_port}/{domain}")
     monkeypatch.setattr(surface, "_cache_root", lambda: tmp_path / "native-static")
-    monkeypatch.setattr(surface, "_now", lambda: _hko_dt(0)-timedelta(hours=1))
+    monkeypatch.setattr(surface, "_now", lambda: _dt(2, 50) if frontier else _hko_dt(0)-timedelta(hours=1))
     try:
         for model in models:
             capture = surface.ensure_model_surface(model)
@@ -185,6 +188,11 @@ def _hko_native_surfaces(tmp_path, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.fixture
+def _target_frontier_native_surfaces(_hko_native_surfaces):
+    """TEST_ONLY_SYNTHETIC_EXTERNAL_CONDITION: legal source/cut, not Shanghai q."""
 
 
 def _hko_raw_openmeteo_bytes() -> bytes:
@@ -527,6 +535,10 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                     grid_lat, grid_lon = cell["selected_grid_lat"], cell["selected_grid_lon"]
                     if grid_lon > 180:
                         grid_lon -= 360.
+            frontier = model in {"icon_global", "ukmo_global_deterministic_10km"} and old["city"] == "Shanghai" and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unrelated_writer'").fetchone() is not None
+            if frontier:
+                grid_lat, grid_lon = ((31.125, 121.75) if model == "icon_global" else (31.21875, 121.78125))
             payload = {"latitude": grid_lat, "longitude": grid_lon, "elevation": 8.0,
                 "timezone": city.timezone, "hourly_units": {variable: "°C"},
                 "hourly": {"time": [f"{old['target_date']}T{hour:02d}:00" for hour in range(24)],
@@ -543,6 +555,8 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                     hours = [(datetime.fromisoformat(at).replace(tzinfo=ZoneInfo(city.timezone)).astimezone(UTC)-run).total_seconds()/3600
                              for at in payload["hourly"]["time"]]
                     assert min(hours) >= 0 and max(hours) <= 48
+            if frontier:
+                payload["utc_offset_seconds"] = 28800
             body = (json.dumps(payload, indent=2) + "\n").encode()
             from src.data.openmeteo_client import PREVIOUS_RUNS_URL
             url = PREVIOUS_RUNS_URL if previous else "https://single-runs-api.open-meteo.com/v1/forecast"
@@ -550,15 +564,37 @@ def _qualify_raw_fixture_rows(conn, *, rebuild=False):
                 captures=[(body, datetime.fromisoformat(captured).timestamp())],
                 network_captures=[(body, datetime.fromisoformat(captured).timestamp(),
                                    {"content-type": "application/json"})]
-                    if old["city"] in {"Los Angeles", "Milan"} else ())
+                    if old["city"] in {"Los Angeles", "Milan"} or frontier else ())
             raw = {key: old[key] for key in ("model", "city", "target_date", "metric", "source_cycle_time",
                 "source_available_at", "lead_days", "forecast_value_c", "endpoint")}
             raw.update(captured_at=captured, **identity, _physical_response=bound[dl._BATCH_PHYSICAL_RESPONSE_KEY])
-            if old["city"] in {"Los Angeles", "Milan"}:
-                # Normal same-DB enrichment of a pre-identity setup row preserves
-                # its raw ID; no foreign artifact/receipt ID is transplanted.
+            if old["city"] in {"Los Angeles", "Milan"} or frontier:
+                # Actual body/receipt artifacts remain in this same database.
+                # A SQL-frontier marker is a fresh ordinary INSERT allocation,
+                # not enrichment of an already licensed or foreign row.
+                allocation = None
+                if frontier:
+                    assert not any(old.get(field) for field in
+                                   ("request_url_hash", "raw_sha256", "artifact_id", "source_id"))
+                    marker = old["raw_model_forecast_id"]
+                    conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?", (marker,))
+                    maximum = conn.execute("SELECT COALESCE(MAX(raw_model_forecast_id),0) FROM raw_model_forecasts").fetchone()[0]
+                    assert maximum < marker
+                    if maximum < marker-1:
+                        allocation = marker-1
+                        conn.execute("INSERT INTO raw_model_forecasts(raw_model_forecast_id,model) VALUES (?,'TEST_ONLY_ALLOCATION')",
+                                     (allocation,))
                 with patch.object(dl, "datetime", Clock):
                     dl._persist_rows(conn, [raw])
+                if frontier:
+                    actual = conn.execute("""SELECT raw_model_forecast_id,raw_sha256 FROM raw_model_forecasts
+                        WHERE product_id=? AND request_url_hash=? AND artifact_id=?""",
+                        (raw["product_id"], raw["request_url_hash"], raw["artifact_id"])).fetchone()
+                    assert tuple(actual) == (marker, raw["raw_sha256"])
+                    if allocation is not None:
+                        conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?", (allocation,))
+                        assert conn.execute("SELECT 1 FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+                                            (allocation,)).fetchone() is None
                 staging.close()
                 continue
             with patch.object(dl, "datetime", Clock):
@@ -6377,7 +6413,7 @@ def _prepared_target_frontier(marker: object):
                 "bayes_precision_fusion": {
                     "raw_model_forecast_ids": [marker],
                     "current_value_serving": {
-                        "ecmwf_ifs9": {"raw_model_forecast_id": marker}
+                        "icon_global": {"raw_model_forecast_id": marker}
                     },
                     "current_evidence_shape": {
                         "snapshot_id": marker,
@@ -6395,12 +6431,13 @@ def _prepared_target_frontier(marker: object):
         None,
         {},
         {"current_value_serving": {}},
-        {"current_value_serving": {"ecmwf_ifs9": {}}},
-        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": "bad"}}},
-        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": 1.5}}},
-        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": True}}},
+        {"current_value_serving": {"icon_global": {}}},
+        {"current_value_serving": {"icon_global": {"raw_model_forecast_id": "bad"}}},
+        {"current_value_serving": {"icon_global": {"raw_model_forecast_id": 1.5}}},
+        {"current_value_serving": {"icon_global": {"raw_model_forecast_id": True}}},
     ),
 )
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_target_witness_allows_live_ineligible_missing_serving_provenance(
     fusion,
 ) -> None:
@@ -6427,12 +6464,13 @@ def test_target_witness_allows_live_ineligible_missing_serving_provenance(
         None,
         {},
         {"current_value_serving": {}},
-        {"current_value_serving": {"ecmwf_ifs9": {}}},
-        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": "bad"}}},
-        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": 1.5}}},
-        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": True}}},
+        {"current_value_serving": {"icon_global": {}}},
+        {"current_value_serving": {"icon_global": {"raw_model_forecast_id": "bad"}}},
+        {"current_value_serving": {"icon_global": {"raw_model_forecast_id": 1.5}}},
+        {"current_value_serving": {"icon_global": {"raw_model_forecast_id": True}}},
     ),
 )
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_target_witness_rejects_live_eligible_missing_serving_provenance(
     fusion,
 ) -> None:
@@ -6453,6 +6491,7 @@ def test_target_witness_rejects_live_eligible_missing_serving_provenance(
     conn.close()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_commit_returns_typed_blocked_for_ineligible_missing_serving(
     monkeypatch,
 ) -> None:
@@ -6506,6 +6545,11 @@ def _blocked_materialization_result():
 
 
 def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
+    """SQL/locking fixture, not a licensed Shanghai forecast certificate.
+
+    TEST_ONLY_SYNTHETIC_EXTERNAL_CONDITION supplies complete controlled ICON
+    response/static bytes through the ordinary writer at the original June cut.
+    """
     conn.executescript(
         f"""
         CREATE TABLE source_run (
@@ -6541,7 +6585,8 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
             raw_model_forecast_id INTEGER PRIMARY KEY,
             model TEXT, city TEXT, target_date TEXT, metric TEXT,
             source_cycle_time TEXT, source_available_at TEXT, captured_at TEXT,
-            lead_days INTEGER, forecast_value_c REAL, endpoint TEXT
+            lead_days INTEGER, forecast_value_c REAL, endpoint TEXT,
+            recorded_at TEXT
         );
         CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
@@ -6585,7 +6630,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
             source_cycle_time, source_available_at, captured_at,
             lead_days, forecast_value_c, endpoint
         ) VALUES (
-            101, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+            101, 'icon_global', 'Shanghai', '2026-06-07', 'high',
             '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
             '2026-06-06T03:00:00+00:00', 1, 27.0, 'single_runs'
         );
@@ -6604,7 +6649,29 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         (_fixture_ens_surface_provenance(),),
     )
     _set_target_frontier_coverage(conn, snapshot_id=101)
+    # The old minimal DDL predates physical writer identity. Upgrade the actual
+    # tables using the normal schema and leave marker IDs/anchor17 untouched.
+    canonical = _conn()
+    artifact_columns = {row[1] for row in conn.execute("PRAGMA table_info(raw_forecast_artifacts)")}
+    for column in canonical.execute("PRAGMA table_info(raw_forecast_artifacts)"):
+        if column[1] not in artifact_columns:
+            conn.execute(f"ALTER TABLE raw_forecast_artifacts ADD COLUMN {column[1]} {column[2]}")
+    canonical.close()
+    conn.execute("""CREATE UNIQUE INDEX fixture_raw_artifact_identity ON raw_forecast_artifacts(
+        source_id,product_id,data_version,source_cycle_time,sha256)""")
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+    ensure_replacement_forecast_live_schema(conn)
     _qualify_raw_fixture_rows(conn)
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    request = _prepared_target_frontier(101).request
+    served = read_current_instrument_values(conn, city=request.city, metric="high",
+        target_date=request.target_date.isoformat(), source_cycle_time_iso=request.source_cycle_time.isoformat(),
+        decision_time_iso=request.computed_at.isoformat(), include_station_sources=True)
+    assert set(served) == {"icon_global"}
+    assert served["icon_global"].raw_model_forecast_id == 101
+    assert served["icon_global"].value_c == 27.0
+    assert served["icon_global"].physical_response["model_surface_witness"]["status"] == "VERIFIED"
+    assert materializer_mod.read_current_evidence_snapshot_id(conn, request, metric="high") == 101
     conn.commit()
 
 
@@ -6633,6 +6700,7 @@ def _set_target_frontier_coverage(
     )
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
     import scripts.materialize_replacement_forecast_live as cli
 
@@ -6665,7 +6733,7 @@ def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
             source_cycle_time, source_available_at, captured_at,
             lead_days, forecast_value_c, endpoint
         ) VALUES (
-            102, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+            102, 'icon_global', 'Shanghai', '2026-06-07', 'high',
             '2026-06-06T01:00:00+00:00', '2026-06-06T03:30:00+00:00',
             '2026-06-06T03:30:00+00:00', 1, 26.0, 'single_runs'
         )
@@ -6698,6 +6766,7 @@ def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
     conn.close()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_materialize_script_ignores_unrelated_data_version_changes(
     tmp_path, monkeypatch
 ) -> None:
@@ -6851,6 +6920,7 @@ def test_source_run_witness_distinguishes_missing_from_present_empty() -> None:
     assert present.fetch_finished_at == "2026-08-03T01:00:00+00:00"
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_target_witness_detects_same_fetch_time_source_run_replacement() -> None:
     import scripts.materialize_replacement_forecast_live as cli
 
@@ -6891,6 +6961,7 @@ def test_target_witness_detects_same_fetch_time_source_run_replacement() -> None
         ("DELETE FROM ensemble_snapshots WHERE snapshot_id = 101", True),
     ),
 )
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_target_witness_refuses_disappeared_exact_dependency(
     delete_sql: str, raises: bool
 ) -> None:
@@ -6914,6 +6985,7 @@ def test_target_witness_refuses_disappeared_exact_dependency(
     conn.close()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_shared_frontier_helpers_match_materializer_selectors() -> None:
     from src.data.replacement_current_value_serving import (
         current_value_serving_schema,
@@ -6962,6 +7034,7 @@ def test_shared_frontier_helpers_match_materializer_selectors() -> None:
     assert snapshot_id == snapshot.snapshot_id == 101
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_selected_ens_proof_is_required_for_identity_and_shape() -> None:
     """An indexed snapshot id cannot bypass the same selected-row land proof."""
     from src.data.replacement_forecast_materializer import (
@@ -7003,6 +7076,7 @@ def test_selected_ens_proof_is_required_for_identity_and_shape() -> None:
     conn.close()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_materialized_shape_binds_verified_selected_ens_grid_hash() -> None:
     from src.data.replacement_forecast_materializer import _read_current_evidence_shape
 
@@ -7013,12 +7087,12 @@ def test_materialized_shape_binds_verified_selected_ens_grid_hash() -> None:
                  (json.dumps([20.0 + index * .05 for index in range(51)]),))
     kwargs = {
         "metric": "high",
-        "provider_values_c": {"ecmwf_ifs9": 21.0, "icon": 22.0},
-        "provider_weights": {"ecmwf_ifs9": .6, "icon": .4},
+        "provider_values_c": {"icon_global": 21.0, "ukmo_global_deterministic_10km": 22.0},
+        "provider_weights": {"icon_global": .6, "ukmo_global_deterministic_10km": .4},
         "center_c": 21.5,
         "provider_cycles": {
-            "ecmwf_ifs9": "2026-06-06T00:00:00+00:00",
-            "icon": "2026-06-06T00:00:00+00:00",
+            "icon_global": "2026-06-06T00:00:00+00:00",
+            "ukmo_global_deterministic_10km": "2026-06-06T00:00:00+00:00",
         },
     }
     first = _read_current_evidence_shape(conn, request, **kwargs)
@@ -7276,6 +7350,7 @@ def test_current_ensemble_requires_exact_complete_target_coverage(
     conn.close()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_new_target_family_provider_changes_final_witness() -> None:
     """A newly eligible provider must invalidate the prepared family frontier."""
     import scripts.materialize_replacement_forecast_live as cli
@@ -7291,8 +7366,8 @@ def test_new_target_family_provider_changes_final_witness() -> None:
             source_cycle_time, source_available_at, captured_at,
             lead_days, forecast_value_c, endpoint
         ) VALUES (
-            104, 'gfs', 'Shanghai', '2026-06-07', 'high',
-            '2026-06-06T01:00:00+00:00', '2026-06-06T03:30:00+00:00',
+            104, 'ukmo_global_deterministic_10km', 'Shanghai', '2026-06-07', 'high',
+            '2026-06-06T00:00:00+00:00', '2026-06-06T03:30:00+00:00',
             '2026-06-06T03:30:00+00:00', 1, 26.0, 'single_runs'
         )
         """
@@ -7305,8 +7380,8 @@ def test_new_target_family_provider_changes_final_witness() -> None:
 
     assert current != baseline
     assert current.provider_family_latest_id == 104
-    assert ("gfs", 104) in refreshed.provider_frontier
-    assert "gfs" in refreshed.provider_models
+    assert ("ukmo_global_deterministic_10km", 104) in refreshed.provider_frontier
+    assert "ukmo_global_deterministic_10km" in refreshed.provider_models
 
 
 def test_final_lock_uses_real_writer_without_revalidation_or_unbounded_reads(
@@ -7353,6 +7428,7 @@ def test_final_lock_uses_real_writer_without_revalidation_or_unbounded_reads(
     )
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_final_ens_frontier_preserves_production_casefold_fallback() -> None:
     from src.data.replacement_forecast_materializer import (
         read_current_evidence_snapshot_id,
@@ -7397,6 +7473,7 @@ def test_final_ens_frontier_preserves_production_casefold_fallback() -> None:
     assert "INTERVAL_CENSORED_TARGET_LOCAL_DAY" in final_sql[2].upper()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_final_ens_frontier_detects_absent_to_present() -> None:
     """A prepared missing ENS identity must not become a permanent final gate."""
     import scripts.materialize_replacement_forecast_live as cli
@@ -7433,6 +7510,7 @@ def test_final_ens_frontier_detects_absent_to_present() -> None:
     assert current.ensemble_frontier_id == 102
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_ens_casefold_fallback_rejects_new_exact_alias_without_current_proof() -> None:
     """An exact-city alias cannot displace a certified canonical-city proof."""
     import scripts.materialize_replacement_forecast_live as cli
@@ -7483,6 +7561,7 @@ def test_ens_casefold_fallback_rejects_new_exact_alias_without_current_proof() -
     assert current_id is None
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_existing_frontier_indexes_require_no_live_ddl() -> None:
     """A normal posterior write must not wait on an already-complete schema."""
 
@@ -7508,6 +7587,7 @@ def test_existing_frontier_indexes_require_no_live_ddl() -> None:
         conn.close()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_final_ens_selector_has_indexed_logarithmic_work() -> None:
     """Canonical exact/folded target selectors must not scan their target range."""
     from src.data.replacement_forecast_materializer import (
@@ -7594,6 +7674,7 @@ def test_final_ens_selector_has_indexed_logarithmic_work() -> None:
     assert samples[-1][2] < samples[0][2] * 2
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_provider_frontier_skips_invalid_rows_like_production_selector() -> None:
     from src.data.replacement_current_value_serving import (
         current_value_serving_schema,
@@ -7610,7 +7691,7 @@ def test_provider_frontier_skips_invalid_rows_like_production_selector() -> None
             source_cycle_time, source_available_at, captured_at,
             lead_days, forecast_value_c, endpoint
         ) VALUES (
-            ?, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+            ?, 'icon_global', 'Shanghai', '2026-06-07', 'high',
             ?, '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
             ?, ?, 'single_runs'
         )
@@ -7635,13 +7716,13 @@ def test_provider_frontier_skips_invalid_rows_like_production_selector() -> None
         metric="high",
         target_date="2026-06-07",
         decision_time_iso="2026-06-06T04:00:00+00:00",
-        models=("ecmwf_ifs9",),
+        models=("icon_global",),
         schema=current_value_serving_schema(conn),
     )
     conn.close()
 
-    assert served["ecmwf_ifs9"].raw_model_forecast_id == 101
-    assert frontier == (("ecmwf_ifs9", 101),)
+    assert served["icon_global"].raw_model_forecast_id == 101
+    assert frontier == (("icon_global", 101),)
 
 
 def test_day0_final_writer_uses_frozen_frontier_without_likelihood_recompute(
@@ -7803,6 +7884,7 @@ def test_day0_ledger_frontier_allows_65_rows_and_retries_on_append(
     conn.close()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> None:
     from src.data.replacement_current_value_serving import (
         current_value_serving_schema,
@@ -7814,67 +7896,18 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
         read_current_evidence_snapshot_identity,
     )
 
-    conn = _conn()
-    _ensure_source_run_table(conn)
-    _ensure_source_run_coverage_table(conn)
-    write_source_run(
-        conn,
-        source_run_id="ens-run",
-        source_id="ecmwf_open_data",
-        track="mx2t6_high_short_horizon",
-        release_calendar_key="ecmwf_open_data:mx2t6_high:short",
-        source_cycle_time=_dt(0),
-        source_available_at=_dt(3),
-        fetch_finished_at=_dt(3),
-        captured_at=_dt(3),
-        imported_at=_dt(3),
-        status="SUCCESS",
-        completeness_status="COMPLETE",
-        partial_run=False,
-    )
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
     _ensure_replacement_identity_columns(conn)
     _ensure_replacement_frontier_indexes(conn)
-    prepared = _prepared_target_frontier(101)
-    request = prepared.request
-    conn.execute(
-        """
-        INSERT INTO raw_model_forecasts (
-            raw_model_forecast_id, model, city, target_date, metric,
-            source_cycle_time, source_available_at, captured_at, lead_days,
-            forecast_value_c, endpoint
-        ) VALUES (101, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
-                  '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
-                  '2026-06-06T03:00:00+00:00', 1, 27.0, 'single_runs')
-        """
-    )
-    conn.execute(
-        f"""
-        INSERT INTO ensemble_snapshots (
-            snapshot_id, city, target_date, temperature_metric, physical_quantity,
-            observation_field, issue_time, available_at, fetch_time, lead_hours,
-            members_json, model_version, dataset_id, source_id, source_cycle_time,
-            source_available_at, source_run_id, forecast_window_attribution_status,
-            contributes_to_target_extrema, causality_status, boundary_ambiguous,
-            members_unit
-        ) VALUES (101, 'Shanghai', '2026-06-07', 'high', 'temperature_max',
-                  'high_temp', '2026-06-06T00:00:00+00:00',
-                  '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
-                  24, '[20.0,21.0]', 'ecmwf_ens', '{_current_baseline_data_version("high")}', 'ecmwf_open_data',
-                  '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
-                  'ens-run', 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'degC')
-        """
-    )
-    conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=101",
-                 (_fixture_ens_surface_provenance(),))
-    _set_target_frontier_coverage(
-        conn,
-        snapshot_id=101,
-        coverage_id="ens-coverage-101",
-        source_run_id="ens-run",
-        track="mx2t6_high_short_horizon",
-        release_key="ecmwf_open_data:mx2t6_high:short",
-    )
+    request = _prepared_target_frontier(101).request
     traced: list[str] = []
+    # Real ordinary body/receipt params are one location. JSON coordinate axes
+    # are bounded per artifact; they are not canonical-table query frontiers.
+    artifact = conn.execute("""SELECT a.request_params_json FROM raw_forecast_artifacts a
+        JOIN raw_model_forecasts r ON r.artifact_id=a.artifact_id WHERE r.raw_model_forecast_id=101""").fetchone()
+    params = json.loads(artifact[0])
+    assert all(len(str(params[key]).split(",")) == 1 for key in ("latitude", "longitude", "timezone"))
     conn.set_trace_callback(traced.append)
     read_current_instrument_frontier_identity(
         conn,
@@ -7882,7 +7915,7 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
         metric="high",
         target_date=request.target_date.isoformat(),
         decision_time_iso=request.computed_at.isoformat(),
-        models=("ecmwf_ifs9",),
+        models=("icon_global",),
         schema=current_value_serving_schema(conn),
     )
     read_current_instrument_family_latest_id(
@@ -7913,6 +7946,9 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
         tuple(str(row[3]) for row in conn.execute("EXPLAIN QUERY PLAN " + sql))
         for sql in frontier_sql
     ]
+    ens_plans = [str(row[3]) for sql in traced
+                 if sql.lstrip().upper().startswith("SELECT") and "FROM ENSEMBLE_SNAPSHOTS" in sql.upper()
+                 for row in conn.execute("EXPLAIN QUERY PLAN " + sql)]
     conn.close()
 
     assert plans
@@ -7928,12 +7964,22 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
         any("IDX_FORECAST_POSTERIORS_SOURCE_FAMILY_FRONTIER" in detail.upper() for detail in plan)
         for plan in plans
     )
-    assert all(
-        not any(detail.upper().startswith("SCAN ") for detail in plan)
-        for plan in plans
-    )
+    known_json_axis_scans = {f"SCAN {axis} VIRTUAL TABLE INDEX 1:" for axis in ("lat", "lon", "tz")}
+    scans = {detail for plan in plans for detail in plan if detail.upper().startswith("SCAN ")}
+    # These three bounded virtual axes are permitted, not mandatory. Current
+    # SQL may use no virtual scan at all; every other SCAN remains forbidden.
+    assert scans <= known_json_axis_scans
+    # Every persisted entity must positively use a keyed SEARCH. No physical
+    # table or unknown virtual alias is exempted by the JSON-axis allowance.
+    for entity in ("raw_model_forecasts", "a", "b", "forecast_posteriors"):
+        assert any(detail.startswith(f"SEARCH {entity} ") for plan in plans for detail in plan), (entity, plans)
+    assert any(detail.startswith("SEARCH ensemble_snapshot USING INDEX idx_ensemble_snapshots_replacement_exact_frontier ")
+               for detail in ens_plans), ens_plans
+    assert not any(detail.startswith(f"SCAN {entity} ") for detail in ens_plans
+                   for entity in ("ensemble_snapshot", "ensemble_snapshots", "source_run", "source_run_coverage")), ens_plans
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_final_provider_witness_query_count_is_fixed_with_many_invalid_rows() -> None:
     import scripts.materialize_replacement_forecast_live as cli
 
@@ -7961,7 +8007,7 @@ def test_final_provider_witness_query_count_is_fixed_with_many_invalid_rows() ->
             source_cycle_time, source_available_at, captured_at,
             lead_days, forecast_value_c, endpoint
         ) VALUES (
-            ?, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+            ?, 'icon_global', 'Shanghai', '2026-06-07', 'high',
             '2026-06-06T02:00:00+00:00', '2026-06-06T03:30:00+00:00',
             '2026-06-06T03:30:00+00:00', 'bad-lead', NULL, 'single_runs'
         )
@@ -8113,6 +8159,7 @@ def test_source_clock_production_selector_has_no_cap_before_legal_winners(tmp_pa
     conn.close()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_final_lock_reads_only_exact_ids_and_bounded_frontiers(
     monkeypatch,
 ) -> None:
@@ -8169,6 +8216,7 @@ def test_final_lock_reads_only_exact_ids_and_bounded_frontiers(
     assert not any("OFFSET" in sql.upper() for sql in selects)
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_exact_target_supersession_retries_before_commit(monkeypatch) -> None:
     import scripts.materialize_replacement_forecast_live as cli
 
@@ -8193,7 +8241,7 @@ def test_exact_target_supersession_retries_before_commit(monkeypatch) -> None:
             source_cycle_time, source_available_at, captured_at,
             lead_days, forecast_value_c, endpoint
         ) VALUES (
-                102, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+                102, 'icon_global', 'Shanghai', '2026-06-07', 'high',
                 '2026-06-06T01:00:00+00:00', '2026-06-06T03:30:00+00:00',
                 '2026-06-06T03:30:00+00:00', 1, 26.0, 'single_runs'
             )
@@ -8446,6 +8494,7 @@ def test_materialize_script_injected_commit_connection_requires_writer_lock(
     conn.close()
 
 
+@pytest.mark.usefixtures("_target_frontier_native_surfaces")
 def test_materialize_cli_bootstraps_hot_indexes_outside_writer_lock(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
