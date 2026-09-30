@@ -4409,7 +4409,9 @@ def test_hko_minute_mean_clock_gate_replays_exact_current_only_body(damage):
 
 
 @pytest.mark.parametrize("damage", [None, "missing", "old_clock", "raw_hash", "wrong_value", "future_record"])
-def test_hko_clock_read_gate_reproduces_raw_record_not_revision_label(damage):
+def test_hko_clock_read_gate_reproduces_raw_record_not_revision_label(
+    damage, _generic_reader_current_row,
+):
     """This is the clock gate only, not a fabricated complete pin authority."""
     import copy
     from src.config import cities_by_name
@@ -4474,31 +4476,70 @@ def test_hko_clock_read_gate_reproduces_raw_record_not_revision_label(damage):
     reason = reader._hko_current_temperature_clock_reason(provenance, city="Hong Kong")
     assert (reason is None) is (damage is None)
     assert reader._hko_current_temperature_clock_reason(provenance, city="Paris") is None
-    if damage is not None:
-        # The actual read boundary must reset old/malformed source-clock rows,
-        # not silently stamp their old q with the current Day0 revision. This
-        # stage assertion does not claim that this minimal carrier is eligible.
-        posterior_id = _insert_posterior(conn)
-        provenance.update(_live_provenance())
-        provenance["bayes_precision_fusion"]["decorrelated_providers_complete"] = True
-        conn.execute(
-            "UPDATE forecast_posteriors SET city=?, target_date=?, provenance_json=? "
-            "WHERE posterior_id=?",
-            ("Hong Kong", "2026-09-29", json.dumps(provenance), posterior_id),
+    # The original clock component above retains its September 29 definition
+    # clocks. The public boundary uses a separate actual, current-policy HKO
+    # certificate, not a Shanghai synthetic shape or retroactive ground proof.
+    licensed, namespace = _generic_reader_current_row
+    actual = sqlite3.connect(f"file:{namespace}?mode=ro", uri=True)
+    actual.row_factory = sqlite3.Row
+    actual.execute("PRAGMA query_only=ON")
+    context = dict(city=licensed["city"], target_date=licensed["target_date"],
+        temperature_metric=licensed["temperature_metric"],
+        decision_time=datetime.fromisoformat(licensed["computed_at"]), raw_input_hwm_conn=actual)
+    try:
+        healthy = reader.read_pinned_replacement_forecast_bundle(
+            actual, posterior_id=licensed["posterior_id"], **context,
         )
-        selected = reader.read_prior_complete_replacement_forecast_bundle(
-            conn, city="Hong Kong", target_date="2026-09-29", temperature_metric="high",
-            decision_time=datetime(2026, 9, 29, 6, 21, tzinfo=timezone.utc),
-            raw_input_hwm_conn=conn,
-        )
-        assert selected.status == "NOT_APPLICABLE"
-        assert selected.reason_code == reason
-        exact = reader.read_pinned_replacement_forecast_bundle(
-            conn, posterior_id=posterior_id, city="Hong Kong", target_date="2026-09-29",
-            temperature_metric="high", decision_time=datetime(2026, 9, 29, 6, 21, tzinfo=timezone.utc),
-            raw_input_hwm_conn=conn,
-        )
-        assert exact.status == "BLOCKED" and exact.reason_code == reason
+        assert healthy.ok, healthy.reason_code
+        assert healthy.bundle.posterior_id == licensed["posterior_id"]
+        if damage is not None:
+            damaged = copy.deepcopy(json.loads(licensed["provenance_json"]))
+            evidence = damaged["day0_current_temperature_clock_evidence"]
+            state = damaged["day0_current_temperature_state"]
+            if damage == "missing":
+                damaged.pop("day0_current_temperature_clock_evidence")
+            elif damage == "old_clock":
+                state["observed_at_utc"] = evidence["published_at_utc"]
+            elif damage == "raw_hash":
+                evidence["raw_report_sha256"] = "unproved-version-label"
+            elif damage == "wrong_value":
+                state["value_native"] = float(state["value_native"]) - 0.1
+            elif damage == "future_record":
+                data = json.loads(evidence["raw_report"])
+                data["recordTime"] = (
+                    datetime.fromisoformat(evidence["published_at_utc"]) + timedelta(minutes=1)
+                ).isoformat()
+                evidence["raw_report"] = json.dumps(data)
+                evidence["raw_report_sha256"] = hashlib.sha256(evidence["raw_report"].encode()).hexdigest()
+            assert reader._hko_current_temperature_clock_reason(damaged, city=licensed["city"]) == reason
+
+            class FaultCursor:
+                def __init__(self, cursor): self.cursor = cursor
+                def fetchone(self):
+                    row = self.cursor.fetchone()
+                    if row is not None and "posterior_id" in row.keys() and row["posterior_id"] == licensed["posterior_id"]:
+                        return {**dict(row), "provenance_json": json.dumps(damaged)}
+                    return row
+                def __getattr__(self, name): return getattr(self.cursor, name)
+
+            class FaultRead:
+                def execute(self, sql, parameters=()):
+                    cursor = actual.execute(sql, parameters)
+                    # Negative-only exact posterior SELECT. No source, READY,
+                    # FK, physical-body or licensed database record is changed.
+                    return FaultCursor(cursor) if "FROM forecast_posteriors" in sql else cursor
+
+            selected = reader.read_prior_complete_replacement_forecast_bundle(FaultRead(), **context)
+            assert selected.status == "NOT_APPLICABLE"
+            assert selected.reason_code == reason
+            exact = reader.read_pinned_replacement_forecast_bundle(
+                FaultRead(), posterior_id=licensed["posterior_id"], **context,
+            )
+            assert exact.status == "BLOCKED" and exact.reason_code == reason
+        assert dict(actual.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (licensed["posterior_id"],)).fetchone()) == licensed
+    finally:
+        actual.close()
     conn.close()
 
 
