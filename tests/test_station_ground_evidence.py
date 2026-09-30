@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-09-29; last_reviewed=2026-09-29; last_reused=2026-09-29
+# Lifecycle: created=2026-09-29; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Canonical immutable ground entities, causal possession and facts-only RESET.
 # Reuse: pytest tests/test_station_ground_evidence.py
 # Authority basis: replacement_final_form §1d205–215; AGENTS §0/§2 INV-14/INV-47.
@@ -17,6 +17,56 @@ from src.data import station_ground_evidence as ground
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 UTC = timezone.utc
+
+
+@pytest.mark.parametrize("city", ("Shanghai", "London"))
+def test_international_homr_normal_archive_uses_new_possession_not_por_and_never_renews(tmp_path, monkeypatch, city):
+    from datetime import date, timedelta
+    import src.config as config
+    from src.data.forecast_target_contract import compute_target_local_day_window_utc
+    from tests.test_config import _official_international_homr_registry
+    registry, official, claims = _official_international_homr_registry(tmp_path, monkeypatch, city)
+    clock = [datetime(2026, 9, 30, 13, tzinfo=UTC)]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz or UTC)
+    monkeypatch.setattr(ground, "datetime", Clock)
+    monkeypatch.setattr(ground, "_store_root", lambda: tmp_path / "ground")
+    db = tmp_path / "international-forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    first = _archive(db, city)
+    assert first["facts"]["station_id"] == config.cities_by_name[city].wu_station
+    assert first["facts"]["location_role"] == "station_ground_reference"
+    assert "temperature_station" not in first["facts"]
+    assert first["captured_at"] == "2026-09-30T12:52:01+00:00"
+    assert first["recorded_at"] == clock[0].isoformat()
+    assert Path(first["body_path"]).read_bytes() == official.read_bytes()
+    for old_cut in ("2004-01-01T00:00:00Z", "2026-09-30T12:52:00Z", "2026-09-30T12:59:59.999999Z"):
+        assert ground.read_frozen_station_ground_evidence(first, decision_at=old_cut) is None
+        assert ground.read_current_station_ground_evidence(db, city=city, decision_at=old_cut) is None
+    assert ground.read_current_station_ground_evidence(db, city=city, decision_at=clock[0]) == first
+    target = date(2026, 10, 2)
+    window = compute_target_local_day_window_utc(city_timezone=config.cities_by_name[city].timezone, target_local_date=target)
+    coverage = ground.station_ground_target_coverage(first, decision_at=clock[0],
+        target_start_utc=window.start_utc, target_end_utc=window.end_utc)
+    assert coverage["status"] == "VERIFIED", coverage
+    with sqlite3.connect(db) as conn:
+        original_rows = conn.execute("SELECT * FROM raw_forecast_artifacts").fetchall()
+    clock[0] += timedelta(days=1)
+    again = _archive(db, city)
+    assert again == first
+    assert ground.read_frozen_station_ground_evidence(first, decision_at=clock[0]) == first
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT * FROM raw_forecast_artifacts").fetchall() == original_rows
+    # A foreign canonical namespace with matching numeric IDs cannot acquire
+    # the stored entity simply by copying its self-described proof.
+    foreign = tmp_path / "foreign-forecasts.db"
+    with sqlite3.connect(foreign) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    rebound = dict(first, forecast_db=str(foreign))
+    assert ground.read_frozen_station_ground_evidence(rebound, decision_at=clock[0]) is None
 
 
 def _setup(tmp_path, monkeypatch, city="Hong Kong"):
