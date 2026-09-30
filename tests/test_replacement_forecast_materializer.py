@@ -2692,6 +2692,103 @@ def _append_shanghai_owner_prints(conn,request):
     conn.commit()
 
 
+def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high"):
+    """Controlled WRH/AWC bodies and complete remaining vectors, not gate mocks."""
+    from src.config import runtime_cities_by_name
+    from src.data import day0_fast_obs as fast, day0_hourly_vectors as hourly
+    from src.data.noaa_wrh_timeseries import rows_from_payload
+    from src.data.daily_obs_append import _append_noaa_wrh_prints
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from zoneinfo import ZoneInfo
+
+    extreme = 31. if metric=="high" else 19.
+    conn, prior = _shanghai_current_owner_request(tmp_path,monkeypatch,metric=metric,observed_extreme=extreme)
+    city = runtime_cities_by_name()[prior.city]
+    cut = prior.computed_at+timedelta(minutes=10)
+    observed = cut-timedelta(minutes=5)
+    source = fast.fast_obs_source_for_city(city,prior.target_date)
+    assert source is not None and source.station_id=="ZSPD"
+    history = [observed-timedelta(hours=index+2) for index in range(fast.FAST_RESIDUAL_MIN_PAIRS)]
+    timestamps = [at.astimezone(ZoneInfo(city.timezone)).strftime("%Y-%m-%dT%H:%M:%S%z") for at in history]
+    raw = [f"ZSPD {at:%d%H%M}Z {round(extreme):02d}/15 T{round(extreme*10):04d}0150" for at in history]
+    product = {"STATION":[{"STID":"ZSPD","OBSERVATIONS":{
+        "date_time":timestamps,"air_temp_set_1":[extreme]*len(history),
+        "sea_level_pressure_set_1":[1010]*len(history),"metar_set_1":raw}}]}
+    rows = rows_from_payload(product,station="ZSPD")
+    historical_capture = prior.computed_at-timedelta(minutes=10)
+    for target in {date.fromisoformat(row.local_date) for row in rows}:
+        _append_noaa_wrh_prints(conn,city_name=city.name,station="ZSPD",unit="C",rows=rows,
+            target_date_local=target,view="all",fetch_utc=historical_capture)
+    reports = fast.parse_metar_api_payload([{"icaoId":"ZSPD","obsTime":at.timestamp(),
+        "receiptTime":(at+timedelta(seconds=30)).isoformat(),"temp":extreme,
+        "metarType":"METAR","rawOb":text} for at,text in zip(history,raw,strict=True)])
+    writer_time = [historical_capture]
+    class ClockType(type):
+        def __instancecheck__(cls,value):
+            return isinstance(value,datetime)
+    class WriterClock(datetime,metaclass=ClockType):
+        @classmethod
+        def now(cls,tz=None):
+            return writer_time[0].astimezone(tz) if tz else writer_time[0].replace(tzinfo=None)
+    monkeypatch.setattr(fast,"datetime",WriterClock)
+    assert fast._append_metar_prints_to_ledger(conn,((city,source,prior.target_date.isoformat()),),reports)
+    writer_time[0] = observed+timedelta(minutes=1)
+    current = fast.parse_metar_api_payload([{"icaoId":"ZSPD","obsTime":observed.timestamp(),
+        "receiptTime":writer_time[0].isoformat(),"temp":30.,"metarType":"METAR",
+        "rawOb":f"ZSPD {observed:%d%H%M}Z 30/20 T03000200"}])
+    assert fast._append_metar_prints_to_ledger(conn,((city,source,prior.target_date.isoformat()),),current)
+    captured = cut-timedelta(minutes=2)
+    models = hourly.day0_hourly_models_for_city(city)
+    ensemble_models = hourly.day0_source_clock_ensemble_member_models()
+    times = [f"{prior.target_date}T{hour:02d}:00" for hour in range(24)]
+    for model in (*models,"__ensemble"):
+        ensemble = model=="__ensemble"
+        api = "ecmwf_ifs025_ensemble" if ensemble else OPENMETEO_MODEL_IDS.get(model,model)
+        payload = {"latitude":city.lat,"longitude":city.lon,"timezone":city.timezone,"utc_offset_seconds":28800,
+            "hourly_units":{"temperature_2m":"°C"},"hourly":{"time":times,"temperature_2m":[30.]*24}}
+        if ensemble:
+            for index in range(51):
+                key = "temperature_2m" if index==0 else f"temperature_2m_member{index:02d}"
+                payload["hourly"][key] = [30.+(index-25)*.02]*24
+        endpoint = hourly.OPENMETEO_ENSEMBLE_URL if ensemble else "https://single-runs-api.open-meteo.com/v1/forecast"
+        params = {"latitude":city.lat,"longitude":city.lon,"timezone":city.timezone,"hourly":"temperature_2m",
+            "models":hourly.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL if ensemble else api,"run":prior.source_cycle_time.isoformat()}
+        if ensemble:
+            params["metadata_model"] = hourly.DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL
+        request_hash = hourly.build_request_hash(endpoint=endpoint,params=params,
+            models=list(ensemble_models) if ensemble else [model],captured_at=captured.isoformat(),payload=payload)
+        def metadata_for(member):
+            return hourly._day0_provider_run_meta(model=member,
+                model_api_id=hourly.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL if ensemble else api,
+                run=prior.source_cycle_time,available_at=prior.source_cycle_time+timedelta(hours=8),
+                modified_at=prior.source_cycle_time+timedelta(hours=8),
+                authority="provider_meta_declared" if ensemble else "run_pinned_single_runs",
+                endpoint_mode="ensemble_meta_stamped" if ensemble else "single_runs",
+                request_params={**params,"endpoint":endpoint},request_hash=request_hash,
+                fetch_started_at=captured,fetch_finished_at=captured)
+        metadata = metadata_for(model)
+        vectors = hourly.parse_openmeteo_ensemble_hourly_payload(payload,city=city,captured_at=captured.isoformat(),
+            source_meta_by_member={member:metadata_for(member) for member in ensemble_models}) if ensemble else hourly.parse_openmeteo_hourly_payload(
+                payload,city=city,models=[model],captured_at=captured.isoformat(),source_run_meta_json=json.dumps(metadata))
+        assert len(vectors)==(51 if ensemble else 1)
+        assert hourly.persist_day0_hourly_vectors(vectors,target_date=prior.target_date.isoformat(),conn=conn,
+            request_hash=request_hash,endpoint=endpoint,now=cut)==len(vectors)
+    conn.commit()
+    request = _refresh_shanghai_owner_request(conn,monkeypatch,replace(prior,computed_at=cut,
+        day0_observed_extreme_source="aviationweather_metar",day0_observed_extreme_observation_time=observed.isoformat()))
+    likelihood = fast.build_fast_station_residual_likelihood(conn,city=city.name,target_date=str(prior.target_date),
+        metric=metric,observed_source="aviationweather_metar",observation_time=observed,decision_time=cut)
+    assert likelihood is not None and likelihood.matched_pairs>=fast.FAST_RESIDUAL_MIN_PAIRS
+    state = hourly.read_day0_current_temperature_state(conn=conn,city=city,target_date=str(prior.target_date),decision_time=cut)
+    assert state is not None and state.observed_at==observed
+    conn.execute("SAVEPOINT qualified_noaa_control")
+    control = materialize_replacement_forecast_live(conn,request)
+    assert control.ok is True, control.reason_codes
+    conn.execute("ROLLBACK TO qualified_noaa_control")
+    conn.execute("RELEASE qualified_noaa_control")
+    return conn,request
+
+
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_day0_owner_witness_allows_current_owner_posterior_write(
     tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -2900,17 +2997,17 @@ def test_noaa_missing_current_state_blocks_only_one_family_and_drains_on_next_cu
     assert recovered.posterior_id is not None
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_noaa_missing_state_boundary_does_not_swallow_unexpected_calculation(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
+    conn, request = _shanghai_noaa_future_request(tmp_path,monkeypatch)
 
     def invalid_calculation(*_args, **_kwargs):
         raise ValueError("UNEXPECTED_CALCULATION_ERROR")
 
     monkeypatch.setattr(materializer_mod, "_compute_posterior_payload", invalid_calculation)
-    request = _request()
     with pytest.raises(ValueError, match="UNEXPECTED_CALCULATION_ERROR"):
         materializer_mod.prepare_replacement_forecast_live(conn, request)
     with pytest.raises(ValueError, match="UNEXPECTED_CALCULATION_ERROR"):
@@ -2925,11 +3022,12 @@ def test_noaa_missing_state_boundary_does_not_swallow_unexpected_calculation(
     "DAY0_CONDITIONAL_HIGH_OBSERVATION_ANCHOR_UNAVAILABLE",
     "DAY0_CONDITIONAL_HIGH_OBSERVATION_MISSING",
 ))
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_conditional_high_missing_evidence_is_family_blocked_not_calculation_error(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch, reason: str,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
+    conn, high = _shanghai_noaa_future_request(tmp_path,monkeypatch)
 
     def missing_high(*_args, metric: str, **_kwargs):
         if metric == "high":
@@ -2937,13 +3035,6 @@ def test_conditional_high_missing_evidence_is_family_blocked_not_calculation_err
         raise AssertionError("LOW must not use the conditional HIGH path")
 
     monkeypatch.setattr(materializer_mod, "_day0_noaa_carrier_future_members", missing_high)
-    high = _request(
-        computed_at=_dt(18, 10),
-        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-        day0_observed_extreme_c=31.0,
-        day0_observed_extreme_source="aviationweather_metar",
-        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-    )
     prepared = materializer_mod.prepare_replacement_forecast_live(conn, high)
     assert isinstance(prepared, materializer_mod.ReplacementForecastMaterializeResult)
     assert prepared.status == "BLOCKED"
@@ -2954,17 +3045,20 @@ def test_conditional_high_missing_evidence_is_family_blocked_not_calculation_err
     assert written.reason_codes == (reason,)
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
-    low = replace(
-        _request(
-            computed_at=_dt(18, 10),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=19.0,
-            day0_observed_extreme_source="noaa_wrh_zspd",
-            day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
-        ),
+    from src.config import runtime_cities_by_name
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    city = runtime_cities_by_name()[high.city]
+    old_entities = {row["artifact_id"]:tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts")}
+    low = _install_hko_live_fusion(monkeypatch,conn=conn,request=replace(
+        high,
         temperature_metric="low",
         baseline_data_version=_current_baseline_data_version("low"),
-    )
+        day0_observed_extreme_c=19.,day0_observed_extreme_source="noaa_wrh_zspd",
+    ),snapshot_id=9002,selected_cells={model:_selected_test_cell(model,city.lat,city.lon)
+        for model in ("icon_global","ukmo_global_deterministic_10km")})
+    assert all(tuple(row)==old_entities[row["artifact_id"]] for row in conn.execute("SELECT * FROM raw_forecast_artifacts")
+               if row["artifact_id"] in old_entities)
+    _append_shanghai_owner_prints(conn,low)
     assert materialize_replacement_forecast_live(conn, low).ok is True
 
 
@@ -2974,17 +3068,17 @@ def test_conditional_high_missing_evidence_is_family_blocked_not_calculation_err
     "DAY0_CONDITIONAL_HIGH_RUN_PROOF_INVALID",
     "UNEXPECTED_CALCULATION_ERROR",
 ))
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_conditional_high_missing_evidence_boundary_does_not_swallow_mismatch(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch, reason: str,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
+    conn, request = _shanghai_noaa_future_request(tmp_path,monkeypatch)
 
     def invalid(*_args, **_kwargs):
         raise ValueError(reason)
 
     monkeypatch.setattr(materializer_mod, "_compute_posterior_payload", invalid)
-    request = _request()
     with pytest.raises(ValueError, match=reason):
         materializer_mod.prepare_replacement_forecast_live(conn, request)
     with pytest.raises(ValueError, match=reason):
