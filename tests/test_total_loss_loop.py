@@ -1917,7 +1917,7 @@ def test_diagnostic_worker_requires_explicit_boolean_composite_health(cfg: dict,
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
 @pytest.mark.parametrize("metric", ["high", "low"])
 def test_degraded_daemon_drains_real_quote_evidence_without_authorizing_dispatch(
-    cfg: dict, monkeypatch: pytest.MonkeyPatch, direction: str, metric: str,
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, direction: str, metric: str,
 ) -> None:
     _position(cfg, direction=direction)
     with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
@@ -1930,8 +1930,19 @@ def test_degraded_daemon_drains_real_quote_evidence_without_authorizing_dispatch
     for suffix, second, bid in [("pre", 1, 0.08), ("floor", 2, 0.04), ("post", 3, 0.08)]:
         _quote(cfg, suffix, f"2026-08-22T09:00:0{second}+00:00", bid, token=token, direction=direction, latest=suffix == "floor")
     state_dir = Path(cfg["paths"]["trades_db"]).parent
-    loop.atomic_json(state_dir / "daemon-heartbeat.json", {"alive": True, "timestamp": loop.iso()})
-    loop.atomic_json(state_dir / "live_health_composite.json", {"healthy": False, "computed_at": loop.iso(), "status": "DEGRADED"})
+    runtime_payloads = {
+        "main_heartbeat": ("daemon-heartbeat.json", "timestamp", {"alive": True, "timestamp": loop.iso()}),
+        "forecast_live_heartbeat": ("forecast-live-heartbeat.json", "written_at", {"daemon": "forecast-live", "timestamp": loop.iso(loop.now() - timedelta(seconds=1)), "written_at": loop.iso(), "status": "alive"}),
+        "live_health_composite": ("live_health_composite.json", "computed_at", {"healthy": False, "computed_at": loop.iso(), "status": "DEGRADED"}),
+        "status_summary": ("status_summary.json", "generated_at", {"generated_at": loop.iso(loop.now() - timedelta(days=1)), "timestamp": loop.iso(loop.now() - timedelta(days=1))}),
+        "market_channel": ("market-channel-continuity.json", "observed_at", {"observed_at": loop.iso(), "connected": False}),
+    }
+    for filename, _clock, payload in runtime_payloads.values():
+        loop.atomic_json(state_dir / filename, payload)
+    decoy_root = tmp_path / "decoy-repo"
+    for filename in ["forecast_live_heartbeat.json", *(item[0] for item in runtime_payloads.values())]:
+        loop.atomic_json(decoy_root / "state" / filename, {"unexpected": "decoy ROOT/state", "timestamp": loop.iso()})
+    monkeypatch.setattr(loop, "ROOT", decoy_root)
     before = {name: Path(cfg["paths"][name]).read_bytes() for name in ("trades_db", "forecasts_db")}
     runtime = Path(cfg["paths"]["runtime"])
     captures: list[dict] = []
@@ -1948,7 +1959,7 @@ def test_degraded_daemon_drains_real_quote_evidence_without_authorizing_dispatch
 
     def read_code_identity(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
         assert command == ["git", "rev-parse", "HEAD"]
-        assert kwargs["cwd"] == ROOT
+        assert kwargs["cwd"] == decoy_root
         return subprocess.CompletedProcess(command, 0, "a" * 40 + "\n", "")
 
     monkeypatch.setattr(loop, "bootstrap", lambda _cfg: {})
@@ -1973,8 +1984,36 @@ def test_degraded_daemon_drains_real_quote_evidence_without_authorizing_dispatch
     assert not any(row["crossing_kind"] == "settlement_full_loss" for row in hard)
     with sqlite3.connect(loop._evidence_pair_paths(cfg, hard[0]["incident_id"])[0]) as evidence:
         recorded = json.loads(evidence.execute("SELECT row_json FROM position WHERE position_id='p1'").fetchone()[0])
+        health = {row[0]: (row[1], json.loads(row[2])) for row in evidence.execute("SELECT name,observed_at,raw_json FROM daemon_health")}
+    for name, (_filename, clock, payload) in runtime_payloads.items():
+        assert health[name] == (payload[clock], payload)
     assert recorded["temperature_metric"] == metric and recorded["phase"] == "day0_window"
     assert before == {name: Path(cfg["paths"][name]).read_bytes() for name in before}
+
+
+@pytest.mark.parametrize("unavailable", ["missing", "malformed"])
+def test_runtime_health_capture_reports_unavailable_configured_main_without_root_fallback(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unavailable: str,
+) -> None:
+    state_dir = Path(cfg["paths"]["trades_db"]).parent
+    if unavailable == "malformed":
+        (state_dir / "daemon-heartbeat.json").write_text("{malformed fixture")
+    decoy_root = tmp_path / "other-repo"
+    for filename in ("daemon-heartbeat.json", "forecast_live_heartbeat.json"):
+        loop.atomic_json(decoy_root / "state" / filename, {"alive": True, "timestamp": loop.iso(), "unexpected": "other runtime"})
+    monkeypatch.setattr(loop, "ROOT", decoy_root)
+
+    with sqlite3.connect(":memory:") as evidence:
+        evidence.executescript(loop.EVIDENCE_SCHEMA)
+        loop._copy_runtime_health(cfg, evidence)
+        observed_at, raw_json = evidence.execute("SELECT observed_at,raw_json FROM daemon_health WHERE name='main_heartbeat'").fetchone()
+
+    assert observed_at is None
+    assert json.loads(raw_json) == {
+        "status": "unavailable",
+        "reason": "missing_or_unreadable",
+        "path": str(state_dir / "daemon-heartbeat.json"),
+    }
 
 
 def test_degraded_settlement_scan_uses_real_command_dedup_basis_and_is_idempotent(cfg: dict) -> None:
@@ -2061,6 +2100,78 @@ def test_daemon_clean_stop_records_actual_mechanism_not_actor(
     assert policy["KeepAlive"]["SuccessfulExit"] is False and "StartInterval" not in policy
 
 
+@pytest.mark.parametrize("stop_kind", ["HALT", "SIGTERM"])
+@pytest.mark.parametrize("yield_point", ["readiness", "poll", "capability", "eligibility"])
+def test_daemon_rechecks_stop_at_each_worker_launch_boundary(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, stop_kind: str, yield_point: str,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    handlers: dict[int, object] = {}
+    stopped = False
+    late_launches: list[str] = []
+    ready_checks = 0
+
+    def request_stop() -> None:
+        nonlocal stopped
+        stopped = True
+        if stop_kind == "HALT":
+            (runtime / "HALT").touch()
+        else:
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+    class CompletedWorker:
+        pid = 454545
+
+        def poll(self) -> int:
+            return 0
+
+    def launch(kind: str) -> CompletedWorker:
+        if stopped:
+            late_launches.append(kind)
+        return CompletedWorker()
+
+    def ready(_cfg: dict) -> tuple[bool, None]:
+        nonlocal ready_checks
+        ready_checks += 1
+        if yield_point == "readiness" and ready_checks == 2:
+            request_stop()
+        return True, None
+
+    def poll_runs(*_args: object) -> list:
+        if yield_point == "poll":
+            request_stop()
+        return []
+
+    def capability(_cfg: dict) -> dict | None:
+        if yield_point == "capability":
+            request_stop()
+            return None
+        return {"ready": True}
+
+    def eligible(*_args: object) -> bool:
+        if yield_point == "eligibility":
+            request_stop()
+        return True
+
+    monkeypatch.setattr(loop.signal, "signal", lambda number, handler: handlers.setdefault(number, handler))
+    monkeypatch.setattr(loop, "bootstrap", lambda _cfg: {})
+    monkeypatch.setattr(loop, "detect", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_live_capital_lane_ready_for_evidence", ready)
+    monkeypatch.setattr(loop, "poll_runs", poll_runs)
+    monkeypatch.setattr(loop, "_provider_backoff", lambda _cfg: None)
+    monkeypatch.setattr(loop, "current_capabilities", capability)
+    monkeypatch.setattr(loop, "_dispatch_has_eligible_debt", eligible)
+    monkeypatch.setattr(loop, "_spawn_evidence_worker", lambda _cfg: launch("evidence"))
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: launch("dispatch"))
+    monkeypatch.setattr(loop, "ensure_capability_probe", lambda _cfg: launch("probe"))
+    monkeypatch.setattr(loop.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("only inert mocked workers are allowed"))
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    assert loop.daemon(cfg) == 0
+    assert stopped and late_launches == []
+
+
 def test_daemon_failed_stop_receipt_does_not_return_clean_success(
     cfg: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2114,7 +2225,7 @@ def test_evidence_worker_health_distinguishes_stale_running_dead_and_old_complet
     monkeypatch.setattr(loop, "_pid_alive", lambda _pid: True)
     monkeypatch.setattr(loop, "_pid_command", lambda _pid: "/usr/bin/python unrelated.py evidence-once")
     assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_command_mismatch"
-    command = f"python {ROOT / 'total_loss_loop.py'} --config {ROOT / 'total_loss_loop.toml'} evidence-once"
+    command = loop.shlex.join([loop.sys.executable, str(ROOT / "total_loss_loop.py"), "--config", str(ROOT / "total_loss_loop.toml"), "evidence-once"])
     monkeypatch.setattr(loop, "_pid_command", lambda _pid: command)
     assert loop.evidence_worker_status_health(cfg)["healthy"] is True
     monkeypatch.setattr(loop, "_pid_command", lambda _pid: command.replace(str(ROOT / "total_loss_loop.toml"), "/other-runtime/config.toml"))
@@ -2131,6 +2242,29 @@ def test_evidence_worker_health_distinguishes_stale_running_dead_and_old_complet
     health = loop.status(cfg)["evidence_worker"]
     assert health["reason"] == "evidence_worker_last_completion_stale" and health["status"] == "complete"
     assert "desired_running" not in health
+
+
+def test_evidence_worker_health_binds_executed_python_script_and_quoted_config(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    cfg["_config_path"] = str(tmp_path / "config with spaces.toml")
+    loop.atomic_json(Path(cfg["paths"]["runtime"]) / "evidence-worker-status.json", {"status": "running", "pid": 123, "at": loop.iso()})
+    monkeypatch.setattr(loop, "_pid_alive", lambda _pid: True)
+    command = [loop.sys.executable, str(ROOT / "total_loss_loop.py"), "--config", cfg["_config_path"], "evidence-once"]
+    monkeypatch.setattr(loop, "_pid_command", lambda _pid: loop.shlex.join(command))
+    assert loop.evidence_worker_status_health(cfg)["healthy"] is True
+    python_alias = tmp_path / "Python alias with spaces"
+    python_alias.symlink_to(loop.sys.executable)
+    command[0] = str(python_alias)
+    assert loop.evidence_worker_status_health(cfg)["healthy"] is True
+    command.insert(1, "/tmp/unrelated.py")
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_command_mismatch"
+    command.pop(1)
+    command[1] = "/tmp/foreign-total_loss_loop.py"
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_command_mismatch"
+    command[1] = str(ROOT / "total_loss_loop.py")
+    command[0] = "/bin/sh"
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_command_mismatch"
 
 
 def test_detector_preserves_trigger_without_running_background_maintenance(

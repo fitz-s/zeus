@@ -3564,7 +3564,7 @@ def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
             _budget_check(evidence, out, extra_bytes=len(raw_json.encode()))
             out.execute("INSERT INTO fills VALUES (?,?,?,?,?)", (f"wallet:{row['id']}", row.get("observed_at"), _float(row.get("price")), _float(row.get("size")), raw_json))
         _copy_source_clocks(cfg, out, position, row_limit=min(row_limit, int(cfg["loop"].get("evidence_source_rows", 1000))))
-        _copy_runtime_health(out)
+        _copy_runtime_health(cfg, out)
         _copy_versions_and_config(cfg, out)
         out.commit()
     _budget_check(evidence)
@@ -4905,8 +4905,10 @@ def evidence_worker_status_health(cfg: Mapping[str, Any]) -> dict[str, Any]:
         command = []
     config_path = str(Path(str(cfg.get("_config_path") or CONFIG_PATH)).resolve())
     if (
-        str(Path(__file__).resolve()) not in command
-        or command[-3:] != ["--config", config_path, "evidence-once"]
+        len(command) != 5
+        or Path(command[0]).resolve() != Path(sys.executable).resolve()
+        or Path(command[1]).resolve() != Path(__file__).resolve()
+        or command[2:] != ["--config", config_path, "evidence-once"]
     ):
         return {**result, "reason": "evidence_worker_command_mismatch"}
     return {**result, "healthy": True, "reason": "evidence_worker_running"}
@@ -5210,19 +5212,27 @@ def _copy_source_clocks(
             raise
 
 
-def _copy_runtime_health(out: sqlite3.Connection) -> None:
+def _copy_runtime_health(cfg: Mapping[str, Any], out: sqlite3.Connection) -> None:
+    state_dir = Path(str(cfg["paths"]["trades_db"])).resolve().parent
     candidates = {
-        "main_heartbeat": ROOT / "state" / "forecast_live_heartbeat.json",
-        "status_summary": ROOT / "state" / "status_summary.json",
-        "market_channel": ROOT / "state" / "market-channel-continuity.json",
+        "main_heartbeat": ("daemon-heartbeat.json", ("timestamp",)),
+        "forecast_live_heartbeat": ("forecast-live-heartbeat.json", ("written_at", "timestamp")),
+        "live_health_composite": ("live_health_composite.json", ("computed_at",)),
+        "status_summary": ("status_summary.json", ("generated_at", "timestamp")),
+        "market_channel": ("market-channel-continuity.json", ("observed_at",)),
     }
-    for name, path in candidates.items():
-        _budget_check(conn=out)
+    for name, (filename, clock_fields) in candidates.items():
+        path = state_dir / filename
+        _budget_check(path, out)
         payload = read_json(path, None)
-        if payload is not None:
-            _budget_check(conn=out, extra_bytes=len(json.dumps(payload, default=str).encode()))
-            observed = payload.get("at") or payload.get("observed_at") or payload.get("timestamp") if isinstance(payload, Mapping) else None
-            out.execute("INSERT INTO daemon_health VALUES (?,?,?)", (name, observed, json.dumps(payload, default=str)))
+        # This is an evidence snapshot, not a fresh-health attestation. Retain
+        # producer clocks as written; file mtime cannot refresh an old report.
+        observed = next((payload[field] for field in clock_fields if payload.get(field)), None) if isinstance(payload, Mapping) else None
+        if payload is None:
+            payload = {"status": "unavailable", "reason": "missing_or_unreadable", "path": str(path)}
+        raw_json = json.dumps(payload, default=str)
+        _budget_check(conn=out, extra_bytes=len(raw_json.encode()))
+        out.execute("INSERT INTO daemon_health VALUES (?,?,?)", (name, observed, raw_json))
 
 
 def _copy_versions_and_config(cfg: Mapping[str, Any], out: sqlite3.Connection) -> None:
@@ -8724,6 +8734,10 @@ def daemon(cfg: Mapping[str, Any]) -> int:
             stop_signal = _signum
             stop_requested_at = iso()
         stopping = True
+
+    def stop_requested() -> bool:
+        return stopping or (run / "HALT").exists()
+
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     bootstrap_complete = False
@@ -8775,7 +8789,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
     next_maintenance_check_at = 0.0
     evidence_suppressed_reason: str | None = None
     maintenance_suppressed_reason: str | None = None
-    while not stopping and not (run / "HALT").exists():
+    while not stop_requested():
         cycle_started = time.monotonic()
         detector_elapsed = 0.0
         error = None
@@ -8905,8 +8919,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
             },
         )
         if (
-            not stopping
-            and not (run / "HALT").exists()
+            not stop_requested()
             and error is None
             and not startup_pending
             and not _startup_debt_pending(cfg)
@@ -8924,7 +8937,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                     evidence_ready, evidence_suppressed_reason = (
                         _live_capital_lane_ready_for_evidence(cfg)
                     )
-                    if evidence_ready:
+                    if evidence_ready and not stop_requested():
                         evidence_worker = _spawn_evidence_worker(cfg)
                     next_evidence_check_at = time.monotonic() + max(
                         5.0,
@@ -8946,7 +8959,8 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                     capabilities_ready = False
                 elif current_capabilities(cfg) is None:
                     capabilities_ready = False
-                    ensure_capability_probe(cfg)
+                    if not stop_requested():
+                        ensure_capability_probe(cfg)
                 else:
                     capability_became_ready = not capabilities_ready
                     capabilities_ready = True
@@ -8955,7 +8969,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                     if (
                         dispatch_worker is None or worker_exited
                     ) and dispatch_wake:
-                        if _dispatch_has_eligible_debt(cfg, running):
+                        if _dispatch_has_eligible_debt(cfg, running) and not stop_requested():
                             dispatch_worker = _spawn_dispatch_worker(cfg)
                         next_debt_check_at = time.monotonic() + 5.0
             except Exception as exc:
