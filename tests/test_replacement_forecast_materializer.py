@@ -2504,7 +2504,7 @@ def test_missing_day0_hourly_carrier_is_a_blocked_input(
 def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
     target_date=date(2026,10,2),source_cycle_time=datetime(2026,10,1,tzinfo=UTC),
     computed_at=None,first_compute_at=None,expires_at=None,observed_extreme=None,
-    observed_sample_count=12):
+    observed_sample_count=12,ground_recorded_at=None):
     """Normal owned ground/anchor/provider proof with controlled ENS/math inputs.
 
     The actual HOMR body was captured Sep30. Move the entire external forecast
@@ -2524,10 +2524,12 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
     first = first_compute_at or computed
     target = target_date
     assert cycle+timedelta(hours=3) <= first <= computed
+    ground_recorded = ground_recorded_at if ground_recorded_at is not None else cycle-timedelta(hours=1)
+    assert ground_recorded.tzinfo is not None and ground_recorded <= first
     class GroundClock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return (cycle-timedelta(hours=1)).astimezone(tz or UTC)
+            return ground_recorded.astimezone(tz or UTC)
     monkeypatch.setattr(ground, "datetime", GroundClock)
     conn = _conn(archive_ground=False)
     db = ground.forecast_db_from_connection(conn)
@@ -2536,7 +2538,7 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
     captured = datetime.fromisoformat(evidence["captured_at"].replace("Z", "+00:00"))
     recorded = datetime.fromisoformat(evidence["recorded_at"])
     assert captured == datetime(2026, 9, 30, 12, 52, 1, tzinfo=UTC)
-    assert captured <= recorded == cycle-timedelta(hours=1) <= cycle <= computed
+    assert captured <= recorded == ground_recorded <= first <= computed
     city = runtime_cities_by_name()["Shanghai"]
     station = runtime_station_geometry_for_city(city, effective_at=computed)
     cell = source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,target_elevation_m=station["ground_elevation_m"])
@@ -2582,6 +2584,33 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
     if request.day0_observed_extreme_c is not None:
         _append_shanghai_owner_prints(conn,request)
     return conn,request
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_shanghai_owner_fixture_keeps_ground_possession_independent_of_run(tmp_path, monkeypatch, metric):
+    """Controlled forecast inputs; real retained HOMR capture, not native GRIB."""
+    from src.data import station_ground_evidence as ground
+
+    cycle = datetime(2026,9,30,12,tzinfo=UTC)
+    ground_recorded = cycle+timedelta(hours=1)
+    first = cycle+timedelta(hours=8,minutes=5)
+    cut = datetime(2026,10,1,8,15,tzinfo=UTC)
+    conn,request = _shanghai_current_owner_request(tmp_path,monkeypatch,metric=metric,
+        target_date=date(2026,10,1),source_cycle_time=cycle,computed_at=cut,first_compute_at=first,
+        ground_recorded_at=ground_recorded)
+    db = ground.forecast_db_from_connection(conn)
+    evidence = ground.read_current_station_ground_evidence(db,city=request.city,decision_at=cut)
+    assert datetime.fromisoformat(evidence["recorded_at"]) == ground_recorded > cycle
+    assert datetime.fromisoformat(evidence["captured_at"].replace("Z","+00:00")) < ground_recorded < first <= cut
+    assert ground.read_current_station_ground_evidence(db,city=request.city,
+        decision_at=ground_recorded-timedelta(microseconds=1)) is None
+    rows = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    assert ground.archive_station_ground_evidence(db,[request.city])["status"] == "GROUND_SOURCE_ARCHIVED"
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == rows
+    assert ground.read_current_station_ground_evidence(db,city=request.city,decision_at=cut) == evidence
+    assert materializer_mod._precision_guard_block_reason(request,conn) == ()
+    conn.close()
 
 
 def _refresh_shanghai_owner_request(conn, monkeypatch, request):
