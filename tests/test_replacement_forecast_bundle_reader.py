@@ -1604,6 +1604,46 @@ def _reader_with_posterior_fault(normal, *, missing=False, **fields):
     return FaultRead()
 
 
+def _reader_new_icon_cycle(normal):
+    """Ordinary controlled entity-body writer; preserve the consumed run."""
+    from dataclasses import replace
+    from src.config import runtime_cities_by_name
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    from tests.test_replacement_forecast_materializer import _hko_current_provider_inputs
+    model = "icon_global"
+    serving = json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
+    consumed_id = serving[model]["raw_model_forecast_id"]
+    old_raw = tuple(tuple(row) for row in normal.conn.execute(
+        "SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id"))
+    old_artifacts = tuple(tuple(row) for row in normal.conn.execute(
+        "SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    value = normal.conn.execute("SELECT forecast_value_c FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+        (consumed_id,)).fetchone()[0]
+    cycle = normal.request.source_cycle_time+timedelta(hours=6)
+    captured = cycle+timedelta(hours=1)
+    city = runtime_cities_by_name()[normal.row["city"]]
+    selected = _selected_test_cell(model,city.lat,city.lon)
+    served = _hko_current_provider_inputs(replace(normal.request,source_cycle_time=cycle,
+        openmeteo_source_available_at=captured),{model:value},conn=normal.conn,
+        selected_cells={model:selected})[model]
+    assert served.raw_model_forecast_id != consumed_id
+    assert datetime.fromisoformat(served.served_cycle) == cycle
+    assert datetime.fromisoformat(served.captured_at) == captured <= normal.request.computed_at
+    new_raw = normal.conn.execute("SELECT source_cycle_time,source_available_at,captured_at,recorded_at"
+        " FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(served.raw_model_forecast_id,)).fetchone()
+    assert tuple(datetime.fromisoformat(value) for value in new_raw[:3]) == (cycle,captured,captured)
+    assert captured <= datetime.fromisoformat(new_raw[3]) <= normal.request.computed_at
+    assert tuple(tuple(row) for row in normal.conn.execute(
+        "SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id<=? ORDER BY raw_model_forecast_id",
+        (max(row[0] for row in old_raw),))) == old_raw
+    assert tuple(tuple(row) for row in normal.conn.execute(
+        "SELECT * FROM raw_forecast_artifacts WHERE artifact_id<=? ORDER BY artifact_id",
+        (max(row[0] for row in old_artifacts),))) == old_artifacts
+    assert dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (normal.row["posterior_id"],)).fetchone()) == normal.row
+    return cycle,captured,served
+
+
 @pytest.mark.parametrize("purpose",tuple(ReplacementForecastAuthorityPurpose))
 def test_reader_normal_native_high_requires_its_actual_snapshot(purpose,_shanghai_reader_current_certificate):
     normal = _shanghai_reader_current_certificate
@@ -2832,67 +2872,50 @@ def test_replacement_bundle_reader_blocks_missing_or_late_posterior(
     assert computed_late.reason_code == "REPLACEMENT_POSTERIOR_COMPUTED_AFTER_DECISION_TIME"
 
 
-def test_replacement_bundle_reader_enforce_raw_input_hwm_blocks_stale_serve() -> None:
+def test_replacement_bundle_reader_enforce_raw_input_hwm_blocks_stale_serve(
+    _shanghai_reader_current_certificate,
+) -> None:
     """W0.1: when opted in, a raw input newer than the served posterior's source_cycle_time
     must block the read instead of serving the stale posterior."""
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)  # source_cycle_time = 2026-06-06T00:00:00+00:00
-    for model in ("ecmwf_ifs", "gfs"):
-        _insert_raw_model_forecast(
-            conn,
-            model=model,
-            source_cycle_time=_dt(3),
-            captured_at=_dt(3, 5),
-            source_available_at=_dt(3, 5),
-        )
-
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        enforce_raw_input_hwm=True,
-    )
+    normal = _shanghai_reader_current_certificate
+    assert read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
+    cycle,captured,_served = _reader_new_icon_cycle(normal)
+    latest = latest_used_raw_model_input_mark(normal.conn,city=normal.row["city"],
+        target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],
+        decision_time=normal.request.computed_at,posterior_source_cycle_time=normal.request.source_cycle_time,
+        posterior_provenance=json.loads(normal.row["provenance_json"]))
+    assert latest == (cycle,captured)
+    assert cycle > normal.request.source_cycle_time
+    assert captured == cycle+timedelta(hours=1)
+    result = read_replacement_forecast_bundle(normal.conn,**normal.kwargs)
 
     assert result.ok is False
     assert result.reason_code.startswith("REPLACEMENT_RAW_INPUT_HWM:")
-    assert "latest_raw_cycle=2026-06-06T03:00:00+00:00" in result.reason_code
-    assert "posterior_cycle=2026-06-06T00:00:00+00:00" in result.reason_code
+    # The new real response changes immutable physical dependencies before the
+    # coarse cycle lag check; do not hide that primary rejection for old labels.
+    assert "basis=current_value_serving_physical_proof_dependency_changed:model=icon_global" in result.reason_code
 
 
-def test_replacement_bundle_reader_raw_input_hwm_default_is_byte_identical() -> None:
+def test_replacement_bundle_reader_raw_input_hwm_default_is_byte_identical(
+    _shanghai_reader_current_certificate,
+) -> None:
     """W0.1: enforce_raw_input_hwm defaults to False — a caller that never opts in must
     keep serving the SAME posterior even when a newer raw input cycle exists."""
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
-    for model in ("ecmwf_ifs", "gfs"):
-        _insert_raw_model_forecast(
-            conn,
-            model=model,
-            source_cycle_time=_dt(3),
-            captured_at=_dt(3, 5),
-            source_available_at=_dt(3, 5),
-        )
-
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-    )
+    from dataclasses import asdict
+    normal = _shanghai_reader_current_certificate
+    kwargs = {key:value for key,value in normal.kwargs.items() if key != "enforce_raw_input_hwm"}
+    before = read_replacement_forecast_bundle(normal.conn,**kwargs)
+    assert before.ok
+    _reader_new_icon_cycle(normal)
+    result = read_replacement_forecast_bundle(normal.conn,**kwargs)
+    explicit_false = read_replacement_forecast_bundle(normal.conn,**kwargs,enforce_raw_input_hwm=False)
 
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
     assert result.bundle is not None
-    assert result.bundle.posterior_id == posterior_id
+    assert result.bundle.posterior_id == normal.row["posterior_id"]
+    assert asdict(result) == asdict(explicit_false) == asdict(before)
+    assert result.bundle.q == json.loads(normal.row["q_json"])
 
 
 def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve(
