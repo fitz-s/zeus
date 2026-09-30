@@ -2065,6 +2065,7 @@ def test_source_clock_partial_current_producer_to_jit(
         assert reason == {"reason": "model_identity_drift:gfs_hrrr"}
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize(("configured", "newer_sibling"), (
     # Scheme weights the LESS specific family member; the more specific one is newer.
@@ -2082,16 +2083,19 @@ def test_source_clock_uses_exactly_the_scheme_sources_whatever_sibling_is_newer(
 
     A newer same-family sibling the scheme does not weight must neither replace a
     weighted source nor be added, whichever of the two is the more specific model.
+    This US scheme component uses LA's own physical inputs, not Chicago authority.
     """
-    from src.config import runtime_cities_by_name
+    from src.data.station_ground_evidence import archive_station_ground_evidence, forecast_db_from_connection
     from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
 
     conn = _conn()
-    city = "Chicago"
-    run = datetime(2026, 9, 30, 6, tzinfo=UTC)
-    decision = run + timedelta(hours=5)
+    city = "Los Angeles"
+    assert archive_station_ground_evidence(forecast_db_from_connection(conn), [city])["status"] == "GROUND_SOURCE_ARCHIVED"
+    run = datetime(2026, 9, 30, 18, tzinfo=UTC)
+    decision = run + timedelta(hours=7)
     rows = [(model, run) for model in dict.fromkeys(("ecmwf_ifs", *configured))]
-    rows.append((newer_sibling, run + timedelta(hours=4)))
+    # Both HRRR runs are real 48h cycles and cover the whole target local day.
+    rows.append((newer_sibling, run + timedelta(hours=6)))
     for index, (model, cycle) in enumerate(rows):
         conn.execute(
             """INSERT INTO raw_model_forecasts (
@@ -2134,22 +2138,9 @@ def test_source_clock_uses_exactly_the_scheme_sources_whatever_sibling_is_newer(
         ),
     )
 
-    class _Shape:
-        center_sigma_c = 0.5
-        predictive_sigma_c = 1.2
-        members_c = tuple(20.0 + x * 0.1 for x in range(51))
-
-        @staticmethod
-        def as_payload() -> dict[str, object]:
-            return {"source": "test-current-ens-shape", "provider_count": 2}
-
-    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
-    request = replace(
-        _request(), city=city, city_id=city,
-        city_timezone=runtime_cities_by_name()[city].timezone,
-        temperature_metric=metric, target_date=date(2026, 10, 1),
-        source_cycle_time=run, computed_at=decision,
-    )
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
+    request = _la_current_physical_request(conn, metric=metric, cycle=run, decision=decision)
+    _qualify_raw_fixture_rows(conn)
 
     override = materializer_mod._replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
@@ -2159,8 +2150,10 @@ def test_source_clock_uses_exactly_the_scheme_sources_whatever_sibling_is_newer(
     assert override.method == "SOURCE_CLOCK_FIXED_WEIGHT"
     assert set(override.used_models) == set(configured)
     assert newer_sibling not in override.used_models
+    conn.close()
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_partial_current_replay_uses_the_pinned_scheme_not_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2171,14 +2164,15 @@ def test_partial_current_replay_uses_the_pinned_scheme_not_active(
     NBM row) the pinned scheme names the drift.  A replay that re-resolved a
     rotated ACTIVE (weighting NBM) would collapse HRRR away and miss it.
     """
-    from src.config import runtime_cities_by_name
+    from src.data.station_ground_evidence import archive_station_ground_evidence, forecast_db_from_connection
     from src.engine import event_reactor_adapter as adapter
     from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
 
     conn = _conn()
     city = "Los Angeles"
+    assert archive_station_ground_evidence(forecast_db_from_connection(conn), [city])["status"] == "GROUND_SOURCE_ARCHIVED"
     metric = "high"
-    run = datetime(2026, 9, 27, 18, tzinfo=UTC)
+    run = datetime(2026, 9, 30, 18, tzinfo=UTC)
     decision = run + timedelta(hours=1)
     configured = ("icon_global", "ukmo_global_deterministic_10km", "gfs_hrrr")
     for index, model in enumerate(("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km")):
@@ -2187,7 +2181,7 @@ def test_partial_current_replay_uses_the_pinned_scheme_not_active(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES (?, ?, '2026-09-29', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
+            ) VALUES (?, ?, '2026-10-01', ?, ?, ?, ?, ?, 1, ?, 'single_runs', 'COVERED')""",
             (model, city, metric, run.isoformat(),
              (run + timedelta(minutes=5)).isoformat(),
              (run + timedelta(minutes=10)).isoformat(),
@@ -2223,22 +2217,9 @@ def test_partial_current_replay_uses_the_pinned_scheme_not_active(
         ),
     )
 
-    class _Shape:
-        center_sigma_c = 0.5
-        predictive_sigma_c = 1.2
-        members_c = tuple(20.0 + x * 0.1 for x in range(51))
-
-        @staticmethod
-        def as_payload() -> dict[str, object]:
-            return {"source": "test-current-ens-shape", "provider_count": 2}
-
-    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
-    request = replace(
-        _request(), city=city, city_id=city,
-        city_timezone=runtime_cities_by_name()[city].timezone,
-        temperature_metric=metric, target_date=date(2026, 9, 29),
-        source_cycle_time=run, computed_at=decision,
-    )
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
+    request = _la_current_physical_request(conn, metric=metric, cycle=run, decision=decision)
+    _qualify_raw_fixture_rows(conn)
     override = materializer_mod._replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=20.0, conn=conn,
     )
@@ -2253,14 +2234,14 @@ def test_partial_current_replay_uses_the_pinned_scheme_not_active(
         "decorrelated_providers_served": override.decorrelated_providers_served,
         "decorrelated_providers_complete": override.decorrelated_providers_complete,
     }}
-    family = SimpleNamespace(city=city, target_date="2026-09-29", metric=metric)
+    family = SimpleNamespace(city=city, target_date="2026-10-01", metric=metric)
     # Replay time: an OLD HRRR row (served but not newest) and a NEWER NBM row
     # exist.  The producer's pinned scheme weights HRRR, so its collapse keeps
     # HRRR and the configured-current set gains it -> genuine drift is named.
     # ACTIVE has rotated to weight NBM instead; a replay that re-resolved ACTIVE
     # would drop HRRR as the stale sibling and silently miss that drift.
     for model, cycle, value in (
-        ("gfs_hrrr", run - timedelta(hours=1), 21.0),
+        ("gfs_hrrr", run - timedelta(hours=6), 21.0),
         ("ncep_nbm_conus", run, 24.0),
     ):
         conn.execute(
@@ -2268,12 +2249,13 @@ def test_partial_current_replay_uses_the_pinned_scheme_not_active(
                 model, city, target_date, metric, source_cycle_time,
                 source_available_at, captured_at, recorded_at, lead_days,
                 forecast_value_c, endpoint, coverage_status
-            ) VALUES (?, ?, '2026-09-29', ?, ?, ?, ?, ?, 2, ?, 'single_runs', 'COVERED')""",
+            ) VALUES (?, ?, '2026-10-01', ?, ?, ?, ?, ?, 1, ?, 'single_runs', 'COVERED')""",
             (model, city, metric, cycle.isoformat(),
              (decision + timedelta(minutes=1)).isoformat(),
              (decision + timedelta(minutes=1)).isoformat(),
              (decision + timedelta(minutes=1)).isoformat(), value),
         )
+    _qualify_raw_fixture_rows(conn)
     rotated = CityOneScheme(
         city=city, scheme_status="ACTIVE",
         final_sources=("icon_global", "ukmo_global_deterministic_10km", "ncep_nbm_conus"),
@@ -2295,8 +2277,10 @@ def test_partial_current_replay_uses_the_pinned_scheme_not_active(
         reason_out=pinned_reason, posterior_computed_at=decision,
     ) is None
     assert pinned_reason == {"reason": "model_identity_drift:configured_current_sources"}
+    conn.close()
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_source_clock_scheme_pinned_once_per_posterior(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2305,13 +2289,15 @@ def test_source_clock_scheme_pinned_once_per_posterior(
     A weekly ACTIVE rotation landing mid-computation must not hand the center a
     different basket than the one that selected the sources, and the posterior
     must pin the basket it used.
+    LA supplies the US component's real physical premises, not Chicago authority.
     """
-    from src.config import runtime_cities_by_name
+    from src.data.station_ground_evidence import archive_station_ground_evidence, forecast_db_from_connection
     from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
 
     conn = _conn()
-    city = "Chicago"
-    run = datetime(2026, 9, 30, 6, tzinfo=UTC)
+    city = "Los Angeles"
+    assert archive_station_ground_evidence(forecast_db_from_connection(conn), [city])["status"] == "GROUND_SOURCE_ARCHIVED"
+    run = datetime(2026, 9, 30, 18, tzinfo=UTC)
     for index, model in enumerate(("ecmwf_ifs", "icon_global", "ncep_nbm_conus")):
         conn.execute(
             """INSERT INTO raw_model_forecasts (
@@ -2363,22 +2349,9 @@ def test_source_clock_scheme_pinned_once_per_posterior(
         ),
     )
 
-    class _Shape:
-        center_sigma_c = 0.5
-        predictive_sigma_c = 1.2
-        members_c = tuple(17.0 + x * 0.1 for x in range(51))
-
-        @staticmethod
-        def as_payload() -> dict[str, object]:
-            return {"source": "test-current-ens-shape", "provider_count": 2}
-
-    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", lambda *_a, **_kw: _Shape())
-    request = replace(
-        _request(), city=city, city_id=city,
-        city_timezone=runtime_cities_by_name()[city].timezone,
-        temperature_metric="low", target_date=date(2026, 10, 1),
-        source_cycle_time=run, computed_at=run + timedelta(hours=1),
-    )
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
+    request = _la_current_physical_request(conn, metric="low", cycle=run, decision=run+timedelta(hours=1))
+    _qualify_raw_fixture_rows(conn)
 
     override = materializer_mod._replacement_bayes_precision_fusion_override(
         request, metric="low", anchor_value_corrected_c=17.0, conn=conn,
@@ -2387,6 +2360,8 @@ def test_source_clock_scheme_pinned_once_per_posterior(
     assert override is not None
     assert set(override.used_models) == {"icon_global", "ncep_nbm_conus"}
     assert override.source_clock_one_scheme["configured_weights"] == dict(first.weights)
+    assert len(calls) == 1
+    conn.close()
 
 
 def test_posterior_identity_binds_day0_carrier_operator_and_content(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4792,8 +4767,9 @@ def test_wu_composite_missing_fusion_retains_typed_capture_missing(
     assert result.replacement_q_mode == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_unreadable_source_clock_scheme_fails_the_family_by_name(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A scheme artifact that cannot be read is a named family failure everywhere.
 
@@ -4805,31 +4781,66 @@ def test_unreadable_source_clock_scheme_fails_the_family_by_name(
 
     from src.data import replacement_fusion_upgrade_trigger as trigger
 
+    # The scheme component keeps controlled ENS/math inputs but uses normal
+    # same-city ground, body and HTTP-receipt writers. This is not a native
+    # public-snapshot qualification test.
+    real_override = materializer_mod._replacement_bayes_precision_fusion_override
+    conn, request = _shanghai_current_owner_request(tmp_path, monkeypatch)
+    monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", real_override)
+    capture = SimpleNamespace(
+        has_extras=True, anchor_z=27.0, anchor_tau0=1.0,
+        likelihood=tuple(SimpleNamespace(
+            model=model, z=25.0, train_residuals=(), n_train=0, residuals_by_date={},
+        ) for model in ("icon_global", "ukmo_global_deterministic_10km")),
+        disagree_var=0.0, anchor_raw_m2_native=None, anchor_raw_n_train=0,
+        dropped_models=(),
+        selection=SimpleNamespace(excluded_regionals=(), dropped_aliases=()),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_capture.capture_bayes_precision_instruments",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "src.forecast.bayes_precision_fusion.fuse_bayes_precision_posterior",
+        lambda **_kwargs: SimpleNamespace(sd=0.5, method="TEST_FUSION",
+            used_models=tuple(x.model for x in capture.likelihood), regional_models=()),
+    )
+    monkeypatch.setattr(materializer_mod, "_read_current_evidence_shape", _fixture_current_shape)
+    healthy = materializer_mod._compute_posterior_payload(
+        conn, request, metric="high", anchor_id=request.anchor_artifact_id,
+    )
+    assert healthy.live_eligible, healthy.capture_status
+    immutable = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+
     def broken(*_args, **_kwargs):
         raise ValueError("ACTIVE.json sha256 mismatch")
 
-    monkeypatch.setattr(
-        "src.strategy.live_inference.source_clock_city_weights.scheme_for_city", broken,
-    )
-    request = _request(computed_at=datetime(2026, 6, 7, 18, tzinfo=UTC))
-    conn = _conn()
-    with caplog.at_level(logging.WARNING, logger="zeus.replacement_bayes_precision_fusion"):
-        result = materializer_mod._compute_posterior_payload(
-            conn, request, metric="high", anchor_id=1,
+    with monkeypatch.context() as fault:
+        fault.setattr("src.strategy.live_inference.source_clock_city_weights.scheme_for_city", broken)
+        with caplog.at_level(logging.WARNING, logger="zeus.replacement_bayes_precision_fusion"):
+            result = materializer_mod._compute_posterior_payload(
+                conn, request, metric="high", anchor_id=request.anchor_artifact_id,
+            )
+        assert result.live_eligible is False
+        assert result.capture_status == "SOURCE_CLOCK_SCHEME_UNAVAILABLE"
+        assert "CAPTURE:SOURCE_CLOCK_SCHEME_UNAVAILABLE" in (
+            materializer_mod._posterior_block_sub_reason_codes(result)
         )
-    assert result.live_eligible is False
-    assert result.capture_status == "SOURCE_CLOCK_SCHEME_UNAVAILABLE"
-    assert "CAPTURE:SOURCE_CLOCK_SCHEME_UNAVAILABLE" in (
-        materializer_mod._posterior_block_sub_reason_codes(result)
+        assert any(
+            "SOURCE_CLOCK_SCHEME_UNAVAILABLE" in record.getMessage()
+            for record in caplog.records
+        )
+        assert trigger._capturable_inputs_for_scope(
+            conn, city=request.city, target_date=str(request.target_date),
+            metric="high", source_cycle_iso=request.source_cycle_time.isoformat(),
+        ) == {}
+    recovered = materializer_mod._compute_posterior_payload(
+        conn, request, metric="high", anchor_id=request.anchor_artifact_id,
     )
-    assert any(
-        "SOURCE_CLOCK_SCHEME_UNAVAILABLE" in record.getMessage()
-        for record in caplog.records
-    )
-    assert trigger._capturable_inputs_for_scope(
-        conn, city=request.city, target_date=str(request.target_date),
-        metric="high", source_cycle_iso=request.source_cycle_time.isoformat(),
-    ) == {}
+    assert recovered.live_eligible
+    assert recovered.q == healthy.q
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == immutable
+    conn.close()
 
 
 def test_legacy_wu_fast_posterior_without_current_carrier_cannot_replay() -> None:
