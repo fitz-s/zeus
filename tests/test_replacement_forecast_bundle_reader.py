@@ -1676,15 +1676,14 @@ def test_live_reader_accepts_only_complete_current_day0_carrier_pair(
 @pytest.mark.parametrize(("carrier","accepted"),[
     pytest.param(carrier,accepted,id=f"carrier{index}-{accepted}")
     for index,(carrier,accepted) in enumerate(_CURRENT_CARRIER_PAIR_CASES)
-    if _source_specific_carrier_case(carrier)
+    if carrier and _source_specific_carrier_case(carrier)
 ])
 @pytest.mark.parametrize("purpose",tuple(ReplacementForecastAuthorityPurpose))
 def test_live_reader_source_specific_carrier_cases_keep_their_original_obligation(
     carrier,accepted,purpose,
 ):
-    # These eight original cases remain pending: six WU fast-residual paths
-    # and two ordinary non-carrier paths. A normal HKO V2/V3 certificate is
-    # not a substitute for either source/producer obligation.
+    # These six original fast-residual cases retain their own source path.
+    # A normal HKO V2/V3 certificate cannot substitute for this obligation.
     provenance = {**_live_provenance(), **carrier}
     row = {
         "runtime_layer": LIVE_RUNTIME_LAYER,
@@ -1697,6 +1696,123 @@ def test_live_reader_source_specific_carrier_cases_keep_their_original_obligatio
         authority_purpose=purpose,
     )
     assert (result is not None) is accepted, carrier
+
+
+@pytest.fixture(scope="module")
+def _generic_reader_noncarrier_template(tmp_path_factory):
+    from tests.test_replacement_forecast_materializer import (
+        _hko_dt, _hko_native_surfaces, _hko_source_surface,
+        _normal_hko_writer_proof_relationship,
+    )
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    from src.data.station_ground_evidence import forecast_db_from_connection
+    from zoneinfo import ZoneInfo
+
+    root = tmp_path_factory.mktemp("reader-noncarrier")
+    with pytest.MonkeyPatch.context() as inputs:
+        native = _hko_native_surfaces.__wrapped__(root, inputs)
+        next(native)
+        try:
+            source = _hko_source_surface.__wrapped__(root, inputs, None)
+            next(source)
+            try:
+                # Reuse the fixed normal writer, not its damaged certificates
+                # or a V3 payload with carrier fields manually removed.
+                _normal_hko_writer_proof_relationship(root, inputs, include_raw_ifs=True)
+                conn = sqlite3.connect(f"file:{root / 'forecast.db'}?mode=ro", uri=True)
+                try:
+                    conn.row_factory = sqlite3.Row
+                    conn.execute("PRAGMA query_only=ON")
+                    # readiness_state is a current projection: the completed
+                    # relationship no longer has its original 20:00 READY.
+                    assert latest_replacement_readiness(conn, city="Hong Kong",
+                        target_date="2026-10-01", temperature_metric="low",
+                        decision_time=_hko_dt(20)) is None
+                    cut = _hko_dt(20, 5)
+                    row = dict(conn.execute(
+                        """SELECT * FROM forecast_posteriors
+                           WHERE city=? AND target_date=? AND temperature_metric=?
+                             AND computed_at=?""",
+                        ("Hong Kong", "2026-10-01", "low", cut.isoformat()),
+                    ).fetchone())
+                    assert datetime.fromisoformat(row["computed_at"]) == cut
+                    assert datetime.fromisoformat(row["recorded_at"]) == cut
+                    namespace = forecast_db_from_connection(conn)
+                    assert namespace.is_relative_to(root)
+                    # This is Oct1 04:05 HKT: an actual ordinary zero-target-
+                    # observation/full-prior route, not a claim of Day1.
+                    assert cut.astimezone(ZoneInfo("Asia/Hong_Kong")).date() == date.fromisoformat(row["target_date"])
+                    provenance = json.loads(row["provenance_json"])
+                    assert "day0_remaining_carrier_content_identity" not in provenance
+                    assert "day0_remaining_carrier_operator" not in provenance
+                    ground = provenance["bayes_precision_fusion"]["current_evidence_shape"]["provider_geometry_audit"]["anchor_station_ground"]
+                    assert ground["manifest_role"] == "source_capture_confirmation"
+                    assert datetime.fromisoformat(ground["captured_at"]) == _hko_dt(20, 4)
+                    assert datetime.fromisoformat(ground["recorded_at"]) == _hko_dt(20, 4) + timedelta(seconds=30)
+                    assert datetime.fromisoformat(ground["recorded_at"]) <= cut
+                    readiness = latest_replacement_readiness(conn, city=row["city"],
+                        target_date=row["target_date"], temperature_metric=row["temperature_metric"],
+                        decision_time=cut)
+                    assert readiness is not None, tuple(tuple(item) for item in conn.execute(
+                        """SELECT source_id, data_version, strategy_key, scope_type,
+                                  status, computed_at, readiness_id
+                           FROM readiness_state
+                           WHERE city=? AND target_local_date=? AND temperature_metric=?
+                           ORDER BY computed_at DESC LIMIT 6""",
+                        (row["city"], row["target_date"], row["temperature_metric"]),
+                    ).fetchall())
+                    posterior_dependency = next(item for item in readiness.dependency_json["dependencies"]
+                        if item["role"] == "soft_anchor_posterior")
+                    assert posterior_dependency["posterior_id"] == row["posterior_id"]
+                    ready_row = conn.execute(
+                        "SELECT computed_at FROM readiness_state WHERE readiness_id=?",
+                        (readiness.readiness_id,),
+                    ).fetchone()
+                    assert datetime.fromisoformat(ready_row[0]) == cut
+                    baseline = next(item for item in readiness.dependency_json["dependencies"]
+                        if item["role"] == "baseline_b0")
+                    assert baseline["source_run_id"] == "new12"
+                    assert baseline["source_available_at"] == _hko_dt(12, 5).isoformat()
+                    class ClockType(type):
+                        def __instancecheck__(cls, value):
+                            return isinstance(value, datetime)
+                    class ReaderClock(datetime, metaclass=ClockType):
+                        @classmethod
+                        def now(cls, tz=None):
+                            return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+                    inputs.setattr(reader, "datetime", ReaderClock)
+                    for purpose in ReplacementForecastAuthorityPurpose:
+                        public = read_replacement_forecast_bundle(conn,
+                            baseline_bundle=_BaselineBundle(_Evidence(baseline["source_run_id"])),
+                            readiness=readiness, city=row["city"], target_date=date.fromisoformat(row["target_date"]),
+                            temperature_metric=row["temperature_metric"], decision_time=cut,
+                            current_bin_topology_hash=row["bin_topology_hash"],
+                            enforce_raw_input_hwm=True, raw_input_hwm_conn=conn, authority_purpose=purpose)
+                        assert public.ok, public.reason_code
+                        assert public.bundle.posterior_id == row["posterior_id"]
+                    yield row, namespace
+                finally:
+                    conn.close()
+            finally:
+                next(source, None)
+        finally:
+            next(native, None)
+
+
+@pytest.mark.parametrize(("carrier", "accepted"), [
+    pytest.param(carrier, accepted, id=f"carrier{index}-{accepted}")
+    for index, (carrier, accepted) in enumerate(_CURRENT_CARRIER_PAIR_CASES)
+    if not carrier
+])
+@pytest.mark.parametrize("purpose", tuple(ReplacementForecastAuthorityPurpose))
+def test_live_reader_accepts_normal_noncarrier_without_inventing_carrier_fields(
+    carrier, accepted, purpose, _generic_reader_noncarrier_template,
+):
+    row, namespace = _generic_reader_noncarrier_template
+    assert carrier == {}
+    assert (reader._live_grade_provenance(
+        row, authority_purpose=purpose, forecast_db=namespace
+    ) is not None) is accepted
 
 
 def _with_current_value_serving(
