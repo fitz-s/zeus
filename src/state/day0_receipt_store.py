@@ -114,11 +114,16 @@ def resolve_receipt(conn: sqlite3.Connection, receipt: dict) -> dict:
         return receipt
     sha = obs[REF_KEY]
     row = conn.execute(
-        f"SELECT payload FROM {TABLE} WHERE heavy_sha256 = ?", (sha,)
+        f"SELECT payload_encoding, payload FROM {TABLE} WHERE heavy_sha256 = ?", (sha,)
     ).fetchone()
     if row is None:
         raise LookupError(f"day0 receipt witnesses {sha} not found in {TABLE}")
-    heavy = json.loads(zstandard.ZstdDecompressor().decompress(row[0]))
+    if row[0] != ENCODING:
+        raise ValueError("day0 receipt witnesses encoding does not match the canonical format")
+    raw = zstandard.ZstdDecompressor().decompress(row[1])
+    if hashlib.sha256(raw).hexdigest() != sha:
+        raise ValueError("day0 receipt witnesses sha256 does not match the reference")
+    heavy = json.loads(raw)
     full_obs = {k: v for k, v in obs.items() if k != REF_KEY}
     full_obs.update(heavy)
     return {**receipt, "observation": full_obs}

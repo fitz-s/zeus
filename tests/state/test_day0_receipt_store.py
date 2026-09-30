@@ -1,5 +1,5 @@
 # Created: 2026-09-30
-# Last audited: 2026-09-30
+# Last reused/audited: 2026-09-30
 # Authority basis: position_events growth fix; src/state/day0_receipt_store.py.
 """Day0 monitor receipt witnesses are stored once, content-addressed."""
 from __future__ import annotations
@@ -10,7 +10,7 @@ import sqlite3
 import pytest
 
 from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
-from src.state.day0_receipt_store import REF_KEY, resolve_receipt
+from src.state.day0_receipt_store import ENCODING, REF_KEY, resolve_receipt
 from tests.test_phase2_exit_emitter_revival import _make_position
 
 METHOD = "day0_observation_conditioned_daily_extrema"
@@ -119,3 +119,40 @@ def test_events_without_a_day0_receipt_are_untouched(conn):
     append_many_and_project(conn, events, projection)
     assert _row_payload(conn, 10) == json.loads(before)
     assert conn.execute("SELECT COUNT(*) FROM day0_receipt_blob").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("fault", ["encoding", "sha256"])
+def test_resolve_receipt_rejects_replaced_content_under_original_hash(conn, fault):
+    import zstandard
+
+    original = _receipt("a", "2026-09-30T15:01:00+00:00")
+    _write(conn, _make_position(), 10, original)
+    slim = _row_payload(conn, 10)["day0_monitor_probability_receipt"]
+    assert resolve_receipt(conn, slim) == original
+    original_slim = json.loads(json.dumps(slim))
+    sha = slim["observation"][REF_KEY]
+    row = conn.execute(
+        "SELECT payload_encoding, payload FROM day0_receipt_blob WHERE heavy_sha256 = ?",
+        (sha,),
+    ).fetchone()
+    assert row["payload_encoding"] == ENCODING
+
+    if fault == "encoding":
+        conn.execute(
+            "UPDATE day0_receipt_blob SET payload_encoding = ? WHERE heavy_sha256 = ?",
+            ("foreign+" + ENCODING, sha),
+        )
+    else:
+        heavy = json.loads(zstandard.ZstdDecompressor().decompress(row["payload"]))
+        heavy["statistical_probability_conditioning"]["blob"] = "replaced witness"
+        replacement = zstandard.ZstdCompressor(level=3).compress(
+            json.dumps(heavy, sort_keys=True, separators=(",", ":")).encode()
+        )
+        conn.execute(
+            "UPDATE day0_receipt_blob SET payload = ? WHERE heavy_sha256 = ?",
+            (replacement, sha),
+        )
+    with pytest.raises(ValueError, match=fault):
+        resolve_receipt(conn, slim)
+    assert slim == original_slim
+    assert _row_payload(conn, 10)["day0_monitor_probability_receipt"] == original_slim
