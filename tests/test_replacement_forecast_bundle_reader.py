@@ -1662,12 +1662,14 @@ def test_reader_day0_high_uses_normal_full_native_prior_and_owned_observation(tm
         next(world,None)
 
 
-def _reader_new_icon_cycle(normal):
+def _reader_new_icon_cycle(normal, *, value_c=None, lead_days=None):
     """Ordinary controlled entity-body writer; preserve the consumed run."""
     from dataclasses import replace
     from src.config import runtime_cities_by_name
     from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
     from tests.test_replacement_forecast_materializer import _hko_current_provider_inputs
+    from src.data import bayes_precision_fusion_download as dl
+    from unittest.mock import patch
     model = "icon_global"
     serving = json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
     consumed_id = serving[model]["raw_model_forecast_id"]
@@ -1677,16 +1679,28 @@ def _reader_new_icon_cycle(normal):
         "SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
     value = normal.conn.execute("SELECT forecast_value_c FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
         (consumed_id,)).fetchone()[0]
+    if value_c is not None:
+        value = value_c
     cycle = normal.request.source_cycle_time+timedelta(hours=6)
     captured = cycle+timedelta(hours=1)
     city = runtime_cities_by_name()[normal.row["city"]]
     selected = _selected_test_cell(model,city.lat,city.lon)
-    served = _hko_current_provider_inputs(replace(normal.request,source_cycle_time=cycle,
-        openmeteo_source_available_at=captured),{model:value},conn=normal.conn,
-        selected_cells={model:selected})[model]
+    persist = dl._persist_rows
+    def input_rows(conn,rows,**kwargs):
+        # Negative-only new writer input for the original changed-lead case;
+        # never update a licensed row or claim that this declaration is true.
+        if lead_days is not None:
+            rows = [{**row,"lead_days":lead_days} if row["model"]==model else row for row in rows]
+        return persist(conn,rows,**kwargs)
+    with patch.object(dl,"_persist_rows",input_rows):
+        served = _hko_current_provider_inputs(replace(normal.request,source_cycle_time=cycle,
+            openmeteo_source_available_at=captured),{model:value},conn=normal.conn,
+            selected_cells={model:selected})[model]
     assert served.raw_model_forecast_id != consumed_id
     assert datetime.fromisoformat(served.served_cycle) == cycle
     assert datetime.fromisoformat(served.captured_at) == captured <= normal.request.computed_at
+    if lead_days is not None:
+        assert served.lead_days == lead_days
     new_raw = normal.conn.execute("SELECT source_cycle_time,source_available_at,captured_at,recorded_at"
         " FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(served.raw_model_forecast_id,)).fetchone()
     assert tuple(datetime.fromisoformat(value) for value in new_raw[:3]) == (cycle,captured,captured)
@@ -2056,13 +2070,13 @@ def test_live_reader_source_specific_carrier_cases_keep_their_original_obligatio
 def test_fast_carrier_format_compatibility_does_not_grant_public_probability_authority(
     carrier, accepted, purpose, _normal_fast_reader_template,
 ):
-    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY,DAY0_PROBABILITY_MIXTURE_POLICY
 
     # These original format inputs are not licensed certificates. FAST V3 is
     # still supported, but matching-final source/public reachability is not
     # proved by KORD's no-final-provider V2 producer.
     format_input = {**carrier, "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
-        "day0_remaining_center_bias_c": 0.0}
+        "day0_remaining_center_bias_c": 0.0,"day0_probability_mixture_policy":DAY0_PROBABILITY_MIXTURE_POLICY}
     assert (reader._day0_carrier_identity_reason(format_input) is None) is accepted
     original, namespace = _normal_fast_reader_template
     row = dict(original)
@@ -4047,91 +4061,118 @@ def test_raw_hwm_marks_isolated_used_provider_revision_unconsumed(
 
 
 def _hourly_relabel_reason(
+    normal,
     *,
-    newer_value_c: float,
+    newer_value_c: float | None = None,
     newer_lead_days: int | None = None,
     consumed_row_present: bool = True,
 ) -> str | None:
-    """One consumed NBM row, then the next hourly cycle of the same provider."""
-    conn = _conn()
-    posterior_id = _insert_posterior(conn)
-    consumed: dict[str, dict[str, object]] = {}
-    for model in ("ecmwf_ifs", "ncep_nbm_conus"):
-        _insert_raw_model_forecast(
-            conn,
-            model=model,
-            source_cycle_time=_dt(0),
-            captured_at=_dt(0, 5),
-            source_available_at=_dt(0, 5),
-        )
-        consumed[model] = {
-            "raw_model_forecast_id": int(
-                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            ),
-            "served_cycle": _dt(0).isoformat(),
-            "captured_at": _dt(0, 5).isoformat(),
-            "served_via": "single_runs",
-        }
-    conn.execute(
-        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
-        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
-    )
-    if not consumed_row_present:
-        conn.execute(
-            "DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id = ?",
-            (consumed["ncep_nbm_conus"]["raw_model_forecast_id"],),
-        )
-    _insert_raw_model_forecast(
-        conn,
-        model="ncep_nbm_conus",
-        source_cycle_time=_dt(1),
-        captured_at=_dt(1, 5),
-        source_available_at=_dt(1, 5),
-        forecast_value_c=newer_value_c,
-    )
-    if newer_lead_days is not None:
-        conn.execute(
-            "UPDATE raw_model_forecasts SET lead_days = ?"
-            " WHERE raw_model_forecast_id = last_insert_rowid()",
-            (newer_lead_days,),
-        )
-    return replacement_live_input_lag_reason(
-        conn,
-        city="Shanghai",
-        target_date="2026-06-07",
-        metric="high",
-        decision_time=_dt(2),
-        posterior_source_cycle_time=_dt(0),
-        posterior_computed_at=_dt(0, 10),
-        posterior_provenance=_with_current_value_serving(consumed),
-    )
+    """Physical evidence supersedes, not a numerical value/lead alias.
 
-
-def test_raw_hwm_hourly_cycle_relabel_of_consumed_evidence_stays_current() -> None:
-    """A newer hourly cycle carrying the consumed value+lead is not new evidence.
-
-    Live 2026-09-30: 141/377 NBM and 91/454 icon_global supersession blocks
-    were exact relabels; each turned an hourly arrival into a family outage.
+    ICON is the licensed normal gridded representative. This fixture does not
+    grant Shanghai a nonexistent NBM product or invent an hourly native run.
     """
-    assert _hourly_relabel_reason(newer_value_c=28.0) is None
+    assert read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
+    proof = json.loads(normal.row["provenance_json"])
+    consumed = proof["bayes_precision_fusion"]["current_value_serving"]["icon_global"]
+    if consumed_row_present:
+        _reader_new_icon_cycle(normal,value_c=newer_value_c,lead_days=newer_lead_days)
+        conn = normal.conn
+    else:
+        # Exact table view executes the original source-validity SQL; only
+        # the consumed row is absent. No canonical table is deleted/modified.
+        class MissingRaw:
+            def execute(self,sql,parameters=()):
+                if "FROM raw_model_forecasts" in sql:
+                    return normal.conn.execute("WITH raw_model_forecasts AS (SELECT * FROM main.raw_model_forecasts "
+                        "WHERE raw_model_forecast_id!=?) "+sql,(consumed["raw_model_forecast_id"],*parameters))
+                return normal.conn.execute(sql,parameters)
+            def __getattr__(self,name): return getattr(normal.conn,name)
+        conn = MissingRaw()
+    reason = replacement_live_input_lag_reason(conn,city=normal.row["city"],target_date=normal.row["target_date"],
+        metric="high",decision_time=normal.request.computed_at,
+        posterior_source_cycle_time=normal.request.source_cycle_time,
+        posterior_computed_at=normal.request.computed_at,posterior_provenance=proof)
+    public = read_replacement_forecast_bundle(conn,**{**normal.kwargs,"raw_input_hwm_conn":conn},
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION)
+    assert not public.ok and public.reason_code == "REPLACEMENT_RAW_INPUT_HWM:"+reason
+    return reason
 
 
-def test_raw_hwm_hourly_cycle_with_changed_value_or_lead_supersedes() -> None:
-    changed_value = _hourly_relabel_reason(newer_value_c=28.3)
-    assert changed_value is not None
-    assert "basis=used_raw_model_forecasts_superseded" in changed_value
-    assert "model=ncep_nbm_conus" in changed_value
+def test_raw_hwm_hourly_cycle_relabel_of_consumed_evidence_stays_current(
+    _shanghai_reader_current_certificate,monkeypatch,
+) -> None:
+    """Only the exact physical repeat stays current, never value/lead equality."""
+    from tests.test_replacement_forecast_materializer import _hko_current_provider_inputs
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    from src.config import runtime_cities_by_name
+    from dataclasses import replace
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    normal = _shanghai_reader_current_certificate
+    model = "icon_global"
+    city = runtime_cities_by_name()[normal.row["city"]]
+    serving = json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"][model]
+    original_raw = tuple(tuple(row) for row in normal.conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id"))
+    value = normal.conn.execute("SELECT forecast_value_c FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+        (serving["raw_model_forecast_id"],)).fetchone()[0]
+    repeated = _hko_current_provider_inputs(normal.request,{model:value},conn=normal.conn,
+        selected_cells={model:_selected_test_cell(model,city.lat,city.lon)})[model]
+    assert repeated.raw_model_forecast_id == serving["raw_model_forecast_id"]
+    assert repeated.captured_at == serving["captured_at"]
+    assert tuple(tuple(row) for row in normal.conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")) == original_raw
+    assert read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
+    reason = _hourly_relabel_reason(normal,newer_value_c=value)
+    assert reason == f"basis=current_value_serving_physical_proof_dependency_changed:model={model}:consumed_raw_id={serving['raw_model_forecast_id']}"
+    # Existing normal producer consumes the genuinely new physical dependency;
+    # the old certificate is never relabeled or given a renewed source clock.
+    new_cut = normal.request.computed_at+timedelta(minutes=1)
+    request = replace(normal.request,computed_at=new_cut)
+    class ClockType(type):
+        def __instancecheck__(cls,value): return isinstance(value,datetime)
+    class Clock(datetime,metaclass=ClockType):
+        @classmethod
+        def now(cls,tz=None): return new_cut.astimezone(tz) if tz else new_cut.replace(tzinfo=None)
+    builtin = sqlite3.connect(":memory:")
+    try:
+        normal.conn.create_function("strftime",2,lambda fmt,value:new_cut.isoformat(timespec="milliseconds")
+            if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+        result = materializer.materialize_replacement_forecast_live(normal.conn,request)
+        assert result.ok,result.reason_codes
+        normal.conn.commit()
+        ready = latest_replacement_readiness(normal.conn,city=normal.row["city"],target_date=normal.row["target_date"],
+            temperature_metric="high",decision_time=new_cut)
+        with monkeypatch.context() as consumer:
+            consumer.setattr(reader,"datetime",Clock)
+            for purpose in ReplacementForecastAuthorityPurpose:
+                public = read_replacement_forecast_bundle(normal.conn,
+                    **{**normal.kwargs,"readiness":ready,"decision_time":new_cut},authority_purpose=purpose)
+                assert public.ok,public.reason_code
+                assert public.bundle.posterior_id == result.posterior_id != normal.row["posterior_id"]
+                assert datetime.fromisoformat(public.bundle.source_cycle_time) == normal.request.source_cycle_time
+    finally:
+        builtin.close()
 
-    changed_lead = _hourly_relabel_reason(newer_value_c=28.0, newer_lead_days=0)
-    assert changed_lead is not None
-    assert "basis=used_raw_model_forecasts_superseded" in changed_lead
+
+@pytest.mark.parametrize(("newer_value_c","newer_lead_days"),((28.3,None),(None,0)))
+def test_raw_hwm_hourly_cycle_with_changed_value_or_lead_supersedes(
+    _shanghai_reader_current_certificate,newer_value_c,newer_lead_days,
+) -> None:
+    normal = _shanghai_reader_current_certificate
+    serving = json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]["icon_global"]
+    expected = f"basis=current_value_serving_physical_proof_dependency_changed:model=icon_global:consumed_raw_id={serving['raw_model_forecast_id']}"
+    # Each fault has its own healthy normal world. A different logical lead
+    # claim is negative new input, not a licensed new forecast.
+    assert _hourly_relabel_reason(normal,newer_value_c=newer_value_c,newer_lead_days=newer_lead_days) == expected
 
 
-def test_raw_hwm_unreadable_consumed_evidence_stays_superseded() -> None:
+def test_raw_hwm_unreadable_consumed_evidence_stays_superseded(_shanghai_reader_current_certificate) -> None:
     """Unknown consumed evidence can never prove a relabel (fail closed)."""
-    reason = _hourly_relabel_reason(newer_value_c=28.0, consumed_row_present=False)
-    assert reason is not None
-    assert "basis=used_raw_model_forecasts_superseded" in reason
+    normal = _shanghai_reader_current_certificate
+    serving = json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]["icon_global"]
+    assert _hourly_relabel_reason(normal,consumed_row_present=False) == (
+        "basis=current_value_serving_raw_hwm_unavailable:model=icon_global:"
+        f"consumed_raw_id={serving['raw_model_forecast_id']}")
 
 
 def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance(
@@ -4249,6 +4290,10 @@ def _coverage_identity_conn(
     city = "Shanghai"
     target_date = "2026-09-29"
     now = datetime.now(timezone.utc).replace(microsecond=0)
+    class CoverageClock(datetime):
+        @classmethod
+        def now(cls,tz=None): return now.astimezone(tz or UTC)
+    monkeypatch.setattr(reader,"datetime",CoverageClock)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
