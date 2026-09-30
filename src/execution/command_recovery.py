@@ -14705,7 +14705,12 @@ def reconcile_terminal_exit_residual_projections_priority(
         priority_factory,
         scope="live_tick",
         deadline_monotonic=deadline,
-        monitor_preemptible=True,
+        # Venue-terminal EXIT truth reduces in one short atomic write per
+        # command. Once the RECOVERY_CRITICAL lease is held, only this pass's
+        # own deadline may interrupt it: yielding to a continuously queued
+        # monitor aborted the same proven command every tick. Acquisition
+        # still yields to a monitor that already owns the coordinator gate.
+        monitor_preemptible=False,
     )
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     result = _run_recovery_pass_with_lock_policy(
@@ -15119,6 +15124,18 @@ def _terminal_fak_partial_exit_review_candidates(
     return [_dict_row(row) for row in rows]
 
 
+def _terminal_fak_exit_drain_predicates(terminal_position: bool) -> dict[str, bool]:
+    """Name the drain target ``..._projection_matches`` proved for this phase."""
+
+    if terminal_position:
+        return {
+            "position_phase_terminal_proof": True,
+            "ctf_reservation_matches_command_token": True,
+            "ctf_reservation_matches_requested_size": True,
+        }
+    return {"synced_chain_residual_matches_post_fill_position": True}
+
+
 def _review_required_terminal_fak_partial_exit_projection_matches(
     conn: sqlite3.Connection,
     *,
@@ -15154,37 +15171,50 @@ def _review_required_terminal_fak_partial_exit_projection_matches(
         )
         if not _table_exists(conn, "collateral_reservations"):
             return False
-        reservation = conn.execute(
-            """
-            SELECT reservation_type, token_id, amount
-             FROM collateral_reservations
-             WHERE command_id = ?
-               AND reservation_type = 'CTF_SELL'
-               AND token_id = ?
-               AND released_at IS NULL
-             LIMIT 1
-            """,
-            (
-                str(command.get("command_id") or ""),
-                command_token_id,
-            ),
-        ).fetchone()
+        reservation = _dict_row(
+            conn.execute(
+                """
+                SELECT amount, released_at, release_reason, converted_amount
+                 FROM collateral_reservations
+                 WHERE command_id = ?
+                   AND reservation_type = 'CTF_SELL'
+                   AND token_id = ?
+                 LIMIT 1
+                """,
+                (
+                    str(command.get("command_id") or ""),
+                    command_token_id,
+                ),
+            ).fetchone()
+        )
         try:
-            active_amount = int(reservation[2]) if reservation is not None else 0
+            amount = int(reservation.get("amount") or 0)
+            converted = int(reservation.get("converted_amount") or 0)
         except (TypeError, ValueError):
-            active_amount = 0
+            return False
         expected_amount = int(
             (requested * Decimal("1000000")).to_integral_value(
                 rounding=ROUND_CEILING
             )
         )
+        # The reservation is the terminal position's drain target: either still
+        # held for the full order (terminalization converts it), or already
+        # converted by the ledger on exactly this fill (nothing left to drain).
+        fill_conversion = int(
+            (Decimal(expected_amount) * filled / requested).to_integral_value(
+                rounding=ROUND_FLOOR
+            )
+        )
+        drained_on_this_fill = bool(
+            reservation.get("released_at")
+            and reservation.get("release_reason") == "CONVERTED_ON_FILL"
+            and converted == fill_conversion
+        )
         return bool(
             command_token_id
             and held_token_id == command_token_id
-            and reservation is not None
-            and str(reservation[0] or "") == "CTF_SELL"
-            and str(reservation[1] or "") == command_token_id
-            and active_amount == expected_amount
+            and amount == expected_amount
+            and (not reservation.get("released_at") or drained_on_this_fill)
         )
     if (
         phase not in {"active", "day0_window", "pending_exit"}
@@ -15511,7 +15541,10 @@ def _clear_canonical_terminal_fak_partial_exit(
         (str(command.get("position_id") or ""),),
     ).fetchone()
     position_phase = str(position_row[0] or "") if position_row is not None else ""
-    if position_phase not in {"active", "day0_window", "pending_exit"}:
+    terminal_position = position_phase in {"settled", "economically_closed"}
+    if not terminal_position and position_phase not in {
+        "active", "day0_window", "pending_exit",
+    }:
         return False
     terminal_payload = {
         "reason": "terminal_fak_partial_exit_confirmed",
@@ -15539,7 +15572,7 @@ def _clear_canonical_terminal_fak_partial_exit(
             "cumulative_fill_below_requested_size": True,
             "fak_order_not_live": True,
             "acked_exit_envelope_exact_order_token_side": True,
-            "synced_chain_residual_matches_post_fill_position": True,
+            **_terminal_fak_exit_drain_predicates(terminal_position),
         },
         "position_phase": position_phase,
     }
@@ -15969,18 +16002,9 @@ def _clear_review_required_terminal_fak_partial_exit(
         },
         "position_phase": position_phase,
     }
-    if terminal_position:
-        terminal_payload["required_predicates"]["position_phase_terminal_proof"] = True
-        terminal_payload["required_predicates"][
-            "active_ctf_reservation_matches_command_token"
-        ] = True
-        terminal_payload["required_predicates"][
-            "active_ctf_reservation_matches_requested_size"
-        ] = True
-    else:
-        terminal_payload["required_predicates"][
-            "synced_chain_residual_matches_post_fill_position"
-        ] = True
+    terminal_payload["required_predicates"].update(
+        _terminal_fak_exit_drain_predicates(terminal_position)
+    )
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
     sp_name = f"sp_terminal_fak_partial_exit_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
@@ -16196,11 +16220,19 @@ def _reconcile_terminal_fak_partial_exit_reviews(
             else:
                 summary["stayed"] += 1
         except Exception as exc:
-            is_budget_expiry = (
-                deadline_monotonic is not None
-                and time.monotonic() >= float(deadline_monotonic)
-                and isinstance(exc, sqlite3.OperationalError)
+            interrupted = (
+                isinstance(exc, sqlite3.OperationalError)
                 and "interrupted" in str(exc).lower()
+            )
+            if interrupted and getattr(_RECOVERY_MONITOR_PREEMPTION, "pending", False):
+                # A preemptible caller's connection yielded to a monitor; the
+                # command's savepoint already rolled back and the pass owner
+                # defers the whole quantum. It is neither an error nor ours.
+                raise
+            is_budget_expiry = (
+                interrupted
+                and deadline_monotonic is not None
+                and time.monotonic() >= float(deadline_monotonic)
             )
             if is_budget_expiry:
                 logger.info(

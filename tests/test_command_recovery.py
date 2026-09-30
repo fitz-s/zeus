@@ -22133,7 +22133,7 @@ class TestRecoveryResolutionTable:
             "position_phase_terminal_proof"
         ] is True
         assert terminal_payload["required_predicates"][
-            "active_ctf_reservation_matches_requested_size"
+            "ctf_reservation_matches_requested_size"
         ] is True
         if review_shape == "cancel_failed":
             order_proof_row = conn.execute(
@@ -45357,3 +45357,228 @@ def test_venue_terminal_fak_exit_review_does_not_rewrite_recorded_fill(conn):
         table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in before
     } == before
+
+
+
+def _seed_settled_terminal_fak_exit_review(
+    conn, *, release_reason="CONVERTED_ON_FILL", converted_amount=5_550_000,
+) -> str:
+    """Live a211986a9b794f9b: FAK SELL 20 @ 0.18 filled 5.55, position since settled.
+
+    The ledger converted the CTF_SELL reservation on the fill, the review
+    carries the MATCHED point order, and the canonical order fact is the
+    terminal partial (remaining 0).
+    """
+    from src.state.venue_command_repo import append_event
+
+    command_id, order_id, position_id = "cmd-live-fak-exit", "ord-live-fak-exit", "pos-live"
+    _insert(conn, command_id=command_id, position_id=position_id,
+            intent_kind="EXIT", side="SELL", order_type="FAK", size=20.0, price=0.18)
+    _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id, order_type="FAK")
+    signed = f"signed-{command_id}".encode()
+    _ensure_envelope(
+        conn, token_id="tok-001", selected_outcome_token_id="tok-001", side="SELL",
+        order_type="FAK", envelope_id=f"signed-{command_id}", order_id=order_id,
+        price=0.18, size=20.0, signed_order=signed,
+        signed_order_hash=hashlib.sha256(signed).hexdigest(),
+    )
+    _seed_pending_entry_projection(
+        conn, position_id=position_id, command_id="cmd-entry", order_id="ord-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled', shares = 8.9, chain_shares = 8.9,
+               chain_state = 'synced', chain_seen_at = '2026-04-27T07:19:44Z',
+               token_id = 'tok-001', direction = 'buy_yes', order_status = 'retry_pending'
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    _append_order_fact(
+        conn, command_id=command_id, order_id=order_id, state="PARTIALLY_MATCHED",
+        matched_size="5.55", remaining_size="0",
+        raw_payload_json={"proof_class": "terminal_partial_order_fact", "status": "matched"},
+    )
+    _append_trade_fact(
+        conn, command_id=command_id, order_id=order_id, trade_id="trade-live",
+        state="CONFIRMED", filled_size="5.55", fill_price="0.18",
+        tx_hash="0xlive", observed_at="2026-04-26T00:05:42Z",
+    )
+    append_event(
+        conn, command_id=command_id, event_type="PARTIAL_FILL_OBSERVED",
+        occurred_at="2026-04-26T00:05:43Z",
+        payload={"venue_order_id": order_id, "trade_id": "0xlive",
+                 "filled_size": "5.55", "fill_price": "0.18"},
+    )
+    conn.execute(
+        "DELETE FROM collateral_reservations WHERE command_id = ?", (command_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO collateral_reservations (
+            command_id, reservation_type, token_id, amount, created_at,
+            released_at, release_reason, converted_amount
+        ) VALUES (?, 'CTF_SELL', 'tok-001', 20000000, '2026-04-26T00:05:34Z',
+                  '2026-04-26T00:05:43Z', ?, ?)
+        """,
+        (command_id, release_reason, converted_amount),
+    )
+    append_event(
+        conn, command_id=command_id, event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:06:17Z",
+        payload={
+            "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+            "venue_order_id": order_id,
+            "point_order_status": "MATCHED",
+            "point_order": {
+                "orderID": order_id, "status": "MATCHED", "order_type": "FAK",
+                "side": "SELL", "asset_id": "tok-001", "original_size": "20",
+                "size_matched": "5.55", "price": "0.18",
+            },
+        },
+    )
+    return command_id
+
+
+def test_law_proven_settled_fak_exit_review_is_terminalized_once(conn):
+    """The reducer the law dispatches to acts on every command the law proves."""
+    from src.execution import command_recovery
+
+    command_id = _seed_settled_terminal_fak_exit_review(conn)
+    assert command_recovery._venue_terminal_fill_shape(conn, command_id) == (
+        "terminal_fak_partial_exit"
+    )
+
+    def counts():
+        return {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("venue_trade_facts", "venue_order_facts", "execution_fact", "position_events",
+                          "collateral_unsettled_proceeds")
+        }
+
+    before = counts()
+    reservation_before = tuple(conn.execute(
+        "SELECT * FROM collateral_reservations WHERE command_id = ?", (command_id,),
+    ).fetchone())
+
+    first = command_recovery.reconcile_venue_terminal_fill_reviews(conn)
+    assert first == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert _get_state(conn, command_id) == "EXPIRED"
+    events = _get_events(conn, command_id)
+    assert [e["event_type"] for e in events][-2:] == ["PARTIAL_FILL_OBSERVED", "EXPIRED"]
+    proof = json.loads(events[-2]["payload_json"])
+    assert proof["filled_size"] == "5.55"
+    assert proof["required_predicates"]["ctf_reservation_matches_requested_size"] is True
+    # The fill is already durable: nothing re-records it or re-converts collateral.
+    assert counts() == before
+    assert tuple(conn.execute(
+        "SELECT * FROM collateral_reservations WHERE command_id = ?", (command_id,),
+    ).fetchone()) == reservation_before
+
+    n_events = len(events)
+    assert command_recovery.reconcile_venue_terminal_fill_reviews(conn) == {
+        "scanned": 0, "advanced": 0, "stayed": 0, "errors": 0,
+    }
+    assert len(_get_events(conn, command_id)) == n_events
+
+
+@pytest.mark.parametrize(
+    ("release_reason", "converted_amount"),
+    [
+        ("CONVERTED_ON_FILL", 4_000_000),  # converted for a different fill
+        ("EXPIRED", 0),  # released with no conversion: drain target unproven
+    ],
+)
+def test_settled_fak_exit_review_with_foreign_reservation_drain_stays(
+    conn, release_reason, converted_amount,
+):
+    from src.execution import command_recovery
+
+    command_id = _seed_settled_terminal_fak_exit_review(
+        conn, release_reason=release_reason, converted_amount=converted_amount,
+    )
+    summary = command_recovery.reconcile_venue_terminal_fill_reviews(
+        conn, command_ids=frozenset({command_id}),
+    )
+    assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+    assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+
+def test_terminal_exit_priority_write_is_not_interrupted_by_queued_monitor(
+    conn, tmp_path, monkeypatch,
+):
+    """Only the pass's own deadline may interrupt its held write lease.
+
+    Live 2026-09-29: every one of 127 'interrupted' errors for a211986a9b794f9b
+    was paired (same millisecond) with 'yielded its write quantum to held
+    monitor': a continuously queued monitor aborted the proven command's write
+    every tick, long before the pass's own deadline.
+    """
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state import write_coordinator
+
+    command_id = _seed_settled_terminal_fak_exit_review(conn)
+    conn.commit()
+    path = tmp_path / "terminal-exit-priority.db"
+    with sqlite3.connect(path) as target:
+        conn.backup(target)
+
+    def factory(**_kwargs):
+        db = sqlite3.connect(path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    factory.supports_nonblocking_flocks = True
+
+    class Coordinator:
+        @staticmethod
+        def has_pending_monitor_waiter(_dbs):
+            return True
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(
+        write_coordinator, "default_runtime_write_coordinator", lambda: Coordinator(),
+    )
+    monkeypatch.setattr(command_recovery, "_identity_bound_rotation_slot", lambda: 1)
+
+    summary = command_recovery.reconcile_terminal_exit_residual_projections_priority(
+        deadline_monotonic=command_recovery.time.monotonic() + 30.0,
+    )
+    assert summary["errors"] == 0, summary
+    assert not summary.get("monitor_preempted"), summary
+    with factory() as persisted:
+        assert _get_state(persisted, command_id) == "EXPIRED"
+
+
+def test_terminal_fak_review_monitor_yield_propagates_to_pass_owner(monkeypatch):
+    """A monitor yield is the pass owner's deferral, never a per-command error."""
+    from src.execution import command_recovery
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_terminal_fak_partial_exit_review_candidates",
+        lambda _conn, *, command_ids=None: [{"command_id": "yielded"}],
+    )
+
+    def _yield(*_args, **_kwargs):
+        command_recovery._RECOVERY_MONITOR_PREEMPTION.pending = True
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(command_recovery, "_reduce_terminal_fak_partial_exit_command", _yield)
+    summary: dict = {}
+    deadline = command_recovery.time.monotonic() + 30
+    try:
+        with sqlite3.connect(":memory:") as isolated:
+            assert command_recovery._run_recovery_pass_with_lock_policy(
+                "terminal_exit_residual_projection_priority",
+                lambda: command_recovery._reconcile_terminal_fak_partial_exit_reviews(
+                    isolated, deadline_monotonic=deadline,
+                ),
+                scope="live_tick",
+                summary=summary,
+                deadline_monotonic=deadline,
+            ) is None
+    finally:
+        command_recovery._RECOVERY_MONITOR_PREEMPTION.pending = False
+    assert summary["monitor_preempted"] is True
