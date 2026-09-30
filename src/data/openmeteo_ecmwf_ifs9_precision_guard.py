@@ -123,6 +123,7 @@ def geometry_proof_authenticity_reason(
     *,
     raw_payload_bytes: bytes | None = None,
     decision_at: datetime | str | None = None,
+    station_ground_evidence: Mapping[str, object] | None = None,
 ) -> str | None:
     """Validate the provider's actual cell against the local surface and station.
 
@@ -172,13 +173,27 @@ def geometry_proof_authenticity_reason(
         station = runtime_station_geometry_for_city(city)
         if station["validity_reason"] is not None:
             return "OM9_STATION_SOURCE_INVALID"
+        ground_facts = station.get("ground_facts")
+        ground_verified = station.get("ground_status") == "VERIFIED"
+        if station_ground_evidence is not None:
+            from src.data.station_ground_evidence import (
+                read_current_station_ground_evidence, read_frozen_station_ground_evidence,
+            )
+            frozen = read_frozen_station_ground_evidence(station_ground_evidence, decision_at=decision_at)
+            current = None if frozen is None else read_current_station_ground_evidence(
+                frozen["forecast_db"], city=metadata.city, decision_at=decision_at,
+            )
+            if frozen is None or current is None or current["facts"] != frozen["facts"]:
+                return "OM9_STATION_GROUND_PROOF_UNPROVEN"
+            ground_facts = frozen["facts"]
+            ground_verified = True
         ground = proof.get("station_ground_proof")
         if (
-            station.get("ground_status") != "VERIFIED"
+            not ground_verified
             or not isinstance(ground, Mapping)
             or ground.get("revision") != "station_ground_roles_v1"
             or ground.get("status") != "VERIFIED"
-            or ground.get("facts") != station.get("ground_facts")
+            or ground.get("facts") != ground_facts
             or not isinstance(ground.get("facts"), Mapping)
         ):
             return "OM9_STATION_GROUND_PROOF_UNPROVEN"
@@ -195,13 +210,16 @@ def geometry_proof_authenticity_reason(
         ):
             return "OM9_STATION_GROUND_PROOF_UNPROVEN"
         try:
-            _to_utc(audit["checked_at"], field_name="station_ground_checked_at")
+            if _to_utc(audit["checked_at"], field_name="station_ground_checked_at") > _to_utc(
+                decision_at, field_name="decision_at",
+            ):
+                return "OM9_STATION_GROUND_PROOF_UNPROVEN"
         except (ValueError, TypeError):
             return "OM9_STATION_GROUND_PROOF_UNPROVEN"
-        # Current official entity bytes independently attest the same station
-        # facts. A frozen certificate's historical whole-page hash remains audit
-        # provenance, never an always-newest page-hash equality gate.
-        station_height = float(station["ground_elevation_m"])
+        # Producer validation uses actual current official bytes. Frozen readers
+        # use their own canonical entity at the independent certificate cutoff;
+        # neither a later page nor a later physical fact rewrites that old cut.
+        station_height = float(ground_facts["elevation_m"])
         station_lat = float(station["lat"])
         station_lon = float(station["lon"])
         if not all(math.isfinite(v) for v in (station_height, station_lat, station_lon)):
@@ -253,6 +271,7 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
     metadata: OpenMeteoIfs9PrecisionMetadata,
     *, raw_payload_bytes: bytes | None = None,
     decision_at: datetime | str | None = None,
+    station_ground_evidence: Mapping[str, object] | None = None,
 ) -> OpenMeteoIfs9PrecisionGuardResult:
     """Evaluate whether OM9 anchor metadata is safe enough for live materialization."""
 
@@ -296,7 +315,10 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         reasons.append("OM9_NEAREST_GRID_DISTANCE_HIGH")
     if metadata.anchor_sigma_c <= 0.0:
         reasons.append("OM9_ANCHOR_SIGMA_INVALID")
-    source_reason = geometry_proof_authenticity_reason(metadata, raw_payload_bytes=raw_payload_bytes, decision_at=decision_at)
+    source_reason = geometry_proof_authenticity_reason(
+        metadata, raw_payload_bytes=raw_payload_bytes, decision_at=decision_at,
+        station_ground_evidence=station_ground_evidence,
+    )
     if source_reason is not None:
         reasons.append(source_reason)
 

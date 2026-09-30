@@ -449,6 +449,66 @@ def test_anchor_legal_foreign_pair_cannot_relabel_independent_certificate_scope(
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
+def test_anchor_frozen_ground_replays_own_cut_after_actual_later_page_and_station_changes(tmp_path, monkeypatch, metric):
+    from copy import deepcopy
+    import src.config as config
+    import scripts.download_replacement_forecast_current_targets as producer
+    from src.data import station_ground_evidence as ground
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata
+    from src.data.replacement_forecast_cycle_policy import _anchor_ifs9_response_has_authority
+    from src.data.replacement_forecast_materializer import _bind_provider_geometry_identity
+    from tests.test_station_ground_evidence import _archive, _update_official
+
+    a, body_path, cut_a, scope = _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric)
+    geometry, audit = a.provider_geometry_evidence, a.provider_geometry_audit
+    db = audit["anchor_raw_artifact"]["forecast_db"]
+    registry = config.CONFIG_DIR / "station_precise_coords.json"
+    official_body = config.CONFIG_DIR / "hko_station_metadata.html"
+    claims = json.loads(registry.read_text())
+    body_a = official_body.read_bytes()
+    clock = [cut_a + timedelta(minutes=2)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz or UTC)
+
+    monkeypatch.setattr(ground, "datetime", Clock)
+    assert _anchor_ifs9_response_has_authority(geometry, audit, materialized_at=cut_a.isoformat(), **scope)
+
+    body_b = body_a + b"<!-- unrelated official page formatting -->"
+    _update_official(registry, official_body, claims, body_b, (cut_a + timedelta(minutes=1)).isoformat())
+    b = _archive(db)
+    assert b["facts_identity"] == audit["anchor_station_ground"]["facts_identity"]
+    assert _anchor_ifs9_response_has_authority(geometry, audit, materialized_at=cut_a.isoformat(), **scope)
+    assert _anchor_ifs9_response_has_authority(geometry, audit, materialized_at=clock[0].isoformat(), **scope)
+
+    body_c = body_b.replace(b'<td class="td1_normal_class">32</td>', b'<td class="td1_normal_class">33</td>', 1)
+    clock[0] = cut_a + timedelta(minutes=4)
+    _update_official(registry, official_body, claims, body_c, (cut_a + timedelta(minutes=3)).isoformat())
+    c = _archive(db)
+    assert c["facts"]["elevation_m"] == 33
+    assert ground.read_current_station_ground_evidence(db, city=scope["city"], decision_at=cut_a)["facts"]["elevation_m"] == 32
+    assert _anchor_ifs9_response_has_authority(geometry, audit, materialized_at=cut_a.isoformat(), **scope)
+    assert not _anchor_ifs9_response_has_authority(geometry, audit, materialized_at=clock[0].isoformat(), **scope)
+
+    metadata_c = OpenMeteoIfs9PrecisionMetadata(**producer._precision_metadata(
+        scope["city"], scope["target_date"], anchor_sigma_c=3., raw_payload_bytes=body_path.read_bytes(),
+    ))
+    bound_c = _bind_provider_geometry_identity(a, {}, anchor_metadata=metadata_c, decision_at=clock[0],
+        station_ground_evidence=c, anchor_raw_artifact=audit["anchor_raw_artifact"])
+    assert _anchor_ifs9_response_has_authority(bound_c.provider_geometry_evidence,
+        bound_c.provider_geometry_audit, materialized_at=clock[0].isoformat(), **scope)
+    forged = deepcopy(bound_c.provider_geometry_audit)
+    forged["anchor_station_ground"]["facts"]["elevation_m"] = 32
+    assert not _anchor_ifs9_response_has_authority(bound_c.provider_geometry_evidence,
+        forged, materialized_at=clock[0].isoformat(), **scope)
+    del forged["anchor_station_ground"]
+    assert not _anchor_ifs9_response_has_authority(bound_c.provider_geometry_evidence,
+        forged, materialized_at=clock[0].isoformat(), **scope)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize("legacy", (False, True))
 def test_frozen_ifs9_keeps_original_raw_identity_when_equal_value_body_is_recaptured(tmp_path, monkeypatch, metric, legacy):
     from src.data.replacement_current_value_serving import frozen_ifs9_response_has_authority, provider_geometry_projection

@@ -276,6 +276,9 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
             return False
         if not city or not target_date or metric not in ("high","low"):
             return False
+        ground_evidence = audit.get("anchor_station_ground")
+        if not isinstance(ground_evidence, Mapping):
+            return False
         artifact = audit["anchor_raw_artifact"]
         if not isinstance(artifact, Mapping):
             return False
@@ -351,7 +354,10 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
                   "grid_elevation_m", "station_elevation_m", "timezone_name", "native_grid", "delivery_grid_resolution", "temperature_unit")
         if any(anchor[key] != getattr(metadata, key) for key in fields):
             return False
-        return evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata, raw_payload_bytes=body, decision_at=decision).passable_for_live_materialization
+        return evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+            metadata, raw_payload_bytes=body, decision_at=decision,
+            station_ground_evidence=ground_evidence,
+        ).passable_for_live_materialization
     except (KeyError, IndexError, TypeError, ValueError, OSError, sqlite3.Error):
         return False
 
