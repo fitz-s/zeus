@@ -43,10 +43,10 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # revision (a provisional carrier that cannot compose fails closed rather than
 # fall back).
 DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = (
-    "day0_settlement_channel_revision_model_v33_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
+    "day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
 )
 DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
-    "day0_resolver_terminal_composition_v32_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
+    "day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
 )
 
 
@@ -99,9 +99,47 @@ DAY0_FINAL_DAILY_SETTLEMENT = "FINAL_DAILY_SETTLEMENT"
 DAY0_UNKNOWN_FINALITY = "UNKNOWN"
 DAY0_WU_FAST_RESIDUAL_SOURCE = "wu_api+same_station_fast_tail"
 DAY0_REMAINING_CENTER_POLICY = "unshifted_live_v1"
+DAY0_PROBABILITY_MIXTURE_POLICY = "unmixed_live_v1"
+DAY0_LEGACY_DIURNAL_FIELDS = (
+    "day0_diurnal_mixture", "day0_diurnal_mixture_status",
+    "day0_diurnal_mixture_weight", "day0_diurnal_mixture_k",
+    "day0_diurnal_mixture_anchor", "day0_diurnal_mixture_artifact",
+    "day0_diurnal_mixture_identity", "day0_diurnal_base_q",
+)
 DAY0_ABSORBING_FINALITIES = frozenset(
     {DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_FINAL_DAILY_SETTLEMENT}
 )
+
+
+def current_day0_probability_mixture_policy_has_authority(
+    provenance: object, *, edli: bool = False,
+) -> bool:
+    """Only a newly constructed carrier can assert current unmixed probability.
+
+    SCOPE: declared carriers and the exact legacy diurnal fields, not ordinary
+    Day0 telemetry. DRAIN: existing seed/cache rebuild. RESET: a new constructor
+    identity; numerical equality or a legacy zero weight cannot restamp a row.
+    """
+    if not isinstance(provenance, Mapping):
+        return False
+    prefix = "_edli_" if edli else ""
+    if any(prefix + field in provenance for field in DAY0_LEGACY_DIURNAL_FIELDS):
+        return False
+    policy_key = prefix + "day0_probability_mixture_policy"
+    if policy_key in provenance:
+        policy = provenance[policy_key]
+        return isinstance(policy, str) and policy == DAY0_PROBABILITY_MIXTURE_POLICY
+    identity_key = "_edli_day0_remaining_content_identity" if edli else "day0_remaining_carrier_content_identity"
+    shape = provenance.get("q_shape")
+    return not (
+        identity_key in provenance
+        or prefix + "day0_remaining_center_policy" in provenance
+        or isinstance(shape, str) and shape in {
+            "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2",
+            "day0_remaining_shared_carrier_v3", "day0_remaining_shared_carrier_resolver_v1",
+            "fused_day0_fast_residual_likelihood",
+        }
+    )
 
 
 def current_day0_remaining_center_policy_has_authority(

@@ -41,6 +41,8 @@ def test_hko_observation_clock_revision_does_not_relabel_old_certificates():
         "day0_resolver_terminal_composition_v30_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1",
         "day0_settlement_channel_revision_model_v32_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1",
         "day0_resolver_terminal_composition_v31_smooth_center_bias_observation_clock_city_instrument_native_boundary_v1",
+        "day0_settlement_channel_revision_model_v33_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1",
+        "day0_resolver_terminal_composition_v32_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1",
     ):
         old = f"day0-semrev:{previous}:immutable-entry-certificate"
         assert day0_probability_semantics_revision(old) != DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -51,11 +53,11 @@ def test_unshifted_joint_revision_preserves_clock_instrument_and_native_boundary
     from src.events import day0_authority as authority
 
     suffix = "observation_clock_city_instrument_native_boundary_v1"
-    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == f"day0_settlement_channel_revision_model_v33_unshifted_remaining_{suffix}"
-    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == f"day0_resolver_terminal_composition_v32_unshifted_remaining_{suffix}"
+    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == f"day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_{suffix}"
+    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == f"day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_{suffix}"
     for current_revision, previous_revision in (
-        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL, f"day0_settlement_channel_revision_model_v32_smooth_center_bias_{suffix}"),
-        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER, f"day0_resolver_terminal_composition_v31_smooth_center_bias_{suffix}"),
+        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL, f"day0_settlement_channel_revision_model_v33_unshifted_remaining_{suffix}"),
+        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER, f"day0_resolver_terminal_composition_v32_unshifted_remaining_{suffix}"),
     ):
         monkeypatch.setattr(authority, "DAY0_PROBABILITY_SEMANTICS_REVISION", current_revision)
         old = f"day0-semrev:{previous_revision}:immutable-source-certificate"
@@ -110,9 +112,47 @@ def test_partial_shared_carriers_still_require_current_unshifted_policy(partial)
     assert not current_day0_remaining_center_policy_has_authority(partial, edli=True)
 
 
+@pytest.mark.parametrize("edli", (False, True))
+@pytest.mark.parametrize("field", (
+    "day0_diurnal_mixture", "day0_diurnal_mixture_status", "day0_diurnal_mixture_weight",
+    "day0_diurnal_mixture_k", "day0_diurnal_mixture_anchor", "day0_diurnal_mixture_artifact",
+    "day0_diurnal_mixture_identity", "day0_diurnal_base_q",
+))
+@pytest.mark.parametrize("value", (None, 0.0, float("nan"), "artifact_unavailable"))
+def test_exact_old_diurnal_declarations_cannot_authorize_current_q(edli, field, value):
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_MIXTURE_POLICY, current_day0_probability_mixture_policy_has_authority,
+    )
+
+    prefix = "_edli_" if edli else ""
+    candidate = {prefix + "day0_probability_mixture_policy": DAY0_PROBABILITY_MIXTURE_POLICY}
+    assert current_day0_probability_mixture_policy_has_authority(candidate, edli=edli)
+    candidate[prefix + field] = value
+    assert not current_day0_probability_mixture_policy_has_authority(candidate, edli=edli)
+
+
+@pytest.mark.parametrize("edli", (False, True))
+@pytest.mark.parametrize("policy", (None, True, 0, "", "fitted_live_v1", "unmixed_live_v1"))
+def test_current_mixture_policy_is_explicit_and_ordinary_telemetry_is_not_a_carrier(edli, policy):
+    from src.events.day0_authority import current_day0_probability_mixture_policy_has_authority
+
+    prefix = "_edli_" if edli else ""
+    assert current_day0_probability_mixture_policy_has_authority({
+        prefix + "day0_diurnal_diagnostic": "offline-only",
+        prefix + "day0_process_sigma_native": 0.5,
+    }, edli=edli)
+    old_zero = {prefix + "day0_remaining_center_policy": "unshifted_live_v1"}
+    assert not current_day0_probability_mixture_policy_has_authority(old_zero, edli=edli)
+    candidate = {**old_zero, prefix + "day0_probability_mixture_policy": policy}
+    assert current_day0_probability_mixture_policy_has_authority(candidate, edli=edli) is (
+        policy == "unmixed_live_v1"
+    )
+
+
 @pytest.mark.parametrize("cache_kind", ("prepared_entry", "prepared_held", "prepared_exit", "ineligible"))
+@pytest.mark.parametrize("revision_kind", ("fast_route", "mixture_policy"))
 def test_fast_consumer_route_invalidates_both_process_caches_and_reuses_new_namespace(
-    monkeypatch, cache_kind,
+    monkeypatch, cache_kind, revision_kind,
 ):
     """Cache-mechanism proof only; canonical FAST authority is tested separately."""
     import hashlib
@@ -137,9 +177,16 @@ def test_fast_consumer_route_invalidates_both_process_caches_and_reuses_new_name
         cut = datetime(2026, 10, 1, 8, 25, tzinfo=UTC)
         databases = tuple((str(row[1]), f"memory:{id(conn)}")
                           for row in conn.execute("PRAGMA database_list"))
-        old_namespace = hashlib.sha256(
-            repr((cut.date().isoformat(), (databases,))).encode("utf-8")
-        ).hexdigest()
+        if revision_kind == "fast_route":
+            old_namespace = hashlib.sha256(
+                repr((cut.date().isoformat(), (databases,))).encode("utf-8")
+            ).hexdigest()
+        else:
+            from src.events import day0_authority as authority
+
+            with monkeypatch.context() as old_policy:
+                old_policy.setattr(authority, "DAY0_PROBABILITY_MIXTURE_POLICY", "fitted_diurnal_live_v1")
+                old_namespace = era._global_probability_family_cache_namespace((conn,), decision_time=cut)
         current_namespace = era._global_probability_family_cache_namespace(
             (conn,), decision_time=cut,
         )

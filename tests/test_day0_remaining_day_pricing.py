@@ -26,6 +26,8 @@ Contracts:
 """
 from __future__ import annotations
 
+from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
+
 import json
 import hashlib
 import sqlite3
@@ -459,8 +461,8 @@ def _assert_rebuilt_day0_held_token_binding(
 
     point = np.asarray(q, dtype=float)
     samples = np.asarray(payload["_edli_day0_remaining_probability_samples"], dtype=float)
-    # The served q now passes the diurnal finalizer after strict carrier replay.
-    # Keep shuffled HKO H/L and NOAA C/F coordinates bound across that seam too.
+    # Shuffled HKO H/L and NOAA C/F coordinates remain bound to the current
+    # carrier; an unrelated historical fitted artifact cannot transform them.
     from src.calibration import day0_diurnal_residual as diurnal
 
     city = runtime_cities_by_name()[family.city]
@@ -503,10 +505,6 @@ def _assert_rebuilt_day0_held_token_binding(
                     calibration_conn=conn, snapshot=snapshot, family=analysis_family,
                     native_costs={}, payload=dict(payload), decision_time=decision_time,
                 )
-                if active_mixture is not None:
-                    inner = analysis._bootstrap_probability_sampler.inner
-                    if isinstance(inner, era._Day0BootstrapSampler):
-                        assert inner.fallback_q == pytest.approx(q)
                 return analysis.p_posterior, analysis.forecast_yes_probability_sample_matrix(500)
             finally:
                 conn.close()
@@ -514,8 +512,8 @@ def _assert_rebuilt_day0_held_token_binding(
     base_point, base_samples = analyze(None)
     point, samples = analyze(mixture)
     assert base_point == pytest.approx(q)
-    assert point == pytest.approx(mixture.apply(base_point))
-    assert samples == pytest.approx(np.asarray([mixture.apply(row) for row in base_samples]))
+    assert point == pytest.approx(base_point)
+    assert samples == pytest.approx(base_samples)
     bindings = tuple(
         OutcomeTokenBinding(
             bin_id=candidate.bin.label,
@@ -2952,6 +2950,7 @@ def _serialize_unshifted_component_carrier(era, *, carrier, identity_inputs, pay
         "day0_remaining_carrier_probability_samples": carrier["samples"],
         "day0_remaining_carrier_sample_count": carrier["sample_count"],
         "day0_remaining_center_policy": identity_inputs["day0_remaining_center_policy"],
+        "day0_probability_mixture_policy": identity_inputs["day0_probability_mixture_policy"],
         "day0_remaining_center_bias_c": 0.0}
     conditioning = era._day0_replacement_conditioning(
         SimpleNamespace(provenance_json=provenance), provisional=True,
@@ -2960,6 +2959,7 @@ def _serialize_unshifted_component_carrier(era, *, carrier, identity_inputs, pay
     assert conditioning["day0_remaining_carrier_q"] == carrier["q"]
     assert conditioning["day0_remaining_carrier_probability_samples"] == carrier["samples"]
     payload.update(_edli_day0_remaining_center_policy=conditioning["day0_remaining_center_policy"],
+        _edli_day0_probability_mixture_policy=conditioning["day0_probability_mixture_policy"],
         _edli_day0_remaining_center_bias_c=conditioning["day0_remaining_center_bias_c"])
 
 
@@ -3031,6 +3031,7 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator
             preliminary_survival_identity=str(likelihood["identity_hash"]),
         )
         identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+        identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
         if conditional_high:
             identity_inputs["current_path_state"] = {
                 "value_native": 33.0, "observed_at_utc": cutoff,
@@ -3451,6 +3452,7 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
         decision_time_utc=cutoff, station_id="HKO",
         preliminary_survival_identity=str(likelihood["identity_hash"]))
     identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+    identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
     expected = build_day0_remaining_probability_carrier(
         future_extremes_c=future,
         final_extreme_centers_c=final_centers,
@@ -4269,6 +4271,7 @@ def _current_fast_source_bundle(*, unit, metric):
         decision_time_utc=cut.isoformat(),station_id=city.wu_station,
         preliminary_survival_identity=likelihood["identity_hash"])
     identity.update(current_path_state=state,day0_remaining_center_policy=DAY0_REMAINING_CENTER_POLICY)
+    identity["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
     future = (28.0,29.0,30.0,31.0)
     carrier = build_day0_remaining_probability_carrier(
         future_extremes_c=tuple(v*scale+offset for v in future),boundary_scenarios=((None,1.0),),
@@ -4290,6 +4293,7 @@ def _current_fast_source_bundle(*, unit, metric):
         "day0_remaining_carrier_path_error_sigma_c":.4,
         "day0_remaining_carrier_probability_cutoff_utc":cut.isoformat(),
         "day0_remaining_center_policy":DAY0_REMAINING_CENTER_POLICY,
+        "day0_probability_mixture_policy":identity["day0_probability_mixture_policy"],
         "day0_remaining_center_bias_c":0.0,"day0_current_temperature_state":state,
         "bin_topology":topology}
     assert _wu_fast_pinned_carrier_reason(provenance,city=city.name,
@@ -4625,6 +4629,7 @@ def test_wu_fast_source_clock_carrier_replays_at_later_monitor_cut(metric):
     )
     identity_inputs["current_path_state"] = current_state
     identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+    identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
     carrier = build_day0_remaining_probability_carrier(
         future_extremes_c=future,
         boundary_scenarios=((None, 1.0),),
@@ -4658,6 +4663,7 @@ def test_wu_fast_source_clock_carrier_replays_at_later_monitor_cut(metric):
         "_edli_day0_remaining_carrier_future_extremes_c": list(future),
         "_edli_day0_remaining_carrier_path_error_sigma_c": 0.4,
         "_edli_day0_remaining_center_policy": identity_inputs["day0_remaining_center_policy"],
+        "_edli_day0_probability_mixture_policy": identity_inputs["day0_probability_mixture_policy"],
         "_edli_day0_remaining_center_bias_c": 0.0,
         "_edli_day0_current_temperature_native": current_state["value_native"],
         "_edli_day0_current_temperature_observed_at_utc": current_state["observed_at_utc"],
@@ -5992,6 +5998,7 @@ def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units(
         decision_time_utc=cutoff, station_id="KATL",
         preliminary_survival_identity=str(likelihood["identity_hash"]))
     identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+    identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
     try:
         expected = build_day0_remaining_probability_carrier(
             future_extremes_c=future_f,
@@ -7826,20 +7833,21 @@ def test_day0_high_signal_seed_is_prefix_stable_when_mc_count_changes():
     )
 
 
-def test_reactor_day0_q_and_every_draw_carry_the_diurnal_mixture(monkeypatch):
-    """The reactor's Day0 action q is the SAME operator the materializer applies:
-    M(base) on the point AND on every bootstrap row; the mixture is stamped."""
+@pytest.mark.parametrize("city_name", ("Paris", "Atlanta"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_reactor_day0_q_and_every_draw_ignore_fitted_diurnal_artifact(monkeypatch, city_name, metric):
+    """A historical fitted artifact cannot change a live point or bootstrap row."""
     import src.engine.event_reactor_adapter as era
     from src.calibration import day0_diurnal_residual as diurnal
 
-    bins = [
-        Bin(low=None, high=31, label="31C or below", unit="C"),
-        Bin(low=32, high=32, label="32C", unit="C"),
-        Bin(low=33, high=None, label="33C or above", unit="C"),
-    ]
+    city = runtime_cities_by_name()[city_name]
+    unit = city.settlement_unit
+    scale, offset = (1.0, 0.0) if unit == "C" else (1.8, 32.0)
+    bounds = ((None, 31), (32, 32), (33, None)) if unit == "C" else ((None, 89), (90, 91), (92, None))
+    bins = [Bin(low, high, unit, f"bin-{i}") for i, (low, high) in enumerate(bounds)]
     family = SimpleNamespace(
-        city="Paris", metric="high", target_date="2026-07-27",
-        event_type="DAY0_EXTREME_UPDATED", family_id="Paris|2026-07-27|high", bins=bins,
+        city=city_name, metric=metric, target_date="2026-07-27",
+        event_type="DAY0_EXTREME_UPDATED", family_id=f"{city_name}|2026-07-27|{metric}", bins=bins,
     )
     family.candidates = [
         SimpleNamespace(condition_id=f"condition-{i}", bin=b, yes_token_id=f"yes-{i}", no_token_id=f"no-{i}")
@@ -7850,17 +7858,19 @@ def test_reactor_day0_q_and_every_draw_carry_the_diurnal_mixture(monkeypatch):
         for i in range(3) for side in ("buy_yes", "buy_no")
     }
     snapshot = {
-        "settlement_unit": "C", "temperature_metric": "high", "members_json": "[31.6, 31.8, 32.1]",
+        "settlement_unit": unit, "temperature_metric": metric,
+        "members_json": json.dumps((np.asarray([31.6, 31.8, 32.1]) * scale + offset).tolist()),
         "members_precision": 1.0, "source_id": "test", "issue_time": "2026-07-27T00:00:00+00:00",
         "dataset_id": "test_v1", "data_version": "test_v1",
     }
     payload = {
-        "metric": "high", "rounded_value": 30, "observation_time": "2026-07-27T01:00:00+00:00",
+        "metric": metric, "rounded_value": (30 if metric == "high" else 34) * scale + offset,
+        "observation_time": "2026-07-27T01:00:00+00:00",
         "_edli_day0_remaining_model_names": ["ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"],
     }
     monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
     monkeypatch.setattr(era, "_day0_remaining_day_members",
-                        lambda **_kwargs: np.asarray([32.1, 31.8, 31.6], dtype=float))
+                        lambda **_kwargs: np.asarray([32.1, 31.8, 31.6], dtype=float) * scale + offset)
     mixture = diurnal.Day0DiurnalMixture(
         weight=0.4, pi=(0.2, 0.3, 0.5), dead=(False, False, False), k=1,
         anchor=30.0, fit_date="2026-07-26", artifact="test",
@@ -7876,7 +7886,7 @@ def test_reactor_day0_q_and_every_draw_carry_the_diurnal_mixture(monkeypatch):
         return m, m.provenance()
 
     monkeypatch.setattr(diurnal, "day0_diurnal_mixture", serve)
-    decision_time = datetime(2026, 7, 27, 1, 5, 42, tzinfo=UTC)
+    decision_time = datetime(2026, 7, 27, 12, 5, 42, tzinfo=UTC)
 
     def analyze():
         threaded = dict(payload)
@@ -7890,15 +7900,11 @@ def test_reactor_day0_q_and_every_draw_carry_the_diurnal_mixture(monkeypatch):
     served["mixture"] = mixture
     mixed_q, mixed_samples, mixed_payload = analyze()
 
-    assert not np.allclose(mixed_q, base_q)
-    assert np.allclose(mixed_q, mixture.apply(base_q), atol=1e-12)
-    assert np.allclose(mixed_samples, [mixture.apply(row) for row in base_samples], atol=1e-12)
+    assert np.array_equal(mixed_q, base_q)
+    assert np.array_equal(mixed_samples, base_samples)
     assert "_edli_day0_diurnal_mixture" not in base_payload
-    assert mixed_payload["_edli_day0_diurnal_mixture"] == mixture.to_payload()
-    # One lookup, fed the probability boundary, native bounds and the minute-cut clock.
-    assert seen["running_extreme"] == 30.0
-    assert seen["bin_bounds"] == [(None, 31.0), (32.0, 32.0), (33.0, None)]
-    assert seen["decision_time"] == decision_time.replace(second=0)
+    assert "_edli_day0_diurnal_mixture" not in mixed_payload
+    assert seen == {}, "live q construction must not read the fitted artifact"
 
 
 @pytest.mark.parametrize("batch", (False, True))
@@ -7915,8 +7921,8 @@ def test_diurnal_draw_equal_to_mixed_point_is_still_transformed(batch):
         p_cal=np.asarray(mixture.apply((0.0, 1.0))), _rng=np.random.default_rng(1),
     )
     inner = era._Day0CarrierRowSampler(rows=np.asarray([[0.5, 0.5], [0.5, 0.5]]))
-    sampler = era._Day0DiurnalMixedSampler(inner=inner, mixture=mixture)
-    result = sampler.sample_matrix(analysis, 2, 2) if batch else sampler(analysis, 2)
+    raw = inner.sample_matrix(analysis, 2, 2) if batch else inner(analysis, 2)
+    result = [mixture.apply(row) for row in raw] if batch else mixture.apply(raw)
     expected = [[0.75, 0.25], [0.75, 0.25]] if batch else [0.75, 0.25]
     assert np.asarray(result) == pytest.approx(np.asarray(expected))
 
@@ -8045,14 +8051,10 @@ def test_post_local_day_held_monitor_does_not_mix_next_days_diurnal_cell(
         active["nowcast"] = nowcast
         probability, refreshed, fresh = refresh()
         assert base_fresh is True and fresh is True
-        if minute_from_midnight < 0:
-            assert era.DAY0_DIURNAL_MIXTURE_KEY in seen["payload"]
-            assert seen["payload"]["_edli_day0_diurnal_mixture_status"] == diurnal.APPLIED
-        else:
-            assert probability == pytest.approx(base_probability)
-            assert seen["samples"] == pytest.approx(base_samples)
-            assert era.DAY0_DIURNAL_MIXTURE_KEY not in seen["payload"]
-            assert seen["payload"]["_edli_day0_diurnal_mixture_status"] == diurnal.NOT_APPLICABLE
+        assert probability == pytest.approx(base_probability)
+        assert seen["samples"] == pytest.approx(base_samples)
+        assert "_edli_day0_diurnal_mixture" not in seen["payload"]
+        assert "_edli_day0_diurnal_mixture_status" not in seen["payload"]
         assert getattr(refreshed, monitor._MONITOR_PROBABILITY_FRESH_ATTR) is True
     finally:
         conn.close()
@@ -8078,8 +8080,8 @@ def test_diurnal_degenerate_bootstrap_uses_explicit_raw_fallback_once(batch):
         bins=[Bin(30, 30, "C", "30C"), Bin(31, 31, "C", "31C")],
         _settle=lambda values: np.asarray(values),
     )
-    sampler = era._Day0DiurnalMixedSampler(inner=inner, mixture=mixture)
-    result = sampler.sample_matrix(analysis, 2, 1) if batch else sampler(analysis, 1)
+    raw = inner.sample_matrix(analysis, 2, 1) if batch else inner(analysis, 1)
+    result = [mixture.apply(row) for row in raw] if batch else mixture.apply(raw)
     expected = [[0.5, 0.5], [0.5, 0.5]] if batch else [0.5, 0.5]
     assert np.asarray(result) == pytest.approx(np.asarray(expected))
 
@@ -11429,6 +11431,7 @@ class TestRemainingDayMembers:
                 decision_time_utc=observed_at, station_id="EDDM",
                 preliminary_survival_identity=qualified.likelihood.identity_hash),
                 "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+                "day0_probability_mixture_policy": DAY0_PROBABILITY_MIXTURE_POLICY,
                 "current_path_state": {"value_native": current.temp_c,
                     "observed_at_utc": observed_at, "source": "aviationweather_metar"}},
             settlement_semantics=semantics)
@@ -11480,6 +11483,7 @@ class TestRemainingDayMembers:
             "_edli_day0_remaining_carrier_future_extremes_c": [30.0, 30.0, 30.0],
             "_edli_day0_remaining_carrier_path_error_sigma_c": 0.0,
             "_edli_day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+            "_edli_day0_probability_mixture_policy": DAY0_PROBABILITY_MIXTURE_POLICY,
             "_edli_day0_remaining_center_bias_c": 0.0,
             "_edli_day0_current_temperature_native": current.temp_c,
             "_edli_day0_current_temperature_observed_at_utc": observed_at,

@@ -515,6 +515,10 @@ def _current_evidence_shape_has_probability_authority(
 
     if not current_day0_remaining_center_policy_has_authority(provenance):
         return False
+    from src.events.day0_authority import current_day0_probability_mixture_policy_has_authority
+
+    if not current_day0_probability_mixture_policy_has_authority(provenance):
+        return False
     if fast_residual_carrier_authority_reason(provenance, city=city, target_date=target_date,
         metric=metric, materialized_at=materialized_at) is not None:
         return False
@@ -847,6 +851,24 @@ def tradeable_grade_coverage_sql(
         "'fused_day0_fast_residual_likelihood')) OR ("
         f"{policy_type} = 'text' AND {policy_value} = '{DAY0_REMAINING_CENTER_POLICY}' AND "
         f"{bias_type} IN ('integer', 'real') AND {bias_value} = 0))"
+    )
+    from src.events.day0_authority import (
+        DAY0_LEGACY_DIURNAL_FIELDS, DAY0_PROBABILITY_MIXTURE_POLICY,
+    )
+
+    mixture_policy_type = f"json_type({provenance_expr}, '$.day0_probability_mixture_policy')"
+    mixture_policy_value = f"json_extract({provenance_expr}, '$.day0_probability_mixture_policy')"
+    fragments.extend(
+        f"AND json_type({provenance_expr}, '$.{field}') IS NULL"
+        for field in DAY0_LEGACY_DIURNAL_FIELDS
+    )
+    fragments.append(
+        f"AND (({mixture_policy_type} IS NULL AND {carrier_identity_type} IS NULL "
+        f"AND {policy_type} IS NULL AND COALESCE({carrier_shape_value}, '') NOT IN ("
+        "'day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', "
+        "'day0_remaining_shared_carrier_v3', 'day0_remaining_shared_carrier_resolver_v1', "
+        "'fused_day0_fast_residual_likelihood')) OR ("
+        f"{mixture_policy_type} = 'text' AND {mixture_policy_value} = '{DAY0_PROBABILITY_MIXTURE_POLICY}'))"
     )
     return "\n              ".join(fragments)
 

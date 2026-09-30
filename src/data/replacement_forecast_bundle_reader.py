@@ -106,6 +106,10 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
 
     if not current_day0_remaining_center_policy_has_authority(provenance):
         return "REPLACEMENT_DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT"
+    from src.events.day0_authority import current_day0_probability_mixture_policy_has_authority
+
+    if not current_day0_probability_mixture_policy_has_authority(provenance):
+        return "REPLACEMENT_DAY0_PROBABILITY_MIXTURE_POLICY_NOT_CURRENT"
     identity_field = "day0_remaining_carrier_content_identity"
     operator_field = "day0_remaining_carrier_operator"
     has_identity = identity_field in provenance
@@ -427,6 +431,10 @@ def _wu_fast_pinned_carrier_reason(
 
     if not current_day0_remaining_center_policy_has_authority(provenance):
         return "REPLACEMENT_DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT"
+    from src.events.day0_authority import current_day0_probability_mixture_policy_has_authority
+
+    if not current_day0_probability_mixture_policy_has_authority(provenance):
+        return "REPLACEMENT_DAY0_PROBABILITY_MIXTURE_POLICY_NOT_CURRENT"
     # SCOPE: this held family's exact pinned WU-fast posterior. DRAIN: normal
     # materialization writes a new source-bound posterior if this immutable row
     # is incomplete. RESET: a nested likelihood and full carrier that this
@@ -507,6 +515,9 @@ def _wu_fast_pinned_carrier_reason(
         from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
 
         identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+        from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
+
+        identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
         conditional_identity = provenance.get("day0_conditional_high_shape_identity")
         conditional_witness = provenance.get("day0_conditional_high_shape_witness")
         conditional_basis = provenance.get("day0_remaining_variance_basis")

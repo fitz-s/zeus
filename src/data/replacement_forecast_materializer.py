@@ -1612,6 +1612,9 @@ def _day0_noaa_preliminary_carrier(
     )
     identity_inputs["current_path_state"] = current_state.identity()
     identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+    from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
+
+    identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
     if conditional_high_shape_identity is not None:
         identity_inputs["conditional_high_shape_identity"] = (
             conditional_high_shape_identity
@@ -6696,84 +6699,6 @@ def served_settlement_log_probability(
     return math.log(max(float(p), 1e-300))
 
 
-def _day0_diurnal_mixture_for_request(
-    request: "ReplacementForecastMaterializeRequest",
-    *,
-    metric: str,
-    observed_extreme_c: float | None,
-):
-    """The served Day0 diurnal-residual mixture for this family, plus provenance.
-
-    Bounds and the observed extreme move to native settlement degrees here; the
-    city's settlement rounding places the anchor. The reactor calls the same
-    ``day0_diurnal_mixture`` with the same inputs, so ENTRY and the posterior
-    agree on the evidence.
-    """
-    from src.calibration.day0_diurnal_residual import day0_diurnal_mixture  # noqa: PLC0415
-    from src.config import runtime_cities_by_name  # noqa: PLC0415
-    from src.contracts.settlement_semantics import SettlementSemantics  # noqa: PLC0415
-
-    city = runtime_cities_by_name().get(request.city)
-    if city is None:
-        return None, {"day0_diurnal_mixture_status": "not_applicable"}
-    unit = str(city.settlement_unit).strip().upper()
-    scale, offset = (1.0, 0.0) if unit == "C" else (9.0 / 5.0, 32.0)
-
-    def native(value):
-        return None if value is None else float(value) * scale + offset
-
-    return day0_diurnal_mixture(
-        city=request.city,
-        metric=metric,
-        unit=unit,
-        decision_time=_to_utc(request.computed_at, field_name="computed_at"),
-        timezone_name=request.city_timezone,
-        running_extreme=native(observed_extreme_c),
-        bin_bounds=[
-            (native(getattr(item, "lower_c", None)), native(getattr(item, "upper_c", None)))
-            for item in request.bins
-        ],
-        round_to_grid=SettlementSemantics.for_city(city).round_single,
-    )
-
-
-def _apply_day0_diurnal_mixture(
-    mixture,
-    *,
-    bins: Sequence[object],
-    q: Mapping[str, float],
-    q_samples_by_bin: Mapping[str, Sequence[float]],
-) -> tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, list[float]]]:
-    """Mix the point simplex and EVERY draw row; rebuild the bounds from the mixed draws.
-
-    Bounds do not commute with the mixture, so q_lcb/q_ucb are recomputed from the
-    transformed rows with the same rule the shared carrier uses.
-    """
-    import numpy as np  # noqa: PLC0415
-
-    order = [str(item.bin_id) for item in bins]
-    point = mixture.apply([float(q[bin_id]) for bin_id in order])
-    columns = [list(q_samples_by_bin[bin_id]) for bin_id in order]
-    rows = [mixture.apply(row) for row in zip(*columns)]
-    mixed_q = dict(zip(order, point))
-    mixed_samples = {
-        bin_id: [float(row[index]) for row in rows] for index, bin_id in enumerate(order)
-    }
-    q_lcb: dict[str, float] = {}
-    q_ucb: dict[str, float] = {}
-    for bin_id in order:
-        draws = mixed_samples[bin_id]
-        q_point = mixed_q[bin_id]
-        low = float(np.percentile(draws, 5.0))
-        q_lcb[bin_id] = (
-            _finite_draw_lower_bound(draws, q_point=q_point)
-            if low > q_point
-            else min(max(low, 0.0), q_point)
-        )
-        q_ucb[bin_id] = max(float(np.percentile(draws, 95.0)), q_point)
-    return mixed_q, q_lcb, q_ucb, mixed_samples
-
-
 def _finite_draw_lower_bound(samples, *, q_point: float) -> float:
     """A 95 % lower bound that still has resolution when the 5th percentile has none.
 
@@ -7211,8 +7136,6 @@ def _compute_posterior_payload(
     _day0_shared_carrier_station_extremes: tuple[dict[str, object], ...] = ()
     _day0_conditional_high_shape: object | None = None
     _day0_remaining_bias_provenance: dict[str, object] = {}
-    _day0_diurnal_provenance: dict[str, object] = {}
-    _day0_diurnal_base_q: dict[str, float] | None = None
     _day0_shared_carrier_error: str | None = None
     _provisional_extreme_c: float | None = None
     from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
@@ -7918,47 +7841,6 @@ def _compute_posterior_payload(
                         if float(q.get(_bid, 1.0)) < FAR_TAIL_Q_POINT_THRESH
                         and _lcb <= FAR_TAIL_LCB_FLOOR + 1e-12
                     )
-            # DAY0 DIURNAL-RESIDUAL MIXTURE (authority §1e). Every Day0 route has its
-            # final q and draws here. The station residual enters the live bins of the
-            # point row AND every draw row through one pure operator; the base q is
-            # persisted so the weight refit never fits on its own output.
-            _day0_mixture_extreme_c = (
-                _day0_obs_extreme_c
-                if _day0_obs_extreme_c is not None
-                else _provisional_extreme_c
-            )
-            if _day0_mixture_extreme_c is not None and _target_local_day_is_open(request):
-                _day0_mixture, _day0_diurnal_provenance = _day0_diurnal_mixture_for_request(
-                    request, metric=metric, observed_extreme_c=_day0_mixture_extreme_c,
-                )
-                if (
-                    _day0_mixture is not None
-                    and _day0_mixture.weight > 0.0
-                    and q_bootstrap_samples_by_bin is not None
-                    and q_lcb_map is not None
-                    and q_ucb_map is not None
-                ):
-                    _day0_diurnal_base_q = {key: float(value) for key, value in q.items()}
-                    q, q_lcb_map, q_ucb_map, q_bootstrap_samples_by_bin = (
-                        _apply_day0_diurnal_mixture(
-                            _day0_mixture,
-                            bins=request.bins,
-                            q=q,
-                            q_samples_by_bin=q_bootstrap_samples_by_bin,
-                        )
-                    )
-                    if _finite_evidence_member_count is None:
-                        _far_tail_honesty_count = sum(
-                            1
-                            for _bid, _lcb in q_lcb_map.items()
-                            if float(q.get(_bid, 1.0)) < FAR_TAIL_Q_POINT_THRESH
-                            and _lcb <= FAR_TAIL_LCB_FLOOR + 1e-12
-                        )
-                elif _day0_mixture is not None:
-                    _day0_diurnal_provenance = {
-                        "day0_diurnal_mixture_status": _day0_mixture.status,
-                        "day0_diurnal_mixture_artifact": _day0_mixture.artifact,
-                    }
             # FIX 1 — FULL vs PARTIAL. The fused Normal is the constructed shape either way (so the
             # live gate admits both); PARTIAL records a degraded fusion (the K3 decorrelated-provider
             # set was INCOMPLETE — reuses the override's verdict, not a parallel check). Wave-2 item 6
@@ -8007,8 +7889,6 @@ def _compute_posterior_payload(
             _center_debias_param_hash = None
             _center_debias_training_cutoff = None
             _day0_shared_carrier_error = str(_exc)
-            _day0_diurnal_provenance = {}
-            _day0_diurnal_base_q = None
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
@@ -8086,10 +7966,17 @@ def _compute_posterior_payload(
         "anchor_sigma_c": float(request.anchor_sigma_c),
         "settlement_step_c": float(request.settlement_step_c),
     }
-    if _day0_diurnal_provenance.get("day0_diurnal_mixture_identity"):
-        posterior_config["day0_diurnal_mixture_identity"] = _day0_diurnal_provenance[
-            "day0_diurnal_mixture_identity"
-        ]
+    from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
+
+    day0_mixture_policy = (
+        DAY0_PROBABILITY_MIXTURE_POLICY
+        if _day0_shared_carrier is not None or (
+            _target_local_day_is_open(request)
+            and (_day0_obs_extreme_c is not None or _provisional_extreme_c is not None)
+        ) else None
+    )
+    if day0_mixture_policy is not None:
+        posterior_config["day0_probability_mixture_policy"] = day0_mixture_policy
     if (
         request.day0_observation_state
         == DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
@@ -8311,13 +8198,8 @@ def _compute_posterior_payload(
         "openmeteo_precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
         "q_point_json_role": "live_point_probability",
         "q_shape": q_shape,
-        # Day0 diurnal-residual mixture (authority §1e): its identity and inputs,
-        # plus the BASE q the weight refit reads so it never fits on mixed q.
-        **_day0_diurnal_provenance,
-        **(
-            {"day0_diurnal_base_q": _day0_diurnal_base_q}
-            if _day0_diurnal_base_q is not None else {}
-        ),
+        **({"day0_probability_mixture_policy": day0_mixture_policy}
+           if day0_mixture_policy is not None else {}),
         **(
             {
                 "day0_remaining_carrier_content_identity": str(
@@ -8355,7 +8237,6 @@ def _compute_posterior_payload(
                         ],
                     }
                     if _fast_residual_likelihood_payload is not None
-                    or _day0_diurnal_base_q is not None
                     else {}
                 ),
                 "day0_remaining_carrier_future_extremes_c": [

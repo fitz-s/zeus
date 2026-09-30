@@ -3028,6 +3028,13 @@ def _blocked_attempt_fingerprint(
                 declares_fast_residual_carrier, fast_residual_coverage_dependency,
             )
             from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+            from src.config import runtime_cities_by_name
+            from zoneinfo import ZoneInfo
+
+            city_obj = runtime_cities_by_name().get(scope[0])
+            day0_mixture_scope = city_obj is not None and (
+                computed_at.astimezone(ZoneInfo(city_obj.timezone)).date().isoformat() == scope[1]
+            )
 
             fast_declared = declares_fast_residual_carrier(payload) or (
                 payload.get("day0_observed_extreme_source") == DAY0_WU_FAST_RESIDUAL_SOURCE
@@ -3050,7 +3057,14 @@ def _blocked_attempt_fingerprint(
                     ORDER BY computed_at DESC, posterior_id DESC LIMIT 1
                     """, params).fetchone()
                 if row is not None:
-                    fast_declared |= declares_fast_residual_carrier(json.loads(row[0]))
+                    previous_provenance = json.loads(row[0])
+                    fast_declared |= declares_fast_residual_carrier(previous_provenance)
+                    from src.events.day0_authority import DAY0_LEGACY_DIURNAL_FIELDS
+
+                    day0_mixture_scope |= any(key in previous_provenance for key in (
+                        *DAY0_LEGACY_DIURNAL_FIELDS, "day0_remaining_center_policy",
+                        "day0_probability_mixture_policy",
+                    ))
             fast_coverage_dependency = (
                 fast_residual_coverage_dependency(city=scope[0], target_date=scope[1])
                 if fast_declared else None
@@ -3186,7 +3200,9 @@ def _blocked_attempt_fingerprint(
             logic_revisions[path.name] = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             logic_revisions[path.name] = None
-    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_MIXTURE_POLICY, DAY0_REMAINING_CENTER_POLICY,
+    )
 
     identity = {
             "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
@@ -3213,6 +3229,8 @@ def _blocked_attempt_fingerprint(
     # Ordinary families acquire no unrelated source-policy fingerprint field.
     if fast_coverage_dependency is not None:
         identity["fast_residual_coverage"] = fast_coverage_dependency
+    if day0_mixture_scope:
+        identity["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
     canonical = json.dumps(
         identity,
         sort_keys=True,

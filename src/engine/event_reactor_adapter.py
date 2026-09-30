@@ -1288,6 +1288,7 @@ def _global_probability_family_cache_namespace(
 ) -> str | None:
     if decision_time.tzinfo is None:
         return None
+    from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
     identities = []
     for conn in connections:
         try:
@@ -1312,6 +1313,7 @@ def _global_probability_family_cache_namespace(
                 decision_time.astimezone(UTC).date().isoformat(),
                 tuple(identities),
                 _DAY0_FAST_CARRIER_CONSUMER_ROUTE_REVISION,
+                DAY0_PROBABILITY_MIXTURE_POLICY,
             )
         ).encode("utf-8")
     ).hexdigest()
@@ -37689,6 +37691,7 @@ def _day0_replacement_conditioning(
                 "day0_remaining_carrier_path_error_sigma_c",
                 "day0_remaining_center_bias_c",
                 "day0_remaining_center_policy",
+                "day0_probability_mixture_policy",
                 "day0_remaining_bias_status",
                 "day0_remaining_bias_artifact",
                 "day0_remaining_carrier_probability_cutoff_utc",
@@ -39018,6 +39021,7 @@ def _global_day0_execution_payload(
             "day0_remaining_carrier_path_error_sigma_c": "_edli_day0_remaining_carrier_path_error_sigma_c",
             "day0_remaining_center_bias_c": "_edli_day0_remaining_center_bias_c",
             "day0_remaining_center_policy": "_edli_day0_remaining_center_policy",
+            "day0_probability_mixture_policy": "_edli_day0_probability_mixture_policy",
             "day0_remaining_bias_status": "_edli_day0_remaining_bias_status",
             "day0_remaining_bias_artifact": "_edli_day0_remaining_bias_artifact",
             "day0_remaining_carrier_probability_cutoff_utc": "_edli_day0_remaining_carrier_probability_cutoff_utc",
@@ -39210,6 +39214,7 @@ def _global_day0_probability_authority_payload(
             ),
             ("remaining_center_bias_c", "_edli_day0_remaining_center_bias_c"),
             ("remaining_center_policy", "_edli_day0_remaining_center_policy"),
+            ("probability_mixture_policy", "_edli_day0_probability_mixture_policy"),
             ("remaining_bias_status", "_edli_day0_remaining_bias_status"),
             ("remaining_bias_artifact", "_edli_day0_remaining_bias_artifact"),
             (
@@ -42809,6 +42814,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_carrier_path_error_sigma_c",
             "_edli_day0_remaining_center_bias_c",
             "_edli_day0_remaining_center_policy",
+            "_edli_day0_probability_mixture_policy",
             "_edli_day0_remaining_bias_status",
             "_edli_day0_remaining_bias_artifact",
             "_edli_day0_remaining_carrier_probability_cutoff_utc",
@@ -45284,97 +45290,6 @@ def _day0_extra_member_sigma_native(
     return extra if extra > 0.0 and np.isfinite(extra) else 0.0
 
 
-DAY0_DIURNAL_MIXTURE_KEY = "_edli_day0_diurnal_mixture"
-
-
-def _day0_diurnal_mixture_for_family(
-    *,
-    payload: dict[str, object],
-    family,
-    city,
-    unit: str,
-    probability_time: "datetime | None",
-):
-    """The served Day0 diurnal-residual mixture for this family, or None.
-
-    The same lookup the materializer uses (``day0_diurnal_mixture``), fed this
-    decision's current probability boundary, native bin bounds and minute-cut
-    probability clock, so ENTRY, held redecision and submit reproduction build the
-    identical operator. Its payload is stamped for provenance and replay.
-    """
-
-    from src.calibration.day0_diurnal_residual import day0_diurnal_mixture
-
-    metric = str(getattr(family, "metric", "") or "").strip().lower()
-    if probability_time is None or metric not in {"high", "low"}:
-        return None
-    # Fitted residuals describe hours inside the target local day. Held tail
-    # redecision continues after midnight, but tomorrow's clock hour cannot
-    # select yesterday's diurnal cell (the materializer applies the same scope).
-    if (
-        probability_time.astimezone(ZoneInfo(str(city.timezone))).date().isoformat()
-        != str(getattr(family, "target_date", "") or "")
-    ):
-        payload["_edli_day0_diurnal_mixture_status"] = "not_applicable"
-        payload.pop(DAY0_DIURNAL_MIXTURE_KEY, None)
-        return None
-    mixture, provenance = day0_diurnal_mixture(
-        city=str(getattr(city, "name", "") or family.city),
-        metric=metric,
-        unit=str(unit or "").strip().upper(),
-        decision_time=probability_time,
-        timezone_name=str(getattr(city, "timezone", "") or ""),
-        running_extreme=_day0_probability_boundary_native(payload, metric, city=city, unit=unit),
-        bin_bounds=[
-            (
-                None if bin_.low is None else float(bin_.low),
-                None if bin_.high is None else float(bin_.high),
-            )
-            for bin_ in family.bins
-        ],
-        round_to_grid=SettlementSemantics.for_city(city).round_single,
-    )
-    payload["_edli_day0_diurnal_mixture_status"] = provenance[
-        "day0_diurnal_mixture_status"
-    ]
-    if mixture is None or mixture.weight <= 0.0:
-        payload.pop(DAY0_DIURNAL_MIXTURE_KEY, None)
-        return None
-    payload[DAY0_DIURNAL_MIXTURE_KEY] = mixture.to_payload()
-    return mixture
-
-
-@dataclass(frozen=True)
-class _Day0DiurnalMixedSampler:
-    """Every bootstrap row through the same diurnal-residual operator as the point q.
-
-    The inner sampler carries an explicit unmixed fallback. Numerical equality
-    with the mixed point cannot establish whether a draw has been transformed.
-    """
-
-    inner: object
-    mixture: object
-
-    def _mix(self, analysis, row) -> np.ndarray:
-        row = np.asarray(row, dtype=float)
-        return np.asarray(self.mixture.apply(row), dtype=float)
-
-    def __call__(self, analysis, n_members):
-        return self._mix(analysis, self.inner(analysis, n_members))
-
-    def sample_matrix(self, analysis, n_samples: int, n_members: int) -> np.ndarray:
-        batch = getattr(self.inner, "sample_matrix", None)
-        rows = (
-            batch(analysis, n_samples, n_members)
-            if callable(batch)
-            else np.asarray(
-                [self.inner(analysis, n_members) for _ in range(max(0, int(n_samples)))],
-                dtype=float,
-            )
-        )
-        return np.asarray([self._mix(analysis, row) for row in rows], dtype=np.float64)
-
-
 @dataclass(frozen=True)
 class _Day0BootstrapSampler:
     members: np.ndarray
@@ -45869,6 +45784,10 @@ def _market_analysis_from_event_snapshot(
             bins=bins,
         )
     day0_probability_time = _day0_probability_clock(decision_time) if is_day0 else decision_time
+    from src.events.day0_authority import current_day0_probability_mixture_policy_has_authority
+
+    if not current_day0_probability_mixture_policy_has_authority(payload, edli=True):
+        raise ValueError("DAY0_PROBABILITY_MIXTURE_POLICY_NOT_CURRENT")
     # === ONE-CALIBRATOR SEAM (#110 / ELEVATION S2) ===========================================
     # When EMOS serves this (city, season) cell, the traded distribution IS
     # the EMOS predictive N(mu, sigma): point p_cal = analytic q_vec; the q_lcb bootstrap draws
@@ -45876,8 +45795,6 @@ def _market_analysis_from_event_snapshot(
     # the former mean-correction maze into a single calibrator.
     _emos_q = None
     _emos_sampler = None
-    _day0_mixture = None
-    _day0_unmixed_q = None
     # ONE-CALIBRATOR REGIME (#110 universal, operator 2026-06-05): for non-day0 cells, the cell
     # is served by EXACTLY one of {EMOS predictive, do-no-harm-VALIDATED honest raw N(xbar,S^2)};
     # served=raw / EMOS-miss / serve-fail routes to honest raw.
@@ -46098,20 +46015,7 @@ def _market_analysis_from_event_snapshot(
         if is_day0:
             p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
             p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
-            # Station diurnal-residual evidence enters q here (authority §1e):
-            # the point rows now, every bootstrap row through the sampler below.
-            _day0_mixture = _day0_diurnal_mixture_for_family(
-                payload=payload,
-                family=family,
-                city=city,
-                unit=unit,
-                probability_time=day0_probability_time,
-            )
-            _capture_held_point_base(p_cal, _day0_mixture, payload=payload)
-            if _day0_mixture is not None:
-                _day0_unmixed_q = tuple(float(value) for value in p_cal)
-                p_raw = np.asarray(_day0_mixture.apply(p_raw), dtype=float)
-                p_cal = np.asarray(_day0_mixture.apply(p_cal), dtype=float)
+            _capture_held_point_base(p_cal, None, payload=payload)
     p_market_yes: list[float] = []
     p_market_no: list[float] = []
     buy_no_available: list[bool] = []
@@ -46160,13 +46064,7 @@ def _market_analysis_from_event_snapshot(
             )
         )
         if _day0_sampler is not None:
-            if _day0_mixture is not None and isinstance(_day0_sampler, _Day0BootstrapSampler):
-                _day0_sampler = dataclass_replace(_day0_sampler, fallback_q=_day0_unmixed_q)
-            sampler = (
-                _day0_sampler
-                if _day0_mixture is None
-                else _Day0DiurnalMixedSampler(inner=_day0_sampler, mixture=_day0_mixture)
-            )
+            sampler = _day0_sampler
         else:
             payload["_edli_day0_q_block_reason"] = "DAY0_BOOTSTRAP_LCB_UNAVAILABLE"
             raise ValueError("DAY0_BOOTSTRAP_LCB_UNAVAILABLE")
@@ -47014,6 +46912,10 @@ def _day0_remaining_p_raw_vector(
 
     if not current_day0_remaining_center_policy_has_authority(payload, edli=True):
         raise ValueError("DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT")
+    from src.events.day0_authority import current_day0_probability_mixture_policy_has_authority
+
+    if not current_day0_probability_mixture_policy_has_authority(payload, edli=True):
+        raise ValueError("DAY0_PROBABILITY_MIXTURE_POLICY_NOT_CURRENT")
     if decision_time is None:
         source_hint = _day0_probability_conditioning_source(payload)
         if _day0_is_shared_provisional_carrier_source(source_hint) or (
@@ -47302,6 +47204,9 @@ def _day0_remaining_p_raw_vector(
         from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
 
         identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+        from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
+
+        identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
         current_value = payload.get("_edli_day0_current_temperature_native")
         current_observed_at = payload.get(
             "_edli_day0_current_temperature_observed_at_utc"
@@ -48830,6 +48735,7 @@ def _snapshot_day0_source_clock_carrier_provenance(
         "_edli_day0_remaining_carrier_path_error_sigma_c",
         "_edli_day0_remaining_center_bias_c",
         "_edli_day0_remaining_center_policy",
+        "_edli_day0_probability_mixture_policy",
         "_edli_day0_remaining_bias_status",
         "_edli_day0_remaining_bias_artifact",
         "_edli_day0_remaining_carrier_probability_cutoff_utc",
@@ -49049,6 +48955,9 @@ def _rebuild_decision_time_day0_carrier(
     from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
 
     identity_inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+    from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
+
+    identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
     semantics = SettlementSemantics.for_city(city)
     from src.calibration.day0_resolver_terminal_residual import (
         resolve_day0_resolver_terminal_input,
@@ -49123,6 +49032,7 @@ def _rebuild_decision_time_day0_carrier(
             "_edli_day0_remaining_carrier_final_extremes_c": list(final_values_c),
             "_edli_day0_remaining_carrier_path_error_sigma_c": path_error_sigma_c,
             "_edli_day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+            "_edli_day0_probability_mixture_policy": DAY0_PROBABILITY_MIXTURE_POLICY,
             "_edli_day0_remaining_center_bias_c": 0.0,
             "_edli_day0_remaining_bias_status": "unshifted_live_policy",
             "_edli_day0_remaining_bias_artifact": None,

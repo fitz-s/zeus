@@ -1,9 +1,9 @@
 # Created: 2026-09-04
-# Last reused or audited: 2026-09-29
-# Authority basis: docs/authority/replacement_final_form_2026_06_09.md §1e "Day0
-#   diurnal-residual mixture"; the estimator and the operator are checked against
-#   hand-computed values, never against the implementation's own output.
-"""Contract tests for the Day0 diurnal-residual evidence served inside q."""
+# Last reused or audited: 2026-09-30
+# Authority basis: operator directive 2026-09-30 prohibits historical fitted
+#   mixtures in live probability; preserve the offline estimator/operator math
+#   against hand-computed values, not its own implementation's output.
+"""Offline-only diurnal residual estimator, artifact lookup and pure operator."""
 
 from __future__ import annotations
 
