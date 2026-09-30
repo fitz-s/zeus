@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -39,6 +40,8 @@ _PROFILES = {
     "icon_d2": ("dwd_icon_d2", 1215, 746, 43.18, -3.94, .02, .02),
     "ukmo_global_deterministic_10km": ("ukmo_global_deterministic_10km", 2560, 1920,
                                          -90.0, -180.0, 360 / 2560, 180 / 1920),
+    "meteofrance_arome_france_hd": ("meteofrance_arome_france_hd", 2801, 1791,
+                                     37.5, -12.0, .01, .01),
 }
 
 
@@ -70,11 +73,35 @@ def _asset_url(domain: str) -> str:
 
 
 def _profile(model: str) -> dict[str, object]:
-    if model not in _PROFILES:
+    if model in _PROFILES:
+        domain, nx, ny, lat, lon, dx, dy = _PROFILES[model]
+        return {"upstream_revision": _UPSTREAM, "domain": domain, "grid_type": "regular",
+                "nx": nx, "ny": ny, "lat_min": lat, "lon_min": lon, "dx": dx, "dy": dy}
+    # Explicit temperature domains only. Seamless/mixed product names cannot
+    # borrow a convenient global/static grid when their actual domain is unknown.
+    if model == "ukmo_uk_deterministic_2km":
+        return {"upstream_revision": _UPSTREAM, "domain": model, "grid_type": "projected",
+            "nx": 1042, "ny": 970, "projection": "laea", "radius": 6371229,
+            "central_longitude": -2.5, "latitude_origin": 54.9,
+            "origin_x": -1158000., "origin_y": -1036000., "dx": 2000., "dy": 2000.}
+    if model not in {"gfs_hrrr", "ncep_nbm_conus"}:
         raise _Invalid("MODEL_SURFACE_UNSUPPORTED")
-    domain, nx, ny, lat, lon, dx, dy = _PROFILES[model]
-    return {"upstream_revision": _UPSTREAM, "domain": domain, "grid_type": "regular",
-            "nx": nx, "ny": ny, "lat_min": lat, "lon_min": lon, "dx": dx, "dy": dy}
+    hrrr = model == "gfs_hrrr"
+    profile = {"upstream_revision": _UPSTREAM, "domain": "ncep_hrrr_conus" if hrrr else model,
+        "grid_type": "projected", "projection": "lcc", "nx": 1799 if hrrr else 2345,
+        "ny": 1059 if hrrr else 1597, "radius": 6371229 if hrrr else 6371200,
+        "central_longitude": -97.5 if hrrr else -95., "latitude_origin": 0.,
+        "standard_parallel": 38.5 if hrrr else 25.}
+    # These are the official constructors, not nominal '3km' or '2.5km'.
+    lat, lon = (21.138, -122.72) if hrrr else (19.229, _float32(_float32(233.723)-360.))
+    profile["origin_x"], profile["origin_y"] = _project(profile, latitude=lat, longitude=lon)
+    if hrrr:
+        ne_x, ne_y = _project(profile, latitude=47.8424, longitude=-60.918)
+        profile["dx"] = _float32(_float32(ne_x-profile["origin_x"])/_float32(profile["nx"]-1))
+        profile["dy"] = _float32(_float32(ne_y-profile["origin_y"])/_float32(profile["ny"]-1))
+    else:
+        profile["dx"] = profile["dy"] = _float32(2539.7)
+    return profile
 
 
 def _json(value: object) -> bytes:
@@ -439,12 +466,107 @@ def _float32(value: float) -> float:
     return struct.unpack("f", struct.pack("f", value))[0]
 
 
+@lru_cache(maxsize=8)
+def _float_math_function(name):
+    import ctypes
+    import ctypes.util
+    # Foundation's Float trig/power overloads use these system float functions.
+    # NumPy's SIMD trig and nearest-rounded np.pi differ by ULPs; those are not
+    # the original upstream Float coordinate contract.
+    try:
+        library = ctypes.util.find_library("m")
+        if library is None:
+            raise _Invalid("MODEL_SURFACE_FLOAT_MATH_UNAVAILABLE")
+        function = getattr(ctypes.CDLL(library), name)
+    except (AttributeError, OSError) as exc:
+        raise _Invalid("MODEL_SURFACE_FLOAT_MATH_UNAVAILABLE") from exc
+    function.argtypes = [ctypes.c_float] * (2 if name in {"powf", "atan2f"} else 1)
+    function.restype = ctypes.c_float
+    return function
+
+
+def _project(profile, *, latitude=None, longitude=None, x=None, y=None):
+    """Pinned Open-Meteo spherical Float formulas, not an EPSG approximation."""
+    import numpy as np
+    f = np.float32
+    pi, one, two = f(3.141592502593994), f(1), f(2)  # Swift Float.pi, bits1078530010.
+    def fm(name, *args):
+        return f(_float_math_function(name)(*(float(arg) for arg in args)))
+    sin, cos, tan = (lambda value: fm("sinf", value)), (lambda value: fm("cosf", value)), (lambda value: fm("tanf", value))
+    power = lambda base, exponent: fm("powf", base, exponent)
+    radians = lambda value: f(value)*pi/f(180)
+    degrees = lambda value: value*f(180)/pi
+    lam0 = radians(profile["central_longitude"])
+    phi0 = radians(profile["latitude_origin"])
+    radius = f(profile["radius"])
+    with np.errstate(all="ignore"):
+        if profile["projection"] == "lcc":
+            phi1 = radians(profile["standard_parallel"])
+            n = sin(phi1)  # These two official profiles have phi1 == phi2.
+            factor = cos(phi1)*power(tan(pi/f(4)+phi1/two), n)/n
+            rho0 = factor/power(tan(pi/f(4)+phi0/two), n)
+            if x is None:
+                phi, lam = radians(latitude), radians(longitude)
+                theta = n*(lam-lam0)
+                rho = factor/power(tan(pi/f(4)+phi/two), n)
+                a, b = radius*rho*sin(theta), radius*(rho0-rho*cos(theta))
+            else:
+                xx, yy = f(x)/radius, f(y)/radius
+                theta = fm("atan2f", xx, rho0-yy)
+                rho = fm("sqrtf", power(xx, two)+power(rho0-yy, two))
+                phi = two*fm("atanf", power(factor/rho, one/n))-pi/two
+                lam = lam0+theta/n
+                a, b = degrees(phi), degrees(lam)
+                if b > f(180):
+                    b -= f(360)
+        else:
+            if x is None:
+                phi, lam = radians(latitude), radians(longitude)
+                k = fm("sqrtf", two/(one+sin(phi0)*sin(phi)+cos(phi0)*cos(phi)*cos(lam-lam0)))
+                a = radius*k*cos(phi)*sin(lam-lam0)
+                b = radius*k*(cos(phi0)*sin(phi)-sin(phi0)*cos(phi)*cos(lam-lam0))
+            else:
+                xx, yy = f(x)/radius, f(y)/radius
+                p = fm("sqrtf", xx*xx+yy*yy)
+                if p == 0:
+                    return float(degrees(phi0)), float(f(profile["central_longitude"]))
+                c = two*fm("asinf", p/two)
+                phi = fm("asinf", cos(c)*sin(phi0)+yy*sin(c)*cos(phi0)/p)
+                lam = lam0+fm("atanf", xx*sin(c)/(p*cos(phi0)*cos(c)-yy*sin(phi0)*sin(c)))
+                a, b = degrees(phi), degrees(lam)
+    return float(a), float(b)
+
+
 def _cell(profile: Mapping[str, object], lat: object, lon: object) -> dict[str, object]:
     if isinstance(lat, bool) or isinstance(lon, bool):
         raise _Invalid("MODEL_SURFACE_SELECTED_CELL_MISMATCH")
     lat, lon = float(lat), float(lon)
     if not math.isfinite(lat) or not math.isfinite(lon) or not -90 <= lat <= 90 or not -180 <= lon <= 180:
         raise _Invalid("MODEL_SURFACE_SELECTED_CELL_MISMATCH")
+    if profile["grid_type"] == "projected":
+        px, py = _project(profile, latitude=lat, longitude=lon)
+        indices = []
+        for value, axis, count in ((px, "x", profile["nx"]), (py, "y", profile["ny"])):
+            q = _float32(_float32(value-profile[f"origin_{axis}"])/profile["dx" if axis == "x" else "dy"])
+            if not math.isfinite(q):
+                raise _Invalid("MODEL_SURFACE_SELECTED_CELL_MISMATCH")
+            index = math.floor(q+.5) if q >= 0 else math.ceil(q-.5)
+            if not 0 <= index < count:
+                raise _Invalid("MODEL_SURFACE_SELECTED_CELL_MISMATCH")
+            indices.append(index)
+        x, y = indices
+        selected_lat, selected_lon = _project(profile,
+            x=_float32(_float32(_float32(x)*profile["dx"])+profile["origin_x"]),
+            y=_float32(_float32(_float32(y)*profile["dy"])+profile["origin_y"]))
+        selected_lon = _float32(math.fmod(_float32(selected_lon+180), 360)-180)
+        import numpy as np
+        for actual, selected in ((lat, selected_lat), (lon, selected_lon)):
+            # At most one original Float coordinate quantum, not a spatial
+            # nearest-cell allowance. Half-cell/request coordinates fail.
+            quantum = abs(float(np.spacing(np.float32(selected))))
+            if not math.isfinite(selected) or abs(actual-selected) > quantum:
+                raise _Invalid("MODEL_SURFACE_SELECTED_CELL_MISMATCH")
+        return {"x": x, "y": y, "selected_latitude": selected_lat, "selected_longitude": selected_lon}
     coords = []
     indices = []
     for value, origin, step, count in ((lon, profile["lon_min"], profile["dx"], profile["nx"]),
