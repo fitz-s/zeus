@@ -253,7 +253,7 @@ def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: 
 
 def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: object, *, materialized_at: object,
         city: object = None, target_date: object = None, metric: object = None, expected_anchor_artifact_id: object = None,
-        anchor_id: object = None, request_anchor_artifact_id: object = None) -> bool:
+        anchor_id: object = None, request_anchor_artifact_id: object = None, forecast_db: object = None) -> bool:
     """The soft anchor replays its own canonical body/cell, including anchor-only IFS roles.
 
     SCOPE: one certificate's anchor. DRAIN: its ordinary source producer freezes
@@ -282,9 +282,15 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
         artifact = audit["anchor_raw_artifact"]
         if not isinstance(artifact, Mapping):
             return False
+        if not forecast_db:
+            return False
+        canonical_db = Path(str(forecast_db)).resolve(strict=True)
+        if (Path(str(artifact["forecast_db"])).resolve(strict=True) != canonical_db
+            or Path(str(ground_evidence["forecast_db"])).resolve(strict=True) != canonical_db):
+            return False
         metadata = OpenMeteoIfs9PrecisionMetadata(**audit["anchor_precision_metadata"])
         anchor = geometry["providers"]["__anchor_ifs9__"]
-        conn = _connect_read_only(Path(str(artifact["forecast_db"])))
+        conn = _connect_read_only(canonical_db)
         try:
             row = conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE a.artifact_id=?",
                 (artifact["artifact_id"],)).fetchone()
@@ -365,13 +371,14 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
 def _current_evidence_shape_has_probability_authority(
     provenance: object, *, materialized_at: object = None, city: object = None, target_date: object = None,
     metric: object = None, anchor_id: object = None, request_anchor_artifact_id: object = None,
+    forecast_db: object = None,
 ) -> bool:
     """Validate same-cycle target-specific ENS probability authority."""
 
     shape = _current_evidence_shape(provenance)
     if shape is None:
         return False
-    if not city or not target_date or metric not in ("high","low"):
+    if not city or not target_date or metric not in ("high","low") or not forecast_db:
         return False
     if current_evidence_shape_source_cycle_time(provenance) is None:
         return False
@@ -408,6 +415,15 @@ def _current_evidence_shape_has_probability_authority(
     geometry_hash = hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     if shape.get("provider_geometry_identity_hash") != geometry_hash:
         return False
+    try:
+        from pathlib import Path
+        audit = shape["provider_geometry_audit"]
+        namespace = Path(str(forecast_db)).resolve(strict=True)
+        if any(Path(str(audit[key]["forecast_db"])).resolve(strict=True) != namespace
+            for key in ("anchor_raw_artifact", "anchor_station_ground")):
+            return False
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
     if not _anchor_station_ground_has_authority(geometry, shape.get("provider_geometry_audit"), materialized_at):
         return False
     try:
@@ -417,7 +433,7 @@ def _current_evidence_shape_has_probability_authority(
         return False
     if not _anchor_ifs9_response_has_authority(geometry, shape.get("provider_geometry_audit"), materialized_at=materialized_at,
         city=city,target_date=target_date,metric=metric,expected_anchor_artifact_id=expected_anchor_artifact_id,
-        anchor_id=anchor_id,request_anchor_artifact_id=request_anchor_artifact_id):
+        anchor_id=anchor_id,request_anchor_artifact_id=request_anchor_artifact_id,forecast_db=forecast_db):
         return False
     try:
         payload = json.loads(provenance) if isinstance(provenance, str) else provenance
@@ -461,7 +477,7 @@ def _current_evidence_shape_has_probability_authority(
 
 def current_evidence_shape_has_entry_authority(provenance: object, *, materialized_at: object = None,
         city: object = None,target_date: object = None,metric: object = None,anchor_id: object = None,
-        request_anchor_artifact_id: object = None) -> bool:
+        request_anchor_artifact_id: object = None, forecast_db: object = None) -> bool:
     """Whether current evidence authorizes a new entry."""
 
     # FAIL-CLOSED GATE CONTRACT
@@ -471,12 +487,13 @@ def current_evidence_shape_has_entry_authority(provenance: object, *, materializ
     # RESET: a coherent same-cycle target-specific raw-member shape restores
     # the authority ratified in replacement_final_form section 1d.
     return _current_evidence_shape_has_probability_authority(provenance, materialized_at=materialized_at,
-        city=city,target_date=target_date,metric=metric,anchor_id=anchor_id,request_anchor_artifact_id=request_anchor_artifact_id)
+        city=city,target_date=target_date,metric=metric,anchor_id=anchor_id,request_anchor_artifact_id=request_anchor_artifact_id,
+        forecast_db=forecast_db)
 
 
 def current_evidence_shape_has_held_authority(provenance: object, *, materialized_at: object = None,
         city: object = None,target_date: object = None,metric: object = None,anchor_id: object = None,
-        request_anchor_artifact_id: object = None) -> bool:
+        request_anchor_artifact_id: object = None, forecast_db: object = None) -> bool:
     """Whether a shape can support reduce-only held-position redecision.
 
     Stale ENS rows remain offline evidence only.  A held position must be
@@ -486,7 +503,8 @@ def current_evidence_shape_has_held_authority(provenance: object, *, materialize
     """
 
     return _current_evidence_shape_has_probability_authority(provenance, materialized_at=materialized_at,
-        city=city,target_date=target_date,metric=metric,anchor_id=anchor_id,request_anchor_artifact_id=request_anchor_artifact_id)
+        city=city,target_date=target_date,metric=metric,anchor_id=anchor_id,request_anchor_artifact_id=request_anchor_artifact_id,
+        forecast_db=forecast_db)
 
 
 def tradeable_grade_coverage_sql(

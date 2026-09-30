@@ -863,6 +863,8 @@ def load_replacement_belief(
         return None
     try:
         conn.row_factory = sqlite3.Row
+        from src.data.station_ground_evidence import forecast_db_from_connection
+        authority_forecast_db = forecast_db_from_connection(conn)
         if deadline_monotonic is not None:
             deadline = float(deadline_monotonic)
             conn.execute(
@@ -1057,7 +1059,8 @@ def load_replacement_belief(
         )
         return None
     if not current_evidence_shape_has_held_authority(provenance, materialized_at=row["computed_at"],
-        city=city,target_date=target_date,metric=temperature_metric,anchor_id=row["openmeteo_anchor_id"]):
+        city=city,target_date=target_date,metric=temperature_metric,anchor_id=row["openmeteo_anchor_id"],
+        forecast_db=authority_forecast_db):
         logger.warning(
             "position_belief: current-evidence shape lacks held authority for %s/%s/%s",
             city,

@@ -1292,10 +1292,12 @@ def _seed_already_covered(
         except (TypeError, ValueError):
             return False
         from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
+        from src.data.station_ground_evidence import forecast_db_from_connection
         fusion = provenance.get("bayes_precision_fusion") if isinstance(provenance, Mapping) else None
         if isinstance(fusion, Mapping) and "current_evidence_shape" in fusion:
             if not current_evidence_shape_has_held_authority(provenance, materialized_at=posterior["computed_at"],
-                city=city,target_date=target_date,metric=metric,anchor_id=posterior["openmeteo_anchor_id"]):
+                city=city,target_date=target_date,metric=metric,anchor_id=posterior["openmeteo_anchor_id"],
+                forecast_db=forecast_db_from_connection(conn)):
                 return False
         if str(seed.get("upgrade_trigger") or "").strip() == "held_belief_computed_age_expired":
             required_computed_at = _parse_utc_iso(seed.get("computed_at"))

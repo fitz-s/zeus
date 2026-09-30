@@ -6217,6 +6217,8 @@ def _qkernel_shadow_current_semantics_by_posterior(
     # RESET: a fresh posterior hash maps to its exact licensed semantics and
     # may claim its target-date key.
     output: dict[str, str] = {}
+    from src.data.station_ground_evidence import forecast_db_from_connection
+    authority_forecast_db = forecast_db_from_connection(conn)
     try:
         for start in range(0, len(posterior_hashes), 500):
             chunk = posterior_hashes[start : start + 500]
@@ -6233,7 +6235,8 @@ def _qkernel_shadow_current_semantics_by_posterior(
                     continue
                 if (
                     current_evidence_shape_has_entry_authority(provenance, materialized_at=materialized_at,
-                        city=city,target_date=target_date,metric=metric,anchor_id=anchor_id)
+                        city=city,target_date=target_date,metric=metric,anchor_id=anchor_id,
+                        forecast_db=authority_forecast_db)
                     and shape.get("between_cohort_status")
                     == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
                     and not current_evidence_shape_semantics_mismatch(provenance)

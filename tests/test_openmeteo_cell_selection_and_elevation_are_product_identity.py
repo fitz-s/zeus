@@ -357,7 +357,7 @@ def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric):
     conn.commit()
     conn.close()
     scope={"city":city.name,"target_date":target.isoformat(),"metric":metric,
-        "expected_anchor_artifact_id":aid,"anchor_id":anchor_id}
+        "expected_anchor_artifact_id":aid,"anchor_id":anchor_id,"forecast_db":db}
     return bound,raw_path,cut,scope
 
 
@@ -436,7 +436,7 @@ def test_anchor_legal_foreign_pair_cannot_relabel_independent_certificate_scope(
         other={**json.loads(conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE artifact_id=?",(aid,)).fetchone()[0]),"forecast_db":old["forecast_db"]}
     audit.update(anchor_raw_artifact=other,anchor_precision_metadata=precision)
     legal={"city":original["city"],"target_date":day.isoformat(),"metric":other_metric,
-        "expected_anchor_artifact_id":aid,"request_anchor_artifact_id":aid}
+        "expected_anchor_artifact_id":aid,"request_anchor_artifact_id":aid,"forecast_db":original["forecast_db"]}
     assert _anchor_ifs9_response_has_authority(geometry,audit,materialized_at=cut.isoformat(),**legal)
     # Even re-signing the body's metadata/main claimed ID cannot change the
     # actual posterior's independently selected canonical anchor FK or family.
@@ -506,6 +506,86 @@ def test_anchor_frozen_ground_replays_own_cut_after_actual_later_page_and_statio
     del forged["anchor_station_ground"]
     assert not _anchor_ifs9_response_has_authority(bound_c.provider_geometry_evidence,
         forged, materialized_at=clock[0].isoformat(), **scope)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_anchor_natural_ids_are_bound_to_the_actual_reader_database_namespace(tmp_path, monkeypatch, metric):
+    from copy import deepcopy
+    from datetime import date
+    import scripts.download_replacement_forecast_current_targets as producer
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        OpenMeteoEcmwfIfs9AnchorRequest, build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
+        extract_openmeteo_ecmwf_ifs9_localday_anchor,
+    )
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
+        OpenMeteoIfs9PrecisionMetadata, evaluate_openmeteo_ecmwf_ifs9_precision_guard,
+    )
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+    from src.data.replacement_current_value_serving import _ARTIFACT_IDENTITY_JSON_SQL
+    from src.data.replacement_forecast_cycle_policy import _anchor_ifs9_response_has_authority
+    from src.data.replacement_forecast_materializer import (
+        ReplacementForecastMaterializeRequest, _bind_provider_geometry_identity, _insert_anchor,
+    )
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+    from tests.test_station_ground_evidence import _archive
+
+    a, path_a, cut, scope_a = _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric)
+    assert _anchor_ifs9_response_has_authority(a.provider_geometry_evidence,
+        a.provider_geometry_audit, materialized_at=cut.isoformat(), **scope_a)
+    db_b = tmp_path / "foreign-namespace" / Path(scope_a["forecast_db"]).name
+    db_b.parent.mkdir()
+    with sqlite3.connect(db_b) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    entity_b = _archive(db_b)
+    payload = json.loads(path_a.read_bytes())
+    payload["hourly"]["temperature_2m"] = [21.] * 24
+    path_b = tmp_path / "foreign-normal-anchor.json"
+    path_b.write_bytes((json.dumps(payload, indent=2) + "\n").encode())
+    metadata_b = OpenMeteoIfs9PrecisionMetadata(**producer._precision_metadata(
+        scope_a["city"], scope_a["target_date"], anchor_sigma_c=3., raw_payload_bytes=path_b.read_bytes(),
+    ))
+    artifact_a = a.provider_geometry_audit["anchor_raw_artifact"]
+    params = json.loads(artifact_a["request_params_json"])
+    run = datetime.fromisoformat(artifact_a["source_cycle_time"])
+    captured = datetime.fromisoformat(artifact_a["captured_at"])
+    target = date.fromisoformat(scope_a["target_date"])
+    manifest_b = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(path_b,
+        request=OpenMeteoEcmwfIfs9AnchorRequest(float(params["latitude"]), float(params["longitude"]), run, params["timezone"]),
+        metric=metric, source_available_at=captured, captured_at=captured,
+        product_metadata={"city":scope_a["city"], "target_date":scope_a["target_date"]})
+    with sqlite3.connect(db_b) as conn:
+        aid_b = write_manifest_to_db(conn, manifest_b)
+        artifact_b = {**json.loads(conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE artifact_id=?",
+            (aid_b,)).fetchone()[0]), "forecast_db":str(db_b)}
+        anchor_b = _insert_anchor(conn, ReplacementForecastMaterializeRequest(
+            city=scope_a["city"],city_id=scope_a["city"],city_timezone=params["timezone"],target_date=target,temperature_metric=metric,
+            baseline_source_run_id="unit-anchor-not-q-authority",baseline_data_version="unit-only",baseline_source_available_at=captured,
+            openmeteo_anchor=extract_openmeteo_ecmwf_ifs9_localday_anchor(payload, city_timezone=params["timezone"],
+                target_local_date=target,source_cycle_time=run,require_full_localday=True),openmeteo_source_run_id=None,
+            openmeteo_source_available_at=captured,bins=[],source_cycle_time=run,computed_at=cut,anchor_artifact_id=aid_b,
+            openmeteo_raw_payload_bytes=path_b.read_bytes(),openmeteo_precision_guard=evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+                metadata_b,raw_payload_bytes=path_b.read_bytes(),decision_at=cut)),metric=metric)
+    assert aid_b == scope_a["expected_anchor_artifact_id"]
+    assert anchor_b == scope_a["anchor_id"]
+    b = _bind_provider_geometry_identity(a, {}, anchor_metadata=metadata_b, decision_at=cut,
+        station_ground_evidence=entity_b,anchor_raw_artifact=artifact_b)
+    assert b.provider_geometry_evidence == a.provider_geometry_evidence
+    scope_b = {**scope_a, "forecast_db":db_b}
+    assert _anchor_ifs9_response_has_authority(b.provider_geometry_evidence,
+        b.provider_geometry_audit,materialized_at=cut.isoformat(),**scope_b)
+    assert not _anchor_ifs9_response_has_authority(a.provider_geometry_evidence,
+        b.provider_geometry_audit,materialized_at=cut.isoformat(),**scope_a)
+    foreign_ground = deepcopy(a.provider_geometry_audit)
+    foreign_ground["anchor_station_ground"] = entity_b
+    assert not _anchor_ifs9_response_has_authority(a.provider_geometry_evidence,
+        foreign_ground,materialized_at=cut.isoformat(),**scope_a)
+    missing_namespace = {**scope_a, "forecast_db":None}
+    assert not _anchor_ifs9_response_has_authority(a.provider_geometry_evidence,
+        a.provider_geometry_audit,materialized_at=cut.isoformat(),**missing_namespace)
+    alias = tmp_path / "reader-db-alias.sqlite"
+    alias.symlink_to(scope_a["forecast_db"])
+    assert _anchor_ifs9_response_has_authority(a.provider_geometry_evidence,
+        a.provider_geometry_audit,materialized_at=cut.isoformat(),**{**scope_a,"forecast_db":alias})
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))

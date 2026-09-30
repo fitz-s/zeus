@@ -1521,10 +1521,34 @@ def _exact_current_value_serving_lag(
         item = serving.get(model)
         if model == "ecmwf_ifs" and item is None:
             from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
+            from src.data.station_ground_evidence import forecast_db_from_connection
+            table = _authority_table_ref(conn, "forecast_posteriors")
+            anchor_id = None
+            if (table is not None and posterior_computed_at is not None
+                and "openmeteo_anchor_id" in _hwm_table_ref_columns(conn, table)):
+                try:
+                    candidates = conn.execute(f"SELECT computed_at,provenance_json,openmeteo_anchor_id FROM {table}"
+                        " WHERE city=? AND target_date=? AND temperature_metric=? AND datetime(computed_at)=datetime(?)",
+                        (city,str(target_date),metric,posterior_computed_at.isoformat())).fetchall()
+                except sqlite3.OperationalError as exc:
+                    _raise_hwm_read_unavailable(exc, basis="posterior_anchor_namespace_read_unavailable")
+                matching = []
+                for candidate in candidates:
+                    if _parse_source_cycle_utc(candidate[0]) != posterior_computed_at:
+                        continue
+                    try:
+                        actual_provenance = json.loads(str(candidate[1]))
+                    except (TypeError, ValueError):
+                        continue
+                    if actual_provenance == provenance:
+                        matching.append(candidate[2])
+                if len(matching) == 1:
+                    anchor_id = matching[0]
             audit = shape.get("provider_geometry_audit") if isinstance(shape,Mapping) else None
             if (not isinstance(audit,Mapping) or audit.get("anchor_ifs9_role") != "anchor_only"
                 or not current_evidence_shape_has_held_authority(provenance,materialized_at=posterior_computed_at,
-                    city=city,target_date=target_date,metric=metric,anchor_id=provenance.get("anchor_id"))):
+                    city=city,target_date=target_date,metric=metric,anchor_id=anchor_id,
+                    forecast_db=forecast_db_from_connection(conn))):
                 return True,"basis=anchor_only_ifs9_provenance_unverifiable",None
             continue
         if not isinstance(item, Mapping):

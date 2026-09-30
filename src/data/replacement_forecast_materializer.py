@@ -4077,13 +4077,14 @@ def _read_current_evidence_shape(
 
 
 def _fusion_current_evidence_shape_has_live_authority(
-    fusion: object, *, request: ReplacementForecastMaterializeRequest,
+    fusion: object, *, request: ReplacementForecastMaterializeRequest, conn: sqlite3.Connection,
 ) -> bool:
     """Apply the shared live shape law at the producer commit boundary."""
 
     shape = getattr(fusion, "current_evidence_shape", None)
     if not isinstance(shape, Mapping):
         return False
+    from src.data.station_ground_evidence import forecast_db_from_connection
     return current_evidence_shape_has_entry_authority(
         {"bayes_precision_fusion": {"current_evidence_shape": shape,
             "current_value_serving": getattr(fusion, "current_value_serving", None),
@@ -4091,6 +4092,7 @@ def _fusion_current_evidence_shape_has_live_authority(
             "openmeteo_anchor_artifact_id":request.anchor_artifact_id}, materialized_at=request.computed_at,
         city=request.city,target_date=_date_text(request.target_date),metric=request.temperature_metric,
         request_anchor_artifact_id=request.anchor_artifact_id,
+        forecast_db=forecast_db_from_connection(conn),
     )
 
 
@@ -8165,7 +8167,7 @@ def _compute_posterior_payload(
     # override layer is fail-soft (returns None) so at this seam an absent override reads as
     # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
     current_shape_live = _fusion_current_evidence_shape_has_live_authority(
-        bayes_precision_fusion_override, request=request,
+        bayes_precision_fusion_override, request=request, conn=conn,
     )
     if source_clock_scheme_unavailable:
         capture_status = REPLACEMENT_CAPTURE_STATUS_SOURCE_CLOCK_SCHEME_UNAVAILABLE
