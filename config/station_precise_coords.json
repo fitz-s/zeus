@@ -539,7 +539,25 @@
   "lat": "51.505299",
   "lon": "0.055278",
   "source": "OurAirports",
-  "station": "EGLC"
+  "station": "EGLC",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "EGLC",
+   "source_station_id": "30146303",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 5.8,
+   "site_lat": 51.505278,
+   "site_lon": 0.055278,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_eglc_station.json",
+   "body_sha256": "bdb7bbff89109cc591e50421006fa9c1c818d8960eaba497ec309be32f52f31f",
+   "checked_at": "2026-09-30T12:52:01Z",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?qid=ICAO%3AEGLC&qidMod=is&current=true&date=2026-09-30&phrData=false"
+  }
  },
  "Los Angeles": {
   "distance_from_citiesjson_m": 2032,
@@ -923,7 +941,25 @@
   "lat": "31.1433",
   "lon": "121.8053",
   "source": "cities.json re-pin e80c101c4c (verified WU/METAR ZSPD) + OurAirports elev",
-  "station": "ZSPD"
+  "station": "ZSPD",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "noaa_homr_international_station_ground_snapshot_v1",
+   "station_id": "ZSPD",
+   "source_station_id": "30137822",
+   "height_role": "ground_msl",
+   "quantity": "location.elevations.GROUND",
+   "elevation_m": 4.0,
+   "site_lat": 31.143378,
+   "site_lon": 121.805214,
+   "location_role": "station_ground_reference",
+   "source_url": "https://www.ncei.noaa.gov/access/homr/services/station/search",
+   "artifact_ref": "config/noaa_homr_zspd_station.json",
+   "body_sha256": "9e31964f1cbe8c32561621b9ac4ece77cbe7c700d93ebdca12fdb1e1cfcad5ec",
+   "checked_at": "2026-09-30T12:52:01Z",
+   "query_date": "2026-09-30",
+   "query_url": "https://www.ncei.noaa.gov/access/homr/services/station/search?qid=ICAO%3AZSPD&qidMod=is&current=true&date=2026-09-30&phrData=false"
+  }
  },
  "Shenzhen": {
   "distance_from_citiesjson_m": 59,

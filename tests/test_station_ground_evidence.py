@@ -15,8 +15,201 @@ import pytest
 
 from src.data import station_ground_evidence as ground
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+from tests.test_replacement_forecast_materializer import _hko_native_surfaces, _hko_source_surface
 
 UTC = timezone.utc
+
+
+@pytest.mark.parametrize("city_name", ("Shanghai", "London"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_international_homr_normal_metadata_seed_and_public_ground_scope(tmp_path, monkeypatch, _hko_source_surface, city_name, metric):
+    """Real retained ground/normal producers; controlled forecast and51 ENS, not field GRIB."""
+    from dataclasses import asdict, replace
+    from datetime import date, timedelta
+    from zoneinfo import ZoneInfo
+    import math
+    import src.config as config
+    from src.data import bayes_precision_fusion_download as dl, replacement_forecast_bundle_reader as reader
+    from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoEcmwfIfs9AnchorRequest, build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db, write_manifest
+    from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
+    from src.data.replacement_forecast_seed_discovery import discover_replacement_forecast_materialization_seeds
+    from src.data.replacement_forecast_live_materialization_queue import _prepare_seed_requests_with_connection
+    from src.data.replacement_forecast_materialization_request_builder import build_materialize_request_dataclass
+    from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
+    from src.data.replacement_forecast_readiness import ReplacementForecastReadinessDecision
+    from src.data.replacement_forecast_bundle_reader import ReplacementForecastAuthorityPurpose
+    from scripts.download_replacement_forecast_current_targets import _precision_metadata
+    from tests.test_config import _official_international_homr_registry
+    from tests.test_replacement_forecast_materializer import _low_revision_authority_conn, _bins, _BaselineBundle, _Evidence
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+
+    configured_claim=json.loads((config.PROJECT_ROOT/"config/station_precise_coords.json").read_text())[city_name]["station_ground_proof"]
+    registry, official, claims = _official_international_homr_registry(tmp_path, monkeypatch, city_name)
+    assert claims[city_name]["station_ground_proof"]==configured_claim
+    city = config.runtime_cities_by_name()[city_name]
+    target, cycle = date(2026, 10, 1), datetime(2026, 9, 30, 12, tzinfo=UTC)
+    capture, recorded, cut = (cycle+timedelta(minutes=m) for m in (55,61,65))
+    db = tmp_path/"homr-normal-public.db"
+    conn = _low_revision_authority_conn(db, include_legacy_provider_fixtures=False,
+        city_name=city_name, include_retired_incumbent=False, target_date=target, source_cycle=cycle)
+    # Controlled native51 schema role is set before any authorized posterior;
+    # no LOW certificate/issued tuple is relabeled into HIGH.
+    if metric == "high":
+        expected = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"]
+        for table in ("source_run", "source_run_coverage", "ensemble_snapshots"):
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            values = {"temperature_metric":metric,"physical_quantity":expected.physical_quantity,
+                "observation_field":expected.observation_field,"dataset_id":expected.data_version,
+                "data_version":expected.data_version,"track":"mx2t6_high_short_horizon",
+                "release_calendar_key":"ecmwf_open_data:mx2t6_high_short_horizon"}
+            fields = {key:value for key,value in values.items() if key in columns}
+            conn.execute(f"UPDATE {table} SET "+",".join(f"{key}=?" for key in fields),tuple(fields.values()))
+    conn.commit()
+    moment = [cycle+timedelta(hours=1)]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment[0].astimezone(tz or UTC)
+    monkeypatch.setattr(ground,"datetime",Clock)
+    evidence = _archive(db,city_name)
+    assert evidence["recorded_at"] == moment[0].isoformat()
+    assert evidence["captured_at"] == "2026-09-30T12:52:01+00:00"
+    assert ground.read_current_station_ground_evidence(db,city=city_name,decision_at=moment[0]-timedelta(microseconds=1)) is None
+    class DownloadClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return capture.astimezone(tz or UTC)
+    monkeypatch.setattr(dl,"datetime",DownloadClock)
+    sqlite_clock = [recorded]
+    native_sqlite = sqlite3.connect(":memory:")
+    conn.create_function("strftime",2,lambda fmt,value: sqlite_clock[0].isoformat(timespec="milliseconds")
+        if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now")
+        else native_sqlite.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+    offset = int(datetime.combine(target,datetime.min.time(),ZoneInfo(city.timezone)).utcoffset().total_seconds())
+    def payload(lat,lon,value):
+        return {"latitude":lat,"longitude":lon,"elevation":32.,"timezone":city.timezone,
+            "utc_offset_seconds":offset,"hourly_units":{"temperature_2m":"°C"},
+            "hourly":{"time":[f"{target.isoformat()}T{h:02d}:00" for h in range(24)],"temperature_2m":[value]*24}}
+    def fetch(url,params,**kwargs):
+        body=(json.dumps(payload(*_selected_test_cell(params["models"],city.lat,city.lon),
+            22. if params["models"]=="icon_global" else 24.))+"\n").encode()
+        kwargs["capture_entity_body"](body,capture.timestamp())
+        kwargs["capture_network_response"](body,capture.timestamp(),{"content-type":"application/json"})
+        return json.loads(body)
+    monkeypatch.setattr("src.data.openmeteo_client.fetch",fetch)
+    dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=cycle,
+        targets=[dl.BayesPrecisionFusionDownloadTarget(city=city_name,metric=metric,target_date=target.isoformat(),
+            lead_days=1,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone)],
+        models=("icon_global","ukmo_global_deterministic_10km"),include_previous_runs=False,prune_after=False)
+    cell=source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,target_elevation_m=32.)
+    anchor=payload(cell["selected_grid_lat"],cell["selected_grid_lon"],18.5)
+    anchor["_zeus_current_target_scope"]={"city":city_name,"target_date":target.isoformat(),"metric":metric}
+    raw=(json.dumps(anchor,sort_keys=True)+"\n").encode()
+    body_path,precision_path=tmp_path/"anchor.json",tmp_path/"precision.json"
+    body_path.write_bytes(raw)
+    precision_path.write_text(json.dumps(_precision_metadata(city_name,target.isoformat(),
+        anchor_sigma_c=3.,raw_payload_bytes=raw,analysis_at=cut),default=str))
+    manifests=tmp_path/"manifests";manifests.mkdir()
+    manifest_path=manifests/"anchor.manifest.json"
+    manifest=build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(body_path,
+        request=OpenMeteoEcmwfIfs9AnchorRequest(city.lat,city.lon,cycle,city.timezone),metric=metric,
+        source_available_at=cycle+timedelta(minutes=5),captured_at=capture,
+        product_metadata={"city":city_name,"target_date":target.isoformat(),"source_run_id":"homr-normal-anchor",
+            "openmeteo_payload_json":str(body_path),"precision_metadata_json":str(precision_path),"manifest_json":str(manifest_path)})
+    aid=write_manifest_to_db(conn,manifest)
+    write_manifest(replace(manifest,product_metadata={**manifest.product_metadata,"artifact_id":aid}),manifest_path)
+    for item in _bins():
+        conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,condition_id,token_id,range_label,range_low,range_high) VALUES(?,?,?,?,?,?,?,?,?)",
+            (f"controlled-{city_name}-{metric}-{item.bin_id}",city_name,target.isoformat(),metric,
+             f"controlled-{item.bin_id}",f"controlled-{item.bin_id}",item.bin_id,item.lower_c,item.upper_c))
+    conn.commit()
+    report=discover_replacement_forecast_materialization_seeds(forecast_db=db,raw_manifest_dir=manifests,
+        seed_dir=tmp_path/"seeds",request_dir=tmp_path/"requests",computed_at=cut,limit=1)
+    assert report.discovered_count==1,report
+    processed,failed,reasons=_prepare_seed_requests_with_connection(seed_dir=tmp_path/"seeds",
+        seed_processed_dir=tmp_path/"processed",seed_failed_dir=tmp_path/"failed",request_dir=tmp_path/"requests",
+        forecast_db=db,forecast_conn=None,limit=1)
+    assert len(processed)==1 and not failed,(processed,failed,reasons)
+    request=build_materialize_request_dataclass(json.loads(next((tmp_path/"requests").glob("*.json")).read_text()),base_dir=tmp_path/"requests")
+    sqlite_clock[0]=cut
+    result=materialize_replacement_forecast_live(conn,request);conn.commit()
+    assert result.ok,result.reason_codes
+    posterior=conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(result.posterior_id,)).fetchone()
+    cert=conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?",(result.readiness_id,)).fetchone()
+    readiness=ReplacementForecastReadinessDecision(readiness_id=cert["readiness_id"],status=cert["status"],
+        reason_codes=tuple(json.loads(cert["reason_codes_json"])),dependency_json=json.loads(cert["dependency_json"]),
+        provenance_json=json.loads(cert["provenance_json"]),expires_at=datetime.fromisoformat(cert["expires_at"]))
+    provenance=json.loads(posterior["provenance_json"])
+    shape=provenance["bayes_precision_fusion"]["current_evidence_shape"]
+    assert shape["provider_geometry_audit"]["anchor_station_ground"]==evidence
+    mu,sigma=provenance["bayes_precision_fusion"]["anchor_value_c"],shape["predictive_sigma_c"]
+    cdf=lambda x: .5*(1+math.erf((x-mu)/(sigma*math.sqrt(2))))
+    def public(row, certificate, at):
+        return [reader.read_replacement_forecast_bundle(conn,baseline_bundle=_BaselineBundle(_Evidence("new12")),
+            readiness=certificate,city=city_name,target_date=target,temperature_metric=metric,
+            decision_time=at.isoformat(),current_bin_topology_hash=row["bin_topology_hash"],
+            enforce_raw_input_hwm=True,authority_purpose=purpose) for purpose in ReplacementForecastAuthorityPurpose]
+    for served in public(posterior,readiness,cut):
+        assert served.ok,served.reason_code
+        assert dict(served.bundle.q)==pytest.approx({"cool":cdf(20.5),"warm":cdf(30.5)-cdf(20.5),"hot":1-cdf(30.5)},abs=1e-12)
+    original_ground_rows=tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE source_id=?",
+        (evidence["source_id"],)).fetchall())
+    original_posterior=tuple(posterior)
+    original_anchor=tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(aid,)).fetchone())
+    # TEST_ONLY_SYNTHETIC_EXTERNAL_CONDITION: a later genuinely acquired
+    # ground snapshot differs. The retained original official files remain
+    # byte-identical; no claim is made that this change occurred in the field.
+    updated=json.loads(official.read_bytes())
+    height=float(evidence["facts"]["elevation_m"])+1
+    updated["stationCollection"]["stations"][0]["location"]["elevations"][0].update(
+        elevationMeters=str(height),elevationFeet=f"{height/.3048:.1f}")
+    newer=(json.dumps(updated,sort_keys=True)+"\n").encode()
+    _update_official(registry,official,claims,newer,(cut+timedelta(minutes=1)).isoformat(),city_name)
+    moment[0]=cut+timedelta(minutes=1,seconds=30)
+    changed=_archive(db,city_name)
+    assert changed["facts_identity"] != evidence["facts_identity"]
+    assert changed["recorded_at"]==moment[0].isoformat()
+    assert all(item.ok for item in public(posterior,readiness,cut))
+    later=cut+timedelta(minutes=2)
+    assert not any(item.ok for item in public(posterior,readiness,later))
+    assert ground.read_current_station_ground_evidence(db,city=city_name,decision_at=later)==changed
+    capture=later+timedelta(minutes=1)
+    dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=cycle,
+        targets=[dl.BayesPrecisionFusionDownloadTarget(city=city_name,metric=metric,target_date=target.isoformat(),
+            lead_days=1,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone)],
+        models=("icon_global","ukmo_global_deterministic_10km"),include_previous_runs=False,prune_after=False)
+    reset_cut=later+timedelta(minutes=3)
+    precision_path.write_text(json.dumps(_precision_metadata(city_name,target.isoformat(),
+        anchor_sigma_c=3.,raw_payload_bytes=raw,analysis_at=reset_cut),default=str))
+    reset_seed,reset_request=tmp_path/"reset-seeds",tmp_path/"reset-requests"
+    reset_report=discover_replacement_forecast_materialization_seeds(forecast_db=db,raw_manifest_dir=manifests,
+        seed_dir=reset_seed,request_dir=reset_request,computed_at=reset_cut,limit=1)
+    assert reset_report.discovered_count==1,reset_report
+    processed,failed,reasons=_prepare_seed_requests_with_connection(seed_dir=reset_seed,
+        seed_processed_dir=tmp_path/"reset-processed",seed_failed_dir=tmp_path/"reset-failed",request_dir=reset_request,
+        forecast_db=db,forecast_conn=None,limit=1)
+    assert len(processed)==1 and not failed,(processed,failed,reasons)
+    rebuilt=build_materialize_request_dataclass(json.loads(next(reset_request.glob("*.json")).read_text()),base_dir=reset_request)
+    sqlite_clock[0]=reset_cut
+    reset=materialize_replacement_forecast_live(conn,rebuilt);conn.commit()
+    assert reset.ok,reset.reason_codes
+    assert reset.posterior_id!=result.posterior_id
+    reset_posterior=conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(reset.posterior_id,)).fetchone()
+    reset_cert=conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?",(reset.readiness_id,)).fetchone()
+    reset_readiness=ReplacementForecastReadinessDecision(readiness_id=reset_cert["readiness_id"],status=reset_cert["status"],
+        reason_codes=tuple(json.loads(reset_cert["reason_codes_json"])),dependency_json=json.loads(reset_cert["dependency_json"]),
+        provenance_json=json.loads(reset_cert["provenance_json"]),expires_at=datetime.fromisoformat(reset_cert["expires_at"]))
+    assert all(item.ok for item in public(reset_posterior,reset_readiness,reset_cut))
+    reset_shape=json.loads(reset_posterior["provenance_json"])["bayes_precision_fusion"]["current_evidence_shape"]
+    assert reset_shape["provider_geometry_audit"]["anchor_station_ground"]==changed
+    assert tuple(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(result.posterior_id,)).fetchone())==original_posterior
+    assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(aid,)).fetchone())==original_anchor
+    assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE source_id=? AND artifact_id=?",
+        (evidence["source_id"],evidence["artifact_id"])).fetchall())==original_ground_rows
+    assert _archive(db,city_name)==changed
+    conn.close();native_sqlite.close()
 
 
 @pytest.mark.parametrize("city", ("Shanghai", "London"))
