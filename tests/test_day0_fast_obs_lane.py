@@ -184,7 +184,9 @@ def test_scoped_carrier_replay_rejects_a_self_consistent_other_target_product(mo
         DAY0_REMAINING_CARRIER_OPERATOR_V2,
     )
     from src.data.replacement_forecast_bundle_reader import _wu_fast_pinned_carrier_reason
-    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_MIXTURE_POLICY, DAY0_REMAINING_CENTER_POLICY,
+    )
     from src.signal.ensemble_signal import sigma_instrument_for_city
     from src.data import day0_fast_obs as fast
 
@@ -205,6 +207,7 @@ def test_scoped_carrier_replay_rejects_a_self_consistent_other_target_product(mo
                 preliminary_survival_identity=model.identity_hash)
             inputs["current_path_state"] = current
             inputs["day0_remaining_center_policy"] = DAY0_REMAINING_CENTER_POLICY
+            inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
             bounds = ((None, 27.0), (28.0, None))
             carrier = build_day0_remaining_probability_carrier(future_extremes_c=(26.0, 28.0),
                 boundary_scenarios=((None, 1.0),), metric=metric, path_error_sigma_c=0.5,
@@ -218,6 +221,7 @@ def test_scoped_carrier_replay_rejects_a_self_consistent_other_target_product(mo
             return {"q_shape": "fused_day0_fast_residual_likelihood", "day0_provisional_observation": conditioning,
                 "day0_preliminary_report_survival_likelihood": {},
                 "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY, "day0_remaining_center_bias_c": 0.0,
+                "day0_probability_mixture_policy": DAY0_PROBABILITY_MIXTURE_POLICY,
                 "day0_remaining_carrier_probability_cutoff_utc": cutoff.isoformat(), "day0_current_temperature_state": current,
                 "bin_topology": [{"lower_c": low, "upper_c": high} for low, high in bounds],
                 "day0_remaining_carrier_future_extremes_c": (26.0, 28.0), "day0_remaining_carrier_path_error_sigma_c": 0.5,
