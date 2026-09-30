@@ -1629,7 +1629,7 @@ def read_replacement_forecast_bundle(
         city=city,
         target_date=target_date_text,
         metric=metric,
-        provenance=_json_mapping(row_map["provenance_json"], field_name="provenance_json"),
+        provenance=provenance,
     )
     if current_snapshot_reason is not None:
         return ReplacementForecastBundleReadResult("BLOCKED", current_snapshot_reason)
