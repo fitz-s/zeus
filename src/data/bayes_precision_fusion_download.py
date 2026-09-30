@@ -2981,13 +2981,64 @@ def _scan_and_audit_request_conflicts(conn, rows: Sequence[dict]) -> None:
         raise _request_conflict_error(*first_conflict)
 
 
-def _persist_http_capture_receipt(conn, row: Mapping[str, object], capture: Mapping[str, object], body_artifact_id: int) -> None:
+def _persist_http_capture_receipt(conn, row: Mapping[str, object], capture: Mapping[str, object], body_artifact_id: int,
+        *, deadline_monotonic: float | None = None) -> None:
     """Append a real network event separately from content-addressed first possession."""
     event = capture.get("network_capture")
     if not isinstance(event, Mapping):
         return  # A cache replay has bytes, but is not a new HTTP observation.
     if event.get("captured_at") != capture.get("captured_at"):
         raise ValueError("HTTP receipt capture clock differs from returned entity")
+    repair_bases = row.get("_physical_capture_repair_bases", {})
+    if repair_bases:
+        if not conn.in_transaction:
+            raise ValueError("physical_capture_repair:same_write_transaction_required")
+        from src.data.replacement_current_value_serving import (
+            validate_physical_capture_repair_basis, _repair_sql_now, _repair_stamp,
+            _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS, _HTTP_REPAIR_MAX_BYTES,
+            _ARTIFACT_IDENTITY_JSON_SQL, _repair_original_row, _resolve_http_capture_receipt,
+            PhysicalCaptureRepairBasis,
+        )
+        if (not isinstance(repair_bases, Mapping) or any(type(raw_id) is not int or raw_id <= 0
+                or not isinstance(basis, PhysicalCaptureRepairBasis) or raw_id != basis.raw_identity["raw_model_forecast_id"]
+                for raw_id, basis in repair_bases.items())):
+            raise ValueError("physical_capture_repair:producer_basis_map_required")
+        common_deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+        if deadline_monotonic is not None:
+            common_deadline = min(common_deadline, deadline_monotonic)
+        # A shared multi-location response is persisted in several city chunks.
+        # Its first seal already contains the COMPLETE authorized map. Reuse
+        # that immutable event; never UPDATE it or mint a new recording clock.
+        expected_map = {str(raw_id): basis.to_dict() for raw_id, basis in repair_bases.items()}
+        existing = conn.execute(
+            f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a"
+            " WHERE a.source_id=? AND a.product_id=? AND a.source_cycle_time=?"
+            " AND a.data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND a.captured_at=? AND a.request_url=? AND a.request_params_json=?"
+            " AND json_extract(a.artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?",
+            (row["source_id"], row["product_id"], row["source_cycle_time"], event["captured_at"],
+             capture["request_url"], json.dumps(capture["request_params"], sort_keys=True), body_artifact_id)).fetchone()
+        if existing is not None:
+            artifact = json.loads(str(existing[0]))
+            frozen = json.loads(str(artifact["metadata"])).get("physical_http_capture_receipt", {})
+            original = _repair_original_row(conn, int(row.get("raw_model_forecast_id") or next(iter(repair_bases))), _repair_sql_now(conn))
+            same_event_fields = ("sha256", "byte_size", "request_url", "request_params", "captured_at",
+                "network_capture", "model", "locations", "native_variable", "temperature_unit", "aggregation")
+            if (frozen.get("repair_bases") != expected_map
+                    or json.dumps({key: frozen.get("physical_response", {}).get(key) for key in same_event_fields}, sort_keys=True, default=str)
+                        != json.dumps({key: capture.get(key) for key in same_event_fields}, sort_keys=True, default=str)
+                    or original is None or _resolve_http_capture_receipt({**original, "physical_artifact": artifact}) is None):
+                raise ValueError("physical_capture_repair:same_event_incomplete_or_conflicting_basis")
+            for basis in repair_bases.values():
+                validate_physical_capture_repair_basis(conn, basis, deadline_monotonic=common_deadline,
+                    _same_event_receipt_id=int(artifact["artifact_id"]))
+            return
+        for raw_id, basis in repair_bases.items():
+            if type(raw_id) is not int or raw_id <= 0 or raw_id != basis.raw_identity["raw_model_forecast_id"]:
+                raise ValueError("physical_capture_repair:conflicting_raw_ID")
+            validate_physical_capture_repair_basis(conn, basis, deadline_monotonic=common_deadline)
+            if not _repair_stamp(basis.observed_at) <= _repair_stamp(event["captured_at"]):
+                raise ValueError("physical_capture_repair:HTTP_event_precedes_observation")
     recorded_at = datetime.now(UTC).isoformat()
     receipt = {
         "revision": "openmeteo_single_model_http_capture_receipt_v1",
@@ -3000,7 +3051,13 @@ def _persist_http_capture_receipt(conn, row: Mapping[str, object], capture: Mapp
         "recorded_at": recorded_at, "response_headers": event.get("response_headers", {}),
         "physical_response": dict(capture),
     }
+    if repair_bases:
+        # New repair receipts only: sealed bytes cannot predict SQL INSERT time.
+        receipt.pop("recorded_at")
+        receipt.update(prepared_at=_repair_sql_now(conn), repair_bases={str(raw_id): basis.to_dict() for raw_id, basis in repair_bases.items()})
     encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"), default=str).encode()
+    if repair_bases and len(encoded) > _HTTP_REPAIR_MAX_BYTES:
+        raise ValueError("physical_capture_repair:receipt_byte_budget")
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(str(capture["artifact_path"])).with_name(f"openmeteo_bpf_capture_receipt_{digest}.json")
     if path.exists():
@@ -3009,6 +3066,33 @@ def _persist_http_capture_receipt(conn, row: Mapping[str, object], capture: Mapp
     else:
         with path.open("xb") as handle:
             handle.write(encoded)
+            if repair_bases:
+                handle.flush()
+                os.fsync(handle.fileno())
+    if repair_bases:
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        for basis in repair_bases.values():
+            validate_physical_capture_repair_basis(conn, basis, deadline_monotonic=common_deadline)
+        if time.monotonic() >= common_deadline:
+            raise _PersistDeadlineExceeded("physical_capture_repair:receipt_deadline")
+        from src.data.replacement_current_value_serving import _HTTP_REPAIR_SQL_CLOCK
+        descriptor = {"clock_role": "actual_sqlite_insert", "prepared_at": receipt["prepared_at"],
+            "receipt_sha256": digest, "body_artifact_id": body_artifact_id,
+            "repair_bases_sha256": hashlib.sha256(json.dumps(receipt["repair_bases"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+        conn.execute(
+            f"""INSERT INTO raw_forecast_artifacts
+               (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
+                artifact_path,sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,json_set(?,'$.canonical_recording.recorded_at',{_HTTP_REPAIR_SQL_CLOCK}),{_HTTP_REPAIR_SQL_CLOCK},0)""",
+            (row["source_id"], row["product_id"], receipt["revision"], row["source_cycle_time"],
+             receipt["source_available_at"], receipt["captured_at"], str(path), digest, len(encoded),
+             capture["request_url"], json.dumps(capture["request_params"], sort_keys=True),
+             json.dumps({"physical_http_capture_receipt": receipt, "canonical_recording": descriptor}, sort_keys=True)))
+        return
     conn.execute(
         """INSERT INTO raw_forecast_artifacts
            (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
@@ -3025,6 +3109,7 @@ def _persist_http_capture_receipt(conn, row: Mapping[str, object], capture: Mapp
 def _persist_rows(
     conn,
     rows: Sequence[dict],
+    *, deadline_monotonic: float | None = None,
 ) -> int:
     """Persist the captured rows, idempotent on the FULL identity (logical key + product_id +
     request_url_hash). Returns rows actually written.
@@ -3096,7 +3181,7 @@ def _persist_rows(
         event_key = (row["source_id"], row["product_id"], row["source_cycle_time"], capture["sha256"],
             json.dumps(params, sort_keys=True), event.get("captured_at") if isinstance(event, Mapping) else None)
         if not station and event_key not in seen_http_events:
-            _persist_http_capture_receipt(conn, row, capture, int(artifact[0]))
+            _persist_http_capture_receipt(conn, row, capture, int(artifact[0]), deadline_monotonic=deadline_monotonic)
             seen_http_events.add(event_key)
         row["captured_at"] = str(artifact[1])
         row["source_available_at"] = str(artifact[2])
@@ -3218,7 +3303,7 @@ def _persist_chunk_with_lock_retry(
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     if rows:
-                        written = _persist_rows(conn, rows)
+                        written = _persist_rows(conn, rows, deadline_monotonic=deadline_monotonic)
                     if cutoff_iso is not None:
                         pruned = _prune_old(conn, cutoff_iso=cutoff_iso)
                     conn.execute("COMMIT")
@@ -3289,7 +3374,7 @@ def _validated_capture_debt(
         raise ValueError("physical_capture_debt: aware issued run required")
     run_iso = run.astimezone(UTC).isoformat()
     from src.state.db import _connect_read_only
-    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason, observe_physical_capture_repair_basis
     records: dict[int, dict[str, object]] = {}
     conn = None
     try:
@@ -3319,6 +3404,11 @@ def _validated_capture_debt(
                 decision_time_iso=decision_time.isoformat(), deadline_monotonic=deadline_monotonic)
             if actual_reason != reason:
                 raise ValueError(f"physical_capture_debt: raw_id={raw_id} no matching recoverable proof debt")
+            # No public basis input exists. The shared classifier independently
+            # observes current canonical facts before this ordinary HTTP path.
+            raw["_physical_capture_repair_basis"] = observe_physical_capture_repair_basis(conn,
+                raw_model_forecast_id=raw_id, decision_time_iso=decision_time.isoformat(),
+                deadline_monotonic=deadline_monotonic)
             raw["receipt_frontier_id"] = int(conn.execute(
                 "SELECT COALESCE(MAX(artifact_id),0) FROM raw_forecast_artifacts"
                 " WHERE source_id=? AND product_id=? AND source_cycle_time=?"
@@ -4358,6 +4448,24 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         # CHUNKED DURABILITY (2026-06-11): persist THIS city×date's rows now — a restart or
         # crash later in the pass can no longer destroy completed targets' fetches.
         if rows:
+            for captured_row in rows:
+                captured = captured_row.get("_physical_response")
+                if not isinstance(captured, Mapping):
+                    continue
+                pairs = tuple(zip(str(captured["request_params"]["latitude"]).split(","),
+                    str(captured["request_params"]["longitude"]).split(","),
+                    str(captured["request_params"]["timezone"]).split(","), strict=True))
+                bases = {}
+                for raw_id, debt_row in capture_debt.items():
+                    basis = debt_row.get("_physical_capture_repair_basis")
+                    if (basis is not None and captured_row["model"] == debt_row["model"]
+                            and captured_row["source_cycle_time"] == debt_row["source_cycle_time"]
+                            and any(float(lat) == float(debt_row["latitude_requested"])
+                                and float(lon) == float(debt_row["longitude_requested"])
+                                and tz == debt_row["timezone_requested"] for lat, lon, tz in pairs)):
+                        bases[raw_id] = basis
+                if bases:
+                    captured_row["_physical_capture_repair_bases"] = bases
             pending_families = {
                 (str(row["city"]), str(row["target_date"]), str(row["metric"]))
                 for row in rows

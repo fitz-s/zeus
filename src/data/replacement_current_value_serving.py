@@ -347,18 +347,7 @@ def _physical_artifact_at_cutoff(row: Mapping[str, object], candidates=None) -> 
     return {**row, "physical_artifact": latest}
 
 
-def _read_product_identity_at_cutoff(conn: sqlite3.Connection, raw: object, *, deadline_monotonic: float | None = None) -> str:
-    """Stream the complete same-issued request family, retaining only its winner.
-
-    SCOPE: one exact provider/request family. DRAIN: normal bounded acquisition
-    or a subsequent read within the existing query budget. RESET: a complete
-    scan, never a truncated older winner after deadline/interruption.
-    """
-    row = json.loads(str(raw))
-    if row.get("physical_proof_cutoff") is None or not all(row.get(key) is not None for key in (
-        "source_id", "product_id", "source_cycle_time", "latitude_requested", "longitude_requested", "timezone_requested"
-    )):
-        return str(raw)
+def _physical_artifact_candidates(conn: sqlite3.Connection, row: Mapping[str, object], *, deadline: float):
     legacy = (row.get("artifact_id") is None and row.get("elevation_param") == "requested"
         and row.get("downscaling_policy") == "none" and row.get("endpoint_mode") == "single_runs")
     sql = f"""SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a
@@ -372,13 +361,11 @@ def _read_product_identity_at_cutoff(conn: sqlite3.Connection, raw: object, *, d
                     THEN a.request_params_json ELSE '{{}}' END,'$.longitude') AS TEXT)), ',', '\",\"')) lon ON lon.key=lat.key
                 JOIN json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
                     THEN a.request_params_json ELSE '{{}}' END,'$.timezone') AS TEXT)), ',', '\",\"')) tz ON tz.key=lat.key
-                WHERE CAST(lat.value AS REAL)=? AND CAST(lon.value AS REAL)=? AND tz.value=?))"""
-    deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
-    if deadline_monotonic is not None:
-        deadline = min(deadline, deadline_monotonic)
+                WHERE CAST(lat.value AS REAL)=? AND CAST(lon.value AS REAL)=? AND tz.value=?))
+        ORDER BY a.artifact_id DESC"""
     cursor = conn.execute(sql, (row.get("artifact_id"), row["source_id"], row["product_id"], row["source_cycle_time"],
         int(legacy), row["latitude_requested"], row["longitude_requested"], row["timezone_requested"]))
-    def candidates():
+    try:
         while True:
             if time.monotonic() >= deadline:
                 raise CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
@@ -386,11 +373,25 @@ def _read_product_identity_at_cutoff(conn: sqlite3.Connection, raw: object, *, d
             if not batch:
                 return
             for item in batch:
+                if time.monotonic() >= deadline:
+                    raise CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
                 yield json.loads(str(item[0]))
-    try:
-        return json.dumps(_physical_artifact_at_cutoff(row, candidates()), separators=(",", ":"))
     finally:
         cursor.close()
+
+
+def _read_product_identity_at_cutoff(conn: sqlite3.Connection, raw: object, *, deadline_monotonic: float | None = None) -> str:
+    """Complete same-issued scan; an observed repair covers only its old unknown-bad prefix."""
+    row = json.loads(str(raw))
+    if row.get("physical_proof_cutoff") is None or not all(row.get(key) is not None for key in (
+        "source_id", "product_id", "source_cycle_time", "latitude_requested", "longitude_requested", "timezone_requested"
+    )):
+        return str(raw)
+    deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+    if deadline_monotonic is not None:
+        deadline = min(deadline, deadline_monotonic)
+    selected = _physical_artifact_at_cutoff(row, _physical_artifact_candidates(conn, row, deadline=deadline))
+    return json.dumps(_select_observed_receipt_repair(conn, row, selected, deadline=deadline), separators=(",", ":"))
 
 
 def read_current_instrument_family_latest_id(
@@ -599,12 +600,44 @@ def _resolve_http_capture_receipt(row: Mapping[str, object]) -> dict[str, object
     try:
         import hashlib
         from pathlib import Path
-        encoded = Path(str(artifact["artifact_path"])).read_bytes()
+        path = Path(str(artifact["artifact_path"]))
+        metadata = json.loads(str(artifact["metadata"]))
+        is_new_protocol = isinstance(metadata, Mapping) and "canonical_recording" in metadata
+        if is_new_protocol and (type(artifact["byte_size"]) is not int or not 0 < artifact["byte_size"] <= _HTTP_REPAIR_MAX_BYTES
+                or path.stat().st_size != artifact["byte_size"]):
+            return None
+        encoded = path.read_bytes()
         if len(encoded) != artifact["byte_size"] or hashlib.sha256(encoded).hexdigest() != artifact["sha256"]:
             return None
         receipt = json.loads(encoded)
-        if json.loads(str(artifact["metadata"])) != {"physical_http_capture_receipt": receipt}:
-            return None
+        repair_bases = receipt.get("repair_bases")
+        if repair_bases is None:
+            if json.loads(str(artifact["metadata"])) != {"physical_http_capture_receipt": receipt}:
+                return None
+        else:
+            receipt = json.loads(encoded, object_pairs_hook=_repair_unique_json_fields)
+            repair_bases = receipt["repair_bases"]
+            if not isinstance(repair_bases, dict) or not repair_bases or "recorded_at" in receipt:
+                return None
+            own_basis = repair_bases.get(str(row["raw_model_forecast_id"]))
+            for raw_id, basis in repair_bases.items():
+                if (not isinstance(raw_id, str) or not raw_id.isascii() or not raw_id.isdigit() or raw_id != str(int(raw_id)) or int(raw_id) <= 0
+                        or type(basis["raw_identity"]["raw_model_forecast_id"]) is not int
+                        or str(basis["raw_identity"]["raw_model_forecast_id"]) != raw_id
+                        or basis["revision"] != _HTTP_REPAIR_BASIS_REVISION or basis["clock_resolution"] != "milliseconds"):
+                    return None
+            if own_basis is not None and own_basis["raw_identity"] != _repair_raw_identity(row):
+                return None
+            prepared = _repair_stamp(receipt["prepared_at"])
+            captured, recorded = _repair_stamp(artifact["captured_at"]), _repair_stamp(artifact["recorded_at"])
+            descriptor = {"clock_role": "actual_sqlite_insert", "prepared_at": receipt["prepared_at"],
+                "receipt_sha256": artifact["sha256"], "body_artifact_id": receipt["body_artifact_id"],
+                "repair_bases_sha256": _repair_sha(repair_bases), "recorded_at": artifact["recorded_at"]}
+            observed = [_repair_stamp(basis["observed_at"]) for basis in repair_bases.values()]
+            if (any(stamp.microsecond % 1000 or not stamp <= captured <= recorded or not stamp <= prepared <= recorded for stamp in observed)
+                    or prepared.microsecond % 1000 or recorded.microsecond % 1000 or prepared > recorded
+                    or json.loads(str(artifact["metadata"])) != {"physical_http_capture_receipt": receipt, "canonical_recording": descriptor}):
+                return None
         body = artifact["body_artifact"]
         if not isinstance(body, dict) or body.get("data_version") != "openmeteo_single_model_entity_body_v1":
             return None
@@ -616,6 +649,8 @@ def _resolve_http_capture_receipt(row: Mapping[str, object]) -> dict[str, object
         if receipt["request_params"] != json.loads(str(artifact["request_params_json"])) or receipt["request_params"] != json.loads(str(body["request_params_json"])):
             return None
         for key in ("captured_at", "source_available_at", "recorded_at"):
+            if key == "recorded_at" and repair_bases is not None:
+                continue
             if receipt[key] != artifact[key]:
                 return None
         proof = receipt["physical_response"]
@@ -864,9 +899,288 @@ def station_ground_target_coverage_for_city(evidence: object, *, city: str, targ
         target_start_utc=window.start_utc,target_end_utc=window.end_utc)
 
 
-def physical_capture_debt_reason(
+_HTTP_REPAIR_BASIS_REVISION = "openmeteo_observed_http_receipt_repair_v1"
+_HTTP_REPAIR_SQL_CLOCK = "strftime('%Y-%m-%dT%H:%M:%f+00:00','now')"
+_HTTP_REPAIR_MAX_BYTES = 1024 * 1024
+
+
+def _repair_stamp(value: object) -> datetime:
+    result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if result.tzinfo is None:
+        raise ValueError("physical_capture_repair:unproven_clock")
+    return result.astimezone(timezone.utc)
+
+
+def _repair_sql_now(conn: sqlite3.Connection) -> str:
+    return str(conn.execute(f"SELECT {_HTTP_REPAIR_SQL_CLOCK}").fetchone()[0])
+
+
+def _repair_sha(value: object) -> str:
+    import hashlib
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _repair_unique_json_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("physical_capture_repair:duplicate_JSON_key")
+        result[key] = value
+    return result
+
+
+def _repair_raw_identity(row: Mapping[str, object]) -> dict[str, object]:
+    return {key: row.get(key) for key in _PRODUCT_IDENTITY_COLUMNS}
+
+
+@dataclass(frozen=True)
+class PhysicalCaptureRepairBasis:
+    """Producer-observed cost basis. It grants no HTTP, source-age or q authority by itself."""
+
+    raw_identity: Mapping[str, object]
+    original_body_artifact: Mapping[str, object]
+    observed_at: str
+    receipt_prefix: Mapping[str, object]
+    unknown_bad_prefix: Mapping[str, object]
+    reason: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {"revision": _HTTP_REPAIR_BASIS_REVISION,
+            "raw_identity": dict(self.raw_identity), "original_body_artifact": dict(self.original_body_artifact),
+            "observed_at": self.observed_at, "clock_resolution": "milliseconds",
+            "receipt_prefix": dict(self.receipt_prefix), "unknown_bad_prefix": dict(self.unknown_bad_prefix),
+            "reason": self.reason}
+
+
+def _unbounded_bad_http_receipt(row: Mapping[str, object], artifact: Mapping[str, object], observed_at: datetime) -> bool:
+    """Only a registered, unorderable bad receipt; never a known future or valid causal event."""
+    try:
+        from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+        from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+        if artifact["data_version"] != "openmeteo_single_model_http_capture_receipt_v1" or artifact["request_url"] != SINGLE_RUNS_FORECAST_URL:
+            return False
+        params = json.loads(str(artifact["request_params_json"]))
+        if (params.get("models") != OPENMETEO_MODEL_IDS.get(str(row["model"]), row["model"])
+                or params.get("temperature_unit") != "celsius" or params.get("cell_selection") != "land"):
+            return False
+        run = datetime.fromisoformat(str(params["run"]))
+        if run.tzinfo is None:
+            run = run.replace(tzinfo=timezone.utc)
+        if run != _repair_stamp(row["source_cycle_time"]):
+            return False
+        # A parseable recording clock keeps its original causal/future ordering.
+        try:
+            _repair_stamp(artifact["recorded_at"])
+            return False
+        except (TypeError, ValueError):
+            pass
+        own_bound = _receipt_canonical_recorded_bound(artifact)
+        return own_bound is None or own_bound <= observed_at
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _repair_frontier(conn: sqlite3.Connection, row: Mapping[str, object], *, observed_at: datetime,
+        deadline: float, max_artifact_id: int | None = None,
+        _same_event_receipt_id: int | None = None) -> tuple[dict[str, object], dict[str, object]]:
+    import hashlib
+    full, unknown = hashlib.sha256(), hashlib.sha256()
+    count = bad_count = maximum = 0
+    for artifact in _physical_artifact_candidates(conn, row, deadline=deadline):
+        if artifact["data_version"] != "openmeteo_single_model_http_capture_receipt_v1":
+            continue
+        aid = int(artifact["artifact_id"])
+        if aid == _same_event_receipt_id:
+            continue
+        if max_artifact_id is not None and aid > max_artifact_id:
+            continue
+        encoded = json.dumps({"artifact_id": aid, "descriptor_sha256": _repair_sha(artifact)},
+            sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        full.update(encoded)
+        count += 1
+        maximum = max(maximum, aid)
+        if _unbounded_bad_http_receipt(row, artifact, observed_at):
+            unknown.update(encoded)
+            bad_count += 1
+    if time.monotonic() >= deadline:
+        raise CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
+    return ({"row_count": count, "max_artifact_id": maximum, "descriptor_sha256": full.hexdigest()},
+        {"row_count": bad_count, "descriptor_sha256": unknown.hexdigest()})
+
+
+def _repair_original_row(conn: sqlite3.Connection, raw_id: int, cut: str) -> dict[str, object] | None:
+    if type(raw_id) is not int or raw_id <= 0:
+        return None
+    schema = current_value_serving_schema(conn)
+    cursor = conn.execute(f"SELECT {_product_identity_select(schema, decision_iso=cut)}"
+        " FROM raw_model_forecasts WHERE raw_model_forecast_id=? AND coverage_status='COVERED' AND training_allowed=0", (raw_id,))
+    item = cursor.fetchone()
+    return None if item is None else json.loads(str(item[0]))
+
+
+def observe_physical_capture_repair_basis(conn: sqlite3.Connection, *, raw_model_forecast_id: int,
+        decision_time_iso: str, deadline_monotonic: float | None = None) -> PhysicalCaptureRepairBasis | None:
+    """Independently observe an exact old unknown-bad frontier at actual SQL now.
+
+    SCOPE one immutable raw request/target; DRAIN quota-bound actual 200; RESET
+    only a durable new receipt accepted at its new cut. Historical caller cuts
+    never renew raw age; no caller supplies the observation clock or frontier.
+    """
+    deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+    if deadline_monotonic is not None:
+        deadline = min(deadline, deadline_monotonic)
+    try:
+        knowledge = _repair_stamp(decision_time_iso)
+        row = _repair_original_row(conn, raw_model_forecast_id, decision_time_iso)
+        if row is None or not isinstance(row.get("physical_artifact"), Mapping):
+            return None
+        if isinstance(row.get("forecast_value_c"), bool) or not isinstance(row.get("forecast_value_c"), (int, float)) or not math.isfinite(row["forecast_value_c"]):
+            return None
+        if any(_repair_stamp(row[key]) > knowledge for key in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at")):
+            return None
+        # SQL now, not decision_time_iso, is the eligibility/age clock.
+        eligibility_now = _repair_sql_now(conn)
+        row = _repair_original_row(conn, raw_model_forecast_id, eligibility_now)
+        current = json.loads(_read_product_identity_at_cutoff(conn, json.dumps(row), deadline_monotonic=deadline))
+        if _source_clock_product_has_authority(json.dumps(current), lead_days=int(row["lead_days"])):
+            return None
+        canonical = _physical_artifact_at_cutoff(row, _physical_artifact_candidates(conn, row, deadline=deadline))
+        if (not isinstance(canonical.get("physical_artifact"), Mapping)
+                or _receipt_canonical_recorded_bound(canonical["physical_artifact"]) is not None
+                or not _unbounded_bad_http_receipt(row, canonical["physical_artifact"], _repair_stamp(eligibility_now))):
+            return None
+        reason = _physical_capture_debt_reason(conn, raw_model_forecast_id=raw_model_forecast_id,
+            decision_time_iso=eligibility_now, deadline_monotonic=deadline, _allow_unknown_receipt=True)
+        if reason not in {"HTTP_CAPTURE_RECEIPT_MISSING", "ENTITY_BODY_MISSING"}:
+            return None
+        frontier, bad = _repair_frontier(conn, row, observed_at=_repair_stamp(eligibility_now), deadline=deadline)
+        if not bad["row_count"]:
+            return None
+        # Verification and complete canonical observation precede this SQL-ms sample.
+        observed = _repair_sql_now(conn)
+        basis = PhysicalCaptureRepairBasis(_repair_raw_identity(row), row["physical_artifact"], observed, frontier, bad, reason)
+        validate_physical_capture_repair_basis(conn, basis, deadline_monotonic=deadline)
+        return basis
+    except (KeyError, TypeError, ValueError, OSError):
+        return None
+
+
+def validate_physical_capture_repair_basis(conn: sqlite3.Connection, basis: PhysicalCaptureRepairBasis,
+        *, deadline_monotonic: float | None = None, _same_event_receipt_id: int | None = None) -> None:
+    """Recheck canonical facts, never accept a payload's self-reported cost permission."""
+    if not isinstance(basis, PhysicalCaptureRepairBasis):
+        raise ValueError("physical_capture_repair:producer_basis_required")
+    deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+    if deadline_monotonic is not None:
+        deadline = min(deadline, deadline_monotonic)
+    now = _repair_sql_now(conn)
+    row = _repair_original_row(conn, int(basis.raw_identity["raw_model_forecast_id"]), now)
+    if (row is None or _repair_raw_identity(row) != basis.raw_identity
+            or row.get("physical_artifact") != basis.original_body_artifact
+            or _repair_stamp(basis.observed_at) > _repair_stamp(now)):
+        raise ValueError("physical_capture_repair:original_identity_changed")
+    reason = _physical_capture_debt_reason(conn, raw_model_forecast_id=int(basis.raw_identity["raw_model_forecast_id"]),
+        decision_time_iso=now, deadline_monotonic=deadline, _allow_unknown_receipt=True)
+    if reason not in {"HTTP_CAPTURE_RECEIPT_MISSING", "ENTITY_BODY_MISSING"}:
+        raise ValueError("physical_capture_repair:current_eligibility_lost")
+    if _same_event_receipt_id is not None:
+        item = conn.execute(f"SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE artifact_id=?", (_same_event_receipt_id,)).fetchone()
+        artifact = None if item is None else json.loads(str(item[0]))
+        doc = {} if artifact is None else json.loads(str(artifact["metadata"])).get("physical_http_capture_receipt", {})
+        resolved = None if artifact is None else _resolve_http_capture_receipt({**row, "physical_artifact": artifact})
+        if (doc.get("repair_bases", {}).get(str(basis.raw_identity["raw_model_forecast_id"])) != basis.to_dict()
+                or resolved is None or not _source_clock_product_has_authority(json.dumps(resolved), lead_days=int(row["lead_days"]))):
+            raise ValueError("physical_capture_repair:unproved_same_event_receipt")
+    frontier, bad = _repair_frontier(conn, row, observed_at=_repair_stamp(basis.observed_at), deadline=deadline,
+        _same_event_receipt_id=_same_event_receipt_id)
+    if frontier != basis.receipt_prefix or bad != basis.unknown_bad_prefix:
+        raise ValueError("physical_capture_repair:frontier_changed")
+
+
+def _select_observed_receipt_repair(conn: sqlite3.Connection, row: Mapping[str, object], selected: dict[str, object], *, deadline: float) -> dict[str, object]:
+    """A new lawful event can dominate its observed unknowns, not other causal evidence."""
+    selected_artifact = selected.get("physical_artifact")
+    cut = _repair_stamp(row["physical_proof_cutoff"])
+    needs_repair = isinstance(selected_artifact, Mapping) and _unbounded_bad_http_receipt(row, selected_artifact, cut)
+    choice = None
+    for artifact in _physical_artifact_candidates(conn, row, deadline=deadline):
+        is_repair_candidate = False
+        try:
+            if artifact["data_version"] != "openmeteo_single_model_http_capture_receipt_v1":
+                continue
+            receipt = json.loads(str(artifact["metadata"])).get("physical_http_capture_receipt")
+            if not isinstance(receipt, Mapping):
+                continue
+            bases = receipt.get("repair_bases")
+            basis = bases.get(str(row["raw_model_forecast_id"])) if isinstance(bases, Mapping) else None
+            if not isinstance(basis, Mapping):
+                continue
+            is_repair_candidate = True
+            recorded = _repair_stamp(artifact["recorded_at"])
+            if recorded > cut:
+                continue
+            if basis["raw_identity"] != _repair_raw_identity(row) or basis["original_body_artifact"] != row.get("physical_artifact"):
+                raise ValueError("basis identity differs")
+            frontier, bad = _repair_frontier(conn, row, observed_at=_repair_stamp(basis["observed_at"]),
+                max_artifact_id=int(basis["receipt_prefix"]["max_artifact_id"]), deadline=deadline)
+            if frontier != basis["receipt_prefix"] or bad != basis["unknown_bad_prefix"]:
+                raise ValueError("basis prefix differs")
+            resolved = _resolve_http_capture_receipt({**row, "physical_artifact": artifact})
+            if resolved is None or not _source_clock_product_has_authority(json.dumps(resolved), lead_days=int(row["lead_days"])):
+                raise ValueError("new repair event lacks authority")
+            from pathlib import Path
+            from src.data.station_ground_evidence import read_current_station_ground_evidence
+            db_path = next((str(item[2]) for item in conn.execute("PRAGMA database_list") if item[1] == "main"), "")
+            ground = read_current_station_ground_evidence(Path(db_path), city=str(row["city"]), decision_at=cut)
+            if ground is None or station_ground_target_coverage_for_city(ground, city=str(row["city"]), target_date=row["target_date"], decision_at=cut)["status"] != "VERIFIED":
+                raise ValueError("new repair event lacks ground")
+            if choice is None or _physical_artifact_at_cutoff(row, (choice[0], artifact))["physical_artifact"]["artifact_id"] == artifact["artifact_id"]:
+                choice = (artifact, basis)
+        except (KeyError, TypeError, ValueError, OSError):
+            if is_repair_candidate and isinstance(selected_artifact, Mapping) and selected_artifact.get("artifact_id") == artifact.get("artifact_id"):
+                return {**row, "physical_artifact": None}
+    if choice is None:
+        return selected
+    # There is no second authority regime: retain the existing causal winner
+    # rule, removing only independently rederived old unknown-bad candidates.
+    newest, basis = choice
+    if not needs_repair and not (isinstance(selected_artifact, Mapping) and selected_artifact.get("artifact_id") == newest["artifact_id"]):
+        return selected
+    observed = _repair_stamp(basis["observed_at"])
+    def retained():
+        for artifact in _physical_artifact_candidates(conn, row, deadline=deadline):
+            if int(artifact["artifact_id"]) <= int(basis["receipt_prefix"]["max_artifact_id"]) and _unbounded_bad_http_receipt(row, artifact, observed):
+                continue
+            yield artifact
+    return _physical_artifact_at_cutoff(row, retained())
+
+
+def physical_capture_debt_reason(conn: sqlite3.Connection, *, raw_model_forecast_id: int,
+        decision_time_iso: str, deadline_monotonic: float | None = None) -> str | None:
+    reason = _physical_capture_debt_reason(conn, raw_model_forecast_id=raw_model_forecast_id,
+        decision_time_iso=decision_time_iso, deadline_monotonic=deadline_monotonic)
+    basis = observe_physical_capture_repair_basis(conn, raw_model_forecast_id=raw_model_forecast_id,
+        decision_time_iso=decision_time_iso, deadline_monotonic=deadline_monotonic)
+    if basis is not None:
+        return basis.reason
+    # An unknown current frontier cannot inherit a cost grant from an older
+    # caller cut when actual-now observation rejected its eligibility.
+    row = _repair_original_row(conn, raw_model_forecast_id, _repair_sql_now(conn))
+    if row is not None:
+        deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+        if deadline_monotonic is not None:
+            deadline = min(deadline, deadline_monotonic)
+        canonical = _physical_artifact_at_cutoff(row, _physical_artifact_candidates(conn, row, deadline=deadline))
+        if (isinstance(canonical.get("physical_artifact"), Mapping)
+                and _receipt_canonical_recorded_bound(canonical["physical_artifact"]) is None
+                and _unbounded_bad_http_receipt(row, canonical["physical_artifact"], _repair_stamp(row["physical_proof_cutoff"]))):
+            return None
+    return reason
+
+
+def _physical_capture_debt_reason(
     conn: sqlite3.Connection, *, raw_model_forecast_id: int,
-    decision_time_iso: str, deadline_monotonic: float | None = None,
+    decision_time_iso: str, deadline_monotonic: float | None = None, _allow_unknown_receipt: bool = False,
 ) -> str | None:
     """Classify one recoverable same-issued producer debt, never source authority.
 
@@ -944,6 +1258,11 @@ def physical_capture_debt_reason(
             city=str(raw["city"]),target_date=raw["target_date"],decision_at=decision)["status"] != "VERIFIED":
             return None
         row = json.loads(_read_product_identity_at_cutoff(conn, item[0], deadline_monotonic=deadline_monotonic))
+        if _allow_unknown_receipt:
+            deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+            if deadline_monotonic is not None:
+                deadline = min(deadline, deadline_monotonic)
+            row = _physical_artifact_at_cutoff(raw, _physical_artifact_candidates(conn, raw, deadline=deadline))
         artifact = row.get("physical_artifact")
         if not isinstance(artifact, Mapping):
             # Only explicit supported domains may incur this one acquisition;
@@ -967,7 +1286,7 @@ def physical_capture_debt_reason(
                 acquisition_bound=_receipt_canonical_recorded_bound(artifact)
             if acquisition_bound is not None and acquisition_bound>decision:
                 acquisition_bound=_receipt_canonical_recorded_bound(artifact)
-            if acquisition_bound is None or acquisition_bound > decision:
+            if (acquisition_bound is None and not _allow_unknown_receipt) or (acquisition_bound is not None and acquisition_bound > decision):
                 return None
             row = _revalidated_legacy_product_row(raw)
             invalid_http_receipt = row is not None

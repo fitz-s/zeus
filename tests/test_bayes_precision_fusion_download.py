@@ -4664,7 +4664,7 @@ def test_capture_debt_bad_contract_is_rejected_before_acquisition(tmp_path, monk
         )
 
 
-def _real_capture_world(tmp_path, monkeypatch, path, metric="high"):
+def _real_capture_world(tmp_path, monkeypatch, path, metric="high", *, private_sql_clock=False):
     """Actual ground/static bytes, canonical writer, quota/store and HTTP client; only HTTP is fake."""
     from types import SimpleNamespace
     from zoneinfo import ZoneInfo
@@ -4684,6 +4684,26 @@ def _real_capture_world(tmp_path, monkeypatch, path, metric="high"):
     _controlled_model_static_transport.__wrapped__(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "state_path", lambda name: tmp_path / "state" / name)
     clock = [datetime(2026, 9, 29, 22, 5, tzinfo=UTC)]
+    if private_sql_clock:
+        import src.state.db as db_module
+        # A deterministic private SQLite clock, independent of caller decision
+        # arguments. Classification/native/ground/transport remain real paths.
+        def with_clock(connect):
+            def open_private(*args, **kwargs):
+                conn = connect(*args, **kwargs)
+                def sql_clock(fmt, value):
+                    if fmt == "%Y-%m-%dT%H:%M:%f+00:00" and value == "now":
+                        return clock[0].isoformat(timespec="milliseconds")
+                    native = sqlite3.connect(":memory:")
+                    try:
+                        return native.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0]
+                    finally:
+                        native.close()
+                conn.create_function("strftime", 2, sql_clock)
+                return conn
+            return open_private
+        monkeypatch.setattr(db_module, "_connect", with_clock(db_module._connect))
+        monkeypatch.setattr(db_module, "_connect_read_only", with_clock(db_module._connect_read_only))
 
     class Clock(datetime):
         @classmethod
@@ -4710,6 +4730,8 @@ def _real_capture_world(tmp_path, monkeypatch, path, metric="high"):
                     "last_run_initialisation_time": run.timestamp(),
                     "last_run_modification_time": run.replace(hour=16).timestamp(),
                     "last_run_availability_time": run.replace(hour=16).timestamp()}, request=request)
+            if private_sql_clock:
+                clock[0] += timedelta(milliseconds=3)
             calls.append(dict(params))
             payloads = []
             for lat, lon, zone in zip(str(params["latitude"]).split(","),
@@ -4741,7 +4763,8 @@ def _real_capture_world(tmp_path, monkeypatch, path, metric="high"):
     else:
         assert dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs, targets=targets)["written_row_count"] == 3
     return SimpleNamespace(db=db, run=run, clock=clock, targets=targets, kwargs=kwargs,
-        calls=calls, tracker=tracker, provider=provider)
+        calls=calls, tracker=tracker, provider=provider,
+        open_forecast=with_clock(sqlite3.connect) if private_sql_clock else sqlite3.connect)
 
 
 @pytest.mark.parametrize("path", ("single", "locations"))
@@ -4816,10 +4839,12 @@ def test_real_capture_debt_recovers_same_issued_rows_and_leaves_neighbor_cost_ze
 
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize("damage", ("receipt_file", "captured_at", "source_available_at", "recorded_at",
-    "future_captured_at", "future_source_available_at", "future_recorded_at", "all_clocks", "receipt_metadata"))
+    "future_captured_at", "future_source_available_at", "future_recorded_at", "all_clocks", "receipt_metadata",
+    "all_clocks_and_receipt_file", "all_clocks_and_body_files"))
 def test_real_damaged_receipt_is_reacquired_without_rewriting_raw_truth(tmp_path, monkeypatch, damage, metric):
     from src.data import bayes_precision_fusion_download as dl
     from src.data.replacement_current_value_serving import physical_capture_debt_reason, read_current_instrument_values
+    actual_time = time.time
     world = _real_capture_world(tmp_path, monkeypatch, "single", metric)
     target = world.targets[0]
     with sqlite3.connect(world.db) as conn:
@@ -4839,21 +4864,33 @@ def test_real_damaged_receipt_is_reacquired_without_rewriting_raw_truth(tmp_path
             conn.execute(f"UPDATE raw_forecast_artifacts SET {damage}='not-a-clock' WHERE artifact_id=?", (receipt_id,))
         elif damage.startswith("future_"):
             conn.execute(f"UPDATE raw_forecast_artifacts SET {damage.removeprefix('future_')}='2026-09-30T10:00:00Z' WHERE artifact_id=?", (receipt_id,))
-        elif damage == "all_clocks":
+        elif damage in ("all_clocks", "all_clocks_and_receipt_file", "all_clocks_and_body_files"):
             conn.execute("UPDATE raw_forecast_artifacts SET captured_at='not-a-clock',"
                 "source_available_at='not-a-clock',recorded_at='not-a-clock' WHERE artifact_id=?", (receipt_id,))
+            if damage != "all_clocks":
+                Path(receipt_path).unlink()
+            if damage == "all_clocks_and_body_files":
+                Path(conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?", (body_id,)).fetchone()[0]).unlink()
         else:
             conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json='{}' WHERE artifact_id=?", (receipt_id,))
         conn.commit()
         world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+        reason = "ENTITY_BODY_MISSING" if damage == "all_clocks_and_body_files" else "HTTP_CAPTURE_RECEIPT_MISSING"
         assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
-            decision_time_iso=world.clock[0].isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+            decision_time_iso=world.clock[0].isoformat()) == reason
         assert "icon_global" not in read_current_instrument_values(conn, city=target.city, metric=target.metric,
             target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
             decision_time_iso=world.clock[0].isoformat())
     old_calls = len(world.calls)
+    if damage in ("all_clocks_and_receipt_file", "all_clocks_and_body_files"):
+        # The new protocol samples actual SQLite now: do not pretend an earlier
+        # fixture HTTP timestamp happened after that independent observation.
+        monkeypatch.setattr(dl, "datetime", datetime)
+        monkeypatch.setattr("src.data.openmeteo_client.time.time", actual_time)
     report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
-        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=(raw_id,))
+        network_capture_reason=reason, capture_debt_raw_ids=(raw_id,))
+    if damage in ("all_clocks_and_receipt_file", "all_clocks_and_body_files"):
+        world.clock[0] = datetime.now(UTC)
     assert len(world.calls) == old_calls + 1
     assert report["written_row_count"] == 0 and report["physical_capture_recovered_raw_ids"] == (raw_id,), report
     with sqlite3.connect(world.db) as conn:
@@ -5162,3 +5199,228 @@ def test_actual_ifs9_missing_original_static_remains_diagnostic_without_native_a
     assert "source_cell_geometry_proof" not in capture["locations"][0]
     assert capture["native_surface"] == "UNKNOWN" and "network_capture" not in capture
     assert not (tmp_path / "static").exists()
+
+
+def _break_unbounded_receipts(world, targets):
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    with world.open_forecast(world.db) as conn:
+        raw_ids = tuple(conn.execute("SELECT raw_model_forecast_id FROM raw_model_forecasts WHERE city=? AND target_date=? AND metric=?",
+            (t.city, t.target_date, t.metric)).fetchone()[0] for t in targets)
+        before = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+        for target in targets:
+            assert "icon_global" in read_current_instrument_values(conn, city=target.city, metric=target.metric,
+                target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(), decision_time_iso=world.clock[0].isoformat())
+        receipts = conn.execute("SELECT artifact_id,artifact_path FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id') IN ("
+            "SELECT artifact_id FROM raw_model_forecasts WHERE raw_model_forecast_id IN (" + ",".join("?" for _ in raw_ids) + "))", raw_ids).fetchall()
+        for aid, path in receipts:
+            conn.execute("UPDATE raw_forecast_artifacts SET captured_at='unknown',source_available_at='unknown',recorded_at='unknown' WHERE artifact_id=?", (aid,))
+            Path(path).unlink()
+        conn.commit()
+    world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+    return raw_ids, before, tuple(aid for aid, _ in receipts)
+
+
+def _served_in_world(conn, world, target, cut=None):
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    return read_current_instrument_values(conn, city=target.city, metric=target.metric,
+        target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
+        decision_time_iso=(cut or world.clock[0]).isoformat())
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("shared_roles", (False, True))
+def test_extreme_shared_200_seals_complete_map_and_preserves_old_cuts(tmp_path, monkeypatch, metric, shared_roles):
+    from dataclasses import replace
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    world = _real_capture_world(tmp_path, monkeypatch, "locations", metric, private_sql_clock=True)
+    targets = world.targets[:2]
+    if shared_roles:
+        other = replace(world.targets[0], metric="low" if metric == "high" else "high")
+        dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[other])
+        targets = [world.targets[0], other]
+    raw_ids, before, old_receipts = _break_unbounded_receipts(world, targets)
+    old_cut = world.clock[0]
+    old_calls, old_quota = len(world.calls), world.tracker.calls_today()
+    with world.open_forecast(world.db) as conn:
+        for raw_id, target in zip(raw_ids, targets, strict=True):
+            assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id, decision_time_iso=old_cut.isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+            assert "icon_global" not in _served_in_world(conn, world, target)
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=targets,
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    assert report["written_row_count"] == 0 and report["physical_capture_recovered_raw_ids"] == tuple(sorted(raw_ids)), report
+    assert len(world.calls) == old_calls + 1
+    assert world.tracker.calls_today() == old_quota + (1 if shared_roles else 2)
+    assert str(world.targets[-1].latitude) not in str(world.calls[-1]["latitude"])
+    with world.open_forecast(world.db) as conn:
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+        row = conn.execute("SELECT artifact_path,artifact_metadata_json,recorded_at FROM raw_forecast_artifacts WHERE json_type(artifact_metadata_json,'$.canonical_recording')='object' ORDER BY artifact_id DESC LIMIT 1").fetchone()
+        doc = json.loads(Path(row[0]).read_bytes())
+        assert "recorded_at" not in doc and set(doc["repair_bases"]) == {str(raw_id) for raw_id in raw_ids}
+        assert doc["prepared_at"] <= row[2]
+        assert json.loads(row[1])["canonical_recording"]["recorded_at"] == row[2]
+        recorded = datetime.fromisoformat(row[2])
+        for raw_id, target in zip(raw_ids, targets, strict=True):
+            assert "icon_global" not in _served_in_world(conn, world, target, old_cut)
+            assert "icon_global" not in _served_in_world(conn, world, target, recorded - timedelta(microseconds=1))
+            assert "icon_global" in _served_in_world(conn, world, target, recorded)
+            assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id, decision_time_iso=world.clock[0].isoformat()) is None
+        assert all(conn.execute("SELECT recorded_at FROM raw_forecast_artifacts WHERE artifact_id=?", (aid,)).fetchone()[0] == "unknown" for aid in old_receipts)
+    dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=world.targets)
+    assert len(world.calls) == old_calls + 1 and world.tracker.calls_today() == old_quota + (1 if shared_roles else 2)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("fault", ("later_unknown", "descriptor_aba", "deleted_prefix"))
+def test_extreme_repaired_cut_never_hides_new_unknown_or_prefix_changes(tmp_path, monkeypatch, metric, fault):
+    from src.data import bayes_precision_fusion_download as dl
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    raw_ids, _, old_receipts = _break_unbounded_receipts(world, [target])
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    assert report["physical_capture_recovered_raw_ids"] == raw_ids
+    with world.open_forecast(world.db) as conn:
+        assert "icon_global" in _served_in_world(conn, world, target)
+        if fault == "later_unknown":
+            conn.execute("""INSERT INTO raw_forecast_artifacts
+                (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,artifact_path,
+                 sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
+                SELECT source_id,product_id,data_version,source_cycle_time,'unknown','unknown',artifact_path,
+                    ?,byte_size,request_url,request_params_json,artifact_metadata_json,'unknown',0
+                FROM raw_forecast_artifacts WHERE artifact_id=?""", ("f" * 64, old_receipts[0]))
+        elif fault == "descriptor_aba":
+            conn.execute("UPDATE raw_forecast_artifacts SET captured_at='different-unknown-descriptor' WHERE artifact_id=?", (old_receipts[0],))
+        else:
+            conn.execute("DELETE FROM raw_forecast_artifacts WHERE artifact_id=?", (old_receipts[0],))
+        conn.commit()
+        assert "icon_global" not in _served_in_world(conn, world, target)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_extreme_observer_uses_sql_now_not_historical_decision_to_wash_age(tmp_path, monkeypatch, metric):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import observe_physical_capture_repair_basis, physical_capture_debt_reason
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    raw_ids, before, _ = _break_unbounded_receipts(world, [target])
+    historical_cut = world.clock[0]
+    with world.open_forecast(world.db) as conn:
+        assert observe_physical_capture_repair_basis(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=historical_cut.isoformat()) is not None
+        world.clock[0] = world.run + timedelta(hours=35)
+        assert observe_physical_capture_repair_basis(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=historical_cut.isoformat()) is None
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=historical_cut.isoformat()) is None
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+    calls = len(world.calls)
+    with pytest.raises(ValueError, match="no matching recoverable"):
+        dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+            network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    assert len(world.calls) == calls
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("status", (304, 400, 429))
+def test_extreme_non200_never_seals_a_repair_map_or_reports_progress(tmp_path, monkeypatch, metric, status):
+    from src.data import bayes_precision_fusion_download as dl
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    raw_ids, before, _ = _break_unbounded_receipts(world, [target])
+    def fail(url, **kwargs):
+        return httpx.Response(status, headers={"retry-after": "1"}, content=b"no new 200 entity", request=httpx.Request("GET", url))
+    monkeypatch.setattr(world.provider, "get", fail)
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    assert report["physical_capture_recovered_raw_ids"] == () and report["committed_families"] == (), report
+    with world.open_forecast(world.db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE json_type(artifact_metadata_json,'$.canonical_recording')='object'").fetchone()[0] == 0
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+        assert "icon_global" not in _served_in_world(conn, world, target)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("fault", ("foreign_scope", "foreign_body", "future_observation", "prefix_commitment"))
+def test_extreme_typed_basis_hijacks_fail_independent_canonical_recheck(tmp_path, monkeypatch, metric, fault):
+    from dataclasses import replace
+    from src.data.replacement_current_value_serving import observe_physical_capture_repair_basis, validate_physical_capture_repair_basis
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    raw_ids, _, _ = _break_unbounded_receipts(world, [world.targets[0]])
+    with world.open_forecast(world.db) as conn:
+        basis = observe_physical_capture_repair_basis(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=world.clock[0].isoformat())
+        assert basis is not None
+        validate_physical_capture_repair_basis(conn, basis)
+        if fault == "foreign_scope":
+            changed = replace(basis, raw_identity={**basis.raw_identity, "city": "Chicago"})
+        elif fault == "foreign_body":
+            changed = replace(basis, original_body_artifact={**basis.original_body_artifact, "sha256": "f" * 64})
+        elif fault == "future_observation":
+            changed = replace(basis, observed_at=(world.clock[0] + timedelta(hours=1)).isoformat())
+        else:
+            changed = replace(basis, receipt_prefix={**basis.receipt_prefix, "descriptor_sha256": "f" * 64})
+        with pytest.raises(ValueError, match="physical_capture_repair"):
+            validate_physical_capture_repair_basis(conn, changed)
+    assert len(world.calls) == 3
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_extreme_cached_old_actual_event_cannot_be_resealed_with_a_new_basis(tmp_path, monkeypatch, metric):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import observe_physical_capture_repair_basis
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    raw_ids, before, _ = _break_unbounded_receipts(world, [world.targets[0]])
+    with world.open_forecast(world.db) as conn:
+        conn.row_factory = sqlite3.Row
+        raw = dict(conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?", raw_ids).fetchone())
+        body = conn.execute("SELECT artifact_metadata_json FROM raw_forecast_artifacts WHERE artifact_id=?", (raw["artifact_id"],)).fetchone()[0]
+        cached_capture = json.loads(body)["physical_response"]
+        basis = observe_physical_capture_repair_basis(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=world.clock[0].isoformat())
+        assert basis is not None
+        raw["_physical_capture_repair_bases"] = {raw_ids[0]: basis}
+        count = conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0]
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ValueError, match="HTTP_event_precedes_observation"):
+            dl._persist_http_capture_receipt(conn, raw, cached_capture, raw["artifact_id"])
+        conn.rollback()
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == count
+        assert [tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == before
+    assert len(world.calls) == 3
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("fault", ("new_unknown", "enospc"))
+def test_extreme_same_transaction_second_validation_and_disk_failure_have_zero_progress(tmp_path, monkeypatch, metric, fault):
+    import errno
+    from src.data import bayes_precision_fusion_download as dl, replacement_current_value_serving as serving
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    raw_ids, before, old_receipts = _break_unbounded_receipts(world, [target])
+    persist = dl._persist_http_capture_receipt
+    real_validate = serving.validate_physical_capture_repair_basis
+    def inject_at_persistence(conn, *args, **kwargs):
+        calls = [0]
+        def recheck(*validate_args, **validate_kwargs):
+            calls[0] += 1
+            if calls[0] == 2:
+                conn.execute("""INSERT INTO raw_forecast_artifacts
+                    (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,artifact_path,
+                     sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
+                    SELECT source_id,product_id,data_version,source_cycle_time,'unknown','unknown',artifact_path,
+                        ?,byte_size,request_url,request_params_json,artifact_metadata_json,'unknown',0
+                    FROM raw_forecast_artifacts WHERE artifact_id=?""", ("f" * 64, old_receipts[0]))
+            return real_validate(*validate_args, **validate_kwargs)
+        with monkeypatch.context() as patch:
+            if fault == "new_unknown":
+                patch.setattr(serving, "validate_physical_capture_repair_basis", recheck)
+            else:
+                def full_disk(_fd):
+                    raise OSError(errno.ENOSPC, "private fixture disk full")
+                patch.setattr(dl.os, "fsync", full_disk)
+            return persist(conn, *args, **kwargs)
+    monkeypatch.setattr(dl, "_persist_http_capture_receipt", inject_at_persistence)
+    with pytest.raises((ValueError, OSError), match="frontier_changed|private fixture disk full"):
+        dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+            network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    with world.open_forecast(world.db) as conn:
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE json_type(artifact_metadata_json,'$.canonical_recording')='object'").fetchone()[0] == 0
+        assert "icon_global" not in _served_in_world(conn, world, target)
