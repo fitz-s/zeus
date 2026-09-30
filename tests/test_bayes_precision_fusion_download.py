@@ -5424,3 +5424,49 @@ def test_extreme_same_transaction_second_validation_and_disk_failure_have_zero_p
         assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
         assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE json_type(artifact_metadata_json,'$.canonical_recording')='object'").fetchone()[0] == 0
         assert "icon_global" not in _served_in_world(conn, world, target)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("fault", ("missing_own", "alias_id", "bool_id", "duplicate_id"))
+def test_extreme_sealed_map_cannot_borrow_sibling_or_accept_noncanonical_ids(tmp_path, monkeypatch, metric, fault):
+    import hashlib
+    from src.data import bayes_precision_fusion_download as dl
+    world = _real_capture_world(tmp_path, monkeypatch, "locations", metric, private_sql_clock=True)
+    targets = world.targets[:2]
+    raw_ids, before, _ = _break_unbounded_receipts(world, targets)
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=targets,
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    assert report["physical_capture_recovered_raw_ids"] == raw_ids
+    calls = len(world.calls)
+    with world.open_forecast(world.db) as conn:
+        assert all("icon_global" in _served_in_world(conn, world, target) for target in targets)
+        aid, path, metadata_json = conn.execute("SELECT artifact_id,artifact_path,artifact_metadata_json FROM raw_forecast_artifacts"
+            " WHERE json_type(artifact_metadata_json,'$.canonical_recording')='object' ORDER BY artifact_id DESC LIMIT 1").fetchone()
+        doc = json.loads(Path(path).read_bytes())
+        own_key = str(raw_ids[0])
+        if fault == "missing_own":
+            del doc["repair_bases"][own_key]
+        elif fault == "alias_id":
+            doc["repair_bases"]["0" + own_key] = doc["repair_bases"][own_key]
+        elif fault == "bool_id":
+            doc["repair_bases"][own_key]["raw_identity"]["raw_model_forecast_id"] = True
+        encoded = json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
+        if fault == "duplicate_id":
+            entry = json.dumps(own_key).encode() + b":" + json.dumps(doc["repair_bases"][own_key], sort_keys=True, separators=(",", ":")).encode()
+            assert encoded.count(entry) == 1
+            encoded = encoded.replace(entry, entry + b"," + entry, 1)
+        # Simulate a fully re-sealed private descriptor, not just a hash mismatch.
+        # Even internally consistent hostile bytes must not grant own-ID authority.
+        digest = hashlib.sha256(encoded).hexdigest()
+        Path(path).write_bytes(encoded)
+        metadata = json.loads(metadata_json)
+        metadata["physical_http_capture_receipt"] = doc
+        metadata["canonical_recording"].update(receipt_sha256=digest,
+            repair_bases_sha256=hashlib.sha256(json.dumps(doc["repair_bases"], sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+        conn.execute("UPDATE raw_forecast_artifacts SET sha256=?,byte_size=?,artifact_metadata_json=? WHERE artifact_id=?",
+            (digest, len(encoded), json.dumps(metadata, sort_keys=True), aid))
+        conn.commit()
+        assert "icon_global" not in _served_in_world(conn, world, targets[0])
+        assert ("icon_global" in _served_in_world(conn, world, targets[1])) is (fault == "missing_own")
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+    assert len(world.calls) == calls
