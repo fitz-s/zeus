@@ -1,0 +1,44 @@
+{
+  "source": "/Users/leofitz/zeus/state/zeus-world.db",
+  "source_open_mode": "ro/query_only/read_transaction",
+  "destination": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-best-source/artifacts/fast_obs_audit/round3_migration/observation-copy.sqlite",
+  "copy_scope": "ALL observation_prints rows; unrelated WORLD tables not copied",
+  "copied_rows": 485931,
+  "copied_at": "2026-09-30T17:32:55.502450+00:00",
+  "sqlite_version": "3.53.2",
+  "synchronous": "FULL",
+  "journal_mode": "WAL",
+  "old_index_columns": [
+    "city",
+    "station_id",
+    "source_channel",
+    "publish_ts_utc",
+    "value_native"
+  ],
+  "new_index_columns": [
+    "city",
+    "station_id",
+    "source_channel",
+    "publish_ts_utc",
+    "value_native",
+    "fetched_at_utc"
+  ],
+  "copy_ms": 4463.669125,
+  "migration_commit_ms": 782.067208,
+  "idempotent_repeat_ms": 0.058041,
+  "before_sha256": "cbec366910c19f65fbbb29770b841eb17001d748daa13cad354e248392111e06",
+  "after_sha256": "cbec366910c19f65fbbb29770b841eb17001d748daa13cad354e248392111e06",
+  "integrity_check": "ok",
+  "aba_insert_results": [
+    true,
+    true,
+    true,
+    false
+  ],
+  "destination_bytes": 147955712,
+  "limitations": [
+    "Local copied-table benchmark, not production contention or power-loss testing.",
+    "Migration requires quiescent writers and creates a new index proportional to table size.",
+    "Downgrade must retain new index after A/B/A revisions; recreating old uniqueness can fail."
+  ]
+}

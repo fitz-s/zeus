@@ -53,3 +53,8 @@ Executed: 352 passed, 1 optional netCDF4 skip across station adapters/receipt/WR
 |NYC|94|63|86|90|
 |San Francisco|77|43|77|75|
 |Seattle|85|58|83|78|
+
+## Item 6 — copied-table migration and operator runbook (completed)
+The actual production WORLD observation table was opened read-only/query-only in a read snapshot and all 485,931 rows copied into a new nonproduction WAL/FULL database. Source/copy row hashes agree. The exact index migration plus commit took 782.067 ms; repeat 0.058 ms; copied file 147,955,712 bytes. Before/after row SHA256 cbec366910c19f65fbbb29770b841eb17001d748daa13cad354e248392111e06; integrity_check=ok; ABAA regression inserted [True, True, True, False] and was rolled back. This is a table-complete copy, not a full copy of unrelated WORLD tables, nor production contention/power-loss proof.
+
+ROUND3_DEPLOYMENT.md contains the exact operator-only pause/flatness/unload/exclusive-cutover/index-transaction/restart/resume-generation/rollback sequence, inspected against the actual launchd plists and deploy_live.py. It deliberately requires a flat maintenance window; no capital monitoring blackout is authorized. It preserves prior operator pauses and requires exact CAS generation on resume. The live-trading restart owns the venue-heartbeat watchdog ordering. Six-column index and revision-aware append semantics must survive rollback; no destructive deduplication or database restore over newer evidence. All runbook mutation commands are unexecuted, verify locally.
