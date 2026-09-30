@@ -266,6 +266,37 @@ def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso:
     return f"json_object({fields}, 'physical_proof_cutoff', {cutoff}, 'physical_artifact', json({artifact}))"
 
 
+def _receipt_canonical_recorded_bound(artifact: Mapping[str,object]) -> datetime | None:
+    """An own hash-sealed receipt can bound a damaged DB clock for selection/cost only.
+
+    Its source clocks are NOT substituted into the artifact or q authority. A
+    truly future receipt remains outside the old decision, while a later real
+    network capture can supersede this invalid append's known possession bound.
+    """
+    try:
+        import hashlib
+        from pathlib import Path
+        if artifact["data_version"]!="openmeteo_single_model_http_capture_receipt_v1":
+            return None
+        path=Path(str(artifact["artifact_path"]))
+        if path.is_symlink() or not path.is_file() or path.stat().st_size!=artifact["byte_size"]:
+            return None
+        encoded=path.read_bytes()
+        if len(encoded)!=artifact["byte_size"] or hashlib.sha256(encoded).hexdigest()!=artifact["sha256"]:
+            return None
+        receipt=json.loads(encoded)
+        if receipt["revision"]!=artifact["data_version"] or any(receipt[key]!=artifact[key] for key in
+            ("source_id","product_id","source_cycle_time","request_url")) or receipt["request_params"]!=json.loads(str(artifact["request_params_json"])):
+            return None
+        clocks=[datetime.fromisoformat(str(receipt[key]).replace("Z","+00:00")) for key in
+                ("source_cycle_time","source_available_at","captured_at","recorded_at")]
+        if any(value.tzinfo is None for value in clocks) or not clocks[0]<=clocks[1]<=clocks[2]<=clocks[3]:
+            return None
+        return clocks[3].astimezone(timezone.utc)
+    except (KeyError,TypeError,ValueError,OSError):
+        return None
+
+
 def _physical_artifact_at_cutoff(row: Mapping[str, object], candidates=None) -> dict[str, object]:
     """Choose the latest possessed event without rounding clocks in SQLite.
 
@@ -292,17 +323,24 @@ def _physical_artifact_at_cutoff(row: Mapping[str, object], candidates=None) -> 
             continue
         captured = clock(artifact.get("captured_at"))
         recorded = clock(artifact.get("recorded_at"))
+        recorded_bound=recorded
+        invalid_recorded=False
+        if recorded is None or (cutoff is not None and recorded>cutoff and (captured is None or captured<=cutoff)):
+            own_bound=_receipt_canonical_recorded_bound(artifact)
+            if own_bound is not None:
+                recorded_bound=own_bound
+                invalid_recorded=recorded!=own_bound
         if cutoff is None:
             if artifact.get("artifact_id") != row.get("artifact_id"):
                 continue
-        elif recorded is not None and recorded > cutoff:
+        elif recorded_bound is not None and recorded_bound > cutoff:
             continue
-        elif recorded is None and captured is not None and captured > cutoff:
+        elif recorded_bound is None and captured is not None and captured > cutoff:
             continue
         # Unknown event order fails closed instead of hiding malformed proof.
-        invalid_capture = captured is None or (recorded is not None and captured > recorded)
-        order = (recorded if invalid_capture else captured) or recorded or datetime.max.replace(tzinfo=timezone.utc)
-        candidate = (order, invalid_capture, recorded or order, int(artifact["artifact_id"]), artifact)
+        invalid_capture = captured is None or invalid_recorded or (recorded_bound is not None and captured > recorded_bound)
+        order = (recorded_bound if invalid_capture else captured) or recorded_bound or datetime.max.replace(tzinfo=timezone.utc)
+        candidate = (order, invalid_capture, recorded_bound or order, int(artifact["artifact_id"]), artifact)
         if best is None or candidate[:4] > best[:4]:
             best = candidate
     latest = best[-1] if best is not None else None
@@ -903,7 +941,13 @@ def physical_capture_debt_reason(
             # older body. A corrupt latest append must still block current q.
             # Independent canonical possession and exact recorded request scope
             # bound the repair; the immutable raw issue/product remain strict.
-            if stamp(artifact["recorded_at"]) > decision:
+            try:
+                acquisition_bound=stamp(artifact["recorded_at"])
+            except (TypeError,ValueError):
+                acquisition_bound=_receipt_canonical_recorded_bound(artifact)
+            if acquisition_bound is not None and acquisition_bound>decision:
+                acquisition_bound=_receipt_canonical_recorded_bound(artifact)
+            if acquisition_bound is None or acquisition_bound > decision:
                 return None
             row = _revalidated_legacy_product_row(raw)
             invalid_http_receipt = row is not None

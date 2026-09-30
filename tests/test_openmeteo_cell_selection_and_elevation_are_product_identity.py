@@ -295,7 +295,8 @@ def test_physical_capture_debt_does_not_force_missing_non_network_evidence(tmp_p
 
 
 @pytest.mark.parametrize("metric", ("high","low"))
-@pytest.mark.parametrize("damage", ("clock","future_capture","metadata","receipt_file"))
+@pytest.mark.parametrize("damage", ("captured_at","source_available_at","recorded_at",
+    "future_captured_at","future_source_available_at","future_recorded_at","all_clocks","metadata","receipt_file"))
 def test_matching_broken_latest_http_receipt_can_drain_without_serving_old_body(tmp_path, monkeypatch, metric, damage):
     from tests.test_station_ground_evidence import _setup, _archive
     from src.data.replacement_current_value_serving import physical_capture_debt_reason, read_current_instrument_values
@@ -316,10 +317,12 @@ def test_matching_broken_latest_http_receipt_can_drain_without_serving_old_body(
     conn.commit()
     latest_id, latest_path = conn.execute("SELECT artifact_id,artifact_path FROM raw_forecast_artifacts"
         " WHERE data_version='openmeteo_single_model_http_capture_receipt_v1' ORDER BY artifact_id DESC LIMIT 1").fetchone()
-    if damage=="clock":
-        conn.execute("UPDATE raw_forecast_artifacts SET captured_at='broken-clock' WHERE artifact_id=?",(latest_id,))
-    elif damage=="future_capture":
-        conn.execute("UPDATE raw_forecast_artifacts SET captured_at='2026-09-30T10:00:00Z' WHERE artifact_id=?",(latest_id,))
+    if damage in ("captured_at","source_available_at","recorded_at"):
+        conn.execute(f"UPDATE raw_forecast_artifacts SET {damage}='broken-clock' WHERE artifact_id=?",(latest_id,))
+    elif damage.startswith("future_"):
+        conn.execute(f"UPDATE raw_forecast_artifacts SET {damage.removeprefix('future_')}='2026-09-30T10:00:00Z' WHERE artifact_id=?",(latest_id,))
+    elif damage=="all_clocks":
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at='broken-clock',source_available_at='broken-clock',recorded_at='broken-clock' WHERE artifact_id=?",(latest_id,))
     elif damage=="metadata":
         conn.execute("UPDATE raw_forecast_artifacts SET artifact_metadata_json='{}' WHERE artifact_id=?",(latest_id,))
     else:
