@@ -86,35 +86,31 @@ therefore:
 | N4 | Open-Meteo day_count and first `source_clock_quota_abort` time | `state/openmeteo_quota.json`, ingest log | 9,000 crossed at 11:56Z / 05:22Z / 16:05Z on 09-23/24/25 |
 
 | N5 | Share of auction cuts ending SELECTED or NO_TRADE, per hour | `tier0_auction_cut.status` in `state/zeus_trades.db` | 09-28: 100 of 1,692 (6 %) |
+| N6 | SELECTED cuts that become an ENTRY venue command, per hour | `tier0_auction_cut.actuation_outcome` | 09-29 10-22Z: 35 of 199 |
 
 Observation → Day0 posterior latency, from source_inventory §4: METAR/WU p50 0.3–0.6
 min, HKO 8 min.
 
-## Status census (2026-09-28 17:05Z, live HEAD 8df58fddc)
+## Status census (2026-09-30 02:30Z, live HEAD 31b086c2a)
 LIVE means landed plus a live metric proving it runs.
 
-| Item | Status | Gap |
+| Item | Status | Evidence / gap |
 |---|---|---|
-| Source inventory, forecast vs observation | LIVE | `source_inventory_and_probability_race_2026-09-24.md` |
-| Quota re-fetch class | LIVE | `070a03481` + `ea68b1a33`. 09-27 and 09-28 no aborts; 5,890 at 17:00Z on 09-28. Leaks left: archive_hourly, health probe, ncep_nbm, ifs9 anchor. |
-| Cursor proof ledger | LIVE | Late-callback proof `81c043bd3` in `6a95a5b78`. |
-| Held-position q freshness | LIVE | Held-anchor full scan `7d0a5e0df`; Hong Kong held-q `6d3bfbd9c`. 9 of 10 fresh at 16:51Z. |
-| Dark families (ENS boundary) | LIVE | `e2d0ca6ba` + authority §1d-bis. |
-| Complete-capture corpus | LIVE | `daa18ab1f`: every cut and its family simplex, exact q_raw. |
-| Day0 carrier producer/replay parity | LIVE | `8df58fddc`: one provider-collapse implementation; mismatch family-scoped. |
-| Cut completion (N5) | OPEN, P0 | Since 15:36Z every cut is INCOMPLETE: `solver.py:4151` selector picks an order its own validator rejects; plus ~80 % cancel/preempt from silent probes and a 39k unacked wake backlog. |
-| Family scoping as one structural rule | OPEN | Reason list is piecemeal; repo-wide parity audit in flight. |
-| Post-selection Day0 vetoes | DONE 2026-09-29 | DIURNAL_NOWCAST deleted, residual mixed into Day0 q (§1e); ASK_REPRICING and executable size share one predicate between ranking and admission, anchored on the selected book. |
-| Market-anchored family correction | TOOLING | `0faa85cc9` offline fit; refit on exact q_raw once labels accrue. |
-| Day0 max/min remaining-window operator | PARTIAL | Center bias active in 2 of 24 cells. Resolver operator OFF. |
-| 10-minute consistency wait | NOT STARTED | `source_clock_vnext.py:17` |
-| Native vs API | NOT STARTED | — |
-| Scope-local recompute | PARTIAL | Mechanism exists. Latency not measured post-quota. |
-| Analytic point probability | PARTIAL | Day0 analytic path exists. MC remains in confidence matrices. |
-| Incremental information | NOT STARTED | Blocked on N2 baseline |
-| Jitter / time splicing | PARTIAL | Day0 identity excludes decision time. No global drift metric. |
-| Maintenance-thread CPU | OPEN | `_replacement_maintenance_tick` GIL convoy. |
-| Storage | PARTIAL | 36 GiB free 09-28; corpus flush skips below 8 GiB. No installed DB retention job. |
+| Quota re-fetch class | LIVE | 09-27..29 no aborts. Leaks left: archive_hourly, health probe, ncep_nbm, ifs9 anchor. |
+| Selector/validator = one predicate | LIVE | Expected growth `dd8012bd8`; size + ask repricing `c28484d17`; same-token cooldown `82f88fa9d`. Structural antibodies in `tests/solve/test_solver_properties.py`. |
+| Day0 diurnal evidence in q | LIVE | `e18722b30`: mixture applied in every Day0 producer, veto deleted; walk-forward dLL -0.058 [-0.070,-0.046]. Legacy Day0Router deleted `9ce365b71`. |
+| Family-scoped faults by construction | LIVE | `e8e74d8eb` `family_fault_tag`; one Wilson bound `f3ea99ecd`. |
+| One cut-cancel predicate + wake retirement | LIVE | `77ef6b7cd`: cancel_source/stage on every cut; backlog 50.7k -> ~31k and falling (500/min). |
+| Actuation outcome persisted | LIVE | `21ea8c372`: tier0_auction_cut.actuation_outcome/_reason. |
+| Recovery never starved | LIVE | `8e2fdab1c`/`7e5869935`/`a9eebec93`/`cb4ab1c5d`/`d9dd60470`: one venue-terminal fill law for guard, preflight and reducer; full sweep cannot be starved; per-pass interrupt scope. |
+| Venue access (geoblock) | LIVE | `31b086c2a`: host-wide VenueAccessState; 09-29 14:32-17:03Z 403 window was host egress via VPN (`utun10`), operator network decision pending. |
+| Book depth never fabricated | LIVE | `761c62b11`: producer keeps ladder on same touch; unknown depth read from venue first. |
+| Storage retention | LIVE | Forecast `64e64935a` (queue files + posterior MC arrays); trades `3025ab504` (executable_market_snapshots ~42.5 GB). File bytes need a separate VACUUM. |
+| position_events growth 0.75 GB/day | OPEN | 94% is MONITOR_REFRESHED.day0_monitor_probability_receipt (~42 KB/row); fix at the writer. |
+| SELECTED -> ENTRY conversion | OPEN | 09-29 funnel: 51/199 MARKET_AUTHORITY_SUPERSEDED (maker witness vs moved book); measure from actuation_outcome now. |
+| Market-anchored family correction | TOOLING | Refit on exact q_raw from the complete-capture corpus once labels accrue. |
+| 10-minute consistency wait / native vs API / scope-local recompute | NOT STARTED | Speed work after conversion is measured. |
+| Incremental information | NOT STARTED | Needs N2 latency baseline. |
 
 ## Workstreams
 | Stream | Moves | Acceptance |
@@ -146,12 +142,13 @@ LIVE means landed plus a live metric proving it runs.
   7. read the declared number.
 
 ## Next action
-1. P0 cut completion: land the shared selector/validator predicate (`solver.py`), then
-   the cancel attribution, wake retirement and single cancel predicate. Read N5 hourly.
-2. Land the structural family-scoping rule and the parity-audit drift fixes.
-3. Move the Day0 vetoes into the remaining-path probability and the ranking cost.
-4. Refit the market-anchored family correction on exact q_raw once labels accrue.
-5. Then speed: the consistency wait, native vs API, scope-local recompute.
+1. Read the actuation_outcome funnel per hour; attack the largest non-fact-change bucket.
+2. position_events writer: store the Day0 monitor receipt by hash + key fields, not 42 KB per row.
+3. Refit the market-anchored family correction on exact q_raw.
+4. Speed: consistency wait, native vs API, scope-local recompute.
+
+Landing law (09-29 lesson): pull and restart are one step; a pulled but not restarted
+runtime diff arms `deployment_freshness_mismatch` and blocks every submit.
 
 ## Diagnostic 2026-09-27: located q defects (offline, `scripts/fit_candidate_calibration.py`)
 These numbers are inputs to the q repair list. Under operator law they never justify
