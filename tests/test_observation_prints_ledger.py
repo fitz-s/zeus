@@ -1,5 +1,5 @@
 # Created: 2026-07-16
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-09-30
 # Authority basis: day0 defects 1-5 (Paris 2026-07-14 monotonicity regression,
 #   WU-backfill-frozen hour buckets, climatology-band self-blinding, HKO
 #   accumulator never folding its own spot read, Seoul binary exclusion where
@@ -22,7 +22,7 @@ import pytest
 from src.data.replacement_forecast_current_target_plan import (
     _latest_authorized_day0_fact,
 )
-from src.state.schema.observation_prints_schema import append_print, ensure_table
+from src.state.schema.observation_prints_schema import CREATE_TABLE_SQL, append_print, ensure_table
 
 UTC = timezone.utc
 
@@ -163,6 +163,68 @@ class TestAppendOnly:
         assert fact["observed_extreme_native"] == corrected_value
         assert fact["observation_available_at"] == "2026-08-09T10:18:22+00:00"
         assert conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0] == 2
+
+    def test_same_clock_reversion_a_b_a_is_a_new_revision(self):
+        """A repeated value after an intervening correction is not a duplicate."""
+
+        conn = _conn()
+        for value, fetched_at in (
+            (34.0, "2026-08-09T08:50:52+00:00"),
+            (35.0, "2026-08-09T09:18:22+00:00"),
+            (34.0, "2026-08-09T10:18:22+00:00"),
+        ):
+            assert append_print(
+                conn,
+                city="Paris",
+                station_id="LFPB",
+                source_channel="wu_icao_history",
+                publish_ts_utc="2026-08-09T08:00:00+00:00",
+                value_native=value,
+                unit="C",
+                fetched_at_utc=fetched_at,
+            )
+
+        rows = conn.execute(
+            "SELECT value_native, fetched_at_utc FROM observation_prints ORDER BY id"
+        ).fetchall()
+        assert [row[0] for row in rows] == [34.0, 35.0, 34.0]
+        fact = _latest_authorized_day0_fact(
+            conn,
+            city="Paris",
+            target_date="2026-08-09",
+            temperature_metric="high",
+            decision_time=datetime(2026, 8, 9, 10, 20, tzinfo=UTC),
+            require_settlement_channel=True,
+        )
+        assert fact is not None
+        assert fact["observed_extreme_native"] == 34.0
+        assert fact["observation_available_at"] == "2026-08-09T10:18:22+00:00"
+
+    def test_legacy_identity_index_is_migrated_without_row_rewrite(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(CREATE_TABLE_SQL)
+        conn.execute(
+            "CREATE UNIQUE INDEX ux_observation_prints_identity "
+            "ON observation_prints(city, station_id, source_channel, "
+            "publish_ts_utc, value_native)"
+        )
+        conn.execute(
+            "INSERT INTO observation_prints "
+            "(city,station_id,source_channel,publish_ts_utc,value_native,unit,"
+            "fetched_at_utc) VALUES ('Paris','LFPB','x','2026-08-09T08:00:00+00:00',"
+            "34,'C','2026-08-09T08:01:00+00:00')"
+        )
+        ensure_table(conn)
+        columns = tuple(
+            row[2] for row in conn.execute(
+                "PRAGMA index_info(ux_observation_prints_identity)"
+            ).fetchall()
+        )
+        assert columns == (
+            "city", "station_id", "source_channel", "publish_ts_utc",
+            "value_native", "fetched_at_utc",
+        )
+        assert conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0] == 1
 
     def test_update_is_structurally_forbidden(self):
         conn = _conn()
@@ -312,7 +374,10 @@ class TestParisTypeSpecimenThroughLedger:
         )
 
         assert fact is not None
-        assert fact["observed_extreme_native"] == pytest.approx(78.08)
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+        margin = metar_margin_units_for_city("NYC", "F")
+        assert margin is not None
+        assert fact["observed_extreme_native"] == pytest.approx(78.08 - margin)
 
     def test_ledger_fact_reaches_35_even_when_instants_says_34_and_events_says_31(self):
         conn = _conn()
@@ -436,7 +501,10 @@ class TestSeoulMarginThroughLedger:
             decision_time=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
         )
         assert fact is not None
-        assert fact["observed_extreme_native"] == 28.0  # 30.0 - 2.0 measured margin
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+        margin = metar_margin_units_for_city("Seoul", "C")
+        assert margin is not None
+        assert fact["observed_extreme_native"] == 30.0 - margin
         assert fact["source"] == "observation_prints:aviationweather_metar"
 
     def test_low_metric_mirror_margin_direction_flips(self):
@@ -453,7 +521,10 @@ class TestSeoulMarginThroughLedger:
             decision_time=datetime(2026, 6, 9, 21, 0, tzinfo=UTC),
         )
         assert fact is not None
-        assert fact["observed_extreme_native"] == 12.0  # 10.0 + 2.0 measured margin
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+        margin = metar_margin_units_for_city("Seoul", "C")
+        assert margin is not None
+        assert fact["observed_extreme_native"] == 10.0 + margin
 
 
 # ---------------------------------------------------------------------------

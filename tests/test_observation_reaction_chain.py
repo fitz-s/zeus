@@ -19,12 +19,15 @@ from tests import test_replacement_forecast_bundle_reader as reader_fixtures
 from src.data.day0_hourly_vectors import Day0HourlyVector, day0_source_clock_ensemble_member_models
 from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
 from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
-from src.runtime.observation_reaction_trace import emit_posterior_ready,emit_stage
+from src.runtime.observation_reaction_trace import (
+    completed_trace, emit_posterior_ready, emit_stage, emit_venue_ack,
+)
 
 _materializer_unit_source_surface = fixtures._materializer_unit_source_surface
 
 
 def test_observation_revision_materializes_then_serves(monkeypatch,caplog,_materializer_unit_source_surface):
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
     conn=fixtures._conn()
     fixtures._install_live_fusion(monkeypatch,snapshot_id=1)
     reader_fixtures._insert_ensemble_snapshot(conn,snapshot_id=1,
@@ -34,9 +37,17 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,_mater
         day0_observed_extreme_c=31.0,day0_observed_extreme_source="aviationweather_metar",
         day0_observed_extreme_observation_time=fixtures._dt(18,5).isoformat())
     conn.execute("CREATE TABLE observation_prints(id INTEGER PRIMARY KEY,city TEXT,station_id TEXT,source_channel TEXT,publish_ts_utc TEXT,value_native REAL,unit TEXT,fetched_at_utc TEXT,raw_report TEXT)")
+    response_received_at_ms=time.time_ns()//1_000_000
     conn.execute("INSERT INTO observation_prints VALUES(1,'Shanghai','ZSPD','aviationweather_metar',?,30,'C',?,?)",
         (fixtures._dt(18,5).isoformat(),fixtures._dt(18,5).isoformat(),"METAR ZSPD 061805Z 30/20 T03000200"))
     conn.commit()
+    world_committed_at_ms=time.time_ns()//1_000_000
+    input_identity={"source":"aviationweather_metar",
+        "observed_at_utc":fixtures._dt(18,5).isoformat(),"value_native":30.0}
+    emit_stage("SOURCE_COMMITTED",city="Shanghai",station_id="ZSPD",
+        source_channel="aviationweather_metar",input_identity=input_identity,
+        response_received_at_ms=response_received_at_ms,
+        world_committed_at_ms=world_committed_at_ms)
     vector=Day0HourlyVector(model="ecmwf_ifs",city="Shanghai",target_date="2026-06-07",
         timezone_name="Asia/Shanghai",captured_at=fixtures._dt(18,8).isoformat(),
         times=tuple(f"2026-06-07T{hour:02d}:00" for hour in range(24)),
@@ -53,7 +64,6 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,_mater
     monkeypatch.setattr("src.data.day0_hourly_vectors.day0_hourly_models_for_city",lambda _:[v.model for v in providers])
     monkeypatch.setattr("src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
         lambda **kw:ensemble if len(kw.get("expected_models") or ())==51 else providers)
-    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
     started=time.monotonic_ns()
     result=materialize_replacement_forecast_live(conn,request)
     assert result.ok, result
@@ -78,7 +88,38 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,_mater
     assert read.ok, read
     assert read.bundle.q == pytest.approx(json.loads(row["q_json"]))
     assert abs(sum(read.bundle.q.values())-1)<1e-9
-    print("MEASURED_HARNESS",json.dumps({"posterior_id":result.posterior_id,
+    q_served_monotonic=time.monotonic_ns()
+
+    # Non-production venue observation: exercise the real telemetry join without
+    # a network side effect. The command uses the exact q_version the live
+    # venue-command row would carry.
+    conn.execute("CREATE TABLE venue_commands(command_id TEXT PRIMARY KEY,q_version TEXT,token_id TEXT)")
+    conn.execute("INSERT INTO venue_commands VALUES(?,?,?)",
+        ("fixture-command",row["posterior_identity_hash"],"fixture-token"))
+    ack_at=datetime.now(timezone.utc)
+    emit_venue_ack(conn,command_id="fixture-command",event_id="fixture-submit-acked",
+                   occurred_at=ack_at.isoformat())
+
+    events=[]
+    for record in caplog.records:
+        message=record.getMessage()
+        prefix="OBSERVATION_REACTION_TRACE "
+        if message.startswith(prefix):
+            events.append(json.loads(message[len(prefix):]))
+    trace=completed_trace(events,posterior_identity_hash=row["posterior_identity_hash"])
+    assert trace["status"]=="OBSERVED_COMPLETE",trace
+    assert isinstance(trace["q_served_at_ms"],int)
+    assert isinstance(trace["venue_ack_at_ms"],int)
+    assert trace["q_served_at_ms"]>=trace["posterior_ready_at_ms"]>=trace["world_committed_at_ms"]
+    assert trace["venue_ack_at_ms"]>=trace["q_served_at_ms"]
+
+    measured={"posterior_id":result.posterior_id,
+        "receipt_to_world_ms":world_committed_at_ms-response_received_at_ms,
+        "world_to_posterior_ms":trace["posterior_ready_at_ms"]-world_committed_at_ms,
         "materialize_ms":(materialized-started)/1e6,
-        "serve_ms":(time.monotonic_ns()-materialized)/1e6,"q":dict(read.bundle.q)}))
+        "posterior_to_q_ms":trace["q_served_at_ms"]-trace["posterior_ready_at_ms"],
+        "serve_ms":(q_served_monotonic-materialized)/1e6,
+        "q_to_ack_ms":trace["venue_ack_at_ms"]-trace["q_served_at_ms"],
+        "receipt_to_ack_ms":trace["receipt_to_ack_ms"],"q":dict(read.bundle.q)}
+    print("MEASURED_HARNESS",json.dumps(measured,sort_keys=True))
     conn.close()

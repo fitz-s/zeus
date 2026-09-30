@@ -21,16 +21,15 @@ over this ledger (MAX/MIN per city/local-day) are DERIVED, computed at read
 time by ``_latest_authorized_day0_fact`` — this table stores no aggregate,
 only the raw prints.
 
-Append-only, no update path anywhere, ever: UNIQUE(city, station_id,
-source_channel, publish_ts_utc, value_native) + INSERT OR IGNORE makes a
-duplicate fetch of the same already-seen reading a free no-op, never a
-mutation. A genuinely later, different reading for the same nominal
-publish_ts_utc (rare — a source republishing a correction) is a DIFFERENT
-row (the uniqueness key includes value_native), not an overwrite of the old
-one. The canonical read projection first chooses the latest fetched version
-for each source clock, then derives the local-day MAX/MIN across distinct
-clocks. Thus audit history remains complete without letting a retracted value
-become an irreversible physical boundary.
+Append-only, no update path anywhere, ever. Consecutive re-fetches of the
+same current revision are a free no-op, while a correction sequence A -> B ->
+A at one source clock appends all three revisions. The database uniqueness
+key includes fetched_at_utc as a final crash/retry fence; append_print itself
+suppresses only a value/unit equal to the immediately preceding revision for
+that (city, station, source, source-clock). The canonical read projection
+chooses the latest appended/fetched version for each source clock, then derives
+the local-day MAX/MIN across distinct clocks. Thus audit history remains
+complete without either poll spam or silently losing a reversion.
 """
 
 from __future__ import annotations
@@ -55,7 +54,9 @@ CREATE TABLE IF NOT EXISTS observation_prints (
 
 CREATE_UNIQUE_INDEX_SQL = """
 CREATE UNIQUE INDEX IF NOT EXISTS ux_observation_prints_identity
-    ON observation_prints(city, station_id, source_channel, publish_ts_utc, value_native)
+    ON observation_prints(
+        city, station_id, source_channel, publish_ts_utc, value_native, fetched_at_utc
+    )
 """
 
 # Backs the day0 fact-reduction's per-(city, local day) MAX/MIN scan.
@@ -81,9 +82,25 @@ END
 """
 
 
+_IDENTITY_INDEX_COLUMNS = (
+    "city", "station_id", "source_channel", "publish_ts_utc",
+    "value_native", "fetched_at_utc",
+)
+
+
+def _ensure_identity_index(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("PRAGMA index_info(ux_observation_prints_identity)").fetchall()
+    columns = tuple(str(row[2]) for row in rows)
+    if columns and columns != _IDENTITY_INDEX_COLUMNS:
+        # The legacy five-column index cannot represent A -> B -> A source
+        # corrections. Dropping/recreating only the index preserves every row.
+        conn.execute("DROP INDEX ux_observation_prints_identity")
+    conn.execute(CREATE_UNIQUE_INDEX_SQL)
+
+
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
-    conn.execute(CREATE_UNIQUE_INDEX_SQL)
+    _ensure_identity_index(conn)
     conn.execute(CREATE_CITY_PUBLISH_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)
@@ -104,16 +121,32 @@ def append_print(
     """Append one published reading. Returns True if a new row was inserted,
     False if it was already present (INSERT OR IGNORE — append-only dedup,
     never a mutation)."""
+    value = float(value_native)
     cur = conn.execute(
         """
         INSERT OR IGNORE INTO observation_prints (
             city, station_id, source_channel, publish_ts_utc,
             value_native, unit, fetched_at_utc, raw_report, schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, 1
+         WHERE NOT COALESCE(
+            (
+                SELECT value_native = ? AND unit = ?
+                  FROM observation_prints
+                 WHERE city = ?
+                   AND station_id = ?
+                   AND source_channel = ?
+                   AND publish_ts_utc = ?
+                 ORDER BY id DESC
+                 LIMIT 1
+            ),
+            0
+         )
         """,
         (
             city, station_id, source_channel, publish_ts_utc,
-            float(value_native), unit, fetched_at_utc, raw_report,
+            value, unit, fetched_at_utc, raw_report,
+            value, unit, city, station_id, source_channel, publish_ts_utc,
         ),
     )
     return cur.rowcount > 0

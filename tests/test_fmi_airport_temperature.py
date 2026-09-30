@@ -224,7 +224,13 @@ def test_new_print_uses_world_coordinator_and_wakes_only_helsinki(monkeypatch, t
     assert trace["provider_published_at_ms"] is None
     assert trace["source_http_ms"] >= 0 and trace["receipt_to_world_ms"] >= 0
     assert trace["world_to_enqueue_return_ms"] >= 0
-    assert trace["q_served_at_ms"] is None and trace["venue_ack_at_ms"] is None
+    assert "q_served_at_ms" not in trace and "venue_ack_at_ms" not in trace
+    assert trace["completion_trace"] == "OBSERVATION_REACTION_TRACE"
+    assert trace["input_identity"] == {
+        "source": SOURCE_CHANNEL,
+        "observed_at_utc": sample.observed_at.isoformat(),
+        "value_native": sample.temperature_c,
+    }
     assert lease_calls == ["entered", 1]
     assert len(wake_calls) == 1
     local_day = now.astimezone(ZoneInfo("Europe/Helsinki")).date().isoformat()

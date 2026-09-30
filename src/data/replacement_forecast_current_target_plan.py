@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from src.data.day0_fast_obs import (
     FAST_OBS_SOURCE_ID,
     FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+    _normalized_raw_report_identity,
     latest_fast_station_conditioning,
     metar_observation_time_from_raw,
 )
@@ -1335,6 +1336,24 @@ def _latest_authorized_day0_fact(
             else:
                 settlement_channels = set()
                 physical_channels = set()
+            station_routes_by_channel = {}
+            try:
+                from src.data.physical_current_sources import physical_current_sources_for_city
+
+                station_routes_by_channel = {
+                    route.source_channel: route
+                    for route in physical_current_sources_for_city(city_obj)
+                }
+            except Exception:
+                # Optional fast-source registry failure cannot remove the base
+                # settlement/physical channels or block a previously servable belief.
+                station_routes_by_channel = {}
+            physical_channels.update(station_routes_by_channel)
+            settlement_channels.update(
+                channel
+                for channel, route in station_routes_by_channel.items()
+                if route.settlement_grade
+            )
             allowed_channels = (
                 settlement_channels if require_settlement_channel else physical_channels
             )
@@ -1378,8 +1397,8 @@ def _latest_authorized_day0_fact(
                 # made a retracted WU 37C coexist forever with its corrected
                 # 36C version and falsely turned the derived running high into
                 # an absorbing 37C boundary.
-                print_versions: dict[
-                    tuple[str, str, float], tuple[str, str, float, str]
+                print_streams: dict[
+                    tuple[str, str], list[tuple[str, str, float, str]]
                 ] = {}
                 for print_row in print_rows:
                     channel = str(print_row["source_channel"])
@@ -1390,6 +1409,24 @@ def _latest_authorized_day0_fact(
                     ):
                         continue
                     value = float(print_row["value_native"])
+                    station_route = station_routes_by_channel.get(channel)
+                    if station_route is not None:
+                        from src.data.station_temperature_adapters import valid_station_print
+
+                        route_observed_at = _utc_instant(
+                            str(print_row["publish_ts_utc"])
+                        )
+                        if (
+                            route_observed_at is None
+                            or print_unit != expected_unit
+                            or not valid_station_print(
+                                station_route,
+                                str(print_row["raw_report"] or ""),
+                                observed_at=route_observed_at,
+                                value=value,
+                            )
+                        ):
+                            continue
                     if channel == "aviationweather_metar":
                         # Always stored raw Celsius on the wire (day0_fast_obs
                         # writer) — apply the SAME unit law
@@ -1471,33 +1508,45 @@ def _latest_authorized_day0_fact(
                     ):
                         continue
                     source_clock = source_clock_utc.isoformat()
-                    canonical_publish_ts = publish_ts
-                    canonical_fetched_at = fetched_at
-                    version_identity = (channel, source_clock, float(value))
-                    previous = print_versions.get(version_identity)
-                    if previous is None or (
-                        canonical_fetched_at,
-                        canonical_publish_ts,
-                    ) < (previous[1], previous[0]):
-                        print_versions[version_identity] = (
-                            canonical_publish_ts,
-                            canonical_fetched_at,
+                    print_streams.setdefault((channel, source_clock), []).append(
+                        (
+                            publish_ts,
+                            fetched_at,
                             float(value),
                             str(print_row["raw_report"] or ""),
                         )
+                    )
 
                 canonical_prints: dict[
                     tuple[str, str], tuple[str, str, float, str]
                 ] = {}
-                for (channel, source_clock, _value), version in print_versions.items():
-                    identity = (channel, source_clock)
-                    previous = canonical_prints.get(identity)
-                    if previous is None or (
-                        version[1],
-                        version[0],
-                        version[2],
-                    ) > (previous[1], previous[0], previous[2]):
-                        canonical_prints[identity] = version
+                for identity, versions in print_streams.items():
+                    channel, _source_clock = identity
+                    ordered = sorted(
+                        versions,
+                        key=lambda version: (
+                            _utc_instant(version[1]) or datetime.min.replace(tzinfo=timezone.utc),
+                            _utc_instant(version[0]) or datetime.min.replace(tzinfo=timezone.utc),
+                        ),
+                    )
+                    if channel == FAST_OBS_SOURCE_ID:
+                        # AWC can publish two textual renderings of the same
+                        # physical METAR. Collapse only ADJACENT identical raw
+                        # reports. A -> B -> A remains three revisions, so an
+                        # actual reversion cannot be confused with "ever seen".
+                        collapsed: list[tuple[str, str, float, str]] = []
+                        for version in ordered:
+                            raw_identity = _normalized_raw_report_identity(version[3])
+                            if (
+                                collapsed
+                                and _normalized_raw_report_identity(collapsed[-1][3])
+                                == raw_identity
+                            ):
+                                continue
+                            collapsed.append(version)
+                        ordered = collapsed
+                    if ordered:
+                        canonical_prints[identity] = ordered[-1]
 
                 ledger_facts: list[dict[str, object]] = []
                 for channel in sorted({key[0] for key in canonical_prints}):

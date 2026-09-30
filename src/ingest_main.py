@@ -2241,8 +2241,14 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         logger.info("PHYSICAL_CURRENT_REDECISION_SEED city=%s station=%s status=%s",
                     city.name, station_id, status)
     sample = max(prints, key=lambda item: item.observed_at)
+    input_identity = {
+        "source": source_channel,
+        "observed_at_utc": sample.observed_at.isoformat(),
+        "value_native": sample.temperature_c,
+    }
     trace = {
         "city": city.name, "station_id": station_id, "source_channel": source_channel,
+        "input_identity": input_identity,
         "provider_observed_at_ms": int(sample.observed_at.timestamp() * 1000),
         "provider_published_at_ms": None,
         "response_received_at_ms": int(sample.fetched_at.timestamp() * 1000),
@@ -2252,14 +2258,15 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         "receipt_to_world_ms": (world_committed_ns - source_received_ns) / 1_000_000,
         "world_to_enqueue_return_ms": (time.monotonic_ns() - world_committed_ns) / 1_000_000,
         "enqueue_status": wake_status,
-        "q_served_at_ms": None,  # Asynchronous producer owns this later fact.
-        "venue_ack_at_ms": None,  # Enqueue is not a market reaction.
+        # q_served_at_ms / venue_ack_at_ms are deliberately absent here:
+        # OBSERVATION_REACTION_TRACE emits them only when those async stages
+        # actually occur and completed_trace can prove the identity join.
+        "completion_trace": "OBSERVATION_REACTION_TRACE",
     }
     if advanced:
         from src.runtime.observation_reaction_trace import emit_stage
         emit_stage("SOURCE_COMMITTED", city=city.name, station_id=station_id,
-            input_identity={"source": source_channel, "observed_at_utc": sample.observed_at.isoformat(),
-                            "value_native": sample.temperature_c},
+            source_channel=source_channel, input_identity=input_identity,
             response_received_at_ms=trace["response_received_at_ms"],
             world_committed_at_ms=world_committed_at_ms)
     if advanced or wake_status != "NO_NEW_SOURCE_REVISION":

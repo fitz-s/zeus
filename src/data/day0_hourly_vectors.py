@@ -4035,6 +4035,17 @@ def read_day0_current_temperature_state(
     if source_contract is None:
         return None
     station, channels = source_contract
+    from src.data.physical_current_sources import physical_current_sources_for_city
+    station_routes = {
+        route.source_channel: route
+        for route in physical_current_sources_for_city(city)
+    }
+    source_type = str(getattr(city, "settlement_source_type", "") or "").lower()
+    base_settlement_channels = (
+        {"wu_icao_history"}
+        if source_type == "wu_icao"
+        else {f"noaa_wrh_{station.lower()}"} if source_type == "noaa" else set()
+    )
     try:
         target = date.fromisoformat(str(target_date)[:10])
         tz = ZoneInfo(timezone_name)
@@ -4119,20 +4130,15 @@ def read_day0_current_temperature_state(
             continue
         observation_time = published
         from src.data.station_temperature_adapters import CHANNELS, valid_station_print
+        route = station_routes.get(channel)
         if channel in CHANNELS.values():
-            from src.data.physical_current_sources import physical_current_sources_for_city
-            route = next((r for r in physical_current_sources_for_city(city)
-                          if r.source_channel == channel and r.station_id == station_raw), None)
-            if route is None or not valid_station_print(
+            if route is None or route.station_id != station_raw or not valid_station_print(
                 route, str(raw_report or ""), observed_at=published, value=value
             ):
                 continue
         if channel == "fmi_airport_temperature":
             from src.data.fmi_airport_temperature import valid_ledger_print
-            from src.data.physical_current_sources import physical_current_sources_for_city
 
-            route = next((r for r in physical_current_sources_for_city(city)
-                          if r.source_channel == channel and r.station_id == station_raw), None)
             if (
                 route is None
                 or str(unit_raw or "").strip().upper() != "C"
@@ -4174,7 +4180,14 @@ def read_day0_current_temperature_state(
             continue
         # Publication can lag physical observation. Delayed older reports
         # cannot roll back the current state used by entry and held paths.
-        clock = (observation_time, int(channel == "fmi_airport_temperature"), published, fetched)
+        # At the SAME physical instant, value-identity-proven settlement-grade
+        # channels outrank physical-only channels. Never special-case a provider:
+        # Helsinki FMI is deliberately physical-only after observed mismatches.
+        settlement_grade = (
+            channel in base_settlement_channels
+            or bool(route is not None and route.settlement_grade)
+        )
+        clock = (observation_time, int(settlement_grade), published, fetched)
         if latest_clock is None or clock > latest_clock:
             latest_clock = clock
             latest_state = Day0CurrentTemperatureState(

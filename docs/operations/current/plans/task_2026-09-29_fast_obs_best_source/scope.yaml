@@ -2,7 +2,7 @@ schema_version: 1
 packet: task_2026-09-29_fast_obs_best_source
 status: in_progress
 branch: feat/fast-obs-best-source
-worktree: /Users/leofitz/zeus/.claude/worktrees/fast-obs-best-source
+worktree: /Users/leofitz/zeus/.claude/worktrees/fast-obs-best-source-r2
 in_scope:
 - src/data/day0_fast_obs.py
 - src/data/fmi_airport_temperature.py
@@ -47,6 +47,10 @@ in_scope:
 - src/data/replacement_forecast_bundle_reader.py
 - src/state/venue_command_repo.py
 - tests/data/test_fusion_upgrade_trigger.py
+- src/state/schema/observation_prints_schema.py
+- tests/test_observation_prints_ledger.py
+- src/data/replacement_forecast_current_target_plan.py
+- architecture/_schema_fingerprint.txt
 allow_companions:
 - config/AGENTS.md
 - architecture/source_rationale.yaml

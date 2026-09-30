@@ -74,3 +74,75 @@ def test_new_station_channel_reaches_causal_current_temperature_reader():
     assert state is not None and state.source==route.source_channel
     assert state.value_native==sample.temperature_c
     conn.close()
+
+
+def test_settlement_grade_registry_channel_wins_same_time_tie():
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+
+    route=next(r for r in load_physical_current_sources()[0] if r.provider=="jma_amedas")
+    sample=parse_station_payload(route,(ROOT/"jma.bin").read_bytes(),received_at=NOW)[-1]
+    city=SimpleNamespace(name="Tokyo", timezone="Asia/Tokyo", settlement_unit="C",
+                         settlement_source_type="noaa", wu_station="RJTT")
+    conn=sqlite3.connect(":memory:");ensure_table(conn)
+    append_print(
+        conn, city=city.name, station_id="RJTT", source_channel="aviationweather_metar",
+        publish_ts_utc=(sample.observed_at+timedelta(seconds=10)).isoformat(),
+        value_native=19.0, unit="C",
+        fetched_at_utc=(NOW-timedelta(seconds=10)).isoformat(),
+        raw_report=f"METAR RJTT {sample.observed_at:%d%H%M}Z 01008KT 9999 19/18 Q1014",
+    )
+    append_print(
+        conn, city=city.name, station_id=route.station_id,
+        source_channel=route.source_channel,
+        publish_ts_utc=sample.observed_at.isoformat(),
+        value_native=sample.temperature_c, unit="C",
+        fetched_at_utc=(NOW-timedelta(seconds=20)).isoformat(),
+        raw_report=sample.raw_report,
+    )
+    state=read_day0_current_temperature_state(
+        conn=conn, city=city, target_date="2026-09-30", decision_time=NOW
+    )
+    assert state is not None
+    assert state.source == route.source_channel
+    assert state.value_native == sample.temperature_c
+    conn.close()
+
+
+def test_noaa_resolver_row_outranks_same_time_physical_only_fmi():
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.fmi_airport_temperature import (
+        DEFAULT_STATION, TEMPERATURE_PROPERTY,
+    )
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+
+    observed=datetime(2026,9,30,3,20,tzinfo=timezone.utc)
+    city=SimpleNamespace(name="Helsinki", timezone="Europe/Helsinki", settlement_unit="C",
+                         settlement_source_type="noaa", wu_station="EFHK")
+    conn=sqlite3.connect(":memory:");ensure_table(conn)
+    fmi_raw=json.dumps({
+        "fmisid":DEFAULT_STATION.fmisid,"wmo":DEFAULT_STATION.wmo,
+        "station":DEFAULT_STATION.name,"property":TEMPERATURE_PROPERTY,
+        "unit":"degC","availability":"local_fetch_only",
+        "observed_at":observed.isoformat(),"value":"7.6",
+    })
+    append_print(
+        conn,city="Helsinki",station_id="EFHK",
+        source_channel="fmi_airport_temperature",
+        publish_ts_utc=observed.isoformat(),value_native=7.6,unit="C",
+        fetched_at_utc=(observed+timedelta(minutes=2)).isoformat(),raw_report=fmi_raw,
+    )
+    append_print(
+        conn,city="Helsinki",station_id="EFHK",
+        source_channel="noaa_wrh_efhk",
+        publish_ts_utc=observed.isoformat(),value_native=7.0,unit="C",
+        fetched_at_utc=(observed+timedelta(minutes=3)).isoformat(),raw_report="{}",
+    )
+    state=read_day0_current_temperature_state(
+        conn=conn,city=city,target_date="2026-09-30",
+        decision_time=observed+timedelta(minutes=4),
+    )
+    assert state is not None
+    assert state.source == "noaa_wrh_efhk"
+    assert state.value_native == 7.0
+    conn.close()
