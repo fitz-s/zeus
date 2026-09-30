@@ -266,7 +266,7 @@ def _historical_shanghai_component_request(tmp_path, monkeypatch, *, metric="hig
         ground_registry_factory=_synthetic_historical_shanghai_ground_registry,record_observed_prints=False)
     request = replace(request,day0_observed_extreme_c=None,day0_observed_extreme_source=None,
         day0_observed_extreme_observation_time=None,day0_observed_extreme_sample_count=None,
-        day0_observed_extreme_unit=None)
+        day0_observed_extreme_unit="C")
     assert materializer_mod._precision_guard_block_reason(request,conn) == ()
     return conn,request
 
@@ -2705,7 +2705,7 @@ def test_shanghai_owner_fixture_keeps_ground_possession_independent_of_run(tmp_p
     conn.close()
 
 
-def _refresh_shanghai_owner_request(conn, monkeypatch, request):
+def _refresh_shanghai_owner_request(conn, monkeypatch, request, *, record_observed_prints=True):
     """Rebind the new analysis cut without renewing ordinary source entities."""
     from src.config import runtime_cities_by_name
     from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
@@ -2719,7 +2719,7 @@ def _refresh_shanghai_owner_request(conn, monkeypatch, request):
         snapshot_id=9001 if request.temperature_metric=="high" else 9002)
     assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == entities
     assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")) == raw
-    if refreshed.day0_observed_extreme_c is not None and refreshed.day0_observed_extreme_source=="noaa_wrh_zspd":
+    if record_observed_prints and refreshed.day0_observed_extreme_c is not None and refreshed.day0_observed_extreme_source=="noaa_wrh_zspd":
         _append_shanghai_owner_prints(conn,refreshed)
     return refreshed
 
@@ -2900,6 +2900,7 @@ def test_day0_owner_witness_allows_current_owner_posterior_write(
         ("low", _current_baseline_data_version("low"), 21.0, 20.0),
     ],
 )
+@pytest.mark.usefixtures("_historical_shanghai_component_surface")
 def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2909,10 +2910,9 @@ def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
     fast_extreme: float,
 ) -> None:
     """A newer fast extreme keeps its residual likelihood and exact enqueue owner."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
+    conn,basis = _historical_shanghai_component_request(tmp_path,monkeypatch,metric=metric)
     absorbing = replace(
-        _request(
+        replace(basis,
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=absorbing_extreme,
@@ -2939,6 +2939,7 @@ def test_day0_owner_witness_keeps_newer_fast_residual_over_absorbing_frontier(
         lambda *args, **kwargs: likelihood,
     )
     _record_fixture_current_temperature(conn, at=_dt(18, 5), value_c=fast_extreme)
+    current = _refresh_shanghai_owner_request(conn,monkeypatch,current,record_observed_prints=False)
     witness = _day0_owner_witness(current, seed_file=tmp_path / "fast-owner.json")
     _record_day0_owner(conn, current, witness)
     prepared = _prepare_for_final_write(
@@ -4014,11 +4015,11 @@ def test_materializer_day0_historical_diurnal_mixture_cannot_enter_q_draws_or_bo
     assert provenance["day0_conditioning"]["source"] == "noaa_wrh_zspd"
 
 
-def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.usefixtures("_historical_shanghai_component_surface")
+def test_materializer_write_replaces_retracted_same_source_high(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A newer snapshot may retract its own HIGH without erasing independent evidence."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    awc = _request(
+    conn,basis = _historical_shanghai_component_request(tmp_path,monkeypatch)
+    awc = replace(basis,
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=31.0,
@@ -4047,7 +4048,7 @@ def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pyt
     ):
         materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
     refreshed = materializer_mod.prepare_replacement_forecast_live(
-        conn, prepared.request
+        conn, _refresh_shanghai_owner_request(conn,monkeypatch,prepared.request,record_observed_prints=False)
     )
     assert isinstance(
         refreshed, materializer_mod.PreparedReplacementForecastMaterialization
@@ -4069,12 +4070,12 @@ def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pyt
 
     plateau = materialize_replacement_forecast_live(
         conn,
-        replace(
+        _refresh_shanghai_owner_request(conn,monkeypatch,replace(
             awc,
             computed_at=_dt(18, 15),
             day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
             day0_observed_extreme_sample_count=13,
-        ),
+        ),record_observed_prints=False),
     )
     assert plateau.ok is True
     plateau_provenance = json.loads(
@@ -4088,13 +4089,13 @@ def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pyt
 
     same_source_regression = materialize_replacement_forecast_live(
         conn,
-        replace(
+        _refresh_shanghai_owner_request(conn,monkeypatch,replace(
             awc,
             computed_at=_dt(18, 20),
             day0_observed_extreme_c=30.0,
             day0_observed_extreme_observation_time=_dt(18, 10).isoformat(),
             day0_observed_extreme_sample_count=14,
-        ),
+        ),record_observed_prints=False),
     )
     assert same_source_regression.ok is True
     regression_provenance = json.loads(
@@ -4141,12 +4142,12 @@ def test_wu_newer_snapshot_retracts_stale_source_frontier(
     assert revised.day0_observed_extreme_observation_time == _dt(18, 10).isoformat()
 
 
-def test_materializer_readonly_replaces_retracted_same_source_low(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.usefixtures("_historical_shanghai_component_surface")
+def test_materializer_readonly_replaces_retracted_same_source_low(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A newer snapshot may retract its own LOW without reopening other sources."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
+    conn,basis = _historical_shanghai_component_request(tmp_path,monkeypatch,metric="low")
     awc = replace(
-        _request(
+        replace(basis,
             computed_at=_dt(18),
             expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=19.0,
@@ -4179,7 +4180,7 @@ def test_materializer_readonly_replaces_retracted_same_source_low(monkeypatch: p
     ):
         materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
     refreshed = materializer_mod.prepare_replacement_forecast_live(
-        conn, prepared.request
+        conn, _refresh_shanghai_owner_request(conn,monkeypatch,prepared.request,record_observed_prints=False)
     )
     assert isinstance(
         refreshed, materializer_mod.PreparedReplacementForecastMaterialization
@@ -4207,7 +4208,8 @@ def test_materializer_readonly_replaces_retracted_same_source_low(monkeypatch: p
         day0_observed_extreme_observation_time=_dt(17, 45).isoformat(),
         day0_observed_extreme_sample_count=10,
     )
-    posterior = materializer_mod.compute_replacement_posterior_readonly(conn, old_wu)
+    posterior = materializer_mod.compute_replacement_posterior_readonly(conn,
+        _refresh_shanghai_owner_request(conn,monkeypatch,old_wu,record_observed_prints=False))
 
     assert posterior is not None
     assert posterior.provenance_payload is not None
@@ -4216,18 +4218,19 @@ def test_materializer_readonly_replaces_retracted_same_source_low(monkeypatch: p
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 2
 
 
+@pytest.mark.usefixtures("_historical_shanghai_component_surface")
 def test_materializer_equal_frontier_uses_current_request_identity(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A retired carrier cannot ratchet its source/clock into every later posterior."""
 
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
+    conn,basis = _historical_shanghai_component_request(tmp_path,monkeypatch)
     likelihood = _fixture_fast_residual_likelihood(extreme_c=31.0, at=_dt(18))
     monkeypatch.setattr("src.data.day0_fast_obs.build_fast_station_residual_likelihood",
                         lambda *_args, **_kwargs: likelihood)
     _record_fixture_current_temperature(conn, at=_dt(17, 55), value_c=31.0)
-    prior = _request(
+    prior = replace(basis,
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=31.0,
@@ -4247,6 +4250,7 @@ def test_materializer_equal_frontier_uses_current_request_identity(
         day0_observed_extreme_observation_time=_dt(17, 50).isoformat(),
         day0_observed_extreme_sample_count=10,
     )
+    current = _refresh_shanghai_owner_request(conn,monkeypatch,current,record_observed_prints=False)
     result = materialize_replacement_forecast_live(conn, current)
 
     assert result.ok is True
@@ -5558,7 +5562,9 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     assert revised_q != q
 
 
+@pytest.mark.usefixtures("_historical_shanghai_component_surface")
 def test_wu_composite_low_rebuilds_current_path_before_one_residual_update(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shanghai LOW prices a changed level with the same provisional extreme."""
@@ -5567,12 +5573,11 @@ def test_wu_composite_low_rebuilds_current_path_before_one_residual_update(
     )
     from src.data.day0_hourly_vectors import Day0CurrentTemperatureState
 
-    conn = _conn()
-    _install_pinned_ready_fusion(monkeypatch)
+    conn,basis = _historical_shanghai_component_request(tmp_path,monkeypatch,metric="low")
     observed = _dt(17, 55)
     current = {"value": 24.0}
     request = replace(
-        _request(
+        replace(basis,
             computed_at=_dt(18), expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
             day0_observed_extreme_c=23.0,
             day0_observed_extreme_source="wu_api+same_station_fast_tail",
@@ -5670,6 +5675,9 @@ def test_wu_composite_low_rebuilds_current_path_before_one_residual_update(
         "_edli_day0_remaining_carrier_future_extremes_c": provenance_first["day0_remaining_carrier_future_extremes_c"],
         "_edli_day0_remaining_carrier_final_extremes_c": provenance_first["day0_remaining_carrier_final_extremes_c"],
         "_edli_day0_remaining_carrier_path_error_sigma_c": provenance_first["day0_remaining_carrier_path_error_sigma_c"],
+        "_edli_day0_remaining_center_bias_c": provenance_first["day0_remaining_center_bias_c"],
+        "_edli_day0_remaining_center_policy": provenance_first["day0_remaining_center_policy"],
+        "_edli_day0_probability_mixture_policy": provenance_first["day0_probability_mixture_policy"],
         "_edli_day0_remaining_carrier_probability_cutoff_utc": provenance_first["day0_remaining_carrier_probability_cutoff_utc"],
         "_edli_day0_carrier_bin_topology": provenance_first["bin_topology"],
         "_edli_day0_remaining_vector_witness": provenance_first["day0_remaining_vector_witness"],
@@ -5694,7 +5702,8 @@ def test_wu_composite_low_rebuilds_current_path_before_one_residual_update(
 
     current["value"] = 27.0
     revised = materialize_replacement_forecast_live(
-        conn, replace(request, computed_at=_dt(18, 10)),
+        conn, _refresh_shanghai_owner_request(conn,monkeypatch,
+            replace(request, computed_at=_dt(18, 10)),record_observed_prints=False),
     )
     assert revised.ok is True
     revised_row = conn.execute(
@@ -8027,13 +8036,14 @@ def test_provider_frontier_skips_invalid_rows_like_production_selector() -> None
     assert frontier == (("icon_global", 101),)
 
 
+@pytest.mark.usefixtures("_historical_shanghai_component_surface")
 def test_day0_final_writer_uses_frozen_frontier_without_likelihood_recompute(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The real final writer compares Day0 identity without rebuilding fast likelihood."""
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    absorbing = _request(
+    conn,basis = _historical_shanghai_component_request(tmp_path,monkeypatch)
+    absorbing = replace(basis,
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=30.0,
@@ -8055,6 +8065,7 @@ def test_day0_final_writer_uses_frozen_frontier_without_likelihood_recompute(
         lambda *_args, **_kwargs: likelihood,
     )
     _record_fixture_current_temperature(conn, at=_dt(18, 5), value_c=31.0)
+    provisional = _refresh_shanghai_owner_request(conn,monkeypatch,provisional,record_observed_prints=False)
     prepared = _prepare_for_final_write(conn, provisional)
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
