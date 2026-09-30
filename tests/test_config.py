@@ -1118,6 +1118,29 @@ def test_wmd_official_location_history_interval_twins(tmp_path, monkeypatch, mut
         assert after is None
 
 
+@pytest.mark.parametrize("level", ["Point", "pos"])
+@pytest.mark.parametrize("attribute,value", [
+    ("srsDimension", "2"), ("srsName", "urn:ogc:def:crs:EPSG::4978"),
+    ("srsName", "urn:ogc:def:crs:EPSG::4979"),
+    ("axisLabels", "lon lat elevation"), ("uomLabels", "deg deg ft"),
+])
+def test_wmd_ground_rejects_explicit_point_or_position_quantity_change(tmp_path, monkeypatch, level, attribute, value):
+    from datetime import datetime, timezone
+    import xml.etree.ElementTree as ET
+    import src.config as config
+    _, artifact, bridge, _ = _official_wmd_registry(tmp_path, monkeypatch)
+    raw = artifact.read_bytes()
+    kwargs = {"source_kind": config.OSCAR_WMD_SOURCE_KIND, "station_id": "LFPB",
+              "identity_bridge_bytes": bridge.read_bytes(),
+              "effective_at": datetime(2026, 9, 30, tzinfo=timezone.utc)}
+    assert config.station_ground_facts_from_bytes(raw_body=raw, **kwargs)["elevation_m"] == 67
+    ns = {"w": "http://def.wmo.int/wmdr/2017", "g": "http://www.opengis.net/gml/3.2"}
+    root = ET.fromstring(raw)
+    point = root.find("w:facility/w:ObservingFacility/w:geospatialLocation/w:GeospatialLocation/w:geoLocation/g:Point", ns)
+    (point if level == "Point" else point.find("g:pos", ns)).set(attribute, value)
+    assert config.station_ground_facts_from_bytes(raw_body=ET.tostring(root), **kwargs) is None
+
+
 @pytest.mark.parametrize("mutation", [
     "foreign_wsi", "multiple_facilities", "foreign_icao", "wrong_wmo", "duplicate_icao", "not_metar",
     "closed", "future_location", "closed_location", "missing_facility_ground", "duplicate_location",

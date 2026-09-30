@@ -848,11 +848,20 @@ def _oscar_wmd_ground_facts(
     if len(positions) != 1:
         raise ValueError("station ground coordinate unavailable")
     position = positions[0]
-    if position.get("srsDimension", "3") != "3":
-        raise ValueError("station ground dimensionality differs")
-    units = position.get("uomLabels") or points[0].get("uomLabels")
-    if units is not None and units.split() != ["deg", "deg", "m"]:
-        raise ValueError("station ground units differ from WMDR coordinate contract")
+    for geometry in (points[0], position):
+        # GML pos inherits containing Point attributes. An explicit alternate
+        # CRS cannot be silently treated as WMDR lat/lon/MSL ground; this parser
+        # performs no geocentric or ellipsoidal-height transformation.
+        if geometry.get("srsDimension", "3") != "3":
+            raise ValueError("station ground dimensionality differs")
+        if geometry.get("srsName") is not None:
+            raise ValueError("explicit station ground CRS is unsupported")
+        axes = geometry.get("axisLabels")
+        if axes is not None and axes.split() != ["lat", "lon", "elevation"]:
+            raise ValueError("station ground axis order differs")
+        units = geometry.get("uomLabels")
+        if units is not None and units.split() != ["deg", "deg", "m"]:
+            raise ValueError("station ground units differ from WMDR coordinate contract")
     values = (position.text or "").split()
     if len(values) != 3:
         raise ValueError("station ground coordinate must include elevation")
