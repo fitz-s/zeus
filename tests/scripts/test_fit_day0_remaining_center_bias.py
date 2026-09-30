@@ -95,6 +95,20 @@ def test_thin_band_is_shrunk_toward_zero_by_its_own_variance() -> None:
     assert abs(band["node_c"]) <= 0.25 * abs(band["b_mle_c"])
 
 
+def test_one_noisy_band_cannot_zero_the_prior_spread() -> None:
+    """Three precise bands at +0.3/-0.2/+0.1 and one noisy band (b^2 << v): a plain
+    mean of b^2 - v is negative, tau2 would be 0 and EVERY node would serve 0."""
+
+    pairs = [(0.3, 0.0003), (-0.2, 0.0004), (0.1, 0.0004), (0.9, 2.0)]
+    assert np.mean([b * b - v for b, v in pairs]) < 0.0
+
+    tau2 = fit._prior_variance(pairs)
+
+    assert tau2 > 0.01
+    assert fit._shrink(0.3, 0.0003, tau2) > 0.9 * 0.3
+    assert fit._prior_variance([(0.0, 0.1), (0.01, 0.1)]) == 0.0
+
+
 def test_one_new_day_cannot_flip_a_band_on_or_off() -> None:
     """Refit-to-refit: adding one settled day moves every node by a small amount; the
     served curve never jumps between 0 and the full estimate as a gate would."""
