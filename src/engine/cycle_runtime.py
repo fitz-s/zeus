@@ -134,8 +134,6 @@ _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
 _TERMINAL_REAPPEARED_CANCEL_STATES = frozenset(
     {"CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
 )
-_ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS = 6 * 60 * 60
-_ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES = frozenset({"economically_closed"})
 _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
@@ -2580,89 +2578,6 @@ def _same_token_terminal_no_fill_reprice_block_detail(
     return verdict
 
 
-def _recent_same_token_exit_cooldown_detail(
-    conn,
-    *,
-    token_id: str,
-    now: datetime | None = None,
-) -> dict[str, object] | None:
-    """Describe a cooldown only when ``token_id`` is the exited native outcome.
-
-    A ``buy_no`` row carries the condition's YES token in ``token_id`` and its
-    actually-held NO token in ``no_token_id``.  Treating both columns as held
-    identities cancels a new YES order after a NO exit, exactly when fresh
-    probability evidence may require switching sides.
-    """
-    token = str(token_id or "").strip()
-    if not token or not _table_exists_in_schema(conn, "main", "position_current"):
-        return None
-    columns = _table_columns_in_schema(conn, "main", "position_current")
-    if not {
-        "direction",
-        "token_id",
-        "no_token_id",
-        "phase",
-        "updated_at",
-    }.issubset(columns):
-        return None
-    phase_sql = "phase IN ({})".format(
-        ",".join("?" for _ in _ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES)
-    )
-    position_id_expr = "position_id" if "position_id" in columns else "''"
-    exit_reason_expr = "exit_reason" if "exit_reason" in columns else "''"
-    try:
-        row = conn.execute(
-            f"""
-            SELECT
-                {position_id_expr} AS position_id,
-                phase,
-                updated_at,
-                {exit_reason_expr} AS exit_reason
-              FROM position_current
-             WHERE {phase_sql}
-               AND (
-                    (LOWER(direction) = 'buy_yes' AND NULLIF(token_id, '') = ?)
-                    OR
-                    (LOWER(direction) = 'buy_no' AND NULLIF(no_token_id, '') = ?)
-               )
-             ORDER BY updated_at DESC
-             LIMIT 1
-            """,
-            (
-                *sorted(_ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES),
-                token,
-                token,
-            ),
-        ).fetchone()
-    except Exception:
-        return None
-    if row is None:
-        return None
-    updated_raw = row["updated_at"] if hasattr(row, "keys") else row[2]
-    updated_at = _parse_utc_timestamp(updated_raw)
-    if updated_at is None:
-        return None
-    now_utc = now or datetime.now(timezone.utc)
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=timezone.utc)
-    age_seconds = (now_utc.astimezone(timezone.utc) - updated_at).total_seconds()
-    if age_seconds < 0:
-        age_seconds = 0.0
-    if age_seconds > _ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS:
-        return None
-    position_id = str(row["position_id"] if hasattr(row, "keys") else row[0] or "")
-    phase = str(row["phase"] if hasattr(row, "keys") else row[1] or "")
-    exit_reason = str(row["exit_reason"] if hasattr(row, "keys") else row[3] or "")
-    return {
-        "position_id": position_id or "unknown",
-        "phase": phase or "unknown",
-        "updated_at": updated_at.isoformat(),
-        "age_seconds": int(age_seconds),
-        "cooldown_seconds": _ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS,
-        "exit_reason": exit_reason or "unknown",
-    }
-
-
 def _fresh_best_bid_for_token(clob, token_id: str) -> Decimal | None:
     getter = getattr(clob, "get_orderbook_snapshot", None)
     if not callable(getter):
@@ -2765,34 +2680,6 @@ def cleanup_stale_entry_orders(clob, *, deps, conn=None) -> int:
                     "Entry order %s canceled: terminal no-fill requires reprice %s",
                     command_id,
                     no_fill_reprice_detail,
-                )
-            continue
-        recent_exit_detail = _recent_same_token_exit_cooldown_detail(
-            conn,
-            token_id=token_id,
-        )
-        if recent_exit_detail is not None:
-            try:
-                from src.execution.exit_safety import request_cancel_for_command
-
-                outcome = request_cancel_for_command(
-                    conn,
-                    command_id,
-                    lambda venue_order_id: clob.cancel_order(venue_order_id),
-                )
-            except Exception as exc:
-                deps.logger.warning(
-                    "Recent same-token exit cooldown cancel failed for %s: %s",
-                    command_id,
-                    exc,
-                )
-                continue
-            if is_cancel_confirmed_status(outcome.status):
-                cancelled += 1
-                deps.logger.info(
-                    "Entry order %s canceled by same-token recent-exit cooldown: %s",
-                    command_id,
-                    recent_exit_detail,
                 )
             continue
         snapshot = conn.execute(

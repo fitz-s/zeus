@@ -4780,9 +4780,6 @@ _ENTRY_HELD_POSITION_BLOCKING_PHASES = frozenset(
 )
 _ENTRY_HELD_POSITION_REASON_BASE = "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED"
 _ENTRY_HELD_FAMILY_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
-_ENTRY_RECENT_SAME_TOKEN_EXIT_REASON_BASE = "RECENT_EXIT_SAME_TOKEN_COOLDOWN"
-_ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES = frozenset({"economically_closed"})
-_ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS = 6 * 60 * 60
 _POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
 _CURRENT_MONEY_RISK_CHAIN_STATES = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
 
@@ -5193,94 +5190,6 @@ def _entry_held_position_same_token_reason(
         ) from exc
 
 
-def _entry_recent_same_token_exit_cooldown_reason(
-    conn: sqlite3.Connection | None,
-    *,
-    token_id: str,
-    now: datetime | None = None,
-) -> str | None:
-    """Return a selection exclusion only for the outcome token actually exited.
-
-    ``position_current.token_id`` is the YES token identity even for a ``buy_no``
-    position; the NO token actually held by that position lives in
-    ``no_token_id``.  Matching a candidate against both columns therefore turns an
-    exited NO into a false cooldown on the opposite YES outcome.  Resolve the
-    position's native held token from its direction before applying the cooldown.
-    """
-    token = str(token_id or "").strip()
-    if conn is None or not token:
-        return None
-    try:
-        if not _adapter_table_exists(conn, "position_current"):
-            return None
-        columns = _position_current_columns(conn)
-        if not {
-            "direction",
-            "token_id",
-            "no_token_id",
-            "phase",
-            "updated_at",
-        }.issubset(columns):
-            return None
-        phase_sql = "phase IN ({})".format(
-            ",".join("?" for _ in _ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES)
-        )
-        position_id_expr = "position_id" if "position_id" in columns else "''"
-        exit_reason_expr = "exit_reason" if "exit_reason" in columns else "''"
-        row = conn.execute(
-            f"""
-            SELECT
-                {position_id_expr} AS position_id,
-                phase,
-                updated_at,
-                {exit_reason_expr} AS exit_reason
-              FROM position_current
-             WHERE {phase_sql}
-               AND (
-                    (LOWER(direction) = 'buy_yes' AND NULLIF(token_id, '') = ?)
-                    OR
-                    (LOWER(direction) = 'buy_no' AND NULLIF(no_token_id, '') = ?)
-               )
-             ORDER BY updated_at DESC
-             LIMIT 1
-            """,
-            (
-                *sorted(_ENTRY_RECENT_SAME_TOKEN_EXIT_PHASES),
-                token,
-                token,
-            ),
-        ).fetchone()
-        if row is None:
-            return None
-        updated_raw = row["updated_at"] if isinstance(row, sqlite3.Row) else row[2]
-        updated_at = _parse_utc(updated_raw)
-        if updated_at is None:
-            return None
-        checked_at = (now or datetime.now(UTC)).astimezone(UTC)
-        age_seconds = (checked_at - updated_at.astimezone(UTC)).total_seconds()
-        if age_seconds < 0:
-            age_seconds = 0.0
-        if age_seconds > _ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS:
-            return None
-        position_id = str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
-        phase = str(row["phase"] if isinstance(row, sqlite3.Row) else row[1] or "")
-        exit_reason = str(row["exit_reason"] if isinstance(row, sqlite3.Row) else row[3] or "")
-        return (
-            f"{_ENTRY_RECENT_SAME_TOKEN_EXIT_REASON_BASE}:"
-            f"position_id={position_id or 'unknown'}:"
-            f"phase={phase or 'unknown'}:"
-            f"updated_at={updated_at.astimezone(UTC).isoformat()}:"
-            f"age_seconds={age_seconds:.0f}:"
-            f"cooldown_seconds={_ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS}:"
-            f"exit_reason={exit_reason or 'unknown'}"
-        )
-    except Exception as exc:  # noqa: BLE001 - fail closed on exit truth ambiguity.
-        raise RuntimeError(
-            f"RECENT_EXIT_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
-        ) from exc
-    return None
-
-
 def _entry_family_metric(value: object) -> str:
     metric = str(value or "").strip().lower()
     if metric in {"high", "tmax", "max", "maximum", "highest"}:
@@ -5397,12 +5306,6 @@ def _entry_held_position_reason_for_proof(
     )
     if same_token_reason is not None:
         return same_token_reason
-    recent_exit_reason = _entry_recent_same_token_exit_cooldown_reason(
-        conn,
-        token_id=str(getattr(proof, "token_id", "") or ""),
-    )
-    if recent_exit_reason is not None:
-        return recent_exit_reason
     return _entry_held_position_same_family_reason(conn, proof)
 
 
@@ -15742,16 +15645,6 @@ def _global_preflight_candidate_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
-    if reason == (
-        "GLOBAL_ACTUATION_PREPARE_FAILED:"
-        "SELECTION_SCOPE_EMPTY:held:input=1:"
-        "classes=RECENT_EXIT_SAME_TOKEN_COOLDOWN=1"
-    ):
-        # SCOPE: BUY of the native token just exited, across execution modes.
-        # DRAIN: exclude that BUY and re-rank the same complete economic cut.
-        # RESET: each recurring cut rechecks the existing cooldown expiry.
-        # The cooldown cannot block held SELLs or other market opportunities.
-        return "CANDIDATE_BLOCKED"
     if (
         _global_preflight_source_clock_superseded(reason)
         or _global_preflight_sell_temporal_authority_superseded(reason)

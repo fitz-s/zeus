@@ -127,6 +127,29 @@ class TestTimeBansRemoved:
         assert not hasattr(pf, "is_token_on_cooldown"), (
             "is_token_on_cooldown (1-hr time-ban) must stay removed — operator no-caps law")
 
+    def test_recent_exit_same_token_time_ban_removed(self):
+        """The 6 h post-exit BUY ban (dd014864d) was deleted 2026-09-30: it
+        rejected auction winners on a wall clock, never on q or the book."""
+        from pathlib import Path
+
+        import src.engine.cycle_runtime as cr
+        import src.engine.event_reactor_adapter as era
+
+        for module, name in (
+            (era, "_entry_recent_same_token_exit_cooldown_reason"),
+            (era, "_ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS"),
+            (cr, "_recent_same_token_exit_cooldown_detail"),
+            (cr, "_ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS"),
+        ):
+            assert not hasattr(module, name), f"{module.__name__}.{name} must stay removed"
+        src_root = Path(era.__file__).resolve().parents[1]
+        offenders = [
+            str(path.relative_to(src_root))
+            for path in src_root.rglob("*.py")
+            if "RECENT_EXIT_SAME_TOKEN" in path.read_text(encoding="utf-8")
+        ]
+        assert offenders == []
+
 
 class TestEVGate:
     def test_ev_gate_prevents_spread_loss(self):

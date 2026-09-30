@@ -1340,7 +1340,16 @@ def test_redecision_scope_can_rank_same_family_without_allowing_same_token_dupli
     ) is False
 
 
-def test_recent_same_token_exit_cooldown_blocks_fresh_entry_and_redecision_scope():
+def test_recently_exited_token_competes_on_current_q_in_scope_selection_and_book():
+    """An exit is history, not a fact about the next order.
+
+    Live 2026-09-30: Helsinki 15C YES was sold at 21:43Z on q=0.075; from 01:09Z
+    the posterior served q~0.56 at a 0.09 ask and the token won 16 cuts, each
+    burned by a flat 6 h RECENT_EXIT_SAME_TOKEN_COOLDOWN at preflight. The
+    exited position carries zero chain exposure, so no held-position law applies:
+    the scope check (preflight), the selector and the book must all let the
+    exited token win on its current economics.
+    """
     import sqlite3
 
     row_a = _snapshot_row(yes_asks=(("0.50", "1000000"),), condition_id="cond-A",
@@ -1360,6 +1369,10 @@ def test_recent_same_token_exit_cooldown_blocks_fresh_entry_and_redecision_scope
             direction TEXT,
             token_id TEXT,
             no_token_id TEXT,
+            chain_state TEXT,
+            chain_shares REAL,
+            shares REAL,
+            cost_basis_usd REAL,
             updated_at TEXT,
             exit_reason TEXT
         )
@@ -1368,148 +1381,43 @@ def test_recent_same_token_exit_cooldown_blocks_fresh_entry_and_redecision_scope
     conn.execute(
         """
         INSERT INTO position_current (
-            position_id, phase, direction, token_id, no_token_id, updated_at,
-            exit_reason
-        ) VALUES (?, 'economically_closed', 'buy_yes', ?, '', ?, ?)
-        """,
-        (
-            "pos-just-exited",
-            "yes-B",
-            datetime.now(timezone.utc).isoformat(),
-            "shift_bin_exit",
-        ),
-    )
-
-    scoped = era._selection_scoped_proofs(proofs=(a, b), held_position_conn=conn)
-    assert scoped == (a,)
-
-    redecision_scoped = era._selection_scoped_proofs(
-        proofs=(a, b),
-        held_position_conn=conn,
-        allow_same_family_monitor_owned=True,
-    )
-    assert redecision_scoped == (a,)
-
-    book = era._opportunity_book_from_proofs(
-        event_id="evt",
-        family_id="fam",
-        proofs=(a, b),
-        selected_proof=a,
-        held_position_conn=conn,
-        allow_same_family_monitor_owned=True,
-    )
-    reason = next(ev.missing_reason for ev in book.evaluations if ev.token_id == "yes-B")
-    assert str(reason).startswith("RECENT_EXIT_SAME_TOKEN_COOLDOWN:")
-    assert "position_id=pos-just-exited" in str(reason)
-
-
-def test_recent_opposite_outcome_exit_does_not_block_selected_native_token():
-    import sqlite3
-
-    row = _snapshot_row(
-        yes_asks=(("0.20", "1000000"),),
-        condition_id="cond-B",
-        yes_token_id="yes-B",
-        no_token_id="no-B",
-        snapshot_id="snapB",
-    )
-    buy_yes = _proof_from_row(
-        direction="buy_yes",
-        row=row,
-        token_id="yes-B",
-        q_posterior=0.75,
-        q_lcb_5pct=0.0,
-        bin_obj=_BIN_Y,
-    )
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE position_current (
-            position_id TEXT,
-            phase TEXT,
-            direction TEXT,
-            token_id TEXT,
-            no_token_id TEXT,
-            updated_at TEXT,
-            exit_reason TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO position_current (
-            position_id, phase, direction, token_id, no_token_id, updated_at,
-            exit_reason
+            position_id, phase, direction, token_id, no_token_id, chain_state,
+            chain_shares, shares, cost_basis_usd, updated_at, exit_reason
         ) VALUES (
-            'pos-exited-no', 'economically_closed', 'buy_no', 'yes-B', 'no-B',
-            ?, 'COMMAND_RECOVERY_EXIT_FILL'
+            'pos-just-exited', 'economically_closed', 'buy_yes', 'yes-B', 'no-B',
+            'chain_confirmed_zero', 0.0, 7.44, 0.6696, ?, 'GLOBAL_CAPITAL_OPTIMAL_SELL'
         )
         """,
         (datetime.now(timezone.utc).isoformat(),),
     )
 
-    assert era._selection_scoped_proofs(
-        proofs=(buy_yes,),
+    # Without the exit row, B (cheaper, same q) is the family winner.
+    assert era._selected_candidate_proof(
+        {"family_id": "fam", "event_id": "evt"}, (a, b)
+    ) is b
+    # The exit one second ago changes nothing: the preflight scope check keeps B,
+    # the selector still picks B, and the book carries no rejection for it.
+    assert era._entry_held_position_reason_for_proof(conn, b) is None
+    for redecision in (False, True):
+        assert era._selection_scoped_proofs(
+            proofs=(a, b),
+            held_position_conn=conn,
+            allow_same_family_monitor_owned=redecision,
+        ) == (a, b)
+    selected = era._selected_candidate_proof(
+        {"family_id": "fam", "event_id": "evt"},
+        (a, b),
         held_position_conn=conn,
-        honor_admission_rejections=False,
-        allow_global_current_state_rebind=True,
-        enforce_win_rate_floor=False,
-    ) == (buy_yes,)
-    assert (
-        era._entry_recent_same_token_exit_cooldown_reason(
-            conn,
-            token_id="yes-B",
-        )
-        is None
     )
-    assert str(
-        era._entry_recent_same_token_exit_cooldown_reason(
-            conn,
-            token_id="no-B",
-        )
-    ).startswith("RECENT_EXIT_SAME_TOKEN_COOLDOWN:")
-
-
-def test_recent_same_token_exit_cooldown_expires_without_permanent_token_ban():
-    import sqlite3
-
-    row_b = _snapshot_row(yes_asks=(("0.20", "1000000"),), condition_id="cond-B",
-                          yes_token_id="yes-B", no_token_id="no-B", snapshot_id="snapB")
-    b = _proof_from_row(direction="buy_yes", row=row_b, token_id="yes-B",
-                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_Y)
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE position_current (
-            position_id TEXT,
-            phase TEXT,
-            direction TEXT,
-            token_id TEXT,
-            no_token_id TEXT,
-            updated_at TEXT,
-            exit_reason TEXT
-        )
-        """
+    assert selected is b
+    book = era._opportunity_book_from_proofs(
+        event_id="evt",
+        family_id="fam",
+        proofs=(a, b),
+        selected_proof=selected,
+        held_position_conn=conn,
     )
-    old_updated_at = datetime.now(timezone.utc) - timedelta(
-        seconds=era._ENTRY_RECENT_SAME_TOKEN_EXIT_COOLDOWN_SECONDS + 60
-    )
-    conn.execute(
-        """
-        INSERT INTO position_current (
-            position_id, phase, direction, token_id, no_token_id, updated_at,
-            exit_reason
-        ) VALUES (?, 'economically_closed', 'buy_yes', ?, '', ?, ?)
-        """,
-        (
-            "pos-old-exit",
-            "yes-B",
-            old_updated_at.isoformat(),
-            "shift_bin_exit",
-        ),
-    )
-
-    assert era._selection_scoped_proofs(proofs=(b,), held_position_conn=conn) == (b,)
+    assert all(ev.missing_reason is None for ev in book.evaluations)
 
 
 def test_same_family_monitor_owned_scope_is_management_lane_only():

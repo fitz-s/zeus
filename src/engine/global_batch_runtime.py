@@ -11220,11 +11220,6 @@ def process_current_global_batch(
                         "LIVE_INFERENCE_INPUTS_MISSING:"
                         "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
                     )
-                    recent_exit_token_cooldown = reason == (
-                        "GLOBAL_ACTUATION_PREPARE_FAILED:"
-                        "SELECTION_SCOPE_EMPTY:held:input=1:"
-                        "classes=RECENT_EXIT_SAME_TOKEN_COOLDOWN=1"
-                    )
                     entry_scope_exclusion = (
                         reason.startswith(
                             (
@@ -11234,17 +11229,8 @@ def process_current_global_batch(
                         )
                         or probability_authority_exclusion
                         or day0_fast_observation_entry_stale
-                        or recent_exit_token_cooldown
                     )
-                    if recent_exit_token_cooldown:
-                        # A token cannot evade its BUY cooldown by switching
-                        # maker/taker mode. SELL and every other token remain
-                        # in this same q/book/wealth comparison.
-                        candidate_exclusion_keys = tuple(
-                            ("BUY", *candidate_key[1:5], mode)
-                            for mode in ("TAKER_LIMIT", "MAKER_REST")
-                        )
-                    elif (
+                    if (
                         reason.startswith(
                             "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
                         )
