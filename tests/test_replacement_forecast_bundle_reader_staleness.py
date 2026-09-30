@@ -16,27 +16,11 @@ so it cannot be bypassed by either consuming path.
 from __future__ import annotations
 
 import json
-import sqlite3
-from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 
-from src.data.replacement_forecast_cycle_policy import (
-    CURRENT_EVIDENCE_SEMANTICS_REVISION,
-    TRADEABLE_GRADE_QLCB_BASIS,
-)
-from src.data.replacement_forecast_bundle_reader import (
-    HIGH_DATA_VERSION,
-    PRODUCT_ID,
-    SOURCE_ID,
-    read_replacement_forecast_bundle,
-)
-from src.data.replacement_forecast_readiness import (
-    ReplacementForecastDependency,
-    build_replacement_forecast_readiness,
-)
-from src.state.schema.v2_schema import apply_canonical_schema
 from tests.test_replacement_forecast_materializer import _hko_native_surfaces, _hko_source_surface
 from tests.test_replacement_forecast_bundle_reader import _shanghai_reader_current_certificate
 
@@ -239,7 +223,7 @@ def test_raw_hwm_real_same_value_receipt_progress_and_zero_cost_repeat(tmp_path,
         assert lag(rebound, world.clock[0]) is None
 
 
-def _normal_read_at(normal, monkeypatch, *, cut=None, readiness=None):
+def _normal_read_at(normal, monkeypatch, *, cut=None, readiness=None, authority_purpose=None):
     """Advance a private reader clock; never rewrite source/row/readiness clocks."""
     from src.data import replacement_forecast_bundle_reader as reader
     cut = cut or normal.request.computed_at
@@ -251,163 +235,29 @@ def _normal_read_at(normal, monkeypatch, *, cut=None, readiness=None):
         def now(cls, tz=None):
             return cut.astimezone(tz or UTC)
     monkeypatch.setattr(reader, "datetime", ReaderClock)
-    return reader.read_replacement_forecast_bundle(normal.conn,
-        **{**normal.kwargs, "decision_time": cut,
-           "readiness": readiness or normal.readiness})
+    kwargs = {**normal.kwargs, "decision_time": cut,
+              "readiness": readiness or normal.readiness}
+    if authority_purpose is not None:
+        kwargs["authority_purpose"] = authority_purpose
+    return reader.read_replacement_forecast_bundle(normal.conn, **kwargs)
+
+
+@pytest.fixture
+def _source_default_staleness_certificate(tmp_path, monkeypatch):
+    """A separate first certificate, never an extension of the eight-hour world."""
+    from tests.test_replacement_forecast_bundle_reader import _shanghai_reader_certificate
+    from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
+    world = _shanghai_reader_certificate(tmp_path, monkeypatch, expires_at=None)
+    normal = next(world)
+    try:
+        assert normal.request.expires_at is None
+        assert normal.readiness.expires_at == replacement_readiness_expires_at(normal.request.source_cycle_time)
+        yield normal
+    finally:
+        next(world, None)
 
 
 UTC = timezone.utc
-_TOPO_HASH = "topo-hash-fixed-001"
-
-
-@dataclass(frozen=True)
-class _Evidence:
-    source_run_id: str
-
-
-@dataclass(frozen=True)
-class _BaselineBundle:
-    evidence: _Evidence
-
-
-def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    apply_canonical_schema(conn, forecast_tables=True)
-    return conn
-
-
-def _dt(day: int, hour: int, minute: int = 0) -> datetime:
-    return datetime(2026, 6, day, hour, minute, tzinfo=UTC)
-
-
-def _provenance(*, source_cycle_time: datetime) -> dict[str, object]:
-    return {
-        "replacement_q_mode": "FUSED_NORMAL_FULL",
-        "q_lcb_basis": TRADEABLE_GRADE_QLCB_BASIS,
-        "bin_topology_hash": _TOPO_HASH,
-        "bayes_precision_fusion": {
-            "current_evidence_shape": {
-                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                "shape_lag_hours": 0.0,
-                "source_cycle_time": source_cycle_time.isoformat(),
-                "translation_applied": False,
-            }
-        },
-        "bin_topology": [
-            {
-                "bin_id": "warm",
-                "lower_c": 20.0,
-                "upper_c": 21.0,
-                "center_c": 20.5,
-                "settlement_step_c": 1.0,
-                "display_unit": "C",
-                "settlement_unit": "C",
-                "rounding_rule": "wmo_half_up",
-            }
-        ],
-    }
-
-
-def _insert_posterior(
-    conn: sqlite3.Connection,
-    *,
-    source_cycle_time: datetime,
-    source_available_at: datetime,
-    computed_at: datetime,
-) -> int:
-    conn.execute(
-        """
-        INSERT INTO forecast_posteriors (
-            source_id, product_id, data_version, city, target_date,
-            temperature_metric, source_cycle_time, source_available_at,
-            computed_at, q_json, q_lcb_json, posterior_method,
-            dependency_source_run_ids_json, provenance_json,
-            training_allowed, runtime_layer,
-            bin_topology_hash, posterior_identity_hash, dependency_hash,
-            posterior_config_hash, q_ucb_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            SOURCE_ID,
-            PRODUCT_ID,
-            HIGH_DATA_VERSION,
-            "Shanghai",
-            "2026-06-07",
-            "high",
-            source_cycle_time.isoformat(),
-            source_available_at.isoformat(),
-            computed_at.isoformat(),
-            json.dumps({"cold": 0.2, "warm": 0.8}),
-            json.dumps({"cold": 0.1, "warm": 0.7}),
-            "openmeteo_ifs9_aifs_sampled_2t_soft_anchor",
-            json.dumps(
-                {
-                    "baseline_b0": "b0-run",
-                    "aifs_sampled_2t": "aifs-run",
-                    "openmeteo_ifs9_anchor": "om9-run",
-                }
-            ),
-            json.dumps(_provenance(source_cycle_time=source_cycle_time)),
-            0,
-            "live",
-            _TOPO_HASH,
-            "pid-hash",
-            "dep-hash",
-            "cfg-hash",
-            json.dumps({"cold": 0.3, "warm": 0.9}),
-        ),
-    )
-    return int(conn.execute("SELECT posterior_id FROM forecast_posteriors").fetchone()[0])
-
-
-def _readiness(*, posterior_id: int, computed_at: datetime, expires_at: datetime, decision_time: datetime):
-    dependencies = (
-        ReplacementForecastDependency(
-            role="baseline_b0",
-            source_id="ecmwf_open_data",
-            product_id="ecmwf_opendata_ifs_ens_0p25",
-            data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
-            source_run_id="b0-run",
-            source_available_at=_dt(6, 0),
-        ),
-        ReplacementForecastDependency(
-            role="aifs_sampled_2t",
-            source_id="ecmwf_aifs_ens",
-            product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
-            data_version="ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
-            source_run_id="aifs-run",
-            source_available_at=_dt(6, 0),
-            artifact_id=11,
-        ),
-        ReplacementForecastDependency(
-            role="openmeteo_ifs9_anchor",
-            source_id="openmeteo_ecmwf_ifs_9km",
-            product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
-            data_version="openmeteo_ecmwf_ifs9_anchor_localday_high",
-            source_run_id="om9-run",
-            source_available_at=_dt(6, 0),
-            anchor_id=22,
-        ),
-        ReplacementForecastDependency(
-            role="soft_anchor_posterior",
-            source_id=SOURCE_ID,
-            product_id=PRODUCT_ID,
-            data_version=HIGH_DATA_VERSION,
-            source_run_id="posterior-run",
-            source_available_at=_dt(6, 0),
-            posterior_id=posterior_id,
-        ),
-    )
-    return build_replacement_forecast_readiness(
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=decision_time,
-        computed_at=computed_at,
-        expires_at=expires_at,
-        dependencies=dependencies,
-    )
 
 
 def test_bundle_reader_blocks_expired_readiness(
@@ -423,33 +273,24 @@ def test_bundle_reader_blocks_expired_readiness(
     assert result.reason_code == "REPLACEMENT_LIVE_READINESS_EXPIRED"
 
 
-def test_bundle_reader_blocks_stale_source_cycle() -> None:
-    """A source cycle beyond the live staleness bound fails closed."""
-    conn = _conn()
-    posterior_id = _insert_posterior(
-        conn,
-        source_cycle_time=_dt(4, 0),   # cycle 60h before decision
-        source_available_at=_dt(4, 1),
-        computed_at=_dt(4, 1, 30),
-    )
-    readiness = _readiness(
-        posterior_id=posterior_id,
-        computed_at=_dt(6, 11),
-        expires_at=_dt(6, 23),         # not expired by wall clock
-        decision_time=_dt(6, 11),
-    )
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=readiness,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(6, 12),
-        current_bin_topology_hash=_TOPO_HASH,
-    )
-    assert result.ok is False
-    assert result.reason_code == "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND"
+def test_bundle_reader_blocks_stale_source_cycle(
+    monkeypatch, _source_default_staleness_certificate,
+) -> None:
+    """Real TTL wins naturally; a forged extension cannot defeat the hard age wall."""
+    from datetime import timedelta
+    from src.data.replacement_forecast_cycle_policy import cycle_age_outside_bound
+    normal = _source_default_staleness_certificate
+    assert _normal_read_at(normal, monkeypatch).ok
+    cut = normal.request.source_cycle_time + timedelta(hours=31)
+    assert cycle_age_outside_bound(cut, normal.request.source_cycle_time)
+    expired = _normal_read_at(normal, monkeypatch, cut=cut)
+    assert not expired.ok and expired.reason_code == "REPLACEMENT_LIVE_READINESS_EXPIRED"
+    # Negative-only DTO attack. No DB/readiness/source clock is rewritten and
+    # no positive assertion ever licenses this forged expiry.
+    forged = replace(normal.readiness, expires_at=cut + timedelta(hours=1))
+    result = _normal_read_at(normal, monkeypatch, cut=cut, readiness=forged)
+    assert not result.ok and result.reason_code == "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND"
+    assert _normal_read_at(normal, monkeypatch).ok
 
 
 @pytest.mark.parametrize(
@@ -491,63 +332,38 @@ def test_bundle_reader_rejects_forged_soft_anchor_dependency(
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
 
 
-def test_bundle_reader_blocks_red_staleness_entry() -> None:
+def test_bundle_reader_blocks_red_staleness_entry(
+    monkeypatch, _source_default_staleness_certificate,
+) -> None:
     """§1e degrade ladder: an aged carrier in the RED band (24h < age < 30h EXPIRED
     wall) isolates NEW ENTRIES — the bundle read (entry authority) fails closed, while
     the held-position monitor/exit lanes read their own paths and stay active."""
-    conn = _conn()
-    posterior_id = _insert_posterior(
-        conn,
-        source_cycle_time=_dt(5, 11),   # 25h before the 06-06 12:00 decision -> RED
-        source_available_at=_dt(5, 12),
-        computed_at=_dt(5, 12, 30),
-    )
-    readiness = _readiness(
-        posterior_id=posterior_id,
-        computed_at=_dt(6, 11),
-        expires_at=_dt(6, 23),          # NOT expired by wall clock or the 30h bound
-        decision_time=_dt(6, 11),
-    )
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=readiness,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(6, 12),
-        current_bin_topology_hash=_TOPO_HASH,
-    )
+    from datetime import timedelta
+    from src.data.replacement_forecast_bundle_reader import ReplacementForecastAuthorityPurpose
+    normal = _source_default_staleness_certificate
+    assert _normal_read_at(normal, monkeypatch).ok
+    cut = normal.request.source_cycle_time + timedelta(hours=25)
+    assert cut < normal.readiness.expires_at
+    result = _normal_read_at(normal, monkeypatch, cut=cut)
     assert result.ok is False
     assert result.reason_code == "REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED"
+    held = _normal_read_at(normal, monkeypatch, cut=cut,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION)
+    assert held.ok, held.reason_code
+    assert _normal_read_at(normal, monkeypatch).ok
 
 
-def test_bundle_reader_amber_still_binds() -> None:
-    """AMBER (18h < age <= 24h) keeps trading — the bundle binds; the fitted sigma
-    inflation is applied at the admission sigma seam, never by withholding the belief."""
-    conn = _conn()
-    posterior_id = _insert_posterior(
-        conn,
-        source_cycle_time=_dt(5, 16),   # 20h before the 06-06 12:00 decision -> AMBER
-        source_available_at=_dt(5, 17),
-        computed_at=_dt(5, 17, 30),
-    )
-    readiness = _readiness(
-        posterior_id=posterior_id,
-        computed_at=_dt(6, 11),
-        expires_at=_dt(6, 23),
-        decision_time=_dt(6, 11),
-    )
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=readiness,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(6, 12),
-        current_bin_topology_hash=_TOPO_HASH,
-    )
+def test_bundle_reader_amber_still_binds(
+    monkeypatch, _source_default_staleness_certificate,
+) -> None:
+    """AMBER retains this source-owned bundle; no fitted variance is asserted here."""
+    from datetime import timedelta
+    from src.data.staleness_degrade_ladder import classify_posterior_staleness, StalenessBand
+    normal = _source_default_staleness_certificate
+    assert _normal_read_at(normal, monkeypatch).ok
+    cut = normal.request.source_cycle_time + timedelta(hours=20)
+    assert classify_posterior_staleness(cut, normal.request.source_cycle_time).band is StalenessBand.AMBER
+    result = _normal_read_at(normal, monkeypatch, cut=cut)
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
     assert result.bundle is not None
