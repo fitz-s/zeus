@@ -1120,6 +1120,10 @@ def _hko_current_provider_inputs(request,values,*,conn,selected_cells=None):
         payload = {"latitude":lat,"longitude":lon,"elevation":32.0,"timezone":city.timezone,"utc_offset_seconds":28800,
             "hourly_units":{"temperature_2m":"°C"},"hourly":{"time":[f"{request.target_date}T{hour:02d}:00" for hour in range(24)],
             "temperature_2m":[value]*24}}
+        if selected_cells is not None and request.temperature_metric == "low":
+            payload["hourly"]["temperature_2m"] = [value if hour==4 else value+1. for hour in range(24)]
+            assert min(payload["hourly"]["temperature_2m"]) == value
+            assert max(payload["hourly"]["temperature_2m"]) != value
         body = (json.dumps(payload,sort_keys=True)+"\n").encode()
         bound = dl._bind_physical_response(payload,model=model,url="https://single-runs-api.open-meteo.com/v1/forecast",
             params=params,run=request.source_cycle_time,captures=[(body,captured.timestamp())],
@@ -2567,7 +2571,9 @@ def test_missing_day0_hourly_carrier_is_a_blocked_input(
     )
 
 
-def _shanghai_current_owner_request(tmp_path, monkeypatch):
+def _shanghai_current_owner_request(tmp_path, monkeypatch, *, metric="high",
+    target_date=date(2026,10,2),source_cycle_time=datetime(2026,10,1,tzinfo=UTC),
+    computed_at=None,first_compute_at=None,expires_at=None,observed_extreme=None):
     """Normal owned ground/anchor/provider proof with controlled ENS/math inputs.
 
     The actual HOMR body was captured Sep30. Move the entire external forecast
@@ -2581,9 +2587,12 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch):
     from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
 
     _official_international_homr_registry(tmp_path, monkeypatch, "Shanghai")
-    cycle = datetime(2026, 10, 1, 0, tzinfo=UTC)
-    computed = cycle + timedelta(hours=18)
-    target = date(2026, 10, 2)
+    assert metric in {"high","low"}
+    cycle = source_cycle_time
+    computed = computed_at or cycle+timedelta(hours=18)
+    first = first_compute_at or computed
+    target = target_date
+    assert cycle+timedelta(hours=3) <= first <= computed
     class GroundClock(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -2606,23 +2615,41 @@ def _shanghai_current_owner_request(tmp_path, monkeypatch):
         "hourly_units":{"temperature_2m":"°C"},
         "hourly":{"time":[f"{target}T{hour:02d}:00" for hour in range(24)],
                   "temperature_2m":[27. if hour==12 else 18.5 for hour in range(24)]},
-        "_zeus_current_target_scope":{"city":city.name,"target_date":str(target),"metric":"high"}},sort_keys=True).encode()
+        "_zeus_current_target_scope":{"city":city.name,"target_date":str(target),"metric":metric}},sort_keys=True).encode()
     anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(body),city_timezone=city.timezone,
         target_local_date=target,source_cycle_time=cycle)
-    assert cycle <= anchor.contributing_valid_times_utc[0] < computed
-    request = replace(_request(openmeteo_precision_guard=None),target_date=target,
-        source_cycle_time=cycle,computed_at=computed,expires_at=computed+timedelta(hours=8),
+    assert cycle <= anchor.contributing_valid_times_utc[0]
+    assert anchor.high_c == 27. and anchor.low_c == 18.5
+    template = replace(_request(openmeteo_precision_guard=None,baseline_data_version=_current_baseline_data_version(metric)),
+        target_date=target,temperature_metric=metric,
+        source_cycle_time=cycle,expires_at=expires_at or computed+timedelta(hours=8),
         openmeteo_source_available_at=cycle+timedelta(hours=3),baseline_source_available_at=cycle+timedelta(hours=2),
-        openmeteo_anchor=anchor,openmeteo_raw_payload_bytes=body,
-        day0_observed_extreme_c=26.,day0_observed_extreme_source="noaa_wrh_zspd",
-        day0_observed_extreme_observation_time=(computed-timedelta(minutes=5)).isoformat(),
-        day0_observed_extreme_sample_count=12,day0_observed_extreme_unit="C")
+        openmeteo_anchor=anchor,openmeteo_raw_payload_bytes=body)
     cells = {model:_selected_test_cell(model,city.lat,city.lon)
              for model in ("icon_global","ukmo_global_deterministic_10km")}
     assert all(abs(lat-city.lat)<.2 and abs(lon-city.lon)<.2 for lat,lon in cells.values())
-    request = _install_hko_live_fusion(monkeypatch,conn=conn,request=request,selected_cells=cells)
+    def stage(cut):
+        active = anchor.contributing_valid_times_utc[0] <= cut
+        assert cut < anchor.contributing_valid_times_utc[-1]+timedelta(hours=1)
+        value = observed_extreme if observed_extreme is not None else (26. if metric=="high" else 19.)
+        request = replace(template,computed_at=cut,
+            day0_observed_extreme_c=value if active else None,
+            day0_observed_extreme_source="noaa_wrh_zspd" if active else None,
+            day0_observed_extreme_observation_time=(cut-timedelta(minutes=5)).isoformat() if active else None,
+            day0_observed_extreme_sample_count=12 if active else None,
+            day0_observed_extreme_unit="C" if active else None)
+        return _install_hko_live_fusion(monkeypatch,conn=conn,request=request,selected_cells=cells,
+                                        snapshot_id=9001 if metric=="high" else 9002)
+    request = stage(first)
+    first_entities = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id"))
+    first_raw = tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id"))
+    if first != computed:
+        request = stage(computed)
+        assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id")) == first_entities
+        assert tuple(tuple(row) for row in conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")) == first_raw
     assert request.city == "Shanghai" and request.openmeteo_precision_guard.passable_for_live_materialization
-    _append_shanghai_owner_prints(conn,request)
+    if request.day0_observed_extreme_c is not None:
+        _append_shanghai_owner_prints(conn,request)
     return conn,request
 
 
@@ -4157,26 +4184,25 @@ def test_materializer_equal_frontier_uses_current_request_identity(
         ("low", _current_baseline_data_version("low"), 19.0),
     ],
 )
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_materializer_blocks_future_day0_observation(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     metric: str,
     baseline_data_version: str,
     extreme: float,
 ) -> None:
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    request = replace(
-        _request(
-            computed_at=_dt(18),
-            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
-            day0_observed_extreme_c=extreme,
-            day0_observed_extreme_source="aviationweather_metar",
-            day0_observed_extreme_observation_time=_dt(18, 30).isoformat(),
-            day0_observed_extreme_sample_count=12,
-        ),
-        temperature_metric=metric,
-        baseline_data_version=baseline_data_version,
-    )
+    # This clock contract is channel-independent; use the currently qualified
+    # same-city WRH product, not an unproven fast-likelihood prerequisite.
+    conn, positive = _shanghai_current_owner_request(tmp_path,monkeypatch,
+        metric=metric,observed_extreme=extreme)
+    assert positive.baseline_data_version == baseline_data_version
+    conn.execute("SAVEPOINT normal_control")
+    control = materialize_replacement_forecast_live(conn,positive)
+    assert control.ok is True
+    conn.execute("ROLLBACK TO normal_control")
+    conn.execute("RELEASE normal_control")
+    request = replace(positive,day0_observed_extreme_observation_time=(positive.computed_at+timedelta(minutes=30)).isoformat())
 
     result = materialize_replacement_forecast_live(conn, request)
 
@@ -7559,15 +7585,20 @@ def test_new_target_family_provider_changes_final_witness() -> None:
     assert "ukmo_global_deterministic_10km" in refreshed.provider_models
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
 def test_final_lock_uses_real_writer_without_revalidation_or_unbounded_reads(
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The final lock may run bounded witnesses and the real target writer only."""
     import scripts.materialize_replacement_forecast_live as cli
 
-    conn = _conn()
-    _install_live_fusion(monkeypatch)
-    prepared = _prepare_for_final_write(conn, _request())
+    cycle = datetime(2026,10,1,tzinfo=UTC)
+    conn, request = _shanghai_current_owner_request(tmp_path,monkeypatch,
+        computed_at=cycle+timedelta(hours=4),first_compute_at=cycle+timedelta(hours=3),
+        expires_at=cycle+timedelta(hours=6))
+    assert request.day0_observed_extreme_c is None
+    prepared = _prepare_for_final_write(conn, request)
     locked_sql: list[str] = []
 
     @contextmanager
