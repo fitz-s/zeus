@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-29
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-29; last_reused=2026-09-29
+# Last reused or audited: 2026-09-30
+# Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -4113,7 +4113,8 @@ def test_noaa_revision_fallback_uses_probability_station_not_settlement_type():
     conn.close()
 
 
-def _fast_residual_composite_payload(*, station: str, settlement_channel: str):
+def _fast_residual_composite_payload(*, station: str, settlement_channel: str,
+                                     unit="C", metric="high", residual_c=0.0):
     """A binding shaped like the live fast-residual composite posterior."""
     from src.data.day0_fast_obs import (
         FAST_OBS_SOURCE_ID,
@@ -4127,11 +4128,11 @@ def _fast_residual_composite_payload(*, station: str, settlement_channel: str):
         "station_id": station,
         "settlement_channel": settlement_channel,
         "fast_channel": FAST_OBS_SOURCE_ID,
-        "unit": "C",
+        "unit": unit,
         "as_of": observed_at,
         "window_start": "2026-09-18T08:23:34+00:00",
         "matched_pairs": 252,
-        "residual_weights_c": ((0.0, 0.99),),
+        "residual_weights_c": ((residual_c, 0.99),),
         "unknown_weight": 0.01,
         "settlement_extreme_c": None,
     }
@@ -4140,19 +4141,19 @@ def _fast_residual_composite_payload(*, station: str, settlement_channel: str):
     ).hexdigest()
     conditioning = {
         "active": True,
-        "metric": "high",
+        "metric": metric,
         "observation_time": observed_at,
         "observed_extreme_c": 29.0,
         "sample_count": 23,
         "source": FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
         "support_truncation": False,
-        "unit": "C",
+        "unit": unit,
         "fast_residual_likelihood": {
             **identity,
             "identity_hash": identity_hash,
-            "residual_weights_c": [{"residual_c": 0.0, "weight": 0.99}],
+            "residual_weights_c": [{"residual_c": residual_c, "weight": 0.99}],
             "scenario_weights": [
-                {"observed_bound_c": 29.0, "weight": 0.99},
+                {"observed_bound_c": 29.0 + residual_c, "weight": 0.99},
                 {"observed_bound_c": None, "weight": 0.01},
             ],
         },
@@ -4164,6 +4165,132 @@ def _fast_residual_composite_payload(*, station: str, settlement_channel: str):
             "statistical_probability_conditioning": conditioning,
         },
     }
+
+
+def _current_fast_source_bundle(*, unit, metric):
+    """Pure source-carrier component, not a raw/native/public-authority fixture."""
+    from src.config import ensemble_n_mc
+    from src.data.replacement_forecast_bundle_reader import _wu_fast_pinned_carrier_reason
+    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    city = runtime_cities_by_name()["Chicago" if unit == "F" else "Tel Aviv"]
+    semantics = SettlementSemantics.for_city(city)
+    payload = _fast_residual_composite_payload(station=city.wu_station,
+        settlement_channel=f"noaa_wrh_{city.wu_station.lower()}",
+        unit=unit, metric=metric, residual_c=-.4)
+    conditioning = payload["_edli_global_day0_binding"]["statistical_probability_conditioning"]
+    likelihood = conditioning["fast_residual_likelihood"]
+    cut = datetime.fromisoformat(likelihood["as_of"]) + timedelta(minutes=2)
+    scale, offset = (1.8, 32.0) if unit == "F" else (1.0, 0.0)
+    native_bounds = ((None, 83), (84, 84), (85, 85), (86, None)) if unit == "F" else (
+        (None, 29), (30, 30), (31, 31), (32, None))
+    topology = [{"bin_id":str(index),
+        "lower_c":None if lo is None else (lo-offset)/scale,
+        "upper_c":None if hi is None else (hi-offset)/scale,
+        "settlement_step_c":1.0/scale,"rounding_rule":semantics.rounding_rule}
+        for index,(lo,hi) in enumerate(native_bounds)]
+    state = {"value_native":29.0*scale+offset,
+        "observed_at_utc":likelihood["as_of"],"source":"aviationweather_metar"}
+    identity = day0_remaining_carrier_identity_inputs(city=city.name,unit=unit,
+        decision_time_utc=cut.isoformat(),station_id=city.wu_station,
+        preliminary_survival_identity=likelihood["identity_hash"])
+    identity.update(current_path_state=state,day0_remaining_center_policy=DAY0_REMAINING_CENTER_POLICY)
+    future = (28.0,29.0,30.0,31.0)
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=tuple(v*scale+offset for v in future),boundary_scenarios=((None,1.0),),
+        metric=metric,path_error_sigma_c=.4*scale,
+        instrument_sigma_c=sigma_instrument_for_city(city).to(unit).value,
+        bin_bounds_c=tuple((None if t["lower_c"] is None else t["lower_c"]*scale+offset,
+                           None if t["upper_c"] is None else t["upper_c"]*scale+offset) for t in topology),
+        n_point=ensemble_n_mc(),n_samples=500,identity_inputs=identity,
+        settlement_semantics=semantics,remaining_center_bias_native=0.0)
+    provenance = {"q_shape":"fused_day0_fast_residual_likelihood",
+        "day0_provisional_observation":conditioning,"day0_preliminary_report_survival_likelihood":{},
+        "day0_remaining_carrier_content_identity":carrier["content_identity"],
+        "day0_remaining_carrier_operator":carrier["operator"],
+        "day0_remaining_carrier_q":carrier["q"],
+        "day0_remaining_carrier_probability_samples":carrier["samples"],
+        "day0_remaining_carrier_sample_count":carrier["sample_count"],
+        "day0_remaining_carrier_future_extremes_c":future,
+        "day0_remaining_carrier_final_extremes_c":(),
+        "day0_remaining_carrier_path_error_sigma_c":.4,
+        "day0_remaining_carrier_probability_cutoff_utc":cut.isoformat(),
+        "day0_remaining_center_policy":DAY0_REMAINING_CENTER_POLICY,
+        "day0_remaining_center_bias_c":0.0,"day0_current_temperature_state":state,
+        "bin_topology":topology}
+    assert _wu_fast_pinned_carrier_reason(provenance,city=city.name,
+        target_date=cut.date(),metric=metric,decision_time=cut) is None
+    payload["_edli_global_day0_binding"].update(city=city.name,target_date=str(cut.date()),metric=metric)
+    payload.update(city=city.name,target_date=str(cut.date()),metric=metric,
+        _edli_day0_provisional_revision_likelihood={},
+        _edli_day0_remaining_content_identity=carrier["content_identity"])
+    bundle = SimpleNamespace(city=city.name,target_date=cut.date(),temperature_metric=metric,
+        provenance_json=provenance)
+    family = SimpleNamespace(city=city.name,target_date=cut.date(),metric=metric)
+    return payload,bundle,family,cut
+
+
+@pytest.mark.parametrize("unit", ("C","F"))
+@pytest.mark.parametrize("metric", ("high","low"))
+def test_qualified_fast_carrier_needs_no_generic_revision_model(unit,metric):
+    import src.engine.event_reactor_adapter as era
+
+    payload,bundle,family,cut = _current_fast_source_bundle(unit=unit,metric=metric)
+    result = era._carried_day0_revision_likelihood(payload,replacement_bundle=bundle,
+        family=family,decision_time=cut)
+    assert result is era._Day0RevisionLikelihoodStatus.NOT_REQUIRED
+    assert "_edli_day0_provisional_boundary_survival_probability" not in payload
+    assert payload["_edli_day0_provisional_revision_likelihood"] == {}
+
+
+@pytest.mark.parametrize("damage", ("missing_bundle","missing_policy","foreign_city",
+    "foreign_date","foreign_metric","changed_content","changed_conditioning","missing_samples",
+    "missing_generic","generic_likelihood","generic_survival","wrong_station","no_cut","naive_cut"))
+def test_fast_not_required_rejects_partial_or_foreign_carrier(damage):
+    import copy
+    import src.engine.event_reactor_adapter as era
+
+    payload,bundle,family,cut = _current_fast_source_bundle(unit="F",metric="low")
+    payload,bundle = copy.deepcopy(payload),copy.deepcopy(bundle)
+    if damage == "missing_bundle": bundle = None
+    elif damage == "missing_policy": del bundle.provenance_json["day0_remaining_center_policy"]
+    elif damage == "foreign_city": bundle.city = "Tel Aviv"
+    elif damage == "foreign_date": bundle.target_date += timedelta(days=1)
+    elif damage == "foreign_metric": bundle.temperature_metric = "high"
+    elif damage == "changed_content": payload["_edli_day0_remaining_content_identity"] = "c"*64
+    elif damage == "changed_conditioning":
+        payload["_edli_global_day0_binding"]["statistical_probability_conditioning"]["observed_extreme_c"] += .1
+    elif damage == "missing_samples": del bundle.provenance_json["day0_remaining_carrier_probability_samples"]
+    elif damage == "missing_generic": del payload["_edli_day0_provisional_revision_likelihood"]
+    elif damage == "generic_likelihood":
+        payload["_edli_day0_provisional_revision_likelihood"] = {"identity_hash":"generic", "boundary_survival_probability":.5}
+    elif damage == "generic_survival": payload["_edli_day0_provisional_boundary_survival_probability"] = .5
+    elif damage == "wrong_station": payload["_edli_global_day0_binding"]["configured_station_id"] = "LLBG"
+    elif damage == "no_cut": cut = None
+    else: cut = cut.replace(tzinfo=None)
+    with pytest.raises(ValueError,match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID"):
+        era._carried_day0_revision_likelihood(payload,replacement_bundle=bundle,
+            family=family,decision_time=cut)
+
+
+@pytest.mark.parametrize("damage", ("removed", "ordinary_relabel"))
+def test_source_fast_carrier_cannot_fall_back_to_ordinary_history(damage):
+    import src.engine.event_reactor_adapter as era
+
+    payload, bundle, family, cut = _current_fast_source_bundle(unit="F", metric="low")
+    del payload["_edli_day0_provisional_revision_likelihood"]
+    binding = payload["_edli_global_day0_binding"]
+    if damage == "removed":
+        del binding["statistical_probability_conditioning"]
+    else:
+        binding["statistical_probability_conditioning"]["source"] = "aviationweather_metar"
+    reason = ("GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID"
+              if damage == "removed" else "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID")
+    with pytest.raises(ValueError, match=reason):
+        era._carried_day0_revision_likelihood(
+            payload, replacement_bundle=bundle, family=family, decision_time=cut,
+        )
 
 
 def _noaa_confirmation_prints(station: str) -> sqlite3.Connection:
@@ -4246,8 +4373,8 @@ def test_wu_settled_fast_residual_keeps_the_wu_revision_model():
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
-def test_current_wu_fast_empty_generic_likelihood_resolves_source_revision(metric):
-    """An empty producer placeholder must still reach the independent model."""
+def test_partial_fast_placeholder_is_not_generic_revision_authority(metric):
+    """A label and invented content hash do not establish a current carrier."""
     import src.engine.event_reactor_adapter as era
 
     payload = _fast_residual_composite_payload(
@@ -4258,7 +4385,8 @@ def test_current_wu_fast_empty_generic_likelihood_resolves_source_revision(metri
     ] = metric
     payload["_edli_day0_remaining_content_identity"] = "c" * 64
     payload["_edli_day0_provisional_revision_likelihood"] = {}
-    assert era._carried_day0_revision_likelihood(payload) is None
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID"):
+        era._carried_day0_revision_likelihood(payload)
     source = era._day0_revision_model_source(payload)
     assert source == "aviationweather_metar"
 
@@ -4289,9 +4417,7 @@ def test_empty_generic_likelihood_requires_verified_current_wu_carrier():
         station="LLBG", settlement_channel="noaa_wrh_llbg"
     )
     payload["_edli_day0_provisional_revision_likelihood"] = {}
-    with pytest.raises(
-        ValueError, match="GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_INVALID"
-    ):
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID"):
         era._carried_day0_revision_likelihood(payload)
 
     payload["_edli_day0_remaining_content_identity"] = "c" * 64
@@ -4309,9 +4435,7 @@ def test_empty_generic_likelihood_requires_verified_current_wu_carrier():
     payload["_edli_day0_provisional_revision_likelihood"] = {
         "identity_hash": "malformed"
     }
-    with pytest.raises(
-        ValueError, match="GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_INVALID"
-    ):
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID"):
         era._carried_day0_revision_likelihood(payload)
 
     payload["_edli_global_day0_binding"]["statistical_probability_conditioning"] = {
@@ -4337,7 +4461,7 @@ def test_empty_generic_likelihood_requires_verified_current_wu_carrier():
         era._carried_day0_revision_likelihood(payload)
 
 
-def test_wu_fast_empty_placeholder_does_not_waive_revision_history_for_entry():
+def test_partial_fast_rejects_and_ordinary_noaa_history_is_still_required():
     import src.engine.event_reactor_adapter as era
 
     payload = _fast_residual_composite_payload(
@@ -4345,7 +4469,8 @@ def test_wu_fast_empty_placeholder_does_not_waive_revision_history_for_entry():
     )
     payload["_edli_day0_remaining_content_identity"] = "c" * 64
     payload["_edli_day0_provisional_revision_likelihood"] = {}
-    assert era._carried_day0_revision_likelihood(payload) is None
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID"):
+        era._carried_day0_revision_likelihood(payload)
     source = era._day0_revision_model_source(payload)
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -4572,7 +4697,7 @@ def test_carried_likelihood_on_noaa_composite_binds_the_configured_station():
     }
     with pytest.raises(
         ValueError,
-        match="GLOBAL_DAY0_PROVISIONAL_REVISION_SOURCE_IDENTITY_INVALID",
+        match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID",
     ):
         era._carried_day0_revision_likelihood(payload)
 

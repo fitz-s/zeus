@@ -1278,6 +1278,9 @@ def _current_global_sell_fee_fraction(
     raise ValueError("GLOBAL_SELL_JIT_FEE_FULL_MARKET_AUTHORITY_REQUIRED")
 
 
+_DAY0_FAST_CARRIER_CONSUMER_ROUTE_REVISION = "qualified_fast_no_generic_revision_v1"
+
+
 def _global_probability_family_cache_namespace(
     connections: Iterable[sqlite3.Connection],
     *,
@@ -1308,6 +1311,7 @@ def _global_probability_family_cache_namespace(
             (
                 decision_time.astimezone(UTC).date().isoformat(),
                 tuple(identities),
+                _DAY0_FAST_CARRIER_CONSUMER_ROUTE_REVISION,
             )
         ).encode("utf-8")
     ).hexdigest()
@@ -37416,33 +37420,85 @@ def _provisional_day0_revision_likelihood(
     raise ValueError("PROVISIONAL_SOURCE_REVISION_MODEL_UNAVAILABLE")
 
 
+class _Day0RevisionLikelihoodStatus(StrEnum):
+    NOT_REQUIRED = "NOT_REQUIRED"
+
+
 def _carried_day0_revision_likelihood(
     payload: Mapping[str, object],
-) -> Mapping[str, object] | None:
-    """Return the likelihood already used to build this probability carrier."""
+    *,
+    replacement_bundle: object | None = None,
+    family: object | None = None,
+    decision_time: datetime | None = None,
+) -> Mapping[str, object] | _Day0RevisionLikelihoodStatus | None:
+    """Keep a qualified FAST no-boundary carrier distinct from missing history."""
+
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
 
     raw = payload.get("_edli_day0_provisional_revision_likelihood")
+    provenance = getattr(replacement_bundle, "provenance_json", None)
+    original = (
+        provenance.get("day0_provisional_observation")
+        if isinstance(provenance, Mapping) else None
+    )
+    if (
+        _day0_probability_conditioning_source(payload).strip().lower()
+        == DAY0_WU_FAST_RESIDUAL_SOURCE
+        or (isinstance(provenance, Mapping)
+            and provenance.get("q_shape") == "fused_day0_fast_residual_likelihood")
+        or (isinstance(original, Mapping)
+            and original.get("source") == DAY0_WU_FAST_RESIDUAL_SOURCE)
+    ):
+        conditioning = _validated_fast_residual_day0_conditioning(
+            _day0_statistical_probability_conditioning(payload)
+        )
+        if conditioning is None:
+            raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID")
+        city = str(getattr(family, "city", "") or "")
+        target = str(getattr(family, "target_date", "") or "")
+        metric = str(getattr(family, "metric", "") or "").lower()
+        if (
+            not isinstance(provenance, Mapping)
+            or type(raw) is not dict
+            or raw
+            or "_edli_day0_provisional_boundary_survival_probability" in payload
+            or not city
+            or not target
+            or metric not in {"high", "low"}
+            or not isinstance(decision_time, datetime)
+            or decision_time.tzinfo is None
+            or decision_time.utcoffset() is None
+            or str(getattr(replacement_bundle, "city", "") or "") != city
+            or str(getattr(replacement_bundle, "target_date", "") or "") != target
+            or str(getattr(replacement_bundle, "temperature_metric", "") or "").lower() != metric
+            or payload.get("_edli_day0_remaining_content_identity")
+            != provenance.get("day0_remaining_carrier_content_identity")
+        ):
+            raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID")
+        binding = payload.get("_edli_global_day0_binding")
+        if (
+            not isinstance(original, Mapping)
+            or not isinstance(binding, Mapping)
+            or str(binding.get("configured_station_id") or "").upper()
+            != str(conditioning["fast_residual_likelihood"]["station_id"]).upper()
+            or any(conditioning.get(key) != value for key, value in original.items())
+        ):
+            raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID")
+        from src.data.replacement_forecast_bundle_reader import (
+            _wu_fast_pinned_carrier_reason,
+        )
+
+        if _wu_fast_pinned_carrier_reason(
+            provenance, city=city, target_date=target,
+            metric=metric, decision_time=decision_time,
+        ) is not None:
+            raise ValueError("GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_CARRIER_INVALID")
+        # This qualified source already owns the uncertain past-extreme
+        # transport. Generic NOAA/HKO boundary survival is not another missing
+        # dependency: adding it would change q and transport the past twice.
+        return _Day0RevisionLikelihoodStatus.NOT_REQUIRED
     if raw is None:
         return None
-    if type(raw) is dict and not raw and str(
-        payload.get("_edli_day0_remaining_content_identity") or ""
-    ).strip():
-        # The current WU-fast producer persists an empty *generic* survival
-        # placeholder: its independent fast-residual proof is nested in the
-        # statistical conditioning.  Only that validated current carrier may
-        # treat the placeholder as absent and resolve the settlement-channel
-        # revision model from current world evidence below.  An empty ordinary
-        # NOAA/HKO carrier remains invalid, not a license to change regimes.
-        from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
-
-        conditioning = _day0_statistical_probability_conditioning(payload)
-        if (
-            isinstance(conditioning, Mapping)
-            and str(conditioning.get("source") or "").strip().lower()
-            == DAY0_WU_FAST_RESIDUAL_SOURCE
-            and _validated_fast_residual_day0_conditioning(conditioning) is not None
-        ):
-            return None
     if not isinstance(raw, Mapping):
         raise ValueError("GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_INVALID")
     try:
@@ -41893,7 +41949,9 @@ def _prepare_current_global_probability_family(
         ):
             try:
                 revision_likelihood = _carried_day0_revision_likelihood(
-                    current_day0_payload
+                    current_day0_payload,
+                    replacement_bundle=bundle,
+                    family=family, decision_time=decision_time,
                 )
                 if revision_likelihood is None:
                     provisional_source = _day0_revision_model_source(
@@ -41929,18 +41987,17 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
                 ) from exc
-            revision_payload = {
-                "_edli_day0_provisional_revision_likelihood": (
-                    revision_likelihood
-                ),
-                "_edli_day0_provisional_boundary_survival_probability": (
-                    revision_likelihood["boundary_survival_probability"]
-                ),
-            }
-            payload.update(revision_payload)
-            current_day0_payload.update(revision_payload)
-            if day0_payload_out is not None:
-                day0_payload_out.update(revision_payload)
+            if revision_likelihood is not _Day0RevisionLikelihoodStatus.NOT_REQUIRED:
+                revision_payload = {
+                    "_edli_day0_provisional_revision_likelihood": revision_likelihood,
+                    "_edli_day0_provisional_boundary_survival_probability": (
+                        revision_likelihood["boundary_survival_probability"]
+                    ),
+                }
+                payload.update(revision_payload)
+                current_day0_payload.update(revision_payload)
+                if day0_payload_out is not None:
+                    day0_payload_out.update(revision_payload)
     bindings = tuple(
         OutcomeTokenBinding(
             bin_id=outcome.bin_id,

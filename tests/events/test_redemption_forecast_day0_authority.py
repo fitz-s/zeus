@@ -110,6 +110,109 @@ def test_partial_shared_carriers_still_require_current_unshifted_policy(partial)
     assert not current_day0_remaining_center_policy_has_authority(partial, edli=True)
 
 
+@pytest.mark.parametrize("cache_kind", ("prepared_entry", "prepared_held", "prepared_exit", "ineligible"))
+def test_fast_consumer_route_invalidates_both_process_caches_and_reuses_new_namespace(
+    monkeypatch, cache_kind,
+):
+    """Cache-mechanism proof only; canonical FAST authority is tested separately."""
+    import hashlib
+    import sqlite3
+    from datetime import UTC, datetime, timedelta
+
+    import numpy as np
+
+    from src.engine import event_reactor_adapter as era
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+    from src.events.day0_authority import bind_day0_probability_semantics
+    from src.solve.solver import (
+        JointOutcomeProbabilityWitness, OutcomeTokenBinding,
+        joint_probability_witness_identity,
+    )
+
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
+    conn = sqlite3.connect(":memory:")
+    try:
+        cut = datetime(2026, 10, 1, 8, 25, tzinfo=UTC)
+        databases = tuple((str(row[1]), f"memory:{id(conn)}")
+                          for row in conn.execute("PRAGMA database_list"))
+        old_namespace = hashlib.sha256(
+            repr((cut.date().isoformat(), (databases,))).encode("utf-8")
+        ).hexdigest()
+        current_namespace = era._global_probability_family_cache_namespace(
+            (conn,), decision_time=cut,
+        )
+        assert current_namespace != old_namespace
+        assert current_namespace == era._global_probability_family_cache_namespace(
+            (conn,), decision_time=cut + timedelta(seconds=1),
+        )
+        family_key = "Chicago|2026-10-01|low"
+        common = dict(family_key=family_key, event_id="same-source-event")
+        if cache_kind == "ineligible":
+            revision = era._global_probability_family_cache_revision((conn,))
+            receipt = era.EventSubmissionReceipt(False, "same-source-event", "same-cut", reason=(
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                f"{era._FAMILY_AUTHORITY_UNAVAILABLE}:"
+                "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
+            ))
+            kwargs = dict(**common, causal_snapshot_id="same-cut", revision=revision)
+            era._store_global_probability_family_ineligible_cache(
+                old_namespace, **kwargs, receipt=receipt,
+            )
+            assert era._probe_global_probability_family_ineligible_cache(
+                old_namespace, **kwargs,
+            ) is receipt
+            assert era._probe_global_probability_family_ineligible_cache(
+                current_namespace, **kwargs,
+            ) is None
+            era._store_global_probability_family_ineligible_cache(
+                current_namespace, **kwargs, receipt=receipt,
+            )
+            assert era._probe_global_probability_family_ineligible_cache(
+                current_namespace, **kwargs,
+            ) is receipt
+        else:
+            probability_use = {
+                "prepared_entry": era._CurrentProbabilityUse.ENTRY,
+                "prepared_held": era._CurrentProbabilityUse.HELD_MONITOR,
+                "prepared_exit": era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+            }[cache_kind]
+            samples = np.tile(np.array([[0.4, 0.6]]), (500, 1))
+            witness_fields = dict(
+                family_key=family_key,
+                bindings=(OutcomeTokenBinding("lower", "c1", None, None),
+                          OutcomeTokenBinding("upper", "c2", None, None)),
+                yes_point_q=np.mean(samples, axis=0), yes_q_samples=samples,
+                q_version=bind_day0_probability_semantics("cache-component"),
+                resolution_identity="resolution", topology_identity="topology",
+                posterior_identity_hash="component-posterior",
+                source_truth_identity="component-source",
+                authority_certificate_hash="component-certificate",
+                band_alpha=0.05, band_basis="component-band", captured_at_utc=cut,
+            )
+            witness = JointOutcomeProbabilityWitness(
+                **witness_fields, max_age=timedelta(minutes=3),
+                witness_identity=joint_probability_witness_identity(**witness_fields),
+            )
+            prepared = PreparedGlobalFamily("component-decision", witness, ())
+            store = dict(**common, family_binding_hash="component-binding",
+                         prepared=prepared, probability_use=probability_use)
+            probe = dict(**common, causal_snapshot_id="new-cut", captured_at_utc=cut,
+                         probability_use=probability_use)
+            era._store_global_probability_family_cache(old_namespace, **store)
+            assert era._probe_global_probability_family_cache(old_namespace, **probe) is not None
+            assert era._probe_global_probability_family_cache(current_namespace, **probe) is None
+            era._store_global_probability_family_cache(current_namespace, **store)
+            reused = era._probe_global_probability_family_cache(current_namespace, **probe)
+            assert reused is not None
+            assert reused.probability_witness.probability_content_identity == witness.probability_content_identity
+            assert reused.probability_witness.q_version == witness.q_version
+            np.testing.assert_array_equal(reused.probability_witness.yes_q_samples, samples)
+    finally:
+        conn.close()
+
+
 def _forecast(**overrides):
     values = dict(
         cycle_hour=0,
