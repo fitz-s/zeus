@@ -50802,6 +50802,175 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
         fixture.conn.close()
 
 
+@pytest.mark.parametrize("metric,raw", (("high", 32.9), ("low", 27.4)))
+def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
+    tmp_path, monkeypatch, metric, raw, _hko_clock_native_sources, record_property,
+):
+    """Normal same-cut q; synthetic books/legacy recipes, never historical fills."""
+    from src.data import day0_hourly_vectors as hourly
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+    from src.state.portfolio import ExitContext, Position
+    from src.config import exit_fee_rate
+    from src.solve.solver import (
+        CandidatePortfolioEndowment, _score_global_single_order_sell_expected,
+        family_payoff_q_samples, global_sell_candidate_from_holding,
+        joint_probability_witness_identity,
+    )
+    actual_builder, calls = hourly.build_day0_remaining_probability_carrier, []
+    signature = inspect.signature(actual_builder)
+    def observe(**kwargs):
+        result = actual_builder(**kwargs)
+        bound = signature.bind(**kwargs)
+        bound.apply_defaults()
+        calls.append((copy.deepcopy(bound.arguments), result))
+        return result
+    monkeypatch.setattr(hourly, "build_day0_remaining_probability_carrier", observe)
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric,
+        observed_extreme_native=raw)
+    try:
+        original_row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone())
+        observation = observation_instant_row_to_day0_observation(dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone()), metric=metric)
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),
+            decision_time=fixture.cut, received_at=fixture.cut.isoformat())
+        prepared = era._prepare_current_global_probability_family(event, forecast_conn=fixture.conn,
+            topology_conn=fixture.conn, observation_conn=fixture.conn, decision_time=fixture.cut,
+            max_age=_dt.timedelta(seconds=30), allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR, raw_input_hwm_conn=fixture.conn)
+        kernel, current_result = calls[-1]
+        assert kernel["boundary_scenarios"][0][0] == raw
+        assert kernel["instrument_sigma_c"] == .1
+        current = prepared.probability_witness
+        np.testing.assert_array_equal(current.yes_point_q, current_result["q"])
+        # The runtime sampler owns its draw sequence. Fixed-action economics
+        # consumes the actual point; do not force its samples onto the pure
+        # builder seed just to manufacture a stopping-law counterfactual.
+        np.testing.assert_array_equal(actual_builder(**kernel)["samples"], current_result["samples"])
+        token_map = {b.condition_id:(b.yes_token_id, f"counterfactual-no-{i}")
+            for i,b in enumerate(current.bindings)}
+        current = _rebind_probability_witness_tokens(current, token_map_by_condition=token_map,
+            required_token_ids=frozenset(token for pair in token_map.values() for token in pair))
+        # Isolate the two former seams, holding the consumed physical recipe,
+        # clocks, order and variance closure fixed. This is not an old licensed
+        # certificate or a reconstruction of the missing 876312 global kernel.
+        total = math.hypot(kernel["path_error_sigma_c"], kernel["instrument_sigma_c"])
+        legacy_extra = math.sqrt(max(max(total, .28)**2 - .28**2, 0))
+        variants = {
+            "boundary": {"boundary_scenarios": tuple((None if b is None else math.trunc(b), w)
+                for b,w in kernel["boundary_scenarios"])},
+            "instrument": {"path_error_sigma_c": legacy_extra},
+        }
+        variants["both"] = {**variants["boundary"], **variants["instrument"]}
+        fee = FeeModel(fee_rate=Decimal(str(exit_fee_rate())))
+        endowment = CandidatePortfolioEndowment(loss_wealth_floor_usd=Decimal("1000"),
+            win_wealth_floor_usd=Decimal("1010"), current_token_shares=Decimal("10"),
+            ledger_snapshot_id="counterfactual-held-ledger")
+        changed, outcomes = set(), []
+        for name,changes in variants.items():
+            result = actual_builder(**{**kernel, **changes})
+            fields = {key:getattr(current,key) for key in inspect.signature(joint_probability_witness_identity).parameters}
+            fields.update(yes_point_q=np.asarray(result["q"]), yes_q_samples=np.asarray(result["samples"]),
+                source_truth_identity=f"counterfactual-legacy-{name}",
+                authority_certificate_hash="synthetic-math-not-a-source-certificate")
+            legacy = replace(current, **{key:value for key,value in fields.items()},
+                witness_identity=joint_probability_witness_identity(**fields))
+            for side,direction in (("YES","buy_yes"),("NO","buy_no")):
+                possibilities = []
+                for binding in current.bindings:
+                    points = [family_payoff_point_q(w,bin_id=binding.bin_id,side=side) for w in (legacy,current)]
+                    for mills in range(50,951):
+                        bid = Decimal(mills)/1000
+                        net = float(bid-fee.fee_per_share(bid))
+                        if min(points)+.001 < net < max(points)-.001:
+                            possibilities.append((abs(points[0]-points[1]),binding,bid,points))
+                if not possibilities:
+                    # This LOW fixture's zero unresolved width is clamped on
+                    # both implementations; a sigma-only fix is no action flip.
+                    assert metric == "low" and name == "instrument"
+                    np.testing.assert_array_equal(legacy.yes_point_q,current.yes_point_q)
+                    continue
+                _,binding,bid,points = max(possibilities,key=lambda item:(item[0],
+                    -abs(float(item[2]-fee.fee_per_share(item[2]))-sum(item[3])/2)))
+                token = binding.yes_token_id if side=="YES" else binding.no_token_id
+                holding = SimpleNamespace(position_id="counterfactual-held",family_key=current.family_key,
+                    bin_id=binding.bin_id,side=side,token_id=token,shares=Decimal("10"))
+                curve = ExecutableSellCurve(token_id=token,side=side,snapshot_id="synthetic-prezero-book",
+                    book_hash="synthetic-prezero-book-hash",levels=(BidBookLevel(price=bid,size=Decimal("10")),),
+                    fee_model=fee,min_tick=Decimal(".001"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+                def candidate(witness,book=curve):
+                    return global_sell_candidate_from_holding(holding, probability_witness=witness,
+                        ledger_snapshot_id=endowment.ledger_snapshot_id,executable_sell_curve=book,
+                        book_captured_at_utc=fixture.cut,neg_risk=False,execution_mode="TAKER_LIMIT",
+                        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+                        exit_authority_status=prepared.day0_exit_authority_status,
+                        exit_authority_reason=prepared.day0_exit_authority_reason,
+                        sell_action_authority_identity=prepared.sell_action_authority_identity)
+                scores,decisions = [],[]
+                for witness,point in zip((legacy,current),points):
+                    proposal = candidate(witness)
+                    assert proposal is not None
+                    score = _score_global_single_order_sell_expected(proposal,held_probability_mean=point,
+                        sample_count=witness.yes_q_samples.shape[0],band_alpha=witness.band_alpha,endowment=endowment)
+                    scores.append(score)
+                    assert score.expected_terminal_wealth.held_probability_mean == point
+                    independent_ev = float(score.shares*(bid-fee.fee_per_share(bid)-Decimal(str(point))))
+                    assert score.expected_terminal_wealth.expected_ev_usd == pytest.approx(independent_ev,abs=1e-5)
+                    samples = family_payoff_q_samples(witness,bin_id=binding.bin_id,side=side)
+                    position = Position(trade_id="counterfactual-held",market_id=binding.condition_id,
+                        city=fixture.city.name,cluster=fixture.city.name,target_date="2026-09-30",bin_label=binding.bin_id,
+                        direction=direction,unit="C",temperature_metric=metric,shares=10,shares_filled=10,
+                        filled_cost_basis_usd=5,cost_basis_usd=5,token_id=binding.yes_token_id,
+                        no_token_id=binding.no_token_id,condition_id=binding.condition_id)
+                    context = ExitContext(fresh_prob=point,fresh_prob_is_fresh=True,current_market_price=float(bid),
+                        current_market_price_is_fresh=True,best_bid=float(bid),bid_size=10,bid_ladder=((float(bid),10),),
+                        hours_to_settlement=9,position_state="active",day0_active=True,
+                        day0_exit_authority_status=prepared.day0_exit_authority_status,
+                        day0_exit_authority_reason=prepared.day0_exit_authority_reason,
+                        current_ci=(min(point,float(samples.min())),max(point,float(samples.max()))),
+                        probability_receipt={"q_version":witness.q_version},bankroll=1000)
+                    decisions.append(position.evaluate_exit(context))
+                    assert position.evaluate_exit(replace(context,best_bid=None,bid_ladder=())).reason == "HOLD"
+                admitted = [score.candidate is not None and not score.rejection_reasons for score in scores]
+                good,bad = (0,1) if points[0] < points[1] else (1,0)
+                assert scores[good].expected_terminal_wealth.expected_ev_usd > 0
+                assert scores[good].expected_terminal_wealth.expected_delta_log_wealth > 0
+                assert scores[bad].expected_terminal_wealth.expected_ev_usd < 0
+                assert not decisions[bad].should_exit
+                if name == "instrument":
+                    # The sigma-only difference in this real kernel is below
+                    # the lawful submitted-floor safety margin: positive cash
+                    # EV alone cannot waive that cumulative execution gate.
+                    assert admitted == [False, False]
+                    assert set(scores[good].rejection_reasons.values()) == {"NON_POSITIVE_ROUNDING_SAFE_SELL"}
+                    assert [decision.reason for decision in decisions] == ["HOLD", "HOLD"]
+                else:
+                    assert admitted[good] and not admitted[bad]
+                    assert decisions[good].should_exit and decisions[good].reason == "SELL_REVERSAL"
+                with pytest.raises(ValueError,match="executable sell curve is incomplete"):
+                    replace(curve,levels=())
+                assert candidate(current,replace(curve,levels=(BidBookLevel(price=Decimal(".04"),size=Decimal("10")),))) is None
+                outcomes.append({"recipe":name,"side":side,"legacy_point":points[0],"current_point":points[1],
+                    "synthetic_bid":str(bid),"position":[decision.reason for decision in decisions],
+                    "fixed_sell_admitted":admitted,
+                    "rejections":[list(score.rejection_reasons.values()) for score in scores]})
+                changed.add((name,side))
+        assert {("boundary",side) for side in ("YES","NO")} <= changed
+        assert {("both",side) for side in ("YES","NO")} <= changed
+        if metric == "high":
+            assert {("instrument",side) for side in ("YES","NO")} <= changed
+        record_property("counterfactual_action_law",json.dumps(outcomes,sort_keys=True))
+        assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone()) == original_row
+    finally:
+        fixture.conn.close()
+
+
 @pytest.mark.parametrize("fault", ("none", "city", "unit", "source"))
 def test_hko_context_loss_is_typed_family_unavailable_in_actual_batch(tmp_path, monkeypatch, fault,_hko_clock_native_sources):
     """Actual source/adapter/classifier; no global risk enum or venue claim."""
