@@ -20,6 +20,8 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | `noaa_homr_klga_station.json` | Original official current NOAA HOMR KLGA primary-temperature-DCP ground entity; NYC-only content-bound proof |
 | `noaa_homr_ksfo_station.json` | Original official current NOAA HOMR KSFO primary-temperature-DCP ground entity; San Francisco-only content-bound proof |
 | `noaa_homr_ksea_station.json` | Original official current NOAA HOMR KSEA primary-temperature-DCP ground entity; Seattle-only content-bound proof |
+| `noaa_homr_zspd_station.json` | Original official NOAA HOMR ZSPD current station-reference GROUND entity; direct ICAO/NCDC/location binding, not primary temperature DCP, sensor AGL or historical possession |
+| `noaa_homr_eglc_station.json` | Original official NOAA HOMR EGLC current station-reference GROUND entity; independent international kind preserves US ASOS/DCP requirements; POR is not individual ground validity |
 | `awc_stationinfo_53_station.json` | Original official AWC current station-list entity shared by WMD proofs; exact ICAO/WMO/METAR identity bridge only, never ground authority from its generic elevation |
 | `wmo_wmd_eham_station.xml` | Original official WMDR EHAM fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
 | `wmo_wmd_cyyz_station.xml` | Original official WMDR CYYZ fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |

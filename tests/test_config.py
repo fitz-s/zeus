@@ -1,5 +1,8 @@
 # Created: pre-Phase-0
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-03-30; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Purpose: Runtime configuration and typed official station-ground identities.
+# Reuse: Inspect current config kinds, original assets and decision possession contracts.
 # Authority basis: Phase 10 DT-close B001 config contract + first-principles ZEUS_MODE cleanup 2026-04-30
 """Tests for config loader and city metadata."""
 
@@ -752,6 +755,132 @@ def test_airport_height_absence_does_not_erase_reference_identity(tmp_path):
     assert geometry["validity_reason"] is None
     assert geometry["elevation_m"] is None
     assert geometry["ground_status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("name,station,height,ncdc", [
+    ("Shanghai", "ZSPD", 4.0, "30137822"),
+    ("London", "EGLC", 5.8, "30146303"),
+])
+def test_international_homr_ground_is_station_reference_not_temperature_dcp(name, station, height, ncdc):
+    import src.config as config
+    kind = "noaa_homr_international_station_ground_snapshot_v1"
+    body = (config.PROJECT_ROOT / f"config/noaa_homr_{station.lower()}_station.json").read_bytes()
+    facts = config.station_ground_facts_from_bytes(source_kind=kind, station_id=station, raw_body=body)
+    assert facts is not None
+    assert facts["elevation_m"] == height
+    assert facts["source_station_id"] == ncdc
+    assert facts["height_role"] == "ground_msl"
+    assert facts["location_role"] == "station_ground_reference"
+    assert "temperature_station" not in facts
+    assert "wmo_station_id" not in facts
+    assert "coordinate_source" not in facts
+    assert config.cities_by_name[name].wu_station == station
+    assert config.station_ground_facts_from_bytes(source_kind="noaa_homr_primary_dcp_snapshot_v1", station_id=station, raw_body=body) is None
+    assert config.station_ground_facts_from_bytes(source_kind=kind, station_id="KORD", raw_body=body) is None
+
+
+def _official_international_homr_registry(tmp_path, monkeypatch, name="Shanghai"):
+    import hashlib
+    import src.config as config
+    station = config.cities_by_name[name].wu_station
+    body = (config.PROJECT_ROOT / f"config/noaa_homr_{station.lower()}_station.json").read_bytes()
+    facts = config.station_ground_facts_from_bytes(source_kind=config.HOMR_INTERNATIONAL_GROUND_SOURCE_KIND, station_id=station, raw_body=body)
+    assert facts is not None
+    artifact = tmp_path / f"noaa_homr_{station.lower()}_station.json"
+    artifact.write_bytes(body)
+    rows = json.loads((config.PROJECT_ROOT / "config/station_precise_coords.json").read_text())
+    rows[name]["station_ground_proof"] = {
+        **facts, "artifact_ref": f"config/{artifact.name}",
+        "body_sha256": hashlib.sha256(body).hexdigest(),
+        "checked_at": "2026-09-30T12:52:01Z", "query_date": "2026-09-30",
+        "query_url": f"{config.HOMR_GROUND_SOURCE_URL}?qid=ICAO%3A{station}&qidMod=is&current=true&date=2026-09-30&phrData=false",
+    }
+    registry = tmp_path / "station_precise_coords.json"
+    registry.write_text(json.dumps(rows))
+    (tmp_path / "cities.json").write_bytes((config.PROJECT_ROOT / "config/cities.json").read_bytes())
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    return registry, artifact, rows
+
+
+@pytest.mark.parametrize("name", ("Shanghai", "London"))
+@pytest.mark.parametrize("mutation", (
+    "foreign_icao", "station_namespace", "location_namespace", "geo_namespace", "nws_namespace",
+    "duplicate_icao", "multiple_station", "multiple_coordinates", "header_mismatch",
+    "ground_airport", "ground_barometric", "duplicate_ground", "units", "boolean_height",
+    "nonfinite", "coordinate_boolean", "known_location_period", "known_identifier_period", "closed", "definition",
+))
+def test_international_homr_rejects_foreign_ambiguous_quantity_and_unsupported_period(name, mutation):
+    import src.config as config
+    station_id = config.cities_by_name[name].wu_station
+    body = (config.PROJECT_ROOT / f"config/noaa_homr_{station_id.lower()}_station.json").read_bytes()
+    kind = config.HOMR_INTERNATIONAL_GROUND_SOURCE_KIND
+    assert config.station_ground_facts_from_bytes(source_kind=kind, station_id=station_id, raw_body=body) is not None
+    payload = json.loads(body)
+    collection = payload["stationCollection"]
+    station = collection["stations"][0]
+    location = station["location"]
+    if mutation == "foreign_icao":
+        station["identifiers"][0]["id"] = "KORD"
+    elif mutation == "station_namespace":
+        station["ncdcStnId"] = "0"
+    elif mutation == "location_namespace":
+        location["ncdcstnId"] = "0"
+    elif mutation == "geo_namespace":
+        location["geoInfo"]["ncdcstnId"] = "0"
+    elif mutation == "nws_namespace":
+        location["nwsInfo"]["ncdcstnId"] = "0"
+    elif mutation == "duplicate_icao":
+        station["identifiers"].append(dict(station["identifiers"][0]))
+    elif mutation == "multiple_station":
+        collection["stations"].append(station.copy())
+    elif mutation == "multiple_coordinates":
+        location["latLonPairs"].append(location["latLonPairs"][0].copy())
+    elif mutation == "header_mismatch":
+        station["header"]["latitude_dec"] = "0"
+    elif mutation in {"ground_airport", "ground_barometric"}:
+        location["elevations"][0]["elevationType"] = mutation.removeprefix("ground_").upper()
+    elif mutation == "duplicate_ground":
+        location["elevations"].append(location["elevations"][0].copy())
+    elif mutation == "units":
+        location["elevations"][0]["elevationFeet"] = "1000"
+    elif mutation == "boolean_height":
+        location["elevations"][0]["elevationMeters"] = True
+    elif mutation == "nonfinite":
+        location["elevations"][0]["elevationMeters"] = "nan"
+    elif mutation == "coordinate_boolean":
+        location["latLonPairs"][0]["latitude_dec"] = True
+    elif mutation == "known_location_period":
+        location["latLonPairs"][0]["beginDate"] = "2026-10-02"
+    elif mutation == "known_identifier_period":
+        station["identifiers"][0]["endDate"] = "2026-10-02"
+    elif mutation == "closed":
+        station["header"]["por"]["endDate"] = "2020-01-01"
+    elif mutation == "definition":
+        next(row for row in collection["definitions"] if row.get("defType") == "elevations" and row.get("abbr") == "GROUND")["description"] = "AIRPORT REFERENCE"
+    assert config.station_ground_facts_from_bytes(source_kind=kind, station_id=station_id, raw_body=json.dumps(payload).encode()) is None
+
+
+@pytest.mark.parametrize("name", ("Shanghai", "London"))
+def test_international_homr_capture_query_day_is_not_decision_or_forecast_target_day(tmp_path, monkeypatch, name):
+    from datetime import datetime, timezone
+    import src.config as config
+    registry, artifact, rows = _official_international_homr_registry(tmp_path, monkeypatch, name)
+    city = config.cities_by_name[name]
+    early = config.runtime_station_geometry_for_city(city, effective_at=datetime(2026, 9, 30, 12, 52, 0, tzinfo=timezone.utc))
+    assert early["ground_status"] == "UNPROVEN"
+    assert early["ground_reason"] == "STATION_GROUND_NOT_POSSESSED_AT_ANALYSIS_CUTOFF"
+    now = config.runtime_station_geometry_for_city(city, effective_at=datetime(2026, 10, 2, tzinfo=timezone.utc))
+    assert now["ground_status"] == "VERIFIED"
+    assert now["ground_facts"]["location_role"] == "station_ground_reference"
+    original = json.loads(json.dumps(rows))
+    for field, value in (("query_date", "2026-10-02"), ("query_url", "https://foreign.invalid/"),
+                         ("location_role", "primary_temperature_dcp"), ("height_role", "airport_msl"),
+                         ("body_sha256", "0"*64), ("checked_at", "2004-01-01T00:00:00Z")):
+        changed = json.loads(json.dumps(original))
+        changed[name]["station_ground_proof"][field] = value
+        registry.write_text(json.dumps(changed))
+        assert config.runtime_station_geometry_for_city(city)["ground_status"] == "UNPROVEN"
+    assert json.loads(artifact.read_bytes())["stationCollection"]["stations"][0]["header"]["por"]["beginDate"]
 
 
 def _official_kord_registry(tmp_path, monkeypatch):

@@ -535,6 +535,7 @@ STATION_GROUND_PROOF_REVISION = "station_ground_roles_v1"
 HKO_GROUND_SOURCE_URL = "https://www.hko.gov.hk/en/cis/stn.htm"
 HKO_GROUND_QUANTITY = "Elevation of ground above mean sea-level (metres)"
 HOMR_GROUND_SOURCE_URL = "https://www.ncei.noaa.gov/access/homr/services/station/search"
+HOMR_INTERNATIONAL_GROUND_SOURCE_KIND = "noaa_homr_international_station_ground_snapshot_v1"
 OSCAR_WMD_SOURCE_KIND = "wmo_wmd_awc_station_snapshot_v1"
 OSCAR_WMD_SOURCE_URL = "https://oscar.wmo.int/surface/rest/api/wmd/download/"
 AWC_STATION_IDENTITY_SOURCE_URL = "https://aviationweather.gov/api/data/stationinfo"
@@ -542,7 +543,8 @@ STATION_GROUND_SOURCE_ARTIFACTS = {
     "hko_station_table_v1": "config/hko_station_metadata.html",
     "noaa_homr_primary_dcp_snapshot_v1": "config/noaa_homr_kord_station.json",
 }
-_STATION_GROUND_SOURCE_KINDS = frozenset({*STATION_GROUND_SOURCE_ARTIFACTS, OSCAR_WMD_SOURCE_KIND})
+_STATION_GROUND_SOURCE_KINDS = frozenset({*STATION_GROUND_SOURCE_ARTIFACTS, OSCAR_WMD_SOURCE_KIND, HOMR_INTERNATIONAL_GROUND_SOURCE_KIND})
+_HOMR_INTERNATIONAL_GROUND_STATIONS = frozenset({"ZSPD", "EGLC"})
 _HOMR_PRIMARY_DCP_STATIONS = frozenset({
     "KATL", "KAUS", "KORD", "KDAL", "KBKF", "KHOU", "KLAX", "KMIA", "KLGA", "KSFO", "KSEA",
 })
@@ -557,6 +559,8 @@ def station_ground_source_artifact_ref(*, source_kind: str, station_id: str) -> 
     if source_kind == "hko_station_table_v1" and station_id == "HKO_HQ":
         return STATION_GROUND_SOURCE_ARTIFACTS[source_kind]
     if source_kind == "noaa_homr_primary_dcp_snapshot_v1" and station_id in _HOMR_PRIMARY_DCP_STATIONS:
+        return f"config/noaa_homr_{station_id.lower()}_station.json"
+    if source_kind == HOMR_INTERNATIONAL_GROUND_SOURCE_KIND and station_id in _HOMR_INTERNATIONAL_GROUND_STATIONS:
         return f"config/noaa_homr_{station_id.lower()}_station.json"
     if source_kind == OSCAR_WMD_SOURCE_KIND and station_id in _OSCAR_WMD_STATIONS:
         return f"config/wmo_wmd_{station_id.lower()}_station.xml"
@@ -735,6 +739,100 @@ def _homr_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
     }
 
 
+def _homr_international_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
+    """Replay current station-reference ground, not the US primary sensor DCP.
+
+    SCOPE: the two approved ICAO entities. DRAIN: real metadata acquisition and
+    normal canonical archive before seeds. RESET: a new causal certificate;
+    POR is not a location interval and this parser grants no historic possession.
+    """
+    if station_id not in _HOMR_INTERNATIONAL_GROUND_STATIONS:
+        raise ValueError("unsupported international ground station")
+
+    def number(value: object) -> float:
+        if isinstance(value, bool):
+            raise ValueError("boolean is not a physical measurement")
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite physical measurement")
+        return parsed
+
+    def reject_periods(value: object) -> None:
+        # Individual periods require a period-aware parser, not a silent
+        # undated promotion. Station header POR is deliberately outside here.
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if str(key).lower() in {
+                    "begindate", "enddate", "startdate", "effective date", "effectivedate",
+                    "validfrom", "validto", "validperiod", "effectiveperiod", "validity",
+                    "beginposition", "endposition", "datefrom", "dateto",
+                } and child not in (None, ""):
+                    raise ValueError("individual station period requires explicit validation")
+                reject_periods(child)
+        elif isinstance(value, list):
+            for child in value:
+                reject_periods(child)
+
+    collection = json.loads(raw)["stationCollection"]
+    definitions = [row for row in collection["definitions"]
+                   if row.get("defType") == "elevations" and row.get("abbr") == "GROUND"]
+    if len(definitions) != 1 or definitions[0].get("description") != "ELEVATION OF THE GROUND":
+        raise ValueError("official ground quantity unavailable")
+    stations = collection["stations"]
+    if not isinstance(stations, list) or len(stations) != 1:
+        raise ValueError("HOMR snapshot must contain one station")
+    station = stations[0]
+    identifiers, location = station["identifiers"], station["location"]
+    reject_periods(identifiers)
+    reject_periods(location)
+    ids = {}
+    for kind in ("ICAO", "NCDCSTNID"):
+        found = [row["id"] for row in identifiers if row.get("idType") == kind]
+        if len(found) != 1 or not isinstance(found[0], str):
+            raise ValueError("official station identifier ambiguous")
+        ids[kind] = found[0]
+    if ids["ICAO"] != station_id or re.fullmatch(r"\d+", ids["NCDCSTNID"]) is None:
+        raise ValueError("official station identifier foreign")
+    if any(value != ids["NCDCSTNID"] for value in (
+        station["ncdcStnId"], location["ncdcstnId"],
+        location["geoInfo"]["ncdcstnId"], location["nwsInfo"]["ncdcstnId"],
+    )):
+        raise ValueError("official location namespace differs")
+    if station["header"]["por"]["endDate"] != "Present":
+        raise ValueError("not a current station snapshot")
+    coordinates = location["latLonPairs"]
+    if not isinstance(coordinates, list) or len(coordinates) != 1:
+        raise ValueError("official station coordinate ambiguous")
+    lat, lon = number(coordinates[0]["latitude_dec"]), number(coordinates[0]["longitude_dec"])
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("official station coordinate invalid")
+    if lat != number(station["header"]["latitude_dec"]) or lon != number(station["header"]["longitude_dec"]):
+        raise ValueError("header and station coordinate differ")
+    elevations = [row for row in location["elevations"] if row.get("elevationType") == "GROUND"]
+    if len(elevations) != 1:
+        raise ValueError("official station ground missing or ambiguous")
+    ground = elevations[0]
+    elevation = number(ground["elevationMeters"])
+    number(ground["elevationFeet"])
+
+    def interval(value: object, scale: Decimal) -> tuple[Decimal, Decimal]:
+        decimal = Decimal(str(value))
+        half = Decimal("0.5").scaleb(decimal.as_tuple().exponent)
+        return (decimal-half)*scale, (decimal+half)*scale
+
+    metres, feet = interval(ground["elevationMeters"], Decimal(1)), interval(ground["elevationFeet"], Decimal("0.3048"))
+    if max(metres[0], feet[0]) > min(metres[1], feet[1]):
+        raise ValueError("official ground units inconsistent")
+    return {
+        "revision": STATION_GROUND_PROOF_REVISION,
+        "source_kind": HOMR_INTERNATIONAL_GROUND_SOURCE_KIND, "station_id": station_id,
+        "source_station_id": ids["NCDCSTNID"], "height_role": "ground_msl",
+        "quantity": "location.elevations.GROUND", "elevation_m": elevation,
+        "site_lat": lat, "site_lon": lon, "location_role": "station_ground_reference",
+        "source_url": HOMR_GROUND_SOURCE_URL,
+    }
+
+
 def _oscar_wmd_ground_facts(
     raw: bytes, station_id: str, identity_bridge_bytes: bytes, effective_at: datetime,
 ) -> dict[str, object]:
@@ -903,6 +1001,8 @@ def station_ground_facts_from_bytes(
     try:
         if source_kind == "hko_station_table_v1":
             return _hko_ground_facts(raw_body, station_id)
+        if source_kind == HOMR_INTERNATIONAL_GROUND_SOURCE_KIND:
+            return _homr_international_ground_facts(raw_body, station_id)
         if source_kind == OSCAR_WMD_SOURCE_KIND:
             if (not isinstance(identity_bridge_bytes, bytes) or len(identity_bridge_bytes) > 256 * 1024
                     or not isinstance(effective_at, datetime)):
@@ -978,13 +1078,15 @@ def _station_ground_for_entry(
         audit_keys = ["artifact_ref", "body_sha256", "checked_at"]
         if kind == OSCAR_WMD_SOURCE_KIND:
             audit_keys.append("source_checked_at")
-        if kind == "noaa_homr_primary_dcp_snapshot_v1":
+        if kind in {"noaa_homr_primary_dcp_snapshot_v1", HOMR_INTERNATIONAL_GROUND_SOURCE_KIND}:
             query_date = date.fromisoformat(claim["query_date"])
             queries = {
                 f"{HOMR_GROUND_SOURCE_URL}?current=true&qid=ICAO%3A{station_id}&date={query_date.isoformat()}&phrData=false",
             }
             if station_id == "KORD":  # Original approved receipt predates current=true narrowing.
                 queries.add(f"{HOMR_GROUND_SOURCE_URL}?qid=ICAO%3AKORD&date={query_date.isoformat()}&phrData=false")
+            if kind == HOMR_INTERNATIONAL_GROUND_SOURCE_KIND:
+                queries = {f"{HOMR_GROUND_SOURCE_URL}?qid=ICAO%3A{station_id}&qidMod=is&current=true&date={query_date.isoformat()}&phrData=false"}
             if query_date != checked.astimezone(timezone.utc).date() or claim.get("query_url") not in queries:
                 raise ValueError("HOMR snapshot query is not bound to current capture")
             audit_keys.extend(("query_date", "query_url"))
