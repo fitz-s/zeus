@@ -1,5 +1,8 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-09-27
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-05-03; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Purpose: Protect native snapshot linkage, land-cell proof and HIGH/LOW local-day boundary semantics.
+# Reuse: Inspect collector/ingester SourceRunContext and current grid/clock contracts before relying on this component suite.
 # Authority basis: LOW local-day-min interval provenance contract plus the original SourceRunContext contract.
 """GRIB ingester source-run context linkage tests."""
 
@@ -173,8 +176,8 @@ def _assert_current_station_geometry_binding(row: sqlite3.Row, monkeypatch: pyte
     for owner, field, delta in (
         ("station_geometry", "lat", .001),
         ("station_geometry", "lon", .001),
-        ("station_geometry", "elevation_m", 1.0),
-        ("station_geometry", "elevation_m", None),
+        ("station_geometry", "lat", None),
+        ("station_geometry", "lon", None),
         (None, "request_lat", .001),
         (None, "request_lon", .001),
     ):
@@ -186,6 +189,18 @@ def _assert_current_station_geometry_binding(row: sqlite3.Row, monkeypatch: pyte
         assert grid_surface_evidence_reason(changed) == (
             "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
         ), (row["temperature_metric"], owner, field)
+    for field, invalid in (("station_id", "FOREIGN_STATION"), ("validity_reason", "REFERENCE_UNVERIFIED")):
+        provenance = json.loads(row["provenance_json"])
+        provenance["grid_surface_evidence"]["station_geometry"][field] = invalid
+        assert grid_surface_evidence_reason({**stored,"provenance_json":json.dumps(provenance)}) == (
+            "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
+        ), (row["temperature_metric"], field)
+
+    # Retired reference-height annotations are not native LSM or typed GROUND
+    # permission. An active-field station/ref proof still must pass below.
+    retired = json.loads(row["provenance_json"])
+    retired["grid_surface_evidence"]["station_geometry"]["elevation_m"] += 1.0
+    assert grid_surface_evidence_reason({**stored,"provenance_json":json.dumps(retired)}) is None
 
     # The registry's whole-file hash is audit provenance, not a global
     # always-newest gate; unrelated-city registry changes cannot freeze HK.
@@ -210,11 +225,13 @@ def _assert_current_station_geometry_binding(row: sqlite3.Row, monkeypatch: pyte
 
     import src.config as config
     actual = config.runtime_station_geometry_for_city
-    for field in ("lat", "lon", "elevation_m"):
+    for field in ("lat", "lon", "station_id", "validity_reason"):
         with monkeypatch.context() as patcher:
             def revised(city, *, changed_field=field):
                 station = actual(city)
-                return {**station, changed_field: float(station[changed_field]) + .001}
+                changed = (float(station[changed_field]) + .001 if changed_field in ("lat","lon")
+                    else "REFERENCE_CHANGED")
+                return {**station, changed_field: changed}
             patcher.setattr(config, "runtime_station_geometry_for_city", revised)
             assert grid_surface_evidence_reason(stored) == (
                 "EXECUTABLE_FORECAST_GRID_SURFACE_STATION_UNVERIFIED"
