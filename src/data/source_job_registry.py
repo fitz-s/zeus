@@ -157,6 +157,11 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   misfire_grace_time=120,
                   notes="bounded EFHK current-temperature poll; changed physical prints "
                         "wake the existing fusion revision and materialization queue"),
+    SourceJobSpec("ingest_current_temperature_delivery", "ingest_main", "live", "default", True,
+                  callable_ref="_current_temperature_delivery_tick", family="forecast",
+                  misfire_grace_time=5,
+                  notes="one-second bounded replay of current-temperature delivery debt; "
+                        "normal fusion reseeds on the serial forecast repair lane, without HTTP"),
     SourceJobSpec("ingest_day0_metar_commit_retry", "ingest_main", "live", "default", True,
                   source_id="aviationweather_metar",
                   callable_ref="_day0_metar_commit_retry_tick", family="observation",

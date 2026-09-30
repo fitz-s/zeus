@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-09-25; last_reused=2026-09-25
+# Lifecycle: created=2026-05-24; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-09-25
+# Last reused or audited: 2026-09-30
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -1136,7 +1136,8 @@ def test_all_jobs_single_instance_coalesce_preserved() -> None:
         assert s.coalesce is True, f"{s.job_id} must coalesce"
 
 
-def test_forecast_repair_lane_admits_only_the_ingest_maintenance_owner() -> None:
+def test_forecast_repair_lane_admits_only_the_ingest_maintenance_owner(monkeypatch) -> None:
+    from dataclasses import replace
     from src.data.scheduler_adapter import (
         JobBuildSpec, build_job_specs, validate_executor_assignment,
         validate_lane_separation,
@@ -1146,6 +1147,7 @@ def test_forecast_repair_lane_admits_only_the_ingest_maintenance_owner() -> None
     assert validate_lane_separation(specs) == []
     repair = [spec for spec in specs if spec.executor_class == "forecast_repair_db"]
     assert [(spec.job_id, spec.owner_daemon) for spec in repair] == [
+        ("ingest_current_temperature_delivery", "ingest_main"),
         ("ingest_replacement_maintenance", "ingest_main")
     ]
     planted = [
@@ -1161,6 +1163,15 @@ def test_forecast_repair_lane_admits_only_the_ingest_maintenance_owner() -> None
         assert "ingest_replacement_maintenance" in violations[1]
         assert "ingest_replacement_maintenance" in violations[2]
         assert "unregistered_writer" in violations[3]
+    from src.data.source_job_registry import JOB_REGISTRY
+    delivery = next(spec for spec in repair if spec.job_id == "ingest_current_temperature_delivery")
+    original = JOB_REGISTRY[delivery.job_id]
+    for mutation in ({"owner_daemon": "main"}, {"role": "derived"},
+                     {"writes_db": False}, {"family": "observation"}):
+        monkeypatch.setitem(JOB_REGISTRY, delivery.job_id, replace(original, **mutation))
+        assert validate_lane_separation([delivery])
+    monkeypatch.setitem(JOB_REGISTRY, delivery.job_id, original)
+    assert validate_lane_separation([replace(delivery, executor_class="forecast_clock_db")])
 
 
 def test_real_scheduler_runs_forecast_repair_while_derived_busy_without_overlap() -> None:
@@ -4689,6 +4700,22 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
         == "hko_final_source_clock_db"
     )
     assert by_id["ingest_replacement_availability_poll"]["executor"] == "forecast_clock_db"
+    delivery = by_id["ingest_current_temperature_delivery"]
+    delivery_spec = JOB_REGISTRY["ingest_current_temperature_delivery"]
+    assert delivery_spec.owner_daemon == "ingest_main"
+    assert delivery_spec.role == "live" and delivery_spec.writes_db is True
+    assert delivery_spec.family == "forecast" and delivery_spec.all_source_ids == ()
+    assert delivery_spec.callable_ref == "_current_temperature_delivery_tick"
+    assert job_defs[delivery_spec.job_id][0] is im._current_temperature_delivery_tick
+    assert delivery["executor"] == "forecast_repair_db"
+    assert delivery["trigger"] == "interval" and delivery["kw"]["seconds"] == 1
+    assert delivery["misfire_grace_time"] == 5
+    assert delivery["max_instances"] == 1 and delivery["coalesce"] is True
+    from dataclasses import replace
+    for mutation in ({"owner_daemon": "main"}, {"role": "derived"},
+                     {"writes_db": False}, {"family": "observation"}):
+        with pytest.raises(ValueError, match="requires ingest_main live DB writer"):
+            executor_class_for(replace(delivery_spec, **mutation))
     assert (
         by_id["ingest_station_forecast_source_clock"]["executor"]
         == "station_forecast_clock_db"

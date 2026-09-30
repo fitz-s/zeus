@@ -1286,6 +1286,9 @@ files:
       HKO finalized Daily Extract polling has its own single-worker
       hko_final_source_clock_db lane, separate from both METAR/WU observation batching and the
       two-second HKO realtime poll, so either source's latency cannot suppress final authority.
+      Current-temperature delivery debt is registered as an ingest_main live DB writer on
+      the existing serial forecast_repair_db lane; it performs no HTTP and retains exact job-set
+      validation, bounded scopes, single-instance/coalesced one-second recovery.
     hazards: []
     downstream:
     - src/ingest_main.py

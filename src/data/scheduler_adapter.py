@@ -68,6 +68,11 @@ ExecutorClass = Literal[
 
 def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
     """Assign an executor class by job intent. writes_db jobs ALWAYS get a *_db class."""
+    if spec.job_id == "ingest_current_temperature_delivery":
+        if (spec.owner_daemon != "ingest_main" or spec.role != "live"
+                or not spec.writes_db or spec.family != "forecast"):
+            raise ValueError("current-temperature delivery requires ingest_main live DB writer")
+        return "forecast_repair_db"
     if spec.job_id == "ingest_replacement_maintenance":
         if spec.owner_daemon != "ingest_main" or spec.role != "derived" or not spec.writes_db:
             raise ValueError("replacement maintenance requires ingest_main derived DB writer")
@@ -214,14 +219,23 @@ def validate_executor_assignment(specs: list[JobBuildSpec] | None = None) -> lis
             violations.append(
                 f"{s.job_id}: writes_db job assigned file-only executor {s.executor_class!r}"
             )
-        if s.executor_class == "forecast_repair_db" and (
-            s.job_id != "ingest_replacement_maintenance"
-            or s.owner_daemon != "ingest_main"
-            or job is None or job.role != "derived" or not job.writes_db
-        ):
+        maintenance = (
+            s.job_id == "ingest_replacement_maintenance"
+            and s.owner_daemon == "ingest_main"
+            and job is not None and job.role == "derived" and job.writes_db
+        )
+        delivery = (
+            s.job_id == "ingest_current_temperature_delivery"
+            and s.owner_daemon == "ingest_main"
+            and job is not None and job.owner_daemon == "ingest_main"
+            and job.role == "live" and job.writes_db and job.family == "forecast"
+        )
+        if s.executor_class == "forecast_repair_db" and not (maintenance or delivery):
             violations.append(f"{s.job_id}: unauthorized forecast_repair_db assignment")
         if s.job_id == "ingest_replacement_maintenance" and s.executor_class != "forecast_repair_db":
             violations.append(f"{s.job_id}: missing dedicated forecast_repair_db assignment")
+        if s.job_id == "ingest_current_temperature_delivery" and s.executor_class != "forecast_repair_db":
+            violations.append(f"{s.job_id}: missing current-temperature forecast_repair_db assignment")
     return violations
 
 
@@ -370,16 +384,25 @@ def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[st
     # otherwise an owner-filtered spec list KeyErrors on the other daemon's jobs (PR review #329 D).
     for s in specs:
         job = JOB_REGISTRY.get(s.job_id)
-        if s.executor_class == "forecast_repair_db" and (
-            s.job_id != "ingest_replacement_maintenance"
-            or s.owner_daemon != "ingest_main"
-            or job is None or job.role != "derived" or not job.writes_db
-        ):
+        maintenance = (
+            s.job_id == "ingest_replacement_maintenance"
+            and s.owner_daemon == "ingest_main"
+            and job is not None and job.role == "derived" and job.writes_db
+        )
+        delivery = (
+            s.job_id == "ingest_current_temperature_delivery"
+            and s.owner_daemon == "ingest_main"
+            and job is not None and job.owner_daemon == "ingest_main"
+            and job.role == "live" and job.writes_db and job.family == "forecast"
+        )
+        if s.executor_class == "forecast_repair_db" and not (maintenance or delivery):
             violations.append(
                 f"{s.job_id}: {s.owner_daemon} cannot use forecast_repair_db"
             )
         if s.job_id == "ingest_replacement_maintenance" and s.executor_class != "forecast_repair_db":
             violations.append(f"{s.job_id}: replacement repair must use forecast_repair_db")
+        if s.job_id == "ingest_current_temperature_delivery" and s.executor_class != "forecast_repair_db":
+            violations.append(f"{s.job_id}: current-temperature delivery must use forecast_repair_db")
         if job is None:
             continue
         if s.executor_class in {
