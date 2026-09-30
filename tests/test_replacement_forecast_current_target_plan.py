@@ -41,6 +41,29 @@ def _baseline_high_data_version() -> str:
     return version
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_warm_covering_posterior_checks_its_independent_metric_without_name_error(metric) -> None:
+    """A coarse current-shape candidate reaches the real authority gate, not a crash."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE forecast_posteriors (
+        posterior_id INTEGER PRIMARY KEY, source_id TEXT, city TEXT, target_date TEXT,
+        temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT,
+        provenance_json TEXT, openmeteo_anchor_id INTEGER, training_allowed INTEGER,
+        runtime_layer TEXT)""")
+    conn.execute("""INSERT INTO forecast_posteriors VALUES (1, ?, 'Paris', '2026-10-01', ?,
+        '2026-09-30T12:00:00+00:00', '2026-09-30T20:00:00+00:00', ?, NULL, 0, 'live')""",
+        (current_target_plan.SOURCE_ID, metric,
+         json.dumps({"bayes_precision_fusion": {"current_evidence_shape": {}}})))
+    assert current_target_plan._covering_posterior_input_lag_reason(
+        conn, city="Paris", target_date="2026-10-01", temperature_metric=metric,
+        decision_time=datetime(2026, 9, 30, 20, 1, tzinfo=timezone.utc),
+        baseline_source_run_id=None, openmeteo_source_run_id=None,
+        posterior_tradeable_grade_clause="", readiness_posterior_id_resolved=True,
+    ) == "basis=current_evidence_probability_authority_invalid"
+    conn.close()
+
+
 def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -2357,7 +2380,8 @@ def _create_db(path, *, include_raw_provider: bool = True) -> None:
                 q_ucb_json TEXT,
                 provenance_json TEXT,
                 source_cycle_time TEXT,
-                computed_at TEXT
+                computed_at TEXT,
+                openmeteo_anchor_id INTEGER
             )
             """
         )

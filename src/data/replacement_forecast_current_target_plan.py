@@ -2213,7 +2213,7 @@ def _covering_posterior_input_lag_reason(
         from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
         from src.data.station_ground_evidence import forecast_db_from_connection
         if not current_evidence_shape_has_held_authority(provenance, materialized_at=row["computed_at"],
-            city=city,target_date=target_date,metric=metric,anchor_id=row["openmeteo_anchor_id"],
+            city=city,target_date=target_date,metric=temperature_metric,anchor_id=row["openmeteo_anchor_id"],
             forecast_db=forecast_db_from_connection(conn)):
             return "basis=current_evidence_probability_authority_invalid"
     from src.data.replacement_input_hwm import replacement_live_input_lag_reason
