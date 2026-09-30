@@ -265,6 +265,19 @@ class RejectionReason(str, Enum):
         "Duplicate-entry suppression while the same token/direction is cooling down "
         "or already active; prevents repeated same-order submission.",
     )
+    VENUE_REJECTED_GEOBLOCK_403 = (
+        "venue_rejected_geoblock_403",
+        RejectionCategory.DESIGNED_GATE,
+        "The venue refused POST /order for the host's region (Polymarket geoblock "
+        "403). A host egress fact recorded by src/control/venue_access.py; the "
+        "order was never created and the event is retried, not burned.",
+    )
+    VENUE_ACCESS_GEOBLOCKED = (
+        "VENUE_ACCESS_GEOBLOCKED",
+        RejectionCategory.DESIGNED_GATE,
+        "Host venue order access is GEOBLOCKED; entries short-circuit before "
+        "signing until the owner's next probe. Exits and cancels are unaffected.",
+    )
     OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED = (
         "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED",
         RejectionCategory.DESIGNED_GATE,

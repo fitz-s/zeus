@@ -6960,3 +6960,105 @@ def test_final_receipt_connection_obeys_total_deadline_during_cutover(tmp_path, 
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
         caller.close()
+
+
+# --- 2026-09-29: host venue order access is one owned fact ---
+
+_GEOBLOCK_MESSAGE = (
+    "PolyApiException[status_code=403, error_message={'error': 'Trading "
+    "restricted in your region, please refer to available regions - "
+    "https://docs.polymarket.com/developers/CLOB/geoblock'}]"
+)
+
+
+@pytest.fixture
+def venue_access_path(tmp_path, monkeypatch):
+    import src.control.venue_access as venue_access
+
+    target = tmp_path / "venue-access.json"
+    monkeypatch.setattr(venue_access, "_path", lambda: target)
+    monkeypatch.setattr(
+        venue_access, "egress_evidence", lambda host="clob.polymarket.com": {"interface": "test"}
+    )
+    return target
+
+
+def _geoblock_result(bound: dict) -> dict:
+    return _final_submit_result(
+        bound,
+        success=False,
+        status="REJECTED",
+        error_code="venue_rejected_geoblock_403",
+        error_message=_GEOBLOCK_MESSAGE,
+    )
+
+
+class TestVenueAccessGeoblock:
+    def test_geoblock_403_blocks_the_next_entry_before_signing(
+        self, mem_conn, monkeypatch, venue_access_path
+    ):
+        """2026-09-29: every candidate re-signed and re-hit the 403 for 2.5 h.
+        The first 403 now sets GEOBLOCKED; the next entry returns a registered
+        reason without a command, an envelope, or a venue call."""
+        import src.control.venue_access as venue_access
+        from src.execution.executor import _live_order
+
+        _allow_entry_submit_until_client(monkeypatch)
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = lambda **kwargs: _geoblock_result(bound)
+            first = _live_order(
+                trade_id="trd-geoblock-first",
+                intent=_make_entry_intent(mem_conn),
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-geoblock-first",
+            )
+            calls_after_first = mock_inst.place_limit_order.call_count
+
+            second = _live_order(
+                trade_id="trd-geoblock-second",
+                intent=_make_entry_intent(mem_conn),
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-geoblock-second",
+            )
+
+        assert first.status == "rejected"
+        assert calls_after_first == 1
+        assert venue_access.summary()["state"] == "GEOBLOCKED"
+        assert second.status == "rejected"
+        assert str(second.reason).startswith("VENUE_ACCESS_GEOBLOCKED:")
+        assert mock_inst.place_limit_order.call_count == calls_after_first
+        assert mem_conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE position_id=?",
+            ("trd-geoblock-second",),
+        ).fetchone()[0] == 0
+
+    def test_exits_still_attempt_while_geoblocked_and_acceptance_reopens(
+        self, mem_conn, venue_access_path
+    ):
+        import src.control.venue_access as venue_access
+        from src.execution.executor import execute_exit_order
+
+        venue_access.record_geoblock(_GEOBLOCK_MESSAGE)
+        assert venue_access.entry_block_reason() is not None
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-exit-geo")
+            )
+            execute_exit_order(
+                intent=_make_exit_intent(mem_conn),
+                conn=mem_conn,
+                decision_id="dec-exit-geo",
+            )
+
+        assert mock_inst.place_limit_order.called
+        assert venue_access.summary()["state"] == "OPEN"

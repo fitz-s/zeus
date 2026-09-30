@@ -5247,6 +5247,11 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # stale authority surface blocks new entries but can clear when the sidecar /
     # daemon / deployment head realigns; retry later, never burn the event.
     "live_health_entry_authority",
+    # Host venue order access (src/control/venue_access.py). The venue refused the
+    # host's region for POST /order: a fact about egress, not the event. Retry on
+    # the runtime-authority floor; the owner's probe re-opens entries.
+    "venue_rejected_geoblock_403",
+    "VENUE_ACCESS_GEOBLOCKED",
     # Continuous redecision coordination: another live action already owns this
     # family, or the old leg is still exiting. The cure is state advancement from
     # that existing action, not burning the family forever.
@@ -5657,6 +5662,8 @@ def _is_runtime_authority_retry_reason(reason: str | None) -> bool:
         in {
             "entries_paused",
             "live_health_entry_authority",
+            "venue_rejected_geoblock_403",
+            "VENUE_ACCESS_GEOBLOCKED",
             "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE",
             "CURRENT_WEALTH_COLLATERAL_EXPIRED",
             "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS",

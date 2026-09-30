@@ -995,6 +995,18 @@ files:
     - src/execution/executor.py
     - src/engine/cycle_runner.py
     - src/main.py
+  src/control/venue_access.py:
+    zone: K1_governance
+    authority_role: venue_order_access_owner
+    why: The one owner of the host's venue order-access fact. A Polymarket geoblock 403 on POST /order sets GEOBLOCKED; entries short-circuit before signing until a backoff probe (60s->300s); any accepted order sets OPEN. Exits and cancels never consult it.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    write_routes:
+    - control_write
+    downstream:
+    - src/execution/executor.py
+    - src/engine/event_reactor_adapter.py
+    - src/observability/status_summary.py
   src/control/ws_gap_guard.py:
     zone: K1_governance
     authority_role: user_ws_submit_guard

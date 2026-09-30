@@ -3238,6 +3238,39 @@ def _allocation_payload_for_intent(intent: ExecutionIntent) -> dict[str, str]:
     }
 
 
+def _observe_venue_order_access(result: object = None, exc: Exception | None = None) -> None:
+    """Report an order POST's outcome to the one host venue-access owner.
+
+    Any accepted order (entry or exit) proves the host has order access; a
+    geoblock 403 proves it has none. Best-effort: bookkeeping never alters the
+    order outcome being returned.
+    """
+
+    from src.control import venue_access
+
+    try:
+        if exc is not None:
+            if _is_polymarket_geoblock_403(exc):
+                venue_access.record_geoblock(str(exc))
+            return
+        if not isinstance(result, Mapping):
+            return
+        if result.get("success") is False:
+            code = str(
+                result.get("errorCode") or result.get("error_code") or result.get("reason") or ""
+            )
+            message = str(result.get("errorMessage") or result.get("error_message") or "")
+            if code == "venue_rejected_geoblock_403" or _is_polymarket_geoblock_403_message(
+                message
+            ):
+                venue_access.record_geoblock(message or code)
+            return
+        if _submit_result_order_id(result):
+            venue_access.record_order_accepted()
+    except Exception as inner:  # noqa: BLE001 - access bookkeeping cannot fail an order
+        logger.warning("venue access bookkeeping failed: %s", inner)
+
+
 def _is_polymarket_geoblock_403(exc: Exception) -> bool:
     return type(exc).__name__ == "PolyApiException" and _is_polymarket_geoblock_403_message(
         str(exc)
@@ -8284,7 +8317,9 @@ def execute_exit_order(
                 side="SELL",
                 order_type=order_type,
             )
+            _observe_venue_order_access(result)
         except Exception as exc:
+            _observe_venue_order_access(exc=exc)
             # M2: place_limit_order has crossed the submit side-effect boundary.
             # Treat SDK/network exceptions as unknown side effects. Narrow
             # synchronous CLOB validation failures are deterministic rejections:
@@ -9411,6 +9446,29 @@ def _live_order(
                 command_state="REJECTED",
             )
 
+        from src.control import venue_access
+
+        venue_access_reason = venue_access.claim_entry_submit()
+        if venue_access_reason is not None:
+            logger.warning(
+                "_live_order: venue order access geoblocked; entry short-circuited "
+                "before signing for trade_id=%s token=%s reason=%s",
+                trade_id,
+                intent.token_id,
+                venue_access_reason,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=venue_access_reason,
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+
         duplicate_same_token_component = _entry_duplicate_same_token_component(
             conn,
             token_id=intent.token_id,
@@ -10230,7 +10288,9 @@ def _live_order(
                 side="BUY",  # Always BUY
                 order_type=effective_order_type,
             )
+            _observe_venue_order_access(result)
         except Exception as exc:
+            _observe_venue_order_access(exc=exc)
             # M2: place_limit_order has crossed the submit side-effect boundary.
             # Treat SDK/network exceptions as unknown side effects. Narrow
             # synchronous CLOB validation failures are deterministic rejections:

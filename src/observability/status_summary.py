@@ -1686,6 +1686,22 @@ def _ws_gap_component(payload: dict, *, current_executor_blocks_exit: bool = Fal
     )
 
 
+def _venue_access_component() -> dict:
+    from src.control.venue_access import summary
+
+    payload = summary()
+    reason = payload.get("entry_block_reason")
+    return _capability_component(
+        "venue_access",
+        allowed=reason is None,
+        reason=str(reason or "allowed"),
+        details={
+            key: payload.get(key)
+            for key in ("state", "since", "next_probe_at", "consecutive_geoblocks", "egress")
+        },
+    )
+
+
 def _risk_allocator_entry_component(payload: dict) -> dict:
     entry = payload.get("entry", {}) if isinstance(payload, dict) else {}
     allowed = bool(entry.get("allow_submit", False))
@@ -1808,6 +1824,7 @@ def _get_execution_capability_status() -> dict:
         components=[
             _cutover_component("entry", cutover),
             _heartbeat_component(heartbeat),
+            _safe_component("venue_access", _venue_access_component),
             _ws_gap_component(ws_gap),
             _risk_allocator_entry_component(risk),
             _collateral_component(collateral, collateral="pUSD"),

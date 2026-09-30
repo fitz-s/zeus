@@ -9076,9 +9076,12 @@ def event_bound_live_adapter_from_trade_conn(
         # transient-retention result without touching BUY capital authority.
         # RESET: the next cycle re-reads durable control and receives a fresh
         # cycle-local block reason, so clearing both restores BUY re-decision.
+        from src.control import venue_access as _venue_access
+
         entry_submit_suppression_reason = (
             _entry_global_submit_suppression_reason()
             or entry_submit_block_reason
+            or _venue_access.entry_block_reason()
         )
         entry_pause_reason = _entry_pause_blocks_live_submit(
             live_cap_conn or trade_conn
