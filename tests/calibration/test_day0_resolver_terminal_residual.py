@@ -1,5 +1,5 @@
 # Created: 2026-09-24
-# Last reused or audited: 2026-09-27
+# Last reused or audited: 2026-09-30
 # Authority basis: resolver-graded Day0 observation model (external review
 #   2026-09-24, design decision item 6).
 """Resolver-graded Day0 terminal residual: label law, hierarchy, operator, switch."""
@@ -670,9 +670,14 @@ def test_switch_on_materializer_carrier_composes_resolver_terminal(monkeypatch):
     assert sum(on["q"][1:]) == pytest.approx(inp.nonviolation_probability, abs=1e-12)
 
 
-def test_switch_on_adapter_rebuild_then_strict_replay_hko_low(monkeypatch):
+def test_switch_on_adapter_rebuild_then_strict_replay_hko_low(monkeypatch, tmp_path):
     """Adapter seam: ON rebuild composes resolver-graded q; strict replay reproduces it;
-    OFF refuses to replay a resolver carrier under the survival revision."""
+    OFF refuses to replay a resolver carrier under the survival revision.
+
+    The observation uses the ordinary HKO native CSV parser/writer/reader.
+    Resolver hierarchy, future members and sigma remain controlled components,
+    not evidence of a full HTTP/ENS/public probability pipeline.
+    """
     import src.engine.event_reactor_adapter as era
     from src.config import runtime_cities_by_name
     from src.types.temperature import TemperatureDelta
@@ -680,10 +685,44 @@ def test_switch_on_adapter_rebuild_then_strict_replay_hko_low(monkeypatch):
     city = runtime_cities_by_name()["Hong Kong"]
     semantics = SettlementSemantics.for_city(city)
     future, final_centers = (25.4, 25.8, 28.4, 26.0), (24.0,)
-    decision_time = datetime(2026, 9, 3, 4, 58, 45, tzinfo=UTC)
+    decision_time = datetime(2026, 9, 30, 4, 58, 45, tzinfo=UTC)
+    target_date = decision_time.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    from scripts import hko_ingest_tick
+    from src.data.observation_instants_writer import insert_rows
+    from src.data.day0_observation_reader import read_day0_observation_context_from_instants
+    from src.data.replacement_forecast_current_target_plan import _persisted_payload_sha256
+    from src.events.triggers.day0_extreme_updated import observation_context_to_live_observation, _expected_station_for_city
+    from src.state.schema.v2_schema import apply_canonical_schema
+    from tests.test_station_forecast_live_ingest_wiring import _hourly_schema_conn
+
+    # Controlled original official-product shape, not an rhr CURRENT_ONLY
+    # temperature promoted to a running extreme or hand-written MATCH labels.
+    body = ("Date time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),"
+            "Minimum Air Temperature Since Midnight(degree Celsius)\n"
+            "202609301258,HK Observatory,29.1,25.9\n").encode()
+    body_path = tmp_path / "hko-since-midnight.csv"
+    body_path.write_bytes(body)
+    fetched = "2026-09-30T04:58:15+00:00"
+    snapshot = hko_ingest_tick._parse_hko_extrema_csv(body_path.read_text(), fetched_at_utc=fetched)
+    row = hko_ingest_tick._build_hko_extrema_row(snapshot, temperature_c=None,
+        accumulator_fetched_at=None, data_version="v1.wu-native", imported_at=fetched)
+    conn = _hourly_schema_conn(tmp_path / "hko-native.db")
+    conn.row_factory = sqlite3.Row
+    apply_canonical_schema(conn, forecast_tables=True)
+    assert insert_rows(conn, [row]) == 1
+    conn.commit()
+    context = read_day0_observation_context_from_instants(conn, city=city,
+        target_date=target_date, decision_time_utc=decision_time)
+    assert context is not None and context.low_so_far == 25.9
+    observation = observation_context_to_live_observation(city=city, target_date=target_date,
+        metric="low", observation=context)
+    stored = conn.execute("SELECT raw_response,provenance_json FROM observation_instants").fetchone()
+    payload_sha256 = _persisted_payload_sha256(stored["raw_response"], stored["provenance_json"])
+    assert payload_sha256 == json.loads(row.provenance_json)["payload_hash"].removeprefix("sha256:")
+    conn.close()
     likelihood = {
         "semantics": "hko_provisional_monotonic_survival_beta_jeffreys_v1",
-        "lookback_start": "2026-08-04", "lookback_end": "2026-09-03", "transition_count": 30,
+        "lookback_start": "2026-08-31", "lookback_end": target_date, "transition_count": 30,
         "retraction_count": 0, "median_update_seconds": 600.0, "projected_remaining_updates": 5,
     }
     likelihood["identity_hash"] = hashlib.sha256(
@@ -694,6 +733,11 @@ def test_switch_on_adapter_rebuild_then_strict_replay_hko_low(monkeypatch):
         levels=(("L0|low", 400, 2, 1.0), ("L1|x", 200, 0, 90.0), ("L2|x", 60, 0, 90.0), ("L3|x", 60, 0, 90.0)),
         g_levels=((2, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)),
     )
+    from dataclasses import replace
+    inp = replace(inp, cell=("hko_daily", terminal.HKO_CHANNEL, "C", "low",
+        terminal.phase_of_local_hour(decision_time.astimezone(ZoneInfo(city.timezone)).hour),
+        terminal.gap_category((*future, *final_centers),
+            observed_settlement=semantics.round_single(context.low_so_far), metric="low"), "HKO"))
     monkeypatch.setattr("src.config.day0_resolver_terminal_residual_enabled", lambda: True)
     monkeypatch.setattr(terminal, "resolve_day0_resolver_terminal_input", lambda **_k: inp)
     monkeypatch.setattr(
@@ -701,8 +745,10 @@ def test_switch_on_adapter_rebuild_then_strict_replay_hko_low(monkeypatch):
     )
     monkeypatch.setattr(era, "_day0_extra_member_sigma_native", lambda **_k: 0.4)
     payload = {
-        "city": "Hong Kong", "target_date": "2026-09-03", "metric": "low", "rounded_value": 25.0,
-        "low_so_far": 25.9, "settlement_source": "hko_hourly_accumulator",
+        **observation,
+        "configured_station_id": _expected_station_for_city(city, target_date),
+        "raw_payload_sha256": payload_sha256,
+        "rounded_value": semantics.round_single(context.low_so_far),
         "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
         "_edli_day0_probability_boundary_native": 25.9,
         "_edli_day0_provisional_boundary_survival_probability": 0.97,
@@ -718,7 +764,7 @@ def test_switch_on_adapter_rebuild_then_strict_replay_hko_low(monkeypatch):
         } | {"vector_id": "hko-vector"},
     }
     family = SimpleNamespace(
-        city="Hong Kong", target_date="2026-09-03", metric="low",
+        city="Hong Kong", target_date=target_date, metric="low",
         candidates=[
             SimpleNamespace(bin=SimpleNamespace(low=None, high=23)),
             SimpleNamespace(bin=SimpleNamespace(low=24, high=24)),
@@ -726,6 +772,8 @@ def test_switch_on_adapter_rebuild_then_strict_replay_hko_low(monkeypatch):
             SimpleNamespace(bin=SimpleNamespace(low=26, high=None)),
         ],
     )
+    from copy import deepcopy
+    source_payload = deepcopy(payload)
     era._rebuild_decision_time_day0_carrier(
         payload=payload, family=family, unit="C", decision_time=decision_time,
         future_extremes_c=future, final_extreme_centers_c=final_centers,
@@ -746,6 +794,22 @@ def test_switch_on_adapter_rebuild_then_strict_replay_hko_low(monkeypatch):
     assert replay.tolist() == payload["_edli_day0_remaining_carrier_q"]
     sampler = era._Day0CarrierRowSampler.from_payload(payload)
     assert sampler.rows.shape == (500, 4)
+    # Each single missing/wrong native prerequisite still refuses; do not
+    # manufacture current-only temperatures or revive the old naked payload.
+    for field, bad_value, reason in (
+        ("settlement_unit", None, "BOUNDARY_MISSING"),
+        ("configured_station_id", "VHHH", "BOUNDARY_MISSING"),
+        ("raw_payload_sha256", "", "BOUNDARY_MISSING"),
+        ("observation_time", "2026-09-30T05:00:00+00:00", "BOUNDARY_MISSING"),
+        ("settlement_source", "hko_current_1min_mean", "SOURCE_INVALID"),
+    ):
+        damaged = {**deepcopy(source_payload), field: bad_value}
+        with pytest.raises(ValueError, match=reason):
+            era._rebuild_decision_time_day0_carrier(payload=damaged, family=family, unit="C",
+                decision_time=decision_time, future_extremes_c=future,
+                final_extreme_centers_c=final_centers,
+                authority_kind="held_current_remaining_path", entry_authority=False)
+    assert body_path.read_bytes() == body
     monkeypatch.setattr("src.config.day0_resolver_terminal_residual_enabled", lambda: False)
     with pytest.raises(ValueError, match="SWITCH_OFF"):
         era._day0_remaining_p_raw_vector(
