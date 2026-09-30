@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-05; last_reused=2026-09-05
+# Lifecycle: created=2026-04-27; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-22
+# Last reused/audited: 2026-09-30
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
@@ -1091,6 +1091,7 @@ class TestExecutor:
         (
             ("src.execution.executor._canonical_trade_write_lease", "lease"),
             ("src.state.venue_command_repo.append_event", "locked"),
+            ("src.state.venue_command_repo.append_event", "coordinated_locked"),
             (
                 "src.state.venue_command_repo._assert_entry_certificate_closure",
                 "closure",
@@ -1213,6 +1214,7 @@ class TestExecutor:
         failure = {
             "lease": WriteLeaseTimeout("entry writer wait"),
             "locked": sqlite3.OperationalError("database is locked"),
+            "coordinated_locked": sqlite3.OperationalError("database is locked"),
             "closure": ValueError("certificate closure failed"),
             "collateral": CollateralInsufficient("collateral changed"),
             "integrity": sqlite3.IntegrityError("idempotency race"),
@@ -1250,6 +1252,46 @@ class TestExecutor:
                 "src.state.write_coordinator.bounded_sqlite_write",
                 bounded_entry_writer,
             )
+
+        if failure_kind == "coordinated_locked":
+            # The real bounded_sqlite_write under a real lease: busy raised by
+            # the admission body must reach its exit and become the typed
+            # WriteLeaseTimeout, not escape as a raw OperationalError.
+            import time as _time
+
+            from src.state.db_writer_lock import WriteClass
+            from src.state.write_coordinator import (
+                DBIdentity,
+                WriteLease,
+                WritePriority,
+                _LeaseMetrics,
+            )
+
+            coordinated_lease = WriteLease(
+                owner="entry_pre_submit_persist",
+                db_set=(DBIdentity.TRADE,),
+                db_paths=(),
+                write_class=WriteClass.LIVE,
+                priority=WritePriority.STANDARD,
+                acquired_at=_time.monotonic(),
+                _metrics=_LeaseMetrics(),
+            )
+
+            @contextmanager
+            def coordinated_real_lease(*args, **kwargs):
+                writer_scope_trace.append("lease_enter")
+                try:
+                    yield coordinated_lease
+                finally:
+                    writer_scope_trace.append("lease_exit")
+
+            monkeypatch.setattr(
+                "src.execution.executor._canonical_trade_write_lease",
+                coordinated_real_lease,
+            )
+            busy_timeout_before = _TEST_CONN.execute(
+                "PRAGMA busy_timeout"
+            ).fetchone()[0]
 
         if failure_kind == "risk_reservation":
             def reserve_collateral(command_id, _intent, conn, *, spend_micro):
@@ -1329,6 +1371,16 @@ class TestExecutor:
                     "pre_submit_db_locked_transient: database is locked "
                     "(writer lease timeout: entry writer wait)"
                 )
+            elif failure_kind == "coordinated_locked":
+                assert result.reason.startswith(
+                    "pre_submit_db_locked_transient: database is locked "
+                    "(writer lease timeout: SQLite write deferred within hold "
+                    "budget for owner=entry_pre_submit_persist"
+                )
+                assert writer_scope_trace == ["lease_enter", "lease_exit"]
+                assert _TEST_CONN.execute(
+                    "PRAGMA busy_timeout"
+                ).fetchone()[0] == busy_timeout_before
 
         assert _TEST_CONN.in_transaction is False
         assert _TEST_CONN.execute(

@@ -4705,6 +4705,17 @@ def _reserve_collateral_for_sell(
     CollateralLedger.reserve_tokens_for_sell_in_transaction(conn, command_id, token_id, shares)
 
 
+def _rollback_on_error(conn, exc_type) -> bool:
+    """ExitStack callback: roll back a failed body; never suppress its error."""
+
+    if exc_type is not None:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    return False
+
+
 def _canonical_trade_write_lease(
     conn,
     *,
@@ -9681,277 +9692,285 @@ def _live_order(
             bounded_sqlite_write,
         )
 
-        entry_write_stack = ExitStack()
         try:
-            write_lease = entry_write_stack.enter_context(
-                _canonical_trade_write_lease(
-                    conn,
-                    owner="entry_pre_submit_persist",
-                    deadline_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
-                    max_hold_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
-                    priority=WritePriority.STANDARD,
-                )
-            )
-            if write_lease is not None:
-                entry_write_stack.enter_context(
-                    bounded_sqlite_write(
+            # A real ``with``: an exception from the admission body must reach
+            # bounded_sqlite_write's exit, which turns SQLite busy into the
+            # typed WriteLeaseTimeout handled below.
+            with ExitStack() as entry_write_stack:
+                write_lease = entry_write_stack.enter_context(
+                    _canonical_trade_write_lease(
                         conn,
-                        write_lease,
+                        owner="entry_pre_submit_persist",
+                        deadline_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
                         max_hold_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                        priority=WritePriority.STANDARD,
                     )
                 )
-            # The fresh owner-local certificate check above proves the commit
-            # exists without disturbing the reactor's caller transaction.
-            # Restart the sanctioned attached admission now so the closure
-            # read and every admission write share a post-commit snapshot.
-            begin_fresh_entry_admission(conn)
-            strategy_policy_submit_component = (
-                _entry_strategy_policy_submit_component(
-                    conn,
-                    intent,
-                    actionable_payload,
+                if write_lease is not None:
+                    entry_write_stack.enter_context(
+                        bounded_sqlite_write(
+                            conn,
+                            write_lease,
+                            max_hold_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                        )
+                    )
+                # Unwinds first: a failed admission rolls back while the writer
+                # lease is still held, never after another writer can enter.
+                entry_write_stack.push(
+                    lambda exc_type, _exc, _tb: _rollback_on_error(conn, exc_type)
                 )
-            )
-            if not strategy_policy_submit_component.get("allowed"):
-                reason = str(
-                    strategy_policy_submit_component.get("reason")
-                    or "strategy_policy_submit_blocked"
-                )
-                strategy_policy_details = (
-                    strategy_policy_submit_component.get("details") or {}
-                )
-                sources = str(strategy_policy_details.get("sources") or "")
-                conn.rollback()
-                logger.warning(
-                    "_live_order: fresh strategy policy blocked command "
-                    "persistence for trade_id=%s token=%s reason=%s sources=%s",
-                    trade_id,
-                    intent.token_id,
-                    reason,
-                    sources,
-                )
-                return OrderResult(
-                    trade_id=trade_id,
-                    status="rejected",
-                    reason=(
-                        f"strategy_policy_pre_submit:{reason}"
-                        + (f":sources={sources}" if sources else "")
-                    ),
-                    submitted_price=intent.limit_price,
-                    shares=shares,
-                    order_role="entry",
-                    idempotency_key=idem.value,
-                    command_id=command_id,
-                    command_state="REJECTED",
-                )
-            collateral_component = _assert_collateral_allows_buy(
-                intent,
-                spend_micro=required_pusd_micro,
-                conn=conn,
-            )
-            increment_binding_component = _capability_component(
-                "global_increment_binding",
-                reason="not_applicable",
-            )
-            pre_submit_envelope = _build_pre_submit_envelope(
-                conn,
-                command_id=command_id,
-                snapshot_id=intent.executable_snapshot_id,
-                token_id=intent.token_id,
-                side="BUY",
-                price=intent.limit_price,
-                size=venue_submit_shares,
-                order_type=effective_order_type,
-                post_only=submit_post_only,
-                captured_at=now_str,
-            )
-            try:
-                # The fresh admission holds SQLite's single-writer lock. The
-                # exact position generation and wealth endowment are re-read
-                # after that boundary and remain stable through the repo's
-                # atomic envelope+certificate+command write.
-                if increment_position_id:
-                    locked_duplicate = _entry_duplicate_same_token_component(
+                # The fresh owner-local certificate check above proves the commit
+                # exists without disturbing the reactor's caller transaction.
+                # Restart the sanctioned attached admission now so the closure
+                # read and every admission write share a post-commit snapshot.
+                begin_fresh_entry_admission(conn)
+                strategy_policy_submit_component = (
+                    _entry_strategy_policy_submit_component(
                         conn,
-                        token_id=intent.token_id,
-                        candidate_position_id=trade_id,
-                        allow_reconciled_position_increment=True,
+                        intent,
+                        actionable_payload,
                     )
-                    locked_position_id = str(
-                        locked_duplicate.get("increment_position_id") or ""
-                    ).strip()
-                    locked_generation = str(
-                        locked_duplicate.get("increment_position_generation") or ""
-                    ).strip()
-                    expected_generation = str(
-                        duplicate_same_token_component.get(
-                            "increment_position_generation"
+                )
+                if not strategy_policy_submit_component.get("allowed"):
+                    reason = str(
+                        strategy_policy_submit_component.get("reason")
+                        or "strategy_policy_submit_blocked"
+                    )
+                    strategy_policy_details = (
+                        strategy_policy_submit_component.get("details") or {}
+                    )
+                    sources = str(strategy_policy_details.get("sources") or "")
+                    conn.rollback()
+                    logger.warning(
+                        "_live_order: fresh strategy policy blocked command "
+                        "persistence for trade_id=%s token=%s reason=%s sources=%s",
+                        trade_id,
+                        intent.token_id,
+                        reason,
+                        sources,
+                    )
+                    return OrderResult(
+                        trade_id=trade_id,
+                        status="rejected",
+                        reason=(
+                            f"strategy_policy_pre_submit:{reason}"
+                            + (f":sources={sources}" if sources else "")
+                        ),
+                        submitted_price=intent.limit_price,
+                        shares=shares,
+                        order_role="entry",
+                        idempotency_key=idem.value,
+                        command_id=command_id,
+                        command_state="REJECTED",
+                    )
+                collateral_component = _assert_collateral_allows_buy(
+                    intent,
+                    spend_micro=required_pusd_micro,
+                    conn=conn,
+                )
+                increment_binding_component = _capability_component(
+                    "global_increment_binding",
+                    reason="not_applicable",
+                )
+                pre_submit_envelope = _build_pre_submit_envelope(
+                    conn,
+                    command_id=command_id,
+                    snapshot_id=intent.executable_snapshot_id,
+                    token_id=intent.token_id,
+                    side="BUY",
+                    price=intent.limit_price,
+                    size=venue_submit_shares,
+                    order_type=effective_order_type,
+                    post_only=submit_post_only,
+                    captured_at=now_str,
+                )
+                try:
+                    # The fresh admission holds SQLite's single-writer lock. The
+                    # exact position generation and wealth endowment are re-read
+                    # after that boundary and remain stable through the repo's
+                    # atomic envelope+certificate+command write.
+                    if increment_position_id:
+                        locked_duplicate = _entry_duplicate_same_token_component(
+                            conn,
+                            token_id=intent.token_id,
+                            candidate_position_id=trade_id,
+                            allow_reconciled_position_increment=True,
                         )
-                        or ""
-                    ).strip()
-                    if (
-                        locked_duplicate.get("allowed") is not True
-                        or locked_position_id != increment_position_id
-                        or not expected_generation
-                        or locked_generation != expected_generation
-                    ):
-                        increment_binding_component = _capability_component(
-                            "global_increment_binding",
-                            allowed=False,
-                            reason="position_generation_superseded",
-                            expected_position_id=increment_position_id,
-                            current_position_id=locked_position_id,
-                            expected_generation=expected_generation,
-                            current_generation=locked_generation,
-                        )
-                    else:
-                        economics = (
-                            actionable_payload.get("qkernel_execution_economics")
-                            if isinstance(actionable_payload, Mapping)
-                            else None
-                        )
-                        if not isinstance(economics, Mapping):
+                        locked_position_id = str(
+                            locked_duplicate.get("increment_position_id") or ""
+                        ).strip()
+                        locked_generation = str(
+                            locked_duplicate.get("increment_position_generation") or ""
+                        ).strip()
+                        expected_generation = str(
+                            duplicate_same_token_component.get(
+                                "increment_position_generation"
+                            )
+                            or ""
+                        ).strip()
+                        if (
+                            locked_duplicate.get("allowed") is not True
+                            or locked_position_id != increment_position_id
+                            or not expected_generation
+                            or locked_generation != expected_generation
+                        ):
                             increment_binding_component = _capability_component(
                                 "global_increment_binding",
                                 allowed=False,
-                                reason="economics_missing",
+                                reason="position_generation_superseded",
+                                expected_position_id=increment_position_id,
+                                current_position_id=locked_position_id,
+                                expected_generation=expected_generation,
+                                current_generation=locked_generation,
                             )
                         else:
-                            increment_binding_component = (
-                                _current_global_increment_wealth_component(
-                                    conn,
-                                    economics,
-                                )
+                            economics = (
+                                actionable_payload.get("qkernel_execution_economics")
+                                if isinstance(actionable_payload, Mapping)
+                                else None
                             )
-            except Exception:
-                if increment_position_id:
-                    _abort_global_increment_admission(conn)
-                raise
+                            if not isinstance(economics, Mapping):
+                                increment_binding_component = _capability_component(
+                                    "global_increment_binding",
+                                    allowed=False,
+                                    reason="economics_missing",
+                                )
+                            else:
+                                increment_binding_component = (
+                                    _current_global_increment_wealth_component(
+                                        conn,
+                                        economics,
+                                    )
+                                )
+                except Exception:
+                    if increment_position_id:
+                        _abort_global_increment_admission(conn)
+                    raise
 
-            if increment_position_id and not increment_binding_component.get("allowed"):
-                # _live_order owns the admission transaction even when the
-                # reactor supplies its long-lived connection: this path commits
-                # command+reservation before network submit.  A collateral
-                # refresh may have opened that transaction before the envelope
-                # write, so a savepoint rollback would strand the writer lock.
-                _abort_global_increment_admission(conn)
-                reason = str(
-                    increment_binding_component.get("reason")
-                    or "global_increment_binding_failed"
-                )
-                return OrderResult(
-                    trade_id=trade_id,
-                    status="rejected",
-                    reason=f"global_increment_binding:{reason}",
-                    submitted_price=intent.limit_price,
-                    shares=shares,
-                    order_role="entry",
-                    idempotency_key=idem.value,
-                    command_id=command_id,
-                    command_state="REJECTED",
-                )
-            insert_command(
-                conn,
-                command_id=command_id,
-                snapshot_id=intent.executable_snapshot_id,
-                envelope_id=f"pre-submit:{command_id}",
-                submission_envelope=pre_submit_envelope,
-                position_id=increment_position_id or trade_id,
-                decision_id=effective_decision_id,
-                idempotency_key=idem.value,
-                intent_kind=IntentKind.ENTRY.value,
-                market_id=intent.market_id,
-                token_id=intent.token_id,
-                side="BUY",
-                size=venue_submit_shares,
-                price=intent.limit_price,
-                created_at=now_str,
-                q_version=entry_q_version,
-                snapshot_checked_at=now_str,
-                expected_min_tick_size=intent.executable_snapshot_min_tick_size,
-                expected_min_order_size=intent.executable_snapshot_min_order_size,
-                expected_neg_risk=intent.executable_snapshot_neg_risk,
-                # LX-E packet (2026-07-13): the actionable certificate gate above
-                # (_entry_actionable_certificate_payload_and_component) already
-                # required this hash to be non-empty and VERIFIED before this point
-                # is reachable — the permanent attribution fact is recorded in the
-                # SAME transaction as the command insert.
-                decision_certificate_hash=(
-                    str(getattr(intent, "actionable_certificate_hash", None) or "").strip()
-                    or None
-                ),
-            )
-            append_event(
-                conn,
-                command_id=command_id,
-                event_type="SUBMIT_REQUESTED",
-                occurred_at=now_str,
-                payload={
-                    "allocation": _allocation_payload_for_intent(intent),
-                    "order_type": effective_order_type,
-                    "post_only": submit_post_only,
-                    "execution_capability": _build_execution_capability(
-                        action="ENTRY",
+                if increment_position_id and not increment_binding_component.get("allowed"):
+                    # _live_order owns the admission transaction even when the
+                    # reactor supplies its long-lived connection: this path commits
+                    # command+reservation before network submit.  A collateral
+                    # refresh may have opened that transaction before the envelope
+                    # write, so a savepoint rollback would strand the writer lock.
+                    _abort_global_increment_admission(conn)
+                    reason = str(
+                        increment_binding_component.get("reason")
+                        or "global_increment_binding_failed"
+                    )
+                    return OrderResult(
+                        trade_id=trade_id,
+                        status="rejected",
+                        reason=f"global_increment_binding:{reason}",
+                        submitted_price=intent.limit_price,
+                        shares=shares,
+                        order_role="entry",
+                        idempotency_key=idem.value,
                         command_id=command_id,
-                        intent_kind=IntentKind.ENTRY.value,
-                        order_type=effective_order_type,
-                        token_id=intent.token_id,
-                        snapshot_id=intent.executable_snapshot_id,
-                        freshness_time=now_str,
-                        components=[
-                            cutover_component,
-                            _component_from_result(
-                                "risk_allocator",
-                            risk_allocator_decision,
-                            ),
-                            _capability_component(
-                                "order_type_selection",
-                                order_type=effective_order_type,
-                                selected_order_type=selected_order_type,
-                                intent_order_type=submit_order_type,
-                                post_only=submit_post_only,
-                            ),
-                            taker_quality_component,
-                            entry_economics_component,
-                            actionable_certificate_component,
-                            heartbeat_component,
-                            ws_gap_component,
-                            collateral_refresh_component,
-                            collateral_component,
-                            strategy_policy_submit_component,
-                            entries_pause_component,
-                            cooldown_component,
-                            duplicate_same_token_component,
-                            increment_binding_component,
-                            decision_source_component,
-                            replacement_input_hwm_component,
-                            corrected_identity_component,
-                            _capability_component("executable_snapshot_gate"),
-                        ],
+                        command_state="REJECTED",
+                    )
+                insert_command(
+                    conn,
+                    command_id=command_id,
+                    snapshot_id=intent.executable_snapshot_id,
+                    envelope_id=f"pre-submit:{command_id}",
+                    submission_envelope=pre_submit_envelope,
+                    position_id=increment_position_id or trade_id,
+                    decision_id=effective_decision_id,
+                    idempotency_key=idem.value,
+                    intent_kind=IntentKind.ENTRY.value,
+                    market_id=intent.market_id,
+                    token_id=intent.token_id,
+                    side="BUY",
+                    size=venue_submit_shares,
+                    price=intent.limit_price,
+                    created_at=now_str,
+                    q_version=entry_q_version,
+                    snapshot_checked_at=now_str,
+                    expected_min_tick_size=intent.executable_snapshot_min_tick_size,
+                    expected_min_order_size=intent.executable_snapshot_min_order_size,
+                    expected_neg_risk=intent.executable_snapshot_neg_risk,
+                    # LX-E packet (2026-07-13): the actionable certificate gate above
+                    # (_entry_actionable_certificate_payload_and_component) already
+                    # required this hash to be non-empty and VERIFIED before this point
+                    # is reachable — the permanent attribution fact is recorded in the
+                    # SAME transaction as the command insert.
+                    decision_certificate_hash=(
+                        str(getattr(intent, "actionable_certificate_hash", None) or "").strip()
+                        or None
                     ),
-                },
-            )
-            _reserve_collateral_for_buy(
-                command_id,
-                intent,
-                conn,
-                spend_micro=required_pusd_micro,
-            )
-            # T2 (quarantine excision, BLOCKER-1): EntryRiskReservation —
-            # persist a conservative bounded EntryExposureObligation for THIS
-            # command in the SAME transaction as command admission, BEFORE
-            # network post (client.place_limit_order below runs after this
-            # commit). See _open_entry_risk_reservation for the full BLOCKER-1
-            # rationale.
-            _open_entry_risk_reservation(
-                conn,
-                command_id=command_id,
-                intent=intent,
-                shares=shares,
-                cost_basis_usd=required_pusd_micro / 1_000_000.0,
-                family_key=entry_family_key,
-            )
-            conn.commit()
+                )
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="SUBMIT_REQUESTED",
+                    occurred_at=now_str,
+                    payload={
+                        "allocation": _allocation_payload_for_intent(intent),
+                        "order_type": effective_order_type,
+                        "post_only": submit_post_only,
+                        "execution_capability": _build_execution_capability(
+                            action="ENTRY",
+                            command_id=command_id,
+                            intent_kind=IntentKind.ENTRY.value,
+                            order_type=effective_order_type,
+                            token_id=intent.token_id,
+                            snapshot_id=intent.executable_snapshot_id,
+                            freshness_time=now_str,
+                            components=[
+                                cutover_component,
+                                _component_from_result(
+                                    "risk_allocator",
+                                risk_allocator_decision,
+                                ),
+                                _capability_component(
+                                    "order_type_selection",
+                                    order_type=effective_order_type,
+                                    selected_order_type=selected_order_type,
+                                    intent_order_type=submit_order_type,
+                                    post_only=submit_post_only,
+                                ),
+                                taker_quality_component,
+                                entry_economics_component,
+                                actionable_certificate_component,
+                                heartbeat_component,
+                                ws_gap_component,
+                                collateral_refresh_component,
+                                collateral_component,
+                                strategy_policy_submit_component,
+                                entries_pause_component,
+                                cooldown_component,
+                                duplicate_same_token_component,
+                                increment_binding_component,
+                                decision_source_component,
+                                replacement_input_hwm_component,
+                                corrected_identity_component,
+                                _capability_component("executable_snapshot_gate"),
+                            ],
+                        ),
+                    },
+                )
+                _reserve_collateral_for_buy(
+                    command_id,
+                    intent,
+                    conn,
+                    spend_micro=required_pusd_micro,
+                )
+                # T2 (quarantine excision, BLOCKER-1): EntryRiskReservation —
+                # persist a conservative bounded EntryExposureObligation for THIS
+                # command in the SAME transaction as command admission, BEFORE
+                # network post (client.place_limit_order below runs after this
+                # commit). See _open_entry_risk_reservation for the full BLOCKER-1
+                # rationale.
+                _open_entry_risk_reservation(
+                    conn,
+                    command_id=command_id,
+                    intent=intent,
+                    shares=shares,
+                    cost_basis_usd=required_pusd_micro / 1_000_000.0,
+                    family_key=entry_family_key,
+                )
+                conn.commit()
         except MarketSnapshotError as exc:
             try:
                 conn.rollback()
@@ -10130,8 +10149,6 @@ def _live_order(
             raise PreVenueSubmitError(
                 f"pre_submit_admission_failed:{type(exc).__name__}: {exc}"
             ) from exc
-        finally:
-            entry_write_stack.close()
 
         # -----------------------------------------------------------------------
         # Phase 4: V2 endpoint-identity preflight (INV-25 / K5)
