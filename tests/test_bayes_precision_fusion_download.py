@@ -5535,3 +5535,169 @@ def test_extreme_earlier_repair_cannot_supersede_independently_known_future_rece
         assert "icon_global" not in _served_in_world(conn, world, target, future + timedelta(seconds=1))
         assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
         assert conn.execute(f"SELECT {future_clock},recorded_at FROM raw_forecast_artifacts WHERE artifact_id=?", (future_id,)).fetchone() == (future.isoformat(), "unknown")
+
+
+def _normal_hk_three_provider_world(tmp_path, monkeypatch, metric):
+    """Actual market-root/coverage/rotation, three native products and a frozen operator basket."""
+    import hashlib
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+    from src.data import bayes_precision_fusion_download as dl, replacement_forecast_production as production
+    from src.data.replacement_forecast_seed_discovery import held_position_family_priorities
+    from src.data.replacement_forecast_current_target_plan import replacement_forecast_current_target_keys
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+    from src.state import db as state_db
+    from src.strategy.live_inference import source_clock_city_weights as weights
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    from tests.test_openmeteo_ecmwf_ifs9_bucket_transport import _actual_o1280_static_fixture
+
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric)
+    target = world.targets[0]
+    models = ("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km")
+    # Exact HK records from ACTIVE city_weights_20260914.json, checked read-only
+    # at full artifact SHA 8a6ba1660ef5d607cc355010ac747c007ccb362497c6efa1cbb21c40fef7f9df.
+    operator_records = {
+        "high": {"basket_provenance": {"mae_basket": 1.0412, "mae_vs_frozen_delta": -0.0082,
+            "n_paired_dates": 268, "region_fallback": False, "tier": "CITY_SPECIFIC"},
+            "models": {"ecmwf_ifs": 0.421908, "ukmo_global_deterministic_10km": 0.578092}},
+        "low": {"basket_provenance": {"mae_basket": 1.029, "mae_vs_frozen_delta": -0.6751,
+            "n_paired_dates": 269, "region_fallback": False, "tier": "CITY_SPECIFIC"},
+            "models": {"icon_global": 0.796021, "ukmo_global_deterministic_10km": 0.203979}},
+    }
+    artifact_dir = tmp_path / "operator_weights"
+    artifact_dir.mkdir()
+    artifact = {"as_of": "2026-09-14", "cities": {"Hong Kong": operator_records},
+        "origin_artifact_sha256": "8a6ba1660ef5d607cc355010ac747c007ccb362497c6efa1cbb21c40fef7f9df"}
+    encoded = json.dumps(artifact, sort_keys=True, separators=(",", ":")).encode()
+    (artifact_dir / "hk_operator.json").write_bytes(encoded)
+    (artifact_dir / "ACTIVE.json").write_text(json.dumps({"artifact": "hk_operator.json",
+        "as_of": artifact["as_of"], "sha256": hashlib.sha256(encoded).hexdigest()}))
+    monkeypatch.setenv(weights.ENV_SOURCE_CLOCK_ARTIFACT_DIR, str(artifact_dir))
+    monkeypatch.delenv(weights.ENV_CITY_ONE_SCHEME_PATH, raising=False)
+    assert weights._load_active_artifact(str(artifact_dir))["cities"]["Hong Kong"] == operator_records
+    assert dict(weights.scheme_for_city("Hong Kong", metric=metric).weights) == operator_records[metric]["models"]
+
+    transport, original_static, _data, _write, static_clock, _kwargs = _actual_o1280_static_fixture(tmp_path, monkeypatch)
+    static_clock[0] = world.clock[0]
+    monkeypatch.setattr(transport, "HSURF_LOCAL_CACHE", str(original_static))
+    monkeypatch.setattr(dl, "BAYES_PRECISION_FUSION_EXTRA_MODELS", models)
+    monkeypatch.setattr(dl, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", ())
+    clock = world.clock
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz or UTC)
+    monkeypatch.setattr(production, "datetime", Clock)
+
+    old_get = world.provider.get
+    def three_product_get(url, *, params=None, timeout=None):
+        if url.endswith("/meta.json"):
+            return old_get(url, params=params, timeout=timeout)
+        assert url == SINGLE_RUNS_FORECAST_URL, "unexpected forecast HTTP is not an allowed fixture transport"
+        world.calls.append(dict(params))
+        model = str(params["models"])
+        assert model in models, "only the three actual configured global products may be fetched"
+        if model == "ecmwf_ifs":
+            point = transport.select_terrain_optimised_point(float(params["latitude"]), float(params["longitude"]), 123.,
+                local_cache=str(original_static))
+            selected_lat, selected_lon = point.grid_latitude, (point.grid_longitude_east + 180) % 360 - 180
+        else:
+            selected_lat, selected_lon = _selected_test_cell(model, float(params["latitude"]), float(params["longitude"]))
+        day = datetime.fromisoformat(target.target_date)
+        payload = {"latitude": selected_lat, "longitude": selected_lon, "elevation": 123.,
+            "timezone": target.timezone_name,
+            "utc_offset_seconds": int(day.replace(tzinfo=ZoneInfo(target.timezone_name)).utcoffset().total_seconds()),
+            "hourly_units": {"temperature_2m": "°C"},
+            "hourly": {"time": [(day + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
+                "temperature_2m": [10. if i == 0 else 20. if i == 12 else 15. for i in range(24)]}}
+        return httpx.Response(200, json=payload, headers={"content-type": "application/json"}, request=httpx.Request("GET", url))
+    monkeypatch.setattr(world.provider, "get", three_product_get)
+    from src.data import openmeteo_model_updates as model_updates, source_clock_update_probe as source_probe
+    metadata_path = tmp_path / "source_updates" / "open_meteo_model_updates.jsonl"
+    model_updates.write_model_updates_jsonl(metadata_path,
+        model_updates.fetch_model_updates(models, session=world.provider, max_workers=1))
+    monkeypatch.setattr(source_probe, "DEFAULT_MODEL_UPDATES_JSONL", metadata_path)
+    assert set(dl._read_source_clock_single_runs_requests(decision_time=world.clock[0])) == set(models)
+    seeded = dl.download_bayes_precision_fusion_extra_raw_inputs(**{**world.kwargs, "models": models,
+        "frozen_source_runs": {model: (world.run, world.run.replace(hour=16)) for model in models}}, targets=[target])
+    assert seeded["written_row_count"] == 2, seeded
+
+    private_state = tmp_path / "state"
+    private_state.mkdir(exist_ok=True)
+    monkeypatch.setattr(state_db, "STATE_DIR", private_state)
+    with sqlite3.connect(private_state / "zeus_trades.db") as conn:
+        conn.execute("CREATE TABLE position_current(city TEXT,target_date TEXT,temperature_metric TEXT,phase TEXT)")
+    assert held_position_family_priorities() == {}
+    with sqlite3.connect(world.db) as conn:
+        conn.execute("CREATE TABLE market_events(city TEXT,target_date TEXT,temperature_metric TEXT,token_id TEXT,range_label TEXT)")
+        conn.execute("INSERT INTO market_events VALUES(?,?,?,?,?)", (target.city, target.target_date, metric, "private-token", "20°C"))
+        conn.execute("CREATE INDEX idx_private_market_city_date ON market_events(city,target_date)")
+        served = read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time_iso=world.run.isoformat(), decision_time_iso=world.clock[0].isoformat())
+        assert set(served) == set(models), {"seeded": seeded, "served": served}
+        raw_rows = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+    keys = replacement_forecast_current_target_keys(world.db, market_root=True, now_utc=world.clock[0],
+        require_local_day_not_ended=True, min_target_date=target.target_date)
+    assert [(key.city, key.target_date, key.temperature_metric) for key in keys] == [(target.city, target.target_date, metric)]
+    cfg = {"forecast_db": world.db, "seed_dir": tmp_path / "seeds", "raw_manifest_dir": tmp_path / "raw_manifests",
+        "bpf_extra_rotation_state_path": tmp_path / "extras_rotation.json"}
+    coverage = production._extras_coverage_missing(cfg, world.run, decision_time=world.clock[0], capture_rows=keys,
+        held_priority=held_position_family_priorities())
+    assert coverage == (set(), 1), coverage
+    healthy_calls, healthy_quota = len(world.calls), world.tracker.calls_today()
+    healthy = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg,
+        planning_cycle=world.run, max_wall_clock_seconds=10, include_previous_runs=False, prune_after=False)
+    assert healthy["status"] == "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS", healthy
+    assert len(world.calls) == healthy_calls and world.tracker.calls_today() == healthy_quota
+    assert not Path(cfg["bpf_extra_rotation_state_path"]).exists()
+    return SimpleNamespace(**vars(world), models=models, cfg=cfg, raw_rows=raw_rows,
+        preferred=set(operator_records[metric]["models"]), keys=keys)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("role", ("preferred", "nonpreferred"))
+def test_normal_unheld_same_issued_bad_third_provider_receipt_has_a_real_drain(tmp_path, monkeypatch, metric, role):
+    from src.data import replacement_forecast_production as production
+    from src.data.replacement_forecast_seed_discovery import held_position_family_priorities
+    from src.data.replacement_current_value_serving import read_current_instrument_values, physical_capture_debt_reason
+    world = _normal_hk_three_provider_world(tmp_path, monkeypatch, metric)
+    target = world.targets[0]
+    # UKMO is preferred on both actual operator tracks; the nonpreferred twin is
+    # ICON on HIGH and IFS on LOW, not a hand-selected preferred-set mock.
+    damaged = "ukmo_global_deterministic_10km" if role == "preferred" else next(model for model in world.models if model not in world.preferred)
+    with sqlite3.connect(world.db) as conn:
+        raw_id, body_id = conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts"
+            " WHERE model=? AND city=? AND target_date=? AND metric=?", (damaged, target.city, target.target_date, metric)).fetchone()
+        receipt_path = conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=? ORDER BY artifact_id DESC LIMIT 1", (body_id,)).fetchone()[0]
+        Path(receipt_path).unlink()
+        world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+        before = read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time_iso=world.run.isoformat(), decision_time_iso=world.clock[0].isoformat())
+        assert set(before) == set(world.models) - {damaged}
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id, decision_time_iso=world.clock[0].isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+    assert held_position_family_priorities() == {}
+    coverage = production._extras_coverage_missing(world.cfg, world.run, decision_time=world.clock[0],
+        capture_rows=world.keys, held_priority=held_position_family_priorities())
+    assert coverage is not None and coverage[1] == 1, coverage
+    calls, quota = len(world.calls), world.tracker.calls_today()
+    report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(world.cfg,
+        planning_cycle=world.run, max_wall_clock_seconds=10, include_previous_runs=False, prune_after=False)
+    with sqlite3.connect(world.db) as conn:
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == world.raw_rows
+        after = read_current_instrument_values(conn, city=target.city, metric=metric, target_date=target.target_date,
+            source_cycle_time_iso=world.run.isoformat(), decision_time_iso=world.clock[0].isoformat())
+    assert damaged in after, json.dumps({"defect": "NORMAL_UNHELD_THIRD_PROVIDER_PROOF_HAS_NO_DRAIN", "metric": metric,
+        "role": role, "damaged": damaged, "missing_scopes": sorted(coverage[0]), "status": report.get("status"),
+        "attempted_groups": report.get("attempted_target_group_count"), "written_rows": report.get("written_row_count"),
+        "recovered_ids": report.get("physical_capture_recovered_raw_ids"), "served_models": sorted(after),
+        "extra_HTTP": len(world.calls) - calls, "extra_quota": world.tracker.calls_today() - quota,
+        "rotation_created": Path(world.cfg["bpf_extra_rotation_state_path"]).exists()}, sort_keys=True)
+    assert len(world.calls) == calls + 1 and world.tracker.calls_today() == quota + 1
+    assert report["written_row_count"] == 0
+    assert report["physical_capture_recovered_raw_ids"] == (raw_id,)
+    assert report["committed_families"] == ((target.city, target.target_date, metric),)
+    repeat = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(world.cfg,
+        planning_cycle=world.run, max_wall_clock_seconds=10, include_previous_runs=False, prune_after=False)
+    assert len(world.calls) == calls + 1 and world.tracker.calls_today() == quota + 1, repeat
