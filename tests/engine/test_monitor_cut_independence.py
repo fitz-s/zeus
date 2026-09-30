@@ -272,3 +272,228 @@ def test_cut_cancel_sources_are_facts_never_monitor_schedule():
         if isinstance(node, ast.FunctionDef) and node.name == "_exit_monitor_cycle"
     )
     assert "_edli_reactor_active_lock" not in ast.unparse(exit_cycle)
+
+
+# ---------------------------------------------------------------------------
+# Capital safety with a concurrent monitor and cut (review F1/F2).
+# ---------------------------------------------------------------------------
+
+
+def _held_trade_db(path):
+    """A canonical trade DB with one held family and current CHAIN collateral."""
+
+    import datetime as _dt
+    import json
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.db import get_connection, init_schema, init_schema_trade_only
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    conn = get_connection(path)
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_collateral_schema(conn)
+    position = Position(
+        trade_id="held-1",
+        market_id="m1",
+        city="NYC",
+        cluster="NYC",
+        target_date="2026-10-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        env="live",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        shares=25.0,
+        cost_basis_usd=10.0,
+        entered_at=now.isoformat(),
+        token_id="yes-1",
+        no_token_id="no-1",
+        state="entered",
+        edge_source="center_buy",
+        strategy="center_buy",
+        strategy_key="center_buy",
+        condition_id="cond-1",
+        decision_snapshot_id="snap-1",
+        chain_state="synced",
+        chain_shares=25.0,
+        chain_avg_price=0.40,
+        chain_cost_basis_usd=10.0,
+        chain_verified_at=now.isoformat(),
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots ("
+        "pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,"
+        "ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,"
+        "captured_at,authority_tier,raw_balance_payload_hash"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            100_000_000,
+            1_000_000_000,
+            0,
+            json.dumps({"yes-1": 25_000_000}),
+            json.dumps({}),
+            0,
+            json.dumps({}),
+            now.isoformat(),
+            "CHAIN",
+            "held-wallet",
+        ),
+    )
+    conn.commit()
+    return conn, now
+
+
+def test_monitor_exit_mid_cut_refuses_the_cut_buy_at_actuation(tmp_path):
+    """F1: an exit committed while a cut is in flight vetoes the cut's BUY.
+
+    With no monitor cancel, a cut sealed on the pre-exit portfolio can reach
+    actuation after the monitor moved a held position to ``pending_exit``. The
+    submit-time guard in ``_actuate_preflighted`` rebuilds current wealth
+    (``_global_actuation_current_wealth_block_reason``); the witness's
+    ``position_set_hash`` binds every held position's lifecycle state, so the
+    exit supersedes the sealed economic identity and the BUY refuses by name
+    before any venue call.
+    """
+
+    import datetime as _dt
+    from types import SimpleNamespace
+
+    from src.engine import event_reactor_adapter as era
+    from src.engine.global_auction_universe import current_portfolio_wealth_witness
+
+    conn, now = _held_trade_db(tmp_path / "trades.db")
+    sealed = current_portfolio_wealth_witness(
+        conn, decision_at_utc=now, max_age=_dt.timedelta(seconds=300)
+    )
+    actuation = SimpleNamespace(wealth_economic_identity=sealed.economic_identity)
+    assert era._global_actuation_current_wealth_block_reason(
+        conn, global_actuation=actuation, decision_time=now
+    ) is None
+
+    # The monitor's exit decision commits mid-cut (EXIT_INTENT -> pending_exit).
+    conn.execute(
+        "UPDATE position_current SET phase = 'pending_exit' "
+        "WHERE position_id = 'held-1'"
+    )
+    conn.commit()
+
+    reason = era._global_actuation_current_wealth_block_reason(
+        conn, global_actuation=actuation, decision_time=now
+    )
+    assert reason is not None
+    assert reason.startswith("GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:")
+
+
+def test_actuate_preflighted_runs_the_current_wealth_guard_before_submit():
+    """F1 wiring: the BUY actuation path consults current wealth before
+    ``_submit_inner`` and returns its reason without submitting."""
+
+    tree = ast.parse((_ROOT / "src/engine/event_reactor_adapter.py").read_text())
+    actuate = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_actuate_preflighted"
+    )
+    body = ast.unparse(actuate)
+    guard = body.index("_global_actuation_current_wealth_block_reason(")
+    submit = body.index("_submit_inner(")
+    assert guard < submit
+    assert "reason=wealth_block" in body
+
+
+def test_exact_sell_debt_still_ends_a_cut_while_the_monitor_runs(monitor_env):
+    """F2 (from the deleted exact-completion tests): a queued exact held-SELL
+    is capital already decided; it keeps ending ordinary cuts at the stage
+    predicate, under its own label, while a monitor owns its claim."""
+
+    from src.events import reactor
+
+    main, _runs = monitor_env
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+    main._held_position_monitor_active.set()
+    try:
+        cancelled = reactor._process_pending_cancelled(
+            committed_day0_wake=False,
+            producer_fast_path=False,
+            urgent_wake_pending=lambda: False,
+            urgent_day0_pending=None,
+        )
+        assert cancelled() is True
+    finally:
+        main._held_position_monitor_active.clear()
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_monitor_cadence_debt_still_scopes_buy_at_cut_admission(monkeypatch):
+    """F2 (from the deleted wrapper tests): canonical cadence debt still blocks
+    BUY for exactly the overdue families at cut admission -- the capital law
+    the monitor handoff never owned and that stays in force without it."""
+
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    captured: dict[str, object] = {}
+    bootstrap = threading.Event()
+    bootstrap.set()
+    debt = threading.Event()
+    monkeypatch.setattr(main, "_held_position_monitor_bootstrap_complete", bootstrap)
+    monkeypatch.setattr(main, "_held_position_monitor_canonical_debt", debt)
+    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(main, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main, "_edli_live_entry_readiness_block", lambda _c: (None, {}))
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        main,
+        "_canonical_monitor_entry_block_scope",
+        lambda reason: (None, {"overdue-family": reason}),
+    )
+    monkeypatch.setattr(
+        "src.control.control_plane.recover_deploy_live_restart_guard",
+        lambda: {"status": "noop"},
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "run_edli_event_reactor_cycle",
+        lambda **kwargs: captured.update(kwargs) or True,
+    )
+
+    assert main._edli_event_reactor_cycle() is True
+    assert captured["live_entry_family_block_reasons"] == {
+        "overdue-family": "held_position_monitor_cadence_overdue"
+    }
+    assert debt.is_set()
+
+
+def test_full_book_monitor_clears_cadence_debt_only_on_fresh_coverage(
+    monitor_env, monkeypatch
+):
+    """F2 (from the deleted recovery/handoff tests): a completed full-book pass
+    clears canonical debt only when the canonical re-read shows no overdue
+    position -- with a cut holding the reactor lock throughout."""
+
+    main, runs = monitor_env
+    counts = [(1, 0, {})]
+    monkeypatch.setattr(
+        main, "_held_position_monitor_recovery_counts", lambda _e: counts[0]
+    )
+    main._held_position_monitor_canonical_debt.set()
+    with main._edli_reactor_active_lock:
+        assert main._exit_monitor_cycle() is True
+        assert main._held_position_monitor_canonical_debt.is_set()
+        counts[0] = (0, 0, {})
+        assert main._exit_monitor_cycle() is True
+        assert not main._held_position_monitor_canonical_debt.is_set()
+    assert len(runs) == 2
