@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-29
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-29; last_reused=2026-09-29
+# Last reused/audited: 2026-09-30
+# Lifecycle: created=2026-06-06; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -2421,7 +2421,7 @@ def test_live_input_hwm_considers_only_newer_current_covered_ensemble(
 @pytest.mark.parametrize(
     ("bound_evidence", "expected_reason"),
     (
-        ("retired", "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"),
+        ("retired", "REPLACEMENT_CURRENT_COORDINATE_COMPATIBILITY_MISSING_OR_INVALID"),
         ("missing_coverage", "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"),
     ),
 )
@@ -2437,15 +2437,22 @@ def test_live_reader_does_not_serve_uncurrent_or_uncovered_bound_ensemble(
     immutable = {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}"))
         for table in ("ensemble_snapshots","source_run","source_run_coverage")}
     calls = []
+    from src.contracts.ensemble_snapshot_provenance import coordinate_bound_data_version
+    # The old bare-native version is now a supported compatibility input.
+    # Use a genuinely unowned coordinate version, consistently in both reads.
+    invalid_version = coordinate_bound_data_version(ECMWF_OPENDATA_HIGH_DATA_VERSION, "a" * 64)
     class FaultCursor:
-        def __init__(self,cursor): self.cursor = cursor
+        def __init__(self,cursor,kind): self.cursor,self.kind = cursor,kind
         def fetchone(self):
             row = self.cursor.fetchone()
             assert row is not None
-            calls.append(bound_evidence)
+            calls.append(self.kind)
             if bound_evidence == "retired":
-                assert row[0] == normal.request.baseline_data_version
-                return ("ecmwf_opendata_mx2t3_local_calendar_day_max",*row[1:])
+                index = 0 if self.kind == "identity" else 3
+                assert row[index] == normal.request.baseline_data_version
+                changed = list(row)
+                changed[index] = invalid_version
+                return tuple(changed)
             return None
         def __getattr__(self,name): return getattr(self.cursor,name)
     class FaultRead:
@@ -2453,21 +2460,25 @@ def test_live_reader_does_not_serve_uncurrent_or_uncovered_bound_ensemble(
             cursor = normal.conn.execute(sql,parameters)
             query = " ".join(sql.upper().split())
             identity_query = query.startswith("SELECT DATASET_ID, SOURCE_ID, CITY, TARGET_DATE, TEMPERATURE_METRIC FROM ENSEMBLE_SNAPSHOTS")
+            native_query = query.startswith("SELECT ES.CITY, ES.TARGET_DATE, ES.TEMPERATURE_METRIC, ES.DATASET_ID, ES.PROVENANCE_JSON,")
             coverage_query = (query.startswith("SELECT 1 FROM ENSEMBLE_SNAPSHOTS AS ENSEMBLE_SNAPSHOT")
                 and "SOURCE_RUN_COVERAGE" in query)
             if bound_evidence == "retired" and identity_query:
                 assert tuple(parameters) == (snapshot_id,)
-                return FaultCursor(cursor)
+                return FaultCursor(cursor,"identity")
+            if bound_evidence == "retired" and native_query:
+                assert tuple(parameters) == (snapshot_id,)
+                return FaultCursor(cursor,"native")
             if bound_evidence == "missing_coverage" and coverage_query:
                 assert tuple(parameters[:4]) == (snapshot_id,normal.row["city"],
                     normal.row["target_date"],normal.row["temperature_metric"])
-                return FaultCursor(cursor)
+                return FaultCursor(cursor,"coverage")
             return cursor
         def __getattr__(self,name): return getattr(normal.conn,name)
     result = read_replacement_forecast_bundle(FaultRead(),**normal.kwargs,authority_purpose=purpose)
     assert result.ok is False
     assert result.reason_code == expected_reason
-    assert calls == [bound_evidence]
+    assert calls == (["identity","native"] if bound_evidence == "retired" else ["coverage"])
     assert {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}"))
         for table in immutable} == immutable
 
@@ -4268,8 +4279,43 @@ def test_raw_hwm_reuses_bound_posterior_provenance(
     assert bound[0][2] == normal.row["openmeteo_anchor_id"]
 
 
+@pytest.fixture
+def _native_low_coverage(tmp_path, monkeypatch):
+    """Controlled external bytes, actual native ingest/authority/public writers."""
+    from tests.integration.test_w3_solve_seam_g3 import (
+        _noaa_native_sources, _kord_normal_prior_fixture, _kord_public_bundles,
+    )
+    static = _noaa_native_sources.__wrapped__(tmp_path.resolve(), monkeypatch)
+    next(static)
+    normal = None
+    try:
+        normal = _kord_normal_prior_fixture(tmp_path.resolve(), monkeypatch, target_date=date(2026, 10, 2))
+        _kord_public_bundles(normal, monkeypatch, at=normal.cut)
+        row = dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (normal.result.posterior_id,)).fetchone())
+        kwargs = dict(dependency_json=json.loads(row["dependency_source_run_ids_json"]),
+            provenance=json.loads(row["provenance_json"]), city=row["city"],
+            target_date=row["target_date"], metric=row["temperature_metric"])
+        class CoverageClock(datetime):
+            @classmethod
+            def now(cls, tz=None): return normal.cut.astimezone(tz or UTC)
+        monkeypatch.setattr(reader, "datetime", CoverageClock)
+        assert reader._current_ensemble_snapshot_identity_reason(normal.conn, **kwargs) is None
+        tables = ("ensemble_snapshots", "source_run", "source_run_coverage", "forecast_posteriors")
+        original = {table:tuple(tuple(item) for item in normal.conn.execute(f"SELECT * FROM {table}"))
+            for table in tables}
+        yield SimpleNamespace(conn=normal.conn, request=normal.request, kwargs=kwargs)
+        assert {table:tuple(tuple(item) for item in normal.conn.execute(f"SELECT * FROM {table}"))
+            for table in tables} == original
+    finally:
+        if normal is not None:
+            normal.conn.close()
+            normal.builtin.close()
+        next(static, None)
+
+
 def _coverage_identity_conn(
-    monkeypatch,
+    normal,
     *,
     coverage_status: str | None,
     coverage_readiness: str | None,
@@ -4277,133 +4323,61 @@ def _coverage_identity_conn(
     run_completeness: str,
     partial_run: int,
 ) -> sqlite3.Connection:
-    """Build the smallest source-run/coverage surface for the carrier gate."""
-
-    import src.config as config
-
-    monkeypatch.setattr(
-        config,
-        "runtime_coordinate_manifest_json",
-        lambda: '{"coordinate_basis":"bundle-coverage-test"}',
-    )
-    metric = "low"
-    city = "Shanghai"
-    target_date = "2026-09-29"
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    class CoverageClock(datetime):
-        @classmethod
-        def now(cls,tz=None): return now.astimezone(tz or UTC)
-    monkeypatch.setattr(reader,"datetime",CoverageClock)
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE ensemble_snapshots (
-            snapshot_id INTEGER PRIMARY KEY,
-            dataset_id TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            temperature_metric TEXT NOT NULL,
-            source_run_id TEXT NOT NULL
-        );
-        CREATE TABLE source_run (
-            source_run_id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL,
-            release_calendar_key TEXT NOT NULL,
-            track TEXT NOT NULL,
-            source_available_at TEXT NOT NULL,
-            status TEXT NOT NULL,
-            completeness_status TEXT NOT NULL,
-            partial_run INTEGER NOT NULL
-        );
-        CREATE TABLE source_run_coverage (
-            coverage_id TEXT PRIMARY KEY,
-            source_run_id TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            release_calendar_key TEXT NOT NULL,
-            track TEXT NOT NULL,
-            city TEXT NOT NULL,
-            target_local_date TEXT NOT NULL,
-            temperature_metric TEXT NOT NULL,
-            expected_members INTEGER NOT NULL,
-            observed_members INTEGER NOT NULL,
-            expected_steps_json TEXT NOT NULL,
-            observed_steps_json TEXT NOT NULL,
-            snapshot_ids_json TEXT NOT NULL,
-            completeness_status TEXT NOT NULL,
-            readiness_status TEXT NOT NULL,
-            computed_at TEXT NOT NULL,
-            expires_at TEXT,
-            recorded_at TEXT NOT NULL
-        );
-        """
-    )
-    expected_dataset = reader.expected_replacement_dependency_identity_by_role("low")[
-        "baseline_b0"
-    ].data_version
-    assert expected_dataset
-    source_run_id = "low-run-1"
-    conn.execute(
-        """
-        INSERT INTO source_run (
-            source_run_id, source_id, release_calendar_key, track,
-            source_available_at, status, completeness_status, partial_run
-        ) VALUES (?, 'ecmwf_open_data', 'ecmwf_open_data.enfo', 'operational', ?, ?, ?, ?)
-        """,
-        (
-            source_run_id,
-            (now - timedelta(minutes=2)).isoformat(),
-            run_status,
-            run_completeness,
-            partial_run,
-        ),
-    )
-    conn.execute(
-        """
-        INSERT INTO ensemble_snapshots (
-            snapshot_id, dataset_id, source_id, city, target_date,
-            temperature_metric, source_run_id
-        ) VALUES (1, ?, 'ecmwf_open_data', ?, ?, ?, ?)
-        """,
-        (expected_dataset, city, target_date, metric, source_run_id),
-    )
-    if coverage_status is not None:
-        conn.execute(
-            """
-            INSERT INTO source_run_coverage (
-                coverage_id, source_run_id, source_id, release_calendar_key, track,
-                city, target_local_date, temperature_metric, expected_members,
-                observed_members, expected_steps_json, observed_steps_json,
-                snapshot_ids_json, completeness_status, readiness_status,
-                computed_at, expires_at, recorded_at
-            ) VALUES (
-                'coverage-1', ?, 'ecmwf_open_data', 'ecmwf_open_data.enfo',
-                'operational', ?, ?, ?, 51, 51, '[0,3,6]', '[0,3,6]', '[1]',
-                ?, ?, ?, ?, ?
-            )
-            """,
-            (
-                source_run_id,
-                city,
-                target_date,
-                metric,
-                coverage_status,
-                coverage_readiness,
-                (now - timedelta(minutes=1)).isoformat(),
-                (now + timedelta(hours=1)).isoformat(),
-                now.isoformat(),
-            ),
-        )
-    conn.commit()
-    return conn
+    """Exact coverage-query fault view; canonical native tuples never change."""
+    source_run_id = normal.request.baseline_source_run_id
+    params = []
+    def projection(table, changed):
+        columns = []
+        for item in normal.conn.execute(f"PRAGMA table_info({table})"):
+            field = item[1]
+            if field in changed:
+                columns.append(f'CASE WHEN source_run_id=? THEN ? ELSE "{field}" END AS "{field}"')
+                params.extend((source_run_id, changed[field]))
+            else:
+                columns.append(f'"{field}"')
+        return "SELECT " + ",".join(columns) + f" FROM main.{table}"
+    run = projection("source_run", {"status":run_status, "completeness_status":run_completeness,
+        "partial_run":partial_run})
+    if coverage_status is None:
+        coverage = "SELECT * FROM main.source_run_coverage WHERE source_run_id!=?"
+        params.append(source_run_id)
+    else:
+        coverage = projection("source_run_coverage", {"completeness_status":coverage_status,
+            "readiness_status":coverage_readiness})
+    cte = f"WITH source_run AS ({run}), source_run_coverage AS ({coverage}) "
+    calls = []
+    class CoverageView:
+        def execute(self, sql, parameters=()):
+            query = " ".join(sql.upper().split())
+            if query.startswith("SELECT 1 FROM") and "SOURCE_RUN_COVERAGE" in query:
+                assert tuple(parameters[:4]) == (normal.kwargs["dependency_json"]["current_ensemble_snapshot"],
+                    normal.kwargs["city"], normal.kwargs["target_date"], normal.kwargs["metric"])
+                calls.append(1)
+                if coverage_status == "COMPLETE" and coverage_readiness == "LIVE_ELIGIBLE":
+                    # Positive control stays the actual normal writer's target
+                    # coverage, never statuses manufactured by this read view.
+                    actual = normal.conn.execute("SELECT completeness_status,readiness_status FROM source_run_coverage "
+                        "WHERE source_run_id=? AND city=? AND target_local_date=? AND temperature_metric=?",
+                        (source_run_id,normal.kwargs["city"],normal.kwargs["target_date"],normal.kwargs["metric"])).fetchall()
+                    assert [tuple(item) for item in actual] == [("COMPLETE","LIVE_ELIGIBLE")]
+                    return normal.conn.execute(sql, parameters)
+                import re
+                # CTEs have no physical index; preserve every eligibility term.
+                sql = re.sub(r"(AS source_coverage) INDEXED BY [A-Za-z0-9_]+", r"\1", sql)
+                return normal.conn.execute(cte + sql, (*params, *parameters))
+            return normal.conn.execute(sql, parameters)
+        def __getattr__(self, name): return getattr(normal.conn, name)
+    view = CoverageView()
+    view.coverage_queries = calls
+    return view
 
 
 def test_current_ensemble_snapshot_rejects_intrinsic_valid_but_blocked_target_coverage(
-    monkeypatch,
+    _native_low_coverage,
 ):
+    normal = _native_low_coverage
     conn = _coverage_identity_conn(
-        monkeypatch,
+        normal,
         coverage_status="HORIZON_OUT_OF_RANGE",
         coverage_readiness="BLOCKED",
         run_status="PARTIAL",
@@ -4412,11 +4386,9 @@ def test_current_ensemble_snapshot_rejects_intrinsic_valid_but_blocked_target_co
     )
     reason = reader._current_ensemble_snapshot_identity_reason(
         conn,
-        dependency_json={"current_ensemble_snapshot": 1},
-        city="Shanghai",
-        target_date="2026-09-29",
-        metric="low",
+        **normal.kwargs,
     )
+    assert conn.coverage_queries == [1]
     assert reason == "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
 
 
@@ -4600,9 +4572,10 @@ def test_hko_clock_read_gate_reproduces_raw_record_not_revision_label(
     conn.close()
 
 
-def test_current_ensemble_snapshot_accepts_complete_current_target_coverage(monkeypatch):
+def test_current_ensemble_snapshot_accepts_complete_current_target_coverage(_native_low_coverage):
+    normal = _native_low_coverage
     conn = _coverage_identity_conn(
-        monkeypatch,
+        normal,
         coverage_status="COMPLETE",
         coverage_readiness="LIVE_ELIGIBLE",
         run_status="SUCCESS",
@@ -4611,17 +4584,16 @@ def test_current_ensemble_snapshot_accepts_complete_current_target_coverage(monk
     )
     reason = reader._current_ensemble_snapshot_identity_reason(
         conn,
-        dependency_json={"current_ensemble_snapshot": 1},
-        city="Shanghai",
-        target_date="2026-09-29",
-        metric="low",
+        **normal.kwargs,
     )
+    assert conn.coverage_queries == [1]
     assert reason is None
 
 
-def test_current_ensemble_snapshot_rejects_missing_target_coverage(monkeypatch):
+def test_current_ensemble_snapshot_rejects_missing_target_coverage(_native_low_coverage):
+    normal = _native_low_coverage
     conn = _coverage_identity_conn(
-        monkeypatch,
+        normal,
         coverage_status=None,
         coverage_readiness=None,
         run_status="PARTIAL",
@@ -4630,9 +4602,7 @@ def test_current_ensemble_snapshot_rejects_missing_target_coverage(monkeypatch):
     )
     reason = reader._current_ensemble_snapshot_identity_reason(
         conn,
-        dependency_json={"current_ensemble_snapshot": 1},
-        city="Shanghai",
-        target_date="2026-09-29",
-        metric="low",
+        **normal.kwargs,
     )
+    assert conn.coverage_queries == [1]
     assert reason == "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
