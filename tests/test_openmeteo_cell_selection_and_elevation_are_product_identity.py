@@ -2108,47 +2108,131 @@ def test_registered_cwa_quantity_cannot_be_served_as_its_opposite_metric(tmp_pat
 
 
 def test_normal_held_revision_missing_producer_recaptures_original_archive_cycle(tmp_path, monkeypatch):
-    from src.data import bayes_precision_fusion_download as dl, replacement_forecast_production as production
+    from src.data import bayes_precision_fusion_download as dl
     from src.data.replacement_current_value_serving import read_current_instrument_values
-    conn,target,_cycle = _current_rows(tmp_path,monkeypatch)
-    cycle = datetime(2026,6,9,tzinfo=UTC)
-    now = datetime(2026,6,10,2,tzinfo=UTC)
-    for model, in conn.execute("SELECT model FROM raw_model_forecasts").fetchall():
-        domain = dl._model_domain_hash(provider=dl.OPENMETEO_PROVIDER,model_name=dl.OPENMETEO_MODEL_IDS.get(model,model),
-            cell_selection="land",elevation_param="requested",downscaling_policy="none",endpoint_mode="single_runs")
+    from tests.test_bayes_precision_fusion_download import _real_capture_world
+    world = _real_capture_world(tmp_path, monkeypatch, "single")
+    target = world.targets[0]
+    with sqlite3.connect(world.db) as conn:
+        raw_id, body_id = conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts WHERE city=?", (target.city,)).fetchone()
+        domain = dl._model_domain_hash(provider=dl.OPENMETEO_PROVIDER, model_name="icon_global",
+            cell_selection="land", elevation_param="requested", downscaling_policy="none", endpoint_mode="single_runs")
         conn.execute("UPDATE raw_model_forecasts SET artifact_id=NULL,raw_sha256=NULL,elevation_param='requested',"
-            "downscaling_policy='none',model_domain_hash=?,source_cycle_time=?,source_available_at=?,captured_at=?,recorded_at=? WHERE model=?",
-            (domain,cycle.isoformat(),*(cycle.replace(hour=4).isoformat(),)*3,model))
-    conn.execute("DELETE FROM raw_forecast_artifacts")
-    old_provenance={"bayes_precision_fusion":{"current_evidence_shape":{"semantics_revision":"ensemble_center_scenarios_v5"}}}
-    conn.execute("INSERT INTO forecast_posteriors (source_id,product_id,data_version,city,target_date,temperature_metric,"
-        "source_cycle_time,source_available_at,computed_at,q_json,posterior_method,provenance_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("openmeteo_ecmwf_ifs9_bayes_fusion","test","test",target.city,target.target_date,target.metric,
-         cycle.isoformat(),cycle.replace(hour=4).isoformat(),cycle.replace(hour=5).isoformat(),'{}',"test",json.dumps(old_provenance)))
-    conn.commit()
-    original=conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
-    original_cert=conn.execute("SELECT * FROM forecast_posteriors").fetchall()
-    db=Path(conn.execute("PRAGMA database_list").fetchone()[2])
-    _download_time(monkeypatch,dl,now)
-    _download_time(monkeypatch,production,now)
-    _mock_single_model_http(monkeypatch,dl,value=20)
-    monkeypatch.setattr(dl,"_read_source_clock_single_runs_requests",lambda **_: {})
-    monkeypatch.setattr("src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
-        lambda **_: {(target.city,target.target_date,target.metric):0})
-    monkeypatch.setattr("src.data.replacement_forecast_current_target_plan.replacement_forecast_current_target_keys",lambda *_a,**_: ())
-    monkeypatch.setattr("src.config.cities_by_name",{target.city:SimpleNamespace(lat=target.latitude,
-        lon=target.longitude,timezone=target.timezone_name)})
-    cfg={"forecast_db":db,"raw_manifest_dir":tmp_path/"raw_manifests","seed_dir":tmp_path/"seeds"}
-    report=production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg,
-        planning_cycle=now.replace(hour=0),max_wall_clock_seconds=5,include_previous_runs=False,prune_after=False)
+            "downscaling_policy='none',model_domain_hash=? WHERE raw_model_forecast_id=?", (domain,raw_id))
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE artifact_id=? OR (data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?)", (body_id,body_id))
+        original = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+        original_cert = conn.execute("SELECT * FROM forecast_posteriors").fetchall()
+    before_calls = len(world.calls)
+    world.clock[0] = datetime(2026,9,29,23,30,tzinfo=UTC)
+    original_get = world.provider.get
+    def later_run_is_a_suffix(url, *, params=None, timeout=None):
+        response = original_get(url, params=params, timeout=timeout)
+        if params and params.get("run") != world.run.replace(tzinfo=None).isoformat():
+            import httpx
+            payload = response.json()
+            issued = datetime.fromisoformat(params["run"]).replace(tzinfo=UTC)
+            indices = [i for i, raw in enumerate(payload["hourly"]["time"])
+                if (datetime.fromisoformat(raw)-timedelta(seconds=payload["utc_offset_seconds"])).replace(tzinfo=UTC)>=issued]
+            payload["hourly"]={key:[values[i] for i in indices] for key,values in payload["hourly"].items()}
+            return httpx.Response(200,json=payload,
+                headers={key:value for key,value in response.headers.items() if key!="content-length"},request=response.request)
+        return response
+    monkeypatch.setattr(world.provider,"get",later_run_is_a_suffix)
+    report = _normal_capture_producer(tmp_path, monkeypatch, world, planning_cycle=world.run+timedelta(hours=6))
     assert "coherent_archive_capture" in report, report
     assert report["coherent_archive_capture"]["attempted_target_group_count"] == 1
     assert report["written_row_count"] == 0
     assert report["committed_families"] == ((target.city,target.target_date,target.metric),)
-    assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()==original
-    assert conn.execute("SELECT * FROM forecast_posteriors").fetchall()==original_cert
-    assert conn.execute("SELECT DISTINCT source_cycle_time FROM raw_forecast_artifacts").fetchall()==[(cycle.isoformat(),)]
-    served=read_current_instrument_values(conn,city=target.city,metric=target.metric,target_date=target.target_date,
-        source_cycle_time_iso=cycle.isoformat(),decision_time_iso=now.isoformat())
-    assert len(served)==1 and all(value.physical_response["revalidated_legacy_product"] for value in served.values())
-    conn.close()
+    assert report["physical_capture_recovered_raw_ids"] == (raw_id,)
+    assert len(world.calls) == before_calls + 2  # Exact old repair plus ordinary latest suffix.
+    assert datetime.fromisoformat(world.calls[-2]["run"]).replace(tzinfo=UTC) == world.run
+    with sqlite3.connect(world.db) as conn:
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()==original
+        assert conn.execute("SELECT * FROM forecast_posteriors").fetchall()==original_cert
+        assert conn.execute("SELECT DISTINCT source_cycle_time FROM raw_forecast_artifacts WHERE product_id LIKE '%icon_global%'").fetchall()==[(world.run.isoformat(),)]
+        served=read_current_instrument_values(conn,city=target.city,metric=target.metric,target_date=target.target_date,
+            source_cycle_time_iso=world.run.isoformat(),decision_time_iso=world.clock[0].isoformat())
+        assert set(served)=={"icon_global"}
+        assert served["icon_global"].physical_response["revalidated_legacy_product"]
+
+
+def _normal_capture_producer(tmp_path, monkeypatch, world, *, planning_cycle=None):
+    """Held-scope input and one configured provider; capture/authority remain real."""
+    from src.data import bayes_precision_fusion_download as dl, replacement_forecast_production as production
+    target = world.targets[0]
+    _download_time(monkeypatch, production, world.clock[0])
+    monkeypatch.setattr(dl, "BAYES_PRECISION_FUSION_EXTRA_MODELS", ("icon_global",))
+    monkeypatch.setattr(dl, "BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS", ())
+    monkeypatch.setattr("src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda **_: {(target.city, target.target_date, target.metric): 0})
+    monkeypatch.setattr("src.data.replacement_forecast_current_target_plan.replacement_forecast_current_target_keys", lambda *_a, **_: ())
+    return production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db":world.db,"raw_manifest_dir":tmp_path/"raw_manifests","seed_dir":tmp_path/"seeds"},
+        planning_cycle=planning_cycle or world.run,max_wall_clock_seconds=5,include_previous_runs=False,prune_after=False)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("damage", ("captured_at", "receipt_file"))
+def test_normal_modern_held_proof_debt_insert_zero_progress_changes_only_new_cut(tmp_path, monkeypatch, metric, damage):
+    from tests.test_bayes_precision_fusion_download import _real_capture_world
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    from src.data.replacement_input_hwm import _exact_current_value_serving_lag
+    from src.data.replacement_forecast_live_materialization_queue import _blocked_attempt_fingerprint
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric)
+    target = world.targets[0]
+    scope = dict(city=target.city,target_date=target.target_date,metric=metric,
+        source_cycle_time_iso=world.run.isoformat())
+    old_cut = datetime(2026,9,29,22,10,tzinfo=UTC)
+    def fingerprint(cut):
+        return _blocked_attempt_fingerprint(input_json=tmp_path/"input.json",forecast_db=world.db,
+            payload={"city":target.city,"target_date":target.target_date,"temperature_metric":metric,
+                "source_cycle_time":world.run.isoformat(),"computed_at":cut.isoformat()})
+    old_fp = fingerprint(old_cut)
+    with sqlite3.connect(world.db) as conn:
+        original = read_current_instrument_values(conn,**scope,decision_time_iso=old_cut.isoformat())["icon_global"]
+        cursor=conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(original.raw_model_forecast_id,))
+        raw=dict(zip((column[0] for column in cursor.description),cursor.fetchone(),strict=True))
+        body_path, request_url, params = conn.execute("SELECT artifact_path,request_url,request_params_json FROM raw_forecast_artifacts WHERE artifact_id=?",(raw["artifact_id"],)).fetchone()
+        body=Path(body_path).read_bytes()
+        world.clock[0]=datetime(2026,9,29,22,30,tzinfo=UTC)
+        bound=dl._bind_physical_response(json.loads(body),model="icon_global",url=request_url,
+            params=json.loads(params),run=world.run,captures=[(body,world.clock[0].timestamp())],
+            network_captures=[(body,world.clock[0].timestamp(),{"content-type":"application/json"})])
+        assert dl._persist_rows(conn,[{**raw,"source_available_at":world.clock[0].isoformat(),
+            "captured_at":world.clock[0].isoformat(),"_physical_response":bound[dl._BATCH_PHYSICAL_RESPONSE_KEY]}])==0
+        latest_id, latest_path = conn.execute("SELECT artifact_id,artifact_path FROM raw_forecast_artifacts"
+            " WHERE data_version='openmeteo_single_model_http_capture_receipt_v1' ORDER BY artifact_id DESC LIMIT 1").fetchone()
+        if damage=="captured_at":
+            conn.execute("UPDATE raw_forecast_artifacts SET captured_at='broken-clock' WHERE artifact_id=?",(latest_id,))
+        else:
+            Path(latest_path).unlink()
+        conn.commit()
+        before=conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+        assert "icon_global" not in read_current_instrument_values(conn,**scope,decision_time_iso="2026-09-29T22:45:00Z")
+    world.clock[0]=datetime(2026,9,29,23,30,tzinfo=UTC)
+    before_calls, before_cost = len(world.calls),world.tracker.calls_today()
+    rejected_fp=fingerprint(world.clock[0])
+    report=_normal_capture_producer(tmp_path,monkeypatch,world)
+    assert report["written_row_count"]==0
+    assert report["physical_capture_recovered_raw_ids"]==(original.raw_model_forecast_id,)
+    assert report["committed_families"]==((target.city,target.target_date,metric),)
+    assert len(world.calls)==before_calls+1 and world.tracker.calls_today()==before_cost+1
+    with sqlite3.connect(world.db) as conn:
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()==before
+        current=read_current_instrument_values(conn,**scope,decision_time_iso=world.clock[0].isoformat())["icon_global"]
+        assert current.raw_model_forecast_id==original.raw_model_forecast_id and current.captured_at==original.captured_at
+        assert current.physical_response["capture_receipt_artifact_id"]!=original.physical_response["capture_receipt_artifact_id"]
+        assert "icon_global" not in read_current_instrument_values(conn,**scope,decision_time_iso="2026-09-29T22:45:00Z")
+        assert read_current_instrument_values(conn,**scope,decision_time_iso=old_cut.isoformat())["icon_global"].physical_response==original.physical_response
+        lag=_exact_current_value_serving_lag(conn,city=target.city,target_date=target.target_date,metric=metric,
+            decision_time=world.clock[0],posterior_computed_at=old_cut,
+            provenance={"bayes_precision_fusion":{"used_models":["icon_global"],"current_value_serving":{"icon_global":original.as_provenance()}}})
+        assert lag[0] and "physical_proof_dependency_changed" in lag[1]
+    assert fingerprint(old_cut)==old_fp
+    healed_fp=fingerprint(world.clock[0])
+    assert healed_fp is not None and healed_fp!=rejected_fp
+    _normal_capture_producer(tmp_path,monkeypatch,world)
+    assert len(world.calls)==before_calls+1 and world.tracker.calls_today()==before_cost+1
+    assert fingerprint(world.clock[0])==healed_fp

@@ -1240,27 +1240,20 @@ def _download_replacement_forecast_current_targets_if_needed(
 def _held_legacy_physical_proof_recovery_candidates(
     forecast_db: Path, held_priority: Mapping[tuple[str, str, str], int], *,
     decision_time: datetime, deadline_monotonic: float | None,
-) -> dict[tuple[str, str, str], tuple[str, datetime]]:
-    """One exact eligible archive witness per revision-missing held family.
+) -> dict[tuple[str, str, str], tuple[str, datetime, str, int]]:
+    """One exact, typed HTTP-repair debt per missing held source family.
 
-    SCOPE: immutable legacy single-runs rows in that held family. DRAIN:
+    SCOPE: eligible immutable single-runs rows in that held family. DRAIN:
     ordinary producer captures the same issued archive under its quota/deadline.
     RESET: exact body/value revalidation, never a rewritten raw row or new expiry.
     """
     from src.config import cities_by_name
     from src.state.db import _connect_read_only
-    from src.data.replacement_forecast_cycle_policy import (
-        current_evidence_shape_has_held_authority, cycle_age_outside_bound,
-    )
     from src.data.replacement_current_value_serving import (
-        current_value_serving_schema, _product_identity_select, _source_clock_product_has_authority, _read_product_identity_at_cutoff,
+        current_value_serving_schema, physical_capture_debt_reason,
     )
-    from src.data.bayes_precision_fusion_download import (
-        BAYES_PRECISION_FUSION_ELEVATION_PARAM, BAYES_PRECISION_FUSION_DOWNSCALING_POLICY, _model_domain_hash,
-    )
-    from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
 
-    candidates: dict[tuple[str, str, str], tuple[str, datetime]] = {}
+    candidates: dict[tuple[str, str, str], tuple[str, datetime, str, int]] = {}
     conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
     try:
         conn.row_factory = sqlite3.Row
@@ -1269,9 +1262,6 @@ def _held_legacy_physical_proof_recovery_candidates(
         schema = current_value_serving_schema(conn)
         if not schema.has_artifacts or not set(("artifact_id", "model_domain_hash", "recorded_at")).issubset(schema.product_identity_columns):
             return candidates
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='forecast_posteriors'").fetchone() is None:
-            return candidates
-        identity = _product_identity_select(schema, decision_iso=decision_time.isoformat())
         for scope, priority in sorted(held_priority.items()):
             _check_source_preflight_deadline(deadline_monotonic)
             if priority >= 2:
@@ -1280,54 +1270,25 @@ def _held_legacy_physical_proof_recovery_candidates(
             city_cfg = cities_by_name.get(city)
             if city_cfg is None:
                 continue
-            posterior = conn.execute(
-                "SELECT provenance_json,computed_at FROM forecast_posteriors WHERE city=? AND target_date=?"
-                " AND temperature_metric=? AND runtime_layer='live'"
-                " ORDER BY computed_at DESC,posterior_id DESC LIMIT 1", scope,
-            ).fetchone()
-            try:
-                provenance = json.loads(str(posterior[0])) if posterior is not None else {}
-                fusion = provenance.get("bayes_precision_fusion")
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(fusion, Mapping) or not isinstance(fusion.get("current_evidence_shape"), Mapping) or current_evidence_shape_has_held_authority(provenance, materialized_at=posterior[1]):
-                continue
-            rows = conn.execute(
-                f"SELECT {identity} FROM raw_model_forecasts WHERE city=? AND target_date=? AND metric=?"
-                " AND endpoint='single_runs' AND endpoint_mode='single_runs' AND artifact_id IS NULL"
-                " AND elevation_param='requested' AND downscaling_policy='none'"
-                " ORDER BY source_cycle_time DESC,model,raw_model_forecast_id DESC LIMIT 64", scope,
-            ).fetchall()
-            for candidate in rows:
-                raw = json.loads(str(candidate[0]))
-                if _source_clock_product_has_authority(_read_product_identity_at_cutoff(conn, candidate[0], deadline_monotonic=deadline_monotonic), lead_days=int(raw["lead_days"])):
-                    continue
-                try:
-                    cycle = datetime.fromisoformat(str(raw["source_cycle_time"]).replace("Z", "+00:00"))
-                    if cycle.tzinfo is None or cycle_age_outside_bound(decision_time, cycle):
-                        continue
-                    clocks = [datetime.fromisoformat(str(raw[key]).replace("Z", "+00:00"))
-                        for key in ("source_available_at", "captured_at", "recorded_at")]
-                    clocks[-1] = clocks[-1].replace(tzinfo=timezone.utc) if clocks[-1].tzinfo is None else clocks[-1]
-                    if any(stamp.tzinfo is None or stamp > decision_time for stamp in clocks):
-                        continue
-                    if not _source_cycle_can_cover_local_decision_window(cycle=cycle, target_date=target_date,
-                        timezone_name=str(city_cfg.timezone), decision_time=decision_time):
-                        continue
-                    basis = dict(provider=str(raw["provider"]), model_name=str(raw["model_name"]),
-                        cell_selection=str(raw["cell_selection"]), endpoint_mode="single_runs")
-                    if raw["model_domain_hash"] != _model_domain_hash(**basis, elevation_param="requested", downscaling_policy="none"):
-                        continue
-                    view = {**raw, "elevation_param": BAYES_PRECISION_FUSION_ELEVATION_PARAM,
-                        "downscaling_policy": BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
-                        "model_domain_hash": _model_domain_hash(**basis, elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
-                            downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY)}
-                    if not raw_product_matches_live_source(view, city_cfg, lead_days=int(raw["lead_days"])):
-                        continue
-                except (KeyError, TypeError, ValueError):
-                    continue
-                candidates[scope] = (str(raw["model"]), cycle)
-                break
+            # An old certificate may still replay at its own cutoff while a
+            # later matching receipt is invalid. Cost eligibility comes solely
+            # from the shared exact-row classifier, not historical q authority.
+            cursor = conn.execute(
+                "SELECT raw_model_forecast_id,model,source_cycle_time FROM raw_model_forecasts"
+                " WHERE city=? AND target_date=? AND metric=? AND endpoint='single_runs'"
+                " AND endpoint_mode='single_runs' ORDER BY source_cycle_time DESC,model,raw_model_forecast_id DESC", scope)
+            while scope not in candidates:
+                _check_source_preflight_deadline(deadline_monotonic)
+                rows = cursor.fetchmany(32)
+                if not rows:
+                    break
+                for raw_id, model, raw_cycle in rows:
+                    reason = physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+                        decision_time_iso=decision_time.isoformat(), deadline_monotonic=deadline_monotonic)
+                    if reason is not None:
+                        cycle = datetime.fromisoformat(str(raw_cycle).replace("Z", "+00:00"))
+                        candidates[scope] = (str(model), cycle, reason, int(raw_id))
+                        break
         return candidates
     finally:
         conn.close()
@@ -1676,15 +1637,21 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                                 _DerivedOffGridSingleRunsRun,
                             )
 
-                            archive_model, archive_cycle = candidate
+                            archive_model, archive_cycle = candidate[:2]
+                            capture_reason = candidate[2] if len(candidate) == 4 else None
                             from dataclasses import replace
                             archive_targets = tuple(
                                 replace(target, lead_days=max(0, (date.fromisoformat(target.target_date) - archive_cycle.date()).days))
                                 for target in rotated_targets
                                 if (target.city, target.target_date) == first_group
-                                and (held_legacy_candidates.get((target.city, target.target_date, target.metric))
-                                    or cohort_backtrack_candidates.get((target.city, target.metric, target.target_date))) == candidate
+                                and (
+                                    (held_legacy_candidates.get((target.city, target.target_date, target.metric)) or ())[:3] == candidate[:3]
+                                    if capture_reason
+                                    else cohort_backtrack_candidates.get((target.city, target.metric, target.target_date)) == candidate
+                                )
                             )
+                            capture_ids = tuple(held_legacy_candidates[(target.city, target.target_date, target.metric)][3]
+                                for target in archive_targets) if capture_reason else ()
                             archive_budget = max(
                                 0.0, deadline_monotonic - time.monotonic()
                             ) / 2.0
@@ -1705,9 +1672,9 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                                         },
                                         include_previous_runs=False,
                                         prune_after=False,
-                                        revalidate_legacy_capture=any(
-                                            (target.city, target.target_date, target.metric) in held_legacy_candidates
-                                            for target in archive_targets),
+                                        revalidate_legacy_capture=capture_reason is not None,
+                                        **({"network_capture_reason": capture_reason, "capture_debt_raw_ids": capture_ids}
+                                           if capture_reason else {}),
                                     )
                                 except Exception as exc:
                                     # Optional between-cohort repair cannot strand
@@ -1795,10 +1762,15 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                         *(result.get("committed_families") or ()),
                     )
                 ))
+                result["physical_capture_recovered_raw_ids"] = tuple(sorted(set(
+                    (*(archive_result.get("physical_capture_recovered_raw_ids") or ()),
+                     *(result.get("physical_capture_recovered_raw_ids") or ())))))
                 result["coherent_archive_capture"] = {
                     "status": archive_result.get("status"),
                     "written_row_count": archive_result.get("written_row_count"),
                     "attempted_target_group_count": archive_attempted,
+                    "physical_capture_reason": archive_result.get("physical_capture_reason"),
+                    "physical_capture_recovered_raw_ids": archive_result.get("physical_capture_recovered_raw_ids"),
                 }
             elif archive_error is not None:
                 result["coherent_archive_capture"] = {
