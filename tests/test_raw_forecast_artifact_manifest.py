@@ -603,3 +603,166 @@ def test_actual_owned_body_declared_scope_cannot_be_rebound(tmp_path, data_versi
     assert list(tmp_path.glob("openmeteo_anchor_local_proof_*.json")) == []
     conn.rollback()
     conn.close()
+
+
+def _bad_local_proof_prefix(conn, first, count):
+    conn.execute("UPDATE raw_forecast_artifacts SET recorded_at='unknown' WHERE artifact_id=?", (first,))
+    for index in range(count - 1):
+        # Leave real ID gaps to distinguish a prefix commitment from count/maxID.
+        conn.execute("""INSERT INTO raw_forecast_artifacts
+            (artifact_id,source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
+             artifact_path,sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at)
+            SELECT ?,source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
+                   artifact_path,?,byte_size,request_url,request_params_json,artifact_metadata_json,'unknown'
+            FROM raw_forecast_artifacts WHERE artifact_id=?""", (first + 2 * (index + 1), f"{index:064x}", first))
+    conn.commit()
+
+
+def _unknown_local_proof_clone(conn, original_proof_id, *, artifact_id=None):
+    conn.execute("""INSERT INTO raw_forecast_artifacts
+        (artifact_id,source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
+         artifact_path,sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at)
+        SELECT ?,source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,
+               artifact_path,?,byte_size,request_url,request_params_json,artifact_metadata_json,'unknown'
+        FROM raw_forecast_artifacts WHERE artifact_id=?""", (artifact_id, "f" * 64, original_proof_id))
+    conn.commit()
+
+
+@pytest.mark.parametrize("data_version", (HIGH_DATA_VERSION, LOW_DATA_VERSION))
+@pytest.mark.parametrize("fault", ("modified_descriptor", "deleted_row", "inserted_gap", "id_aba", "new_unknown"))
+def test_more_than_one_frontier_batch_of_bad_proofs_has_normal_reset(tmp_path, data_version, fault):
+    import time
+    conn, original_id, original, candidate, precision = _local_proof_case(tmp_path, data_version)
+    conn.execute("BEGIN IMMEDIATE")
+    first = manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision)
+    conn.commit()
+    assert _read_local(conn, original_id, original, datetime.now(timezone.utc)).proof_artifact_id == first
+    _bad_local_proof_prefix(conn, first, 129)
+    old_cut = datetime.now(timezone.utc)
+    with pytest.raises(ValueError, match="anchor_local_proof"):
+        _read_local(conn, original_id, original, old_cut)
+    time.sleep(0.003)  # Separate actual SQL millisecond cuts, never alter source clocks.
+    conn.execute("BEGIN IMMEDIATE")
+    repaired = manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision)
+    conn.commit()
+    result = _read_local(conn, original_id, original, datetime.now(timezone.utc))
+    assert result.proof_artifact_id == repaired
+    row = conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?", (repaired,)).fetchone()
+    sealed = json.loads(Path(row["artifact_path"]).read_text())
+    assert sealed["observed_frontier"]["row_count"] == 129
+    assert Path(row["artifact_path"]).stat().st_size < 10_000
+    with pytest.raises(ValueError, match="anchor_local_proof"):
+        _read_local(conn, original_id, original, old_cut)
+    conn.execute("BEGIN IMMEDIATE")
+    assert manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision) == repaired
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 131
+    assert _read_local(conn, original_id, original, datetime.now(timezone.utc)).recorded_at == result.recorded_at
+    if fault == "modified_descriptor":
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at='ABA-descriptor-change' WHERE artifact_id=?", (first,))
+    elif fault == "deleted_row":
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE artifact_id=?", (first,))
+    elif fault == "inserted_gap":
+        _unknown_local_proof_clone(conn, first, artifact_id=first + 1)
+    elif fault == "id_aba":
+        # Count and maxID stay identical, but the observed ordered IDs do not.
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE artifact_id=?", (first + 2,))
+        _unknown_local_proof_clone(conn, first, artifact_id=first + 1)
+    else:
+        _unknown_local_proof_clone(conn, repaired)
+    conn.commit()
+    with pytest.raises(ValueError, match="anchor_local_proof"):
+        _read_local(conn, original_id, original, datetime.now(timezone.utc))
+    conn.close()
+
+
+@pytest.mark.parametrize("data_version", (HIGH_DATA_VERSION, LOW_DATA_VERSION))
+def test_thousand_row_frontier_streams_all_pages_and_reuses_first_clock(tmp_path, monkeypatch, data_version):
+    conn, original_id, original, candidate, precision = _local_proof_case(tmp_path, data_version)
+    conn.execute("BEGIN IMMEDIATE")
+    first = manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision)
+    conn.commit()
+    original_row = dict(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (original_id,)).fetchone())
+    assert _read_local(conn, original_id, original, datetime.now(timezone.utc)).proof_artifact_id == first
+    _bad_local_proof_prefix(conn, first, 1000)
+    page_sizes = []
+    decode = manifest_module._proof_rows_as_dicts
+
+    def record_page(cursor):
+        rows = decode(cursor)
+        page_sizes.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(manifest_module, "_proof_rows_as_dicts", record_page)
+    conn.execute("BEGIN IMMEDIATE")
+    repaired = manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision)
+    conn.commit()
+    result = _read_local(conn, original_id, original, datetime.now(timezone.utc))
+    assert result.proof_artifact_id == repaired
+    sealed = json.loads(Path(conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?", (repaired,)).fetchone()[0]).read_text())
+    assert sealed["observed_frontier"]["row_count"] == 1000
+    assert page_sizes.count(128) >= 7
+    assert max(page_sizes) == 128
+    assert sealed["observed_frontier"]["max_artifact_id"] == first + 2 * 999
+    assert len(json.dumps(sealed).encode()) < 10_000
+    conn.execute("BEGIN IMMEDIATE")
+    assert manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision) == repaired
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == 1002
+    assert _read_local(conn, original_id, original, datetime.now(timezone.utc)).recorded_at == result.recorded_at
+    assert dict(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (original_id,)).fetchone()) == original_row
+    conn.close()
+
+
+@pytest.mark.parametrize("data_version", (HIGH_DATA_VERSION, LOW_DATA_VERSION))
+@pytest.mark.parametrize("stage", ("observe", "before_insert", "read"))
+def test_frontier_deadline_in_second_page_never_returns_partial_commitment(tmp_path, monkeypatch, data_version, stage):
+    conn, original_id, original, candidate, precision = _local_proof_case(tmp_path, data_version)
+    conn.execute("BEGIN IMMEDIATE")
+    first = manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision)
+    conn.commit()
+    assert _read_local(conn, original_id, original, datetime.now(timezone.utc)).proof_artifact_id == first
+    _bad_local_proof_prefix(conn, first, 1000)
+    if stage == "read":
+        conn.execute("BEGIN IMMEDIATE")
+        manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision)
+        conn.commit()
+        assert _read_local(conn, original_id, original, datetime.now(timezone.utc)) is not None
+    prior_rows = conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0]
+    prior_files = set(tmp_path.glob("openmeteo_anchor_local_proof_*.json"))
+    state = {"clock": 0.0, "frontier_calls": 0, "pages": 0, "armed": False}
+    frontier = manifest_module._proof_frontier
+
+    def observe_frontier(*args, **kwargs):
+        state["frontier_calls"] += 1
+        state["armed"] = state["frontier_calls"] == (2 if stage == "before_insert" else 1)
+        return frontier(*args, **kwargs)
+
+    def expire_during_second_query(sql):
+        if state["armed"] and "ORDER BY artifact_id DESC LIMIT" in sql:
+            state["pages"] += 1
+            if state["pages"] == 2:
+                state["clock"] = 10.0
+
+    monkeypatch.setattr(manifest_module, "_proof_frontier", observe_frontier)
+    monkeypatch.setattr(manifest_module.time, "monotonic", lambda: state["clock"])
+    conn.set_trace_callback(expire_during_second_query)
+    try:
+        if stage == "read":
+            with pytest.raises(TimeoutError, match="deadline_expired"):
+                manifest_module.read_anchor_local_proof(conn, original_id, **_proof_scope_for_test(original), decision_at=datetime.now(timezone.utc), deadline_monotonic=5.0)
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+            with pytest.raises(TimeoutError, match="deadline_expired"):
+                manifest_module.write_anchor_local_proof(conn, original_id, candidate, precision_metadata=precision, deadline_monotonic=5.0)
+        assert state["pages"] == 2  # One complete batch was observed, never treated as a full prefix.
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == prior_rows
+        files = set(tmp_path.glob("openmeteo_anchor_local_proof_*.json"))
+        if stage == "before_insert":
+            assert len(files - prior_files) == 1  # Uncommitted complete file is not canonical progress.
+        else:
+            assert files == prior_files
+    finally:
+        conn.set_trace_callback(None)
+        conn.rollback()
+        conn.close()

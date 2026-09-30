@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from src.data.forecast_source_registry import REPLACEMENT_FORECAST_PRODUCTS
 
@@ -501,7 +501,7 @@ ANCHOR_LOCAL_PROOF_REVISION = "openmeteo_anchor_local_proof_possession_v1"
 _PROOF_CLOCK_SQL = "strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')"
 _LOCAL_PROOF_MAX_BYTES = 1024 * 1024
 _LOCAL_BODY_MAX_BYTES = 32 * 1024 * 1024
-_LOCAL_PROOF_MAX_ROWS = 128
+_LOCAL_PROOF_BATCH_ROWS = 128
 
 
 @dataclass(frozen=True)
@@ -655,30 +655,54 @@ def _proof_precision(body: Mapping[str, Any], owned: Mapping[str, Any], precisio
     return frozen
 
 
-def _local_proof_rows(conn: sqlite3.Connection, body: Mapping[str, Any], deadline: float | None) -> list[dict[str, Any]]:
-    _proof_deadline(deadline)
-    # The encoded original ID also retains narrow ownership when latest metadata is damaged.
-    rows = _proof_rows_as_dicts(conn.execute(
-        """SELECT * FROM raw_forecast_artifacts
-           WHERE source_id=? AND product_id=? AND source_cycle_time=? AND data_version=?
-             AND ((json_valid(artifact_metadata_json) AND json_extract(artifact_metadata_json,'$.original_artifact_id')=?)
-                  OR artifact_path GLOB ?)
-           ORDER BY artifact_id DESC LIMIT ?""",
-        (body["source_id"], body["product_id"], body["source_cycle_time"], ANCHOR_LOCAL_PROOF_REVISION,
-         body["artifact_id"], f"*/openmeteo_anchor_local_proof_{body['artifact_id']}_*.json", _LOCAL_PROOF_MAX_ROWS + 1),
-    ))
-    _proof_deadline(deadline)
-    if len(rows) > _LOCAL_PROOF_MAX_ROWS:
-        raise _proof_error("frontier_row_budget")
-    if any(not isinstance(row[key], str) or len(row[key].encode()) > _LOCAL_PROOF_MAX_BYTES
-           for row in rows for key in ("artifact_metadata_json", "request_params_json")):
-        raise _proof_error("frontier_descriptor_byte_budget")
-    return rows
+def _local_proof_rows(conn: sqlite3.Connection, body: Mapping[str, Any], deadline: float | None,
+                      *, before_artifact_id: int | None = None) -> Iterator[dict[str, Any]]:
+    """Stream the complete exact namespace; 128 limits memory, never permission."""
+    before = before_artifact_id
+    while True:
+        _proof_deadline(deadline)
+        # The encoded original ID also retains narrow ownership when latest metadata is damaged.
+        rows = _proof_rows_as_dicts(conn.execute(
+            """SELECT * FROM raw_forecast_artifacts
+               WHERE source_id=? AND product_id=? AND source_cycle_time=? AND data_version=?
+                 AND ((json_valid(artifact_metadata_json) AND json_extract(artifact_metadata_json,'$.original_artifact_id')=?)
+                      OR artifact_path GLOB ?)
+                 AND (? IS NULL OR artifact_id < ?)
+               ORDER BY artifact_id DESC LIMIT ?""",
+            (body["source_id"], body["product_id"], body["source_cycle_time"], ANCHOR_LOCAL_PROOF_REVISION,
+             body["artifact_id"], f"*/openmeteo_anchor_local_proof_{body['artifact_id']}_*.json",
+             before, before, _LOCAL_PROOF_BATCH_ROWS),
+        ))
+        _proof_deadline(deadline)
+        for row in rows:
+            _proof_deadline(deadline)
+            if any(not isinstance(row[key], str) or len(row[key].encode()) > _LOCAL_PROOF_MAX_BYTES
+                   for key in ("artifact_metadata_json", "request_params_json")):
+                raise _proof_error("frontier_descriptor_byte_budget")
+            yield row
+        if len(rows) < _LOCAL_PROOF_BATCH_ROWS:
+            return
+        before = rows[-1]["artifact_id"]
 
 
-def _proof_frontier(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{"artifact_id": row["artifact_id"], "descriptor_sha256": hashlib.sha256(_proof_json(row)).hexdigest()}
-            for row in sorted(rows, key=lambda row: row["artifact_id"])]
+def _proof_frontier(conn: sqlite3.Connection, body: Mapping[str, Any], deadline: float | None,
+                    *, before_artifact_id: int | None = None) -> dict[str, Any]:
+    """Commit every ordered ID and full immutable descriptor, with constant memory.
+
+    A digest is returned only after the entire prefix is observed. Count/maxID
+    alone never substitute for the descriptor commitment, including on deadline.
+    """
+    digest = hashlib.sha256()
+    count = 0
+    maximum = 0
+    for row in _local_proof_rows(conn, body, deadline, before_artifact_id=before_artifact_id):
+        descriptor_sha = hashlib.sha256(_proof_json(row)).hexdigest()
+        digest.update(_proof_json({"artifact_id": row["artifact_id"], "descriptor_sha256": descriptor_sha}))
+        digest.update(b"\n")
+        maximum = max(maximum, row["artifact_id"])
+        count += 1
+    _proof_deadline(deadline)
+    return {"row_count": count, "max_artifact_id": maximum, "descriptor_sha256": digest.hexdigest()}
 
 
 def _proof_recorded(row: Mapping[str, Any]) -> datetime | None:
@@ -707,11 +731,10 @@ def read_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int,
     scope = _proof_scope(body)
     if scope != {"city": city, "target_date": target_date, "metric": metric}:
         raise _proof_error("scope_mismatch")
-    rows = _local_proof_rows(conn, body, deadline_monotonic)
-    visible = [row for row in rows if _proof_recorded(row) is None or _proof_recorded(row) <= cut]
-    if not visible:
+    row = next((item for item in _local_proof_rows(conn, body, deadline_monotonic)
+                if _proof_recorded(item) is None or _proof_recorded(item) <= cut), None)
+    if row is None:
         return None
-    row = visible[0]
     try:
         encoded = _proof_bytes(_proof_path(row["artifact_path"], root), row["sha256"], row["byte_size"],
                                limit=_LOCAL_PROOF_MAX_BYTES, deadline=deadline_monotonic)
@@ -723,7 +746,6 @@ def read_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int,
         expected_metadata = {"revision": ANCHOR_LOCAL_PROOF_REVISION, "original_artifact_id": original_artifact_id,
                              **scope, "document_sha256": row["sha256"], "local_possessed_at": doc["local_possessed_at"],
                              "recorded_at": row["recorded_at"], "clock_role": "local_proof_possession_not_http"}
-        prior = [item for item in rows if item["artifact_id"] < row["artifact_id"]]
         if (doc["revision"] != ANCHOR_LOCAL_PROOF_REVISION or doc["original_body_artifact"] != body
                 or doc["scope"] != scope or doc["request_params"] != json.loads(body["request_params_json"])
                 or doc.get("clock_resolution") != "milliseconds" or "recorded_at" in doc
@@ -733,10 +755,12 @@ def read_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int,
                 or row["source_available_at"] != doc["local_possessed_at"] or row["captured_at"] != doc["local_possessed_at"]
                 or row["request_url"] != body["request_url"] or row["request_params_json"] != body["request_params_json"]
                 or row["training_allowed"] != 0 or metadata != expected_metadata
-                or doc["observed_frontier"] != _proof_frontier(prior)
+                or doc["observed_frontier"] != _proof_frontier(conn, body, deadline_monotonic, before_artifact_id=row["artifact_id"])
                 or doc["owned_body"]["sha256"] != body["sha256"] or doc["owned_body"]["byte_size"] != body["byte_size"]):
             raise _proof_error("latest_invalid_or_frontier_changed")
         precision = _proof_precision(body, doc["owned_body"], doc["precision_metadata"], root=root, deadline=deadline_monotonic)
+    except TimeoutError:
+        raise
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise _proof_error("latest_invalid_or_frontier_changed") from exc
     return AnchorLocalProofEvidence(body, row["artifact_id"], row["sha256"], doc["owned_body"],
@@ -792,7 +816,7 @@ def write_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int
             or _proof_json(payload["request_params"]) != _proof_json(json.loads(body["request_params_json"]))
             or any(manifest.product_metadata.get(key) != value for key, value in scope.items())):
         raise _proof_error("original_request_or_scope_mismatch")
-    observed = _local_proof_rows(conn, body, deadline_monotonic)
+    observed = _proof_frontier(conn, body, deadline_monotonic)
     owned = {"path": str(_proof_path(manifest.artifact_path, root)), "sha256": body["sha256"], "byte_size": body["byte_size"]}
     precision = _proof_precision(body, owned, precision_metadata, root=root, deadline=deadline_monotonic)
     try:
@@ -811,7 +835,7 @@ def write_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int
     doc = {"revision": ANCHOR_LOCAL_PROOF_REVISION, "original_body_artifact": body,
            "scope": scope, "request_params": json.loads(body["request_params_json"]), "owned_body": owned,
            "precision_metadata": precision, "local_possessed_at": verified_at, "prepared_at": verified_at,
-           "clock_resolution": "milliseconds", "observed_frontier": _proof_frontier(observed)}
+           "clock_resolution": "milliseconds", "observed_frontier": observed}
     encoded = _proof_json(doc)
     if len(encoded) > _LOCAL_PROOF_MAX_BYTES:
         raise _proof_error("proof_byte_budget")
@@ -820,7 +844,7 @@ def write_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int
     _write_local_proof_file(path, encoded)
     _proof_deadline(deadline_monotonic)
     if (_proof_original(conn, original_artifact_id) != body
-            or _proof_frontier(_local_proof_rows(conn, body, deadline_monotonic)) != doc["observed_frontier"]):
+            or _proof_frontier(conn, body, deadline_monotonic) != doc["observed_frontier"]):
         raise _proof_error("frontier_changed_before_insert")
     metadata = {"revision": ANCHOR_LOCAL_PROOF_REVISION, "original_artifact_id": original_artifact_id,
                 **scope, "document_sha256": digest, "local_possessed_at": verified_at,
