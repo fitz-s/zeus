@@ -345,6 +345,7 @@ def test_taker_to_maker_fresh_price_survives_command_verifier_and_executor_recap
     import src.data.polymarket_client as pmc
     import src.engine.cycle_runtime as cycle_runtime
     import src.state.snapshot_repo as snapshot_repo
+    from src.data.polymarket_request_governor import RequestPriority
     from src.decision_kernel.certificate import build_certificate
     from src.decision_kernel.certificates.execution import (
         build_execution_command_certificate_from_final_intent,
@@ -432,6 +433,7 @@ def test_taker_to_maker_fresh_price_survives_command_verifier_and_executor_recap
         best_bid=maker_bid,
         best_ask=maker_ask,
         exact_maker_shares="8.00",
+        exact_maker_limit_price="0.11",
     )
     assert final_intent.payload["post_only"] is True
     assert final_intent.payload["limit_price"] == pytest.approx(0.11)
@@ -524,6 +526,7 @@ def test_taker_to_maker_fresh_price_survives_command_verifier_and_executor_recap
         min_order_size=5.0,
         fee_details={"fee_rate_fraction": "0"},
         neg_risk=False,
+        orderbook_top_bid=Decimal("0.10"),
         orderbook_top_ask=Decimal("0.93"),
         yes_token_id="yes-1",
         no_token_id="no-1",
@@ -552,6 +555,10 @@ def test_taker_to_maker_fresh_price_survives_command_verifier_and_executor_recap
     )
 
     class FakeClient:
+        def __init__(self, *, public_http_limits, public_request_priority):
+            assert public_http_limits is pmc.PRESUBMIT_JIT_CLOB_HTTP_LIMITS
+            assert public_request_priority is RequestPriority.SUBMIT_JIT
+
         def __enter__(self):
             return self
 
