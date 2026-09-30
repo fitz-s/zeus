@@ -264,7 +264,7 @@ def test_anchor_artifact_manifest_rejects_bad_metric_and_future_issue_but_keeps_
     assert manifest.product_metadata["requested_source_available_at_role"] == "telemetry_not_authority"
     assert manifest.product_metadata["source_available_at_authority"] == "captured_at_no_signed_openmeteo_generation_time"
     future_issue = build_anchor_request(latitude=31.1979, longitude=121.3363,
-        run="2026-06-06T08:00:00Z", timezone_name="Asia/Shanghai")
+        run="2026-06-06T12:00:00Z", timezone_name="Asia/Shanghai")
     with pytest.raises(ValueError):
         build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
             artifact,
