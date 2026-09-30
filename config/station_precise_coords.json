@@ -5,7 +5,33 @@
   "lat": "52.308601",
   "lon": "4.76389",
   "source": "OurAirports",
-  "station": "EHAM"
+  "station": "EHAM",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "EHAM",
+   "source_station_id": "0-20000-0-06240",
+   "wmo_station_id": "06240",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": -3.35,
+   "site_lat": 52.3172222222,
+   "site_lon": 4.7897222222,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-06240",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_eham_station.xml",
+   "body_sha256": "20c0aac76ab2f27a3f56717c0c2fe0059eb6fcf8a2d36173d999fa21edcc94f8",
+   "source_checked_at": "2026-09-30T00:21:40.246985+00:00",
+   "checked_at": "2026-09-30T00:21:40.246985+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Ankara": {
   "distance_from_citiesjson_m": 14,
@@ -13,7 +39,33 @@
   "lat": "40.128101",
   "lon": "32.995098",
   "source": "OurAirports",
-  "station": "LTAC"
+  "station": "LTAC",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "LTAC",
+   "source_station_id": "0-20000-0-17128",
+   "wmo_station_id": "17128",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 959,
+   "site_lat": 40.115921,
+   "site_lon": 32.986827,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-17128",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_ltac_station.xml",
+   "body_sha256": "723dc934801635e7e2761df422a961e5c26bb5ffd144cd9001720aa83e3e7ab6",
+   "source_checked_at": "2026-09-30T00:21:50.190671+00:00",
+   "checked_at": "2026-09-30T00:21:50.190671+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Atlanta": {
   "distance_from_citiesjson_m": 1521,
@@ -97,7 +149,33 @@
   "lat": "-34.8222",
   "lon": "-58.5358",
   "source": "OurAirports",
-  "station": "SAEZ"
+  "station": "SAEZ",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "SAEZ",
+   "source_station_id": "0-20000-0-87576",
+   "wmo_station_id": "87576",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 20,
+   "site_lat": -34.81856,
+   "site_lon": -58.54229,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-87576",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_saez_station.xml",
+   "body_sha256": "d9e23fb90a8393fa8f9d343db1c372cc5a5af04815c542fe7b390f897272bf3e",
+   "source_checked_at": "2026-09-30T00:21:58.278913+00:00",
+   "checked_at": "2026-09-30T00:21:58.278913+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Busan": {
   "distance_from_citiesjson_m": 56,
@@ -113,7 +191,33 @@
   "lat": "-33.97403",
   "lon": "18.604333",
   "source": "OurAirports",
-  "station": "FACT"
+  "station": "FACT",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "FACT",
+   "source_station_id": "0-20000-0-68816",
+   "wmo_station_id": "68816",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 42,
+   "site_lat": -33.9631,
+   "site_lon": 18.6023,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-68816",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_fact_station.xml",
+   "body_sha256": "f4f159ce3e1a98f2e10a149ee959038b03b27460ea51e522a1af511ae61a1aac",
+   "source_checked_at": "2026-09-30T00:21:44.159379+00:00",
+   "checked_at": "2026-09-30T00:21:44.159379+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Chengdu": {
   "distance_from_citiesjson_m": 2230,
@@ -213,7 +317,33 @@
   "lat": "60.318363",
   "lon": "24.963341",
   "source": "OurAirports",
-  "station": "EFHK"
+  "station": "EFHK",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "EFHK",
+   "source_station_id": "0-20000-0-02974",
+   "wmo_station_id": "02974",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 46.8,
+   "site_lat": 60.3267,
+   "site_lon": 24.95675,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-02974",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_efhk_station.xml",
+   "body_sha256": "0f38efb32e22d3dcd7203fdb35c3c26d39aa8f73b44c181a4fd8ceae443ae179",
+   "source_checked_at": "2026-09-30T00:54:59.964846+00:00",
+   "checked_at": "2026-09-30T00:54:59.964846+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Hong Kong": {
   "distance_from_citiesjson_m": null,
@@ -291,7 +421,33 @@
   "lat": "21.680241",
   "lon": "39.157436",
   "source": "OurAirports",
-  "station": "OEJN"
+  "station": "OEJN",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "OEJN",
+   "source_station_id": "0-20000-0-41024",
+   "wmo_station_id": "41024",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 16.88,
+   "site_lat": 21.657559,
+   "site_lon": 39.185749,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-41024",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_oejn_station.xml",
+   "body_sha256": "28104b5369f7eea4f5cedb92a2084607652394c93d80f2c9c9a3018fc1d08f15",
+   "source_checked_at": "2026-09-30T00:21:51.342588+00:00",
+   "checked_at": "2026-09-30T00:21:51.342588+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Jinan": {
   "distance_from_citiesjson_m": 900,
@@ -307,7 +463,33 @@
   "lat": "24.9065",
   "lon": "67.160797",
   "source": "OurAirports",
-  "station": "OPKC"
+  "station": "OPKC",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "OPKC",
+   "source_station_id": "0-20000-0-41780",
+   "wmo_station_id": "41780",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 21,
+   "site_lat": 24.9,
+   "site_lon": 67.1333333333,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-41780",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_opkc_station.xml",
+   "body_sha256": "2ab132ccf60d49c400976ff012bad167bdff73681ccdd8b45f5722ca92acf7d5",
+   "source_checked_at": "2026-09-30T00:21:53.198402+00:00",
+   "checked_at": "2026-09-30T00:21:53.198402+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Kuala Lumpur": {
   "distance_from_citiesjson_m": 472,
@@ -315,7 +497,33 @@
   "lat": "2.74558",
   "lon": "101.709999",
   "source": "OurAirports",
-  "station": "WMKK"
+  "station": "WMKK",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "WMKK",
+   "source_station_id": "0-20000-0-48650",
+   "wmo_station_id": "48650",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 16.11,
+   "site_lat": 2.730833,
+   "site_lon": 101.7031,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-48650",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_wmkk_station.xml",
+   "body_sha256": "698e1c309f1a7e63def85a7f96fead3709d239db22e1e1279fadffa8aeeea4ed",
+   "source_checked_at": "2026-09-30T00:22:01.127369+00:00",
+   "checked_at": "2026-09-30T00:22:01.127369+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Lagos": {
   "distance_from_citiesjson_m": 45,
@@ -369,7 +577,33 @@
   "lat": "26.760599",
   "lon": "80.889297",
   "source": "OurAirports",
-  "station": "VILK"
+  "station": "VILK",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "VILK",
+   "source_station_id": "0-20000-0-42369",
+   "wmo_station_id": "42369",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 122,
+   "site_lat": 26.75,
+   "site_lon": 80.8833,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-42369",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_vilk_station.xml",
+   "body_sha256": "c2e5883e31f7394df71b8b786ec126a922b3f4b9b6443d12a834e05a70d98e6b",
+   "source_checked_at": "2026-09-30T00:21:59.933583+00:00",
+   "checked_at": "2026-09-30T00:21:59.933583+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Madrid": {
   "distance_from_citiesjson_m": 3379,
@@ -377,7 +611,33 @@
   "lat": "40.493407",
   "lon": "-3.572249",
   "source": "OurAirports",
-  "station": "LEMD"
+  "station": "LEMD",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "LEMD",
+   "source_station_id": "0-20000-0-08221",
+   "wmo_station_id": "08221",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 609,
+   "site_lat": 40.4666666667,
+   "site_lon": -3.5555555556,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-08221",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_lemd_station.xml",
+   "body_sha256": "b18724ac86be63cea976e85bc2b31c29b6c8e418c4acb9c41ff76cc76a9f69b9",
+   "source_checked_at": "2026-09-30T00:21:47.056374+00:00",
+   "checked_at": "2026-09-30T00:21:47.056374+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Manila": {
   "distance_from_citiesjson_m": 1731,
@@ -385,7 +645,33 @@
   "lat": "14.5086",
   "lon": "121.019997",
   "source": "OurAirports",
-  "station": "RPLL"
+  "station": "RPLL",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "RPLL",
+   "source_station_id": "0-20000-0-98429",
+   "wmo_station_id": "98429",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 21.06,
+   "site_lat": 14.5047,
+   "site_lon": 121.004751,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-98429",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_rpll_station.xml",
+   "body_sha256": "88f6e2e1cc2d8bab755a8dc1b2a6e28e6e6222f59e728c5ef6b49b2d2a006e24",
+   "source_checked_at": "2026-09-30T00:21:56.371268+00:00",
+   "checked_at": "2026-09-30T00:21:56.371268+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Mexico City": {
   "distance_from_citiesjson_m": 176,
@@ -431,7 +717,33 @@
   "lat": "45.6306",
   "lon": "8.72811",
   "source": "OurAirports",
-  "station": "LIMC"
+  "station": "LIMC",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "LIMC",
+   "source_station_id": "0-20000-0-16066",
+   "wmo_station_id": "16066",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 234,
+   "site_lat": 45.63,
+   "site_lon": 8.7230555556,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-16066",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_limc_station.xml",
+   "body_sha256": "e8659c81e9af8e60bc88a93f1332b221b72fbb5dc9c08b8c869bf6da0458df4a",
+   "source_checked_at": "2026-09-30T00:21:47.712433+00:00",
+   "checked_at": "2026-09-30T00:21:47.712433+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Moscow": {
   "distance_from_citiesjson_m": 64,
@@ -493,7 +805,33 @@
   "lat": "48.962276",
   "lon": "2.436539",
   "source": "OurAirports",
-  "station": "LFPB"
+  "station": "LFPB",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "LFPB",
+   "source_station_id": "0-20000-0-07150",
+   "wmo_station_id": "07150",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 67,
+   "site_lat": 48.9675,
+   "site_lon": 2.4275,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-07150",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_lfpb_station.xml",
+   "body_sha256": "c09e6bdb0264a44557cb0151f6fc852ddac77626b195b2f98f9163519dffefc1",
+   "source_checked_at": "2026-09-30T00:54:57.194219+00:00",
+   "checked_at": "2026-09-30T00:54:57.194219+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Qingdao": {
   "distance_from_citiesjson_m": 105,
@@ -601,7 +939,33 @@
   "lat": "1.35019",
   "lon": "103.994003",
   "source": "OurAirports",
-  "station": "WSSS"
+  "station": "WSSS",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "WSSS",
+   "source_station_id": "0-20000-0-48698",
+   "wmo_station_id": "48698",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 14,
+   "site_lat": 1.3679,
+   "site_lon": 103.9824,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-48698",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_wsss_station.xml",
+   "body_sha256": "06bf7e3cea2a1d492f40bfaab14e5c56841fc976b51f799bacb8e32eb4ab1c20",
+   "source_checked_at": "2026-09-30T00:22:03.643576+00:00",
+   "checked_at": "2026-09-30T00:22:03.643576+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Taipei": {
   "distance_from_citiesjson_m": 212,
@@ -625,7 +989,33 @@
   "lat": "35.549678",
   "lon": "139.786958",
   "source": "OurAirports",
-  "station": "RJTT"
+  "station": "RJTT",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "RJTT",
+   "source_station_id": "0-20000-0-47671",
+   "wmo_station_id": "47671",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 6.41,
+   "site_lat": 35.5533333333,
+   "site_lon": 139.7811111111,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-47671",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_rjtt_station.xml",
+   "body_sha256": "6818252e0483af295a7ba2ee655d290fb9949bd68c11a712c5318c336ddebd39",
+   "source_checked_at": "2026-09-30T00:21:54.708633+00:00",
+   "checked_at": "2026-09-30T00:21:54.708633+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Toronto": {
   "distance_from_citiesjson_m": 342,
@@ -633,7 +1023,33 @@
   "lat": "43.675935",
   "lon": "-79.629421",
   "source": "OurAirports",
-  "station": "CYYZ"
+  "station": "CYYZ",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "CYYZ",
+   "source_station_id": "0-20000-0-71624",
+   "wmo_station_id": "71624",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 173.4,
+   "site_lat": 43.67666667,
+   "site_lon": -79.63055556,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-71624",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_cyyz_station.xml",
+   "body_sha256": "12de79a33312f50585d372be9baa71e18e3d6c2a980d260b58c9531154a03e19",
+   "source_checked_at": "2026-09-30T00:21:40.617571+00:00",
+   "checked_at": "2026-09-30T00:21:40.617571+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Warsaw": {
   "distance_from_citiesjson_m": 513,
@@ -641,7 +1057,33 @@
   "lat": "52.165699",
   "lon": "20.9671",
   "source": "OurAirports",
-  "station": "EPWA"
+  "station": "EPWA",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "wmo_wmd_awc_station_snapshot_v1",
+   "station_id": "EPWA",
+   "source_station_id": "0-20000-0-12375",
+   "wmo_station_id": "12375",
+   "height_role": "ground_msl",
+   "quantity": "WIGOS3-07.ObservingFacility.geospatialLocation.elevation",
+   "elevation_m": 106.51,
+   "site_lat": 52.1627777778,
+   "site_lon": 20.9611111111,
+   "location_role": "fixed_land_station_ground_reference",
+   "source_url": "https://oscar.wmo.int/surface/rest/api/wmd/download/0-20000-0-12375",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/wmo_wmd_epwa_station.xml",
+   "body_sha256": "c2d92d62c759f62768511feef7b37c42da811297eef568573c329e4dea588353",
+   "source_checked_at": "2026-09-30T00:21:43.910746+00:00",
+   "checked_at": "2026-09-30T00:21:43.910746+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57Z",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Wellington": {
   "distance_from_citiesjson_m": 468,

@@ -10,3 +10,21 @@ config/noaa_homr_kmia_station.json -text
 config/noaa_homr_klga_station.json -text
 config/noaa_homr_ksfo_station.json -text
 config/noaa_homr_ksea_station.json -text
+config/wmo_wmd_eham_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_cyyz_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_epwa_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_fact_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_lemd_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_limc_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_ltac_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_oejn_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_opkc_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_rjtt_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_rpll_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_saez_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_vilk_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_wmkk_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_wsss_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_lfpb_station.xml -text whitespace=cr-at-eol
+config/wmo_wmd_efhk_station.xml -text whitespace=cr-at-eol
+config/awc_stationinfo_53_station.json -text

@@ -8,7 +8,7 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 |------|---------|
 | `settings.json` | Tunable runtime parameters — cycle intervals, thresholds, Kelly multipliers, risk limits |
 | `cities.json` | 46 cities: coordinates (= settlement station lat/lon), station id, `settlement_source_type`, timezone, unit, peak hour, cluster; `_source_contract_pending_conversions` blocks config-only source migrations until release evidence exists. **Routine check needed** — see discipline note below |
-| `station_precise_coords.json` | Per-city station/reference coordinates and elevation; its optional typed `station_ground_proof` is exact HKO/HOMR source-ground metadata, not sensor AGL or a blanket precision-PASS grant |
+| `station_precise_coords.json` | Per-city station/reference coordinates and elevation; optional typed `station_ground_proof` binds HKO/HOMR/WMD ground metadata to original entities, not sensor AGL or a blanket precision-PASS grant |
 | `hko_station_metadata.html` | Original official HKO station-table response body referenced only by a content-hash-bound `station_ground_proof`; do not execute or normalize this source HTML |
 | `noaa_homr_kord_station.json` | Original official NOAA HOMR response body referenced only by Chicago's content-hash-bound primary-DCP `station_ground_proof`; do not normalize or treat airport/barometric elevations as ground |
 | `noaa_homr_katl_station.json` | Original official current NOAA HOMR KATL primary-temperature-DCP ground entity; Atlanta-only content-bound proof, never airport/barometric height or historical possession |
@@ -20,6 +20,24 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | `noaa_homr_klga_station.json` | Original official current NOAA HOMR KLGA primary-temperature-DCP ground entity; NYC-only content-bound proof |
 | `noaa_homr_ksfo_station.json` | Original official current NOAA HOMR KSFO primary-temperature-DCP ground entity; San Francisco-only content-bound proof |
 | `noaa_homr_ksea_station.json` | Original official current NOAA HOMR KSEA primary-temperature-DCP ground entity; Seattle-only content-bound proof |
+| `awc_stationinfo_53_station.json` | Original official AWC current station-list entity shared by WMD proofs; exact ICAO/WMO/METAR identity bridge only, never ground authority from its generic elevation |
+| `wmo_wmd_eham_station.xml` | Original official WMDR EHAM fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_cyyz_station.xml` | Original official WMDR CYYZ fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_epwa_station.xml` | Original official WMDR EPWA fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_fact_station.xml` | Original official WMDR FACT fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_lemd_station.xml` | Original official WMDR LEMD fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_limc_station.xml` | Original official WMDR LIMC fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_ltac_station.xml` | Original official WMDR LTAC fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_oejn_station.xml` | Original official WMDR OEJN fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_opkc_station.xml` | Original official WMDR OPKC fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_rjtt_station.xml` | Original official WMDR RJTT fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_rpll_station.xml` | Original official WMDR RPLL fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_saez_station.xml` | Original official WMDR SAEZ fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_vilk_station.xml` | Original official WMDR VILK fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_wmkk_station.xml` | Original official WMDR WMKK fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_wsss_station.xml` | Original official WMDR WSSS fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_lfpb_station.xml` | Original official WMDR LFPB fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
+| `wmo_wmd_efhk_station.xml` | Original official WMDR EFHK fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
 | `city_monthly_bounds.json` | Generated monthly physical bounds used by ingestion guard; generated config, not hand-edited |
 | `city_correlation_matrix.json` | Generated city correlation matrix for risk/data-rebuild work; generated config, not hand-edited |
 | `provenance_registry.yaml` | INV-13 constant registration for Kelly cascade — every magic number traced to source |
