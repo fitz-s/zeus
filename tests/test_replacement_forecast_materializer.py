@@ -1108,22 +1108,33 @@ def _fixture_native_shape_identity(conn, request, monkeypatch, *, members_c):
         assert path.read_text() == serialized, "one issued native input cannot change with provider center"
     else:
         path.write_text(serialized)
+    existing = conn.execute("""SELECT es.* FROM ensemble_snapshots es JOIN source_run sr
+        ON sr.source_run_id=es.source_run_id WHERE es.city=? AND es.target_date=?
+        AND es.temperature_metric=? AND es.source_cycle_time=? AND sr.manifest_hash=?""",
+        (city.name,str(request.target_date),metric,cycle.isoformat(),manifest_sha)).fetchone()
+    if existing is not None:
+        # Rebinding a later decision reads its first canonical possession;
+        # it must not re-run the writer and renew recorded/source clocks.
+        row = dict(existing)
+    else:
+        row = None
     class ClockType(type):
         def __instancecheck__(cls, value): return isinstance(value, datetime)
     class NativeClock(datetime, metaclass=ClockType):
         @classmethod
         def now(cls, tz=None): return captured.astimezone(tz or UTC)
-    with monkeypatch.context() as ingress:
-        ingress.setattr(native, "datetime", NativeClock)
-        ingress.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: captured.isoformat())
-        decision, release = native._select_cycle_for_track(track=track, now_utc=captured)
-        assert decision is native.FetchDecision.FETCH_ALLOWED and release["selected_cycle_time"] == cycle
-        collected = native.collect_open_ens_cycle(track=track, skip_download=True, skip_extract=True,
-            grid_surface_source_evidence=grid, conn=conn, now_utc=captured,
-            _paths=native._resolve_opendata_paths(source_root=root, environ={}))
-    assert collected["status"] == "ok", collected
-    row = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=? AND city=? AND target_date=? AND temperature_metric=?",
-        (collected["source_run_id"], city.name, str(request.target_date), metric)).fetchone())
+    if row is None:
+        with monkeypatch.context() as ingress:
+            ingress.setattr(native, "datetime", NativeClock)
+            ingress.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: captured.isoformat())
+            decision, release = native._select_cycle_for_track(track=track, now_utc=captured)
+            assert decision is native.FetchDecision.FETCH_ALLOWED and release["selected_cycle_time"] == cycle
+            collected = native.collect_open_ens_cycle(track=track, skip_download=True, skip_extract=True,
+                grid_surface_source_evidence=grid, conn=conn, now_utc=captured,
+                _paths=native._resolve_opendata_paths(source_root=root, environ={}))
+        assert collected["status"] == "ok", collected
+        row = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=? AND city=? AND target_date=? AND temperature_metric=?",
+            (collected["source_run_id"], city.name, str(request.target_date), metric)).fetchone())
     assert row["source_cycle_time"] == cycle.isoformat()
     actual_members = tuple(json.loads(row["members_json"]))
     if city.settlement_unit == "F":
@@ -1131,7 +1142,7 @@ def _fixture_native_shape_identity(conn, request, monkeypatch, *, members_c):
     assert actual_members == pytest.approx(tuple(members_c))
     from src.contracts.ensemble_snapshot_provenance import grid_surface_evidence_identity_hash
     surface = json.loads(row["provenance_json"])["grid_surface_evidence"]
-    return row, grid_surface_evidence_identity_hash(surface)
+    return row, grid_surface_evidence_identity_hash(surface), actual_members
 
 
 def _install_hko_live_fusion(monkeypatch, **kwargs):
@@ -1147,7 +1158,7 @@ def _install_hko_live_fusion(monkeypatch, **kwargs):
         return request  # Legacy downstream seam, not current proof authority.
     original = materializer_mod._replacement_bayes_precision_fusion_override()
     members = original.current_evidence_members_c
-    native_row, native_surface_hash = _fixture_native_shape_identity(conn, request, monkeypatch, members_c=members)
+    native_row, native_surface_hash, members = _fixture_native_shape_identity(conn, request, monkeypatch, members_c=members)
     within = sum((value-25.0)**2 for value in members)/len(members)
     delta = math.sqrt(original.predictive_sigma_c**2-within)
     values = {"icon_global":25.0-delta,"ukmo_global_deterministic_10km":25.0+delta}
@@ -2986,6 +2997,14 @@ def test_day0_owner_witness_allows_current_owner_posterior_write(
         target_date=request.target_date,metric=request.temperature_metric) == "REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_MISSING"
     assert not materializer_mod._fusion_current_evidence_shape_has_live_authority(
         replace(fusion,current_evidence_shape=missing),request=request,conn=conn)
+    native_before = {table:tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
+                     for table in ("ensemble_snapshots","source_run","source_run_coverage")}
+    rebound, _, members = _fixture_native_shape_identity(conn,replace(request,computed_at=request.computed_at+timedelta(minutes=1)),
+        monkeypatch,members_c=fusion.current_evidence_members_c)
+    assert rebound["snapshot_id"] == shape["snapshot_id"]
+    assert members == pytest.approx(fusion.current_evidence_members_c)
+    assert all(tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")) == before
+               for table,before in native_before.items())
     witness = _day0_owner_witness(request, seed_file=tmp_path / "owner-a.json")
     _record_day0_owner(conn, request, witness)
     prepared = _prepare_for_final_write(
