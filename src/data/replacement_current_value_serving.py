@@ -322,6 +322,7 @@ def _physical_artifact_at_cutoff(row: Mapping[str, object], candidates=None) -> 
         if not isinstance(artifact, dict):
             continue
         captured = clock(artifact.get("captured_at"))
+        available = clock(artifact.get("source_available_at"))
         recorded = clock(artifact.get("recorded_at"))
         recorded_bound=recorded
         invalid_recorded=False
@@ -333,6 +334,9 @@ def _physical_artifact_at_cutoff(row: Mapping[str, object], candidates=None) -> 
         if cutoff is None:
             if artifact.get("artifact_id") != row.get("artifact_id"):
                 continue
+        elif (available is not None and available > cutoff
+                and ((available_bound := _receipt_canonical_recorded_bound(artifact)) is None or available_bound > cutoff)):
+            continue
         elif recorded_bound is not None and recorded_bound > cutoff:
             continue
         elif recorded_bound is None and captured is not None and captured > cutoff:
@@ -968,6 +972,14 @@ def _unbounded_bad_http_receipt(row: Mapping[str, object], artifact: Mapping[str
             run = run.replace(tzinfo=timezone.utc)
         if run != _repair_stamp(row["source_cycle_time"]):
             return False
+        # Each independently known future clock keeps its causal boundary even
+        # when recording is unknown and the sealed receipt file has been lost.
+        for key in ("source_available_at", "captured_at"):
+            try:
+                if _repair_stamp(artifact[key]) > observed_at:
+                    return False
+            except (TypeError, ValueError):
+                pass
         # A parseable recording clock keeps its original causal/future ordering.
         try:
             _repair_stamp(artifact["recorded_at"])

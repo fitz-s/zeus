@@ -5470,3 +5470,46 @@ def test_extreme_sealed_map_cannot_borrow_sibling_or_accept_noncanonical_ids(tmp
         assert ("icon_global" in _served_in_world(conn, world, targets[1])) is (fault == "missing_own")
         assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
     assert len(world.calls) == calls
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("future_clock", ("captured_at", "source_available_at"))
+def test_extreme_earlier_repair_cannot_supersede_independently_known_future_receipt(tmp_path, monkeypatch, metric, future_clock):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    raw_ids, before, old_receipts = _break_unbounded_receipts(world, [target])
+    old_cut = world.clock[0]
+    future = old_cut + timedelta(minutes=1)
+    with world.open_forecast(world.db) as conn:
+        future_values = {"captured_at": "unknown", "source_available_at": "unknown"}
+        future_values[future_clock] = future.isoformat()
+        future_id = conn.execute("""INSERT INTO raw_forecast_artifacts
+            (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,artifact_path,
+             sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
+            SELECT source_id,product_id,data_version,source_cycle_time,?,?,artifact_path,
+                ?,byte_size,request_url,request_params_json,artifact_metadata_json,'unknown',0
+            FROM raw_forecast_artifacts WHERE artifact_id=?""",
+            (future_values["source_available_at"], future_values["captured_at"], "f" * 64, old_receipts[0])).lastrowid
+        conn.commit()
+        assert "icon_global" not in _served_in_world(conn, world, target)
+    early = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    assert early["physical_capture_recovered_raw_ids"] == raw_ids, early
+    intermediate_cut = world.clock[0]
+    with world.open_forecast(world.db) as conn:
+        assert "icon_global" in _served_in_world(conn, world, target, intermediate_cut)
+        world.clock[0] = future + timedelta(seconds=1)
+        assert "icon_global" not in _served_in_world(conn, world, target), "KNOWN_FUTURE_RECEIPT_WASHED_BY_EARLIER_REPAIR"
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=world.clock[0].isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+    later = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    assert later["physical_capture_recovered_raw_ids"] == raw_ids, later
+    with world.open_forecast(world.db) as conn:
+        assert "icon_global" in _served_in_world(conn, world, target)
+        assert "icon_global" not in _served_in_world(conn, world, target, old_cut)
+        assert "icon_global" in _served_in_world(conn, world, target, intermediate_cut)
+        assert "icon_global" not in _served_in_world(conn, world, target, future + timedelta(seconds=1))
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
+        assert conn.execute(f"SELECT {future_clock},recorded_at FROM raw_forecast_artifacts WHERE artifact_id=?", (future_id,)).fetchone() == (future.isoformat(), "unknown")
