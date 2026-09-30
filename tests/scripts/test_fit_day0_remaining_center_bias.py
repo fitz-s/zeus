@@ -148,12 +148,20 @@ def test_estimate_variance_is_clustered_by_city_day() -> None:
     assert math.isfinite(v1) and v20 >= v1 - 1e-12
 
 
-def test_edge_maximum_is_unmeasured() -> None:
-    rows = _records("high", 4, 3.0, days=5, cities=2, hours=1, noise=0.0)
+def test_edge_maximum_saturates_instead_of_vanishing() -> None:
+    """Hong Kong high|0, 09-22..09-26: the city MLE sat near the +1.5 grid edge and
+    alternated between +1.4 and "unmeasured" (served 0) on successive refits. An
+    edge maximum must saturate at the edge with a finite variance, continuously."""
 
-    est = fit.estimate(rows, lambda r: (r.city, r.target_date))
+    inside = _records("high", 4, 1.4, days=5, cities=2, hours=1, noise=0.0)
+    beyond = _records("high", 4, 3.0, days=5, cities=2, hours=1, noise=0.0)
 
-    assert est.b == 0.0 and math.isinf(est.v)
+    a = fit.estimate(inside, lambda r: (r.city, r.target_date))
+    b = fit.estimate(beyond, lambda r: (r.city, r.target_date))
+
+    assert math.isfinite(a.v) and math.isfinite(b.v)
+    assert abs(a.b - 1.4) <= 0.05
+    assert b.b == float(fit.GRID_C[-1])
 
 
 def test_fast_residual_posteriors_are_excluded_from_records(tmp_path, monkeypatch) -> None:

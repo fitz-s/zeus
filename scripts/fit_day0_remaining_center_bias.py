@@ -28,7 +28,7 @@ evaluated on a fixed grid once per record; every fit below is a sum over that ma
 
 FIT. Evidence pools per (metric, 2-hour local band). Each band's MLE ``b`` comes with
 a variance clustered by city-day. Its node is the posterior mean under a N(0, tau2)
-prior, tau2 the method-of-moments spread of the metric's band MLEs:
+prior, tau2 the Paule-Mandel spread of the metric's band MLEs:
 ``node = b * tau2 / (tau2 + v)``. A station's node adds its own deviation from the
 band MLE, shrunk the same way toward 0. There is no activation gate: a thin band's
 node is near 0 by its own variance, so a refit moves a node by the change in its
@@ -267,10 +267,9 @@ def estimate(records: list[Record], cluster) -> Estimate:
     groups: dict[object, list[np.ndarray]] = collections.defaultdict(list)
     for record in records:
         groups[cluster(record)].append(record.loglik)
-    i = int(np.argmax(total))
-    if i in (0, GRID_C.size - 1):
-        # The maximum is not inside the grid: the curve bounds nothing.
-        return Estimate(0.0, math.inf, len(records), len(groups))
+    # A maximum on the grid edge saturates at the edge with the edge curvature; it
+    # never becomes "unmeasured", which would flip a node to 0 between refits.
+    i = min(max(int(np.argmax(total)), 1), GRID_C.size - 2)
     y0, y1, y2 = total[i - 1], total[i], total[i + 1]
     second = (y0 - 2.0 * y1 + y2) / step**2
     if not second < 0.0:
@@ -286,12 +285,28 @@ def estimate(records: list[Record], cluster) -> Estimate:
 
 
 def _prior_variance(pairs: list[tuple[float, float]]) -> float:
-    """Method-of-moments spread of the true values behind noisy (estimate, variance)."""
+    """Spread tau2 of the true values behind noisy (estimate, variance) pairs.
 
-    finite = [(b, v) for b, v in pairs if math.isfinite(v)]
+    Paule-Mandel for a prior centred at 0: the tau2 at which
+    sum b^2 / (v + tau2) equals the number of estimates. Each estimate's pull is
+    bounded by its own precision, so one noisy estimate (b^2 < v) cannot drive tau2
+    to 0 and switch every well-measured estimate off, as a plain mean of b^2 - v does.
+    """
+
+    finite = [(b * b, v) for b, v in pairs if math.isfinite(v) and v > 0.0]
     if len(finite) < 2:
         return 0.0
-    return max(0.0, float(np.mean([b * b - v for b, v in finite])))
+
+    def excess(tau2: float) -> float:
+        return sum(b2 / (v + tau2) for b2, v in finite) - len(finite)
+
+    if excess(0.0) <= 0.0:
+        return 0.0
+    low, high = 0.0, max(b2 for b2, _v in finite) + 1.0
+    for _ in range(100):
+        mid = 0.5 * (low + high)
+        low, high = (mid, high) if excess(mid) > 0.0 else (low, mid)
+    return 0.5 * (low + high)
 
 
 def _shrink(value: float, variance: float, prior: float) -> float:
@@ -306,7 +321,7 @@ def fit_metric(records: list[Record]) -> dict:
     """Node curve for one metric: per-band estimates shrunk toward 0, plus stations.
 
     Pooled node = band MLE shrunk by its clustered variance under a N(0, tau2) prior,
-    tau2 the method-of-moments spread of the band MLEs. A station's node adds its own
+    tau2 the Paule-Mandel spread of the band MLEs. A station's node adds its own
     deviation from the band MLE, shrunk the same way toward 0 under the spread of
     all stations' deviations in that band; its variance is never below the band's
     median within-city per-city-day variance over its own city-days. No gate: an

@@ -385,7 +385,7 @@ local band): the band's MLE comes from the terminal-bin likelihood of this same
 operator on posteriors whose served q is the carrier itself
 (fast-residual-transported rows excluded), with a variance clustered by
 city-day. The band's node is the posterior mean under a N(0, tau2) prior, with
-tau2 the method-of-moments spread of the metric's band MLEs. A station's node
+tau2 the Paule-Mandel spread of the metric's band MLEs. A station's node
 adds its own shrunk deviation. `b(h)` interpolates linearly between nodes at the
 band centres and is flat past the end nodes. There is no activation gate and no
 step. The same evidence on either side of a band edge serves the same q up to
