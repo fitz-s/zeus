@@ -1455,9 +1455,7 @@ def test_live_reader_does_not_accept_malformed_or_non_object_provenance(
         )
 
 
-@pytest.mark.parametrize(
-    ("carrier", "accepted"),
-    (
+_CURRENT_CARRIER_PAIR_CASES = (
         ({}, True),
         ({"q_shape": "day0_remaining_shared_carrier_v1"}, False),
         ({"q_shape": "day0_remaining_shared_carrier_v2"}, False),
@@ -1581,12 +1579,111 @@ def test_live_reader_does_not_accept_malformed_or_non_object_provenance(
             },
             True,
         ),
-    ),
 )
+
+
+def _source_specific_carrier_case(carrier):
+    return not carrier or carrier.get("q_shape") == "fused_day0_fast_residual_likelihood"
+
+
+@pytest.fixture(scope="module")
+def _generic_reader_format_template(tmp_path_factory, request):
+    # Group by the actual V2/V3 normal producer, retaining one private DB per
+    # immutable source cut. Each case changes only a deep-copied JSON payload.
+    root = tmp_path_factory.mktemp("reader-v3" if request.param else "reader-v2")
+    with pytest.MonkeyPatch.context() as inputs:
+        normal = _generic_reader_current_row.__wrapped__(root, inputs, request)
+        next_value = next(normal)
+        try:
+            assert next_value[1].is_relative_to(root)
+            yield next_value
+        finally:
+            next(normal, None)
+
+
+@pytest.mark.parametrize(("carrier","accepted","_generic_reader_format_template"),[
+    pytest.param(carrier,accepted,
+        carrier.get("day0_remaining_carrier_operator") != "extreme_observed_then_noisy_future_analytic_gaussian_mixture_v2",
+        id=f"carrier{index}-{accepted}")
+    for index,(carrier,accepted) in enumerate(_CURRENT_CARRIER_PAIR_CASES)
+    if not _source_specific_carrier_case(carrier)
+],indirect=["_generic_reader_format_template"])
 @pytest.mark.parametrize("purpose", tuple(ReplacementForecastAuthorityPurpose))
 def test_live_reader_accepts_only_complete_current_day0_carrier_pair(
-    carrier: dict[str, object], accepted: bool, purpose: ReplacementForecastAuthorityPurpose
+    carrier: dict[str, object], accepted: bool, purpose: ReplacementForecastAuthorityPurpose,
+    _generic_reader_format_template,
 ) -> None:
+    original, namespace = _generic_reader_format_template
+    row = dict(original)
+    provenance = json.loads(row["provenance_json"])
+    identity_key = "day0_remaining_carrier_content_identity"
+    operator_key = "day0_remaining_carrier_operator"
+    fields = dict(carrier)
+    # Nonempty placeholder identities/centers are structural constants, not
+    # new probability authority. Positive paths use the actual producer's
+    # content identity, native final center and complete provider proof.
+    if identity_key in fields and isinstance(fields[identity_key],str) and fields[identity_key].strip():
+        fields[identity_key] = provenance[identity_key]
+    if identity_key in fields and operator_key not in fields:
+        provenance.pop(operator_key)
+    elif operator_key in fields and identity_key not in fields:
+        provenance.pop(identity_key)
+    elif identity_key not in fields and operator_key not in fields:
+        provenance.pop(identity_key)
+    final_key = "day0_remaining_carrier_final_extremes_c"
+    provider_key = "day0_remaining_carrier_station_extreme_providers"
+    actual_final = provenance[final_key]
+    offset = actual_final[0]-32.0 if actual_final else 0.0
+    def native_constant(value):
+        return value+offset if type(value) in (int,float) else value
+    if isinstance(fields.get(final_key),(list,tuple)):
+        fields[final_key] = [native_constant(value) for value in fields[final_key]]
+    if isinstance(fields.get(provider_key),(list,tuple)):
+        actual_providers = provenance[provider_key]
+        providers = []
+        for index,value in enumerate(fields[provider_key]):
+            if not isinstance(value,dict):
+                providers.append(value)
+                continue
+            copied = dict(actual_providers[index]) if index < len(actual_providers) else {}
+            copied.update(value)
+            if "forecast_value_c" in value:
+                copied["forecast_value_c"] = native_constant(value["forecast_value_c"])
+            providers.append(copied)
+        fields[provider_key] = providers
+    provenance.update(fields)
+    row["provenance_json"] = json.dumps(provenance)
+    result = reader._live_grade_provenance(
+        row, authority_purpose=purpose, forecast_db=namespace
+    )
+    assert (result is not None) is accepted, carrier
+    # Every fault remains in the copied format input. The actual licensed row,
+    # including source/cut/identity/value fields, remains byte-for-byte intact.
+    persisted = sqlite3.connect(f"file:{namespace}?mode=ro", uri=True)
+    try:
+        persisted.row_factory = sqlite3.Row
+        persisted.execute("PRAGMA query_only=ON")
+        unchanged = persisted.execute(
+            "SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (original["posterior_id"],),
+        ).fetchone()
+        assert dict(unchanged) == original
+    finally:
+        persisted.close()
+
+
+@pytest.mark.parametrize(("carrier","accepted"),[
+    pytest.param(carrier,accepted,id=f"carrier{index}-{accepted}")
+    for index,(carrier,accepted) in enumerate(_CURRENT_CARRIER_PAIR_CASES)
+    if _source_specific_carrier_case(carrier)
+])
+@pytest.mark.parametrize("purpose",tuple(ReplacementForecastAuthorityPurpose))
+def test_live_reader_source_specific_carrier_cases_keep_their_original_obligation(
+    carrier,accepted,purpose,
+):
+    # These eight original cases remain pending: six WU fast-residual paths
+    # and two ordinary non-carrier paths. A normal HKO V2/V3 certificate is
+    # not a substitute for either source/producer obligation.
     provenance = {**_live_provenance(), **carrier}
     row = {
         "runtime_layer": LIVE_RUNTIME_LAYER,
