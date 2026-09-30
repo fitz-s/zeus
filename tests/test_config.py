@@ -805,6 +805,90 @@ def test_international_homr_legitimate_zero_and_negative_ground_remain_valid(sta
     assert facts["elevation_m"] == float(metres)
 
 
+_INTERNATIONAL_HOMR_ADDITIONAL_ENTITIES = (
+    ("Auckland", "NZAA", "30151541", 7.0),
+    ("Busan", "RKPK", "20029737", 1.8),
+    ("Chengdu", "ZUUU", "30137836", 495.3),
+    ("Chongqing", "ZUCK", "30137833", 416.1),
+    ("Guangzhou", "ZGGG", "30137796", 15.2),
+    ("Istanbul", "LTFM", "30146057", 99.0),
+    ("Jakarta", "WIHH", "30140750", 25.6),
+    ("Jinan", "ZSJN", "30137818", 23.2),
+    ("Lagos", "DNMM", "30152035", 41.1),
+    ("Mexico City", "MMMX", "30149753", 2229.9),
+    ("Munich", "EDDM", "30103328", 453.2),
+    ("Sao Paulo", "SBGR", "30134434", 749.5),
+    ("Seoul", "RKSI", "30150507", 7.0),
+    ("Shenzhen", "ZGSZ", "30137800", 4.0),
+    ("Wellington", "NZWN", "30083512", 7.0),
+    ("Zhengzhou", "ZHCC", "30137802", 150.9),
+)
+
+
+@pytest.mark.parametrize("name,station,ncdc,height", _INTERNATIONAL_HOMR_ADDITIONAL_ENTITIES)
+def test_international_homr_additional_explicit_entity_is_reference_only(name, station, ncdc, height):
+    """Actual retained station bytes; neither configured permission nor thermal DCP."""
+    import src.config as config
+    raw = (config.PROJECT_ROOT / f"config/noaa_homr_{station.lower()}_station.json").read_bytes()
+    facts = config.station_ground_facts_from_bytes(
+        source_kind=config.HOMR_INTERNATIONAL_GROUND_SOURCE_KIND,
+        station_id=station, raw_body=raw,
+    )
+    assert facts is not None
+    assert config.runtime_cities_by_name()[name].wu_station == station
+    assert facts["source_station_id"] == ncdc
+    assert facts["elevation_m"] == height
+    assert facts["location_role"] == "station_ground_reference"
+    assert "temperature_station" not in facts
+    assert "wmo_station_id" not in facts
+    assert config.station_ground_source_artifact_ref(
+        source_kind=config.HOMR_INTERNATIONAL_GROUND_SOURCE_KIND, station_id=station,
+    ) == f"config/noaa_homr_{station.lower()}_station.json"
+    assert config.station_ground_facts_from_bytes(
+        source_kind="noaa_homr_primary_dcp_snapshot_v1", station_id=station, raw_body=raw,
+    ) is None
+
+
+@pytest.mark.parametrize("name,station,ncdc,height", _INTERNATIONAL_HOMR_ADDITIONAL_ENTITIES)
+@pytest.mark.parametrize("mutation", (
+    "foreign_icao", "self_consistent_foreign_ncdc", "multiple_coordinates",
+    "header_mismatch", "ground_airport", "duplicate_ground", "units",
+    "sentinel", "known_location_period", "known_identifier_period",
+))
+def test_international_homr_additional_entity_positive_first_rejects_single_fault(name, station, ncdc, height, mutation):
+    import src.config as config
+    raw = (config.PROJECT_ROOT / f"config/noaa_homr_{station.lower()}_station.json").read_bytes()
+    kind = config.HOMR_INTERNATIONAL_GROUND_SOURCE_KIND
+    assert config.station_ground_facts_from_bytes(source_kind=kind, station_id=station, raw_body=raw) is not None
+    payload = json.loads(raw)
+    entity = payload["stationCollection"]["stations"][0]
+    location = entity["location"]
+    ground = next(row for row in location["elevations"] if row["elevationType"] == "GROUND")
+    if mutation == "foreign_icao":
+        next(row for row in entity["identifiers"] if row["idType"] == "ICAO")["id"] = "ZSPD"
+    elif mutation == "self_consistent_foreign_ncdc":
+        next(row for row in entity["identifiers"] if row["idType"] == "NCDCSTNID")["id"] = "0"
+        entity["ncdcStnId"] = location["ncdcstnId"] = "0"
+        location["geoInfo"]["ncdcstnId"] = location["nwsInfo"]["ncdcstnId"] = "0"
+    elif mutation == "multiple_coordinates":
+        location["latLonPairs"].append(dict(location["latLonPairs"][0]))
+    elif mutation == "header_mismatch":
+        entity["header"]["latitude_dec"] = "0"
+    elif mutation == "ground_airport":
+        ground["elevationType"] = "AIRPORT"
+    elif mutation == "duplicate_ground":
+        location["elevations"].append(dict(ground))
+    elif mutation == "units":
+        ground["elevationFeet"] = "99999"
+    elif mutation == "sentinel":
+        ground.update(elevationFeet="-99999", elevationMeters="-30479.6952")
+    elif mutation == "known_location_period":
+        location["latLonPairs"][0]["beginDate"] = "2026-10-02"
+    elif mutation == "known_identifier_period":
+        entity["identifiers"][0]["endDate"] = "2026-10-02"
+    assert config.station_ground_facts_from_bytes(source_kind=kind, station_id=station, raw_body=json.dumps(payload).encode()) is None
+
+
 def _official_international_homr_registry(tmp_path, monkeypatch, name="Shanghai"):
     import hashlib
     import src.config as config
@@ -891,6 +975,36 @@ def test_international_homr_rejects_foreign_ambiguous_quantity_and_unsupported_p
     elif mutation == "definition":
         next(row for row in collection["definitions"] if row.get("defType") == "elevations" and row.get("abbr") == "GROUND")["description"] = "AIRPORT REFERENCE"
     assert config.station_ground_facts_from_bytes(source_kind=kind, station_id=station_id, raw_body=json.dumps(payload).encode()) is None
+
+
+@pytest.mark.parametrize("name", ("Shanghai", "London"))
+def test_international_homr_original_query_order_forms_do_not_relax_keys(tmp_path, monkeypatch, name):
+    from datetime import datetime, timezone
+    import src.config as config
+    registry, _artifact, rows = _official_international_homr_registry(tmp_path, monkeypatch, name)
+    city = config.runtime_cities_by_name()[name]
+    claim = rows[name]["station_ground_proof"]
+    original_url = claim["query_url"]
+    claim["query_url"] = (
+        f"{config.HOMR_GROUND_SOURCE_URL}?date=2026-09-30&current=true&"
+        f"qid=ICAO%3A{city.wu_station}&qidMod=is&phrData=false"
+    )
+    registry.write_text(json.dumps(rows))
+    later = datetime(2026, 10, 2, tzinfo=timezone.utc)
+    assert config.runtime_station_geometry_for_city(city, effective_at=later)["ground_status"] == "VERIFIED"
+    for url in (
+        claim["query_url"] + "&qid=ICAO%3AZSPD",
+        claim["query_url"] + "&date=2026-09-30",
+        claim["query_url"].replace("current=true", "current=false"),
+        claim["query_url"].replace("qidMod=is", "qidMod=contains"),
+        claim["query_url"].replace("www.ncei.noaa.gov", "foreign.invalid"),
+    ):
+        claim["query_url"] = url
+        registry.write_text(json.dumps(rows))
+        assert config.runtime_station_geometry_for_city(city, effective_at=later)["ground_status"] == "UNPROVEN"
+    claim["query_url"] = original_url
+    registry.write_text(json.dumps(rows))
+    assert config.runtime_station_geometry_for_city(city, effective_at=later)["ground_status"] == "VERIFIED"
 
 
 @pytest.mark.parametrize("name", ("Shanghai", "London"))

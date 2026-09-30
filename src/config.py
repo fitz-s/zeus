@@ -544,7 +544,16 @@ STATION_GROUND_SOURCE_ARTIFACTS = {
     "noaa_homr_primary_dcp_snapshot_v1": "config/noaa_homr_kord_station.json",
 }
 _STATION_GROUND_SOURCE_KINDS = frozenset({*STATION_GROUND_SOURCE_ARTIFACTS, OSCAR_WMD_SOURCE_KIND, HOMR_INTERNATIONAL_GROUND_SOURCE_KIND})
-_HOMR_INTERNATIONAL_GROUND_STATIONS = frozenset({"ZSPD", "EGLC"})
+_HOMR_INTERNATIONAL_GROUND_NCDC = {
+    "ZSPD": "30137822", "EGLC": "30146303",
+    "NZAA": "30151541", "RKPK": "20029737", "ZUUU": "30137836",
+    "ZUCK": "30137833", "ZGGG": "30137796", "LTFM": "30146057",
+    "WIHH": "30140750", "ZSJN": "30137818", "DNMM": "30152035",
+    "MMMX": "30149753", "EDDM": "30103328", "SBGR": "30134434",
+    "RKSI": "30150507", "ZGSZ": "30137800", "NZWN": "30083512",
+    "ZHCC": "30137802",
+}
+_HOMR_INTERNATIONAL_GROUND_STATIONS = frozenset(_HOMR_INTERNATIONAL_GROUND_NCDC)
 _HOMR_PRIMARY_DCP_STATIONS = frozenset({
     "KATL", "KAUS", "KORD", "KDAL", "KBKF", "KHOU", "KLAX", "KMIA", "KLGA", "KSFO", "KSEA",
 })
@@ -742,7 +751,7 @@ def _homr_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
 def _homr_international_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
     """Replay current station-reference ground, not the US primary sensor DCP.
 
-    SCOPE: the two approved ICAO entities. DRAIN: real metadata acquisition and
+    SCOPE: the explicit ICAO/NCDC entities. DRAIN: real metadata acquisition and
     normal canonical archive before seeds. RESET: a new causal certificate;
     POR is not a location interval and this parser grants no historic possession.
     """
@@ -793,7 +802,7 @@ def _homr_international_ground_facts(raw: bytes, station_id: str) -> dict[str, o
         if len(found) != 1 or not isinstance(found[0], str):
             raise ValueError("official station identifier ambiguous")
         ids[kind] = found[0]
-    if ids["ICAO"] != station_id or re.fullmatch(r"\d+", ids["NCDCSTNID"]) is None:
+    if ids["ICAO"] != station_id or ids["NCDCSTNID"] != _HOMR_INTERNATIONAL_GROUND_NCDC[station_id]:
         raise ValueError("official station identifier foreign")
     if any(value != ids["NCDCSTNID"] for value in (
         station["ncdcStnId"], location["ncdcstnId"],
@@ -1095,7 +1104,12 @@ def _station_ground_for_entry(
             if station_id == "KORD":  # Original approved receipt predates current=true narrowing.
                 queries.add(f"{HOMR_GROUND_SOURCE_URL}?qid=ICAO%3AKORD&date={query_date.isoformat()}&phrData=false")
             if kind == HOMR_INTERNATIONAL_GROUND_SOURCE_KIND:
-                queries = {f"{HOMR_GROUND_SOURCE_URL}?qid=ICAO%3A{station_id}&qidMod=is&current=true&date={query_date.isoformat()}&phrData=false"}
+                # Exact original acquisition forms only: order differs, not
+                # host/path/key/value authority. Duplicate/extra keys never match.
+                queries = {
+                    f"{HOMR_GROUND_SOURCE_URL}?qid=ICAO%3A{station_id}&qidMod=is&current=true&date={query_date.isoformat()}&phrData=false",
+                    f"{HOMR_GROUND_SOURCE_URL}?date={query_date.isoformat()}&current=true&qid=ICAO%3A{station_id}&qidMod=is&phrData=false",
+                }
             if query_date != checked.astimezone(timezone.utc).date() or claim.get("query_url") not in queries:
                 raise ValueError("HOMR snapshot query is not bound to current capture")
             audit_keys.extend(("query_date", "query_url"))
