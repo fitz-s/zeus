@@ -2170,7 +2170,7 @@ def test_fast_carrier_format_compatibility_does_not_grant_public_probability_aut
     ), purpose
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def _generic_reader_noncarrier_template(tmp_path_factory):
     from tests.test_replacement_forecast_materializer import (
         _hko_dt, _hko_native_surfaces, _hko_source_surface,
