@@ -10088,10 +10088,13 @@ def process_current_global_batch(
                 payoff_q_correction_resolver=payoff_q_correction_resolver,
                 cancelled=selection_cancelled,
             )
+            primary_selection_s = time.monotonic() - selection_compute_started
+            proof_selection_s = 0.0
             proof_selected = None
             proof_submit_count_before = None
             proof_submit_count_after = None
             if proof_candidate_policy_rejection_resolver is not None:
+                proof_selection_started = time.monotonic()
                 proof_submit_count_before = venue_submit_count()
                 proof_selected = select_prepared_global_auction(
                     prepared_for_selection,
@@ -10140,6 +10143,7 @@ def process_current_global_batch(
                     cancelled=selection_cancelled,
                 )
                 proof_submit_count_after = venue_submit_count()
+                proof_selection_s = time.monotonic() - proof_selection_started
                 if proof_submit_count_after != proof_submit_count_before:
                     raise RuntimeError(
                         "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT"
@@ -10235,8 +10239,11 @@ def process_current_global_batch(
                     ),
                 )
             _LOG.info(
-                "global auction selection compute completed: elapsed_s=%.3f families=%d",
+                "global auction selection compute completed: elapsed_s=%.3f "
+                "primary_s=%.3f proof_s=%.3f families=%d",
                 time.monotonic() - selection_compute_started,
+                primary_selection_s,
+                proof_selection_s,
                 len(prepared_for_selection),
             )
             family_context_by_key = {
