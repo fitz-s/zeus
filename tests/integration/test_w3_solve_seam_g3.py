@@ -49243,6 +49243,359 @@ def test_geoblocked_actual_adapter_keeps_held_point_trace_lanes(tmp_path,monkeyp
         tmp_path,monkeypatch,"high","none",_hko_clock_native_sources,inspect_cut=inspect_cut)
 
 
+def _kord_normal_prior_fixture(tmp_path, monkeypatch):
+    """Ordinary KORD physical writers; controlled forecasts/ENS, not live weather."""
+    from dataclasses import replace
+    from datetime import date, datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    from src.data import bayes_precision_fusion_download as dl, station_ground_evidence as ground
+    from src.data import openmeteo_ecmwf_ifs9_bucket_transport as surface
+    from src.data import openmeteo_model_surface as model_surface
+    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+    from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
+    from src.contracts.replacement_pipeline_files import DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
+    from tests.test_replacement_forecast_materializer import (
+        _current_baseline_data_version, _low_revision_authority_conn,
+        _hko_request_with_owned_anchor, _request,
+    )
+    from src.data.replacement_forecast_materialization_seed_builder import (
+        _market_bins_to_celsius, _settlement_step_c, market_bins_for_replacement_seed,
+    )
+    from src.data.replacement_forecast_materialization_request_builder import _bins_to_temperature_bins
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.producer_readiness import build_producer_readiness_for_scope
+    from src.data.forecast_target_contract import ForecastTargetScope, compute_target_local_day_window_utc
+
+    utc = timezone.utc
+    city = runtime_cities_by_name()["Chicago"]
+    target, cycle = date(2026, 10, 1), datetime(2026, 10, 1, tzinfo=utc)
+    capture, cut = cycle + timedelta(minutes=10), cycle + timedelta(hours=5, minutes=55)
+    station = runtime_station_geometry_for_city(city, effective_at=cut)
+    assert city.settlement_source_type == "noaa" and city.wu_station == "KORD"
+    assert city.settlement_unit == "F" and station["ground_elevation_m"] == pytest.approx(204.8)
+    db = tmp_path / "kord-normal.db"
+    conn = _low_revision_authority_conn(db, city_name=city.name, target_date=target,
+        source_cycle=cycle, include_legacy_provider_fixtures=False, include_retired_incumbent=False)
+    archived = ground.archive_station_ground_evidence(db, [city.name])
+    assert city.name in archived["archived"], archived
+    possessed = archived["archived"][city.name]
+    assert datetime.fromisoformat(possessed["captured_at"]) <= datetime.fromisoformat(possessed["recorded_at"]) <= capture
+    cell = surface.source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
+        target_elevation_m=station["ground_elevation_m"])
+    lon = cell["selected_grid_lon"] - 360 if cell["selected_grid_lon"] > 180 else cell["selected_grid_lon"]
+    midnight = datetime.combine(target, datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
+    assert cycle <= midnight.astimezone(utc)
+    times = [f"{target}T{hour:02d}:00" for hour in range(24)]
+    raw = json.dumps({"latitude":cell["selected_grid_lat"], "longitude":lon,
+        "elevation":station["ground_elevation_m"], "timezone":city.timezone,
+        "utc_offset_seconds":int(midnight.utcoffset().total_seconds()),
+        "hourly_units":{"temperature_2m":"°C"},
+        "hourly":{"time":times,"temperature_2m":[19.0]*24},
+        "_zeus_current_target_scope":{"city":city.name,"target_date":str(target),"metric":"low"}},
+        sort_keys=True).encode()
+    anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(raw), city_timezone=city.timezone,
+        target_local_date=target, source_cycle_time=cycle, require_full_localday=True)
+    native_market_bins = (("56F or below", None, 56), ("57F", 57, 57), ("58F or above", 58, None))
+    for index,(label,lower,upper) in enumerate(native_market_bins):
+        conn.execute("""INSERT INTO market_events (market_slug,city,target_date,temperature_metric,
+            condition_id,token_id,range_label,range_low,range_high,created_at,recorded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",(f"kord-low-{index}",city.name,str(target),"low",
+            "0x"+f"{index+101:064x}",f"kord-yes-{index}",label,lower,upper,
+            cut.isoformat(),cut.isoformat()))
+    bins = _bins_to_temperature_bins(_market_bins_to_celsius(
+        market_bins_for_replacement_seed(conn,city=city.name,target_date=str(target),temperature_metric="low"),
+        settlement_unit=city.settlement_unit,rounding_rule=SettlementSemantics.for_city(city).rounding_rule))
+    request = replace(_request(), city=city.name,city_id="CHICAGO",city_timezone=city.timezone,
+        target_date=target,temperature_metric="low",baseline_source_run_id="new12",
+        baseline_data_version=_current_baseline_data_version("low"),baseline_source_available_at=cycle+timedelta(minutes=5),
+        source_cycle_time=cycle,computed_at=cut,expires_at=cut+timedelta(hours=2),
+        openmeteo_anchor=anchor,openmeteo_raw_payload_bytes=raw,openmeteo_source_available_at=capture,
+        day0_observation_state=DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS,bins=bins,
+        settlement_step_c=_settlement_step_c(city.settlement_unit))
+    request = _hko_request_with_owned_anchor(conn, request)  # Generic actual-city branch, not HKO source permission.
+
+    def provider_http(_url, params, **kwargs):
+        if params["models"] == "ecmwf_ifs":
+            body = raw
+        else:
+            profile = model_surface._profile(params["models"])
+            assert profile["grid_type"] == "regular"
+            lat = profile["lat_min"] + round((city.lat-profile["lat_min"])/profile["dy"])*profile["dy"]
+            longitude = profile["lon_min"] + round((city.lon-profile["lon_min"])/profile["dx"])*profile["dx"]
+            body = json.dumps({"latitude":lat,"longitude":longitude,"elevation":32.0,
+                "timezone":city.timezone,"utc_offset_seconds":int(midnight.utcoffset().total_seconds()),
+                "hourly_units":{"temperature_2m":"°C"},"hourly":{"time":times,
+                "temperature_2m":[19.0 if params["models"] == "icon_global" else 19.3]*24}},sort_keys=True).encode()
+        kwargs["capture_entity_body"](body,capture.timestamp())
+        kwargs["capture_network_response"](body,capture.timestamp(),{"content-type":"application/json"})
+        return json.loads(body)
+    class CaptureClock(datetime):
+        @classmethod
+        def now(cls,tz=None): return capture.astimezone(tz or utc)
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear()
+    dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    conn.commit()
+    with monkeypatch.context() as http:
+        http.setattr(dl,"datetime",CaptureClock)
+        http.setattr("src.data.openmeteo_client.fetch",provider_http)
+        written = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db,cycle=cycle,
+            targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,metric="low",target_date=str(target),
+                lead_days=1,latitude=city.lat,longitude=city.lon,timezone_name=city.timezone)],
+            models=("ecmwf_ifs","icon_global","ukmo_global_deterministic_10km"),
+            frozen_source_runs={model:(cycle,capture) for model in ("ecmwf_ifs","icon_global","ukmo_global_deterministic_10km")},
+            include_previous_runs=False,prune_after=False)
+    assert written["written_row_count"] == 3, written
+    window = compute_target_local_day_window_utc(city_timezone=city.timezone,target_local_date=target)
+    producer = build_producer_readiness_for_scope(conn,scope=ForecastTargetScope(city_id="CHICAGO",city_name=city.name,
+        city_timezone=city.timezone,target_local_date=target,temperature_metric="low",source_cycle_time=cycle,
+        data_version=request.baseline_data_version,target_window_start_utc=window.start_utc,target_window_end_utc=window.end_utc,
+        required_step_hours=(0,3,6),market_refs=()),source_id="ecmwf_open_data",source_transport="native_grib",
+        track="mn2t6_low_short_horizon",computed_at=cycle+timedelta(minutes=5),
+        release_calendar_key="ecmwf_open_data:mn2t6_low_short_horizon")
+    assert producer.status == "LIVE_ELIGIBLE", producer.reason_codes
+    # Control only the private SQL INSERT clock; source issue/fetch clocks stay original.
+    builtin = sqlite3.connect(":memory:")
+    sql_clock = [cut]
+    conn.create_function("strftime",2,lambda fmt,value: sql_clock[0].isoformat(timespec="milliseconds")
+        if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+    from src.data.replacement_forecast_materializer import read_current_evidence_snapshot_identity
+    from src.data.executable_forecast_reader import grid_surface_evidence_reason
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=12").fetchone())
+    assert read_current_evidence_snapshot_identity(conn,request,metric="low") is not None, {
+        "grid_reason":grid_surface_evidence_reason(snapshot),
+        "cycle":snapshot["source_cycle_time"], "available":snapshot["source_available_at"],
+        "dataset":snapshot["dataset_id"], "members_unit":snapshot["members_unit"]}
+    result = materialize_replacement_forecast_live(conn,request)
+    assert result.ok, result.reason_codes
+    conn.commit()
+    return SimpleNamespace(conn=conn,db=db,city=city,request=request,result=result,cut=cut,
+        bins=bins,sql_clock=sql_clock,builtin=builtin)
+
+
+def _kord_public_bundles(fixture,monkeypatch,*,at):
+    from datetime import datetime
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data.replacement_forecast_bundle_reader import ReplacementForecastAuthorityPurpose
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    ready = latest_replacement_readiness(fixture.conn,city=fixture.city.name,
+        target_date=str(fixture.request.target_date),temperature_metric="low",decision_time=at)
+    assert ready is not None
+    dependencies = {item["role"]:item for item in ready.dependency_json["dependencies"]}
+    assert dependencies["baseline_b0"]["source_run_id"] == fixture.request.baseline_source_run_id
+    assert dependencies["baseline_b0"]["source_available_at"] == fixture.request.baseline_source_available_at.isoformat()
+    assert dependencies["soft_anchor_posterior"]["posterior_id"] == fixture.result.posterior_id
+    clocks_before = [tuple(row) for row in fixture.conn.execute(
+        "SELECT source_cycle_time,source_available_at,captured_at,recorded_at FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
+    class ClockType(type):
+        def __instancecheck__(cls,value): return isinstance(value,datetime)
+    class ReaderClock(datetime,metaclass=ClockType):
+        @classmethod
+        def now(cls,tz=None): return at.astimezone(tz) if tz else at.replace(tzinfo=None)
+    bundles = {}
+    with monkeypatch.context() as consumer:
+        # TEST_ONLY consumer wall clock is this declared decision, never a
+        # renewed source issue/availability/capture/record/expiry clock.
+        consumer.setattr(reader,"datetime",ReaderClock)
+        for purpose in (ReplacementForecastAuthorityPurpose.ENTRY,ReplacementForecastAuthorityPurpose.HELD_REDECISION):
+            served = reader.read_replacement_forecast_bundle(fixture.conn,baseline_bundle=None,readiness=ready,
+                city=fixture.city.name,target_date=str(fixture.request.target_date),temperature_metric="low",decision_time=at,
+                require_baseline_bundle=False,enforce_raw_input_hwm=True,authority_purpose=purpose)
+            assert served.bundle is not None, (served.status,served.reason_code)
+            bundles[purpose] = served.bundle
+    assert [tuple(row) for row in fixture.conn.execute(
+        "SELECT source_cycle_time,source_available_at,captured_at,recorded_at FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == clocks_before
+    return bundles
+
+
+def _kord_causal_fast_inputs(fixture,monkeypatch):
+    """Ordinary same-report parsers/ledger and 51-member remaining fetch, not fitted q."""
+    from datetime import date,datetime,timedelta,timezone
+    from zoneinfo import ZoneInfo
+    from src.data import day0_fast_obs as fast,noaa_wrh_timeseries as wrh
+    from src.data import day0_hourly_vectors as hourly,openmeteo_model_updates as updates
+    from src.data.daily_obs_append import _append_noaa_wrh_prints
+    from src.state.schema.observation_prints_schema import ensure_table
+    city,conn = fixture.city,fixture.conn
+    cycle = fixture.request.source_cycle_time
+    observed = cycle+timedelta(hours=6)
+    historical_fetch,vector_capture = observed-timedelta(minutes=10),observed-timedelta(minutes=2)
+    current_fetch,cut = observed+timedelta(seconds=20),observed+timedelta(minutes=5)
+    source = fast.fast_obs_source_for_city(city,fixture.request.target_date)
+    assert source is not None and source.station_id == "KORD"
+    dates,reports,awc = [],[],[]
+    # Product 57.2F is 14C; same report's precise T group measures 14.4C.
+    # This realistic display/precision pair is not two independent measurements.
+    for index in range(fast.FAST_RESIDUAL_MIN_PAIRS):
+        time = observed-timedelta(minutes=45,hours=index)
+        report = f"KORD {time:%d%H%M}Z 00000KT 10SM CLR 14/14 A3005 RMK AO2 T01440139"
+        dates.append(time.astimezone(ZoneInfo(city.timezone)).strftime("%Y-%m-%dT%H:%M:%S%z"))
+        reports.append(report)
+        awc.append({"icaoId":"KORD","obsTime":time.timestamp(),"receiptTime":(time+timedelta(seconds=10)).isoformat(),
+            "temp":14.4,"metarType":"METAR","rawOb":report})
+    product_body = json.dumps({"STATION":[{"STID":"KORD","OBSERVATIONS":{
+        "date_time":dates,"air_temp_set_1":[57.2]*len(dates),"sea_level_pressure_set_1":[1013.0]*len(dates),
+        "metar_set_1":reports}}]}).encode()
+    product = wrh._parse_rows(json.loads(product_body),"KORD")
+    parsed_fast = fast.parse_metar_api_payload(json.loads(json.dumps(awc).encode()))
+    assert len(product) == len(parsed_fast) == fast.FAST_RESIDUAL_MIN_PAIRS
+    ensure_table(conn)
+    for target in {item.local_date for item in product}:
+        _append_noaa_wrh_prints(conn,city_name=city.name,station="KORD",unit="F",rows=product,
+            target_date_local=date.fromisoformat(target),view=city.settlement_page_view,fetch_utc=historical_fetch)
+    writer_at = [historical_fetch]
+    class ClockType(type):
+        def __instancecheck__(cls,value): return isinstance(value,datetime)
+    class LedgerClock(datetime,metaclass=ClockType):
+        @classmethod
+        def now(cls,tz=None): return writer_at[0].astimezone(tz or timezone.utc)
+    current_body = json.dumps([{"icaoId":"KORD","obsTime":observed.timestamp(),
+        "receiptTime":(observed+timedelta(seconds=10)).isoformat(),"temp":13.9,"metarType":"METAR", "rawOb":
+        f"KORD {observed:%d%H%M}Z 00000KT 10SM CLR 14/14 A3005 RMK AO2 T01390139"}]).encode()
+    with monkeypatch.context() as writer:
+        writer.setattr(fast,"datetime",LedgerClock)
+        assert fast._append_metar_prints_to_ledger(conn,((city,source,fixture.request.target_date),),parsed_fast)
+        writer_at[0] = current_fetch
+        assert fast._append_metar_prints_to_ledger(conn,((city,source,fixture.request.target_date),),
+            fast.parse_metar_api_payload(json.loads(current_body)))
+    times = [f"{fixture.request.target_date}T{hour:02d}:00" for hour in range(24)]
+    common = {"latitude":city.lat,"longitude":city.lon,"timezone":city.timezone,"utc_offset_seconds":-18000}
+    deterministic = {**common,"hourly":{"time":times,"temperature_2m":[19.0]*24},
+        "hourly_units":{"temperature_2m":"°C"}}
+    ensemble_hourly = {"time":times}
+    for index in range(51):
+        key = "temperature_2m" if index==0 else f"temperature_2m_member{index:02d}"
+        ensemble_hourly[key] = [19.0+(index-25)*.02]*24
+    ensemble = {**common,"hourly":ensemble_hourly,
+        "hourly_units":{key:"°C" for key in ensemble_hourly if key!="time"}}
+    meta = {"last_run_initialisation_time":cycle.isoformat(),
+        "last_run_availability_time":(cycle+timedelta(minutes=10)).isoformat(),
+        "last_run_modification_time":(cycle+timedelta(minutes=10)).isoformat(),
+        "update_interval_seconds":21600,"temporal_resolution_seconds":3600}
+    def http(url,params,**kwargs):
+        payload = dict(ensemble if "ensemble-api" in url else deterministic)
+        if "ensemble-api" not in url:
+            from src.data import openmeteo_model_surface as surface
+            from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+            if params["models"] == "ecmwf_ifs":
+                geometry = source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,target_elevation_m=204.8)
+                payload.update(latitude=geometry["selected_grid_lat"],
+                    longitude=(geometry["selected_grid_lon"]+180)%360-180,elevation=204.8)
+            else:
+                profile = surface._profile(params["models"])
+                if profile["grid_type"] == "regular":
+                    lat = profile["lat_min"]+round((city.lat-profile["lat_min"])/profile["dy"])*profile["dy"]
+                    lon = profile["lon_min"]+round((city.lon-profile["lon_min"])/profile["dx"])*profile["dx"]
+                else:
+                    x,y = surface._project(profile,latitude=city.lat,longitude=city.lon)
+                    x = profile["origin_x"]+round((x-profile["origin_x"])/profile["dx"])*profile["dx"]
+                    y = profile["origin_y"]+round((y-profile["origin_y"])/profile["dy"])*profile["dy"]
+                    lat,lon = surface._project(profile,x=x,y=y)
+                payload.update(latitude=lat,longitude=lon,elevation=32.0)
+        body = json.dumps(payload).encode()
+        if "capture_entity_body" in kwargs: kwargs["capture_entity_body"](body,vector_capture.timestamp())
+        if "capture_network_response" in kwargs:
+            kwargs["capture_network_response"](body,vector_capture.timestamp(),{"content-type":"application/json"})
+        return json.loads(body)
+    with monkeypatch.context() as fetch:
+        fetch.setattr(updates,"_fetch_openmeteo",lambda *_a,**_kw:dict(meta))
+        fetch.setattr("src.data.openmeteo_client.fetch",http)
+        fetch.setattr(hourly,"_day0_utc_now",lambda:vector_capture)
+        vectors,identity = hourly.fetch_day0_hourly_vectors(city,now=vector_capture,causal_boundary_utc=observed)
+        assert len(vectors) == len(hourly.day0_hourly_models_for_city(city))
+        ens,ens_identity = hourly.fetch_day0_source_clock_ensemble_vectors(city,now=vector_capture)
+        assert len(ens) == 51
+        assert {json.loads(row.source_run_meta_json)["request_hash"] for row in ens} == {ens_identity}
+        for rows,key,endpoint in ((vectors,identity,json.loads(vectors[0].source_run_meta_json)["endpoint"]),
+                                  (ens,ens_identity,hourly.OPENMETEO_ENSEMBLE_URL)):
+            assert hourly.persist_day0_hourly_vectors(rows,target_date=str(fixture.request.target_date),conn=conn,
+                request_hash=key,endpoint=endpoint,now=vector_capture) == len(rows)
+    conn.commit()
+    qualified = fast.latest_fast_station_conditioning(conn,city=city.name,target_date=str(fixture.request.target_date),
+        metric="low",decision_time=cut,settlement_extreme_native=57.2,settlement_unit="F")
+    assert qualified is not None
+    assert qualified.observed_extreme_c == pytest.approx(13.9)
+    assert qualified.likelihood.residual_weights_c[0][0] == pytest.approx(-.4)
+    assert qualified.likelihood.settlement_extreme_c == pytest.approx(14.0)
+    assert qualified.likelihood.matched_pairs == fast.FAST_RESIDUAL_MIN_PAIRS
+    original_channels = [tuple(row) for row in conn.execute(
+        "SELECT source_channel,unit,value_native,raw_report,fetched_at_utc FROM observation_prints "
+        "WHERE raw_report=? ORDER BY source_channel",(reports[0],))]
+    assert {(row[0],row[1],row[2]) for row in original_channels} == {
+        ("noaa_wrh_kord","F",57.2),(fast.FAST_OBS_SOURCE_ID,"C",14.4)}
+    assert {row[4] for row in original_channels} == {historical_fetch.isoformat()}
+    return cut,qualified
+
+
+@pytest.fixture
+def _noaa_native_sources(tmp_path,monkeypatch):
+    """Whole native static bodies, without the HKO-only registry override."""
+    from tests.test_replacement_forecast_materializer import _hko_native_surfaces,_hko_source_surface
+    native = _hko_native_surfaces.__wrapped__(tmp_path,monkeypatch)
+    try:
+        next(native)
+        static = _hko_source_surface.__wrapped__(tmp_path,monkeypatch,None)
+        try:
+            next(static)
+            yield
+        finally:
+            next(static,None)
+    finally:
+        next(native,None)
+
+
+def test_noaa_kord_normal_prior_has_independent_physical_public_authority(tmp_path,monkeypatch,_noaa_native_sources):
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch)
+    try:
+        _kord_public_bundles(fixture,monkeypatch,at=fixture.cut)
+    finally:
+        fixture.conn.close()
+        fixture.builtin.close()
+
+
+def test_noaa_kord_product_minus_fast_v2_enters_normal_public_certificate(tmp_path,monkeypatch,_noaa_native_sources):
+    from dataclasses import replace
+    from src.data import day0_fast_obs as fast,replacement_forecast_materializer as materializer
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch)
+    try:
+        _kord_public_bundles(fixture,monkeypatch,at=fixture.cut)
+        original = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone())
+        cut,conditioning = _kord_causal_fast_inputs(fixture,monkeypatch)
+        request = replace(fixture.request,computed_at=cut,day0_observation_state=None,
+            day0_observed_extreme_c=conditioning.observed_extreme_c,
+            day0_observed_extreme_source=fast.FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+            day0_observed_extreme_observation_time=conditioning.observation_time,
+            day0_observed_extreme_sample_count=conditioning.sample_count,day0_observed_extreme_unit=conditioning.unit)
+        fixture.sql_clock[0] = cut
+        result = materializer.materialize_replacement_forecast_live(fixture.conn,request)
+        assert result.ok, result.reason_codes
+        fixture.conn.commit()
+        new = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(result.posterior_id,)).fetchone())
+        proof = json.loads(new["provenance_json"])
+        assert proof["q_shape"] == "fused_day0_fast_residual_likelihood"
+        likelihood = proof["day0_provisional_observation"]["fast_residual_likelihood"]
+        assert likelihood["semantics_revision"] == fast.FAST_RESIDUAL_LIKELIHOOD_REVISION
+        assert likelihood["settlement_extreme_c"] == pytest.approx(14)
+        assert likelihood["residual_weights_c"][0]["residual_c"] == pytest.approx(-.4)
+        assert _dt.datetime.fromisoformat(new["recorded_at"]) == _dt.datetime.fromisoformat(new["computed_at"]) == cut
+        for field in ("source_cycle_time","source_available_at","expires_at"):
+            assert new[field] == original[field]
+        fixture.result,fixture.request = result,request
+        bundles = _kord_public_bundles(fixture,monkeypatch,at=cut)
+        q = json.loads(new["q_json"])
+        assert all(dict(bundle.q) == q for bundle in bundles.values())
+        draws = proof["q_bootstrap_samples_by_bin"]
+        assert set(draws) == set(q)
+        assert {len(values) for values in draws.values()} == {500}
+        assert all(sum(draws[key][index] for key in draws) == pytest.approx(1) for index in range(500))
+        assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (original["posterior_id"],)).fetchone()) == original
+    finally:
+        fixture.conn.close()
+        fixture.builtin.close()
+
+
 def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_path,monkeypatch,_hko_clock_native_sources):
     """Real selector/order hook and corpus flush, not a mocked winning score."""
     from src.engine import tier0_auction_corpus as corpus
