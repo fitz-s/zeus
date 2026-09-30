@@ -6167,6 +6167,7 @@ def _edli_day0_hourly_refresh_due_families(
         day0_source_clock_ensemble_member_models,
         day0_source_clock_ensemble_target_dates,
         day0_conditional_high_run_proof,
+        read_day0_current_temperature_state,
         read_freshest_day0_hourly_vectors,
     )
     from src.data.replacement_forecast_current_target_plan import (
@@ -6256,6 +6257,20 @@ def _edli_day0_hourly_refresh_due_families(
                     conn=vector_conn,
                 )
             )
+            # The consumer's causal boundary is the latest same-station print
+            # (materializer, held monitor), not the time of the running extreme
+            # the authorized fact carries.  Scheduling on the extreme's time
+            # (hours old once the day peaks) made every fetch that covered the
+            # real boundary fail REMAINING_WINDOW_INCOMPLETE and be discarded.
+            try:
+                current_state = read_day0_current_temperature_state(
+                    conn=fact_conn,
+                    city=city_obj,
+                    target_date=target_date,
+                    decision_time=now,
+                )
+            except Exception:  # noqa: BLE001 -- boundary hint; the fact time remains
+                current_state = None
             for metric in ("high", "low"):
                 if deadline_expired():
                     raise TimeoutError(
@@ -6281,6 +6296,11 @@ def _edli_day0_hourly_refresh_due_families(
                     continue
                 if observation_time > now:
                     continue
+                if current_state is not None:
+                    observation_time = max(
+                        observation_time,
+                        current_state.observed_at.astimezone(timezone.utc),
+                    )
                 city_date = (city_name, target_date)
                 prior_window_start = window_starts.get(city_date)
                 # The fetch gate's window is the NEWEST metric boundary. Each consumer

@@ -1744,6 +1744,59 @@ def test_priority_probe_window_start_is_the_newest_metric_boundary(monkeypatch) 
     )
 
 
+def test_priority_probe_window_start_is_the_consumer_current_print(monkeypatch) -> None:
+    """The fetch window is the latest same-station print, not the extreme's time.
+
+    Live 2026-09-30 (Chicago/Houston/Dallas): the authorized fact carried the
+    running-max print (05:51Z) while the latest print was 08:51Z.  The producer
+    proved coverage from 05:51, which no fresh fetch can cover, so 114 of 133
+    complete 51/51 ENS bundles were discarded although they covered the 08:51
+    boundary the materializer consumes.
+    """
+    import src.config as config_module
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.events.reactor as reactor
+    import src.state.db as db_module
+
+    city = SimpleNamespace(
+        name="Chicago", timezone="America/Chicago", lat=41.98, lon=-87.9
+    )
+    now = datetime(2026, 9, 30, 9, 13, 0, tzinfo=UTC)
+    target_date = now.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    extreme_print = datetime(2026, 9, 30, 5, 51, 0, tzinfo=UTC)
+    latest_print = datetime(2026, 9, 30, 8, 51, 0, tzinfo=UTC)
+
+    class _Conn:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {city.name: city})
+    monkeypatch.setattr(db_module, "get_world_connection_read_only", lambda **_kw: _Conn())
+    monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", lambda **_kw: _Conn())
+    monkeypatch.setattr(
+        target_plan,
+        "_latest_authorized_day0_fact",
+        lambda *_args, **_kwargs: {"observation_time": extreme_print.isoformat()},
+    )
+    monkeypatch.setattr(
+        day0,
+        "read_day0_current_temperature_state",
+        lambda **_kwargs: SimpleNamespace(observed_at=latest_print),
+    )
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ncep_nbm_conus"])
+    monkeypatch.setattr(
+        day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: ()
+    )
+    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", lambda **_kwargs: [])
+
+    probe = reactor._edli_day0_hourly_refresh_due_families(cities=[city], decision_time=now)
+
+    assert probe.proved is True
+    assert dict(((c, td), ws) for c, td, ws in probe.window_starts) == {
+        (city.name, target_date): latest_print
+    }
+
+
 def test_ambiguous_low_missing_ens_is_priority_debt_until_strict_current_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
