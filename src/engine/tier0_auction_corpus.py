@@ -99,7 +99,7 @@ def _point_trace_unavailable(reason: str, trace: Mapping[str, object] | None = N
               "producer_witness_identity", "probability_content_identity", "q_version",
               "source_truth_identity", "posterior_identity_hash", "consumer_witness_identity",
               "consumer_bindings", "consumer_yes_q", "consumer_captured_at_utc",
-              "selected_lane", "role"}
+              "selected_lane", "role", "producer_identity_recipe"}
     value = {key: value for key, value in (trace or {}).items() if key in fields}
     value.update(schema="held_sell_point_kernel_trace_v1",status="UNAVAILABLE",reason=reason)
     try:
@@ -138,11 +138,25 @@ def freeze_held_sell_point_trace(trace: Mapping[str, object]) -> bytes:
         "bindings", "input_identities", "carrier_content_identity",
         "consumer_witness_identity", "consumer_bindings", "consumer_yes_q",
         "consumer_captured_at_utc", "selected_lane",
-        "role", "reason",
+        "role", "reason", "producer_identity_recipe",
     }
     try:
         if set(trace).difference(fields) or trace.get("schema") != "held_sell_point_kernel_trace_v1":
             return _point_trace_unavailable("TRACE_FIELDS_INVALID")
+        recipe = trace.get("producer_identity_recipe")
+        recipe_fields = {
+            "kind", "resolution_identity", "topology_identity", "authority_certificate_hash",
+            "band_alpha", "band_basis", "captured_at_utc", "sample_shape", "sample_matrix_identity",
+        }
+        if recipe is not None and (
+            not isinstance(recipe, Mapping) or set(recipe) != recipe_fields
+            or any(not isinstance(recipe[key], str) for key in recipe_fields-{"band_alpha", "sample_shape"})
+            or type(recipe["band_alpha"]) not in {int, float} or not math.isfinite(recipe["band_alpha"])
+            or not isinstance(recipe["sample_shape"], (list, tuple)) or len(recipe["sample_shape"]) != 2
+            or any(type(value) is not int or value < 0 for value in recipe["sample_shape"])
+        ):
+            return _point_trace_unavailable("PRODUCER_IDENTITY_RECIPE_FIELDS_INVALID",
+                {key: value for key, value in trace.items() if key != "producer_identity_recipe"})
         if trace.get("status") == "UNAVAILABLE":
             return _point_trace_unavailable(str(trace.get("reason") or "POINT_TRACE_UNAVAILABLE"),trace)
         kernel = trace.get("kernel")

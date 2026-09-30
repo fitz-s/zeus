@@ -48799,6 +48799,25 @@ def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_toke
         assert entry.probability_content_identity == baseline.probability_witness.probability_content_identity
         assert entry.source_truth_identity == baseline.probability_witness.source_truth_identity
         np.testing.assert_array_equal(entry.yes_point_q,baseline.probability_witness.yes_point_q)
+        # Inspect the actual observer closure: diagnostics retain bytes only,
+        # including the unused HELD lane, not its witness or sample matrix.
+        import inspect
+        sink = inspect.getclosurevars(hooks["selection_telemetry_observer"]).nonlocals["_held_point_traces_for_cut"]
+        collector = inspect.getclosurevars(sink).nonlocals["held_point_trace_lanes"]
+        assert set(collector) == ({family} if fault in {"none","freeze"} else set())
+        for lanes in collector.values():
+            assert set(lanes) == {"ENTRY","HELD_MONITOR"}
+            for raw in lanes.values():
+                assert isinstance(raw,bytes)
+                decoded = json.loads(raw)
+                if fault == "freeze":
+                    assert decoded["status"] == "UNAVAILABLE"
+                    assert "producer_identity_recipe" not in decoded
+                    continue
+                recipe = decoded["producer_identity_recipe"]
+                assert recipe["sample_shape"] == list(entry.yes_q_samples.shape)
+                assert isinstance(recipe["sample_matrix_identity"],str)
+                assert not any(isinstance(value,(list,dict)) for key,value in recipe.items() if key!="sample_shape")
         tokens = {binding.condition_id:(binding.yes_token_id,f"no-complete-{i}")
                   for i,binding in enumerate(entry.bindings)}
         selected = _rebind_probability_witness_tokens(entry,token_map_by_condition=tokens,
@@ -48816,6 +48835,7 @@ def test_held_point_trace_normal_adapter_preserves_selected_entry_and_exact_toke
             assert trace["role"] == ("SELECTED_GLOBAL" if trace["lane"]=="ENTRY" else "NONSELECTED_LANE")
             np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(raw),witness.yes_point_q)
         # A second observation cannot retain or re-label the old cut's buffers.
+        assert collector == {}
         assert hooks["selection_telemetry_observer"]({family:selected},None,{},SimpleNamespace(),held_at) == ()
     finally:
         trade.close(); fixture.conn.close()

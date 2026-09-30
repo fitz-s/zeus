@@ -274,6 +274,7 @@ def _freeze_prepared_held_point_trace(capture, prepared, *, lane: str, at: datet
     if capture is None or prepared is None:
         return None
     from src.engine import tier0_auction_corpus as corpus
+    from src.solve.solver import JointOutcomeProbabilityWitness
     try:
         witness = prepared.probability_witness
         binding = {
@@ -286,6 +287,17 @@ def _freeze_prepared_held_point_trace(capture, prepared, *, lane: str, at: datet
             "posterior_identity_hash": str(witness.posterior_identity_hash),
             "q_version": str(witness.q_version),
             "bindings": [[b.bin_id,b.condition_id,b.yes_token_id,b.no_token_id] for b in witness.bindings],
+        }
+        if not isinstance(witness,JointOutcomeProbabilityWitness) or witness.exact_payoff_witness is not None:
+            return corpus._point_trace_unavailable("UNSUPPORTED_EXACT_PAYOFF_POINT_KERNEL",binding)
+        binding["producer_identity_recipe"] = {
+            "kind": "joint_v1", "resolution_identity": str(witness.resolution_identity),
+            "topology_identity": str(witness.topology_identity),
+            "authority_certificate_hash": str(witness.authority_certificate_hash),
+            "band_alpha": float(witness.band_alpha), "band_basis": str(witness.band_basis),
+            "captured_at_utc": witness.captured_at_utc.isoformat(),
+            "sample_shape": list(witness.yes_q_samples.shape),
+            "sample_matrix_identity": witness.sample_matrix_identity,
         }
         if "kernel" not in capture or "unavailable" in capture:
             return corpus._point_trace_unavailable(
@@ -322,6 +334,49 @@ def _freeze_prepared_held_point_trace(capture, prepared, *, lane: str, at: datet
         })
     except Exception:  # noqa: BLE001 -- never a probability/action failure
         return corpus._point_trace_unavailable("PREPARED_POINT_TRACE_FREEZE_FAILED")
+
+
+def _held_point_trace_matches_consumer(trace: Mapping[str, object], consumer: object) -> bool:
+    """Validate compact identity using the already-consumed consumer matrix.
+
+    No witness, sample array or copy is stored or constructed by diagnostics.
+    The canonical identity function borrows the actual consumer's matrix only
+    after its hash matches the producer's frozen scalar recipe.
+    """
+    from src.solve.solver import (
+        JointOutcomeProbabilityWitness, OutcomeTokenBinding,
+        joint_probability_content_identity, joint_probability_witness_identity,
+    )
+
+    if not isinstance(consumer,JointOutcomeProbabilityWitness) or consumer.exact_payoff_witness is not None:
+        return False
+    recipe = trace.get("producer_identity_recipe")
+    if not isinstance(recipe,Mapping) or recipe.get("kind") != "joint_v1":
+        return False
+    if (recipe["sample_matrix_identity"] != consumer.sample_matrix_identity
+            or recipe["sample_shape"] != list(consumer.yes_q_samples.shape)):
+        return False
+    original = tuple(OutcomeTokenBinding(*row) for row in trace["bindings"])
+    if len(original) != len(consumer.bindings): return False
+    for before,after in zip(original,consumer.bindings):
+        if (before.bin_id,before.condition_id) != (after.bin_id,after.condition_id): return False
+        if ((before.yes_token_id and before.yes_token_id != after.yes_token_id)
+                or (before.no_token_id and before.no_token_id != after.no_token_id)):
+            return False  # Exact completion may fill missing tokens, never replace them.
+    fields = dict(family_key=trace["family"],q_version=trace["q_version"],
+        resolution_identity=recipe["resolution_identity"],topology_identity=recipe["topology_identity"],
+        posterior_identity_hash=trace["posterior_identity_hash"],source_truth_identity=trace["source_truth_identity"],
+        authority_certificate_hash=recipe["authority_certificate_hash"],band_alpha=recipe["band_alpha"],
+        band_basis=recipe["band_basis"],captured_at_utc=datetime.fromisoformat(recipe["captured_at_utc"]),
+        yes_point_q=np.asarray(trace["final_yes_q"],dtype=np.float64),
+        yes_q_samples=consumer.yes_q_samples)
+    content_fields = {key:value for key,value in fields.items()
+                      if key not in {"authority_certificate_hash","captured_at_utc"}}
+    if joint_probability_content_identity(**content_fields,bindings=original) != trace["probability_content_identity"]:
+        return False
+    if joint_probability_witness_identity(**fields,bindings=original) != trace["producer_witness_identity"]:
+        return False
+    return joint_probability_witness_identity(**fields,bindings=consumer.bindings) == consumer.witness_identity
 
 
 _GLOBAL_BOOK_PROJECTION_HINT_BUDGET_SECONDS = 0.25
@@ -9407,12 +9462,12 @@ def event_bound_live_adapter_from_trade_conn(
         ] = {}
         emitted_global_selection_telemetry: set[tuple[str, str]] = set()
         held_point_trace_scope: frozenset[str] = frozenset()
-        held_point_trace_lanes: dict[str, dict[str, tuple[bytes, object]]] = {}
+        held_point_trace_lanes: dict[str, dict[str, bytes]] = {}
 
         def _held_trace_retained_charge():
             return sys.getsizeof(held_point_trace_lanes)+sum(
                 sys.getsizeof(key)+sys.getsizeof(lanes)+sum(
-                    sys.getsizeof(lane)+sys.getsizeof(item)+sys.getsizeof(item[0])
+                    sys.getsizeof(lane)+sys.getsizeof(item)
                     for lane,item in lanes.items()
                 ) for key,lanes in held_point_trace_lanes.items()
             ) if held_point_trace_lanes else 0
@@ -9424,15 +9479,13 @@ def event_bound_live_adapter_from_trade_conn(
             held_point_trace_lanes.clear()
             held_point_trace_scope = frozenset(str(value) for value in families)
 
-        def _record_held_point_trace(family_key, lane, raw, prepared):
+        def _record_held_point_trace(family_key, lane, raw):
             from src.engine import tier0_auction_corpus as corpus
 
             try:
-                if raw is None or prepared is None:
+                if raw is None:
                     return
-                held_point_trace_lanes.setdefault(family_key, {})[lane] = (
-                    raw, prepared.probability_witness,
-                )
+                held_point_trace_lanes.setdefault(family_key, {})[lane] = raw
                 if (_held_trace_retained_charge()+corpus.point_trace_pending_charge()
                         > corpus._POINT_TRACE_QUEUE_LIMIT):
                     del held_point_trace_lanes[family_key][lane]
@@ -9445,30 +9498,21 @@ def event_bound_live_adapter_from_trade_conn(
 
         def _held_point_traces_for_cut(probabilities, selection_at):
             from src.engine import tier0_auction_corpus as corpus
-            from src.engine.global_auction_universe import _rebind_probability_witness_tokens
 
             frozen = []
             for family_key, consumer in probabilities.items():
                 lanes = held_point_trace_lanes.get(family_key) or {}
                 selected_lane = None
-                for lane, (_raw, original) in lanes.items():
+                for lane, raw in lanes.items():
                     try:
-                        if original.witness_identity == consumer.witness_identity:
+                        if _held_point_trace_matches_consumer(json.loads(raw),consumer):
                             selected_lane = lane
                             break
-                        tokens = {b.condition_id: (b.yes_token_id, b.no_token_id) for b in consumer.bindings}
-                        rebound = _rebind_probability_witness_tokens(
-                            original, token_map_by_condition=tokens,
-                            required_token_ids=frozenset(t for pair in tokens.values() for t in pair if t),
-                        )
-                        if rebound.witness_identity == consumer.witness_identity:
-                            selected_lane = lane
-                            break
-                    except (AttributeError, TypeError, ValueError):
+                    except (AttributeError, KeyError, TypeError, ValueError):
                         continue
                 if lanes and selected_lane is None:
                     corpus._point_trace_warning("held point trace unavailable: selected witness has no captured lane")
-                for lane, (raw, original) in tuple(lanes.items()):
+                for lane, raw in tuple(lanes.items()):
                     try:
                         trace = json.loads(raw)
                         if trace.get("status") == "UNAVAILABLE":
@@ -9477,12 +9521,7 @@ def event_bound_live_adapter_from_trade_conn(
                             raise ValueError("POINT_TRACE_STATUS_INVALID")
                         bindings = [[b.bin_id, b.condition_id, b.yes_token_id, b.no_token_id]
                                     for b in consumer.bindings]
-                        if ([row[:2] for row in trace["bindings"]] != [row[:2] for row in bindings]
-                                or trace["probability_content_identity"] != str(original.probability_content_identity)
-                                or trace["source_truth_identity"] != str(original.source_truth_identity)
-                                or trace["posterior_identity_hash"] != str(original.posterior_identity_hash)
-                                or trace["q_version"] != str(original.q_version)
-                                or trace["final_yes_q"] != original.yes_point_q.tolist()):
+                        if ([row[:2] for row in trace["bindings"]] != [row[:2] for row in bindings]):
                             raise ValueError("PRODUCER_TRACE_BINDING_MISMATCH")
                         role = "SELECTED_GLOBAL" if lane == selected_lane else "NONSELECTED_LANE"
                         # Never substitute a held kernel for an ENTRY-selected
@@ -9730,7 +9769,7 @@ def event_bound_live_adapter_from_trade_conn(
                     if family_key in held_point_trace_scope:
                         _record_held_point_trace(family_key, "ENTRY", _freeze_prepared_held_point_trace(
                             {"unavailable": b"CACHED_POINT_KERNEL_NOT_RETAINED"},cached,lane="ENTRY",at=at,
-                        ), cached)
+                        ))
                     return _prepared_global_event_receipt(event, cached)
                 cached_ineligible = (
                     _probe_global_probability_family_ineligible_cache(
@@ -9753,7 +9792,7 @@ def event_bound_live_adapter_from_trade_conn(
                 )
             prepared = receipt.prepared_global_family
             point_trace = _freeze_prepared_held_point_trace(capture, prepared, lane="ENTRY", at=at)
-            _record_held_point_trace(family_key, "ENTRY", point_trace, prepared)
+            _record_held_point_trace(family_key, "ENTRY", point_trace)
             if prepared is not None:
                 _store_global_probability_family_cache(
                     probability_cache_namespace,
@@ -9864,7 +9903,7 @@ def event_bound_live_adapter_from_trade_conn(
                         if family_key in held_point_trace_scope:
                             _record_held_point_trace(family_key, "HELD_MONITOR", _freeze_prepared_held_point_trace(
                                 {"unavailable": b"CACHED_POINT_KERNEL_NOT_RETAINED"},cached,lane="HELD_MONITOR",at=at,
-                            ), cached)
+                            ))
                         return _prepared_global_event_receipt(event, cached)
                     probability_cache_stats["miss"] += 1
             try:
@@ -9906,7 +9945,7 @@ def event_bound_live_adapter_from_trade_conn(
                     ),
                 )
             point_trace = _freeze_prepared_held_point_trace(capture, prepared, lane="HELD_MONITOR", at=at)
-            _record_held_point_trace(family_key, "HELD_MONITOR", point_trace, prepared)
+            _record_held_point_trace(family_key, "HELD_MONITOR", point_trace)
             if is_forecast_lane or held_is_day0:
                 _store_global_probability_family_cache(
                     probability_cache_namespace,

@@ -160,7 +160,11 @@ def test_held_sell_point_kernel_trace_replays_active_mixture_without_samples(met
                  final_yes_q=final_q, producer_witness_identity="b"*64,
                  probability_content_identity="c"*64, source_truth_identity="d"*64,
                  posterior_identity_hash="e"*64, q_version="day0-v28",
-                 bindings=[[str(i), f"cond-{i}", f"yes-{i}", f"no-{i}"] for i in range(len(bounds))])
+                 bindings=[[str(i), f"cond-{i}", f"yes-{i}", f"no-{i}"] for i in range(len(bounds))],
+                 producer_identity_recipe=dict(kind="joint_v1",resolution_identity="r"*64,
+                     topology_identity="t"*64,authority_certificate_hash="a"*64,band_alpha=.05,
+                     band_basis="current-evidence",captured_at_utc="2026-09-30T06:20:00+00:00",
+                     sample_shape=[400,len(bounds)],sample_matrix_identity="s"*64))
     frozen = corpus.freeze_held_sell_point_trace(trace)
     future[0] = -999.  # Async consumers must not close over a mutable array.
     np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(frozen), final_q)
@@ -405,6 +409,77 @@ def _controlled_point_trace():
                 "settlement":dict(resolution_source="hko_daily",measurement_unit="C",precision=1.,
                     rounding_rule="oracle_truncate",finalization_time="12:00:00Z")})
     return witness,corpus.freeze_held_sell_point_trace(trace)
+
+
+@pytest.mark.parametrize("fault",("none","producer_id","rebound_id","content","point","samples","token","shape","source"))
+def test_held_point_trace_compact_recipe_binds_original_and_completed_consumer(fault):
+    from dataclasses import replace
+    from src.engine import event_reactor_adapter as era
+    from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+
+    witness,raw = _controlled_point_trace()
+    original_bindings = tuple(replace(binding,no_token_id=None) for binding in witness.bindings)
+
+    def with_identity(value,**changes):
+        fields = {key:getattr(value,key) for key in (
+            "family_key","bindings","q_version","resolution_identity","topology_identity",
+            "posterior_identity_hash","source_truth_identity","authority_certificate_hash",
+            "band_alpha","band_basis","yes_point_q","yes_q_samples","captured_at_utc",
+        )}
+        fields.update(changes)
+        return replace(value,**changes,witness_identity=joint_probability_witness_identity(**fields))
+
+    original = with_identity(witness,bindings=original_bindings)
+    trace = json.loads(raw)
+    capture = {"kernel":json.dumps(trace["kernel"]).encode(),
+               "base_yes_q":json.dumps(original.yes_point_q.tolist()).encode(),
+               "carrier_content_identity":b"controlled-point-kernel"}
+    frozen = era._freeze_prepared_held_point_trace(capture,SimpleNamespace(probability_witness=original),
+        lane="ENTRY",at=AT)
+    trace = json.loads(frozen)
+    assert trace["status"] == "READY"
+    assert era._held_point_trace_matches_consumer(trace,original)
+    consumer = _rebind_probability_witness_tokens(original,
+        token_map_by_condition={binding.condition_id:(binding.yes_token_id,binding.no_token_id)
+                                for binding in witness.bindings},
+        required_token_ids=frozenset(token for binding in witness.bindings
+                                    for token in (binding.yes_token_id,binding.no_token_id)))
+    assert consumer.witness_identity != original.witness_identity
+    assert consumer.yes_q_samples is original.yes_q_samples
+    assert era._held_point_trace_matches_consumer(trace,consumer)
+    if fault == "producer_id": trace["producer_witness_identity"] = "0"*64
+    elif fault == "rebound_id": consumer = with_identity(consumer,captured_at_utc=AT+_dt.timedelta(seconds=1))
+    elif fault == "content": trace["probability_content_identity"] = "0"*64
+    elif fault == "point":
+        trace["final_yes_q"][0] += .01; trace["final_yes_q"][1] -= .01
+    elif fault == "samples":
+        samples = consumer.yes_q_samples.copy()
+        samples[0,0] += .01; samples[0,1] -= .01
+        consumer = with_identity(consumer,yes_q_samples=samples)
+    elif fault == "token":
+        # Completion can fill NO, but cannot replace an existing YES token.
+        consumer = with_identity(consumer,bindings=(replace(consumer.bindings[0],yes_token_id="wrong"),
+                                                    *consumer.bindings[1:]))
+    elif fault == "shape": trace["producer_identity_recipe"]["sample_shape"][0] += 1
+    elif fault == "source": trace["source_truth_identity"] = "different-source"
+    assert era._held_point_trace_matches_consumer(trace,consumer) is (fault=="none")
+    assert set(trace["producer_identity_recipe"]) == {
+        "kind","resolution_identity","topology_identity","authority_certificate_hash",
+        "band_alpha","band_basis","captured_at_utc","sample_shape","sample_matrix_identity",
+    }
+    assert "yes_q_samples" not in frozen.decode()
+
+
+@pytest.mark.parametrize("status",("READY","UNAVAILABLE"))
+def test_held_point_trace_recipe_rejects_sample_values_even_when_unavailable(status):
+    witness,raw = _controlled_point_trace()
+    trace = json.loads(raw)
+    trace.update(status=status,producer_identity_recipe={"yes_q_samples":witness.yes_q_samples.tolist()})
+    unavailable = json.loads(corpus.freeze_held_sell_point_trace(trace))
+    assert unavailable["status"] == "UNAVAILABLE"
+    assert unavailable["reason"] == "PRODUCER_IDENTITY_RECIPE_FIELDS_INVALID"
+    assert "producer_identity_recipe" not in unavailable
+    assert unavailable["producer_witness_identity"] == witness.witness_identity
 
 
 def test_held_point_trace_sidecar_preserves_receipt_q_books_legs_and_old_v1(tmp_path):
