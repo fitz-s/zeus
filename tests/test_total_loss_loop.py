@@ -1,14 +1,20 @@
-# Lifecycle: created=2026-08-22; last_reviewed=2026-08-30; last_reused=2026-08-30
+# Lifecycle: created=2026-08-22; last_reviewed=2026-09-29; last_reused=2026-09-29
 # Purpose: Relationship antibodies for event-time total-loss detection and evidence isolation.
 # Reuse: Run whenever detector timing, exposure lifecycle, quote persistence, or Codex orchestration changes.
+# Created: 2026-08-22
+# Last reused/audited: 2026-09-29
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """Relationship antibodies for the event-time total-loss loop."""
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import inspect
 import json
 import os
+import plistlib
+import signal
 import sqlite3
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -1829,7 +1835,7 @@ def test_detector_can_commit_crossing_without_waiting_for_evidence_worker(
     assert tuple(incident) == ("queued", "blind")
 
 
-def test_evidence_worker_yields_to_unhealthy_live_capital_lane(
+def test_diagnostic_worker_admits_fresh_degraded_live_capital_lane(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state_dir = Path(cfg["paths"]["trades_db"]).parent
@@ -1849,8 +1855,8 @@ def test_evidence_worker_yields_to_unhealthy_live_capital_lane(
 
     ready, reason = loop._live_capital_lane_ready_for_evidence(cfg)
 
-    assert ready is False
-    assert reason == "live_health_composite_unhealthy"
+    assert ready is True
+    assert reason is None
 
 
 def test_evidence_worker_admits_only_fresh_healthy_live_capital_lane(
@@ -1866,6 +1872,265 @@ def test_evidence_worker_admits_only_fresh_healthy_live_capital_lane(
     )
 
     assert loop._live_capital_lane_ready_for_evidence(cfg) == (True, None)
+
+
+@pytest.mark.parametrize("surface", ["daemon-heartbeat.json", "live_health_composite.json"])
+@pytest.mark.parametrize("invalid", ["missing", "malformed", "stale", "future"])
+def test_diagnostic_worker_rejects_unresponsive_or_future_runtime(
+    cfg: dict, surface: str, invalid: str,
+) -> None:
+    state_dir = Path(cfg["paths"]["trades_db"]).parent
+    stamp = loop.now()
+    payloads = {
+        "daemon-heartbeat.json": {"alive": True, "timestamp": loop.iso(stamp)},
+        "live_health_composite.json": {"healthy": False, "computed_at": loop.iso(stamp)},
+    }
+    if invalid == "missing":
+        payloads.pop(surface)
+    elif invalid == "malformed":
+        payloads[surface] = {"alive": "true"} if surface.startswith("daemon") else {"healthy": "false"}
+    else:
+        clock_key = "timestamp" if surface.startswith("daemon") else "computed_at"
+        offset = -91 if invalid == "stale" else 1
+        payloads[surface][clock_key] = loop.iso(stamp + timedelta(seconds=offset))
+    for name, payload in payloads.items():
+        loop.atomic_json(state_dir / name, payload)
+
+    ready, reason = loop._live_capital_lane_ready_for_evidence(cfg)
+
+    assert ready is False
+    assert reason == ("main_heartbeat_unhealthy" if surface.startswith("daemon") else "live_health_composite_unhealthy")
+
+
+@pytest.mark.parametrize("healthy", [None, "false", 0, [], {}])
+def test_diagnostic_worker_requires_explicit_boolean_composite_health(cfg: dict, healthy: object) -> None:
+    state_dir = Path(cfg["paths"]["trades_db"]).parent
+    loop.atomic_json(state_dir / "daemon-heartbeat.json", {"alive": True, "timestamp": loop.iso()})
+    health = {"computed_at": loop.iso()}
+    if healthy is not None:
+        health["healthy"] = healthy
+    loop.atomic_json(state_dir / "live_health_composite.json", health)
+
+    assert loop._live_capital_lane_ready_for_evidence(cfg) == (False, "live_health_composite_unhealthy")
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_degraded_daemon_drains_real_quote_evidence_without_authorizing_dispatch(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, direction: str, metric: str,
+) -> None:
+    _position(cfg, direction=direction)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute("UPDATE position_current SET phase='day0_window',temperature_metric=?", (metric,))
+    if metric == "low":
+        with sqlite3.connect(cfg["paths"]["forecasts_db"]) as conn:
+            conn.execute("UPDATE forecast_posteriors SET temperature_metric='low' WHERE city='London'")
+            conn.execute("UPDATE ensemble_snapshots SET temperature_metric='low' WHERE city='London'")
+    token = "no-token" if direction == "buy_no" else "yes-token"
+    for suffix, second, bid in [("pre", 1, 0.08), ("floor", 2, 0.04), ("post", 3, 0.08)]:
+        _quote(cfg, suffix, f"2026-08-22T09:00:0{second}+00:00", bid, token=token, direction=direction, latest=suffix == "floor")
+    state_dir = Path(cfg["paths"]["trades_db"]).parent
+    loop.atomic_json(state_dir / "daemon-heartbeat.json", {"alive": True, "timestamp": loop.iso()})
+    loop.atomic_json(state_dir / "live_health_composite.json", {"healthy": False, "computed_at": loop.iso(), "status": "DEGRADED"})
+    before = {name: Path(cfg["paths"][name]).read_bytes() for name in ("trades_db", "forecasts_db")}
+    runtime = Path(cfg["paths"]["runtime"])
+    captures: list[dict] = []
+
+    class CompletedEvidenceWorker:
+        pid = 424242
+
+        def poll(self) -> int:
+            return 0
+
+    def capture_worker(local_cfg: dict) -> CompletedEvidenceWorker:
+        captures.append(loop.evidence_once(local_cfg))
+        return CompletedEvidenceWorker()
+
+    def read_code_identity(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        assert command == ["git", "rev-parse", "HEAD"]
+        assert kwargs["cwd"] == ROOT
+        return subprocess.CompletedProcess(command, 0, "a" * 40 + "\n", "")
+
+    monkeypatch.setattr(loop, "bootstrap", lambda _cfg: {})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
+    monkeypatch.setattr(loop, "_provider_backoff", lambda _cfg: {"kind": "test_backoff"})
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: pytest.fail("backoff must still prevent capability/dispatch admission"))
+    monkeypatch.setattr(loop, "_dispatch_has_eligible_debt", lambda *_args: pytest.fail("diagnostic readiness must not authorize dispatch"))
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda *_args: pytest.fail("no dispatch while provider backoff is active"))
+    monkeypatch.setattr(loop, "_spawn_evidence_worker", capture_worker)
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("evidence capture must not launch repair/venue work"))
+    monkeypatch.setattr(loop.subprocess, "run", read_code_identity)
+    monkeypatch.setattr(loop.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("diagnostics must not spawn external work"))
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: (runtime / "HALT").touch())
+
+    assert loop.daemon(cfg) == 0
+    assert len(captures) == 1 and captures[0]["status"] == "complete"
+    hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    assert len(hard) == 1 and hard[0]["crossing_kind"] == "below_floor"
+    assert hard[0]["held_token_id"] == token
+    assert hard[0]["incident_id"] in captures[0]["built"]
+    assert not any(row["crossing_kind"] == "settlement_full_loss" for row in hard)
+    with sqlite3.connect(loop._evidence_pair_paths(cfg, hard[0]["incident_id"])[0]) as evidence:
+        recorded = json.loads(evidence.execute("SELECT row_json FROM position WHERE position_id='p1'").fetchone()[0])
+    assert recorded["temperature_metric"] == metric and recorded["phase"] == "day0_window"
+    assert before == {name: Path(cfg["paths"][name]).read_bytes() for name in before}
+
+
+def test_degraded_settlement_scan_uses_real_command_dedup_basis_and_is_idempotent(cfg: dict) -> None:
+    _settled_full_loss(cfg)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.executescript("""
+            CREATE TABLE execution_fact (
+                intent_id TEXT PRIMARY KEY, position_id TEXT, command_id TEXT,
+                order_role TEXT, filled_at TEXT, posted_at TEXT, fill_price REAL,
+                shares REAL, terminal_exec_status TEXT, venue_status TEXT
+            );
+            INSERT INTO execution_fact VALUES
+              ('p-settled:entry','p-settled','entry-1','entry','2026-08-22T09:00:00Z',NULL,.5,10,'filled','FILLED'),
+              ('duplicate-intent','p-settled','entry-1','entry','2026-08-22T09:01:00Z',NULL,.5,100,'filled','FILLED');
+        """)
+    state_dir = Path(cfg["paths"]["trades_db"]).parent
+    loop.atomic_json(state_dir / "daemon-heartbeat.json", {"alive": True, "timestamp": loop.iso()})
+    loop.atomic_json(state_dir / "live_health_composite.json", {"healthy": False, "computed_at": loop.iso()})
+    before = Path(cfg["paths"]["trades_db"]).read_bytes()
+    ready, _reason = loop._live_capital_lane_ready_for_evidence(cfg)
+
+    first = loop.detect(cfg, capture_evidence=False, run_maintenance=ready)
+    second = loop.detect(cfg, capture_evidence=False, run_maintenance=ready)
+
+    assert len(first) == 1 and second == []
+    rows = _incidents(cfg)
+    assert len(rows) == 1 and rows[0]["crossing_kind"] == "settlement_full_loss"
+    assert rows[0]["t_floor"] is None and rows[0]["observed_bid"] is None
+    assert loop.evidence_once(cfg)["built"] == first
+    assert before == Path(cfg["paths"]["trades_db"]).read_bytes()
+
+
+def test_degraded_settlement_scan_preserves_missing_canonical_basis_as_debt(cfg: dict) -> None:
+    _settled_full_loss(cfg)
+    state_dir = Path(cfg["paths"]["trades_db"]).parent
+    loop.atomic_json(state_dir / "daemon-heartbeat.json", {"alive": True, "timestamp": loop.iso()})
+    loop.atomic_json(state_dir / "live_health_composite.json", {"healthy": False, "computed_at": loop.iso()})
+    ready, _reason = loop._live_capital_lane_ready_for_evidence(cfg)
+
+    assert loop.detect(cfg, capture_evidence=False, run_maintenance=ready) == []
+    assert _incidents(cfg) == []
+    with loop.memory(cfg) as mem:
+        debt = mem.execute("SELECT kind,status,reason FROM controller_debt WHERE debt_id='execution_fact_schema'").fetchone()
+    assert debt[0] == "execution_fact" and debt[1] == "blocked"
+    assert str(debt[2]).startswith("execution_fact_schema_unavailable:")
+
+
+@pytest.mark.parametrize("signum", [None, signal.SIGTERM, signal.SIGINT])
+def test_daemon_clean_stop_records_actual_mechanism_not_actor(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, signum: int | None,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    state_dir = Path(cfg["paths"]["trades_db"]).parent
+    loop.atomic_json(state_dir / "daemon-heartbeat.json", {"alive": True, "timestamp": loop.iso()})
+    loop.atomic_json(state_dir / "live_health_composite.json", {"healthy": False, "computed_at": loop.iso()})
+    handlers: dict[int, object] = {}
+    monkeypatch.setattr(loop.signal, "signal", lambda number, handler: handlers.setdefault(number, handler))
+    monkeypatch.setattr(loop, "bootstrap", lambda _cfg: {})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
+    monkeypatch.setattr(loop, "_spawn_evidence_worker", lambda _cfg: pytest.fail("no evidence work after a requested stop"))
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: pytest.fail("no dispatch after a requested stop"))
+    monkeypatch.setattr(loop.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("stop test may not spawn external work"))
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    def stop_in_detect(_cfg: dict, **_kwargs: object) -> list[str]:
+        if signum is None:
+            (runtime / "HALT").touch()
+        else:
+            handlers[signum](signum, None)
+        return []
+
+    monkeypatch.setattr(loop, "detect", stop_in_detect)
+    assert loop.daemon(cfg) == 0
+    payload = loop.read_json(runtime / "status.json")
+    assert payload["alive"] is False
+    assert payload["stop_reason"] == ("HALT" if signum is None else signal.Signals(signum).name)
+    assert payload["stop_signal"] == signum and payload["stop_actor"] == "UNKNOWN"
+    assert payload["stop_requested_at"] == loop.iso()
+    assert loop.status(cfg)["controller"]["stop_reason"] == payload["stop_reason"]
+    with (ROOT / "total_loss_loop.plist").open("rb") as handle:
+        policy = plistlib.load(handle)
+    assert policy["KeepAlive"]["SuccessfulExit"] is False and "StartInterval" not in policy
+
+
+def test_daemon_failed_stop_receipt_does_not_return_clean_success(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runtime.mkdir()
+    (runtime / "HALT").touch()
+    monkeypatch.setattr(loop, "bootstrap", lambda _cfg: {})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    original_atomic = loop.atomic_json
+
+    def fail_stop_receipt(path: Path, payload: object) -> None:
+        if path.name == "status.json" and isinstance(payload, dict) and payload.get("alive") is False:
+            raise OSError(errno.ENOSPC, "private fixture disk full")
+        original_atomic(path, payload)
+
+    monkeypatch.setattr(loop, "atomic_json", fail_stop_receipt)
+    with pytest.raises(OSError) as failure:
+        loop.daemon(cfg)
+    assert failure.value.errno == errno.ENOSPC
+    payload = loop.read_json(runtime / "status.json")
+    assert payload["alive"] is True and "stop_reason" not in payload
+    with (ROOT / "total_loss_loop.plist").open("rb") as handle:
+        assert plistlib.load(handle)["KeepAlive"]["SuccessfulExit"] is False
+
+
+def test_status_keeps_legacy_stop_actor_unknown_and_exposes_exact_diagnostic_debt(cfg: dict) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    loop.atomic_json(runtime / "status.json", {"alive": False, "pid": 123, "at": loop.iso(), "evidence_suppressed_reason": "main_heartbeat_unhealthy"})
+    with loop.memory(cfg) as mem:
+        mem.execute("INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) VALUES ('settlement_basis:p1','settlement_basis','retry_pending','basis missing',?)", (loop.iso(),))
+        mem.commit()
+
+    observed = loop.status(cfg)
+
+    assert observed["controller"]["stop_reason"] == "UNKNOWN"
+    assert observed["controller"]["stop_actor"] == "UNKNOWN"
+    assert observed["diagnostics"]["evidence_suppressed_reason"] == "main_heartbeat_unhealthy"
+    assert observed["diagnostics"]["pending_debt"][0]["debt_id"] == "settlement_basis:p1"
+
+
+def test_evidence_worker_health_distinguishes_stale_running_dead_and_old_completion(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    status_path = runtime / "evidence-worker-status.json"
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_status_missing"
+    payload = {"status": "running", "pid": 123, "at": loop.iso()}
+    loop.atomic_json(status_path, payload)
+    monkeypatch.setattr(loop, "_pid_alive", lambda _pid: False)
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_pid_dead"
+    monkeypatch.setattr(loop, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(loop, "_pid_command", lambda _pid: "/usr/bin/python unrelated.py evidence-once")
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_command_mismatch"
+    command = f"python {ROOT / 'total_loss_loop.py'} --config {ROOT / 'total_loss_loop.toml'} evidence-once"
+    monkeypatch.setattr(loop, "_pid_command", lambda _pid: command)
+    assert loop.evidence_worker_status_health(cfg)["healthy"] is True
+    monkeypatch.setattr(loop, "_pid_command", lambda _pid: command.replace(str(ROOT / "total_loss_loop.toml"), "/other-runtime/config.toml"))
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_command_mismatch"
+    loop.atomic_json(status_path, dict(payload, status="complete", controller_degraded={"status": "controller_degraded"}))
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_controller_degraded"
+    loop.atomic_json(status_path, dict(payload, status="error"))
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_last_run_error"
+    loop.atomic_json(status_path, dict(payload, at=loop.iso(loop.now() - timedelta(seconds=1000))))
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_status_stale"
+    loop.atomic_json(status_path, dict(payload, at=loop.iso(loop.now() + timedelta(seconds=1))))
+    assert loop.evidence_worker_status_health(cfg)["reason"] == "evidence_worker_status_stale"
+    loop.atomic_json(status_path, dict(payload, status="complete", at=loop.iso(loop.now() - timedelta(days=1))))
+    health = loop.status(cfg)["evidence_worker"]
+    assert health["reason"] == "evidence_worker_last_completion_stale" and health["status"] == "complete"
+    assert "desired_running" not in health
 
 
 def test_detector_preserves_trigger_without_running_background_maintenance(
@@ -3199,7 +3464,7 @@ def test_daemon_owns_missing_capability_probe_before_dispatch(
 
     def fake_detect(_cfg: dict, **_kwargs: object) -> list[str]:
         detected.append(len(detected) + 1)
-        if len(detected) == 3:
+        if len(detected) == 4:
             (runtime / "HALT").touch()
         return []
 
@@ -3216,7 +3481,7 @@ def test_daemon_owns_missing_capability_probe_before_dispatch(
     _queue_blind_dispatch_debt(cfg, incident_id="capability-debt")
 
     assert loop.daemon(cfg) == 0
-    assert detected == [1, 2, 3]
+    assert detected == [1, 2, 3, 4]
     assert len(probes) == 2
     assert len(spawned) == 1
 

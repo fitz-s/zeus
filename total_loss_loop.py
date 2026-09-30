@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -4848,7 +4849,16 @@ def controller_status_health(
     """Return fail-closed controller liveness, not its last self-reported state."""
     payload = payload if payload is not None else read_json(runtime_dir(cfg) / "status.json", {})
     if not isinstance(payload, Mapping) or payload.get("alive") is not True:
-        return {"healthy": False, "reason": "controller_status_not_alive"}
+        stopped = payload if isinstance(payload, Mapping) else {}
+        return {
+            "healthy": False,
+            "reason": "controller_status_not_alive",
+            "stop_reason": stopped.get("stop_reason") or "UNKNOWN",
+            "stop_signal": stopped.get("stop_signal"),
+            "stop_requested_at": stopped.get("stop_requested_at"),
+            # A signal or HALT receipt proves mechanism, not its initiator.
+            "stop_actor": "UNKNOWN",
+        }
     at = parse_time(str(payload.get("at") or ""))
     maximum_age = max(
         1.0,
@@ -4864,6 +4874,42 @@ def controller_status_health(
     if "total_loss_loop.py" not in command or "daemon" not in command:
         return {"healthy": False, "reason": "controller_command_mismatch", "pid": pid}
     return {"healthy": True, "reason": "controller_healthy", "pid": int(pid), "at": at.isoformat()}
+
+
+def evidence_worker_status_health(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Observe the last capture receipt without inferring desired-running state."""
+
+    payload = read_json(runtime_dir(cfg) / "evidence-worker-status.json", {})
+    if not isinstance(payload, Mapping) or not payload:
+        return {"healthy": False, "reason": "evidence_worker_status_missing"}
+    worker_status = str(payload.get("status") or "")
+    result = {"healthy": False, "status": worker_status, "pid": payload.get("pid"), "at": payload.get("at")}
+    if worker_status not in {"running", "complete"}:
+        return {**result, "reason": "evidence_worker_last_run_error" if worker_status == "error" else "evidence_worker_status_invalid"}
+    if payload.get("controller_degraded"):
+        return {**result, "reason": "evidence_worker_controller_degraded"}
+    at = parse_time(str(payload.get("at") or ""))
+    budget_seconds = max(0.001, float(cfg["loop"].get("evidence_build_budget_ms", 1000)) / 1000.0)
+    maximum_age = budget_seconds + 5.0
+    if worker_status == "complete":
+        maximum_age += max(5.0, float(cfg["loop"].get("evidence_scan_interval_seconds", 60)))
+    if at is None or (age := (now() - at).total_seconds()) < 0 or age > maximum_age:
+        return {**result, "reason": "evidence_worker_last_completion_stale" if worker_status == "complete" else "evidence_worker_status_stale"}
+    if worker_status == "complete":
+        return {**result, "healthy": True, "reason": "evidence_worker_last_run_complete"}
+    if not _pid_alive(payload.get("pid")):
+        return {**result, "reason": "evidence_worker_pid_dead"}
+    try:
+        command = shlex.split(_pid_command(payload.get("pid")))
+    except ValueError:
+        command = []
+    config_path = str(Path(str(cfg.get("_config_path") or CONFIG_PATH)).resolve())
+    if (
+        str(Path(__file__).resolve()) not in command
+        or command[-3:] != ["--config", config_path, "evidence-once"]
+    ):
+        return {**result, "reason": "evidence_worker_command_mismatch"}
+    return {**result, "healthy": True, "reason": "evidence_worker_running"}
 
 
 def _publish_evidence_controller_degraded(reason_code: str, error: str) -> dict[str, Any]:
@@ -8383,6 +8429,12 @@ def status(cfg: Mapping[str, Any]) -> dict[str, Any]:
     with memory(cfg) as mem:
         counts = {row[0]: row[1] for row in mem.execute("SELECT status,COUNT(*) FROM incidents GROUP BY status")}
         latest = [dict(row) for row in mem.execute("SELECT * FROM incidents ORDER BY detected_at DESC LIMIT 20")]
+        pending_debt = [dict(row) for row in mem.execute(
+            "SELECT debt_id,kind,status,reason,updated_at FROM controller_debt "
+            "WHERE status != 'resolved' ORDER BY updated_at,debt_id LIMIT 20"
+        )]
+    controller = read_json(runtime_dir(cfg) / "status.json", {})
+    controller = controller if isinstance(controller, Mapping) else {}
     return {
         "runtime": str(runtime_dir(cfg)),
         "floor": floor_price(cfg),
@@ -8392,7 +8444,14 @@ def status(cfg: Mapping[str, Any]) -> dict[str, Any]:
         "capabilities": read_json(runtime_dir(cfg) / "capabilities.json", None),
         "provider_backoff": _provider_backoff(cfg),
         "halted": (runtime_dir(cfg) / "HALT").exists(),
-        "controller": controller_status_health(cfg),
+        "controller": controller_status_health(cfg, controller),
+        "evidence_worker": evidence_worker_status_health(cfg),
+        "diagnostics": {
+            "evidence_suppressed_reason": controller.get("evidence_suppressed_reason"),
+            "maintenance_suppressed_reason": controller.get("maintenance_suppressed_reason"),
+            "pending_debt": pending_debt,
+            "pending_debt_sample_limit": 20,
+        },
     }
 
 
@@ -8570,8 +8629,13 @@ def _spawn_evidence_worker(cfg: Mapping[str, Any]) -> subprocess.Popen[Any]:
 def _live_capital_lane_ready_for_evidence(
     cfg: Mapping[str, Any],
 ) -> tuple[bool, str | None]:
-    """Yield historical DB scans whenever the live money path is degraded."""
+    """Yield bounded diagnostics while the main runtime is unresponsive."""
 
+    # SCOPE: this controller's canonical read-only diagnostics, never dispatch,
+    # repair, delivery, risk, or venue authority. A responsive DEGRADED runtime
+    # still needs settlement-loss detection and incident evidence.
+    # DRAIN: recheck on the existing maintenance/evidence cadence, under the
+    # unchanged SQL/time/byte budgets. RESET: fresh explicit runtime reports.
     state_dir = Path(str(cfg["paths"]["trades_db"])).resolve().parent
     max_age = float(
         cfg.get("capital_lane", {}).get("max_main_heartbeat_age_seconds", 90)
@@ -8582,11 +8646,12 @@ def _live_capital_lane_ready_for_evidence(
         if isinstance(heartbeat, Mapping)
         else None
     )
+    checked_at = now()
     if (
         not isinstance(heartbeat, Mapping)
         or heartbeat.get("alive") is not True
         or heartbeat_at is None
-        or (now() - heartbeat_at).total_seconds() > max_age
+        or not 0 <= (checked_at - heartbeat_at).total_seconds() <= max_age
     ):
         return False, "main_heartbeat_unhealthy"
 
@@ -8598,9 +8663,9 @@ def _live_capital_lane_ready_for_evidence(
     )
     if (
         not isinstance(health, Mapping)
-        or health.get("healthy") is not True
+        or type(health.get("healthy")) is not bool
         or health_at is None
-        or (now() - health_at).total_seconds() > max_age
+        or not 0 <= (checked_at - health_at).total_seconds() <= max_age
     ):
         return False, "live_health_composite_unhealthy"
     return True, None
@@ -8651,8 +8716,13 @@ def daemon(cfg: Mapping[str, Any]) -> int:
     except BlockingIOError:
         return 75
     stopping = False
+    stop_signal: int | None = None
+    stop_requested_at: str | None = None
     def stop(_signum: int, _frame: Any) -> None:
-        nonlocal stopping
+        nonlocal stopping, stop_signal, stop_requested_at
+        if stop_signal is None:
+            stop_signal = _signum
+            stop_requested_at = iso()
         stopping = True
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
@@ -8803,6 +8873,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         except Exception as exc:  # the detector remains restartable and evidence-backed
             error = f"{type(exc).__name__}: {exc}"
         recorded_dispatch_error = dispatch_error
+        recorded_evidence_suppressed_reason = evidence_suppressed_reason
         atomic_json(
             run / "status.json",
             {
@@ -8833,7 +8904,13 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 "provider_backoff": _provider_backoff(cfg),
             },
         )
-        if error is None and not startup_pending and not _startup_debt_pending(cfg):
+        if (
+            not stopping
+            and not (run / "HALT").exists()
+            and error is None
+            and not startup_pending
+            and not _startup_debt_pending(cfg)
+        ):
             try:
                 evidence_worker_exited = (
                     evidence_worker is not None and evidence_worker.poll() is not None
@@ -8885,7 +8962,10 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 dispatch_error = f"{type(exc).__name__}: {exc}"
             else:
                 dispatch_error = None
-            if dispatch_error != recorded_dispatch_error:
+            if (
+                dispatch_error != recorded_dispatch_error
+                or evidence_suppressed_reason != recorded_evidence_suppressed_reason
+            ):
                 atomic_json(
                     run / "status.json",
                     {
@@ -8898,8 +8978,15 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                             if dispatch_worker is not None and dispatch_worker.poll() is None
                             else None
                         ),
+                        "evidence_worker_pid": (
+                            evidence_worker.pid
+                            if evidence_worker is not None and evidence_worker.poll() is None
+                            else None
+                        ),
                         "error": error,
                         "dispatch_error": dispatch_error,
+                        "evidence_suppressed_reason": evidence_suppressed_reason,
+                        "maintenance_suppressed_reason": maintenance_suppressed_reason,
                         "provider_backoff": _provider_backoff(cfg),
                     },
                 )
@@ -8907,6 +8994,8 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         _record_cycle_latency(cfg, detector_elapsed=detector_elapsed, total_elapsed=elapsed)
         if elapsed < poll:
             time.sleep(poll - elapsed)
+    stop_reason = signal.Signals(stop_signal).name if stop_signal is not None else "HALT"
+    stop_requested_at = stop_requested_at or iso()
     if dispatch_worker is not None and dispatch_worker.poll() is None:
         _terminate_process_group(dispatch_worker.pid)
     if evidence_worker is not None and evidence_worker.poll() is None:
@@ -8922,7 +9011,18 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         _terminate_process_group(pid)
     atomic_json(
         run / "status.json",
-        {"alive": False, "pid": os.getpid(), "at": iso(), "terminated_runs": terminated},
+        {
+            "alive": False,
+            "pid": os.getpid(),
+            "at": iso(),
+            "terminated_runs": terminated,
+            "stop_reason": stop_reason,
+            "stop_signal": stop_signal,
+            "stop_requested_at": stop_requested_at,
+            "stop_actor": "UNKNOWN",
+            "evidence_suppressed_reason": evidence_suppressed_reason,
+            "maintenance_suppressed_reason": maintenance_suppressed_reason,
+        },
     )
     return 0
 
