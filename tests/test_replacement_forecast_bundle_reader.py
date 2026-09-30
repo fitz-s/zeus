@@ -1450,7 +1450,8 @@ def _reader_shanghai_native_high(conn, request, root, monkeypatch):
             interval = f"{window['start_step_hours']}-{window['end_step_hours']}"
             window["value_native_unit"] = value if interval in member["inner_step_ranges"] else value-.2
     source_root = root/"native-ens"
-    directory = source_root/"raw"/"coordinate_manifests"/manifest_sha/"open_ens_mx2t6_localday_max"/"shanghai"/cycle.strftime("%Y%m%d")
+    cycle_directory = native._cycle_extract_dir_name(run_date=cycle.date(),run_hour=cycle.hour)
+    directory = source_root/"raw"/"coordinate_manifests"/manifest_sha/"open_ens_mx2t6_localday_max"/"shanghai"/cycle_directory
     directory.mkdir(parents=True)
     path = directory/f"open_ens_mx2t6_localday_max_target_{request.target_date}_lead_1.json"
     path.write_text(json.dumps(body),encoding="utf-8")
@@ -1467,7 +1468,8 @@ def _reader_shanghai_native_high(conn, request, root, monkeypatch):
         ingress.setattr(native._ingest_grib_module,"_now_utc_iso",lambda:captured.isoformat())
         decision,release = native._select_cycle_for_track(track="mx2t6_high",now_utc=captured)
         assert decision is native.FetchDecision.FETCH_ALLOWED
-        assert release["selected_cycle_time"] == cycle and release["horizon_profile"] == "full"
+        assert release["selected_cycle_time"] == cycle
+        assert release["horizon_profile"] == ("full" if cycle.hour in (0,12) else "short")
         collected = native.collect_open_ens_cycle(track="mx2t6_high",skip_download=True,skip_extract=True,
             grid_surface_source_evidence=grid,conn=conn,now_utc=captured,
             _paths=native._resolve_opendata_paths(source_root=source_root,environ={}))
@@ -2262,114 +2264,116 @@ def _insert_posterior(
     return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
-def test_live_input_hwm_blocks_posterior_when_newer_ensemble_cycle_is_available() -> None:
-    conn = _conn()
-    _insert_ensemble_snapshot(
-        conn,
-        snapshot_id=1,
-        source_cycle_time=_dt(0),
-        available_at=_dt(1),
-    )
-    _insert_ensemble_snapshot(
-        conn,
-        snapshot_id=2,
-        source_cycle_time=_dt(2),
-        available_at=_dt(3),
-    )
+def _reader_next_native_cycle(normal,monkeypatch):
+    from dataclasses import replace
+    from src.data.station_ground_evidence import forecast_db_from_connection
+    cycle = normal.request.source_cycle_time+timedelta(hours=6)
+    cut = cycle+timedelta(hours=8,minutes=15)
+    class ClockType(type):
+        def __instancecheck__(cls,value): return isinstance(value,datetime)
+    class ReaderClock(datetime,metaclass=ClockType):
+        @classmethod
+        def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+    monkeypatch.setattr(reader,"datetime",ReaderClock)
+    kwargs = {**normal.kwargs,"decision_time":cut,
+        "authority_purpose":ReplacementForecastAuthorityPurpose.HELD_REDECISION}
+    assert read_replacement_forecast_bundle(normal.conn,**kwargs).ok
+    old_snapshots = tuple(tuple(row) for row in normal.conn.execute("SELECT * FROM ensemble_snapshots ORDER BY snapshot_id"))
+    _request,snapshot,builtin = _reader_shanghai_native_high(normal.conn,
+        replace(normal.request,source_cycle_time=cycle,computed_at=cut),
+        forecast_db_from_connection(normal.conn).parent,monkeypatch)
+    try:
+        normal.conn.commit()
+        assert input_hwm._latest_eligible_ensemble_input_mark(normal.conn,
+            city=normal.row["city"],target_date=normal.row["target_date"],
+            metric=normal.row["temperature_metric"],decision_time=cut) == (snapshot["snapshot_id"],cycle)
+        yield SimpleNamespace(cycle=cycle,cut=cut,snapshot=snapshot,kwargs=kwargs)
+        assert tuple(tuple(row) for row in normal.conn.execute(
+            "SELECT * FROM ensemble_snapshots WHERE snapshot_id<=? ORDER BY snapshot_id",
+            (max(row[0] for row in old_snapshots),))) == old_snapshots
+    finally:
+        builtin.close()
 
-    reason = replacement_live_input_lag_reason(
-        conn,
-        city="Shanghai",
-        target_date="2026-06-07",
-        metric="high",
-        decision_time=_dt(4),
-        posterior_source_cycle_time=_dt(0),
-        posterior_computed_at=_dt(1, 30),
-        posterior_provenance=_live_provenance(),
-    )
 
-    assert reason == (
-        "basis=current_ensemble_snapshot_superseded:"
-        "latest_snapshot_id=2:"
-        "latest_ensemble_cycle=2026-06-06T02:00:00+00:00:"
-        "consumed_ensemble_cycle=2026-06-06T00:00:00+00:00:"
-        "lag_h=2.00"
-    )
-
-    posterior_id = _insert_posterior(conn)
-    held = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        enforce_raw_input_hwm=True,
-        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
-    )
-
-    assert held.ok is False
-    assert "basis=current_ensemble_snapshot_superseded" in held.reason_code
+def test_live_input_hwm_blocks_posterior_when_newer_ensemble_cycle_is_available(
+    monkeypatch, _shanghai_reader_current_certificate,
+) -> None:
+    normal = _shanghai_reader_current_certificate
+    world = _reader_next_native_cycle(normal,monkeypatch)
+    newer = next(world)
+    try:
+        reason = replacement_live_input_lag_reason(normal.conn,city=normal.row["city"],
+            target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],decision_time=newer.cut,
+            posterior_source_cycle_time=normal.request.source_cycle_time,
+            posterior_computed_at=normal.request.computed_at,
+            posterior_provenance=json.loads(normal.row["provenance_json"]))
+        assert reason == ("basis=current_ensemble_snapshot_superseded:"
+            f"latest_snapshot_id={newer.snapshot['snapshot_id']}:latest_ensemble_cycle={newer.cycle.isoformat()}:"
+            f"consumed_ensemble_cycle={normal.request.source_cycle_time.isoformat()}:lag_h=6.00")
+        held = read_replacement_forecast_bundle(normal.conn,**newer.kwargs)
+        assert held.ok is False
+        assert reason in held.reason_code
+    finally:
+        next(world,None)
 
 
 @pytest.mark.parametrize("newer_evidence", ("current", "retired", "missing_coverage"))
 def test_live_input_hwm_considers_only_newer_current_covered_ensemble(
     newer_evidence: str,
+    monkeypatch, _shanghai_reader_current_certificate,
 ) -> None:
-    conn = _conn()
-    _insert_ensemble_snapshot(
-        conn, snapshot_id=1, source_cycle_time=_dt(0), available_at=_dt(1)
-    )
-    _insert_ensemble_snapshot(
-        conn, snapshot_id=2, source_cycle_time=_dt(2), available_at=_dt(3)
-    )
-    if newer_evidence == "retired":
-        retired = "ecmwf_opendata_mx2t3_local_calendar_day_max"
-        conn.execute(
-            "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = 2",
-            (retired,),
-        )
-        conn.execute(
-            "UPDATE source_run SET dataset_id = ? WHERE source_run_id = 'ens-run-2'",
-            (retired,),
-        )
-    elif newer_evidence == "missing_coverage":
-        conn.execute(
-            "DELETE FROM source_run_coverage WHERE source_run_id = 'ens-run-2'"
-        )
-
-    reason = replacement_live_input_lag_reason(
-        conn,
-        city="Shanghai",
-        target_date="2026-06-07",
-        metric="high",
-        decision_time=_dt(4),
-        posterior_source_cycle_time=_dt(0),
-        posterior_computed_at=_dt(3, 5),
-        posterior_provenance=_live_provenance(),
-    )
-    assert (
-        reason is not None and "basis=current_ensemble_snapshot_superseded" in reason
-    ) is (newer_evidence == "current")
-
-    posterior_id = _insert_posterior(conn)
-    held = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=_readiness(posterior_id=posterior_id),
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        decision_time=_dt(4),
-        current_bin_topology_hash="topology-hash",
-        enforce_raw_input_hwm=True,
-        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
-    )
-    assert held.ok is (newer_evidence != "current")
-    if newer_evidence == "current":
-        assert "basis=current_ensemble_snapshot_superseded" in held.reason_code
+    import re
+    normal = _shanghai_reader_current_certificate
+    world = _reader_next_native_cycle(normal,monkeypatch)
+    newer = next(world)
+    original = {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}"))
+        for table in ("ensemble_snapshots","source_run","source_run_coverage")}
+    calls = []
+    class EvidenceView:
+        def execute(self,sql,parameters=()):
+            query = " ".join(sql.upper().split())
+            if (newer_evidence != "current" and query.startswith("SELECT SNAPSHOT_ID,")
+                and "FROM ENSEMBLE_SNAPSHOTS AS ENSEMBLE_SNAPSHOT" in query):
+                assert tuple(parameters[:3]) == (normal.row["city"],normal.row["target_date"],normal.row["temperature_metric"])
+                calls.append(newer_evidence)
+                if newer_evidence == "retired":
+                    columns = [row[1] for row in normal.conn.execute("PRAGMA table_info(ensemble_snapshots)")]
+                    projection = ",".join("CASE WHEN snapshot_id=? THEN ? ELSE dataset_id END AS dataset_id"
+                        if column=="dataset_id" else f'"{column}"' for column in columns)
+                    sql = f"WITH ensemble_snapshots AS (SELECT {projection} FROM main.ensemble_snapshots) "+sql
+                    parameters = (newer.snapshot["snapshot_id"],"ecmwf_opendata_mx2t3_local_calendar_day_max",*parameters)
+                else:
+                    # A read-only absent-coverage view, not a fake final mark:
+                    # the original completeness/identity/asof SQL still runs.
+                    sql = re.sub(r"(AS source_coverage) INDEXED BY [A-Za-z0-9_]+",r"\1",sql)
+                    sql = "WITH source_run_coverage AS (SELECT * FROM main.source_run_coverage WHERE source_run_id!=?) "+sql
+                    parameters = (newer.snapshot["source_run_id"],*parameters)
+            return normal.conn.execute(sql,parameters)
+        def __getattr__(self,name): return getattr(normal.conn,name)
+    active = EvidenceView()
+    try:
+        expected_mark = (newer.snapshot["snapshot_id"],newer.cycle) if newer_evidence=="current" else (
+            json.loads(normal.row["dependency_source_run_ids_json"])["current_ensemble_snapshot"],normal.request.source_cycle_time)
+        assert input_hwm._latest_eligible_ensemble_input_mark(active,city=normal.row["city"],
+            target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],
+            decision_time=newer.cut) == expected_mark
+        reason = replacement_live_input_lag_reason(active,city=normal.row["city"],
+            target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],decision_time=newer.cut,
+            posterior_source_cycle_time=normal.request.source_cycle_time,
+            posterior_computed_at=normal.request.computed_at,
+            posterior_provenance=json.loads(normal.row["provenance_json"]))
+        assert (reason is not None and "basis=current_ensemble_snapshot_superseded" in reason) is (newer_evidence=="current")
+        held = read_replacement_forecast_bundle(active,**{**newer.kwargs,"raw_input_hwm_conn":active})
+        assert held.ok is (newer_evidence != "current")
+        if newer_evidence=="current":
+            assert "basis=current_ensemble_snapshot_superseded" in held.reason_code
+        else:
+            assert reason is None
+            assert calls and set(calls)=={newer_evidence}
+        assert {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}"))
+            for table in original} == original
+    finally:
+        next(world,None)
 
 
 @pytest.mark.parametrize(
