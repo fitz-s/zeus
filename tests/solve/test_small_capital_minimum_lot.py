@@ -465,6 +465,8 @@ def test_joint_leg_below_the_band_floor_never_reaches_the_planner():
 
 
 def test_joint_planner_lot_respects_each_candidates_own_cap():
+    # A cap of exactly the lot cost ($1.00 = 5 shares at 0.20) makes the lot
+    # the optimizer's active bound; it must be admitted deterministically.
     candidate, witness = _joint_family(q=0.26, family="joint-own-cap")
     endowment = _joint_endowment(witness)
     admitted = S.plan_family_joint_buy_targets(
@@ -484,6 +486,30 @@ def test_joint_planner_lot_respects_each_candidates_own_cap():
 
     assert [t.shares for t in admitted.targets] == [Decimal("5.00")]
     assert refused.targets == ()
+
+
+def test_joint_planner_snaps_an_active_optimizer_bound_onto_its_exact_cap(monkeypatch):
+    # SLSQP reports an active 5-share bound as 4.999999999999998 on some numpy
+    # builds; the at-most grid floor must not turn that into 4.95.
+    candidate, witness = _joint_family(q=0.26, family="joint-bound-snap")
+    original = S._ru_cvar_optimum
+
+    def just_below_bound(**kwargs):
+        _direct, utility, iterations = original(**kwargs)
+        return np.nextafter(kwargs["caps"], 0.0), utility, iterations
+
+    monkeypatch.setattr(S, "_ru_cvar_optimum", just_below_bound)
+    plan = S.plan_family_joint_buy_targets(
+        (candidate,),
+        probability_witness=witness,
+        endowment=_joint_endowment(witness),
+        capital_limit_by_candidate={candidate.candidate_id: Decimal("1.00")},
+        fractional_kelly_multiplier=KAPPA,
+    )
+
+    (target,) = plan.targets
+    assert target.full_kelly_target_shares == Decimal("5.00")
+    assert target.shares == Decimal("5.00")
 
 
 def test_joint_planner_uses_normal_sizing_with_large_capital():
@@ -547,6 +573,41 @@ def test_disabling_the_predicate_disables_both_paths(monkeypatch):
 
     candidate, witness = _joint_family(q=0.26, family="predicate-off-joint")
     assert _plan(candidate, witness).targets == ()
+
+
+def test_evaluation_rows_refuse_a_lot_other_than_the_venue_minimum():
+    taker, maker = _maker_leg(cid="forged-eval")
+    bound = _global_select(
+        (taker, maker),
+        floor="32",
+        ceiling="32",
+        cash="15.24",
+        cap="15.24",
+        fractional_kelly_multiplier="0.125",
+    )
+    assert bound.candidate is maker and bound.shares == Decimal("5")
+    # The bound winner builds a coherent row as-is.
+    S._global_candidate_evaluations(
+        (maker,), rejections={}, scores=(bound,), winner_id=maker.candidate_id,
+    )
+    # 6 shares still satisfies the predicate (h + 6 <= full Kelly 12.19), so
+    # only the venue-minimum identity refuses it. The forged score skips its
+    # own __post_init__, as a stale or hand-built row would.
+    forged = S.GlobalSingleOrderDecision.__new__(S.GlobalSingleOrderDecision)
+    for name, value in vars(bound).items():
+        object.__setattr__(forged, name, value)
+    object.__setattr__(forged, "shares", Decimal("6"))
+    assert S.small_capital_minimum_lot_admits(
+        current_token_shares=forged.current_token_shares,
+        full_kelly_target_shares=forged.full_kelly_target_shares,
+        fractional_kelly_target_shares=forged.fractional_kelly_target_shares,
+        minimum_lot_shares=forged.shares,
+    )
+
+    with pytest.raises(ValueError, match="venue-legal minimum"):
+        S._global_candidate_evaluations(
+            (maker,), rejections={}, scores=(forged,), winner_id=maker.candidate_id,
+        )
 
 
 def test_validator_refuses_a_forged_small_capital_lot():

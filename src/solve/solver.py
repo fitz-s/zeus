@@ -123,6 +123,10 @@ _BUDGET_BIND_REL = 1e-3
 # precision and prevents binary floating-point residue from becoming an order.
 _ROBUST_EV_EPS_USD = 1e-12
 
+# Relative resolution at which the family optimizer (SLSQP, ftol 1e-12) reports
+# an active box bound; far below the 0.01 share quantum it is snapped onto.
+_OPTIMIZER_BOUND_RESOLUTION = Decimal("1e-9")
+
 # Base share discretization. Immediate BUY feasibility is a price-dependent subset
 # of this grid because the venue also constrains SDK maker/taker amount precision.
 _SIZE_QUANTUM = Decimal("0.01")
@@ -3988,6 +3992,9 @@ class GlobalSingleOrderCandidateEvaluation:
                 > self.full_kelly_target_shares
             )
             if repair is None and self.buy_sizing_mode == SMALL_CAPITAL_MINIMUM_LOT:
+                # The row carries no curve, so ``shares == L`` is proven where
+                # the row is built from its candidate
+                # (``_global_candidate_evaluations``).
                 sizing_invalid = not small_capital_minimum_lot_admits(
                     current_token_shares=self.current_token_shares,
                     full_kelly_target_shares=self.full_kelly_target_shares,
@@ -4604,6 +4611,11 @@ def _global_candidate_evaluations(
         q_raw, q_served, probability_semantics_revision = (
             _global_candidate_q_provenance(score)
         )
+        if (
+            score.buy_sizing_mode == SMALL_CAPITAL_MINIMUM_LOT
+            and score.shares != _single_order_legal_minimum_lot(candidate)
+        ):
+            raise ValueError("small-capital lot is not the venue-legal minimum")
         evaluations.append(
             GlobalSingleOrderCandidateEvaluation(
                 candidate_id=candidate.candidate_id,
@@ -5433,6 +5445,7 @@ def plan_family_joint_buy_targets(
 
     tranche_owner: list[int] = []
     tranche_caps: list[float] = []
+    tranche_caps_exact: list[Decimal] = []
     tranche_costs: list[float] = []
     tranche_payoffs: list[np.ndarray] = []
     candidate_caps: list[Decimal] = []
@@ -5477,6 +5490,7 @@ def plan_family_joint_buy_targets(
             unit_cost = curve.fee_model.all_in_price(level.price)
             tranche_owner.append(owner)
             tranche_caps.append(float(take))
+            tranche_caps_exact.append(take)
             tranche_costs.append(float(unit_cost))
             tranche_payoffs.append(win_mask - float(unit_cost))
             remaining -= take
@@ -5540,7 +5554,17 @@ def plan_family_joint_buy_targets(
 
     full_by_candidate = [Decimal("0") for _ in candidates]
     for index, units in enumerate(direct):
-        full_by_candidate[tranche_owner[index]] += Decimal(str(float(units)))
+        # SLSQP (ftol 1e-12) returns an active bound as e.g. 4.999999999999998
+        # for a 5-share cap, and the at-most grid floor below would then drop
+        # a whole quantum. A tranche within the optimizer's resolution of its
+        # exact Decimal cap IS at the cap.
+        tranche_cap = tranche_caps_exact[index]
+        units_exact = Decimal(str(float(units)))
+        if abs(units_exact - tranche_cap) <= _OPTIMIZER_BOUND_RESOLUTION * max(
+            Decimal("1"), tranche_cap
+        ):
+            units_exact = tranche_cap
+        full_by_candidate[tranche_owner[index]] += units_exact
     held_by_token = dict(endowment.current_token_shares)
     desired: list[tuple[int, Decimal]] = []
     target_by_index: dict[int, tuple[Decimal, Decimal]] = {}
