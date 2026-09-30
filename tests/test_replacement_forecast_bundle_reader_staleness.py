@@ -1,5 +1,5 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-07-25
+# Last reused/audited: 2026-09-30
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md
 """H3 antibody — readiness expiry / source-cycle age must be a HARD gate.
 
@@ -37,6 +37,204 @@ from src.data.replacement_forecast_readiness import (
     build_replacement_forecast_readiness,
 )
 from src.state.schema.v2_schema import apply_canonical_schema
+
+
+def _hwm_consumed_context(serving):
+    """Exact HWM input context only, never a live-grade posterior certificate."""
+    return {"bayes_precision_fusion": {"used_models": list(serving), "current_value_serving": serving}}
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("change", ("cohort_loss", "cohort_sigma"))
+def test_raw_hwm_equal_value_new_cycle_requires_current_cohort_redecision(tmp_path, monkeypatch, metric, change):
+    """Actual typed source/HWM/shape relationship; not a public-q or venue grant."""
+    import math
+    import socket
+    import httpx
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    from src.calibration.emos import bin_probability_settlement
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    from src.data.replacement_forecast_materializer import _current_evidence_shape_from_values
+    from src.data.replacement_input_hwm import _exact_current_value_serving_lag
+    from tests.test_bayes_precision_fusion_download import _real_capture_world
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    from tests.test_openmeteo_ecmwf_ifs9_bucket_transport import _actual_o1280_static_fixture
+
+    def unexpected_network(*_args, **_kwargs):
+        raise AssertionError("unexpected external network in private HWM fixture")
+    monkeypatch.setattr(socket, "create_connection", unexpected_network)
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    values = {"icon_global": 20., "ukmo_global_deterministic_10km": 20.}
+    if change == "cohort_sigma":
+        values.update(ukmo_global_deterministic_10km=24., ecmwf_ifs=20.)
+    transport, static_path, _data, _write, static_clock, _args = _actual_o1280_static_fixture(tmp_path, monkeypatch)
+    static_clock[0] = world.clock[0]
+    monkeypatch.setattr(transport, "HSURF_LOCAL_CACHE", str(static_path))
+    original_get = world.provider.get
+
+    def source_response(url, *, params=None, timeout=None):
+        if url.endswith("/meta.json"):
+            return original_get(url, params=params, timeout=timeout)
+        assert url == SINGLE_RUNS_FORECAST_URL
+        model = params["models"]
+        assert model in values
+        world.clock[0] += timedelta(milliseconds=3)
+        world.calls.append(dict(params))
+        lat, lon = float(params["latitude"]), float(params["longitude"])
+        if model == "ecmwf_ifs":
+            point = transport.select_terrain_optimised_point(lat, lon, 123., local_cache=str(static_path))
+            selected_lat, selected_lon = point.grid_latitude, (point.grid_longitude_east + 180) % 360 - 180
+        else:
+            selected_lat, selected_lon = _selected_test_cell(model, lat, lon)
+        day = datetime.fromisoformat(target.target_date)
+        payload = {"latitude": selected_lat, "longitude": selected_lon, "elevation": 123.,
+            "timezone": target.timezone_name,
+            "utc_offset_seconds": int(day.replace(tzinfo=ZoneInfo(target.timezone_name)).utcoffset().total_seconds()),
+            "hourly_units": {"temperature_2m": "°C"},
+            "hourly": {"time": [(day + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
+                "temperature_2m": [values[model] - 10 if i == 0 else values[model] if i == 12 else values[model] - 5
+                    for i in range(24)]}}
+        return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(world.provider, "get", source_response)
+
+    def capture(models, run):
+        return dl.download_bayes_precision_fusion_extra_raw_inputs(**{**world.kwargs, "models": tuple(models),
+            "frozen_source_runs": {model: (run, run + timedelta(hours=4)) for model in models}}, targets=[target])
+
+    assert capture(set(values) - {"icon_global"}, world.run)["written_row_count"] == len(values) - 1
+    with world.open_forecast(world.db) as conn:
+        def current():
+            return read_current_instrument_values(conn, city=target.city, metric=metric,
+                target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
+                decision_time_iso=world.clock[0].isoformat(), include_station_sources=True)
+
+        consumed = current()
+        assert set(consumed) == set(values)
+        source_values = {model: value.value_c for model, value in consumed.items()}
+        center = sum(source_values.values()) / len(source_values)
+
+        def shape(serving):
+            return _current_evidence_shape_from_values(snapshot_id=1,
+                source_cycle_time=world.run.isoformat(), source_available_at=(world.run + timedelta(hours=4)).isoformat(),
+                members_c=[center + (i - 25)*.01 for i in range(51)], provider_values_c=source_values,
+                provider_weights={model: 1/len(source_values) for model in source_values},
+                center_c=center, provider_cycles={model: value.served_cycle for model, value in serving.items()})
+
+        def lag(serving, computed_at):
+            return _exact_current_value_serving_lag(conn, city=target.city, target_date=target.target_date,
+                metric=metric, decision_time=world.clock[0], posterior_computed_at=computed_at,
+                provenance=_hwm_consumed_context({model: value.as_provenance() for model, value in serving.items()}))[1]
+
+        old_cut = world.clock[0]
+        old_shape = shape(consumed)
+        assert old_shape.between_cohort_status == "SIMULTANEOUS_PROVEN"
+        assert lag(consumed, old_cut) is None
+        world.clock[0] = world.clock[0].replace(hour=23, minute=30)
+        newer_cycle = world.run + timedelta(hours=6)
+        assert capture(("ukmo_global_deterministic_10km",), newer_cycle)["written_row_count"] == 1
+        selected = current()
+        assert selected["ukmo_global_deterministic_10km"].served_cycle == newer_cycle.isoformat()
+        assert {model: value.value_c for model, value in selected.items()} == source_values
+        if change == "cohort_loss":
+            with pytest.raises(ValueError, match="two simultaneous provider families"):
+                shape(selected)
+        else:
+            current_shape = shape(selected)
+            assert set(current_shape.between_cohort_models) == {"icon_global", "ecmwf_ifs"}
+            assert current_shape.predictive_sigma_c < old_shape.predictive_sigma_c
+            # Hong Kong's actual Celsius integer truncation resolver. Opposite
+            # shoulders show that old wider q is not conservative for both sides.
+            boundary = math.ceil(center + 3)
+            old_above = bin_probability_settlement(center, old_shape.predictive_sigma_c, boundary, None,
+                rounding_rule="oracle_truncate")
+            new_above = bin_probability_settlement(center, current_shape.predictive_sigma_c, boundary, None,
+                rounding_rule="oracle_truncate")
+            old_below = bin_probability_settlement(center, old_shape.predictive_sigma_c, None, boundary - 1,
+                rounding_rule="oracle_truncate")
+            new_below = bin_probability_settlement(center, current_shape.predictive_sigma_c, None, boundary - 1,
+                rounding_rule="oracle_truncate")
+            assert old_above > new_above and old_below < new_below
+        # The parent's already-correct physical dependency gate fires before
+        # the removed numeric alias. This test is baseline GREEN, not the
+        # separately retained exact-df legacy RED counter.
+        reason = lag(consumed, old_cut)
+        assert reason is not None and "physical_proof_dependency_changed" in reason
+        if change == "cohort_loss":
+            assert capture(("icon_global",), newer_cycle)["written_row_count"] == 1
+        selected = current()
+        assert shape(selected).between_cohort_status == "SIMULTANEOUS_PROVEN"
+        # Component RESET binds actual newly consumed rows/proofs. Full normal
+        # materializer -> public posterior is a separate integration obligation.
+        assert lag(selected, world.clock[0]) is None
+        repeat_calls = len(world.calls)
+        assert capture(tuple(values), newer_cycle if change == "cohort_loss" else world.run)["written_row_count"] == 0
+        assert len(world.calls) == repeat_calls
+        assert lag(selected, world.clock[0]) is None
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_raw_hwm_real_same_value_receipt_progress_and_zero_cost_repeat(tmp_path, monkeypatch, metric):
+    """Real private body/native/ground/client/writer; no mocked proof or HWM result."""
+    import socket
+    from pathlib import Path
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_current_value_serving import physical_capture_debt_reason
+    from src.data.replacement_input_hwm import _exact_current_value_serving_lag
+    from tests.test_bayes_precision_fusion_download import _real_capture_world, _served_in_world
+
+    def unexpected_network(*_args, **_kwargs):
+        raise AssertionError("unexpected external network in private HWM fixture")
+    monkeypatch.setattr(socket, "create_connection", unexpected_network)
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    with world.open_forecast(world.db) as conn:
+        original = _served_in_world(conn, world, target)["icon_global"]
+        original_raw = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+        original_count = conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0]
+        original_receipt = original.physical_response["capture_receipt_artifact_id"]
+        original_provenance = _hwm_consumed_context({"icon_global": original.as_provenance()})
+        old_cut = world.clock[0]
+
+        def lag(provenance, computed_at, cut=None):
+            return _exact_current_value_serving_lag(conn, city=target.city, target_date=target.target_date,
+                metric=metric, decision_time=cut or world.clock[0], posterior_computed_at=computed_at,
+                provenance=provenance)[1]
+
+        assert lag(original_provenance, old_cut) is None
+        calls = len(world.calls)
+        repeated = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target])
+        assert repeated["written_row_count"] == 0 and len(world.calls) == calls
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == original_count
+        assert lag(original_provenance, old_cut) is None
+        receipt_path = conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?",
+            (original_receipt,)).fetchone()[0]
+        Path(receipt_path).unlink()  # Only this fixture-owned receipt is removed.
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=original.raw_model_forecast_id,
+            decision_time_iso=world.clock[0].isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
+        repaired = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+            network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING",
+            capture_debt_raw_ids=(original.raw_model_forecast_id,))
+        assert repaired["written_row_count"] == 0
+        assert repaired["physical_capture_recovered_raw_ids"] == (original.raw_model_forecast_id,)
+        assert len(world.calls) == calls + 1
+        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == original_raw
+        current = _served_in_world(conn, world, target)["icon_global"]
+        assert current.value_c == original.value_c and current.raw_model_forecast_id == original.raw_model_forecast_id
+        assert current.physical_response["capture_receipt_artifact_id"] != original_receipt
+        assert "physical_proof_dependency_changed" in lag(original_provenance, old_cut)
+        assert lag(original_provenance, old_cut, old_cut) is not None
+        rebound = _hwm_consumed_context({"icon_global": current.as_provenance()})
+        assert lag(rebound, world.clock[0]) is None
+        repaired_count = conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0]
+        repeated = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target])
+        assert repeated["written_row_count"] == 0 and len(world.calls) == calls + 1
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts").fetchone()[0] == repaired_count
+        assert lag(rebound, world.clock[0]) is None
 
 
 UTC = timezone.utc
