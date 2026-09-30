@@ -1653,7 +1653,52 @@ def test_current_ensemble_bundle_already_persisted_matches_a_single_run_hwm_acro
     )
 
 
-def test_ensemble_fetch_skips_http_when_current_run_already_persisted(monkeypatch) -> None:
+def _parsed_ensemble_vectors(city, run, available, moment, *, request_hash="sha256:ens"):
+    members = day0.day0_source_clock_ensemble_member_models()
+    template = _strict_ensemble_member_vector(
+        city, members[0], run, available, moment, moment, moment,
+    )
+    hourly = {"time": list(template.times)}
+    metadata = {}
+    for index, member in enumerate(members):
+        key = "temperature_2m" if index == 0 else f"temperature_2m_member{index:02d}"
+        hourly[key] = list(template.temps_c)
+        meta = _json.loads(template.source_run_meta_json)
+        meta.update(model=member, request_hash=request_hash,
+                    provider_run_id=f"openmeteo:ecmwf_ifs025_ensemble:{run.isoformat()}")
+        metadata[member] = meta
+    rows = day0.parse_openmeteo_ensemble_hourly_payload(
+        {"hourly": hourly}, city=city, captured_at=moment.isoformat(),
+        source_meta_by_member=metadata,
+    )
+    assert len(rows) == 51
+    return rows
+
+
+def _private_vector_store(monkeypatch, tmp_path):
+    import src.state.db as db_module
+    path = tmp_path / "vectors.db"
+    conn = sqlite3.connect(path)
+    original = day0.persist_day0_hourly_vectors
+    calls = []
+
+    def persist(rows, **kwargs):
+        kwargs.setdefault("now", day0._day0_utc_now())
+        count = original(rows, conn=conn, **kwargs)
+        calls.append((kwargs.get("endpoint"), count))
+        return count
+
+    def read_only(**_kwargs):
+        result = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        result.execute("PRAGMA query_only=ON")
+        return result
+
+    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", persist)
+    monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", read_only)
+    return conn, original, calls
+
+
+def test_ensemble_fetch_skips_http_when_current_run_already_persisted(monkeypatch, tmp_path) -> None:
     """QUOTA (round 3 residual): fetch_day0_source_clock_ensemble_vectors was called
     unconditionally on every priority/recovery pass whenever ensemble_target_dates was
     non-empty, re-reserving already-successful keys for a run already fully persisted.
@@ -1673,8 +1718,10 @@ def test_ensemble_fetch_skips_http_when_current_run_already_persisted(monkeypatc
     avail_b = datetime(2026, 9, 6, 6, 10, 0, tzinfo=UTC)
 
     current_run = {"init": run_a, "avail": avail_a}
-    persisted = {"init": None, "avail": None}
     ensemble_calls = {"n": 0}
+    conn, _writer, _calls = _private_vector_store(monkeypatch, tmp_path)
+    moment = {"now": decision_time}
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: moment["now"])
 
     day0._LAST_REFRESH_MONOTONIC.clear()
     day0._DAY0_PROVIDER_RUN_HWM_PIN.clear()
@@ -1684,14 +1731,17 @@ def test_ensemble_fetch_skips_http_when_current_run_already_persisted(monkeypatc
     monkeypatch.setattr(
         day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target_date,)
     )
-    monkeypatch.setattr(
-        day0,
-        "fetch_day0_hourly_vectors",
-        lambda city_arg, *, models=None, now=None, timeout_s=None: (
-            [_det_vector(city_arg, model_det, now)],
-            "sha256:det",
-        ),
-    )
+    def fetch_deterministic(city_arg, *, models=None, now=None, timeout_s=None):
+        vector = _parsed_ensemble_vectors(
+            city_arg, current_run["init"], current_run["avail"], now,
+        )[0]
+        meta = _json.loads(vector.source_run_meta_json)
+        meta.update(model=model_det, request_hash="sha256:det",
+                    provider_run_id=f"openmeteo:ecmwf_ifs025:{current_run['init'].isoformat()}")
+        meta["request_params_json"] = _json.dumps({"metadata_model": "ecmwf_ifs025"})
+        return [replace(vector, model=model_det, source_run_meta_json=_json.dumps(meta))], "sha256:det"
+
+    monkeypatch.setattr(day0, "fetch_day0_hourly_vectors", fetch_deterministic)
 
     def fake_probe_hwm(*, decision_time, timeout_s):
         return Day0ProviderRunHwm(
@@ -1706,50 +1756,20 @@ def test_ensemble_fetch_skips_http_when_current_run_already_persisted(monkeypatc
         ensemble_calls["n"] += 1
         return (
             [
-                _ensemble_member_vector(
-                    city_arg, member, current_run["init"], current_run["avail"], now
+                vector for vector in _parsed_ensemble_vectors(
+                    city_arg, current_run["init"], current_run["avail"], now,
+                    request_hash=f"sha256:ens-{current_run['init'].isoformat()}",
                 )
-                for member in members
             ],
             f"sha256:ens-{current_run['init'].isoformat()}",
         )
 
     monkeypatch.setattr(day0, "fetch_day0_source_clock_ensemble_vectors", fake_fetch_ensemble)
 
-    def fake_persist(vectors, *, target_date, request_hash, endpoint=None, **_kwargs):
-        if endpoint == day0.OPENMETEO_ENSEMBLE_URL:
-            persisted["init"] = current_run["init"]
-            persisted["avail"] = current_run["avail"]
-        return len(vectors)
-
-    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", fake_persist)
-
-    def fake_read_freshest(**kwargs):
-        expected = tuple(kwargs.get("expected_models") or ())
-        if expected == (model_det,):
-            return [object()]
-        if set(expected) == set(members) and persisted["init"] is not None:
-            return [
-                _ensemble_member_vector(
-                    city, member, persisted["init"], persisted["avail"], decision_time
-                )
-                for member in members
-            ]
-        return []
-
-    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", fake_read_freshest)
-
-    class _FakeConn:
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr(
-        "src.state.db.get_forecasts_connection_read_only", lambda: _FakeConn()
-    )
-
     def _refresh() -> None:
+        moment["now"] += timedelta(minutes=1)
         day0.maybe_refresh_day0_hourly_vectors(
-            [city], decision_time=decision_time, interval_s=0.0, quota_priority_cities=1,
+            [city], decision_time=moment["now"], interval_s=0.0, quota_priority_cities=1,
         )
 
     _refresh()
@@ -1764,10 +1784,11 @@ def test_ensemble_fetch_skips_http_when_current_run_already_persisted(monkeypatc
     current_run["avail"] = avail_b
     _refresh()
     assert ensemble_calls["n"] == 2, "a genuinely newer run must fetch exactly once more"
+    conn.close()
 
 
 def test_complete_ensemble_bundle_persists_when_deterministic_bundle_is_unavailable(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
     """QUOTA (round 6, 2026-09-06): the ENS carrier was persisted only after the
     deterministic bundle passed every completeness gate, so a deterministic
@@ -1789,8 +1810,8 @@ def test_complete_ensemble_bundle_persists_when_deterministic_bundle_is_unavaila
     avail = datetime(2026, 9, 6, 1, 8, 57, tzinfo=UTC)
 
     ensemble_calls = {"n": 0}
-    persisted_endpoints: list[tuple[str | None, int]] = []
-    persisted = {"done": False}
+    conn, _writer, persisted_endpoints = _private_vector_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: decision_time)
 
     day0._LAST_REFRESH_MONOTONIC.clear()
     day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
@@ -1822,38 +1843,11 @@ def test_complete_ensemble_bundle_persists_when_deterministic_bundle_is_unavaila
     def fake_fetch_ensemble(city_arg, *, now=None, timeout_s=None, window_start=None):
         ensemble_calls["n"] += 1
         return (
-            [_ensemble_member_vector(city_arg, member, run, avail, now) for member in members],
+            _parsed_ensemble_vectors(city_arg, run, avail, now),
             "sha256:ens",
         )
 
     monkeypatch.setattr(day0, "fetch_day0_source_clock_ensemble_vectors", fake_fetch_ensemble)
-
-    def fake_persist(vectors, *, target_date, request_hash, endpoint=None, **_kwargs):
-        persisted_endpoints.append((endpoint, len(vectors)))
-        if endpoint == day0.OPENMETEO_ENSEMBLE_URL:
-            persisted["done"] = True
-        return len(vectors)
-
-    monkeypatch.setattr(day0, "persist_day0_hourly_vectors", fake_persist)
-
-    def fake_read_freshest(**kwargs):
-        expected = tuple(kwargs.get("expected_models") or ())
-        if set(expected) == set(members) and persisted["done"]:
-            return [
-                _ensemble_member_vector(city, member, run, avail, decision_time)
-                for member in members
-            ]
-        return []
-
-    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", fake_read_freshest)
-
-    class _FakeConn:
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr(
-        "src.state.db.get_forecasts_connection_read_only", lambda: _FakeConn()
-    )
 
     def _refresh() -> None:
         day0.maybe_refresh_day0_hourly_vectors(
@@ -1873,6 +1867,7 @@ def test_complete_ensemble_bundle_persists_when_deterministic_bundle_is_unavaila
     assert ensemble_calls["n"] == 1, (
         "the next pass for the same run must reuse the persisted bundle, not re-fetch"
     )
+    conn.close()
 
 
 def test_priority_probe_window_start_is_the_newest_metric_boundary(monkeypatch) -> None:
@@ -1896,13 +1891,9 @@ def test_priority_probe_window_start_is_the_newest_metric_boundary(monkeypatch) 
     newest = now - timedelta(minutes=32)
     oldest = now - timedelta(hours=6, minutes=32)
 
-    class _Conn:
-        def close(self) -> None:
-            return None
-
     monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {city.name: city})
-    monkeypatch.setattr(db_module, "get_world_connection_read_only", lambda: _Conn())
-    monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", lambda: _Conn())
+    monkeypatch.setattr(db_module, "get_world_connection_read_only", lambda **_kwargs: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", lambda **_kwargs: sqlite3.connect(":memory:"))
     monkeypatch.setattr(
         target_plan,
         "_latest_authorized_day0_fact",
@@ -2091,196 +2082,100 @@ def test_priority_probe_names_a_failed_current_print_read(monkeypatch, caplog) -
 
 
 def test_ambiguous_low_missing_ens_is_priority_debt_until_strict_current_bundle(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
-    """A ready deterministic bundle cannot hide Day0 LOW's 51-member carrier debt."""
+    """HIGH has a legal51 positive before independently exercising LOW debt."""
     from src.data.openmeteo_quota import OpenMeteoQuotaTracker
     import src.config as config_module
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.events.reactor as reactor
     import src.state.db as db_module
 
-    city = SimpleNamespace(
-        name="Taipei", timezone="Asia/Taipei", lat=25.067244, lon=121.552822
-    )
+    city = SimpleNamespace(name="Taipei", timezone="Asia/Taipei", lat=25.067244, lon=121.552822)
     decision = datetime(2026, 9, 20, 16, 20, tzinfo=UTC)
-    target_date = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
-    observation_time = decision - timedelta(minutes=20)
-    members = day0.day0_source_clock_ensemble_member_models()
-    run = decision - timedelta(hours=2)
-    available = decision - timedelta(hours=1)
-    valid = [
-        _strict_ensemble_member_vector(
-            city,
-            member,
-            run,
-            available,
-            decision - timedelta(minutes=5),
-            decision - timedelta(minutes=4),
-            decision - timedelta(minutes=3),
-        )
-        for member in members
-    ]
+    target = decision.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    observation = decision - timedelta(minutes=20)
+    run, available = decision - timedelta(hours=2), decision - timedelta(hours=1)
+    valid = _parsed_ensemble_vectors(city, run, available, decision - timedelta(minutes=3))
+    conn, writer, _calls = _private_vector_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(day0, "_day0_utc_now", lambda: decision)
+    monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {city.name: city})
+    monkeypatch.setattr(db_module, "get_world_connection_read_only", lambda **_kwargs: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+    monkeypatch.setattr(day0, "day0_source_clock_ensemble_target_dates", lambda **_kwargs: (target,))
+    fact_metric = {"value": "high"}
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact",
+        lambda *_args, temperature_metric, **_kwargs: (
+            {"observation_time": observation.isoformat()}
+            if temperature_metric == fact_metric["value"] else None))
 
-    def wrong_metadata(vector: Day0HourlyVector) -> Day0HourlyVector:
-        payload = _json.loads(vector.source_run_meta_json or "{}")
-        params = _json.loads(payload["request_params_json"])
-        params["metadata_model"] = "ecmwf_ifs025"
-        payload["request_params_json"] = _json.dumps(params)
-        return replace(vector, source_run_meta_json=_json.dumps(payload))
+    def write_carrier(rows):
+        conn.execute("DELETE FROM day0_hourly_vectors WHERE city=? AND target_date=? AND model LIKE ?",
+                     (city.name, target, day0.DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX + "%"))
+        conn.commit()
+        if rows:
+            writer(rows, target_date=target, conn=conn, request_hash="sha256:ens",
+                   endpoint=day0.OPENMETEO_ENSEMBLE_URL, now=decision)
 
-    carriers = {
-        "missing": [],
-        "old_target": [
-            _strict_ensemble_member_vector(
-                city,
-                member,
-                run - timedelta(days=1),
-                available - timedelta(days=1),
-                decision - timedelta(days=1),
-                decision - timedelta(days=1) + timedelta(minutes=1),
-                decision - timedelta(days=1) + timedelta(minutes=2),
-            )
-            for member in members
-        ],
-        "wrong_metadata_run": [wrong_metadata(vector) for vector in valid],
-        "partial": valid[:-1],
-        "valid": valid,
-    }
-    state: dict[str, object] = {
-        "carrier": carriers["missing"],
-        "persisted": False,
-        "persisted_rows": 0,
-    }
-
-    class _Conn:
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr(
-        config_module, "runtime_cities_by_name", lambda: {city.name: city}
-    )
-    monkeypatch.setattr(
-        db_module, "get_world_connection_read_only", lambda **_kwargs: _Conn()
-    )
-    monkeypatch.setattr(
-        db_module, "get_forecasts_connection_read_only", lambda **_kwargs: _Conn()
-    )
-    monkeypatch.setattr(
-        target_plan,
-        "_latest_authorized_day0_fact",
-        lambda *_args, **_kwargs: {"observation_time": observation_time.isoformat()},
-    )
-    monkeypatch.setattr(
-        day0, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"]
-    )
-    monkeypatch.setattr(
-        day0,
-        "day0_source_clock_ensemble_target_dates",
-        lambda **_kwargs: (target_date,),
-    )
-
-    def strict_readback(**kwargs):
-        expected = tuple(kwargs.get("expected_models") or ())
-        if expected == ("ecmwf_ifs",):
-            return [object()]
-        if set(expected) != set(members):
-            return []
-        vectors = state["carrier"] if not state["persisted"] else valid
-        return day0.select_ready_day0_hourly_vectors(
-            vectors,
-            target_date=kwargs["target_date"],
-            now=kwargs["now"],
-            expected_models=expected,
-            require_expected=True,
-            max_bundle_skew_minutes=kwargs["max_bundle_skew_minutes"],
-            remaining_window_start=kwargs["remaining_window_start"],
-            require_complete_remaining_window=True,
-        )
-
-    monkeypatch.setattr(day0, "read_freshest_day0_hourly_vectors", strict_readback)
+    metadata = _json.loads(valid[0].source_run_meta_json)
+    metadata.update(model="ecmwf_ifs", request_hash="sha256:det",
+                    provider_run_id=f"openmeteo:ecmwf_ifs025:{run.isoformat()}")
+    metadata["request_params_json"] = _json.dumps({"metadata_model": "ecmwf_ifs025"})
+    deterministic = replace(valid[0], model="ecmwf_ifs", source_run_meta_json=_json.dumps(metadata))
+    for target_date in day0.day0_hourly_target_dates_for_refresh(city=city, decision_time=decision):
+        assert writer([deterministic], target_date=target_date, conn=conn,
+                      request_hash="sha256:det", now=decision) == 1
 
     def due_probe():
-        return reactor._edli_day0_hourly_refresh_due_families(
-            cities=[city], decision_time=decision
-        )
+        return reactor._edli_day0_hourly_refresh_due_families(cities=[city], decision_time=decision)
 
-    for carrier_name in ("missing", "old_target", "wrong_metadata_run", "partial"):
-        state["carrier"] = carriers[carrier_name]
-        state["persisted"] = False
-        assert due_probe().refresh_due_families == frozenset(
-            {(city.name, target_date, "low")}
-        ), carrier_name
+    try:
+        write_carrier(valid)
+        assert due_probe().proved
+        assert due_probe().refresh_due_families == frozenset()  # Real HIGH51 positive.
+        fact_metric["value"] = "low"
 
-    state["carrier"] = carriers["valid"]
-    assert due_probe().refresh_due_families == frozenset()
+        def wrong_metadata(vector):
+            meta = _json.loads(vector.source_run_meta_json)
+            meta["request_params_json"] = _json.dumps({"metadata_model": "ecmwf_ifs025"})
+            return replace(vector, source_run_meta_json=_json.dumps(meta))
 
-    state["carrier"] = carriers["missing"]
-    priority_families = reactor._edli_day0_hourly_priority_families(
-        held_families=(), refresh_due_families=due_probe().refresh_due_families
-    )
-    ordered, priority_city_count = reactor._edli_order_day0_hourly_refresh_cities(
-        [city], decision_time=decision, priority_families=priority_families
-    )
-    assert ordered == [city]
-    assert priority_city_count == 1
+        carriers = {
+            "missing": [],
+            "old_target": _parsed_ensemble_vectors(city, run - timedelta(days=1),
+                available - timedelta(days=1), decision - timedelta(days=1)),
+            "wrong_metadata_run": [wrong_metadata(row) for row in valid],
+            "partial": valid[:-1],
+        }
+        for name, rows in carriers.items():
+            write_carrier(rows)
+            assert due_probe().refresh_due_families == frozenset({(city.name, target, "low")}), name
+        write_carrier(valid)
+        assert due_probe().refresh_due_families == frozenset()
 
-    ensemble_fetches = {"n": 0}
-    monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
-    monkeypatch.setattr(
-        day0, "_current_provider_bundle_already_persisted", lambda **_kwargs: True
-    )
-    monkeypatch.setattr(
-        day0,
-        "_probe_day0_source_clock_ensemble_run_hwm",
-        lambda **_kwargs: Day0ProviderRunHwm(
-            model="ecmwf_ifs025_ensemble",
-            run_initialisation_time=run,
-            run_availability_time=available,
-        ),
-    )
-    monkeypatch.setattr(
-        day0,
-        "_current_ensemble_bundle_already_persisted",
-        lambda **_kwargs: bool(state["persisted"]),
-    )
-    monkeypatch.setattr(
-        day0,
-        "fetch_day0_hourly_vectors",
-        lambda **_kwargs: pytest.fail("ready deterministic carrier must not refetch"),
-    )
-    monkeypatch.setattr(
-        day0,
-        "fetch_day0_source_clock_ensemble_vectors",
-        lambda *_args, **_kwargs: (
-            ensemble_fetches.__setitem__("n", ensemble_fetches["n"] + 1)
-            or (valid, "sha256:ens")
-        ),
-    )
-    monkeypatch.setattr(
-        day0,
-        "persist_day0_hourly_vectors",
-        lambda rows, **_kwargs: (
-            state.__setitem__("persisted", True)
-            or state.__setitem__("persisted_rows", len(rows))
-            or len(rows)
-        ),
-    )
-    monkeypatch.setattr(day0, "_day0_utc_now", lambda: decision)
-    day0._LAST_REFRESH_MONOTONIC.clear()
-    day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
-    day0._INCOMPLETE_RETRY_STREAK.clear()
-
-    day0.maybe_refresh_day0_hourly_vectors(
-        ordered,
-        decision_time=decision,
-        interval_s=0.0,
-        quota_priority_cities=priority_city_count,
-    )
-
-    assert ensemble_fetches["n"] == 1
-    assert state["persisted_rows"] == 51
-    assert due_probe().refresh_due_families == frozenset()
+        write_carrier([])
+        priority = reactor._edli_day0_hourly_priority_families(
+            held_families=(), refresh_due_families=due_probe().refresh_due_families)
+        ordered, priority_count = reactor._edli_order_day0_hourly_refresh_cities(
+            [city], decision_time=decision, priority_families=priority)
+        assert ordered == [city] and priority_count == 1
+        fetches = []
+        monkeypatch.setattr(day0, "quota_tracker", OpenMeteoQuotaTracker())
+        monkeypatch.setattr(day0, "_probe_day0_source_clock_ensemble_run_hwm",
+            lambda **_kwargs: _hwm(day0.DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL, run, available))
+        monkeypatch.setattr(day0, "fetch_day0_hourly_vectors",
+            lambda **_kwargs: pytest.fail("ready deterministic carrier must not refetch"))
+        monkeypatch.setattr(day0, "fetch_day0_source_clock_ensemble_vectors",
+            lambda *_args, **_kwargs: (fetches.append(run) or (valid, "sha256:ens")))
+        day0._LAST_REFRESH_MONOTONIC.clear()
+        day0._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+        day0._INCOMPLETE_RETRY_STREAK.clear()
+        stats = day0.maybe_refresh_day0_hourly_vectors(
+            ordered, decision_time=decision, interval_s=0.0, quota_priority_cities=priority_count)
+        assert fetches == [run] and stats == 51
+        assert due_probe().refresh_due_families == frozenset()
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize(
