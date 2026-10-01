@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-30
+# Last reused/audited: 2026-10-01
 # Authority: REQ-20260930-114240-ee2a70; isolated observation/auction/executor integration.
 """Controlled forecast inputs, real Day0 integration and posterior persistence.
 
@@ -27,7 +27,9 @@ from src.runtime.observation_reaction_trace import (
     completed_trace, emit_posterior_ready, emit_stage, emit_venue_ack,
 )
 
-_materializer_unit_source_surface = fixtures._materializer_unit_source_surface
+_hko_native_surfaces = fixtures._hko_native_surfaces
+_hko_source_surface = fixtures._hko_source_surface
+_historical_shanghai_component_surface = fixtures._historical_shanghai_component_surface
 trade_schema = exit_fixtures.conn
 
 
@@ -357,7 +359,7 @@ def _submit_selected_entry(trade, world, auction, bundle, monkeypatch):
 
 @pytest.mark.parametrize('reaction_path',['sell','entry','replace'])
 @pytest.mark.parametrize('incumbent_without_carrier',[False,True])
-def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_path,trade_schema,_materializer_unit_source_surface,incumbent_without_carrier,reaction_path):
+def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_path,trade_schema,_historical_shanghai_component_surface,incumbent_without_carrier,reaction_path):
     import scripts.materialize_replacement_forecast_live as cli
     import src.main as main  # Already resident in a warm trading process.
     from src.data import replacement_fusion_upgrade_trigger as delivery
@@ -367,10 +369,10 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     from src.state.schema.observation_prints_schema import append_print, ensure_table
 
     caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
-    forecast_path, world_path, trade_path = (tmp_path/name for name in ('zeus-forecasts.db','zeus-world.db','zeus_trades.db'))
-    seed=fixtures._conn()
-    conn=sqlite3.connect(forecast_path);conn.row_factory=sqlite3.Row
-    seed.backup(conn);seed.close()
+    world_path, trade_path = (tmp_path/name for name in ('zeus-world.db','zeus_trades.db'))
+    # Normal owned ground/anchor/provider proof for the same June-07 scenario the
+    # sibling Shanghai materializer tests use, never the legacy unproven seam.
+    conn,basis=fixtures._historical_shanghai_component_request(tmp_path,monkeypatch,computed_at=fixtures._dt(8))
     trade=sqlite3.connect(trade_path);trade.row_factory=sqlite3.Row
     trade_schema.backup(trade)
     world=sqlite3.connect(world_path)
@@ -392,39 +394,19 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
         orderbook_top_bid='0.74',orderbook_top_ask='0.75')
     trade.execute("INSERT INTO position_current(position_id,phase,market_id,city,target_date,temperature_metric,chain_state,chain_shares,chain_cost_basis_usd,updated_at) VALUES('source-reaction-held','active','condition-test','Shanghai','2026-06-07','high','synced',5,2,'2026-06-06T18:00:00Z')")
     trade.commit()
-    source_models=('ecmwf_ifs9','gfs','icon','gem','jma')
-    for index,model in enumerate(source_models):
-        conn.execute('''INSERT INTO raw_model_forecasts
-            (raw_model_forecast_id,model,city,target_date,metric,source_cycle_time,
-             source_available_at,captured_at,lead_days,forecast_value_c,endpoint,recorded_at,coverage_status)
-            VALUES(?,?,'Shanghai','2026-06-07','high',?,?,?,1,25.0,'single_runs',?,'COVERED')''',
-            (101+index,model,fixtures._dt(0).isoformat(),fixtures._dt(3).isoformat(),
-             fixtures._dt(3).isoformat(),fixtures._dt(3).isoformat()))
-    from src.data.replacement_current_value_serving import read_current_instrument_values
-    serving=read_current_instrument_values(conn,city='Shanghai',metric='high',
-        target_date='2026-06-07',source_cycle_time_iso=fixtures._dt(0).isoformat(),
-        decision_time_iso=fixtures._dt(4).isoformat())
-    assert set(serving)==set(source_models)
-    fixtures._install_live_fusion(monkeypatch,snapshot_id=1,
-        current_serving={model:value.as_provenance() for model,value in serving.items()})
-    original_override=fixtures.materializer_mod._replacement_bayes_precision_fusion_override
-    monkeypatch.setattr(fixtures.materializer_mod,'_replacement_bayes_precision_fusion_override',
-        lambda *args,**kw: replace(original_override(*args,**kw),
-            raw_model_forecast_ids=tuple(range(101,106))))
-    reader_fixtures._insert_ensemble_snapshot(conn,snapshot_id=1,
-        source_cycle_time=fixtures._dt(0),available_at=fixtures._dt(2))
     # End fixture preparation before the independent WORLD evidence writer.
     conn.commit()
     if incumbent_without_carrier:
-        incumbent=materialize_replacement_forecast_live(conn,fixtures._request())
+        incumbent=materialize_replacement_forecast_live(conn,basis)
         assert incumbent.ok,incumbent
         conn.commit()
         prior=conn.execute('SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?',(incumbent.posterior_id,)).fetchone()
         assert not json.loads(prior[0]).get('day0_current_temperature_state')
     now=fixtures._dt(18,10)
-    request=fixtures._request(computed_at=now,expires_at=datetime(2026,6,7,2,tzinfo=timezone.utc),
+    request=fixtures._refresh_shanghai_owner_request(conn,monkeypatch,replace(basis,computed_at=now,
+        expires_at=datetime(2026,6,7,2,tzinfo=timezone.utc),
         day0_observed_extreme_c=31.0,day0_observed_extreme_source="aviationweather_metar",
-        day0_observed_extreme_observation_time=fixtures._dt(18,5).isoformat())
+        day0_observed_extreme_observation_time=fixtures._dt(18,5).isoformat()),record_observed_prints=False)
     if reaction_path=='replace':
         _seed_prior_rest(trade,conn,city=request.city,target_date=str(request.target_date),at=now)
     response_received_at_ms=time.time_ns()//1_000_000
@@ -462,8 +444,9 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     fields=('city','city_id','city_timezone','temperature_metric','baseline_source_run_id','baseline_data_version',
             'baseline_source_available_at','openmeteo_source_run_id','openmeteo_source_available_at','source_cycle_time',
             'computed_at','expires_at','target_date','day0_observed_extreme_c','day0_observed_extreme_source',
-            'day0_observed_extreme_observation_time')
+            'day0_observed_extreme_observation_time','day0_observed_extreme_sample_count','day0_observed_extreme_unit')
     payload={key:getattr(request,key) for key in fields}
+    payload['openmeteo_anchor_artifact_id']=request.anchor_artifact_id
     payload.update(openmeteo_payload_json='anchor.json',precision_metadata_json='precision.json',bins=[asdict(b) for b in request.bins])
     request_path=tmp_path/'request.json';request_path.write_text(json.dumps(payload,default=encode))
     wake_path=tmp_path/'wake.json'
@@ -505,6 +488,14 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
         metric='high',decision_time=now,changed_sources=('day0_current_temperature_state',))
     assert not consumed['is_upgrade'],consumed
     from src.data.replacement_forecast_readiness import ReplacementForecastReadinessDecision
+    from src.data import replacement_forecast_bundle_reader as bundle_reader
+    class ReaderClock(datetime):
+        # The reader judges source-run coverage expiry against its own wall clock;
+        # pin it to the scenario's decision cut, never to the day the suite runs.
+        @classmethod
+        def now(cls,tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+    monkeypatch.setattr(bundle_reader,'datetime',ReaderClock)
     cert=conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?",(response['readiness_id'],)).fetchone()
     ready=ReplacementForecastReadinessDecision(
         readiness_id=cert["readiness_id"],status=cert["status"],
@@ -515,7 +506,7 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     read=read_replacement_forecast_bundle(conn,
         baseline_bundle=reader_fixtures._BaselineBundle(reader_fixtures._Evidence("b0-run")),
         readiness=ready,city="Shanghai",target_date="2026-06-07",temperature_metric="high",
-        decision_time=now,current_bin_topology_hash=row["bin_topology_hash"])
+        decision_time=now.isoformat(),current_bin_topology_hash=row["bin_topology_hash"])
     assert read.ok, read
     assert read.bundle.q == pytest.approx(json.loads(row["q_json"]))
     assert abs(sum(read.bundle.q.values())-1)<1e-9

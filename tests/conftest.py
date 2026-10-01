@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-11
+# Last reused/audited: 2026-10-01
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
 #                  + docs/operations/task_2026-05-01_bankroll_truth_chain/architect_memo.md §7
 #                  + PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md §5.6
@@ -93,6 +93,20 @@ def pytest_unconfigure(config) -> None:
     if verified != _TEST_STATE_ROOT.resolve(strict=False):
         return
     shutil.rmtree(verified)
+
+
+@pytest.fixture(autouse=True)
+def _loopback_fixtures_bypass_env_proxy(monkeypatch):
+    """Loopback servers in tests must never transit HTTP(S)_PROXY / ALL_PROXY.
+
+    httpx and urllib honor those variables even for 127.0.0.1, so a developer
+    shell that routes egress through a local proxy turns every in-process
+    ThreadingHTTPServer fixture into a proxied 404 (e.g. MODEL_SURFACE_HTTP_UNAVAILABLE).
+    """
+    for key in ("NO_PROXY", "no_proxy"):
+        kept = [host for host in os.environ.get(key, "").split(",") if host.strip()]
+        monkeypatch.setenv(key, ",".join(dict.fromkeys([*kept, "127.0.0.1", "localhost", "::1"])))
+    yield
 
 
 @pytest.fixture(autouse=True)

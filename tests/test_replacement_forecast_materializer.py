@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-30
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Last reused/audited: 2026-10-01
+# Lifecycle: created=2026-06-06; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -835,17 +835,11 @@ def _fixture_current_shape(_conn, request, **kwargs):
 
 def _record_fixture_current_temperature(conn, *, at, value_c=30.0):
     """Possessed typed METAR input consumed by the real Day0 state reader."""
-    conn.execute("""CREATE TABLE IF NOT EXISTS observation_prints (
-        id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, source_channel TEXT,
-        publish_ts_utc TEXT, value_native REAL, unit TEXT,
-        fetched_at_utc TEXT, raw_report TEXT
-    )""")
-    conn.execute("""INSERT INTO observation_prints (
-        city, station_id, source_channel, publish_ts_utc, value_native, unit,
-        fetched_at_utc, raw_report
-    ) VALUES ('Shanghai', 'ZSPD', 'aviationweather_metar', ?, ?, 'C', ?, ?)""",
-        (at.isoformat(), value_c, at.isoformat(),
-         f"METAR ZSPD {at.strftime('%d%H%M')}Z {round(value_c):02d}/20 T{round(value_c*10):04d}0200"))
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+    ensure_table(conn)  # the production ledger shape, never a hand-copied legacy DDL
+    append_print(conn, city="Shanghai", station_id="ZSPD", source_channel="aviationweather_metar",
+        publish_ts_utc=at.isoformat(), value_native=value_c, unit="C", fetched_at_utc=at.isoformat(),
+        raw_report=f"METAR ZSPD {at.strftime('%d%H%M')}Z {round(value_c):02d}/20 T{round(value_c*10):04d}0200")
     from src.config import runtime_cities_by_name
     from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
     from src.data.day0_hourly_vectors import (
@@ -2893,7 +2887,11 @@ def _shanghai_noaa_future_request(tmp_path, monkeypatch, *, metric="high", witho
     from zoneinfo import ZoneInfo
 
     extreme = absorbing_extreme if absorbing_extreme is not None else (31. if metric=="high" else 19.)
-    conn, prior = _shanghai_current_owner_request(tmp_path,monkeypatch,metric=metric,observed_extreme=extreme)
+    from src.state.schema.observation_prints_schema import ensure_table
+    # The owner fixture's own current WRH print would itself be today's current state.
+    conn, prior = _shanghai_current_owner_request(tmp_path,monkeypatch,metric=metric,observed_extreme=extreme,
+                                                  record_observed_prints=False)
+    ensure_table(conn)
     city = runtime_cities_by_name()[prior.city]
     cut = prior.computed_at+timedelta(minutes=10)
     observed = cut-timedelta(minutes=5)
