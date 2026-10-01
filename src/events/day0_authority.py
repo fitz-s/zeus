@@ -304,6 +304,27 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     return DAY0_MONOTONE_SETTLEMENT_BOUND
 
 
+DAY0_ABSORBING_CONDITIONING_KEY = "day0_conditioning"
+DAY0_PROVISIONAL_CONDITIONING_KEY = "day0_provisional_observation"
+
+
+def day0_conditioning_key(source: object) -> str:
+    """Name the provenance key under which a Day0 observation conditions q.
+
+    Under H = max(H_confirmed, H_remaining) an absorbing settlement-channel
+    observation is H_confirmed itself and truncates support; every other
+    source is a provisional overlay. The materializer writes, and the held
+    pinned replay reads, the key this returns.
+    """
+
+    finality = day0_evidence_finality({"settlement_source": source})
+    return (
+        DAY0_ABSORBING_CONDITIONING_KEY
+        if finality in DAY0_ABSORBING_FINALITIES
+        else DAY0_PROVISIONAL_CONDITIONING_KEY
+    )
+
+
 def assert_absorbing_day0_payload_authority(
     payload: Mapping[str, object],
 ) -> None:

@@ -806,14 +806,15 @@ def _day0_absorbing_observed_extreme_c(
     if value is None:
         return None
     from src.events.day0_authority import (
-        DAY0_ABSORBING_FINALITIES,
-        day0_evidence_finality,
+        DAY0_ABSORBING_CONDITIONING_KEY,
+        day0_conditioning_key,
     )
 
-    finality = day0_evidence_finality(
-        {"settlement_source": request.day0_observed_extreme_source}
+    absorbing = (
+        day0_conditioning_key(request.day0_observed_extreme_source)
+        == DAY0_ABSORBING_CONDITIONING_KEY
     )
-    return value if finality in DAY0_ABSORBING_FINALITIES else None
+    return value if absorbing else None
 
 
 def _request_with_day0_physical_frontier(

@@ -10425,6 +10425,37 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert vector_gap_payload["_edli_day0_held_pinned_fallback_reason"] == (
         "current_remaining_vectors_unavailable"
     )
+    # Under H = max(H_confirmed, H_remaining) a settlement-channel bound with
+    # no provisional print beyond it is H_confirmed alone: the writer files it
+    # under day0_conditioning and the pinned replay must price that shape.
+    pinned_provisional = source_clock_bundle.provenance_json.pop(
+        "day0_provisional_observation"
+    )
+    source_clock_bundle.provenance_json["day0_conditioning"] = {
+        **pinned_provisional,
+        "source": "noaa_wrh_kdal",
+    }
+    absorbing_payload: dict[str, object] = {}
+    absorbing_held = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=absorbing_payload,
+        allow_provisional_day0_replacement=True,
+        probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+    )
+    assert pinned_reads == [17, 17]
+    assert absorbing_payload["_edli_day0_held_pinned_recompute"] is True
+    assert absorbing_held.probability_witness.yes_point_q.tolist() == pytest.approx(
+        source_clock_q
+    )
+    source_clock_bundle.provenance_json.pop("day0_conditioning")
+    source_clock_bundle.provenance_json[
+        "day0_provisional_observation"
+    ] = pinned_provisional
     if supporting_clock != "same":
         monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: False)
         with pytest.raises(

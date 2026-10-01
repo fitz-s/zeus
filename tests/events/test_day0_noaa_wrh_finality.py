@@ -97,3 +97,51 @@ def test_unrelated_sources_are_untouched() -> None:
     assert day0_evidence_finality({"settlement_source": "noaa_other_product"}) == (
         DAY0_UNKNOWN_FINALITY
     )
+
+
+@pytest.mark.parametrize(
+    ("source", "key"),
+    [
+        ("noaa_wrh_ksfo", "day0_conditioning"),
+        ("observation_prints:noaa_wrh_klax", "day0_conditioning"),
+        ("hko_daily_api", "day0_conditioning"),
+        ("wu_api+same_station_fast_tail", "day0_provisional_observation"),
+        ("aviationweather_metar", "day0_provisional_observation"),
+        ("wu_icao_history", "day0_provisional_observation"),
+        ("hko_hourly_accumulator", "day0_provisional_observation"),
+    ],
+)
+def test_writer_and_pinned_replay_share_one_conditioning_key(source, key) -> None:
+    """H = max(H_confirmed, H_remaining): an absorbing settlement-channel bound
+    is H_confirmed and lives under day0_conditioning; every other source is a
+    provisional overlay. The materializer and the held pinned replay both
+    decide by day0_conditioning_key, so a valid writer shape always replays."""
+    from types import SimpleNamespace
+
+    from src.data.replacement_forecast_materializer import (
+        _day0_absorbing_observed_extreme_c,
+    )
+    from src.engine.event_reactor_adapter import _held_pinned_day0_conditioning_key
+    from src.events.day0_authority import day0_conditioning_key
+
+    assert day0_conditioning_key(source) == key
+    absorbing = _day0_absorbing_observed_extreme_c(
+        SimpleNamespace(day0_observed_extreme_c=13.3, day0_observed_extreme_source=source)
+    )
+    assert (absorbing is not None) == (key == "day0_conditioning")
+
+    observation = {"active": True, "metric": "high", "unit": "F", "source": source}
+    bundle = SimpleNamespace(provenance_json={key: observation})
+    assert _held_pinned_day0_conditioning_key(bundle, metric="high", unit="F") == key
+
+    other = (
+        "day0_provisional_observation"
+        if key == "day0_conditioning"
+        else "day0_conditioning"
+    )
+    misfiled = SimpleNamespace(provenance_json={other: observation})
+    with pytest.raises(ValueError, match="GLOBAL_HELD_PINNED_CONDITIONING_KEY_MISMATCH"):
+        _held_pinned_day0_conditioning_key(misfiled, metric="high", unit="F")
+    both = SimpleNamespace(provenance_json={key: observation, other: observation})
+    with pytest.raises(ValueError, match="GLOBAL_HELD_PINNED_CONDITIONING_MISSING"):
+        _held_pinned_day0_conditioning_key(both, metric="high", unit="F")

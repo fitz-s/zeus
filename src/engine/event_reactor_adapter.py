@@ -36962,6 +36962,49 @@ def _assert_provisional_day0_replacement_bundle(
         raise ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH")
 
 
+def _held_pinned_day0_conditioning_key(
+    pinned_bundle: object,
+    *,
+    metric: str,
+    unit: str,
+) -> str:
+    """Return the provenance key holding a pinned carrier's Day0 observation.
+
+    The materializer files the observation under ``day0_conditioning_key``:
+    an absorbing settlement-channel bound is H_confirmed (``day0_conditioning``)
+    and anything else a provisional overlay.  The replay accepts exactly the
+    shape that predicate names, so writer and reader cannot diverge.
+    """
+
+    from src.events.day0_authority import day0_conditioning_key
+
+    provenance = getattr(pinned_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        provenance = {}
+    present = [
+        key
+        for key in ("day0_conditioning", "day0_provisional_observation")
+        if isinstance(provenance.get(key), Mapping)
+    ]
+    if len(present) != 1:
+        raise ValueError("GLOBAL_HELD_PINNED_CONDITIONING_MISSING")
+    key = present[0]
+    observation = provenance[key]
+    if day0_conditioning_key(observation.get("source")) != key:
+        raise ValueError("GLOBAL_HELD_PINNED_CONDITIONING_KEY_MISMATCH")
+    if observation.get("active") is not True:
+        raise ValueError("GLOBAL_HELD_PINNED_CONDITIONING_ACTIVE_INVALID")
+    if str(observation.get("metric") or "").strip().lower() != str(
+        metric
+    ).strip().lower():
+        raise ValueError("GLOBAL_HELD_PINNED_CONDITIONING_METRIC_MISMATCH")
+    if str(observation.get("unit") or "").strip().upper() != str(
+        unit
+    ).strip().upper():
+        raise ValueError("GLOBAL_HELD_PINNED_CONDITIONING_UNIT_MISMATCH")
+    return key
+
+
 def _replacement_uses_provisional_day0_conditioning(
     replacement_bundle: object,
 ) -> bool:
@@ -41801,32 +41844,15 @@ def _prepare_current_global_probability_family(
         else:
             conditioning = None
             if pinned_complete_bundle is not None:
-                pinned_provenance = (
-                    getattr(pinned_complete_bundle, "provenance_json", None) or {}
+                pinned_key = _held_pinned_day0_conditioning_key(
+                    pinned_complete_bundle,
+                    metric=str(family.metric),
+                    unit=str(omega.resolution.measurement_unit),
                 )
-                pinned_provisional = (
-                    pinned_provenance.get("day0_provisional_observation")
-                    if isinstance(pinned_provenance, Mapping)
-                    else None
-                )
-                if not isinstance(pinned_provisional, Mapping):
-                    raise ValueError(
-                        "GLOBAL_HELD_PINNED_PROVISIONAL_CONDITIONING_MISSING"
-                    )
-                if pinned_provisional.get("active") is not True:
-                    raise ValueError("GLOBAL_HELD_PINNED_PROVISIONAL_ACTIVE_INVALID")
-                if str(pinned_provisional.get("metric") or "").strip().lower() != str(
-                    family.metric
-                ).strip().lower():
-                    raise ValueError("GLOBAL_HELD_PINNED_PROVISIONAL_METRIC_MISMATCH")
-                if str(pinned_provisional.get("unit") or "").strip().upper() != str(
-                    omega.resolution.measurement_unit
-                ).strip().upper():
-                    raise ValueError("GLOBAL_HELD_PINNED_PROVISIONAL_UNIT_MISMATCH")
                 pinned_bundle_for_conditioning = pinned_complete_bundle
                 conditioning = _day0_replacement_conditioning(
                     pinned_bundle_for_conditioning,
-                    provisional=True,
+                    provisional=pinned_key == "day0_provisional_observation",
                     metric=str(family.metric),
                     unit=str(omega.resolution.measurement_unit),
                     decision_time=decision_time,
