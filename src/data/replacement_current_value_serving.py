@@ -410,8 +410,17 @@ def _read_product_identity_at_cutoff(conn: sqlite3.Connection, raw: object, *, d
     deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
     if deadline_monotonic is not None:
         deadline = min(deadline, deadline_monotonic)
-    selected = _physical_artifact_at_cutoff(row, _physical_artifact_candidates(conn, row, deadline=deadline))
-    return json.dumps(_select_observed_receipt_repair(conn, row, selected, deadline=deadline), separators=(",", ":"))
+    # One streamed scan serves selection and repair discovery. Only receipts that
+    # name this row as a repair basis are retained; the catalog stays streamed.
+    repairs: list[tuple[dict[str, object], Mapping[str, object]]] = []
+    def scanned():
+        for artifact in _physical_artifact_candidates(conn, row, deadline=deadline):
+            basis = _repair_basis_for_row(artifact, row)
+            if basis is not None:
+                repairs.append((artifact, basis))
+            yield artifact
+    selected = _physical_artifact_at_cutoff(row, scanned())
+    return json.dumps(_select_observed_receipt_repair(conn, row, selected, deadline=deadline, repairs=repairs), separators=(",", ":"))
 
 
 def read_current_instrument_family_latest_id(
@@ -1201,25 +1210,34 @@ def validate_physical_capture_repair_basis(conn: sqlite3.Connection, basis: Phys
         raise ValueError("physical_capture_repair:frontier_changed")
 
 
-def _select_observed_receipt_repair(conn: sqlite3.Connection, row: Mapping[str, object], selected: dict[str, object], *, deadline: float) -> dict[str, object]:
-    """A new lawful event can dominate its observed unknowns, not other causal evidence."""
+def _repair_basis_for_row(artifact: Mapping[str, object], row: Mapping[str, object]) -> Mapping[str, object] | None:
+    """The repair basis an HTTP capture receipt declares for this raw row, if any."""
+    try:
+        if artifact["data_version"] != "openmeteo_single_model_http_capture_receipt_v1":
+            return None
+        receipt = json.loads(str(artifact["metadata"])).get("physical_http_capture_receipt")
+        if not isinstance(receipt, Mapping):
+            return None
+        bases = receipt.get("repair_bases")
+        basis = bases.get(str(row["raw_model_forecast_id"])) if isinstance(bases, Mapping) else None
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    return basis if isinstance(basis, Mapping) else None
+
+
+def _select_observed_receipt_repair(conn: sqlite3.Connection, row: Mapping[str, object], selected: dict[str, object], *,
+        deadline: float, repairs: list[tuple[dict[str, object], Mapping[str, object]]]) -> dict[str, object]:
+    """A new lawful event can dominate its observed unknowns, not other causal evidence.
+
+    ``repairs`` holds, in scan order, every candidate receipt naming this row as
+    a repair basis, collected during the selection scan.
+    """
     selected_artifact = selected.get("physical_artifact")
     cut = _repair_stamp(row["physical_proof_cutoff"])
     needs_repair = isinstance(selected_artifact, Mapping) and _unbounded_bad_http_receipt(row, selected_artifact, cut)
     choice = None
-    for artifact in _physical_artifact_candidates(conn, row, deadline=deadline):
-        is_repair_candidate = False
+    for artifact, basis in repairs:
         try:
-            if artifact["data_version"] != "openmeteo_single_model_http_capture_receipt_v1":
-                continue
-            receipt = json.loads(str(artifact["metadata"])).get("physical_http_capture_receipt")
-            if not isinstance(receipt, Mapping):
-                continue
-            bases = receipt.get("repair_bases")
-            basis = bases.get(str(row["raw_model_forecast_id"])) if isinstance(bases, Mapping) else None
-            if not isinstance(basis, Mapping):
-                continue
-            is_repair_candidate = True
             recorded = _repair_stamp(artifact["recorded_at"])
             if recorded > cut:
                 continue
@@ -1241,7 +1259,7 @@ def _select_observed_receipt_repair(conn: sqlite3.Connection, row: Mapping[str, 
             if choice is None or _physical_artifact_at_cutoff(row, (choice[0], artifact))["physical_artifact"]["artifact_id"] == artifact["artifact_id"]:
                 choice = (artifact, basis)
         except (KeyError, TypeError, ValueError, OSError):
-            if is_repair_candidate and isinstance(selected_artifact, Mapping) and selected_artifact.get("artifact_id") == artifact.get("artifact_id"):
+            if isinstance(selected_artifact, Mapping) and selected_artifact.get("artifact_id") == artifact.get("artifact_id"):
                 return {**row, "physical_artifact": None}
     if choice is None:
         return selected

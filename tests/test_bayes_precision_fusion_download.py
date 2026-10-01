@@ -5341,6 +5341,42 @@ def test_extreme_repaired_cut_never_hides_new_unknown_or_prefix_changes(tmp_path
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
+def test_repaired_row_is_selected_from_one_receipt_scan(tmp_path, monkeypatch, metric):
+    """Selection and repair discovery share one streamed scan per raw row.
+
+    The second identical scan per row was ~10 s of a 44 s cold auction prepare
+    over 121 live families (2026-10-01). A repaired row is still served, and a
+    broken unrepaired row is still refused.
+    """
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data import replacement_current_value_serving as serving
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    raw_ids, _, _ = _break_unbounded_receipts(world, [target])
+    with world.open_forecast(world.db) as conn:
+        assert "icon_global" not in _served_in_world(conn, world, target)
+    dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
+        network_capture_reason="HTTP_CAPTURE_RECEIPT_MISSING", capture_debt_raw_ids=raw_ids)
+    scans: list[int] = []
+    real = serving._physical_artifact_candidates
+    def counted(conn, row, *, deadline):
+        scans.append(int(row["raw_model_forecast_id"]))
+        yield from real(conn, row, deadline=deadline)
+    monkeypatch.setattr(serving, "_physical_artifact_candidates", counted)
+    reads: list[int] = []
+    real_read = serving._read_product_identity_at_cutoff
+    monkeypatch.setattr(serving, "_read_product_identity_at_cutoff", lambda conn, raw, **kw: (
+        reads.append(1) or real_read(conn, raw, **kw)))
+    with world.open_forecast(world.db) as conn:
+        assert "icon_global" in _served_in_world(conn, world, target)
+    # One selection scan that also discovers the repair, then the basis prefix
+    # proof and the retained-candidate rescan (previously four: discovery
+    # re-ran the selection query).
+    assert len(reads) == 1
+    assert scans == [raw_ids[0]] * 3
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
 def test_extreme_observer_uses_sql_now_not_historical_decision_to_wash_age(tmp_path, monkeypatch, metric):
     from src.data import bayes_precision_fusion_download as dl
     from src.data.replacement_current_value_serving import observe_physical_capture_repair_basis, physical_capture_debt_reason
