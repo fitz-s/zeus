@@ -1494,6 +1494,13 @@ files:
     - src/data/bayes_precision_fusion_download.py
     - src/data/replacement_current_value_serving.py
     - src/data/replacement_forecast_materializer.py
+  src/data/versioned_file_read.py:
+    zone: K2_runtime
+    authority_role: file_content_identity
+    why: "One version-keyed file read: no-follow open, sha256 of the bytes read, memoized on (st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns) so an unchanged file is not re-hashed and any rewrite, atomic rename or mtime-forging repair is. A write racing the read is unsettled and never memoized. Shared by the model-surface asset check and the seed input identity (one implementation); carries no authority of its own."
+    downstream:
+    - src/data/openmeteo_model_surface.py
+    - src/data/replacement_forecast_live_materialization_queue.py
   src/data/station_ground_evidence.py:
     zone: K2_runtime
     authority_role: station_ground_immutable_evidence
