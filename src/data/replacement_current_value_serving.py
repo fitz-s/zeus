@@ -58,8 +58,9 @@ import json
 from collections.abc import Mapping
 import math
 import sqlite3
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 # Freshness horizon for a previous_runs substitution: the row's captured_at may be at most this
@@ -351,20 +352,128 @@ def _physical_artifact_at_cutoff(row: Mapping[str, object], candidates=None) -> 
     return {**row, "physical_artifact": latest}
 
 
+def _request_coordinates_sql(key: str) -> str:
+    """One comma-split request parameter as json_each rows (a batched request names many cells)."""
+    return (f"json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json) "
+            f"THEN a.request_params_json ELSE '{{}}' END,'$.{key}') AS TEXT)), ',', '\",\"'))")
+
+
+# The request family of every physical capture a raw row may cite: same issued
+# product cycle and a receipt (or, for legacy rows, entity-body) kind.
+_CAPTURE_GROUP_WHERE = """a.source_id=? AND a.product_id=? AND a.source_cycle_time=?
+      AND (a.data_version='openmeteo_single_model_http_capture_receipt_v1'
+          OR (? AND a.data_version='openmeteo_single_model_entity_body_v1'))"""
+_CAPTURE_GROUP_SQL = f"SELECT a.artifact_id, {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE {_CAPTURE_GROUP_WHERE}"
+# One row per requested cell of each family capture; SQLite performs the casts.
+_CAPTURE_GROUP_CELLS_SQL = f"""SELECT a.artifact_id, CAST(lat.value AS REAL), CAST(lon.value AS REAL), tz.value
+    FROM raw_forecast_artifacts a
+    JOIN {_request_coordinates_sql('latitude')} lat
+    JOIN {_request_coordinates_sql('longitude')} lon ON lon.key=lat.key
+    JOIN {_request_coordinates_sql('timezone')} tz ON tz.key=lat.key
+    WHERE {_CAPTURE_GROUP_WHERE}"""
+
+_CAPTURE_BY_ID_SQL = f"SELECT a.artifact_id, {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE a.artifact_id=?"
+
+
+@dataclass
+class _SnapshotMemo:
+    key: tuple[object, ...] | None = None
+    groups: dict[tuple[object, ...], list[tuple[int, str, frozenset[tuple[object, object, object]]]]] = field(default_factory=dict)
+    by_id: dict[object, tuple[int, str] | None] = field(default_factory=dict)
+
+
+_SNAPSHOT_MEMO = threading.local()
+
+
+def _snapshot_memo(conn: sqlite3.Connection) -> _SnapshotMemo:
+    """Per-thread capture reads of one never-written connection's visible database.
+
+    Every schema's PRAGMA data_version moves when another connection commits
+    to it, and stays put inside an open read transaction, exactly as the rows
+    this connection can see. A connection that ever wrote (total_changes) could
+    roll its own rows back without moving either, so it gets a one-call memo.
+    """
+    if conn.total_changes:
+        return _SnapshotMemo()
+    versions = tuple(
+        (str(item[1]), conn.execute(f'PRAGMA "{str(item[1]).replace(chr(34), chr(34) * 2)}".data_version').fetchone()[0])
+        for item in conn.execute("PRAGMA database_list").fetchall()
+    )
+    memo = getattr(_SNAPSHOT_MEMO, "memo", None)
+    if memo is None or memo.key[0] is not conn or memo.key[1] != versions:
+        memo = _SNAPSHOT_MEMO.memo = _SnapshotMemo(key=(conn, versions))
+    return memo
+
+
+def _fetch_complete(cursor: sqlite3.Cursor, *, deadline: float) -> list[tuple]:
+    rows: list[tuple] = []
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                raise CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
+            batch = cursor.fetchmany(256)
+            if not batch:
+                return rows
+            rows.extend(batch)
+    finally:
+        cursor.close()
+
+
 def _physical_artifact_candidates(conn: sqlite3.Connection, row: Mapping[str, object], *, deadline: float):
+    """Every capture a row may cite: its own artifact, or any same-family capture of its exact cell.
+
+    One request-family read serves every row of that family in the current
+    read snapshot; loader cost is round-trips, not rows.
+    """
     legacy = (row.get("artifact_id") is None and row.get("elevation_param") == "requested"
         and row.get("downscaling_policy") == "none" and row.get("endpoint_mode") == "single_runs")
+    cell = (row["latitude_requested"], row["longitude_requested"], row["timezone_requested"])
+    if not (all(type(value) in (int, float) for value in cell[:2]) and type(cell[2]) is str):
+        # Only exact JSON numbers/text are matched in Python; any other bound
+        # type keeps SQLite's own affinity comparison in the per-row query.
+        yield from _physical_artifact_candidates_by_row(conn, row, legacy=legacy, deadline=deadline)
+        return
+    memo = _snapshot_memo(conn)
+    group_key = (row["source_id"], row["product_id"], row["source_cycle_time"], int(legacy))
+    group = memo.groups.get(group_key)
+    if group is None:
+        # Both reads see the same snapshot only inside a read transaction;
+        # outside one, a capture inserted between them is simply not served
+        # from this group (its identity row is required), never mis-served.
+        texts = {int(artifact_id): str(text) for artifact_id, text in
+                 _fetch_complete(conn.execute(_CAPTURE_GROUP_SQL, group_key), deadline=deadline)}
+        cells: dict[int, set[tuple[object, object, object]]] = {}
+        for artifact_id, lat, lon, tz in _fetch_complete(conn.execute(_CAPTURE_GROUP_CELLS_SQL, group_key), deadline=deadline):
+            cells.setdefault(int(artifact_id), set()).add((lat, lon, tz))
+        group = [(artifact_id, texts[artifact_id], frozenset(found))
+                 for artifact_id, found in cells.items() if artifact_id in texts]
+        memo.groups[group_key] = group
+    own_id = row.get("artifact_id")
+    if own_id not in memo.by_id:
+        found = _fetch_complete(conn.execute(_CAPTURE_BY_ID_SQL, (own_id,)), deadline=deadline)
+        memo.by_id[own_id] = (int(found[0][0]), str(found[0][1])) if found else None
+    # SQLite's `CAST(lat AS REAL)=? AND CAST(lon AS REAL)=? AND tz=?` for a
+    # float/int and text binding: REAL compares by value, text compares exactly.
+    matched = {artifact_id: text for artifact_id, text, found in group if any(
+        isinstance(lat, float) and isinstance(lon, float) and isinstance(tz, str)
+        and lat == cell[0] and lon == cell[1] and tz == cell[2] for lat, lon, tz in found)}
+    if memo.by_id[own_id] is not None:
+        matched.setdefault(*memo.by_id[own_id])
+    for artifact_id in sorted(matched, reverse=True):
+        if time.monotonic() >= deadline:
+            raise CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
+        yield json.loads(matched[artifact_id])
+
+
+def _physical_artifact_candidates_by_row(conn: sqlite3.Connection, row: Mapping[str, object], *,
+        legacy: bool, deadline: float):
     sql = f"""SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a
         WHERE a.artifact_id=? OR (a.source_id=? AND a.product_id=? AND a.source_cycle_time=?
             AND (a.data_version='openmeteo_single_model_http_capture_receipt_v1'
                 OR (? AND a.data_version='openmeteo_single_model_entity_body_v1'))
-            AND EXISTS (SELECT 1 FROM
-                json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
-                    THEN a.request_params_json ELSE '{{}}' END,'$.latitude') AS TEXT)), ',', '\",\"')) lat
-                JOIN json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
-                    THEN a.request_params_json ELSE '{{}}' END,'$.longitude') AS TEXT)), ',', '\",\"')) lon ON lon.key=lat.key
-                JOIN json_each(replace(json_array(CAST(json_extract(CASE WHEN json_valid(a.request_params_json)
-                    THEN a.request_params_json ELSE '{{}}' END,'$.timezone') AS TEXT)), ',', '\",\"')) tz ON tz.key=lat.key
+            AND EXISTS (SELECT 1 FROM {_request_coordinates_sql('latitude')} lat
+                JOIN {_request_coordinates_sql('longitude')} lon ON lon.key=lat.key
+                JOIN {_request_coordinates_sql('timezone')} tz ON tz.key=lat.key
                 WHERE CAST(lat.value AS REAL)=? AND CAST(lon.value AS REAL)=? AND tz.value=?))
         ORDER BY a.artifact_id DESC"""
     cursor = conn.execute(sql, (row.get("artifact_id"), row["source_id"], row["product_id"], row["source_cycle_time"],
@@ -1215,7 +1324,10 @@ def _repair_basis_for_row(artifact: Mapping[str, object], row: Mapping[str, obje
     try:
         if artifact["data_version"] != "openmeteo_single_model_http_capture_receipt_v1":
             return None
-        receipt = json.loads(str(artifact["metadata"])).get("physical_http_capture_receipt")
+        metadata = str(artifact["metadata"])
+        if '"repair_bases"' not in metadata and "\\u" not in metadata:
+            return None  # Without escapes, a repair_bases key can only appear verbatim.
+        receipt = json.loads(metadata).get("physical_http_capture_receipt")
         if not isinstance(receipt, Mapping):
             return None
         bases = receipt.get("repair_bases")

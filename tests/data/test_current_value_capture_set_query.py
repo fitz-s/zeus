@@ -1,0 +1,160 @@
+# Created: 2026-10-01
+# Last reused/audited: 2026-10-01
+# Authority basis: live auction prepare budget (45 s cut); loader cost is round-trips, not rows.
+"""One request-family capture read per snapshot serves every raw row exactly as the per-row query."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+
+import pytest
+
+from src.data import replacement_current_value_serving as serving
+
+RECEIPT = "openmeteo_single_model_http_capture_receipt_v1"
+BODY = "openmeteo_single_model_entity_body_v1"
+SCHEMA = """CREATE TABLE raw_forecast_artifacts (
+    artifact_id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT NOT NULL, product_id TEXT NOT NULL,
+    data_version TEXT NOT NULL, source_cycle_time TEXT NOT NULL, source_available_at TEXT NOT NULL,
+    captured_at TEXT NOT NULL, artifact_path TEXT NOT NULL, sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL,
+    request_url TEXT, request_params_json TEXT NOT NULL DEFAULT '{}', artifact_metadata_json TEXT NOT NULL DEFAULT '{}',
+    recorded_at TEXT NOT NULL)"""
+CYCLE = "2026-10-01T00:00:00+00:00"
+
+
+def _insert(conn, *, source="icon_global_single_runs", cycle=CYCLE, kind=RECEIPT, params, n=[0]):
+    n[0] += 1
+    return conn.execute(
+        "INSERT INTO raw_forecast_artifacts (source_id, product_id, data_version, source_cycle_time, source_available_at,"
+        " captured_at, artifact_path, sha256, byte_size, request_url, request_params_json, recorded_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (source, source.replace("_single_runs", "::single_runs"), kind, cycle, cycle, cycle, f"/x/{n[0]}", f"{n[0]:064x}", 1,
+         "https://example.invalid", params if isinstance(params, str) else json.dumps(params), cycle),
+    ).lastrowid
+
+
+def _row(*, lat, lon, tz, artifact_id=None, source="icon_global_single_runs", cycle=CYCLE, legacy=False):
+    return {"artifact_id": artifact_id, "source_id": source, "product_id": source.replace("_single_runs", "::single_runs"),
+            "source_cycle_time": cycle, "latitude_requested": lat, "longitude_requested": lon, "timezone_requested": tz,
+            "elevation_param": "requested" if legacy else "nan", "downscaling_policy": "none", "endpoint_mode": "single_runs"}
+
+
+def _catalog(conn):
+    batched = {"latitude": "40.7,51.5,-33.9", "longitude": "-74.0,-0.1,18.4",
+               "timezone": "America/New_York,Europe/London,Africa/Johannesburg"}
+    ids = {
+        "batched": _insert(conn, params=batched),
+        "single_ny": _insert(conn, params={"latitude": 40.7, "longitude": -74.0, "timezone": "America/New_York"}),
+        "int_coords": _insert(conn, params={"latitude": 40, "longitude": -74, "timezone": "America/New_York"}),
+        "string_coords": _insert(conn, params={"latitude": "40.70", "longitude": "-74.0", "timezone": "America/New_York"}),
+        "legacy_body": _insert(conn, kind=BODY, params={"latitude": 40.7, "longitude": -74.0, "timezone": "America/New_York"}),
+        "other_cycle": _insert(conn, cycle="2026-10-01T06:00:00+00:00", params={"latitude": 40.7, "longitude": -74.0, "timezone": "America/New_York"}),
+        "other_source": _insert(conn, source="gfs_global_single_runs", params={"latitude": 40.7, "longitude": -74.0, "timezone": "America/New_York"}),
+        "malformed": _insert(conn, params="not json"),
+        "tz_mismatch": _insert(conn, params={"latitude": 40.7, "longitude": -74.0, "timezone": "UTC"}),
+        "null_lat": _insert(conn, params={"latitude": None, "longitude": -74.0, "timezone": "America/New_York"}),
+    }
+    conn.commit()
+    return ids
+
+
+ROWS = [
+    _row(lat=40.7, lon=-74.0, tz="America/New_York"),
+    _row(lat=40.7, lon=-74.0, tz="America/New_York", legacy=True),
+    _row(lat=51.5, lon=-0.1, tz="Europe/London"),
+    _row(lat=40, lon=-74, tz="America/New_York"),
+    _row(lat=40.0, lon=-74.0, tz="America/New_York"),
+    _row(lat=-33.9, lon=18.4, tz="Africa/Johannesburg", artifact_id=2),
+    _row(lat=1.0, lon=1.0, tz="UTC", artifact_id=7),
+    _row(lat=40.7, lon=-74.0, tz="America/New_York", cycle="2026-10-01T06:00:00+00:00"),
+    _row(lat=40.7, lon=-74.0, tz="America/New_York", source="gfs_global_single_runs"),
+    _row(lat=40.7, lon=-74.0, tz="UTC"),
+    _row(lat="40.7", lon=-74.0, tz="America/New_York"),  # non-numeric binding keeps SQLite affinity
+    _row(lat=0.0, lon=0.0, tz="UTC", artifact_id=999),  # own id absent
+]
+
+
+def _ids(candidates):
+    return [item["artifact_id"] for item in candidates]
+
+
+def _per_row(conn, row):
+    legacy = (row.get("artifact_id") is None and row.get("elevation_param") == "requested"
+              and row.get("downscaling_policy") == "none" and row.get("endpoint_mode") == "single_runs")
+    return list(serving._physical_artifact_candidates_by_row(conn, row, legacy=legacy, deadline=time.monotonic() + 30))
+
+
+@pytest.mark.parametrize("snapshot", [True, False])
+def test_set_query_returns_each_rows_per_row_candidates(tmp_path, snapshot):
+    conn = sqlite3.connect(tmp_path / "f.db")
+    conn.execute(SCHEMA)
+    _catalog(conn)
+    reader = sqlite3.connect(tmp_path / "f.db")
+    if snapshot:
+        reader.execute("BEGIN")
+    for row in ROWS:
+        expected = _per_row(reader, row)
+        actual = list(serving._physical_artifact_candidates(reader, row, deadline=time.monotonic() + 30))
+        assert actual == expected, row
+    # Not vacuous: the batched request serves its NY cell together with the
+    # single, REAL-cast text ("40.70") and legacy-body captures of that cell;
+    # the integer binding matches the REAL-cast integer request.
+    assert _ids(serving._physical_artifact_candidates(reader, ROWS[1], deadline=time.monotonic() + 30)) == [5, 4, 2, 1]
+    assert _ids(serving._physical_artifact_candidates(reader, ROWS[3], deadline=time.monotonic() + 30)) == [3]
+    assert _ids(serving._physical_artifact_candidates(reader, ROWS[6], deadline=time.monotonic() + 30)) == [7]
+
+
+def test_set_query_reads_each_family_once_per_snapshot_and_sees_new_commits(tmp_path):
+    conn = sqlite3.connect(tmp_path / "f.db")
+    conn.execute(SCHEMA)
+    _catalog(conn)
+    reader = sqlite3.connect(tmp_path / "f.db")
+    statements = []
+    reader.set_trace_callback(statements.append)
+    reader.execute("BEGIN")
+    for _ in range(3):
+        for row in ROWS[:6]:
+            list(serving._physical_artifact_candidates(reader, row, deadline=time.monotonic() + 30))
+    family_reads = [sql for sql in statements if "FROM raw_forecast_artifacts a" in sql and "a.source_id=" in sql]
+    assert len(family_reads) == 2 * 2  # (icon cycle, legacy 0/1) x (identity, cells), not x rows x rounds
+    reader.rollback()
+    added = _insert(conn, params={"latitude": 40.7, "longitude": -74.0, "timezone": "America/New_York"})
+    conn.commit()
+    row = ROWS[0]
+    assert _ids(serving._physical_artifact_candidates(reader, row, deadline=time.monotonic() + 30))[0] == added
+    assert list(serving._physical_artifact_candidates(reader, row, deadline=time.monotonic() + 30)) == _per_row(reader, row)
+
+
+def test_open_snapshot_does_not_see_later_commits(tmp_path):
+    conn = sqlite3.connect(tmp_path / "f.db")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(SCHEMA)
+    _catalog(conn)
+    reader = sqlite3.connect(tmp_path / "f.db")
+    reader.execute("BEGIN")
+    before = list(serving._physical_artifact_candidates(reader, ROWS[0], deadline=time.monotonic() + 30))
+    _insert(conn, params={"latitude": 40.7, "longitude": -74.0, "timezone": "America/New_York"})
+    conn.commit()
+    assert list(serving._physical_artifact_candidates(reader, ROWS[0], deadline=time.monotonic() + 30)) == before == _per_row(reader, ROWS[0])
+
+
+def test_a_connection_that_wrote_is_never_served_from_the_memo(tmp_path):
+    conn = sqlite3.connect(tmp_path / "f.db")
+    conn.execute(SCHEMA)
+    _catalog(conn)
+    conn.execute("BEGIN")
+    list(serving._physical_artifact_candidates(conn, ROWS[0], deadline=time.monotonic() + 30))
+    added = _insert(conn, params={"latitude": 40.7, "longitude": -74.0, "timezone": "America/New_York"})
+    assert _ids(serving._physical_artifact_candidates(conn, ROWS[0], deadline=time.monotonic() + 30))[0] == added
+    conn.rollback()
+    assert added not in _ids(serving._physical_artifact_candidates(conn, ROWS[0], deadline=time.monotonic() + 30))
+
+
+def test_expired_scan_budget_still_fails_closed(tmp_path, monkeypatch):
+    conn = sqlite3.connect(tmp_path / "f.db")
+    conn.execute(SCHEMA)
+    _catalog(conn)
+    with pytest.raises(serving.CurrentValueServingReadUnavailable, match="scan_budget_exceeded"):
+        list(serving._physical_artifact_candidates(conn, ROWS[0], deadline=time.monotonic() - 1))
