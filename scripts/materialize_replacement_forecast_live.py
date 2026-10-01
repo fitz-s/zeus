@@ -1101,7 +1101,11 @@ def _materialize(
         payload, openmeteo_manifest, metric, target_date, source_cycle_time, \
             anchor_cycle_time, anchor_artifact_id, openmeteo_payload, \
             openmeteo_raw_payload_bytes = _validated_named_inputs(input_json)
+    # The request is judged against the inputs it names only when the Open-Meteo
+    # bytes came from a named file; fetched bytes belong to no such identity.
+    validation_scope = _validating_request_inputs
     if openmeteo_payload is None:
+        validation_scope = contextlib.nullcontext
         if "latitude" not in payload or "longitude" not in payload:
             raise RequestInputInvalid("Open-Meteo direct fetch requires latitude and longitude")
         # A network fetch, not a named input: its failures are no input verdict.
@@ -1126,7 +1130,7 @@ def _materialize(
             json.dumps(scoped_payload, indent=2, sort_keys=True, default=str) + "\n"
         ).encode("utf-8")
         openmeteo_payload = scoped_payload
-    with _validating_request_inputs():
+    with validation_scope():
         request = _validated_request(
             payload,
             base_dir=input_json.parent,

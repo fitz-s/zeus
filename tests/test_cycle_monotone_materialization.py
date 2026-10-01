@@ -2875,3 +2875,34 @@ def test_worker_categories_name_what_each_failure_proves() -> None:
     assert category(PermissionError("unreadable")) == "ENVIRONMENT_RETRY"
     assert category(worker.ReplacementForecastWriteDeferred("busy")) == "ENVIRONMENT_RETRY"
     assert category(RuntimeError("unexpected")) == "UNCLASSIFIED"
+
+
+
+def test_worker_fetched_payload_defect_is_never_an_input_verdict(tmp_path, monkeypatch) -> None:
+    """Direct-fetch route: bytes from the network are not a named input, so a
+    ValueError while validating them is UNCLASSIFIED, never fenced."""
+    import scripts.materialize_replacement_forecast_live as worker
+
+    request = tmp_path / "fetch.json"
+    request.write_text(json.dumps({
+        "city": "Panama City", "city_timezone": "America/Panama",
+        "target_date": "2026-06-22", "temperature_metric": "high",
+        "source_cycle_time": "2026-06-21T06:00:00+00:00",
+        "computed_at": "2026-06-21T06:05:00+00:00",
+        "latitude": 8.97, "longitude": -79.53, "bins": [{"bin_id": "30C"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(worker, "build_anchor_request", lambda **_k: object())
+    monkeypatch.setattr(worker, "fetch_openmeteo_ecmwf_ifs9_anchor_payload", lambda _r: {"hourly": {}})
+
+    def defective(*_a, **_k):
+        raise ValueError("fetched payload lacks hourly samples")
+
+    monkeypatch.setattr(worker, "extract_openmeteo_ecmwf_ifs9_localday_anchor", defective)
+    with sqlite3.connect(":memory:") as worker_conn:
+        returncode, _stdout, stderr = worker._run_one(
+            request, commit=False, init_schema=False, conn=worker_conn,
+        )
+    emitted = json.loads(stderr.strip().splitlines()[-1])
+    assert (returncode, emitted["error_type"], emitted["failure_category"]) == (
+        2, "ValueError", "UNCLASSIFIED",
+    )
