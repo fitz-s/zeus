@@ -1045,6 +1045,38 @@ def failed_seed_identity_fenced(
     )
 
 
+def consumed_seed_request_owned(seed_file: Path) -> bool | None:
+    """Whether the request built from ``seed_file`` is still pending or inflight.
+
+    A retained request (transient error, timeout, deferred write) is the family's
+    single owner; a producer must not publish fresh work beside it. Scanned under
+    the queue lock so a request moving between requests/ and inflight/ is seen.
+    None when the queue state cannot be read.
+    """
+    if seed_file.parent.name != "seeds":
+        return False
+    queue_root = seed_file.parent.parent
+    name = seed_file.name
+
+    def owns(directory: Path) -> bool:
+        return any(
+            _stable_request_id(candidate) == name
+            for candidate in directory.glob(f"{seed_file.stem}*{seed_file.suffix}")
+        )
+
+    try:
+        with _queue_lock(queue_root / ".materialization_queue.lock") as acquired:
+            if not acquired:
+                return None
+            if owns(queue_root / "requests"):
+                return True
+            inflight = queue_root / MATERIALIZATION_INFLIGHT_DIR_NAME
+            batches = tuple(inflight.iterdir()) if inflight.is_dir() else ()
+            return any(batch.is_dir() and owns(batch) for batch in batches)
+    except OSError:
+        return None
+
+
 def _record_materialization_blocked_identity(
     input_json: Path,
     *,
@@ -3907,6 +3939,25 @@ def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str])
                 continue
             return tuple(str(reason) for reason in reasons)
     return ()
+
+
+# A child ERROR of exactly this type is a verdict on the request's inputs,
+# mirroring the seed path's ``type(exc) is ValueError`` split. Every other error
+# type is transient or unknown: never an input-identity fence.
+_INPUT_VERDICT_ERROR_TYPES = frozenset({"ValueError"})
+_ERROR_RETAINED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_ERROR_RETAINED_BY_OWNER"
+
+
+def _subprocess_result_error_type(completed: subprocess.CompletedProcess[str]) -> str | None:
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, Mapping) and payload.get("error_type") not in (None, ""):
+                return str(payload["error_type"])
+    return None
 
 
 def _subprocess_result_status(completed: subprocess.CompletedProcess[str]) -> str | None:
@@ -6831,6 +6882,7 @@ def _process_claimed_materialization_batch(
     source_cycles_awaiting_ensemble: list[str] = []
     already_covered: list[str] = []
     write_deferred: list[str] = []
+    error_retained: list[str] = []
     timed_out_requests: list[str] = []
     timeout_stage_reasons: list[str] = []
     deadline_deferred_reasons: list[str] = []
@@ -7222,8 +7274,19 @@ def _process_claimed_materialization_batch(
             and (
                 result_status == "BLOCKED"
                 or _UNCHANGED_BLOCKED_REASON in result_reason_codes
+                or (
+                    result_status == "ERROR"
+                    and _subprocess_result_error_type(completed)
+                    in _INPUT_VERDICT_ERROR_TYPES
+                )
             )
         ):
+            # SCOPE: this request's exact attempt fingerprint. BLOCKED or an
+            # input-verdict ERROR re-fails identically on unchanged inputs.
+            # DRAIN/RESET: any fingerprinted input change reopens it; no clock.
+            verdict_reasons = result_reason_codes or (
+                f"ERROR:{_subprocess_result_error_type(completed)}",
+            )
             try:
                 _write_blocked_attempt_marker(
                     marker_path=item.marker_path,
@@ -7242,7 +7305,7 @@ def _process_claimed_materialization_batch(
                 request_payload=item.request_payload,
                 receipt_dir_name="blocked_latest",
                 status="BLOCKED_MISSING_PROBABILITY_AUTHORITY",
-                reason_codes=(_BLOCKED_INPUT_RECEIPT_REASON, *result_reason_codes),
+                reason_codes=(_BLOCKED_INPUT_RECEIPT_REASON, *verdict_reasons),
             )
             processed.append(str(receipt))
             unchanged_blocked.append(str(receipt))
@@ -7256,6 +7319,28 @@ def _process_claimed_materialization_batch(
                     request_path.name,
                 )
             write_deferred.append(str(restored))
+        elif item.request_payload is not None and result_status in ("ERROR", None):
+            # SCOPE: this one request. A transient or unknown error is no verdict
+            # on its inputs, so it is neither fenced nor surrendered: the request
+            # stays the family's single owner, retried by this queue, and
+            # producers that see it (``consumed_seed_request_owned``) publish no
+            # fresh seed. RESET: its own next outcome.
+            if retry_path is None or input_json.parent == retry_path:
+                restored = input_json
+            else:
+                restored = _restore_claimed_request(
+                    input_json,
+                    retry_path,
+                    request_path.name,
+                )
+            _LOG.warning(
+                "materialize[%s] %s retained by its request: returncode=%s stderr=%s",
+                input_json.name,
+                _subprocess_result_error_type(completed) or "unknown error",
+                completed.returncode,
+                (completed.stderr or "")[-500:],
+            )
+            error_retained.append(str(restored))
         else:
             moved = _move_request(input_json, failed_path)
             _write_sidecar(moved, payload)
@@ -7288,6 +7373,12 @@ def _process_claimed_materialization_batch(
         _LOG.warning(
             "replacement forecast writes deferred by transient contention: count=%d",
             len(write_deferred),
+        )
+    if error_retained:
+        reasons.append(_ERROR_RETAINED_REASON)
+        _LOG.warning(
+            "replacement forecast materialization errors retained by their request: count=%d",
+            len(error_retained),
         )
     if timed_out_requests:
         reasons.extend(

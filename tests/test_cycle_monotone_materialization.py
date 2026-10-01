@@ -3,7 +3,8 @@
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
 # Lifecycle: created=2026-06-12; last_reviewed=2026-10-01; last_reused=2026-10-01
-#   (held re-heal: 30-min cooldown replaced by the input-identity fence)
+#   (held re-heal: 30-min cooldown replaced by the input-identity fence;
+#   worker ERROR is fenced (input verdict) or owner-retained (transient), never respawned)
 # Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.
 # Reuse: Run when replacement cycle-advance, materialization reseed, or freshness gates change.
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
@@ -1738,6 +1739,76 @@ def test_held_family_whose_local_day_ended_is_never_readmitted(tmp_path, monkeyp
     for n in range(100):
         inputs["value"] = f"changed-{n}"
         assert not decide(start + timedelta(minutes=5 * n))
+
+
+@pytest.mark.parametrize(
+    ("error_type", "retained"),
+    (("ValueError", False), ("OperationalError", True), (None, True)),
+)
+def test_held_materialization_error_is_fenced_or_owned_never_respawned(
+    tmp_path, monkeypatch, error_type, retained,
+) -> None:
+    """S3: a worker ERROR never makes held re-heal publish fresh producer work per tick.
+    An input-verdict error (ValueError) is fenced on the attempt identity; a transient or
+    unknown error keeps its one request as the family's owner, retried by the queue."""
+    import subprocess
+
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "replacement_forecast_live"
+    seeds, requests = root / "seeds", root / "requests"
+    requests.mkdir(parents=True)
+    seeds.mkdir()
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    seed_file = seeds / "Panama_City.2026-06-22.high.20260621T060500Z.json"
+    request = {
+        "city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high",
+        "source_cycle_time": "2026-06-21T06:00:00+00:00",
+        "computed_at": "2026-06-21T06:05:00+00:00",
+        "baseline_source_run_id": "baseline-run", "openmeteo_source_run_id": "om-run",
+        "openmeteo_payload_json": "payload.json", "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    (requests / seed_file.name).write_text(json.dumps(request), encoding="utf-8")
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
+    monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+    body = "" if error_type is None else json.dumps({"status": "ERROR", "error_type": error_type})
+    report = queue._process_claimed_materialization_batch(
+        request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
+        forecast_db=db, limit=1,
+        runner=lambda argv: subprocess.CompletedProcess(list(argv), 2, stdout="", stderr=body),
+        marker_dir=root / "blocked_attempts", seed_dir=seeds,
+    )
+    assert (requests / seed_file.name).is_file() is retained
+    assert not report.failed_count
+    assert queue.consumed_seed_request_owned(seed_file) is retained
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('2026-06-21T06:05:00+00:00','Panama City','2026-06-22','high',
+                   '2026-06-20T18:00:00+00:00','2026-06-21T06:00:00+00:00', 1, ?, NULL)""",
+        (str(seed_file),),
+    )
+    conn.commit()
+
+    def admitted(n: int) -> bool:
+        return cycle_advance._enqueue_decision(
+            conn, city="Panama City", target_date="2026-06-22", metric="high",
+            target_cycle_iso="2026-06-21T06:00:00+00:00",
+            as_of=datetime(2026, 6, 21, 6, 6, tzinfo=timezone.utc) + timedelta(minutes=n),
+        ) is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
+
+    assert not any(admitted(n) for n in range(50))
+    if retained:
+        (requests / seed_file.name).unlink()  # the owner drains (e.g. it succeeded)
+        assert admitted(51), "re-heal resumes once the owning request is gone"
+    conn.close()
 
 
 def test_held_reheal_unknown_city_timezone_is_not_ended() -> None:

@@ -1263,6 +1263,7 @@ def _enqueue_decision(
             return _CycleAdvanceEnqueueDecision.RETRY_PENDING
         return _CycleAdvanceEnqueueDecision.ADMIT
     from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+        consumed_seed_request_owned,
         failed_seed_identity_fenced,
     )
 
@@ -1401,6 +1402,14 @@ def _enqueue_decision(
             and not allow_missing_seed_file_reenqueue
             and _held_target_local_day_ended(city, target_date, decision_as_of)
         ):
+            return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
+        # The consumed seed's request still owns this family (retained after a
+        # transient error, timeout or deferred write); the queue retries it, so
+        # fresh producer work beside it would only duplicate the attempt.
+        owned = consumed_seed_request_owned(Path(seed_file))
+        if owned is None:
+            return _CycleAdvanceEnqueueDecision.RETRY_PENDING
+        if owned:
             return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
         return _CycleAdvanceEnqueueDecision.ADMIT
     return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
