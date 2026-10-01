@@ -35871,6 +35871,11 @@ def test_global_batch_actual_and_proof_share_cut_local_plan_cache(
 
         def select(*_args, **kwargs):
             cache_objects.append(kwargs.get("family_joint_plan_cache"))
+            # The proof policy rejects what the actual policy admits, so the
+            # proof solve cannot be the actual result and must run.
+            kwargs["candidate_policy_rejection_resolver"](
+                SimpleNamespace(candidate_id="candidate-cache", action="BUY")
+            )
             if force_uncached:
                 kwargs["family_joint_plan_cache"] = None
             return selected
@@ -35932,6 +35937,184 @@ def test_global_batch_actual_and_proof_share_cut_local_plan_cache(
         )
         for event_id, receipt in uncached_result.receipts.items()
     }
+
+
+@pytest.mark.parametrize("case", ["agree", "differ", "side_effect"])
+def test_global_batch_proof_solve_reuses_actual_result_when_policies_agree(
+    monkeypatch,
+    case,
+):
+    """Agreeing policy verdicts make the proof solve the actual solve itself.
+
+    The skipped proof solve must persist the same proof bytes the full proof
+    solve would, bind to the same receipt call, and keep the venue side-effect
+    guard across the whole selection compute.
+    """
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-proof-reuse")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    witness = SimpleNamespace(
+        family_key=scope.family_keys[0],
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-proof-reuse",
+        witness_identity="q-run-proof-reuse",
+    )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="decision-proof-reuse",
+        probability_witness=witness,
+        candidate_seeds=(),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_selection_holdings",
+        lambda prepared_by_event, **_kwargs: dict(prepared_by_event),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-proof-reuse",
+            economic_identity="wealth-economics-proof-reuse",
+            ledger_snapshot_id="ledger-proof-reuse",
+            native_holdings_micro=(),
+            pending_entry_endowments_micro=(),
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue-proof-reuse",
+    )
+    stored = []
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_, **kwargs: stored.append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_stored_global_auction_receipt",
+        lambda _conn, *, selected, decision_log_id: selected,
+    )
+    identified = tuple(
+        SimpleNamespace(candidate_id=f"candidate-{index}", action="BUY")
+        for index in range(3)
+    )
+    # A candidate without an identity cannot reuse a verdict, which forces
+    # the full proof solve: the behavior before the reuse existed.
+    unidentified = tuple(SimpleNamespace(action="BUY") for _ in range(3))
+    submits = [0]
+
+    def run(*, proof_reason, force_full_proof):
+        calls = []
+        candidates = unidentified if force_full_proof else identified
+
+        def select(*_args, **kwargs):
+            policy = kwargs["candidate_policy_rejection_resolver"]
+            verdicts = tuple(policy(candidate) for candidate in candidates)
+            calls.append(verdicts)
+            if case == "side_effect":
+                submits[0] += 1
+            # A deterministic solve: equal verdicts over equal inputs give an
+            # equal result, distinct verdicts a distinct one.
+            return SimpleNamespace(
+                decision=SimpleNamespace(
+                    candidate=None,
+                    candidate_evaluations=(),
+                    rejection_reasons={},
+                    no_trade_reason=f"TEST_NO_TRADE:{verdicts}",
+                ),
+                winner_event_id=None,
+                holding_coverage=(),
+                materialization_excluded_by_family={},
+                actuation=None,
+            )
+
+        monkeypatch.setattr(
+            global_batch_runtime, "select_prepared_global_auction", select
+        )
+        stored.clear()
+        trade = sqlite3.connect(":memory:")
+        try:
+            result = global_batch_runtime.process_current_global_batch(
+                (event,),
+                decision_time=decision_at,
+                world_conn=object(),
+                forecast_conn=object(),
+                trade_conn=trade,
+                payload_reader=lambda current: json.loads(current.payload_json),
+                prepare_event=lambda current, _at: EventSubmissionReceipt(
+                    False,
+                    current.event_id,
+                    current.causal_snapshot_id,
+                    prepared_global_family=prepared,
+                ),
+                actuate_winner=lambda *_: pytest.fail("no-trade must not actuate"),
+                stamp_receipt=lambda receipt: receipt,
+                venue_submit_count=lambda: submits[0],
+                current_execution=lambda *_: object(),
+                current_time_provider=lambda: decision_at,
+                current_book_epoch_provider=lambda probabilities, _at: (
+                    probabilities,
+                    None,
+                ),
+                candidate_policy_rejection_resolver=lambda _candidate: None,
+                proof_candidate_policy_rejection_resolver=(
+                    lambda _candidate: proof_reason
+                ),
+            )
+        finally:
+            trade.close()
+        return result, calls, list(stored)
+
+    if case == "side_effect":
+        result, calls, receipts = run(proof_reason=None, force_full_proof=False)
+        assert len(calls) == 1
+        assert receipts == []
+        assert "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT" in (
+            result.receipts[event.event_id].reason
+        )
+        return
+
+    proof_reason = None if case == "agree" else "PROOF_ONLY_REJECTION"
+    result, calls, receipts = run(proof_reason=proof_reason, force_full_proof=False)
+    assert len(receipts) == 1
+    proof = receipts[0]["proof_counterfactual"]
+    assert proof["venue_submit_count_before"] == proof["venue_submit_count_after"]
+    if case == "agree":
+        # One solve; its result is both the actual and the proof selection.
+        assert calls == [(None, None, None)]
+        assert proof["no_trade_reason"] == receipts[0]["selected"].decision.no_trade_reason
+    else:
+        # The proof solve runs, reusing the verdicts the actual solve took.
+        assert calls == [
+            (None, None, None),
+            ("PROOF_ONLY_REJECTION",) * 3,
+        ]
+        assert proof["no_trade_reason"] != (
+            receipts[0]["selected"].decision.no_trade_reason
+        )
+
+    full_result, full_calls, full_receipts = run(
+        proof_reason=proof_reason, force_full_proof=True
+    )
+    assert len(full_calls) == 2
+    # Identical inputs persist byte-identical receipt kwargs and winner.
+    assert global_batch_runtime._canonical_json_bytes(
+        full_receipts[0]["proof_counterfactual"]
+    ) == global_batch_runtime._canonical_json_bytes(proof)
+    assert (
+        full_receipts[0]["selected"].decision.no_trade_reason
+        == receipts[0]["selected"].decision.no_trade_reason
+    )
+    assert full_result.winner_event_id == result.winner_event_id
 
 
 def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(

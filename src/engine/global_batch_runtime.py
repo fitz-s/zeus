@@ -10111,6 +10111,50 @@ def process_current_global_batch(
                     )
                 return current_execution(candidate, selection_at)
 
+            # The proof solve differs from the actual one only by its candidate
+            # policy. Ask both policies about each candidate the actual solve
+            # consults, at the same instant: when every verdict agrees, the
+            # deterministic solve over identical inputs is the actual result
+            # itself, and the second solve is skipped. One differing, raising
+            # or unidentifiable verdict runs the full proof solve, which reuses
+            # the verdicts already taken.
+            proof_verdicts: dict[str, str | None] = {}
+            proof_verdicts_agree = True
+
+            def actual_policy(candidate):
+                nonlocal proof_verdicts_agree
+                try:
+                    reason = candidate_policy(candidate)
+                except Exception:
+                    proof_verdicts_agree = False
+                    raise
+                if proof_candidate_policy_rejection_resolver is None:
+                    return reason
+                candidate_id = getattr(candidate, "candidate_id", None)
+                try:
+                    proof_reason = proof_candidate_policy(candidate)
+                except Exception:  # noqa: BLE001 - the full proof solve owns the failure
+                    proof_verdicts_agree = False
+                    return reason
+                if not isinstance(candidate_id, str) or not candidate_id:
+                    proof_verdicts_agree = False
+                    return reason
+                proof_verdicts[candidate_id] = proof_reason
+                if proof_reason != reason:
+                    proof_verdicts_agree = False
+                return reason
+
+            def proof_policy(candidate):
+                candidate_id = getattr(candidate, "candidate_id", None)
+                if isinstance(candidate_id, str) and candidate_id in proof_verdicts:
+                    return proof_verdicts[candidate_id]
+                return proof_candidate_policy(candidate)
+
+            proof_submit_count_before = (
+                venue_submit_count()
+                if proof_candidate_policy_rejection_resolver is not None
+                else None
+            )
             selection_compute_started = time.monotonic()
             selected = select_prepared_global_auction(
                 prepared_for_selection,
@@ -10138,7 +10182,7 @@ def process_current_global_batch(
                 book_epoch=attempt_book_epoch,
                 family_joint_plan_cache=family_joint_plan_cache,
                 current_capital_limit_resolver=current_capital_limit_resolver,
-                candidate_policy_rejection_resolver=candidate_policy,
+                candidate_policy_rejection_resolver=actual_policy,
                 selected_order_rejection_resolver=selected_order_rejection_resolver,
                 preflight_excluded_by_family=preflight_excluded_by_family,
                 buy_disabled_family_keys=frozenset(
@@ -10151,11 +10195,14 @@ def process_current_global_batch(
             primary_selection_s = time.monotonic() - selection_compute_started
             proof_selection_s = 0.0
             proof_selected = None
-            proof_submit_count_before = None
             proof_submit_count_after = None
-            if proof_candidate_policy_rejection_resolver is not None:
+            if (
+                proof_candidate_policy_rejection_resolver is not None
+                and proof_verdicts_agree
+            ):
+                proof_selected = selected
+            elif proof_candidate_policy_rejection_resolver is not None:
                 proof_selection_started = time.monotonic()
-                proof_submit_count_before = venue_submit_count()
                 proof_selected = select_prepared_global_auction(
                     prepared_for_selection,
                     selection_epoch_identity=attempt_selection_epoch_identity,
@@ -10184,9 +10231,7 @@ def process_current_global_batch(
                     book_epoch=attempt_book_epoch,
                     family_joint_plan_cache=family_joint_plan_cache,
                     current_capital_limit_resolver=current_capital_limit_resolver,
-                    candidate_policy_rejection_resolver=(
-                        proof_candidate_policy
-                    ),
+                    candidate_policy_rejection_resolver=proof_policy,
                     selected_order_rejection_resolver=(
                         selected_order_rejection_resolver
                     ),
@@ -10202,8 +10247,9 @@ def process_current_global_batch(
                     payoff_q_correction_resolver=payoff_q_correction_resolver,
                     cancelled=selection_cancelled,
                 )
-                proof_submit_count_after = venue_submit_count()
                 proof_selection_s = time.monotonic() - proof_selection_started
+            if proof_candidate_policy_rejection_resolver is not None:
+                proof_submit_count_after = venue_submit_count()
                 if proof_submit_count_after != proof_submit_count_before:
                     raise RuntimeError(
                         "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT"
