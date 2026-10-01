@@ -28,7 +28,6 @@
         "longitude": 24.97274
       },
       "authority_note": "Exact same-station/UTC-time rounded value comparison: 37/49; no separate instrument certificate required.",
-      "settlement_grade": false,
       "value_identity_proof": {
         "city": "Helsinki",
         "channel": "fmi",
@@ -267,7 +266,8 @@
         "version_conflicts": [],
         "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
-      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking."
+      "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
+      "role": "physical_only"
     },
     {
       "provider": "jma_amedas",
@@ -281,14 +281,15 @@
       "identity": {
         "provider_station": "44166"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "city": "Tokyo",
         "channel": "jma_amedas",
         "n_pairs": 152,
         "n_exact": 152,
         "mismatches": [],
-        "report_path": "artifacts/fast_obs_audit/round4_cumulative_identity.json"
+        "report_path": "artifacts/fast_obs_audit/round4_cumulative_identity.json",
+        "station": "RJTT",
+        "unit": "C"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
       "authority_note": "Exact same-station/UTC-time rounded value comparison: 23/23; no separate instrument certificate required.",
@@ -336,10 +337,22 @@
                 "lag_upper_ms": 793288.7829999999
               }
             }
-          ]
+          ],
+          "paired_value": {
+            "candidate": {
+              "value": 19.0,
+              "unit": "C"
+            },
+            "resolver": {
+              "value": 19.0,
+              "unit": "C"
+            },
+            "source": "artifacts/fast_obs_audit/round3_origin_measurements.json"
+          }
         },
         "limitation": "Measured transitions, not all-time latency domination."
-      }
+      },
+      "role": "fast_admission"
     },
     {
       "provider": "eccc_swob",
@@ -353,14 +366,15 @@
       "identity": {
         "provider_station": "CYYZ"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "city": "Toronto",
         "channel": "eccc_swob",
         "n_pairs": 57,
         "n_exact": 57,
         "mismatches": [],
-        "report_path": "artifacts/fast_obs_audit/round4_cumulative_identity.json"
+        "report_path": "artifacts/fast_obs_audit/round4_cumulative_identity.json",
+        "station": "CYYZ",
+        "unit": "C"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
       "authority_note": "Exact same-station/UTC-time rounded value comparison: 6/6; no separate instrument certificate required.",
@@ -408,10 +422,22 @@
                 "lag_upper_ms": 542160.612
               }
             }
-          ]
+          ],
+          "paired_value": {
+            "candidate": {
+              "value": 22.3,
+              "unit": "C"
+            },
+            "resolver": {
+              "value": 22.0,
+              "unit": "C"
+            },
+            "source": "artifacts/fast_obs_audit/round3_origin_measurements.json"
+          }
         },
         "limitation": "Measured transitions, not all-time latency domination."
-      }
+      },
+      "role": "fast_admission"
     },
     {
       "provider": "imgw_synop",
@@ -425,7 +451,6 @@
       "identity": {
         "provider_station": "12375"
       },
-      "settlement_grade": false,
       "value_identity_proof": {
         "city": "Warsaw",
         "channel": "imgw",
@@ -456,7 +481,8 @@
         "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
-      "authority_note": "Exact same-station/UTC-time rounded value comparison: 1/2; no separate instrument certificate required."
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 1/2; no separate instrument certificate required.",
+      "role": "physical_only"
     },
     {
       "provider": "dwd_cdc",
@@ -470,7 +496,6 @@
       "identity": {
         "provider_station": "01262"
       },
-      "settlement_grade": false,
       "value_identity_proof": {
         "city": "Munich",
         "channel": "dwd",
@@ -748,7 +773,8 @@
         "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
-      "authority_note": "Exact same-station/UTC-time rounded value comparison: 34/48; no separate instrument certificate required."
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 34/48; no separate instrument certificate required.",
+      "role": "physical_only"
     },
     {
       "provider": "knmi_observations",
@@ -762,7 +788,6 @@
       "identity": {
         "provider_station": "06240"
       },
-      "settlement_grade": false,
       "value_identity_proof": {
         "city": "Amsterdam",
         "channel": "knmi",
@@ -773,7 +798,8 @@
         "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
-      "authority_note": "Exact same-station/UTC-time rounded value comparison: 0/0; no separate instrument certificate required."
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 0/0; no separate instrument certificate required.",
+      "role": "physical_only"
     },
     {
       "provider": "wu_station_history",
@@ -787,7 +813,6 @@
       "identity": {
         "provider_station": "ZSJN:9:CN"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "city": "Jinan",
         "channel": "wu_station_history",
@@ -798,7 +823,8 @@
         "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
-      "authority_note": "Exact same-station/UTC-time rounded value comparison: 40/40; no separate instrument certificate required."
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 40/40; no separate instrument certificate required.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "wu_station_current",
@@ -812,7 +838,6 @@
       "identity": {
         "provider_station": "ZSJN:9:CN"
       },
-      "settlement_grade": false,
       "value_identity_proof": {
         "city": "Jinan",
         "channel": "wu_station_current",
@@ -823,7 +848,8 @@
         "report_path": "artifacts/fast_obs_audit/source_identity_report.json"
       },
       "proof_scope": "Short recorded windows under contract unit/rounding law. Exact-clock equality is admission evidence, not a guarantee for all future values or a latency ranking.",
-      "authority_note": "Exact same-station/UTC-time rounded value comparison: 0/0; no separate instrument certificate required."
+      "authority_note": "Exact same-station/UTC-time rounded value comparison: 0/0; no separate instrument certificate required.",
+      "role": "physical_only"
     },
     {
       "provider": "noaa_wrh",
@@ -838,14 +864,14 @@
         "provider_station": "KATL",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 76,
         "n_exact": 76,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -860,14 +886,14 @@
         "provider_station": "KAUS",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 83,
         "n_exact": 83,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -882,14 +908,14 @@
         "provider_station": "KORD",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 90,
         "n_exact": 90,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -904,14 +930,14 @@
         "provider_station": "KDAL",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 76,
         "n_exact": 76,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -926,14 +952,14 @@
         "provider_station": "KBKF",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 76,
         "n_exact": 76,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -948,14 +974,14 @@
         "provider_station": "KHOU",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 72,
         "n_exact": 72,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -970,14 +996,14 @@
         "provider_station": "KLAX",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 75,
         "n_exact": 75,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -992,14 +1018,14 @@
         "provider_station": "KMIA",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 77,
         "n_exact": 77,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -1014,14 +1040,14 @@
         "provider_station": "KLGA",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 94,
         "n_exact": 94,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -1036,14 +1062,14 @@
         "provider_station": "KSFO",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 77,
         "n_exact": 77,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "noaa_wrh",
@@ -1058,14 +1084,14 @@
         "provider_station": "KSEA",
         "resolver_view": "hourly"
       },
-      "settlement_grade": true,
       "value_identity_proof": {
         "n_pairs": 85,
         "n_exact": 85,
         "mismatches": [],
         "basis": "Direct native air_temp_set_1 from the existing resolver product; preserves parsed field and view, not an independent METAR reconstruction."
       },
-      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC."
+      "authority_note": "Existing resolver acquisition accelerated as one unit/station-set batch. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
     },
     {
       "provider": "imd_olbs_metar",
@@ -1080,69 +1106,80 @@
         "provider_station": "VILK"
       },
       "access": "free_public_no_account",
-      "settlement_grade": true,
       "value_identity_proof": {
         "city": "Lucknow",
         "channel": "imd_olbs_metar",
         "n_pairs": 2,
         "n_exact": 2,
         "mismatches": [],
-        "report_path": "artifacts/fast_obs_audit/round4_india_proof.json"
+        "report_path": "artifacts/fast_obs_audit/round4_india_proof.json",
+        "station": "VILK",
+        "unit": "C"
       },
       "latency_evidence": {
         "scope": "Individual observed publication transitions, not universal dominance or percentiles.",
-        "races": [
-          {
-            "observation": "2026-09-30T23:30:00+00:00",
-            "candidate": {
-              "city": "Lucknow",
-              "station": "VILK",
-              "channel": "imd_olbs_metar",
-              "observed_at": "2026-09-30T23:30:00+00:00",
-              "value": 24.0,
-              "unit": "C",
-              "negative_request_at": "2026-09-30T23:29:30.557824+00:00",
-              "positive_receipt_at": "2026-09-30T23:30:32.557084+00:00",
-              "lag_lower_ms": -29442.176,
-              "lag_upper_ms": 32557.084000000003
-            },
-            "comparators": [
-              {
+        "first_proven_lead": {
+          "observation": "2026-09-30T23:30:00+00:00",
+          "candidate": {
+            "city": "Lucknow",
+            "station": "VILK",
+            "channel": "imd_olbs_metar",
+            "observed_at": "2026-09-30T23:30:00+00:00",
+            "value": 24.0,
+            "unit": "C",
+            "negative_request_at": "2026-09-30T23:29:30.557824+00:00",
+            "positive_receipt_at": "2026-09-30T23:30:32.557084+00:00",
+            "lag_lower_ms": -29442.176,
+            "lag_upper_ms": 32557.084000000003
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Lucknow",
+                "station": "VILK",
                 "channel": "awc",
-                "verdict": "FASTER",
-                "interval": {
-                  "city": "Lucknow",
-                  "station": "VILK",
-                  "channel": "awc",
-                  "observed_at": "2026-09-30T23:30:00+00:00",
-                  "value": 24.0,
-                  "unit": "C",
-                  "negative_request_at": "2026-09-30T23:31:27.758211+00:00",
-                  "positive_receipt_at": "2026-09-30T23:32:34.389799+00:00",
-                  "lag_lower_ms": 87758.211,
-                  "lag_upper_ms": 154389.799
-                }
-              },
-              {
-                "channel": "resolver",
-                "verdict": "FASTER",
-                "interval": {
-                  "city": "Lucknow",
-                  "station": "VILK",
-                  "channel": "resolver",
-                  "observed_at": "2026-09-30T23:30:00+00:00",
-                  "value": 24.0,
-                  "unit": "C",
-                  "negative_request_at": "2026-09-30T23:34:32.548369+00:00",
-                  "positive_receipt_at": "2026-09-30T23:35:30.559757+00:00",
-                  "lag_lower_ms": 272548.369,
-                  "lag_upper_ms": 330559.757
-                }
+                "observed_at": "2026-09-30T23:30:00+00:00",
+                "value": 24.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:31:27.758211+00:00",
+                "positive_receipt_at": "2026-09-30T23:32:34.389799+00:00",
+                "lag_lower_ms": 87758.211,
+                "lag_upper_ms": 154389.799
               }
-            ]
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Lucknow",
+                "station": "VILK",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T23:30:00+00:00",
+                "value": 24.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:34:32.548369+00:00",
+                "positive_receipt_at": "2026-09-30T23:35:30.559757+00:00",
+                "lag_lower_ms": 272548.369,
+                "lag_upper_ms": 330559.757
+              }
+            }
+          ],
+          "paired_value": {
+            "candidate": {
+              "value": 24.0,
+              "unit": "C"
+            },
+            "resolver": {
+              "value": 24.0,
+              "unit": "C"
+            },
+            "source": "artifacts/fast_obs_audit/round4_india_proof.json"
           }
-        ]
-      }
+        }
+      },
+      "role": "fast_admission"
     },
     {
       "provider": "mgm_metar",
@@ -1156,7 +1193,6 @@
       "identity": {
         "provider_station": "LTAC"
       },
-      "settlement_grade": true,
       "free_access": "Anonymous public national-service METAR; no key, login, or contract.",
       "publisher_role": "NATIONAL_ORIGIN",
       "value_identity_proof": {
@@ -1165,7 +1201,9 @@
         "n_pairs": 50,
         "n_exact": 50,
         "mismatches": [],
-        "report_path": "artifacts/fast_obs_audit/round4_mgm_proof.json"
+        "report_path": "artifacts/fast_obs_audit/round4_mgm_proof.json",
+        "station": "LTAC",
+        "unit": "C"
       },
       "latency_evidence": {
         "required_comparators": [
@@ -1220,10 +1258,21 @@
               }
             }
           ],
-          "paired_value_identity": true
+          "paired_value": {
+            "candidate": {
+              "value": 11.0,
+              "unit": "C"
+            },
+            "resolver": {
+              "value": 11.0,
+              "unit": "C"
+            },
+            "source": "artifacts/fast_obs_audit/round4_mgm_proof.json"
+          }
         }
       },
-      "scope_note": "Same station, exact UTC observation instant, contract value. No final daily-product substitution."
+      "scope_note": "Same station, exact UTC observation instant, contract value. No final daily-product substitution.",
+      "role": "fast_admission"
     },
     {
       "provider": "mgm_metar",
@@ -1237,7 +1286,6 @@
       "identity": {
         "provider_station": "LTFM"
       },
-      "settlement_grade": true,
       "free_access": "Anonymous public national-service METAR; no key, login, or contract.",
       "publisher_role": "NATIONAL_ORIGIN",
       "value_identity_proof": {
@@ -1246,7 +1294,9 @@
         "n_pairs": 49,
         "n_exact": 49,
         "mismatches": [],
-        "report_path": "artifacts/fast_obs_audit/round4_mgm_proof.json"
+        "report_path": "artifacts/fast_obs_audit/round4_mgm_proof.json",
+        "station": "LTFM",
+        "unit": "C"
       },
       "latency_evidence": {
         "required_comparators": [
@@ -1301,10 +1351,21 @@
               }
             }
           ],
-          "paired_value_identity": true
+          "paired_value": {
+            "candidate": {
+              "value": 18.0,
+              "unit": "C"
+            },
+            "resolver": {
+              "value": 18.0,
+              "unit": "C"
+            },
+            "source": "artifacts/fast_obs_audit/round4_mgm_proof.json"
+          }
         }
       },
-      "scope_note": "Same station, exact UTC observation instant, contract value. No final daily-product substitution."
+      "scope_note": "Same station, exact UTC observation instant, contract value. No final daily-product substitution.",
+      "role": "fast_admission"
     }
   ]
 }

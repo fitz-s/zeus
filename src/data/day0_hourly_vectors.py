@@ -4412,7 +4412,7 @@ def read_day0_current_temperature_state(
         # FMI remains physical-only unless actual value identity proves grade.
         settlement_grade = (
             channel in base_settlement_channels
-            or bool(route is not None and route.settlement_grade)
+            or bool(route is not None and route.settlement_authorized)
         )
         clock = (
             observation_time,

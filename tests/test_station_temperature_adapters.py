@@ -16,10 +16,10 @@ ROOT = Path(__file__).parent / "fixtures" / "station_temperature"
 NOW = datetime(2026, 9, 30, 5, tzinfo=timezone.utc)
 
 def _public_route(provider="mgm_metar", station="LTAC"):
-    from src.data.physical_current_sources import PhysicalCurrentSource
+    from src.data.physical_current_sources import PhysicalCurrentSource, SourceRole
     from src.data.station_temperature_adapters import CHANNELS
     return PhysicalCurrentSource(provider, CHANNELS[provider], station, ("noaa",),
-        "C", 60., None, {"provider_station": station}, True)
+        "C", 60., None, {"provider_station": station}, SourceRole.FAST_ADMISSION)
 
 
 def _public_fixture(name):
@@ -132,7 +132,7 @@ def test_mgm_admission_binds_exact_value_and_all_current_speed_paths(station):
     proof=row['value_identity_proof']
     report=json.loads((REGISTRY_PATH.parents[1]/proof['report_path']).read_text())
     measured=next(r for r in report if r['station']==station)
-    assert row['settlement_grade'] and measured['n_pairs']==measured['n_exact']>0
+    assert row['role']=='fast_admission' and measured['n_pairs']==measured['n_exact']>0
     assert measured['mismatches']==[]
     race=row['latency_evidence']['first_proven_lead']
     assert any(p['time']==race['observation'] and p['match'] for p in measured['pairs'])
@@ -152,7 +152,7 @@ def test_promoted_origins_have_extended_identity_and_measured_latency_lead(provi
     data = json.loads(REGISTRY_PATH.read_text())
     row = next(r for r in data["sources"] if r["provider"] == provider)
     proof = row["value_identity_proof"]
-    assert row["settlement_grade"] is True
+    assert row["role"] == "fast_admission"
     assert proof["n_pairs"] >= 48 and proof["n_exact"] == proof["n_pairs"]
     assert proof["mismatches"] == []
     race = row["latency_evidence"]["first_proven_lead"]
@@ -198,26 +198,22 @@ def test_jma_bad_quality_and_future_values_cannot_enter():
     assert parse_station_payload(route, body, received_at=NOW) == ()
 
 
-def test_systematic_mismatch_cannot_be_marked_settlement_grade(tmp_path):
+def test_systematic_mismatch_cannot_be_admitted(tmp_path):
     data = json.loads(REGISTRY_PATH.read_text())
-    next(r for r in data["sources"] if r["provider"] == "dwd_cdc")["settlement_grade"] = True
+    next(r for r in data["sources"] if r["provider"] == "dwd_cdc")["role"] = "fast_admission"
     path=tmp_path/"registry.json";path.write_text(json.dumps(data))
-    with pytest.raises(ValueError, match="NOT_PROVEN"): load_physical_current_sources(path)
+    assert all(r.provider != "dwd_cdc" for r in load_physical_current_sources(path)[0])
 
 
-@pytest.mark.parametrize('provider',['fmi_wfs','jma_amedas','eccc_swob','imgw_synop','dwd_cdc','knmi_observations'])
-def test_same_value_rule_is_provider_independent(tmp_path, provider):
+@pytest.mark.parametrize('provider',['fmi_wfs','imgw_synop','dwd_cdc','knmi_observations'])
+def test_counts_only_proof_cannot_admit_any_provider(tmp_path, provider):
     data=json.loads(REGISTRY_PATH.read_text())
     row=next(r for r in data['sources'] if r['provider']==provider)
-    row['settlement_grade']=True
-    # Synthetic admission test only; this is not a measurement or production promotion.
+    row['role']='fast_admission'
+    # Synthetic forged counts: equal, but bound to nothing and with no race.
     row['value_identity_proof']={'n_pairs':8,'n_exact':8,'mismatches':[]}
     path=tmp_path/'equal.json';path.write_text(json.dumps(data))
-    route=next(r for r in load_physical_current_sources(path)[0] if r.provider==provider)
-    assert route.settlement_grade is True
-    row['value_identity_proof']['n_exact']=7
-    bad=tmp_path/'different.json';bad.write_text(json.dumps(data))
-    with pytest.raises(ValueError,match='NOT_PROVEN'):load_physical_current_sources(bad)
+    assert all(r.provider != provider for r in load_physical_current_sources(path)[0])
 
 
 def test_every_configured_promotion_matches_committed_pair_evidence():
@@ -230,7 +226,7 @@ def test_every_configured_promotion_matches_committed_pair_evidence():
             native_rows=json.loads(gzip.decompress((ROOT/'us_resolver_precision.json.gz').read_bytes()))
             n=sum(r['station']==row['station_id'] for r in native_rows)
             assert proof['n_pairs']==proof['n_exact']==n
-            assert row['settlement_grade'] and row['unit']=='F'
+            assert row['role']=='canonical_resolver' and row['unit']=='F'
             assert row['source_channel']=='noaa_wrh_'+row['station_id'].lower()
             continue  # Existing native resolver, not an alternate-channel promotion.
         evidence_path=proof.get('report_path')
@@ -245,9 +241,9 @@ def test_every_configured_promotion_matches_committed_pair_evidence():
             actual=measured[(row['station_id'],proof['channel'])]
             proven=actual['value_identity_proven']
         assert (proof['n_pairs'],proof['n_exact'])==(actual['n_pairs'],actual['n_exact'])
-        assert row['settlement_grade']==proven
+        assert (row['role']!='physical_only')==proven
     imgw=next(r for r in load_physical_current_sources()[0] if r.provider=='imgw_synop')
-    assert imgw.settlement_grade is False  # Exact-time observed mismatch, not geography.
+    assert not imgw.settlement_authorized  # Exact-time observed mismatch, not geography.
 
 
 def test_new_station_channel_reaches_causal_current_temperature_reader():
@@ -615,3 +611,84 @@ def test_shared_cache_lock_is_free_during_network_io():
 
     adapters._fetch_public_metar(route, httpx.Client(transport=httpx.MockTransport(handler)))
     adapters._PUBLIC_METAR_CACHE.clear()
+
+
+def _ltac_registry_row():
+    data = json.loads(REGISTRY_PATH.read_text())
+    return data, next(r for r in data["sources"] if r["provider"] == "mgm_metar" and r["station_id"] == "LTAC")
+
+
+def test_every_configured_role_satisfies_its_law():
+    from src.data.physical_current_sources import SourceRole, fast_admission_defect
+    data = json.loads(REGISTRY_PATH.read_text())
+    by_station = {}
+    for row in data["sources"]:
+        by_station.setdefault(row["station_id"], set()).add(row["provider"])
+    loaded = {(r.provider, r.station_id): r.role for r in load_physical_current_sources()[0]}
+    for row in data["sources"]:
+        assert loaded[(row["provider"], row["station_id"])] is SourceRole(row["role"])
+        if row["role"] == "fast_admission":
+            rivals = frozenset(by_station[row["station_id"]] - {row["provider"]})
+            assert fast_admission_defect(row, rivals) is None, row["provider"]
+
+
+@pytest.mark.parametrize("forge,reason", [
+    ("counts_only", "PROOF_IDENTITY"),
+    ("wrong_unit", "PROOF_IDENTITY"),
+    ("wrong_station", "PROOF_IDENTITY"),
+    ("missing_comparator", "LEAD_NOT_FASTER:resolver"),
+    ("unpaired_lead", "LEAD_UNPAIRED"),
+    ("lead_value_mismatch", "LEAD_VALUE_MISMATCH"),
+    ("overlapping_comparator", "LEAD_NOT_FASTER:awc"),
+    ("rival_registry_route", "LEAD_NOT_FASTER:jma_amedas"),
+])
+def test_invalid_fast_admission_is_omitted_and_incumbents_keep_serving(tmp_path, caplog, forge, reason):
+    from src.data.physical_current_sources import fast_admission_defect
+    data, row = _ltac_registry_row()
+    lead = row["latency_evidence"]["first_proven_lead"]
+    rivals = frozenset()
+    if forge == "counts_only":
+        row["value_identity_proof"] = {"n_pairs": 50, "n_exact": 50, "mismatches": []}
+    elif forge == "wrong_unit":
+        row["value_identity_proof"]["unit"] = "F"
+    elif forge == "wrong_station":
+        row["value_identity_proof"]["station"] = "LTFM"
+    elif forge == "missing_comparator":
+        lead["comparators"] = [c for c in lead["comparators"] if c["channel"] != "resolver"]
+    elif forge == "unpaired_lead":
+        del lead["paired_value"]
+    elif forge == "lead_value_mismatch":
+        lead["paired_value"]["candidate"]["value"] = 12.0
+    elif forge == "overlapping_comparator":
+        awc = next(c for c in lead["comparators"] if c["channel"] == "awc")
+        awc["interval"]["lag_lower_ms"] = lead["candidate"]["lag_upper_ms"] - 1
+    else:
+        rivals = frozenset({"jma_amedas"})
+    assert fast_admission_defect(row, rivals) == reason
+    if forge == "rival_registry_route":
+        return
+    path = tmp_path / "forged.json"
+    path.write_text(json.dumps(data))
+    with caplog.at_level("ERROR"):
+        routes = load_physical_current_sources(path)[0]
+    assert {(r.provider, r.station_id) for r in routes if r.provider == "mgm_metar"} == {("mgm_metar", "LTFM")}
+    assert any(r.provider == "noaa_wrh" for r in routes)
+    assert "PHYSICAL_CURRENT_FAST_ADMISSION_OMITTED" in caplog.text and reason in caplog.text
+
+
+def test_canonical_role_cannot_be_claimed_by_a_transport(tmp_path):
+    data, row = _ltac_registry_row()
+    row["role"] = "canonical_resolver"
+    path = tmp_path / "claimed.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="CANONICAL_ROLE_INVALID"):
+        load_physical_current_sources(path)
+
+
+def test_target_plan_authorizes_only_settlement_roles():
+    from src.data.physical_current_sources import SourceRole
+    routes = load_physical_current_sources()[0]
+    assert {r.provider for r in routes if r.settlement_authorized} == {
+        "jma_amedas", "eccc_swob", "imd_olbs_metar", "mgm_metar", "wu_station_history", "noaa_wrh"}
+    assert all(r.role is SourceRole.PHYSICAL_ONLY for r in routes
+               if r.provider in {"fmi_wfs", "imgw_synop", "dwd_cdc", "knmi_observations", "wu_station_current"})

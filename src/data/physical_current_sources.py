@@ -1,14 +1,21 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-29
-"""Station-bound current observations and measured settlement-value equality.
+# Last reused/audited: 2026-10-01
+"""Station-bound current observations and their settlement roles.
 
 Adapters own fixed endpoints. Configuration cannot inject URLs, SQL, or code.
 A shared request budget scales with station count, not with city-name branches.
-Settlement-grade samples remain distinct from final daily resolver publication.
+Settlement-authorized samples remain distinct from final daily resolver publication.
+
+Roles: a canonical resolver product is the resolver's own feed. An optional
+fast transport is admitted only by bound evidence that its value equals the
+resolver's at the same station and instant under the contract's unit/rounding
+law AND that it beat every current path at that value-matched instant. An
+invalid fast admission is omitted; incumbent channels keep serving.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from functools import lru_cache
 import json
 import logging
@@ -23,6 +30,19 @@ logger = logging.getLogger(__name__)
 REGISTRY_PATH = Path(__file__).resolve().parents[2] / "config" / "physical_current_sources.json"
 
 
+class SourceRole(str, Enum):
+    CANONICAL_RESOLVER = "canonical_resolver"
+    FAST_ADMISSION = "fast_admission"
+    PHYSICAL_ONLY = "physical_only"
+
+
+# Resolver products by settlement source type; nothing else may claim the role.
+_CANONICAL = {"noaa_wrh": "noaa", "wu_station_history": "wu_icao"}
+# Current paths every fast admission must beat, besides other registry routes
+# at its station: the AWC METAR feed and the resolver channel itself.
+CURRENT_COMPARATORS = ("awc", "resolver")
+
+
 @dataclass(frozen=True)
 class PhysicalCurrentSource:
     provider: str
@@ -33,23 +53,75 @@ class PhysicalCurrentSource:
     minimum_poll_seconds: float
     station: FmiStation | None
     identity: dict[str, Any] = field(default_factory=dict)
-    settlement_grade: bool = False
+    role: SourceRole = SourceRole.PHYSICAL_ONLY
+
+    @property
+    def settlement_authorized(self) -> bool:
+        return self.role is not SourceRole.PHYSICAL_ONLY
 
 
-def _settlement_grade(row: dict[str, Any]) -> bool:
-    """One value-identity admission rule for every provider, including FMI."""
-    grade = row.get("settlement_grade", False)
-    if not isinstance(grade, bool):
-        raise ValueError("STATION_VALUE_IDENTITY_GRADE_INVALID")
-    if not grade:
-        return False
-    proof = row.get("value_identity_proof", {})
+def _counts_proven(proof: Any) -> bool:
     pairs, exact = proof.get("n_pairs"), proof.get("n_exact")
-    if not (type(pairs) is int and type(exact) is int and pairs > 0
-            and exact == pairs and proof.get("mismatches") == []
-            and not proof.get("version_conflicts", [])):
-        raise ValueError("STATION_VALUE_IDENTITY_NOT_PROVEN")
-    return True
+    return (type(pairs) is int and type(exact) is int and pairs > 0 and exact == pairs
+            and proof.get("mismatches") == [] and not proof.get("version_conflicts", []))
+
+
+def _role(row: dict[str, Any]) -> SourceRole:
+    try:
+        role = SourceRole(row.get("role"))
+    except ValueError:
+        raise ValueError("PHYSICAL_CURRENT_ROLE_INVALID") from None
+    if role is SourceRole.CANONICAL_RESOLVER and (
+        tuple(row["settlement_source_types"]) != (_CANONICAL.get(row["provider"]),)
+        or not _counts_proven(row.get("value_identity_proof", {}))
+    ):
+        raise ValueError("PHYSICAL_CURRENT_CANONICAL_ROLE_INVALID")
+    return role
+
+
+def fast_admission_defect(row: dict[str, Any], rivals: frozenset[str] = frozenset()) -> str | None:
+    """Return why a fast-admission row is not proven, or None when it is.
+
+    The proof binds station, channel and unit; its counts show exact equality;
+    the lead instant carries a value pair equal under the city's settlement
+    rounding; and at that instant the candidate's latest possible receipt
+    precedes the earliest possible receipt of every current path (``rivals``
+    are other registry providers at the same station).
+    """
+    from src.config import cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    station, channel, unit = row["station_id"], row["provider"], row["unit"]
+    proof = row.get("value_identity_proof") or {}
+    city = cities_by_name.get(str(proof.get("city")))
+    if (proof.get("station"), proof.get("channel"), proof.get("unit")) != (station, channel, unit):
+        return "PROOF_IDENTITY"
+    if city is None or str(city.wu_station).upper() != station or city.settlement_unit != unit:
+        return "PROOF_CITY"
+    if not _counts_proven(proof):
+        return "VALUE_IDENTITY_COUNTS"
+    lead = (row.get("latency_evidence") or {}).get("first_proven_lead") or {}
+    when, candidate = lead.get("observation"), lead.get("candidate") or {}
+    if not when or (candidate.get("station"), candidate.get("channel"), candidate.get("observed_at")) != (
+            station, channel, when):
+        return "LEAD_IDENTITY"
+    paired = lead.get("paired_value") or {}
+    sides = [paired.get("candidate") or {}, paired.get("resolver") or {}]
+    if any(side.get("unit") != unit or type(side.get("value")) not in (int, float) for side in sides):
+        return "LEAD_UNPAIRED"
+    semantics = SettlementSemantics.for_city(city)
+    if semantics.round_single(sides[0]["value"]) != semantics.round_single(sides[1]["value"]):
+        return "LEAD_VALUE_MISMATCH"
+    try:
+        upper = float(candidate["lag_upper_ms"])
+        beaten = {c["channel"] for c in lead.get("comparators", ())
+                  if c["interval"]["observed_at"] == when
+                  and c["interval"].get("station", station) == station
+                  and upper < float(c["interval"]["lag_lower_ms"])}
+    except (KeyError, TypeError, ValueError):
+        return "LEAD_COMPARATOR_MALFORMED"
+    missing = (set(CURRENT_COMPARATORS) | set(rivals)) - beaten
+    return "LEAD_NOT_FASTER:" + ",".join(sorted(missing)) if missing else None
 
 
 @lru_cache(maxsize=4)
@@ -59,8 +131,19 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
         raise ValueError("PHYSICAL_CURRENT_REGISTRY_ROLE")
     sources = []
     seen = set()
+    by_station: dict[str, set[str]] = {}
     for row in data["sources"]:
-        grade = _settlement_grade(row)
+        by_station.setdefault(row["station_id"], set()).add(row["provider"])
+    for row in data["sources"]:
+        role = _role(row)
+        if role is SourceRole.FAST_ADMISSION:
+            defect = fast_admission_defect(row, frozenset(by_station[row["station_id"]] - {row["provider"]}))
+            if defect is not None:
+                # SCOPE: this one optional route. DRAIN/RESET: a config with
+                # bound evidence on restart. Incumbent channels keep serving.
+                logger.error("PHYSICAL_CURRENT_FAST_ADMISSION_OMITTED provider=%s station=%s reason=%s",
+                             row["provider"], row["station_id"], defect)
+                continue
         if row["provider"] != "fmi_wfs":
             from src.data.station_temperature_adapters import CHANNELS
             identity = row["identity"]
@@ -82,7 +165,7 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
                 or not kinds or any(t not in {"noaa", "wu_icao"} for t in kinds)):
                 raise ValueError("PHYSICAL_CURRENT_ADAPTER_INVALID")
             sources.append(PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
-                                                  kinds, unit, seconds, None, dict(identity), grade))
+                                                  kinds, unit, seconds, None, dict(identity), role))
             seen.add(key)
             continue
         if row["provider"] != "fmi_wfs" or row["source_channel"] != SOURCE_CHANNEL or row["unit"] != "C":
@@ -102,7 +185,7 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
         station = FmiStation(row["station_id"], str(identity["fmisid"]), str(identity["wmo"]),
                              identity["name"], latitude, longitude)
         sources.append(PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
-                                              types, row["unit"], seconds, station, dict(identity), grade))
+                                              types, row["unit"], seconds, station, dict(identity), role))
     budget = data["providers"]["fmi_wfs"]
     fraction = float(budget["budget_fraction"])
     per_day, per_window = int(budget["requests_per_day"]), int(budget["requests_per_five_minutes"])

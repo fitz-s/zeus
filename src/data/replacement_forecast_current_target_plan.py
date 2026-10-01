@@ -1427,7 +1427,9 @@ def _latest_authorized_day0_fact(
             settlement_channels.update(
                 channel
                 for channel, route in station_routes_by_channel.items()
-                if route.settlement_grade
+                # Canonical resolver products and proven fast admissions only;
+                # physical-only routes advance belief but never authorize.
+                if route.settlement_authorized
             )
             allowed_channels = (
                 settlement_channels if require_settlement_channel else physical_channels

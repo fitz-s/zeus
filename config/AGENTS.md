@@ -68,7 +68,7 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | `risk_policy.yaml` | Tracked, content-addressed ceilings for every risk-increasing `sizing.*` lever the live entry path consumes (kelly_multiplier, max_correlated_pct, max_portfolio_heat_pct, max_single_position_pct). Boot guard `src/main.py::assert_risk_policy_artifact` fails closed on any live value exceeding its ceiling and logs `policy_version` + sha256 at every boot. Runtime/control-plane overrides may lower risk freely; they may never raise it above this file |
 | `settings.example.json` | Template for config/settings.json with operator-specific values marked null; copy to settings.json to configure |
 | `source_release_calendar.yaml` | Source release calendar for data-source availability windows and release schedules |
-| `physical_current_sources.json` | Station-bound observation adapters, measured same-time rounded-value equality, and provider request budgets; settlement-grade samples are separate from final daily authority; process-lifetime snapshot applied on restart |
+| `physical_current_sources.json` | Station-bound observation adapters with an explicit `role` (`canonical_resolver`, `fast_admission` validated at load against bound same-instant equality and a lead over every current path, else omitted; `physical_only`) and provider request budgets; settlement-authorized samples are separate from final daily authority; process-lifetime snapshot applied on restart |
 
 ## Rules
 
