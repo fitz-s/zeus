@@ -1367,3 +1367,112 @@ class _FrozenAfterDeadline(datetime):
     @classmethod
     def now(cls, tz=None):
         return datetime(2026, 9, 13, 4, 10, tzinfo=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# A WRH outage that outlives the recent= window still recovers to the primary
+# ---------------------------------------------------------------------------
+
+
+def _stub_wrh_http(monkeypatch, responses):
+    """Serve ``responses`` in order; a BaseException instance is raised."""
+    from src.data import noaa_wrh_timeseries as wrh
+
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, body):
+            self.content = body
+
+    def get(url, *, params, **kwargs):
+        calls.append(dict(params))
+        item = responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return Response(item)
+
+    monkeypatch.setattr(wrh.httpx, "get", get)
+    monkeypatch.setattr(wrh, "_wait_for_request_slot", lambda: None)
+    monkeypatch.setattr(wrh.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda **_: "fixture-token")
+    return calls
+
+
+def _wrh_coverage(conn, target):
+    return conn.execute(
+        "SELECT status, reason FROM world.data_coverage WHERE city='Houston' "
+        "AND data_source='noaa_wrh_khou' AND target_date=?", (target,),
+    ).fetchone()
+
+
+def test_outage_past_recent_window_fetches_the_explicit_day_window(tmp_path, monkeypatch):
+    from src.data import daily_obs_append as appender
+
+    import httpx
+
+    body = (FIXTURE_DIR / "syn_KHOU.json").read_bytes()
+    # Ten days after the target: no recent= window can hold the whole day.
+    now = datetime(2026, 9, 20, 15, tzinfo=timezone.utc)
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        calls = _stub_wrh_http(monkeypatch, [httpx.ConnectError("outage")] * 3)
+        stats = appender.append_noaa_wrh_city("Houston", [date(2026, 9, 10)], conn, now_utc=now)
+        # Transport failure stays retryable uncertainty, never a permanent gap.
+        assert stats["fetch_errors"] == 1 and stats["explicit_window"] == 1
+        assert tuple(_wrh_coverage(conn, "2026-09-10")) == ("FAILED", "NETWORK_ERROR")
+        assert all("recent" not in c and c["start"] == "202609090000"
+                   and c["end"] == "202609112359" for c in calls)
+
+        calls = _stub_wrh_http(monkeypatch, [body])
+        stats = appender.append_noaa_wrh_city("Houston", [date(2026, 9, 10)], conn, now_utc=now)
+        assert stats["inserted"] == 1 and len(calls) == 1
+        assert tuple(_wrh_coverage(conn, "2026-09-10")) == ("WRITTEN", None)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE city='Houston' "
+            "AND target_date='2026-09-10' AND source='noaa_wrh_khou'"
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_restart_catch_up_recovers_an_aged_failed_wrh_day(tmp_path, monkeypatch):
+    """A FAILED day older than the recent= horizon is retried by the scheduled
+    hole-scanner/startup catch-up, not left for an operator backfill."""
+    from src.data import daily_obs_append as appender
+    from src.state.data_coverage import CoverageReason, DataTable, record_failed
+
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        record_failed(
+            conn, data_table=DataTable.OBSERVATIONS, city="Houston",
+            data_source="noaa_wrh_khou", target_date=date(2026, 9, 10),
+            reason=CoverageReason.NETWORK_ERROR,
+            retry_after=datetime(2026, 9, 11, tzinfo=timezone.utc),
+        )
+        conn.commit()
+        calls = _stub_wrh_http(monkeypatch, [(FIXTURE_DIR / "syn_KHOU.json").read_bytes()])
+        totals = appender.catch_up_missing(conn, days_back=100_000)
+        assert totals["noaa_wrh_inserted"] == 1 and "recent" not in calls[0]
+        assert tuple(_wrh_coverage(conn, "2026-09-10")) == ("WRITTEN", None)
+    finally:
+        conn.close()
+
+
+def test_aged_valid_empty_product_mints_absence_only_after_the_deadline(tmp_path, monkeypatch):
+    from src.data import daily_obs_append as appender
+
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        _stub_wrh_http(monkeypatch, [_empty_product_body()])
+        stats = appender.append_noaa_wrh_city(
+            "Houston", [date(2026, 9, 10)], conn,
+            now_utc=datetime(2026, 9, 20, 15, tzinfo=timezone.utc),
+        )
+        assert stats["no_rows"] == 1 and stats["inserted"] == 0
+        # Wall clock is past the 2026-09-11 23:59 ET contract deadline.
+        assert tuple(_wrh_coverage(conn, "2026-09-10")) == (
+            "FAILED", "SOURCE_CONFIRMED_EMPTY_AFTER_CONTRACT_DEADLINE")
+    finally:
+        conn.close()

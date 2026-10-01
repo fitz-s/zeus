@@ -2078,7 +2078,9 @@ def append_noaa_wrh_city(
     One Synoptic request per target date, sized by
     ``recent_minutes_for_local_day`` — the page's own request shape and the
     sparsity the per-IP token quota requires (see
-    src/data/noaa_wrh_timeseries.py for the measured facts).
+    src/data/noaa_wrh_timeseries.py for the measured facts). A day older than
+    one recent= window is asked for by explicit start/end, so a WRH outage that
+    outlives the window is recovered by the scheduled catch-up retries.
 
     A refused token (HTTP 403) and a station-dark day are recorded differently
     on purpose: the refusal is a FAILED coverage row with a retry embargo,
@@ -2115,7 +2117,7 @@ def append_noaa_wrh_city(
     unit = city_cfg.settlement_unit
     stats = {
         "inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0,
-        "window_too_old": 0, "prints_written": 0, "print_errors": 0,
+        "explicit_window": 0, "prints_written": 0, "print_errors": 0,
     }
 
     try:
@@ -2138,41 +2140,25 @@ def append_noaa_wrh_city(
 
     for target_d in target_dates:
         try:
-            recent_minutes = recent_minutes_for_local_day(
+            window = {"recent_minutes": recent_minutes_for_local_day(
                 target_d, city_cfg.timezone, now_utc=now_utc,
-            )
-        except WrhWindowTooOld as exc:
-            # A single recent= window cannot reach the start of this local day.
-            # Requesting a clamped one would return the day's tail and its
-            # extremum would be indistinguishable from a complete day's, so this
-            # path records the gap and writes no value. Older days belong to
-            # scripts/backfill_noaa_wrh.py, which asks by explicit start/end.
-            stats["window_too_old"] += 1
-            logger.warning(
-                "noaa_wrh %s/%s outside the single-window horizon: %s",
-                city_name, target_d, exc,
-            )
-            # LEGITIMATE_GAP, not FAILED: re-running this lane cannot reach the
-            # day, so a retry embargo would just re-log forever. The day is
-            # still fillable, by scripts/backfill_noaa_wrh.py's explicit
-            # start/end request; the gap row is what shows an operator it needs
-            # filling.
-            record_legitimate_gap(
-                conn,
-                data_table=DataTable.OBSERVATIONS,
-                city=city_name,
-                data_source=source_tag,
-                target_date=target_d,
-                reason=CoverageReason.OUTSIDE_LANE_REQUEST_WINDOW,
-            )
-            conn.commit()
-            continue
-        request_url = request_url_without_token(
-            station, unit=unit, recent_minutes=recent_minutes,
-        )
+            )}
+        except WrhWindowTooOld:
+            # One recent= window cannot reach the start of this local day, and a
+            # clamped one would return a partial-day extremum. Ask for the whole
+            # local day by explicit start/end instead, widened a UTC day on each
+            # side as the backfill does, so an outage that outlives the recent
+            # window still recovers to data, valid-empty, or retryable FAILED.
+            stats["explicit_window"] += 1
+            day_utc = datetime(target_d.year, target_d.month, target_d.day, tzinfo=timezone.utc)
+            window = {
+                "start_utc": day_utc - timedelta(days=1),
+                "end_utc": day_utc + timedelta(days=1, hours=23, minutes=59),
+            }
+        request_url = request_url_without_token(station, unit=unit, **window)
         try:
             product = _fetch_wrh_product_with_token_refresh(
-                station, unit=unit, token=token, recent_minutes=recent_minutes,
+                station, unit=unit, token=token, **window,
             )
             rows = product.rows
         except WrhTokenRefused as exc:
@@ -2555,7 +2541,7 @@ def daily_tick(
     ogimet_stats = {"inserted": 0, "guard_rejected": 0, "fetch_errors": 0}
     noaa_wrh_stats = {
         "inserted": 0, "guard_rejected": 0, "fetch_errors": 0, "no_rows": 0,
-        "window_too_old": 0, "prints_written": 0, "print_errors": 0,
+        "explicit_window": 0, "prints_written": 0, "print_errors": 0,
     }
     for city_name, target_d in _noaa_daily_target_dates_due(now_utc).items():
         city_cfg = cities_by_name.get(city_name)
