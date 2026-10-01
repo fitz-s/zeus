@@ -100,7 +100,13 @@ def test_fence_reopens_on_each_dependency_its_build_reads(
         (raw / "precision.json").write_text('{"v": 2}\n', encoding="utf-8")
         _touch(raw / "precision.json", 1)
     elif dependency == "declared_body":
+        # v3 identity is the bytes read: a touch alone changes nothing the build reads.
         _touch(raw / "openmeteo.json", 1)
+        tick()
+        assert len(builds) == failed_builds, "same bytes, new mtime: still fenced"
+        body = raw / "openmeteo.json"
+        body.write_bytes(body.read_bytes() + b" ")
+        _touch(body, 1)
     else:
         _insert_local_proof(db, original_id=body_id, cycle=_SEOUL_ANCHOR_CYCLE)
     tick()
@@ -220,3 +226,75 @@ def test_fenced_identity_makes_every_producer_write_zero_seed_files(
         (raw / "precision.json").write_text('{"v": 2}\n', encoding="utf-8")
         assert build(conn, computed_at=later) is not None
     assert len(written) == 1
+
+
+def test_v3_fence_is_the_bytes_read_not_the_file_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-3 Q1/Q2: a same-size, mtime-preserving repair reopens; an unreadable
+    file (stat succeeds, read fails) is unknown; v2 markers never fence."""
+    db, raw, _revision, tick, queue_root, builds = _blocked_identity_harness(tmp_path, monkeypatch)
+    tick()
+    seed = next(json.loads(f.read_text()) for f in (queue_root / "seed_failed").glob("*.json")
+                if "city" in json.loads(f.read_text()))
+    cut = datetime.fromisoformat(seed["computed_at"])
+    precision = raw / "precision.json"
+    with sqlite3.connect(db) as conn:
+        assert queue.blocked_seed_identity_fenced(seed, queue_root=queue_root, conn=conn, decision_at=cut)
+        marker = next((queue_root / queue.BLOCKED_SEED_IDENTITY_DIR).glob("*.v3.*.json"))
+        v2 = marker.with_name(marker.name.replace(".v3.", ".v2."))
+        marker.rename(v2)
+        assert not queue.blocked_seed_identity_fenced(seed, queue_root=queue_root, conn=conn, decision_at=cut)
+        v2.rename(marker)
+
+        precision.chmod(0)
+        try:
+            deps = queue.seed_build_dependencies(
+                seed, seeds_dir=queue_root / "seeds", conn=conn, decision_at=cut,
+            )
+            assert deps.identity is None and isinstance(deps.unknown, PermissionError)
+        finally:
+            precision.chmod(0o600)
+
+        before = precision.stat()
+        staged = raw / "staged.json"
+        staged.write_text("[]\n", encoding="utf-8")  # same size as "{}\n"
+        os.utime(staged, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(staged, precision)
+        assert precision.stat().st_size == before.st_size
+        assert precision.stat().st_mtime_ns == before.st_mtime_ns
+        assert not queue.blocked_seed_identity_fenced(seed, queue_root=queue_root, conn=conn, decision_at=cut)
+
+
+def test_verdict_counts_only_against_the_versions_it_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write between the descriptor and the verdict (even back to the same
+    bytes) leaves the verdict about unknown bytes: nothing is recorded."""
+    db, raw, _revision, tick, queue_root, _builds = _blocked_identity_harness(tmp_path, monkeypatch)
+    tick()
+    seed = next(json.loads(f.read_text()) for f in (queue_root / "seed_failed").glob("*.json")
+                if "city" in json.loads(f.read_text()))
+    cut = datetime.fromisoformat(seed["computed_at"])
+    precision = raw / "precision.json"
+    with sqlite3.connect(db) as conn:
+        deps = queue.seed_build_dependencies(
+            seed, seeds_dir=queue_root / "seeds", conn=conn, decision_at=cut,
+        )
+        before = precision.stat()
+        staged = raw / "staged.json"
+        staged.write_bytes(precision.read_bytes())  # A -> A by atomic replace
+        os.utime(staged, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(staged, precision)
+        assert queue._record_blocked_seed_identity(
+            queue_root / "seeds" / "x.json", seed, reason_codes=("X",), conn=conn,
+            forecast_db=db, deps=deps,
+        ) is None
+        same = queue.seed_build_dependencies(
+            seed, seeds_dir=queue_root / "seeds", conn=conn, decision_at=cut,
+        )
+        assert same.identity == deps.identity, "same bytes: same content identity"
+        assert queue._record_blocked_seed_identity(
+            queue_root / "seeds" / "x.json", seed, reason_codes=("X",), conn=conn,
+            forecast_db=db, deps=same,
+        ) == same.identity
