@@ -851,7 +851,7 @@ def station_ground_target_coverage(evidence: object, *, decision_at: object,
     SCOPE/DRAIN/RESET are the caller's city/date/provider re-evaluation, not a
     global gate or a wait-until-future-coordinates-become-current instruction.
     """
-    from src.config import OSCAR_WMD_SOURCE_KIND, station_ground_facts_from_bytes
+    from src.config import OSCAR_WMD_SOURCE_KIND, station_ground_facts_from_bytes, wmdr_document
     from src.state.db import _connect_read_only
     revision = "station_ground_target_applicability_v1"
     result = {"revision": revision, "status": "DATA_DEGRADED",
@@ -869,7 +869,6 @@ def station_ground_target_coverage(evidence: object, *, decision_at: object,
         result.update(station_id=frozen["station_id"], facts_identity=frozen["facts_identity"])
         result.update(status="VERIFIED", reason=None)
         if frozen["source_kind"] == OSCAR_WMD_SOURCE_KIND:
-            import xml.etree.ElementTree as ET
             conn = _connect_read_only(Path(frozen["forecast_db"]), deadline_monotonic=deadline)
             raw = {}
             for role, dependency in frozen["input_bodies"].items():
@@ -888,7 +887,7 @@ def station_ground_target_coverage(evidence: object, *, decision_at: object,
                 result.update(status="DATA_DEGRADED", reason="TARGET_STATION_GROUND_NOT_CURRENT")
             else:
                 ns = {"w": "http://def.wmo.int/wmdr/2017", "g": "http://www.opengis.net/gml/3.2"}
-                facility = ET.fromstring(raw["ground"]).find("w:facility/w:ObservingFacility", ns)
+                facility = wmdr_document(raw["ground"]).find("w:facility/w:ObservingFacility", ns)
                 # Only the direct physical-ground/status subtrees that the
                 # approved parser consumes. Equipment/deployment/schedule
                 # periods elsewhere in this catalog do not impose a gate.

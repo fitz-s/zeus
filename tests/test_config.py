@@ -1603,3 +1603,38 @@ def test_wmd_current_ground_rejects_wrong_quantity_identity_or_possession(tmp_pa
         claim["bridge"]["body_sha256"] = hashlib.sha256(identity_artifact.read_bytes()).hexdigest()
     registry.write_text(json.dumps(rows))
     assert config.runtime_station_geometry_for_city(config.cities_by_name["Paris"])["ground_status"] == "UNPROVEN"
+
+
+def test_station_ground_parse_is_memoized_by_exact_bytes_without_changing_facts():
+    """Replays of one official body parse it once; any byte change is a new parse."""
+    from datetime import datetime, timezone
+    import src.config as config
+    station_id = config.cities_by_name["Paris"].wu_station
+    raw = (config.PROJECT_ROOT / config.station_ground_source_artifact_ref(
+        source_kind=config.OSCAR_WMD_SOURCE_KIND, station_id=station_id)).read_bytes()
+    bridge = (config.PROJECT_ROOT / config.station_ground_identity_bridge_artifact_ref(
+        source_kind=config.OSCAR_WMD_SOURCE_KIND, station_id=station_id)).read_bytes()
+    at = datetime(2026, 9, 30, 1, tzinfo=timezone.utc)
+
+    def facts(body, effective_at=at):
+        return config.station_ground_facts_from_bytes(source_kind=config.OSCAR_WMD_SOURCE_KIND,
+            station_id=station_id, raw_body=body, identity_bridge_bytes=bridge, effective_at=effective_at)
+
+    config.wmdr_document.cache_clear()
+    first = facts(raw)
+    assert first is not None and first["elevation_m"] == 67
+    for _ in range(3):
+        assert facts(raw) == first
+    assert facts(raw, at.replace(hour=2)) == first  # validity is still evaluated at each instant
+    info = config.wmdr_document.cache_info()
+    assert (info.misses, info.hits) == (1, 4)
+    # A returned dict is the caller's own: mutating it cannot leak into a replay.
+    first["elevation_m"] = -1
+    assert facts(raw)["elevation_m"] == 67
+    # Different bytes are a different parse with their own verdict.
+    altered = raw.replace(b"WIGOSMetadataRecord", b"WIGOSMetadataRecorX")
+    assert facts(altered) is None
+    assert config.wmdr_document.cache_info().misses == 2
+    # A body that is not XML raises per call and is never cached.
+    assert facts(b"<not-closed") is None and facts(b"<not-closed") is None
+    assert config.wmdr_document.cache_info().currsize == 2

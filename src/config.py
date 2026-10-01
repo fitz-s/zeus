@@ -625,12 +625,28 @@ class _HkoStationTable(HTMLParser):
             self.in_table = False
 
 
+@functools.cache
+def _hko_station_rows(raw: bytes) -> tuple[tuple[str, ...], ...]:
+    """The official table's cells; a pure function of the exact page bytes."""
+    table = _HkoStationTable()
+    table.feed(raw.decode("utf-8"))
+    return tuple(tuple(row) for row in table.rows)
+
+
+@functools.cache
+def wmdr_document(raw: bytes) -> ET.Element:
+    """Parse one exact WMDR body once per process; callers only read the tree.
+
+    Keyed on the whole bytes, so it is bounded by the distinct official bodies
+    a process replays. A parse error is never cached and re-raises per call.
+    """
+    return ET.fromstring(raw)
+
+
 def _hko_ground_facts(raw: bytes, station_id: str) -> dict[str, object]:
     if station_id != "HKO_HQ":
         raise ValueError("official HKO row is not this settlement station")
-    table = _HkoStationTable()
-    table.feed(raw.decode("utf-8"))
-    rows = table.rows
+    rows = [list(row) for row in _hko_station_rows(raw)]
     if len(rows) < 3 or rows[0][2] != HKO_GROUND_QUANTITY or rows[1][:4] != ["Latitude N", "Longitude E", "Wind", "Temp"]:
         raise ValueError("official ground quantity/temperature column unavailable")
     sites = [row for row in rows[2:] if row and row[0] == "Hong Kong Observatory (HKO) (01/01/1884)"]
@@ -886,7 +902,7 @@ def _oscar_wmd_ground_facts(
         raise ValueError("external or expanded XML entities are unsupported")
     ns = {"w": "http://def.wmo.int/wmdr/2017", "g": "http://www.opengis.net/gml/3.2"}
     href = "{http://www.w3.org/1999/xlink}href"
-    root = ET.fromstring(raw)
+    root = wmdr_document(raw)
     if root.tag != "{http://def.wmo.int/wmdr/2017}WIGOSMetadataRecord":
         raise ValueError("official WMDR namespace unavailable")
     facilities = root.findall("w:facility/w:ObservingFacility", ns)
