@@ -2983,6 +2983,9 @@ _WAKE_KIND_BY_REASON = {
     "money_path_substrate_refreshed": WAKE_KIND_REBOUND,
     COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON: WAKE_KIND_REBOUND,
     "forecast_posterior_advanced": WAKE_KIND_BELIEF,
+    # A current-only print writes no extreme or absorbing event; it reseeds
+    # the named families' posteriors, so it scopes like their belief.
+    "current_temperature_print_committed": WAKE_KIND_BELIEF,
     "day0_extreme_event_committed": WAKE_KIND_HARD,
     "position_fill_projected": WAKE_KIND_CAPITAL,
 }

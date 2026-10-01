@@ -160,10 +160,38 @@ Q_FROZEN = CutDependency(
         (_wake("forecast_posterior_advanced", (PARIS,)), UNPUBLISHED, None),
         (_wake("forecast_posterior_advanced", (PARIS,)), Q_FROZEN, None),
         (_wake("forecast_posterior_advanced"), SCOPED, "epoch"),
+        # A current-only print reseeds its named families: belief, never CAPITAL.
+        (_wake("current_temperature_print_committed", (PARIS,)), SCOPED, "epoch"),
+        (_wake("current_temperature_print_committed", (TOKYO,)), SCOPED, None),
+        (_wake("current_temperature_print_committed", (PARIS,)), Q_FROZEN, None),
+        (_wake("current_temperature_print_committed", (PARIS,)), UNPUBLISHED, None),
     ],
 )
 def test_the_one_predicate_truth_table(wake, dependency, expected):
     assert _verdict(wake, dependency) == expected
+
+
+def test_every_emitted_wake_reason_has_a_declared_kind():
+    """An unmapped reason defaults to CAPITAL and supersedes every running cut.
+
+    2026-09-30: an unmapped one-city HKO print wake cancelled 100-180 cuts/h.
+    """
+    emitted: set[str] = set()
+    for path in [*(_ROOT / "src").rglob("*.py"), *(_ROOT / "scripts").rglob("*.py")]:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", getattr(node.func, "attr", "")) == "publish_reactor_wake"
+            ):
+                emitted.update(
+                    keyword.value.value
+                    for keyword in node.keywords
+                    if keyword.arg == "reason"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                )
+    assert emitted, "producer scan found no literal reasons"
+    assert emitted - _WAKE_REASONS == set()
 
 
 def test_grace_applies_to_belief_only():
