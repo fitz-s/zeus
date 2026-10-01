@@ -558,13 +558,48 @@ def publish_anchor_transport_manifest(manifest: RawForecastArtifactManifest, out
     return path
 
 
+@dataclass(frozen=True)
+class SeedTransportResolution:
+    """What a seed's request build consumes from local proof, and every file it read.
+
+    ``paths`` overrides seed fields (None: the seed's own declarations stand).
+    ``error`` is a deterministic verdict on the read state (bad DB rows, a
+    missing or changed derived transport). ``reads`` names each file the
+    selection read or checked, including a derived file found absent, so a
+    failure fence keyed on their state reopens when any of them changes.
+    """
+
+    paths: Mapping[str, str] | None
+    reads: tuple[Path, ...]
+    error: str | None
+
+
+def resolve_anchor_local_proof_seed_transport(
+    conn: sqlite3.Connection, seed: Mapping[str, Any], *, base_dir: Path,
+) -> SeedTransportResolution:
+    """Resolve a seed's transport; an I/O error (unknown state) propagates."""
+    reads: list[Path] = []
+    try:
+        paths = _select_seed_transport(conn, seed, base_dir=base_dir, reads=reads)
+    except (ValueError, KeyError, TypeError) as exc:
+        return SeedTransportResolution(None, tuple(reads), f"{type(exc).__name__}:{exc}")
+    return SeedTransportResolution(paths, tuple(reads), None)
+
+
 def anchor_local_proof_seed_transport(
     conn: sqlite3.Connection, seed: Mapping[str, Any], *, base_dir: Path,
 ) -> Mapping[str, str] | None:
     """Select exact canonical local proof at the original seed cut, without writes."""
+    return _select_seed_transport(conn, seed, base_dir=base_dir, reads=[])
+
+
+def _select_seed_transport(
+    conn: sqlite3.Connection, seed: Mapping[str, Any], *, base_dir: Path, reads: list[Path],
+) -> Mapping[str, str] | None:
     from src.data.openmeteo_ecmwf_ifs9_anchor import SOURCE_ID, PRODUCT_ID, HIGH_DATA_VERSION, LOW_DATA_VERSION
     path = Path(str(seed["openmeteo_payload_json"]))
     path = path if path.is_absolute() else base_dir / path
+    reads.append(path)
     if path.is_symlink() or not path.is_file() or path.stat().st_size > _LOCAL_BODY_MAX_BYTES:
         raise _proof_error("seed_body_path")
     raw = path.read_bytes()
@@ -600,14 +635,27 @@ def anchor_local_proof_seed_transport(
     if len(matches) != 1:
         raise _proof_error("seed_original_ambiguous")
     original_id = int(matches[0])
+    # read_anchor_local_proof opens the original body and this namespace's proof
+    # documents (a missing one surfaces as a ValueError verdict), so they are reads.
+    reads.extend(Path(str(row[0])) for row in conn.execute(
+        """SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?
+           UNION ALL SELECT artifact_path FROM raw_forecast_artifacts
+           WHERE source_id=? AND product_id=? AND data_version=?
+             AND ((json_valid(artifact_metadata_json) AND json_extract(artifact_metadata_json,'$.original_artifact_id')=?)
+                  OR artifact_path GLOB ?)""",
+        (original_id, SOURCE_ID, PRODUCT_ID, ANCHOR_LOCAL_PROOF_REVISION, original_id,
+         f"*/openmeteo_anchor_local_proof_{original_id}_*.json"),
+    ) if row[0])
     local = read_anchor_local_proof(conn, original_id, city=str(seed["city"]),
         target_date=str(seed["target_date"]), metric=metric, decision_at=seed["computed_at"])
     if local is None:
         return None
+    reads.extend((Path(str(local.original_body_artifact["artifact_path"])), Path(str(local.owned_body["path"]))))
     if path.resolve() not in {Path(str(local.original_body_artifact["artifact_path"])).resolve(),
                              Path(str(local.owned_body["path"])).resolve()}:
         raise _proof_error("seed_body_foreign")
     precision = anchor_precision_transport_path(local.owned_body["path"], local.precision_metadata)
+    reads.append(precision)
     if precision.is_symlink() or not precision.is_file() or precision.read_bytes() != _proof_json(dict(local.precision_metadata)):
         raise _proof_error("precision_transport_changed_or_missing")
     return {"openmeteo_payload_json": str(local.owned_body["path"]),

@@ -2133,5 +2133,12 @@ def _build_and_write_upgrade_seed(
         seed_payload["input_revision_sources"] = list(
             dict.fromkeys(str(source) for source in input_revision_sources)
         )
+    from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+        raise_if_seed_identity_fenced,
+    )
+
+    raise_if_seed_identity_fenced(
+        seed_payload, queue_root=seed_path.parent, conn=conn, decision_at=computed_at,
+    )
     write_seed(seed_file, seed_payload)
     return seed_file

@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from glob import escape as glob_escape
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
@@ -814,25 +815,56 @@ _CLOCK_HEALABLE_SEED_BLOCKS = frozenset({
 })
 
 
-def blocked_seed_input_identity(
+# Version of the failed-input identity. Markers of an earlier version (hashes
+# written by fc85ad238/dfbabe2b4, which omitted the derived precision transport
+# and hashed unreadable files as known) live at unversioned paths: kept as
+# evidence, never looked up, so they cannot fence anything.
+SEED_IDENTITY_SCHEMA = "v2"
+
+
+@dataclass(frozen=True)
+class SeedBuildDependencies:
+    """Every input a request build of one seed at one cut reads, resolved once.
+
+    The consumer builds from ``transport`` and fences on ``identity``; producers
+    and fence checks derive the same object, so the build and its fence cannot
+    read different dependency sets. ``identity`` is None when any read state is
+    unknown (an I/O error other than proven absence): unknown never fences.
+    ``unknown`` keeps that error so the build re-raises it as a transient failure.
+    """
+
+    transport: object | None
+    identity: str | None
+    newest_possessed: datetime | None
+    unknown: BaseException | None
+
+
+class _UnknownSeedInput(Exception):
+    """A dependency's state could not be read (permission, I/O)."""
+
+
+def seed_build_dependencies(
     seed: Mapping[str, object],
     *,
     seeds_dir: Path,
     conn: sqlite3.Connection,
     decision_at: datetime,
-) -> tuple[str, datetime] | None:
-    """Hash exactly what a request build of this seed at ``decision_at`` reads.
+) -> SeedBuildDependencies:
+    """Resolve and hash exactly what a request build of this seed at ``decision_at`` reads.
 
-    Also returns the newest input possession time: a failure is only a verdict on
-    its inputs when every input was already possessed at the seed's own cut.
+    ``newest_possessed`` is the newest input possession time: a failure is only a
+    verdict on its inputs when every input was already possessed at the seed's cut.
 
     SCOPE: one city/date/metric seed. The build reads its seed fields, its
-    anchor/precision files, the family's anchor bodies at the seed's anchor cycle
-    and their local proofs (``anchor_local_proof_seed_transport``), this city's
-    station identity/ground facts effective at ``decision_at`` (precision guard)
-    and its own logic. Producer labels (transition key, trigger), other cycles'
-    bodies and proofs, and station-ground DB rows are not read, so their churn
-    does not reopen the fence. Unknown state returns None.
+    anchor/precision files, the transport the local proof derives from them
+    (``resolve_anchor_local_proof_seed_transport``: the original body, its proof
+    documents and the derived precision file, each by its proven state), the
+    family's anchor bodies at the seed's anchor cycle and their local proofs,
+    this city's station identity/ground facts effective at ``decision_at``
+    (precision guard) and its own logic. Producer labels, other cycles' bodies and
+    proofs, and station-ground DB rows are not read, so their churn does not
+    reopen the fence. A missing file is a known state (its creation reopens);
+    an unreadable one makes the identity unknown.
     """
     try:
         city = str(seed["city"]).strip()
@@ -845,19 +877,25 @@ def blocked_seed_input_identity(
             HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID as OM9,
         )
         from src.data.raw_forecast_artifact_manifest import (  # noqa: PLC0415
-            ANCHOR_LOCAL_PROOF_REVISION,
+            ANCHOR_LOCAL_PROOF_REVISION, resolve_anchor_local_proof_seed_transport,
         )
 
         newest = [datetime.min.replace(tzinfo=timezone.utc)]
 
-        def revision(path: Path, *, possessed: bool = True) -> tuple[int, int] | None:
+        def revision(path: Path, *, possessed: bool = True) -> tuple[int, int] | str:
             try:
                 stat = path.stat()
-            except OSError:
-                return None
+            except (FileNotFoundError, NotADirectoryError):
+                return "absent"
+            except OSError as exc:
+                raise _UnknownSeedInput(f"{path}: {exc!r}") from exc
             if possessed:
                 newest.append(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
             return stat.st_mtime_ns, stat.st_size
+
+        # The request build consumes this resolution; an I/O error inside it is
+        # unknown state, raised below.
+        transport = resolve_anchor_local_proof_seed_transport(conn, seed, base_dir=seeds_dir)
 
         def possessed(rows: list[tuple]) -> list[tuple]:
             for row in rows:
@@ -915,6 +953,7 @@ def blocked_seed_input_identity(
                 continue
             path = Path(str(seed[field]))
             files[field] = revision(path if path.is_absolute() else seeds_dir / path)
+        transport_reads = {str(path): revision(path) for path in transport.reads}
         # Code and config are identity, not possessed data: a deploy reopens
         # every fence through the hash, never through the possession clock.
         logic = {
@@ -931,11 +970,18 @@ def blocked_seed_input_identity(
         }
     except _ClaimReadDeadlineExceeded:
         raise
-    except Exception:  # noqa: BLE001 - unknown identity must retry, never suppress
-        return None
+    except Exception as exc:  # noqa: BLE001 - unknown identity must retry, never suppress
+        unknown = exc.__cause__ if isinstance(exc, _UnknownSeedInput) else exc
+        return SeedBuildDependencies(None, None, None, unknown)
     identity = {
+        "schema": SEED_IDENTITY_SCHEMA,
         "seed": {k: v for k, v in seed.items() if k not in _SEED_IDENTITY_EXCLUDED_FIELDS},
         "files": files,
+        "transport": {
+            "paths": None if transport.paths is None else dict(transport.paths),
+            "error": transport.error,
+            "reads": transport_reads,
+        },
         "anchor_bodies": sorted(int(row[0]) for row in bodies),
         "anchor_local_proofs": sorted(int(row[0]) for row in proofs),
         "station": station,
@@ -944,38 +990,73 @@ def blocked_seed_input_identity(
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()
-    return digest, max(newest)
+    return SeedBuildDependencies(transport, digest, max(newest), None)
+
+
+def blocked_seed_input_identity(
+    seed: Mapping[str, object],
+    *,
+    seeds_dir: Path,
+    conn: sqlite3.Connection,
+    decision_at: datetime,
+) -> tuple[str, datetime] | None:
+    """(identity, newest possession) of ``seed_build_dependencies``; None when unknown."""
+    deps = seed_build_dependencies(seed, seeds_dir=seeds_dir, conn=conn, decision_at=decision_at)
+    if deps.identity is None or deps.newest_possessed is None:
+        return None
+    return deps.identity, deps.newest_possessed
 
 
 def _blocked_seed_identity_path(queue_root: Path, seed: Mapping[str, object], identity: str) -> Path:
     city = str(seed["city"]).strip().replace("/", "_").replace(" ", "_")
     return (
         queue_root / BLOCKED_SEED_IDENTITY_DIR
-        / f"{city}.{seed['target_date']}.{seed['temperature_metric']}.{identity}.json"
+        / f"{city}.{seed['target_date']}.{seed['temperature_metric']}"
+          f".{SEED_IDENTITY_SCHEMA}.{identity}.json"
     )
+
+
+class SeedInputIdentityFenced(Exception):
+    """A producer's seed would re-read inputs whose request build already failed."""
+
+
+def raise_if_seed_identity_fenced(
+    seed: Mapping[str, object],
+    *,
+    queue_root: Path,
+    conn: sqlite3.Connection,
+    decision_at: datetime,
+) -> None:
+    """Every seed producer calls this before writing a seed file.
+
+    SCOPE: one family + input identity. A fenced identity yields zero seed files,
+    whatever producer or trigger asks. RESET: any read input change; unknown
+    identity never fences. No clock.
+    """
+    if blocked_seed_identity_fenced(
+        seed, queue_root=queue_root, conn=conn, decision_at=decision_at,
+    ):
+        raise SeedInputIdentityFenced(
+            f"{seed.get('city')}/{seed.get('target_date')}/{seed.get('temperature_metric')}"
+        )
 
 
 _FENCED_BLOCKED_SEED_SKIP_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_SEED_FENCED_BLOCKED_INPUT"
 
 
-def _fenced_seed_identity(
+def _seed_dependencies_at_cut(
     seed: Mapping[str, object],
     *,
     seed_json: Path,
     conn: sqlite3.Connection | None,
-) -> str | None:
-    """The recorded failed identity this seed's build at its own cut would re-read."""
+) -> SeedBuildDependencies | None:
+    """This queued seed's build dependencies at its own cut; None outside a seed queue."""
     cut = _parse_utc_iso(seed.get("computed_at"))
     if conn is None or cut is None or seed_json.parent.name != "seeds":
         return None
-    identity = blocked_seed_input_identity(
+    return seed_build_dependencies(
         seed, seeds_dir=seed_json.parent, conn=conn, decision_at=cut,
     )
-    if identity is None or not _blocked_seed_identity_path(
-        seed_json.parent.parent, seed, identity[0],
-    ).is_file():
-        return None
-    return identity[0]
 
 
 def blocked_seed_identity_fenced(
@@ -991,6 +1072,12 @@ def blocked_seed_identity_fenced(
     fact about immutable inputs. RESET: any input change yields a new identity,
     which is not fenced. Unknown identity is never fenced.
     """
+    try:
+        marker_prefix = _blocked_seed_identity_path(queue_root, seed, "").name[: -len(".json")]
+        if not any((queue_root / BLOCKED_SEED_IDENTITY_DIR).glob(f"{glob_escape(marker_prefix)}*.json")):
+            return False  # no failure recorded for this family under this schema
+    except (KeyError, OSError):
+        return False
     identity = blocked_seed_input_identity(
         seed, seeds_dir=queue_root / "seeds", conn=conn, decision_at=decision_at,
     )
@@ -1108,8 +1195,13 @@ def _record_blocked_seed_identity(
     reason_codes: Sequence[str],
     conn: sqlite3.Connection | None,
     forecast_db: Path | str | None,
+    deps: SeedBuildDependencies | None = None,
 ) -> str | None:
-    """Durably record a request-build failure's input identity before its move."""
+    """Durably record a request-build failure's input identity before its move.
+
+    ``deps`` is the resolution the failed build consumed; recording that same
+    object (not a re-read) is what makes the fence the build's exact read set.
+    """
     if (
         not isinstance(seed, Mapping)
         or seed_json.parent.name != "seeds"
@@ -1118,26 +1210,32 @@ def _record_blocked_seed_identity(
         return None
     owned = None
     try:
-        if conn is None:
-            if forecast_db is None or not Path(forecast_db).exists():
-                return None
-            conn = owned = _queue_read_only_connection(Path(forecast_db))
         cut = _parse_utc_iso(seed.get("computed_at"))
         if cut is None:
             return None
-        computed = blocked_seed_input_identity(
-            seed, seeds_dir=seed_json.parent, conn=conn, decision_at=cut,
-        )
+        if deps is None:
+            if conn is None:
+                if forecast_db is None or not Path(forecast_db).exists():
+                    return None
+                conn = owned = _queue_read_only_connection(Path(forecast_db))
+            deps = seed_build_dependencies(
+                seed, seeds_dir=seed_json.parent, conn=conn, decision_at=cut,
+            )
         # An input possessed after the seed's cut may be exactly what the block
         # lacked; the next seed sees it, so this failure fences nothing.
-        if computed is None or computed[1] > cut:
+        if (
+            deps.identity is None
+            or deps.newest_possessed is None
+            or deps.newest_possessed > cut
+        ):
             return None
-        identity = computed[0]
+        identity = deps.identity
         target = _blocked_seed_identity_path(seed_json.parent.parent, seed, identity)
         _ensure_directory_entry_durable(target.parent, durable_ancestor=seed_json.parent.parent)
         temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
         with temporary.open("w", encoding="utf-8") as handle:
-            json.dump({"seed_file": str(seed_json), "reason_codes": list(reason_codes)},
+            json.dump({"seed_file": str(seed_json), "reason_codes": list(reason_codes),
+                       "identity_schema": SEED_IDENTITY_SCHEMA},
                       handle, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
@@ -1161,11 +1259,12 @@ def _move_failed_seed(
     *,
     conn: sqlite3.Connection | None,
     forecast_db: Path | str | None,
+    deps: SeedBuildDependencies | None = None,
 ) -> Path:
     """Move a request-build failure; a fenced identity also gets an indexed receipt."""
     identity = _record_blocked_seed_identity(
         seed_json, seed, reason_codes=tuple(receipt.get("reason_codes") or ()),
-        conn=conn, forecast_db=forecast_db,
+        conn=conn, forecast_db=forecast_db, deps=deps,
     )
     if identity is None:
         moved = _move_request(seed_json, failed_path)
@@ -5856,6 +5955,7 @@ def _prepare_seed_requests_with_connection(
             break
         inspected_count += 1
         seed = None
+        deps = None
         try:
             seed = _load_seed_json(seed_json)
             if not _looks_like_seed(seed):
@@ -6041,8 +6141,16 @@ def _prepare_seed_requests_with_connection(
                 processed.append(str(moved))
                 actionable_count += 1
                 continue
-            fenced_identity = _fenced_seed_identity(
-                seed, seed_json=seed_json, conn=forecast_conn,
+            # One resolution at the seed's own cut feeds the fence check, the
+            # build and the failure record, so they cannot read different inputs.
+            deps = _seed_dependencies_at_cut(seed, seed_json=seed_json, conn=forecast_conn)
+            fenced_identity = (
+                deps.identity
+                if deps is not None and deps.identity is not None
+                and _blocked_seed_identity_path(
+                    seed_json.parent.parent, seed, deps.identity,
+                ).is_file()
+                else None
             )
             if fenced_identity is not None:
                 # SCOPE: this seed. Every producer (any transition key, trigger
@@ -6063,10 +6171,22 @@ def _prepare_seed_requests_with_connection(
                 continue
             request_seed = dict(seed)
             if forecast_conn is not None:
-                from src.data.raw_forecast_artifact_manifest import anchor_local_proof_seed_transport
-                transport = anchor_local_proof_seed_transport(forecast_conn, seed, base_dir=seed_json.parent)
-                if transport is not None:
-                    request_seed.update(transport)
+                if deps is not None and deps.transport is not None:
+                    transport = deps.transport
+                else:
+                    # Identity unknown: resolve for the build alone (an I/O
+                    # error raises as transient); the failure is never fenced.
+                    from src.data.raw_forecast_artifact_manifest import (  # noqa: PLC0415
+                        resolve_anchor_local_proof_seed_transport,
+                    )
+
+                    transport = resolve_anchor_local_proof_seed_transport(
+                        forecast_conn, seed, base_dir=seed_json.parent,
+                    )
+                if transport.error is not None:
+                    raise ValueError(transport.error)
+                if transport.paths is not None:
+                    request_seed.update(transport.paths)
             result = build_replacement_forecast_materialization_request(request_seed, base_dir=seed_json.parent)
             if not result.ok or result.request is None:
                 moved = _move_failed_seed(
@@ -6080,6 +6200,7 @@ def _prepare_seed_requests_with_connection(
                     },
                     conn=forecast_conn,
                     forecast_db=forecast_db,
+                    deps=deps,
                 )
                 failed.append(str(moved))
                 actionable_count += 1
@@ -6175,7 +6296,7 @@ def _prepare_seed_requests_with_connection(
                 moved = _move_failed_seed(
                     seed_json, failed_path, seed,
                     {**receipt, "reason_codes": [f"ERROR:{exc}"[:200]]},
-                    conn=forecast_conn, forecast_db=forecast_db,
+                    conn=forecast_conn, forecast_db=forecast_db, deps=deps,
                 )
             else:
                 moved = _move_request(seed_json, failed_path)

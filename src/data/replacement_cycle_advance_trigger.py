@@ -2321,6 +2321,10 @@ def enqueue_cycle_advance_reseeds(
                 if enqueue_decision is _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED:
                     report["already_enqueued"] = int(report["already_enqueued"]) + 1
                     continue
+            from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+                SeedInputIdentityFenced,
+            )
+
             try:
                 staged_seed_file, visible_seed_file = _staged_cycle_advance_seed_paths(
                     seed_path=seed_path,
@@ -2373,6 +2377,11 @@ def enqueue_cycle_advance_reseeds(
                     cycle_advance_enqueue_owner=True,
                     required_baseline_source_run_id=causal_baseline_source_run_id,
                 )
+            except SeedInputIdentityFenced:
+                # The identity this seed would read already failed its build:
+                # no seed file, and the family is settled for this wake.
+                report["already_enqueued"] = int(report["already_enqueued"]) + 1
+                continue
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 report["seed_build_failed"] = int(report.get("seed_build_failed", 0)) + 1
                 if causal_baseline_source_run_id:
@@ -3974,5 +3983,14 @@ def _build_and_write_advance_seed(
         computed_at=computed_at,
     )
     _require_deadline()
+    from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+        raise_if_seed_identity_fenced,
+    )
+
+    # Every trigger of this producer (cycle advance, committed ENS supersede,
+    # Day0, held recompute) ends here: a fenced identity writes no seed file.
+    raise_if_seed_identity_fenced(
+        seed_payload, queue_root=seed_path.parent, conn=conn, decision_at=computed_at,
+    )
     write_seed(seed_file, seed_payload)
     return seed_file
