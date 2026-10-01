@@ -1,5 +1,5 @@
 # Created: 2026-07-16
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-10-01
 # Authority basis: day0 defects 1-5 (Paris 2026-07-14 monotonicity regression,
 #   WU-backfill-frozen hour buckets, climatology-band self-blinding, HKO
 #   accumulator never folding its own spot read, Seoul binary exclusion where
@@ -21,20 +21,26 @@ over this ledger (MAX/MIN per city/local-day) are DERIVED, computed at read
 time by ``_latest_authorized_day0_fact`` — this table stores no aggregate,
 only the raw prints.
 
-Append-only, no update path anywhere, ever. Consecutive re-fetches of the
-same current revision are a free no-op, while a correction sequence A -> B ->
-A at one source clock appends all three revisions. The database uniqueness
-key includes fetched_at_utc as a final crash/retry fence; append_print itself
-suppresses only a value/unit equal to the immediately preceding revision for
-that (city, station, source, source-clock). The canonical read projection
-chooses the latest appended/fetched version for each source clock, then derives
-the local-day MAX/MIN across distinct clocks. Thus audit history remains
-complete without either poll spam or silently losing a reversion.
+Append-only, no update path anywhere, ever. Revisions of one
+(city, station, source, source-clock) are ordered by RECEIPT:
+``julianday(fetched_at_utc)`` then ``id`` (an equal-receipt conflict resolves
+to the later commit). Admission and every revision-selecting reader share that
+ordering (``RECEIPT_ORDER_DESC_SQL``). A receipt at or after the receipt-latest
+revision is suppressed only when it repeats that revision's value/unit, so
+re-polls are free and A -> B -> A appends all three. A receipt older than the
+receipt-latest revision is late evidence: it is kept under exact idempotency
+(the unique index), never compared with an unrelated neighbour. Thus an
+out-of-order 68@:10, 69@:12, 68@:11, 68@:13 still reads 68. Timestamps are
+normalized to UTC ISO-8601; naive or unparseable clocks are rejected.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
+
+# One revision ordering for admission and readers: receipt, then commit order.
+RECEIPT_ORDER_DESC_SQL = "julianday(fetched_at_utc) DESC, id DESC"
 
 
 CREATE_TABLE_SQL = """
@@ -106,6 +112,18 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)
 
 
+def _utc_iso(name: str, value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"observation_prints {name} is not ISO-8601: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"observation_prints {name} is naive: {value!r}")
+    if parsed.utcoffset() == timedelta(0) and str(value).endswith("+00:00"):
+        return str(value)  # already canonical; keep stored identities byte-stable
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def append_print(
     conn: sqlite3.Connection,
     *,
@@ -118,35 +136,43 @@ def append_print(
     fetched_at_utc: str,
     raw_report: str | None = None,
 ) -> bool:
-    """Append one published reading. Returns True if a new row was inserted,
-    False if it was already present (INSERT OR IGNORE — append-only dedup,
-    never a mutation)."""
+    """Append one published reading; True iff a row was inserted.
+
+    Suppresses only a receipt no older than the receipt-latest revision of the
+    same source clock that repeats its value/unit; see the module docstring.
+    """
     value = float(value_native)
+    publish_ts_utc = _utc_iso("publish_ts_utc", publish_ts_utc)
+    fetched_at_utc = _utc_iso("fetched_at_utc", fetched_at_utc)
     cur = conn.execute(
-        """
+        f"""
         INSERT OR IGNORE INTO observation_prints (
             city, station_id, source_channel, publish_ts_utc,
             value_native, unit, fetched_at_utc, raw_report, schema_version
         )
         SELECT ?, ?, ?, ?, ?, ?, ?, ?, 1
-         WHERE NOT COALESCE(
-            (
-                SELECT value_native = ? AND unit = ?
+         WHERE NOT EXISTS (
+            SELECT 1
+              FROM (
+                SELECT value_native, unit, fetched_at_utc
                   FROM observation_prints
                  WHERE city = ?
                    AND station_id = ?
                    AND source_channel = ?
                    AND publish_ts_utc = ?
-                 ORDER BY id DESC
+                 ORDER BY {RECEIPT_ORDER_DESC_SQL}
                  LIMIT 1
-            ),
-            0
+              ) AS latest
+             WHERE julianday(?) >= julianday(latest.fetched_at_utc)
+               AND latest.value_native = ?
+               AND latest.unit = ?
          )
         """,
         (
             city, station_id, source_channel, publish_ts_utc,
             value, unit, fetched_at_utc, raw_report,
-            value, unit, city, station_id, source_channel, publish_ts_utc,
+            city, station_id, source_channel, publish_ts_utc,
+            fetched_at_utc, value, unit,
         ),
     )
     return cur.rowcount > 0

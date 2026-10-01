@@ -1445,6 +1445,7 @@ def _latest_authorized_day0_fact(
                        AND julianday(publish_ts_utc) < julianday(?)
                        AND julianday(publish_ts_utc) <= julianday(?)
                        AND julianday(fetched_at_utc) <= julianday(?)
+                     ORDER BY rowid
                     """,
                     (
                         city,

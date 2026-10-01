@@ -66,6 +66,7 @@ from scipy.special import log_ndtr, ndtri_exp
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.settlement_semantics import settlement_preimage_offsets
 from src.data.openmeteo_quota import quota_tracker
+from src.state.schema.observation_prints_schema import RECEIPT_ORDER_DESC_SQL
 
 logger = logging.getLogger(__name__)
 
@@ -4285,7 +4286,7 @@ def read_day0_current_temperature_state(
                AND publish_ts_utc >= ? AND publish_ts_utc < ?
                AND julianday(publish_ts_utc) <= julianday(?)
                AND julianday(fetched_at_utc) <= julianday(?)
-             ORDER BY publish_ts_utc DESC, id DESC
+             ORDER BY publish_ts_utc DESC, {RECEIPT_ORDER_DESC_SQL}
             """,
             (
                 city_name,

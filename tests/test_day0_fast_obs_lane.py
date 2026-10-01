@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-09-30
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Last reused/audited: 2026-10-01
+# Lifecycle: created=2026-06-10; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -5128,7 +5128,12 @@ class TestAnomalyFreshnessGates:
         row.update(changes[defect])
         conn = sqlite3.connect(":memory:")
         ensure_table(conn)
-        append_print(conn, **row)
+        if defect == "naive":
+            # The ledger writer refuses a naive clock outright.
+            with pytest.raises(ValueError, match="naive"):
+                append_print(conn, **row)
+        else:
+            append_print(conn, **row)
         conn.commit()
         emitter = Day0FastObsEmitter()
         emitter.sync_ledger_report_keys(conn, [_tokyo()], as_of=now)

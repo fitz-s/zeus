@@ -480,6 +480,7 @@ from src.strategy.live_inference.source_clock_city_weights import (
     ONE_SCHEME_READY_STATUS,
     SOURCE_CLOCK_ARTIFACT_ACTIVE_STATUS,
 )
+from src.state.schema.observation_prints_schema import RECEIPT_ORDER_DESC_SQL
 from src.state.snapshot_repo import (
     executable_snapshot_from_row,
     get_snapshot,
@@ -48450,7 +48451,7 @@ def _legacy_latest_day0_current_temperature_native(
            AND publish_ts_utc < ?
            AND publish_ts_utc <= ?
            AND julianday(fetched_at_utc) <= julianday(?)
-         ORDER BY publish_ts_utc DESC, id DESC
+         ORDER BY publish_ts_utc DESC, {RECEIPT_ORDER_DESC_SQL}
         """,
         (
             str(family.city),

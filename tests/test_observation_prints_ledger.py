@@ -1,5 +1,5 @@
 # Created: 2026-07-16
-# Last reused/audited: 2026-09-30
+# Last reused/audited: 2026-10-01
 # Authority basis: day0 defects 1-5 (Paris 2026-07-14 monotonicity regression,
 #   WU-backfill-frozen hour buckets, climatology-band self-blinding, HKO
 #   accumulator never folding its own spot read, Seoul binary exclusion where
@@ -216,6 +216,87 @@ class TestAppendOnly:
         assert fact is not None
         assert fact["observed_extreme_native"] == 34.0
         assert fact["observation_available_at"] == "2026-08-09T10:18:22+00:00"
+
+    @staticmethod
+    def _append_paris(conn, value, fetched_at):
+        return append_print(
+            conn, city="Paris", station_id="LFPB", source_channel="wu_icao_history",
+            publish_ts_utc="2026-08-09T08:00:00+00:00", value_native=value, unit="C",
+            fetched_at_utc=fetched_at,
+        )
+
+    def test_out_of_order_receipt_keeps_later_reversion(self):
+        """68@:10, 69@:12, late 68@:11, 68@:13 -> receipt-latest is 68."""
+
+        conn = _conn()
+        inserted = [
+            self._append_paris(conn, value, f"2026-08-09T08:{minute:02d}:00+00:00")
+            for value, minute in ((68.0, 10), (69.0, 12), (68.0, 11), (68.0, 13))
+        ]
+        # The late :11 receipt is preserved history; :13 is a new revision.
+        assert inserted == [True, True, True, True]
+        fact = _latest_authorized_day0_fact(
+            conn, city="Paris", target_date="2026-08-09", temperature_metric="high",
+            decision_time=datetime(2026, 8, 9, 8, 20, tzinfo=UTC),
+            require_settlement_channel=True,
+        )
+        assert fact is not None
+        assert fact["observed_extreme_native"] == 68.0
+        assert fact["observation_available_at"] == "2026-08-09T08:13:00+00:00"
+
+    def test_late_and_repeated_receipts_are_exactly_idempotent(self):
+        conn = _conn()
+        assert self._append_paris(conn, 68.0, "2026-08-09T08:10:00+00:00")
+        assert self._append_paris(conn, 69.0, "2026-08-09T08:12:00+00:00")
+        # Re-poll of the receipt-latest value is a free no-op.
+        assert not self._append_paris(conn, 69.0, "2026-08-09T08:14:00+00:00")
+        # Redelivery of the exact late row is a no-op; its first delivery is kept.
+        assert self._append_paris(conn, 70.0, "2026-08-09T08:11:00+00:00")
+        assert not self._append_paris(conn, 70.0, "2026-08-09T08:11:00+00:00")
+        assert conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0] == 3
+
+    def test_equal_receipt_conflict_resolves_to_later_commit(self):
+        conn = _conn()
+        assert self._append_paris(conn, 68.0, "2026-08-09T08:10:00+00:00")
+        assert self._append_paris(conn, 69.0, "2026-08-09T08:10:00+00:00")
+        fact = _latest_authorized_day0_fact(
+            conn, city="Paris", target_date="2026-08-09", temperature_metric="high",
+            decision_time=datetime(2026, 8, 9, 8, 20, tzinfo=UTC),
+            require_settlement_channel=True,
+        )
+        assert fact is not None and fact["observed_extreme_native"] == 69.0
+
+    def test_offset_and_z_clocks_normalize_to_one_receipt_order(self):
+        conn = _conn()
+        assert self._append_paris(conn, 68.0, "2026-08-09T13:40:00+05:30")
+        assert not self._append_paris(conn, 68.0, "2026-08-09T08:10:00Z")
+        (stored,) = conn.execute("SELECT fetched_at_utc FROM observation_prints").fetchone()
+        assert stored == "2026-08-09T08:10:00+00:00"
+
+    @pytest.mark.parametrize("fetched_at", ["2026-08-09T08:10:00", "not-a-clock"])
+    def test_naive_or_unparseable_receipt_is_rejected(self, fetched_at):
+        with pytest.raises(ValueError):
+            self._append_paris(_conn(), 68.0, fetched_at)
+
+    @pytest.mark.parametrize("order", [(0, 1, 2, 3), (1, 2, 0, 3), (3, 2, 1, 0)])
+    def test_current_reader_follows_receipt_order_under_commit_permutations(self, order):
+        from src.config import cities_by_name
+        from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+
+        receipts = ((68.0, 10), (69.0, 12), (68.0, 11), (68.0, 13))
+        conn = _conn()
+        for index in order:
+            value, minute = receipts[index]
+            append_print(
+                conn, city="Chicago", station_id="KORD", source_channel="noaa_wrh_kord",
+                publish_ts_utc="2026-08-09T18:00:00+00:00", value_native=value, unit="F",
+                fetched_at_utc=f"2026-08-09T18:{minute:02d}:00+00:00",
+            )
+        state = read_day0_current_temperature_state(
+            conn=conn, city=cities_by_name["Chicago"], target_date="2026-08-09",
+            decision_time=datetime(2026, 8, 9, 18, 20, tzinfo=UTC),
+        )
+        assert state is not None and state.value_native == 68.0
 
     def test_legacy_identity_index_is_migrated_without_row_rewrite(self):
         conn = sqlite3.connect(":memory:")

@@ -2128,7 +2128,7 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
     """HTTP before WORLD lease; committed physical evidence before any reseed."""
     from src.data.station_temperature_adapters import fetch_station_temperature, native_sample_value
     from src.state.db import get_world_connection, world_write_mutex
-    from src.state.schema.observation_prints_schema import append_print
+    from src.state.schema.observation_prints_schema import RECEIPT_ORDER_DESC_SQL, append_print
     from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
 
     station_id, source_channel = route.station_id, route.source_channel
@@ -2174,7 +2174,7 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
                 newest_row = conn.execute(
                     "SELECT publish_ts_utc, value_native FROM observation_prints "
                     "WHERE city = ? AND station_id = ? AND source_channel = ? "
-                    "ORDER BY publish_ts_utc DESC, id DESC LIMIT 1",
+                    f"ORDER BY publish_ts_utc DESC, {RECEIPT_ORDER_DESC_SQL} LIMIT 1",
                     (city.name, station_id, source_channel),
                 ).fetchone()
                 newest = str(newest_row[0]) if newest_row else ""
@@ -2725,6 +2725,7 @@ def _replay_hko_current_temperature_redecision() -> tuple[dict, ...]:
     """
     from src.state.db import get_world_connection_read_only
     from src.data.day0_hourly_vectors import replay_hko_current_temperature_print
+    from src.state.schema.observation_prints_schema import RECEIPT_ORDER_DESC_SQL
 
     now = datetime.now(timezone.utc)
     conn = None
@@ -2732,7 +2733,7 @@ def _replay_hko_current_temperature_redecision() -> tuple[dict, ...]:
         conn = get_world_connection_read_only()
         rows = conn.execute("""SELECT publish_ts_utc,fetched_at_utc,raw_report FROM observation_prints
             WHERE city=? AND source_channel=? AND julianday(fetched_at_utc)<=julianday(?)
-            ORDER BY publish_ts_utc DESC,id DESC LIMIT 4""",
+            ORDER BY publish_ts_utc DESC,"""+RECEIPT_ORDER_DESC_SQL+""" LIMIT 4""",
             ("Hong Kong","hko_current_1min_mean",now.isoformat())).fetchall()
     except Exception:
         logger.warning("HKO current redecision replay unavailable",exc_info=True)
