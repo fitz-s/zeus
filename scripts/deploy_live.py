@@ -148,6 +148,7 @@ RESTART_WORLD_MIGRATION_TARGETS = (
         "world_active_redecision_backfill_notnull",
         "202608_edli_active_redecision_projection_receipt_notnull",
     ),
+    ("world_data_coverage_evidence", "202610_data_coverage_evidence_json"),
 )
 RESTART_TRADE_MIGRATION_TARGETS = (
     ("trade", "202607_cas_reservation_ledger"),

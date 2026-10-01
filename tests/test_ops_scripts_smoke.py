@@ -2768,6 +2768,7 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
         "202607_drop_world_collateral_unsettled_ghost",
         "202608_edli_active_redecision_projection",
         "202608_edli_active_redecision_projection_receipt_notnull",
+        "202610_data_coverage_evidence_json",
     ]
     assert "get_world_connection_read_only" in calls[0][2]
     assert "PRAGMA table_info(opportunity_event_processing_type_backfill)" in calls[0][2]
