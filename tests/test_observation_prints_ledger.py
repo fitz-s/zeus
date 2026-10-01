@@ -1,5 +1,5 @@
 # Created: 2026-07-16
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-01 (exact-microsecond receipt order)
 # Authority basis: day0 defects 1-5 (Paris 2026-07-14 monotonicity regression,
 #   WU-backfill-frozen hour buckets, climatology-band self-blinding, HKO
 #   accumulator never folding its own spot read, Seoul binary exclusion where
@@ -297,6 +297,42 @@ class TestAppendOnly:
             decision_time=datetime(2026, 8, 9, 18, 20, tzinfo=UTC),
         )
         assert state is not None and state.value_native == 68.0
+
+    def test_submillisecond_receipts_keep_exact_order(self):
+        """julianday() collapses these receipts; exact microseconds must not."""
+        from src.config import cities_by_name
+        from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+
+        conn = _conn()
+        inserted = [
+            append_print(
+                conn, city="Chicago", station_id="KORD", source_channel="noaa_wrh_kord",
+                publish_ts_utc="2026-08-09T18:00:00+00:00", value_native=value, unit="F",
+                fetched_at_utc=f"2026-08-09T18:10:00.000{us}+00:00",
+            )
+            for value, us in ((68.0, 100), (69.0, 300), (68.0, 200), (68.0, 400))
+        ]
+        assert inserted == [True, True, True, True]
+        state = read_day0_current_temperature_state(
+            conn=conn, city=cities_by_name["Chicago"], target_date="2026-08-09",
+            decision_time=datetime(2026, 8, 9, 18, 20, tzinfo=UTC),
+        )
+        assert state is not None and state.value_native == 68.0
+
+    @pytest.mark.parametrize("text", [
+        "2026-08-09T18:10:00.999999+00:00", "2026-08-09T18:10:00+00:00",
+        "2026-08-09T18:10:00.1Z", "2026-08-09 13:10:00.25-05:00",
+        "2026-08-09T18:10+00:00", "2026-08-09T18:10:00.1234567+00:00",
+        "1969-12-31T23:59:59.5+00:00",
+    ])
+    def test_receipt_sql_key_equals_python_parse(self, text):
+        """Legacy variable-format/offset rows order by parse, not by text."""
+        from src.state.schema.observation_prints_schema import receipt_us, receipt_us_sql
+
+        (got,) = sqlite3.connect(":memory:").execute(
+            f"SELECT {receipt_us_sql('?1')}", (text,)
+        ).fetchone()
+        assert got == receipt_us(datetime.fromisoformat(text.replace("Z", "+00:00")))
 
     def test_legacy_identity_index_is_migrated_without_row_rewrite(self):
         conn = sqlite3.connect(":memory:")

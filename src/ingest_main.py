@@ -2725,16 +2725,18 @@ def _replay_hko_current_temperature_redecision() -> tuple[dict, ...]:
     """
     from src.state.db import get_world_connection_read_only
     from src.data.day0_hourly_vectors import replay_hko_current_temperature_print
-    from src.state.schema.observation_prints_schema import RECEIPT_ORDER_DESC_SQL
+    from src.state.schema.observation_prints_schema import (
+        RECEIPT_ORDER_DESC_SQL, RECEIPT_US_SQL, receipt_us,
+    )
 
     now = datetime.now(timezone.utc)
     conn = None
     try:
         conn = get_world_connection_read_only()
         rows = conn.execute("""SELECT publish_ts_utc,fetched_at_utc,raw_report FROM observation_prints
-            WHERE city=? AND source_channel=? AND julianday(fetched_at_utc)<=julianday(?)
+            WHERE city=? AND source_channel=? AND """+RECEIPT_US_SQL+"""<=?
             ORDER BY publish_ts_utc DESC,"""+RECEIPT_ORDER_DESC_SQL+""" LIMIT 4""",
-            ("Hong Kong","hko_current_1min_mean",now.isoformat())).fetchall()
+            ("Hong Kong","hko_current_1min_mean",receipt_us(now))).fetchall()
     except Exception:
         logger.warning("HKO current redecision replay unavailable",exc_info=True)
         return ()

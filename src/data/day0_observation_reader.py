@@ -65,6 +65,7 @@ from typing import Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from src.contracts.family_fault_scope import GlobalValueFault
+from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
 from src.types.temperature import Fahrenheit, f_to_c
 
 # ---------------------------------------------------------------------------
@@ -876,10 +877,10 @@ def same_station_preliminary_report_survival_likelihood(
           FROM {table}
          WHERE city = ? AND upper(station_id) = ?
            AND source_channel IN (?, ?)
-           AND julianday(fetched_at_utc) < julianday(?)
+           AND {receipt_us} < ?
            AND julianday(publish_ts_utc) < julianday(?)
            AND julianday(publish_ts_utc) >= julianday(?)
-         ORDER BY julianday(fetched_at_utc), id
+         ORDER BY {receipt_us}, id
     """
     try:
         table = "world.observation_prints"
@@ -888,13 +889,13 @@ def same_station_preliminary_report_survival_likelihood(
         table = "observation_prints"
     try:
         rows = conn.execute(
-            query.format(table=table),
+            query.format(table=table, receipt_us=RECEIPT_US_SQL),
             (
                 city,
                 station,
                 awc_channel,
                 ogimet_channel,
-                cutoff.isoformat(),
+                receipt_us(cutoff),
                 cutoff.isoformat(),
                 start.isoformat(),
             ),

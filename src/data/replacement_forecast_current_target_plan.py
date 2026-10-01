@@ -35,6 +35,7 @@ from src.data.replacement_forecast_source_run_identity import (
 )
 from src.engine.time_context import has_city_local_day_ended, has_city_local_day_started
 from src.state.db import _connect_read_only
+from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
 
 _LOG = logging.getLogger("zeus.replacement_forecast_current_target_plan")
 
@@ -1446,7 +1447,7 @@ def _latest_authorized_day0_fact(
                        AND julianday(publish_ts_utc) >= julianday(?)
                        AND julianday(publish_ts_utc) < julianday(?)
                        AND julianday(publish_ts_utc) <= julianday(?)
-                       AND julianday(fetched_at_utc) <= julianday(?)
+                       AND {RECEIPT_US_SQL} <= ?
                      ORDER BY rowid
                     """,
                     (
@@ -1455,7 +1456,7 @@ def _latest_authorized_day0_fact(
                         local_day_start_utc.isoformat(),
                         local_day_end_utc.isoformat(),
                         decision_utc.isoformat(),
-                        decision_utc.isoformat(),
+                        receipt_us(decision_utc),
                     ),
                 ).fetchall()
                 margin_by_channel: dict[str, float | None] = {}

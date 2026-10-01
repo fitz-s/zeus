@@ -66,6 +66,7 @@ from src.data.metar_temperature import (
     metar_temperature_c,
 )
 from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
 
 logger = logging.getLogger(__name__)
 
@@ -547,7 +548,7 @@ def latest_fast_station_extreme_c(
                AND julianday(publish_ts_utc) >= julianday(?)
                AND julianday(publish_ts_utc) < julianday(?)
                AND julianday(publish_ts_utc) <= julianday(?)
-               AND julianday(fetched_at_utc) <= julianday(?)
+               AND {RECEIPT_US_SQL} <= ?
              ORDER BY publish_ts_utc
             """,
             (
@@ -557,7 +558,7 @@ def latest_fast_station_extreme_c(
                 local_start.isoformat(),
                 local_end.isoformat(),
                 decision.isoformat(),
-                decision.isoformat(),
+                receipt_us(decision),
             ),
         ).fetchall()
     except sqlite3.DatabaseError:
@@ -779,7 +780,7 @@ def build_fast_station_residual_likelihood(
                AND source_channel IN (?, ?)
                AND julianday(publish_ts_utc) >= julianday(?)
                AND julianday(publish_ts_utc) < julianday(?)
-               AND julianday(fetched_at_utc) < julianday(?)
+               AND {RECEIPT_US_SQL} < ?
              ORDER BY publish_ts_utc, id
             """,
             (
@@ -791,7 +792,7 @@ def build_fast_station_residual_likelihood(
                 FAST_OBS_SOURCE_ID,
                 window_start.isoformat(),
                 training_cutoff.isoformat(),
-                training_cutoff.isoformat(),
+                receipt_us(training_cutoff),
             ),
         ).fetchall()
     except sqlite3.DatabaseError:
@@ -2565,7 +2566,7 @@ def read_noaa_fast_obs_context_from_ledger(
     ).astimezone(UTC)
     try:
         rows = world_conn.execute(
-            """
+            f"""
             SELECT publish_ts_utc, value_native, unit, station_id, raw_report,
                    fetched_at_utc
               FROM observation_prints
@@ -2575,7 +2576,7 @@ def read_noaa_fast_obs_context_from_ledger(
                AND publish_ts_utc >= ?
                AND publish_ts_utc < ?
                AND publish_ts_utc <= ?
-               AND julianday(fetched_at_utc) <= julianday(?)
+               AND {RECEIPT_US_SQL} <= ?
              ORDER BY publish_ts_utc, id
             """,
             (
@@ -2585,7 +2586,7 @@ def read_noaa_fast_obs_context_from_ledger(
                 (day_start - timedelta(hours=1)).isoformat(),
                 (day_end + timedelta(hours=1)).isoformat(),
                 decision_utc.isoformat(),
-                decision_utc.isoformat(),
+                receipt_us(decision_utc),
             ),
         ).fetchall()
     except Exception:
@@ -3004,12 +3005,12 @@ def _latest_kma_day0_event_state(
                    AND source_channel IN (?, ?)
                    AND publish_ts_utc >= ? AND publish_ts_utc < ?
                    AND publish_ts_utc <= ?
-                   AND julianday(fetched_at_utc) <= julianday(?)
+                   AND {RECEIPT_US_SQL} <= ?
                 """,
                 (
                     city_name, station, FAST_OBS_SOURCE_ID, ogimet_channel,
                     day_start.isoformat(), day_end.isoformat(),
-                    decision.isoformat(), decision.isoformat(),
+                    decision.isoformat(), receipt_us(decision),
                 ),
             ).fetchall()
         except Exception:

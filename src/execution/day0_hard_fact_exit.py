@@ -1227,6 +1227,8 @@ def _durable_fast_tail_hard_fact_evidence(
     except Exception:
         return None
 
+    from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
+
     print_rows = None
     for table_ref in ("world.observation_prints", "observation_prints"):
         try:
@@ -1241,7 +1243,7 @@ def _durable_fast_tail_hard_fact_evidence(
                    AND publish_ts_utc >= ?
                    AND publish_ts_utc < ?
                    AND publish_ts_utc <= ?
-                   AND fetched_at_utc <= ?
+                   AND {RECEIPT_US_SQL} <= ?
                  ORDER BY publish_ts_utc, id
                 """,
                 (
@@ -1251,7 +1253,7 @@ def _durable_fast_tail_hard_fact_evidence(
                     day_start.isoformat(),
                     day_end.isoformat(),
                     now.astimezone(UTC).isoformat(),
-                    now.astimezone(UTC).isoformat(),
+                    receipt_us(now),
                 ),
             ).fetchall()
             break

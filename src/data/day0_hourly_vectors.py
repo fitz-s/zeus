@@ -66,7 +66,11 @@ from scipy.special import log_ndtr, ndtri_exp
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.settlement_semantics import settlement_preimage_offsets
 from src.data.openmeteo_quota import quota_tracker
-from src.state.schema.observation_prints_schema import RECEIPT_ORDER_DESC_SQL
+from src.state.schema.observation_prints_schema import (
+    RECEIPT_ORDER_DESC_SQL,
+    RECEIPT_US_SQL,
+    receipt_us,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -4381,7 +4385,7 @@ def read_day0_current_temperature_state(
                AND source_channel IN ({placeholders})
                AND publish_ts_utc >= ? AND publish_ts_utc < ?
                AND julianday(publish_ts_utc) <= julianday(?)
-               AND julianday(fetched_at_utc) <= julianday(?)
+               AND {RECEIPT_US_SQL} <= ?
              ORDER BY publish_ts_utc DESC, {RECEIPT_ORDER_DESC_SQL}
             """,
             (
@@ -4390,7 +4394,7 @@ def read_day0_current_temperature_state(
                 (start - timedelta(hours=1)).isoformat(),
                 (end + timedelta(hours=1)).isoformat(),
                 decision_time.astimezone(UTC).isoformat(),
-                decision_time.astimezone(UTC).isoformat(),
+                receipt_us(decision_time),
             ),
         ).fetchall()
     except sqlite3.Error:

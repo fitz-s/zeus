@@ -1,5 +1,5 @@
 # Created: 2026-07-16
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-01 (receipt order: exact UTC microseconds)
 # Authority basis: day0 defects 1-5 (Paris 2026-07-14 monotonicity regression,
 #   WU-backfill-frozen hour buckets, climatology-band self-blinding, HKO
 #   accumulator never folding its own spot read, Seoul binary exclusion where
@@ -22,10 +22,12 @@ time by ``_latest_authorized_day0_fact`` — this table stores no aggregate,
 only the raw prints.
 
 Append-only, no update path anywhere, ever. Revisions of one
-(city, station, source, source-clock) are ordered by RECEIPT:
-``julianday(fetched_at_utc)`` then ``id`` (an equal-receipt conflict resolves
-to the later commit). Admission and every revision-selecting reader share that
-ordering (``RECEIPT_ORDER_DESC_SQL``). A receipt at or after the receipt-latest
+(city, station, source, source-clock) are ordered by RECEIPT as exact integer
+UTC microseconds (``RECEIPT_US_SQL``, computed from the stored text), then
+``id`` only when receipts are exactly equal (the later commit wins).
+``julianday`` is not used: it keeps ~1 ms and collapses distinct receipts.
+Admission and every revision-selecting reader share that ordering
+(``RECEIPT_ORDER_DESC_SQL``). A receipt at or after the receipt-latest
 revision is suppressed only when it repeats that revision's value/unit, so
 re-polls are free and A -> B -> A appends all three. A receipt older than the
 receipt-latest revision is late evidence: it is kept under exact idempotency
@@ -39,8 +41,35 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-# One revision ordering for admission and readers: receipt, then commit order.
-RECEIPT_ORDER_DESC_SQL = "julianday(fetched_at_utc) DESC, id DESC"
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def receipt_us_sql(column: str) -> str:
+    """Exact UTC microseconds of an aware ISO-8601 text column, as SQL.
+
+    ``unixepoch`` resolves any offset/separator to whole UTC seconds; the
+    fraction digits (truncated to six, as ``datetime.fromisoformat`` does) add
+    the microseconds. Equal to ``receipt_us`` for every accepted format.
+    """
+    frac = f"substr({column}, 21)"
+    digits = f"(length({frac}) - length(ltrim({frac}, '0123456789')))"
+    return (
+        f"(unixepoch({column}) * 1000000 + CASE WHEN substr({column}, 20, 1) = '.' "
+        f"THEN CAST(substr(substr({frac}, 1, {digits}) || '000000', 1, 6) AS INTEGER) "
+        "ELSE 0 END)"
+    )
+
+
+def receipt_us(value: datetime) -> int:
+    """Exact UTC microseconds of an aware datetime (the Python twin)."""
+    if value.tzinfo is None:
+        raise ValueError(f"receipt clock is naive: {value!r}")
+    return (value - _EPOCH) // timedelta(microseconds=1)
+
+
+RECEIPT_US_SQL = receipt_us_sql("fetched_at_utc")
+# One revision ordering for admission and readers: exact receipt, then commit.
+RECEIPT_ORDER_DESC_SQL = f"{RECEIPT_US_SQL} DESC, id DESC"
 
 
 CREATE_TABLE_SQL = """
@@ -163,7 +192,7 @@ def append_print(
                  ORDER BY {RECEIPT_ORDER_DESC_SQL}
                  LIMIT 1
               ) AS latest
-             WHERE julianday(?) >= julianday(latest.fetched_at_utc)
+             WHERE ? >= {receipt_us_sql("latest.fetched_at_utc")}
                AND latest.value_native = ?
                AND latest.unit = ?
          )
@@ -172,7 +201,7 @@ def append_print(
             city, station_id, source_channel, publish_ts_utc,
             value, unit, fetched_at_utc, raw_report,
             city, station_id, source_channel, publish_ts_utc,
-            fetched_at_utc, value, unit,
+            receipt_us(datetime.fromisoformat(fetched_at_utc)), value, unit,
         ),
     )
     return cur.rowcount > 0
