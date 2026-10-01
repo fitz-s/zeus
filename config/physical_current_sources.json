@@ -1272,6 +1272,168 @@
           }
         ]
       }
+    },
+    {
+      "provider": "mgm_metar",
+      "source_channel": "mgm_metar_temperature",
+      "station_id": "LTAC",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "LTAC"
+      },
+      "settlement_grade": true,
+      "free_access": "Anonymous public national-service METAR; no key, login, or contract.",
+      "publisher_role": "NATIONAL_ORIGIN",
+      "value_identity_proof": {
+        "city": "Ankara",
+        "channel": "mgm_metar",
+        "n_pairs": 50,
+        "n_exact": 50,
+        "mismatches": [],
+        "report_path": "artifacts/fast_obs_audit/round4_mgm_proof.json"
+      },
+      "latency_evidence": {
+        "required_comparators": [
+          "awc",
+          "resolver"
+        ],
+        "first_proven_lead": {
+          "observation": "2026-09-30T23:50:00+00:00",
+          "candidate": {
+            "city": "Ankara",
+            "station": "LTAC",
+            "channel": "mgm_metar",
+            "observed_at": "2026-09-30T23:50:00+00:00",
+            "value": 11.0,
+            "unit": "C",
+            "negative_request_at": "2026-09-30T23:53:46.232199+00:00",
+            "positive_receipt_at": "2026-09-30T23:54:48.448345+00:00",
+            "lag_lower_ms": 226232.19900000002,
+            "lag_upper_ms": 288448.34500000003
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Ankara",
+                "station": "LTAC",
+                "channel": "awc",
+                "observed_at": "2026-09-30T23:50:00+00:00",
+                "value": 11.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:55:51.870059+00:00",
+                "positive_receipt_at": "2026-09-30T23:56:50.769804+00:00",
+                "lag_lower_ms": 351870.059,
+                "lag_upper_ms": 410769.804
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Ankara",
+                "station": "LTAC",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T23:50:00+00:00",
+                "value": 11.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:55:52.024552+00:00",
+                "positive_receipt_at": "2026-09-30T23:56:51.478385+00:00",
+                "lag_lower_ms": 352024.552,
+                "lag_upper_ms": 411478.385
+              }
+            }
+          ],
+          "paired_value_identity": true
+        }
+      },
+      "scope_note": "Same station, exact UTC observation instant, contract value. No final daily-product substitution."
+    },
+    {
+      "provider": "mgm_metar",
+      "source_channel": "mgm_metar_temperature",
+      "station_id": "LTFM",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "LTFM"
+      },
+      "settlement_grade": true,
+      "free_access": "Anonymous public national-service METAR; no key, login, or contract.",
+      "publisher_role": "NATIONAL_ORIGIN",
+      "value_identity_proof": {
+        "city": "Istanbul",
+        "channel": "mgm_metar",
+        "n_pairs": 49,
+        "n_exact": 49,
+        "mismatches": [],
+        "report_path": "artifacts/fast_obs_audit/round4_mgm_proof.json"
+      },
+      "latency_evidence": {
+        "required_comparators": [
+          "awc",
+          "resolver"
+        ],
+        "first_proven_lead": {
+          "observation": "2026-09-30T23:50:00+00:00",
+          "candidate": {
+            "city": "Istanbul",
+            "station": "LTFM",
+            "channel": "mgm_metar",
+            "observed_at": "2026-09-30T23:50:00+00:00",
+            "value": 18.0,
+            "unit": "C",
+            "negative_request_at": "2026-09-30T23:53:46.232199+00:00",
+            "positive_receipt_at": "2026-09-30T23:54:48.448345+00:00",
+            "lag_lower_ms": 226232.19900000002,
+            "lag_upper_ms": 288448.34500000003
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Istanbul",
+                "station": "LTFM",
+                "channel": "awc",
+                "observed_at": "2026-09-30T23:50:00+00:00",
+                "value": 18.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:55:51.870059+00:00",
+                "positive_receipt_at": "2026-09-30T23:56:50.769804+00:00",
+                "lag_lower_ms": 351870.059,
+                "lag_upper_ms": 410769.804
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Istanbul",
+                "station": "LTFM",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T23:50:00+00:00",
+                "value": 18.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:55:52.024552+00:00",
+                "positive_receipt_at": "2026-09-30T23:56:51.478385+00:00",
+                "lag_lower_ms": 352024.552,
+                "lag_upper_ms": 411478.385
+              }
+            }
+          ],
+          "paired_value_identity": true
+        }
+      },
+      "scope_note": "Same station, exact UTC observation instant, contract value. No final daily-product substitution."
     }
   ]
 }

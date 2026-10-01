@@ -142,6 +142,27 @@ def test_public_mgm_batch_never_exceeds_ten_stations(monkeypatch):
     assert len(calls)==3
 
 
+@pytest.mark.parametrize('station',['LTAC','LTFM'])
+def test_mgm_admission_binds_exact_value_and_all_current_speed_paths(station):
+    data=json.loads(REGISTRY_PATH.read_text())
+    row=next(r for r in data['sources'] if r['provider']=='mgm_metar' and r['station_id']==station)
+    proof=row['value_identity_proof']
+    report=json.loads((REGISTRY_PATH.parents[1]/proof['report_path']).read_text())
+    measured=next(r for r in report if r['station']==station)
+    assert row['settlement_grade'] and measured['n_pairs']==measured['n_exact']>0
+    assert measured['mismatches']==[]
+    race=row['latency_evidence']['first_proven_lead']
+    assert any(p['time']==race['observation'] and p['match'] for p in measured['pairs'])
+    required=set(row['latency_evidence']['required_comparators'])
+    assert {'awc','resolver'} <= required
+    for channel in required:
+        other=next(p for p in race['comparators'] if p['channel']==channel)
+        assert other['interval']['observed_at']==race['observation']
+        assert race['candidate']['lag_upper_ms']<other['interval']['lag_lower_ms']
+    assert row['minimum_poll_seconds']>=60
+    assert row['identity']['provider_station']==station
+
+
 @pytest.mark.parametrize("provider", ["jma_amedas", "eccc_swob"])
 def test_promoted_origins_have_extended_identity_and_measured_latency_lead(provider):
     """A historical fetch proves equality, not publication latency; require both artifacts."""
@@ -445,6 +466,8 @@ def test_wrh_rate_limit_is_deferred_without_secret_in_error(monkeypatch):
     ("Chicago","noaa_wrh",62.6,"F"),
     ("Moscow","metaviatelecom_metar",8.0,"C"),
     ("Lucknow","imd_olbs_metar",24.0,"C"),
+    ("Ankara","mgm_metar",12.0,"C"),
+    ("Istanbul","mgm_metar",19.0,"C"),
 ])
 def test_native_temperature_ingest_reseeds_after_durable_world_commit(monkeypatch,tmp_path,city_name,provider,value,unit):
     import threading

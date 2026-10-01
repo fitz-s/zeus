@@ -1,0 +1,2568 @@
+[
+  {
+    "city": "Ankara",
+    "station": "LTAC",
+    "channel": "mgm_metar",
+    "reference_channel": "resolver",
+    "comparison_role": "EXACT_RESOLVER_VALUE_COMPARISON",
+    "n_pairs": 50,
+    "n_exact": 50,
+    "mismatches": [],
+    "pairs": [
+      {
+        "time": "2026-09-29T23:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          11
+        ],
+        "resolver_contract": [
+          11
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-29T23:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          11
+        ],
+        "resolver_contract": [
+          11
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T00:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          11
+        ],
+        "resolver_contract": [
+          11
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T00:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          10
+        ],
+        "resolver_contract": [
+          10
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T01:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          10
+        ],
+        "resolver_contract": [
+          10
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T01:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 9.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 9.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          9
+        ],
+        "resolver_contract": [
+          9
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T02:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          10
+        ],
+        "resolver_contract": [
+          10
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T02:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          10
+        ],
+        "resolver_contract": [
+          10
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T03:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 9.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 9.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          9
+        ],
+        "resolver_contract": [
+          9
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T03:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 9.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 9.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          9
+        ],
+        "resolver_contract": [
+          9
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T04:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          10
+        ],
+        "resolver_contract": [
+          10
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T04:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 10.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          10
+        ],
+        "resolver_contract": [
+          10
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T05:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          11
+        ],
+        "resolver_contract": [
+          11
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T05:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T06:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 13.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 13.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          13
+        ],
+        "resolver_contract": [
+          13
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T06:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 14.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 14.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          14
+        ],
+        "resolver_contract": [
+          14
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T07:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T07:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 16.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 16.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T08:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 16.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 16.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          16
+        ],
+        "resolver_contract": [
+          16
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T08:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T09:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T09:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T10:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T10:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T11:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T11:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T12:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T12:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T13:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T13:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T14:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 15.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          15
+        ],
+        "resolver_contract": [
+          15
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T14:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 14.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 14.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          14
+        ],
+        "resolver_contract": [
+          14
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T15:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 13.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 13.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          13
+        ],
+        "resolver_contract": [
+          13
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T15:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 13.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 13.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          13
+        ],
+        "resolver_contract": [
+          13
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T16:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 13.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 13.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          13
+        ],
+        "resolver_contract": [
+          13
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T16:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T17:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T17:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T18:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T18:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T19:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T19:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T20:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T20:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T21:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T21:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T22:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          11
+        ],
+        "resolver_contract": [
+          11
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T22:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T23:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 12.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          12
+        ],
+        "resolver_contract": [
+          12
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T23:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 11.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          11
+        ],
+        "resolver_contract": [
+          11
+        ],
+        "match": true
+      }
+    ],
+    "races": [
+      {
+        "observation": "2026-09-30T22:50:00+00:00",
+        "candidate": {
+          "city": "Ankara",
+          "station": "LTAC",
+          "channel": "mgm_metar",
+          "observed_at": "2026-09-30T22:50:00+00:00",
+          "value": 12.0,
+          "unit": "C",
+          "negative_request_at": "2026-09-30T22:58:46.158058+00:00",
+          "positive_receipt_at": "2026-09-30T22:59:52.729859+00:00",
+          "lag_lower_ms": 526158.058,
+          "lag_upper_ms": 592729.859
+        },
+        "comparators": [
+          {
+            "channel": "awc",
+            "verdict": "SLOWER",
+            "interval": {
+              "city": "Ankara",
+              "station": "LTAC",
+              "channel": "awc",
+              "observed_at": "2026-09-30T22:50:00+00:00",
+              "value": 12.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T22:55:42.210611+00:00",
+              "positive_receipt_at": "2026-09-30T22:56:42.687386+00:00",
+              "lag_lower_ms": 342210.611,
+              "lag_upper_ms": 402687.386
+            }
+          },
+          {
+            "channel": "resolver",
+            "verdict": "OVERLAP",
+            "interval": {
+              "city": "Ankara",
+              "station": "LTAC",
+              "channel": "resolver",
+              "observed_at": "2026-09-30T22:50:00+00:00",
+              "value": 12.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T22:58:42.226613+00:00",
+              "positive_receipt_at": "2026-09-30T22:59:47.908531+00:00",
+              "lag_lower_ms": 522226.61300000007,
+              "lag_upper_ms": 587908.5310000001
+            }
+          }
+        ],
+        "paired_value_identity": true
+      },
+      {
+        "observation": "2026-09-30T23:20:00+00:00",
+        "candidate": {
+          "city": "Ankara",
+          "station": "LTAC",
+          "channel": "mgm_metar",
+          "observed_at": "2026-09-30T23:20:00+00:00",
+          "value": 12.0,
+          "unit": "C",
+          "negative_request_at": "2026-09-30T23:23:29.120971+00:00",
+          "positive_receipt_at": "2026-09-30T23:24:29.935458+00:00",
+          "lag_lower_ms": 209120.971,
+          "lag_upper_ms": 269935.458
+        },
+        "comparators": [
+          {
+            "channel": "awc",
+            "verdict": "OVERLAP",
+            "interval": {
+              "city": "Ankara",
+              "station": "LTAC",
+              "channel": "awc",
+              "observed_at": "2026-09-30T23:20:00+00:00",
+              "value": 12.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:24:27.711949+00:00",
+              "positive_receipt_at": "2026-09-30T23:25:35.079874+00:00",
+              "lag_lower_ms": 267711.949,
+              "lag_upper_ms": 335079.874
+            }
+          },
+          {
+            "channel": "resolver",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Ankara",
+              "station": "LTAC",
+              "channel": "resolver",
+              "observed_at": "2026-09-30T23:20:00+00:00",
+              "value": 12.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:25:27.716871+00:00",
+              "positive_receipt_at": "2026-09-30T23:26:35.003436+00:00",
+              "lag_lower_ms": 327716.87100000004,
+              "lag_upper_ms": 395003.43600000005
+            }
+          }
+        ],
+        "paired_value_identity": true
+      },
+      {
+        "observation": "2026-09-30T23:50:00+00:00",
+        "candidate": {
+          "city": "Ankara",
+          "station": "LTAC",
+          "channel": "mgm_metar",
+          "observed_at": "2026-09-30T23:50:00+00:00",
+          "value": 11.0,
+          "unit": "C",
+          "negative_request_at": "2026-09-30T23:53:46.232199+00:00",
+          "positive_receipt_at": "2026-09-30T23:54:48.448345+00:00",
+          "lag_lower_ms": 226232.19900000002,
+          "lag_upper_ms": 288448.34500000003
+        },
+        "comparators": [
+          {
+            "channel": "awc",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Ankara",
+              "station": "LTAC",
+              "channel": "awc",
+              "observed_at": "2026-09-30T23:50:00+00:00",
+              "value": 11.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:55:51.870059+00:00",
+              "positive_receipt_at": "2026-09-30T23:56:50.769804+00:00",
+              "lag_lower_ms": 351870.059,
+              "lag_upper_ms": 410769.804
+            }
+          },
+          {
+            "channel": "resolver",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Ankara",
+              "station": "LTAC",
+              "channel": "resolver",
+              "observed_at": "2026-09-30T23:50:00+00:00",
+              "value": 11.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:55:52.024552+00:00",
+              "positive_receipt_at": "2026-09-30T23:56:51.478385+00:00",
+              "lag_lower_ms": 352024.552,
+              "lag_upper_ms": 411478.385
+            }
+          }
+        ],
+        "paired_value_identity": true
+      }
+    ],
+    "required_speed_comparators": [
+      "awc",
+      "resolver"
+    ],
+    "verdict": "VALUE_IDENTICAL_FASTER_OBSERVED",
+    "first_proven_lead": {
+      "observation": "2026-09-30T23:50:00+00:00",
+      "candidate": {
+        "city": "Ankara",
+        "station": "LTAC",
+        "channel": "mgm_metar",
+        "observed_at": "2026-09-30T23:50:00+00:00",
+        "value": 11.0,
+        "unit": "C",
+        "negative_request_at": "2026-09-30T23:53:46.232199+00:00",
+        "positive_receipt_at": "2026-09-30T23:54:48.448345+00:00",
+        "lag_lower_ms": 226232.19900000002,
+        "lag_upper_ms": 288448.34500000003
+      },
+      "comparators": [
+        {
+          "channel": "awc",
+          "verdict": "FASTER",
+          "interval": {
+            "city": "Ankara",
+            "station": "LTAC",
+            "channel": "awc",
+            "observed_at": "2026-09-30T23:50:00+00:00",
+            "value": 11.0,
+            "unit": "C",
+            "negative_request_at": "2026-09-30T23:55:51.870059+00:00",
+            "positive_receipt_at": "2026-09-30T23:56:50.769804+00:00",
+            "lag_lower_ms": 351870.059,
+            "lag_upper_ms": 410769.804
+          }
+        },
+        {
+          "channel": "resolver",
+          "verdict": "FASTER",
+          "interval": {
+            "city": "Ankara",
+            "station": "LTAC",
+            "channel": "resolver",
+            "observed_at": "2026-09-30T23:50:00+00:00",
+            "value": 11.0,
+            "unit": "C",
+            "negative_request_at": "2026-09-30T23:55:52.024552+00:00",
+            "positive_receipt_at": "2026-09-30T23:56:51.478385+00:00",
+            "lag_lower_ms": 352024.552,
+            "lag_upper_ms": 411478.385
+          }
+        }
+      ],
+      "paired_value_identity": true
+    }
+  },
+  {
+    "city": "Istanbul",
+    "station": "LTFM",
+    "channel": "mgm_metar",
+    "reference_channel": "resolver",
+    "comparison_role": "EXACT_RESOLVER_VALUE_COMPARISON",
+    "n_pairs": 49,
+    "n_exact": 49,
+    "mismatches": [],
+    "pairs": [
+      {
+        "time": "2026-09-29T23:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-29T23:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T00:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T00:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T01:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T01:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T02:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T03:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T03:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T04:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T04:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T05:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T05:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T06:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T06:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T07:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T07:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T08:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T08:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T09:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T09:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T10:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T10:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T11:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T11:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T12:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T12:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 21.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          21
+        ],
+        "resolver_contract": [
+          21
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T13:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T13:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T14:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 20.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          20
+        ],
+        "resolver_contract": [
+          20
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T14:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T15:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T15:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T16:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 19.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          19
+        ],
+        "resolver_contract": [
+          19
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T16:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T17:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T17:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T18:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T18:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T19:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T19:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T20:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T20:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T21:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 17.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 17.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T21:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 17.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 17.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T22:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 17.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 17.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T22:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 17.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 17.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          17
+        ],
+        "resolver_contract": [
+          17
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T23:20:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-09-30T23:50:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 18.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true
+      }
+    ],
+    "races": [
+      {
+        "observation": "2026-09-30T23:20:00+00:00",
+        "candidate": {
+          "city": "Istanbul",
+          "station": "LTFM",
+          "channel": "mgm_metar",
+          "observed_at": "2026-09-30T23:20:00+00:00",
+          "value": 18.0,
+          "unit": "C",
+          "negative_request_at": "2026-09-30T23:23:30.551440+00:00",
+          "positive_receipt_at": "2026-09-30T23:24:32.197103+00:00",
+          "lag_lower_ms": 210551.44,
+          "lag_upper_ms": 272197.103
+        },
+        "comparators": [
+          {
+            "channel": "awc",
+            "verdict": "OVERLAP",
+            "interval": {
+              "city": "Istanbul",
+              "station": "LTFM",
+              "channel": "awc",
+              "observed_at": "2026-09-30T23:20:00+00:00",
+              "value": 18.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:24:27.711949+00:00",
+              "positive_receipt_at": "2026-09-30T23:25:35.079874+00:00",
+              "lag_lower_ms": 267711.949,
+              "lag_upper_ms": 335079.874
+            }
+          },
+          {
+            "channel": "resolver",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Istanbul",
+              "station": "LTFM",
+              "channel": "resolver",
+              "observed_at": "2026-09-30T23:20:00+00:00",
+              "value": 18.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:25:27.716871+00:00",
+              "positive_receipt_at": "2026-09-30T23:26:35.003436+00:00",
+              "lag_lower_ms": 327716.87100000004,
+              "lag_upper_ms": 395003.43600000005
+            }
+          }
+        ],
+        "paired_value_identity": true
+      },
+      {
+        "observation": "2026-09-30T23:50:00+00:00",
+        "candidate": {
+          "city": "Istanbul",
+          "station": "LTFM",
+          "channel": "mgm_metar",
+          "observed_at": "2026-09-30T23:50:00+00:00",
+          "value": 18.0,
+          "unit": "C",
+          "negative_request_at": "2026-09-30T23:53:46.232199+00:00",
+          "positive_receipt_at": "2026-09-30T23:54:48.448345+00:00",
+          "lag_lower_ms": 226232.19900000002,
+          "lag_upper_ms": 288448.34500000003
+        },
+        "comparators": [
+          {
+            "channel": "awc",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Istanbul",
+              "station": "LTFM",
+              "channel": "awc",
+              "observed_at": "2026-09-30T23:50:00+00:00",
+              "value": 18.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:55:51.870059+00:00",
+              "positive_receipt_at": "2026-09-30T23:56:50.769804+00:00",
+              "lag_lower_ms": 351870.059,
+              "lag_upper_ms": 410769.804
+            }
+          },
+          {
+            "channel": "resolver",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Istanbul",
+              "station": "LTFM",
+              "channel": "resolver",
+              "observed_at": "2026-09-30T23:50:00+00:00",
+              "value": 18.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:55:52.024552+00:00",
+              "positive_receipt_at": "2026-09-30T23:56:51.478385+00:00",
+              "lag_lower_ms": 352024.552,
+              "lag_upper_ms": 411478.385
+            }
+          }
+        ],
+        "paired_value_identity": true
+      }
+    ],
+    "required_speed_comparators": [
+      "awc",
+      "resolver"
+    ],
+    "verdict": "VALUE_IDENTICAL_FASTER_OBSERVED",
+    "first_proven_lead": {
+      "observation": "2026-09-30T23:50:00+00:00",
+      "candidate": {
+        "city": "Istanbul",
+        "station": "LTFM",
+        "channel": "mgm_metar",
+        "observed_at": "2026-09-30T23:50:00+00:00",
+        "value": 18.0,
+        "unit": "C",
+        "negative_request_at": "2026-09-30T23:53:46.232199+00:00",
+        "positive_receipt_at": "2026-09-30T23:54:48.448345+00:00",
+        "lag_lower_ms": 226232.19900000002,
+        "lag_upper_ms": 288448.34500000003
+      },
+      "comparators": [
+        {
+          "channel": "awc",
+          "verdict": "FASTER",
+          "interval": {
+            "city": "Istanbul",
+            "station": "LTFM",
+            "channel": "awc",
+            "observed_at": "2026-09-30T23:50:00+00:00",
+            "value": 18.0,
+            "unit": "C",
+            "negative_request_at": "2026-09-30T23:55:51.870059+00:00",
+            "positive_receipt_at": "2026-09-30T23:56:50.769804+00:00",
+            "lag_lower_ms": 351870.059,
+            "lag_upper_ms": 410769.804
+          }
+        },
+        {
+          "channel": "resolver",
+          "verdict": "FASTER",
+          "interval": {
+            "city": "Istanbul",
+            "station": "LTFM",
+            "channel": "resolver",
+            "observed_at": "2026-09-30T23:50:00+00:00",
+            "value": 18.0,
+            "unit": "C",
+            "negative_request_at": "2026-09-30T23:55:52.024552+00:00",
+            "positive_receipt_at": "2026-09-30T23:56:51.478385+00:00",
+            "lag_lower_ms": 352024.552,
+            "lag_upper_ms": 411478.385
+          }
+        }
+      ],
+      "paired_value_identity": true
+    }
+  }
+]

@@ -101,10 +101,14 @@ def main():
     from src.data.day0_fast_obs import KMA_PRIORITY_STATIONS
     current_natives=defaultdict(set)
     aliases={'jma_amedas':'jma_amedas','eccc_swob':'eccc_swob',
-             'metaviatelecom_metar':'metaviatelecom_display','imd_olbs_metar':'imd_olbs_metar'}
+             'metaviatelecom_metar':'metaviatelecom_display','imd_olbs_metar':'imd_olbs_metar','mgm_metar':'mgm_metar'}
     for route in c.load_physical_current_sources()[0]:
         if route.settlement_grade and route.provider in aliases:
             current_natives[route.station_id].add(aliases[route.provider])
+        if route.provider == 'wu_station_current':
+            # Missing timing for the current endpoint cannot be replaced by a
+            # comparison against the slower station-history resolver.
+            current_natives[route.station_id].add('wu_station_current')
     for station in KMA_PRIORITY_STATIONS:current_natives[station].add('kma_amo_raw_metar')
     report=[]
     for (sid,ch),clocks in sorted(groups.items()):
@@ -120,7 +124,7 @@ def main():
             if (st,channel)!=(sid,ch):continue
             native=min(bs,key=lambda x:x['positive_receipt_at'])
             rr={'observation':stamp,'candidate':native,'comparators':[]}
-            for name in ['awc','resolver','jma_amedas','eccc_swob','kma_amo_raw_metar','hko_native_csv','metaviatelecom_display','imd_olbs_metar']:
+            for name in ['awc','resolver','jma_amedas','eccc_swob','kma_amo_raw_metar','hko_native_csv','metaviatelecom_display','imd_olbs_metar','mgm_metar','wu_station_current']:
                 if name==ch:continue
                 peer=bounds.get((sid,name,stamp),[])
                 if not peer:continue
@@ -129,7 +133,7 @@ def main():
                 rr['comparators'].append({'channel':name,'verdict':verdict,'interval':earliest})
             if rr['comparators']:races.append(rr)
         bad=[x for x in pairs if not x['match']]
-        required=({'awc'} if (sid,'awc') in groups else {reference_channel}) | current_natives[sid]
+        required={reference_channel} | ({'awc'} if (sid,'awc') in groups else set()) | current_natives[sid]
         required.discard(ch)
         paired_match_times={p['time'] for p in pairs if p['match']}
         for race in races:
