@@ -871,7 +871,7 @@ test_trust_policy:
     tests/test_bayes_precision_fusion_covariance_falls_back_to_diag_when_common_dates_low.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: date-intersection too short -> collapse to diagonal C0 (PARSIMONY rule)"}
     tests/test_anchor_history_product_matches_live_anchor_or_bridge_required.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 3 RT: anchor prior must match live 9km product or go through explicit ifs025->ifs9 bridge"}
     tests/test_ecmwf_ifs025_previous_runs_cannot_label_as_ecmwf_ifs9_without_bridge.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 3 RT: 025 previous-runs history must be bridged before becoming 9km anchor prior"}
-    tests/test_openmeteo_cell_selection_and_elevation_are_product_identity.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 RT: cell_selection + elevation/downscaling are first-class product identity and must be persisted"}
+    tests/test_openmeteo_cell_selection_and_elevation_are_product_identity.py: {created: "2026-06-08", last_used: "2026-09-30", note: "Product identity, normal immutable local transport, and actual selected-seed daemon bootstrap to fresh private public H/L; source clocks and older raw/sidecars remain immutable."}
     tests/test_openmeteo_request_params_persisted.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 RT: BAYES_PRECISION_FUSION download writer must persist Open-Meteo request params so every stored forecast is reconstructable"}
     tests/test_raw_model_forecasts_requires_product_identity.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 RT: raw_model_forecasts must carry product-identity columns; no provenance -> must not train live-money posterior"}
     tests/test_raw_model_forecasts_rejects_same_key_different_request_hash.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (operator-sharpened) RT: same logical key + DIFFERENT request_url_hash/product_id is REJECTED (RawModelForecastRequestConflict + audit row), never silently INSERT-OR-IGNORE dropped; stale value never silently survives a corrected request"}
@@ -3785,7 +3785,7 @@ test_metadata:
       materially change the returned 2m temperature and are first-class product
       identity. These params must be persisted with every raw_model_forecasts row.
     created: 2026-06-08
-    last_reused_or_audited: 2026-06-08
+    last_reused_or_audited: 2026-09-30
 
   tests/test_station_ground_evidence.py:
     modules: [data]

@@ -379,7 +379,7 @@ def test_normal_float32_ifs9_cell_producer_guard_and_frozen_reader_keep_native_i
     conn.close()
 
 
-def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric, *, city_name="Hong Kong"):
+def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric, *, city_name="Hong Kong", daemon_lane=None):
     """The current-target producer owns this anchor's actual body and frozen O1280."""
     from dataclasses import dataclass
     from tests.test_station_ground_evidence import _setup, _wmd_setup, _archive
@@ -395,6 +395,60 @@ def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric, *, city_name="Hong K
     from src.data.openmeteo_ecmwf_ifs9_precision_guard import evaluate_openmeteo_ecmwf_ifs9_precision_guard
 
     db, *_ = (_wmd_setup if city_name == "Paris" else _setup)(tmp_path, monkeypatch)
+    if daemon_lane is not None:
+        from src.ingest import forecast_live_daemon as daemon
+        from src.data import station_ground_evidence as ground
+        from src.state.schema.v2_schema import apply_canonical_schema
+        with sqlite3.connect(db) as conn:
+            apply_canonical_schema(conn, forecast_tables=True)
+            if daemon_lane=="background":
+                from src.data.replacement_forecast_readiness import SOURCE_ID as replacement_source
+                # This explicitly unlicensed old row only selects the ordinary
+                # background queue. It is never read as probability authority.
+                conn.execute("""INSERT INTO forecast_posteriors(source_id,product_id,data_version,
+                    city,target_date,temperature_metric,source_cycle_time,source_available_at,
+                    computed_at,q_json,posterior_method) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (replacement_source,"test_only_old","old_unlicensed",city_name,"2026-10-01",metric,
+                     "2026-09-29T12:00:00+00:00","2026-09-29T12:05:00+00:00",
+                     "2026-09-29T13:00:00+00:00","{}","TEST_ONLY_UNLICENSED_QUEUE_ROLE"))
+        seed_dir, requests = tmp_path/"bootstrap-seeds",tmp_path/"bootstrap-requests"
+        seed_dir.mkdir()
+        requests.mkdir()
+        cut = datetime(2026,9,29,21,59,59,tzinfo=UTC)
+        seed = {"city":city_name,"target_date":"2026-10-01","temperature_metric":metric,
+            "computed_at":cut.isoformat(),"source_cycle_time":"2026-09-29T12:00:00+00:00",
+            "baseline_source_run_id":"bootstrap-baseline","openmeteo_source_run_id":"bootstrap-anchor",
+            "openmeteo_payload_json":str(tmp_path/"not-yet-acquired-anchor.json"),
+            "precision_metadata_json":str(tmp_path/"not-yet-derived-precision.json"),
+            "bins":[{"bin_id":"25C","lower_c":24.5,"upper_c":25.5}]}
+        cfg={"forecast_db":db,"seed_dir":seed_dir,"request_dir":requests,
+            "seed_processed_dir":tmp_path/"bootstrap-processed","seed_failed_dir":tmp_path/"bootstrap-failed",
+            "processed_dir":tmp_path/"requests-processed","failed_dir":tmp_path/"requests-failed",
+            "raw_manifest_dir":tmp_path/"manifests"}
+        def tick():
+            return (daemon._replacement_forecast_station_revision_fast_lane(cfg) if daemon_lane=="station"
+                else daemon._replacement_forecast_materialize_lane(cfg,lane="background",seed_limit=1))
+        name=(f"Hong_Kong.station-input-revision.{metric}.json" if daemon_lane=="station"
+            else f"Hong_Kong.ordinary.{metric}.json")
+        # A foreign declared namespace cannot bootstrap the actual queue DB.
+        (seed_dir/name).write_text(json.dumps({**seed,"forecast_db":str(tmp_path/"foreign.db")}))
+        tick()
+        assert ground.read_current_station_ground_evidence(db,city=city_name,decision_at="2026-09-29T22:00:00Z") is None
+        assert not list(requests.glob("*.json"))
+        (seed_dir/name).write_text(json.dumps(seed))
+        bootstrap_report=tick()
+        entity=ground.read_current_station_ground_evidence(db,city=city_name,decision_at="2026-09-29T22:00:00Z")
+        assert entity is not None,json.dumps(bootstrap_report)
+        assert ground.read_current_station_ground_evidence(db,city=city_name,decision_at=cut) is None
+        assert not list(requests.glob("*.json"))
+        with sqlite3.connect(db) as conn:
+            oldtuple=tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(entity["artifact_id"],)).fetchone())
+        (seed_dir/name).write_text(json.dumps(seed))
+        tick()
+        with sqlite3.connect(db) as conn:
+            assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(entity["artifact_id"],)).fetchone())==oldtuple
+            if daemon_lane=="background":
+                conn.execute("DELETE FROM forecast_posteriors WHERE posterior_method='TEST_ONLY_UNLICENSED_QUEUE_ROLE'")
     entity = _archive(db, city_name)
     transport, path, _, _, clock, _ = _actual_o1280_static_fixture(tmp_path, monkeypatch)
     # Fixture producer clock precedes actual SQLite INSERT; no old cut is
@@ -451,13 +505,13 @@ def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric, *, city_name="Hong K
     return bound,raw_path,cut,scope
 
 
-def _normal_localproof_recovery(tmp_path, monkeypatch, metric):
+def _normal_localproof_recovery(tmp_path, monkeypatch, metric, *, daemon_lane=None):
     import scripts.download_replacement_forecast_current_targets as producer
     from src.config import runtime_cities_by_name
     from src.data.raw_forecast_artifact_manifest import write_manifest_to_db, read_anchor_local_proof
     from src.data.openmeteo_ecmwf_ifs9_anchor import build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest
 
-    bound, source_path, _, scope = _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric)
+    bound, source_path, _, scope = _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric, daemon_lane=daemon_lane)
     from src.data import openmeteo_ecmwf_ifs9_bucket_transport as transport
     prerequisite = transport.source_geometry_static_prerequisite_reason
     # The prerequisite's definition-time default names the live-relative file.
@@ -512,7 +566,15 @@ def _normal_localproof_recovery(tmp_path, monkeypatch, metric):
     args = dict(forecast_db=scope["forecast_db"], output_dir=output, cycle=cycle, limit=None,
         write_db=True,release_lag_hours=0.,anchor_sigma_c=3.,
         required_scopes=[(city.name,scope["target_date"],metric)],expand_metric_siblings=False)
+    preserved = {}
+    if daemon_lane is not None:
+        legacy_precision = raw_dir/f"openmeteo_precision_{producer._safe_name(city.name)}_{scope['target_date']}_{metric}.json"
+        legacy_manifest = output/f"{original.source_id}.{original.data_version}.{cycle.strftime('%Y%m%dT%H%M%SZ')}.{original.sha256[:12]}.{producer._safe_name(city.name)}.manifest.json"
+        legacy_precision.write_bytes(b'{"old_transport_without_ground":true}\n')
+        producer.write_manifest(original,legacy_manifest)
+        preserved={path:path.read_bytes() for path in (legacy_precision,legacy_manifest,owned_path)}
     report = producer.download_current_target_raw_inputs(**args)
+    assert all(path.read_bytes()==body for path,body in preserved.items())
     assert report["db_artifact_ids"] == [aid], json.dumps(report, default=str)
     assert report["downloaded"]["openmeteo_transport_fetch_count"] == 0
     assert len(report["local_proof_artifact_ids"]) == 1
@@ -663,7 +725,7 @@ def test_frozen_precision_identity_normalizes_only_explicit_same_date_and_instan
             variant in ("date_objects","utc_z","same_offset"))
 
 
-def _normal_owned_anchor_seed_public(tmp_path, monkeypatch, metric, missing_transport, capture_case=None):
+def _normal_owned_anchor_seed_public(tmp_path, monkeypatch, metric, missing_transport, capture_case=None, *, daemon_lane=None):
     """Real local acquisition/seed/public chain; controlled 51 ENS, not GRIB."""
     from src.data import bayes_precision_fusion_download as dl
     from tests.test_replacement_forecast_materializer import _low_revision_authority_conn, _bins, _BaselineBundle, _Evidence
@@ -677,7 +739,7 @@ def _normal_owned_anchor_seed_public(tmp_path, monkeypatch, metric, missing_tran
     from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
     from src.data.replacement_forecast_seed_discovery import held_position_family_priorities as real_held_priorities
 
-    context = _normal_localproof_recovery(tmp_path, monkeypatch, metric)
+    context = _normal_localproof_recovery(tmp_path, monkeypatch, metric, daemon_lane=daemon_lane)
     city, cycle, db = context.city, context.cycle, context.scope["forecast_db"]
     target = datetime.fromisoformat(context.scope["target_date"]).date()
     conn = _low_revision_authority_conn(db, include_legacy_provider_fixtures=False,
@@ -767,9 +829,24 @@ def _normal_owned_anchor_seed_public(tmp_path, monkeypatch, metric, missing_tran
         assert seed["openmeteo_anchor_artifact_id"] == context.aid
         assert seed["openmeteo_source_available_at"] == context.original.source_available_at.isoformat()
         assert datetime.fromisoformat(seed["expires_at"]) <= replacement_readiness_expires_at(cycle)
-        processed,failed,reasons = _prepare_seed_requests_with_connection(seed_dir=seed_dir,
-            seed_processed_dir=tmp_path/f"processed-{label}",seed_failed_dir=tmp_path/f"failed-{label}",request_dir=request_dir,
-            forecast_db=db,forecast_conn=None,limit=1)
+        from src.data.replacement_forecast_live_materialization_queue import _queue_read_only_connection
+        if daemon_lane == "station":
+            from src.ingest import forecast_live_daemon as daemon
+            filename=next(seed_dir.glob("*.json"))
+            station_filename=filename.with_name(f"{filename.stem}.station-input-revision.fresh.json")
+            filename.rename(station_filename)
+            original_seed_bytes=station_filename.read_bytes()
+            report=daemon._replacement_forecast_station_revision_fast_lane({"forecast_db":db,
+                "seed_dir":seed_dir,"request_dir":request_dir,"seed_processed_dir":tmp_path/f"processed-{label}",
+                "seed_failed_dir":tmp_path/f"failed-{label}"})
+            processed,failed,reasons=report["seed_processed_files"],report["seed_failed_files"],report["reason_codes"]
+            assert len(processed)==1 and not failed,json.dumps(report)
+            assert Path(processed[0]).read_bytes()==original_seed_bytes,report
+        else:
+            with _queue_read_only_connection(db) as readonly:
+                processed,failed,reasons = _prepare_seed_requests_with_connection(seed_dir=seed_dir,
+                    seed_processed_dir=tmp_path/f"processed-{label}",seed_failed_dir=tmp_path/f"failed-{label}",request_dir=request_dir,
+                    forecast_db=db,forecast_conn=readonly if daemon_lane else None,limit=1)
         assert len(processed)==1 and not failed, (processed,failed,reasons)
         request = build_materialize_request_dataclass(json.loads(next(request_dir.glob("*.json")).read_text()),base_dir=request_dir)
         assert request.computed_at == at
@@ -922,6 +999,13 @@ def _normal_owned_anchor_seed_public(tmp_path, monkeypatch, metric, missing_tran
 @pytest.mark.parametrize("missing_transport", (None, "precision", "manifest"))
 def test_same_byte_local_proof_normal_seed_materializer_and_public_reset(tmp_path, monkeypatch, metric, missing_transport):
     _normal_owned_anchor_seed_public(tmp_path,monkeypatch,metric,missing_transport)
+
+
+@pytest.mark.parametrize("metric", ("high","low"))
+@pytest.mark.parametrize("lane", ("station","background"))
+def test_daemon_selected_seed_bootstraps_ground_then_fresh_immutable_precision_and_public(tmp_path,monkeypatch,metric,lane):
+    """Actual daemon bootstrap without a request; normal fresh proof/seed/q, no oldcut renewal."""
+    _normal_owned_anchor_seed_public(tmp_path,monkeypatch,metric,None,daemon_lane=lane)
 
 
 @pytest.mark.parametrize("metric",("low","high"))

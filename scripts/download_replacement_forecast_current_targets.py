@@ -25,6 +25,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
+from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 from zoneinfo import ZoneInfo
@@ -64,6 +65,10 @@ from src.data.raw_forecast_artifact_manifest import (  # noqa: E402
     write_manifest,
     write_manifest_to_db,
     write_anchor_local_proof,
+    anchor_precision_transport_path,
+    publish_anchor_precision_transport,
+    anchor_transport_manifest_path,
+    publish_anchor_transport_manifest,
 )
 from src.data.replacement_forecast_current_target_plan import (  # noqa: E402
     ReplacementForecastCurrentTargetPlan,
@@ -862,13 +867,11 @@ def _anchor_local_proof_transport(
             owned.name == f"{expected_body.stem}.geometry-{suffix}.json"
             and len(suffix) == 12 and all(c in "0123456789abcdef" for c in suffix))):
         raise ValueError("anchor transport body is outside owned cycle path")
-    precision_path = raw_dir / f"openmeteo_precision_{_safe_name(city)}_{target_date}_{metric}.json"
-    manifest_path = raw_dir.parent / (
-        f"{OPENMETEO_SOURCE_ID}.{body['data_version']}.{cycle.strftime('%Y%m%dT%H%M%SZ')}."
-        f"{body['sha256'][:12]}.{_safe_name(city)}.manifest.json"
-    )
+    precision_path = anchor_precision_transport_path(owned, local.precision_metadata)
     metadata = {**json.loads(body["artifact_metadata_json"]),
         "openmeteo_payload_json": str(owned), "precision_metadata_json": str(precision_path)}
+    metadata["source_run_id"] = metadata.get("source_run_id") or (
+        f"raw:{body['source_id']}:{body['data_version']}:{cycle.astimezone(UTC).isoformat()}")
     manifest = RawForecastArtifactManifest(
         source_id=body["source_id"], product_id=body["product_id"], data_version=body["data_version"],
         artifact_path=str(owned), sha256=body["sha256"], byte_size=body["byte_size"],
@@ -877,6 +880,7 @@ def _anchor_local_proof_transport(
         request_params=json.loads(body["request_params_json"]), product_metadata=metadata,
     )
     manifest.verify_artifact()
+    manifest_path = anchor_transport_manifest_path(manifest, raw_dir.parent)
     # Validate every existing file before publishing anything. An existing
     # corrupt/new truth is never overwritten using an older frozen proof.
     missing: list[tuple[Path, object]] = []
@@ -890,6 +894,9 @@ def _anchor_local_proof_transport(
             raise ValueError("anchor transport path is not a regular file")
         actual = json.loads(path.read_bytes())
         if path == precision_path:
+            if path.read_bytes() != json.dumps(dict(local.precision_metadata), sort_keys=True,
+                    separators=(",", ":"), allow_nan=False).encode():
+                raise ValueError("anchor transport precision bytes differ from frozen proof")
             if anchor_precision_metadata_identity(OpenMeteoIfs9PrecisionMetadata(**actual)) != anchor_precision_metadata_identity(
                 OpenMeteoIfs9PrecisionMetadata(**local.precision_metadata)):
                 raise ValueError("anchor transport precision differs from frozen proof")
@@ -912,7 +919,7 @@ def _anchor_local_proof_transport(
     for path, payload in missing:
         # Publish an fsynced complete file with no replacement. A concurrent
         # writer, symlink or ENOSPC cannot be reported as successful restoration.
-        data = (json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n").encode()
+        data = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
         try:
             with os.fdopen(fd, "wb") as handle:
@@ -1256,6 +1263,9 @@ def _canonical_sibling_payload_reuse(
 
 
 def _write_manifest_file(output_dir: Path, manifest: RawForecastArtifactManifest) -> Path:
+    if (manifest.source_id == OPENMETEO_SOURCE_ID
+            and ".precision-" in str(manifest.product_metadata.get("precision_metadata_json", ""))):
+        return publish_anchor_transport_manifest(manifest, output_dir)
     target = output_dir / (
         f"{manifest.source_id}.{manifest.data_version}."
         f"{manifest.source_cycle_time.strftime('%Y%m%dT%H%M%SZ')}."
@@ -2492,14 +2502,20 @@ def download_current_target_raw_inputs(
                 })
                 mark_processed(target)
                 continue
-            if not payload_is_materializable and base_payload_path.exists():
+            if base_payload_path.exists() and (
+                not payload_is_materializable or base_payload_path.read_bytes() != scoped_bytes
+            ):
                 payload_path = base_payload_path.with_name(
                     f"{base_payload_path.stem}.geometry-{hashlib.sha256(scoped_bytes).hexdigest()[:12]}.json"
                 )
                 if payload_path.exists() and payload_path.read_bytes() != scoped_bytes:
                     raise ValueError("OM9 geometry repair path hash collision")
-            _write_json(payload_path, scoped_payload)
-            _write_json(precision_path, precision)
+            if payload_path.exists():
+                if payload_path.is_symlink() or payload_path.read_bytes() != scoped_bytes:
+                    raise ValueError("OM9 existing body differs from normal scoped bytes")
+            else:
+                _write_json(payload_path, scoped_payload)
+            precision_path = publish_anchor_precision_transport(payload_path, precision)
             downloaded["openmeteo_payload_count"] = (
                 int(downloaded["openmeteo_payload_count"]) + 1
             )
@@ -2569,13 +2585,29 @@ def download_current_target_raw_inputs(
             # artifact is left to write_manifest_to_db's verify to raise (not re-pinned).
             if not manifest_matches_artifact(manifest) and Path(manifest.artifact_path).exists():
                 manifest = repin_manifest_from_file(manifest)
-            manifest_path = _write_manifest_file(output_dir, manifest)
-            written_manifests.append(str(manifest_path))
             if conn is not None:
                 artifact_id = write_manifest_to_db(
                     conn, manifest, verify_artifact=True, repin_on_drift=True,
                 )
                 db_artifact_ids.append(artifact_id)
+                # Same-body reuse retains the canonical run, even when this
+                # local transport adds newly possessed precision. A transport
+                # label cannot create a new provider issue or source run.
+                if manifest.source_id == OPENMETEO_SOURCE_ID:
+                    cursor = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(artifact_id,))
+                    canonical = dict(zip((column[0] for column in cursor.description),cursor.fetchone()))
+                    metadata = json.loads(canonical["artifact_metadata_json"])
+                    original_run = metadata.get("source_run_id") or (
+                        f"raw:{manifest.source_id}:{manifest.data_version}:"
+                        f"{datetime.fromisoformat(canonical['source_cycle_time'].replace('Z','+00:00')).astimezone(UTC).isoformat()}")
+                    manifest = replace(manifest,
+                        source_cycle_time=datetime.fromisoformat(canonical["source_cycle_time"].replace("Z","+00:00")),
+                        source_available_at=datetime.fromisoformat(canonical["source_available_at"].replace("Z","+00:00")),
+                        captured_at=datetime.fromisoformat(canonical["captured_at"].replace("Z","+00:00")),
+                        request_url=canonical["request_url"],request_params=json.loads(canonical["request_params_json"]),
+                        product_metadata={**metadata,"source_run_id":original_run,
+                            "openmeteo_payload_json":manifest.artifact_path,
+                            "precision_metadata_json":manifest.product_metadata["precision_metadata_json"]})
                 # A same-byte row retains its original path, metadata and first
                 # clocks. Freeze this actual producer's independently possessed
                 # body/precision as a separate local dependency, never as HTTP
@@ -2597,6 +2629,8 @@ def download_current_target_raw_inputs(
                     conn, artifact_id, manifest, precision_metadata=precision,
                     deadline_monotonic=deadline_monotonic,
                 ))
+            manifest_path = _write_manifest_file(output_dir, manifest)
+            written_manifests.append(str(manifest_path))
         if conn is not None:
             conn.commit()
     except Exception:

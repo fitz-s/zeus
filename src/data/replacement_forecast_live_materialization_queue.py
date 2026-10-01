@@ -5510,6 +5510,21 @@ def _prepare_seed_requests_with_connection(
                 failed.append(str(moved))
                 actionable_count += 1
                 continue
+            # Both daemon lanes reach this bounded, validated family before
+            # building a request. Acquired metadata is not canonical possession
+            # until this ordinary producer archives it; an older seed cut stays
+            # older and must be replaced by the normal publisher, never restamped.
+            if (forecast_db is not None and seed.get("forecast_db") is not None
+                    and Path(str(seed["forecast_db"])).resolve() != Path(forecast_db).resolve()):
+                raise ValueError("REPLACEMENT_SEED_FORECAST_DB_NAMESPACE_MISMATCH")
+            if (forecast_db is not None and (seed.get("forecast_db") is None
+                    or Path(str(seed["forecast_db"])).resolve() == Path(forecast_db).resolve())):
+                from src.data.station_ground_evidence import archive_station_ground_evidence
+                claim = _active_claim_read_deadline()
+                archive_station_ground_evidence(Path(forecast_db), (str(seed["city"]),),
+                    deadline_monotonic=None if claim is None else claim.deadline_monotonic)
+                if forecast_conn is not None and forecast_conn.in_transaction:
+                    forecast_conn.rollback()  # end the old read snapshot, not a write
             # UPGRADE RE-SEED BYPASS (Task #32, 2026-06-11): a seed written by the fusion-upgrade
             # trigger (upgrade_trigger="instrument_set_expansion") INTENTIONALLY re-materializes a
             # covered scope — "a tradeable posterior exists" is precisely the state it supersedes
@@ -5611,7 +5626,13 @@ def _prepare_seed_requests_with_connection(
                 processed.append(str(moved))
                 actionable_count += 1
                 continue
-            result = build_replacement_forecast_materialization_request(seed, base_dir=seed_json.parent)
+            request_seed = dict(seed)
+            if forecast_conn is not None:
+                from src.data.raw_forecast_artifact_manifest import anchor_local_proof_seed_transport
+                transport = anchor_local_proof_seed_transport(forecast_conn, seed, base_dir=seed_json.parent)
+                if transport is not None:
+                    request_seed.update(transport)
+            result = build_replacement_forecast_materialization_request(request_seed, base_dir=seed_json.parent)
             if not result.ok or result.request is None:
                 moved = _move_request(seed_json, failed_path)
                 _write_sidecar(

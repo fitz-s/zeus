@@ -215,6 +215,57 @@ def _read_local(conn, original_id, manifest, decision_at):
 
 
 @pytest.mark.parametrize("data_version", (HIGH_DATA_VERSION, LOW_DATA_VERSION))
+def test_seed_local_transport_binds_original_cycle_run_cut_and_immutable_precision(tmp_path, data_version):
+    conn, original_id, original, candidate, precision = _local_proof_case(tmp_path, data_version)
+    day = original.product_metadata["target_date"]
+    start = datetime.fromisoformat(day).replace(tzinfo=timezone.utc) - timedelta(hours=5)
+    precision.update(station_id="OPKC", city_lat=24.9, city_lon=67.1, station_lat=24.9,
+        station_lon=67.1, requested_coordinate_precision_decimals=4, nearest_grid_distance_km=0.,
+        native_grid="O1280", delivery_grid_resolution="native", interpolation_method="nearest",
+        endpoint_mode="standard", local_day_start_utc=start.isoformat(),
+        local_day_end_utc=(start+timedelta(days=1)).isoformat(), temperature_unit="C",
+        anchor_sigma_c=3., grid_elevation_m=12., station_elevation_m=12., land_sea_mask="land",
+        city_class="inland", station_mapping_policy="same_station")
+    # Same target/body, two real source issues: body SHA alone is not run identity.
+    later_cycle = original.source_cycle_time + timedelta(hours=6)
+    later = replace(original, source_cycle_time=later_cycle,
+        source_available_at=later_cycle+timedelta(minutes=5), captured_at=later_cycle+timedelta(minutes=5),
+        request_params={**original.request_params, "run": later_cycle.strftime("%Y-%m-%dT%H:%M")})
+    later_id = write_manifest_to_db(conn, later)
+    conn.commit()
+    for oid, manifest in ((original_id, candidate), (later_id, replace(later, artifact_path=candidate.artifact_path))):
+        conn.execute("BEGIN IMMEDIATE")
+        manifest_module.write_anchor_local_proof(conn, oid, manifest, precision_metadata=precision)
+        conn.commit()
+    path = manifest_module.publish_anchor_precision_transport(candidate.artifact_path, precision)
+    before = path.stat().st_mtime_ns, path.read_bytes()
+    assert manifest_module.publish_anchor_precision_transport(candidate.artifact_path, precision) == path
+    assert (path.stat().st_mtime_ns, path.read_bytes()) == before
+    for oid, manifest in ((original_id, original), (later_id, later)):
+        seed = {"city":"Karachi", "target_date":day, "temperature_metric":original.product_metadata["metric"],
+            "openmeteo_payload_json":candidate.artifact_path, "computed_at":datetime.now(timezone.utc).isoformat(),
+            "openmeteo_source_cycle_time":manifest.source_cycle_time.isoformat(),
+            "openmeteo_source_run_id":f"raw:{SOURCE_ID}:{data_version}:{manifest.source_cycle_time.isoformat()}",
+            "openmeteo_anchor_artifact_id":oid}
+        transport = manifest_module.anchor_local_proof_seed_transport(conn, seed, base_dir=tmp_path)
+        assert transport == {"openmeteo_payload_json":candidate.artifact_path, "precision_metadata_json":str(path)}
+        assert manifest_module.anchor_local_proof_seed_transport(conn,
+            {**seed,"openmeteo_anchor_artifact_id":None},base_dir=tmp_path) == transport
+        assert manifest_module.anchor_local_proof_seed_transport(conn,
+            {**seed,"computed_at":manifest.captured_at.isoformat()},base_dir=tmp_path) is None
+        for key, value in (("openmeteo_source_run_id","foreign-run"),
+                           ("openmeteo_source_cycle_time",(later_cycle+timedelta(hours=6)).isoformat())):
+            with pytest.raises(ValueError, match="seed_original_cycle_run_mismatch"):
+                manifest_module.anchor_local_proof_seed_transport(conn,{**seed,key:value},base_dir=tmp_path)
+    path.write_bytes(before[1]+b" ")
+    with pytest.raises(ValueError,match="precision_transport_changed_or_missing"):
+        manifest_module.anchor_local_proof_seed_transport(conn,seed,base_dir=tmp_path)
+    with pytest.raises(ValueError,match="sealed_file_changed"):
+        manifest_module.publish_anchor_precision_transport(candidate.artifact_path,precision)
+    conn.close()
+
+
+@pytest.mark.parametrize("data_version", (HIGH_DATA_VERSION, LOW_DATA_VERSION))
 def test_explicit_local_proof_new_path_and_precision_only_at_new_cut(tmp_path, data_version):
     conn, original_id, original, candidate, precision = _local_proof_case(tmp_path, data_version)
     before = dict(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?", (original_id,)).fetchone())

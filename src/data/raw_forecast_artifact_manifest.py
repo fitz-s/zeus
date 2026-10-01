@@ -518,6 +518,96 @@ class AnchorLocalProofEvidence:
     recorded_at: datetime
 
 
+def anchor_precision_transport_path(body_path: Path | str, precision: Mapping[str, Any]) -> Path:
+    """Content-bound local transport; its bytes are not a new HTTP capture."""
+    from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata
+    from src.data.replacement_forecast_cycle_policy import anchor_precision_metadata_identity
+    identity = anchor_precision_metadata_identity(OpenMeteoIfs9PrecisionMetadata(**dict(precision)))
+    digest = hashlib.sha256(_proof_json(identity)).hexdigest()
+    body = Path(body_path)
+    return body.with_name(f"{body.stem}.precision-{digest}.json")
+
+
+def publish_anchor_precision_transport(body_path: Path | str, precision: Mapping[str, Any]) -> Path:
+    """Normal producer publishes complete immutable bytes, never an old sidecar UPDATE."""
+    path = anchor_precision_transport_path(body_path, precision)
+    _write_local_proof_file(path, _proof_json(dict(precision)))
+    return path
+
+
+def anchor_transport_manifest_path(manifest: RawForecastArtifactManifest, output_dir: Path) -> Path:
+    precision = Path(str(manifest.product_metadata["precision_metadata_json"]))
+    digest = precision.stem.rsplit(".precision-", 1)[-1]
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise _proof_error("precision_transport_identity")
+    city = str(manifest.product_metadata["city"]).replace("/", "_").replace(" ", "_")
+    return output_dir / (f"{manifest.source_id}.{manifest.data_version}."
+        f"{manifest.source_cycle_time.strftime('%Y%m%dT%H%M%SZ')}.{manifest.sha256[:12]}."
+        f"{city}.precision-{digest}.manifest.json")
+
+
+def publish_anchor_transport_manifest(manifest: RawForecastArtifactManifest, output_dir: Path) -> Path:
+    path = anchor_transport_manifest_path(manifest, output_dir)
+    _write_local_proof_file(path, _proof_json(manifest.to_dict()))
+    return path
+
+
+def anchor_local_proof_seed_transport(
+    conn: sqlite3.Connection, seed: Mapping[str, Any], *, base_dir: Path,
+) -> Mapping[str, str] | None:
+    """Select exact canonical local proof at the original seed cut, without writes."""
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SOURCE_ID, PRODUCT_ID, HIGH_DATA_VERSION, LOW_DATA_VERSION
+    path = Path(str(seed["openmeteo_payload_json"]))
+    path = path if path.is_absolute() else base_dir / path
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > _LOCAL_BODY_MAX_BYTES:
+        raise _proof_error("seed_body_path")
+    raw = path.read_bytes()
+    metric = str(seed["temperature_metric"])
+    version = HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
+    rows = conn.execute("""SELECT artifact_id, source_cycle_time, artifact_metadata_json FROM raw_forecast_artifacts
+        WHERE source_id=? AND product_id=? AND data_version=? AND sha256=? AND byte_size=?
+          AND json_valid(artifact_metadata_json)
+          AND json_extract(artifact_metadata_json,'$.city')=?
+          AND json_extract(artifact_metadata_json,'$.target_date')=?
+          AND json_extract(artifact_metadata_json,'$.metric')=?""",
+        (SOURCE_ID, PRODUCT_ID, version, hashlib.sha256(raw).hexdigest(), len(raw),
+         seed["city"], seed["target_date"], metric)).fetchall()
+    if not rows:
+        return None
+    declared = seed.get("openmeteo_anchor_artifact_id")
+    anchor_cycle = seed.get("openmeteo_source_cycle_time")
+    if not anchor_cycle:
+        return None  # the original builder retains the legacy seed contract
+    cycle = _parse_utc(anchor_cycle, field_name="openmeteo_source_cycle_time")
+    matches = []
+    for row in rows:
+        artifact_id, row_cycle, metadata_json = tuple(row)
+        metadata = json.loads(metadata_json)
+        canonical_cycle = _parse_utc(row_cycle, field_name="source_cycle_time")
+        run = metadata.get("source_run_id") or f"raw:{SOURCE_ID}:{version}:{canonical_cycle.isoformat()}"
+        if (canonical_cycle == cycle
+                and run == seed.get("openmeteo_source_run_id")
+                and (declared is None or not isinstance(declared, bool) and artifact_id == declared)):
+            matches.append(artifact_id)
+    if not matches:
+        raise _proof_error("seed_original_cycle_run_mismatch")
+    if len(matches) != 1:
+        raise _proof_error("seed_original_ambiguous")
+    original_id = int(matches[0])
+    local = read_anchor_local_proof(conn, original_id, city=str(seed["city"]),
+        target_date=str(seed["target_date"]), metric=metric, decision_at=seed["computed_at"])
+    if local is None:
+        return None
+    if path.resolve() not in {Path(str(local.original_body_artifact["artifact_path"])).resolve(),
+                             Path(str(local.owned_body["path"])).resolve()}:
+        raise _proof_error("seed_body_foreign")
+    precision = anchor_precision_transport_path(local.owned_body["path"], local.precision_metadata)
+    if precision.is_symlink() or not precision.is_file() or precision.read_bytes() != _proof_json(dict(local.precision_metadata)):
+        raise _proof_error("precision_transport_changed_or_missing")
+    return {"openmeteo_payload_json": str(local.owned_body["path"]),
+            "precision_metadata_json": str(precision)}
+
+
 def _proof_error(reason: str) -> ValueError:
     return ValueError(f"anchor_local_proof:{reason}")
 

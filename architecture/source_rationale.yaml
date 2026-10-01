@@ -475,12 +475,14 @@ files:
   src/data/raw_forecast_artifact_manifest.py:
     zone: K2_runtime
     authority_role: replacement_raw_manifest_schema
-    why: Enforces the immutable raw-artifact manifest schema and exposes typed unsupported-field evidence. Current readers stay fail-closed on unknown top-level fields while bounded inventory compatibility may identify the one retired authority stamp without accepting it as current input. Explicit local-proof append and as-of replay use registered exact anchor request, family and original owned bytes in the same canonical transaction. Complete frontier commitments stream bounded batches without a total-row gate; local possession cannot renew original body/source clocks, claim HTTP acquisition or grant posterior authority. Normal caller, HWM and public RESET remain separate obligations.
+    why: Enforces the immutable raw-artifact manifest schema and exposes typed unsupported-field evidence. Current readers stay fail-closed on unknown top-level fields while bounded inventory compatibility may identify the one retired authority stamp without accepting it as current input. Explicit local-proof append and as-of replay use registered exact anchor request, family and original owned bytes in the same canonical transaction. Complete frontier commitments stream bounded batches without a total-row gate; local possession cannot renew original body/source clocks, claim HTTP acquisition or grant posterior authority. Its shared transport identity binds the complete precision and immutable manifest; the selected-seed reader verifies canonical original ID, independent anchor cycle/run, family, bytes and decision cut before using a newly possessed path in memory. Normal caller, HWM and public RESET remain separate obligations.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
     - src/data/replacement_forecast_seed_discovery.py
     - src/data/replacement_forecast_production.py
+    - src/data/replacement_forecast_live_materialization_queue.py
+    - scripts/download_replacement_forecast_current_targets.py
   src/data/replacement_forecast_seed_discovery.py:
     zone: K2_runtime
     authority_role: replacement_forecast_seed_discovery
