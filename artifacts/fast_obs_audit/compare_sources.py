@@ -7,7 +7,7 @@ from __future__ import annotations
 import csv
 from collections import defaultdict
 from datetime import datetime
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal
 import hashlib
 import gzip
 import json
@@ -17,6 +17,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from src.config import cities
+from src.contracts.settlement_semantics import SettlementSemantics
 
 HERE = Path(__file__).resolve().parent
 INPUTS = (
@@ -24,15 +25,20 @@ INPUTS = (
     HERE/'recovered/measurements_late_samples.json',
     HERE/'resume_measurements/samples.json',
 )
+# Value-only pair audits retained without first-seen clocks: (city, channel) ->
+# file of {time, candidate, resolver} in the city's settlement unit. They add
+# value pairs, never availability timing or sample rows.
+VALUE_PAIR_AUDITS = {('Toronto','eccc'): HERE/'recovered/eccc_expanded_identity.json'}
 
 def stamp(value):
     return datetime.fromisoformat(value.replace('Z','+00:00'))
 
-def contract_value(value, unit, target_unit):
+def contract_value(value, unit, city):
+    """The city's settlement integer for one reading, via the contract's own law."""
     number = Decimal(str(value))
-    if unit != target_unit:
-        number = number * Decimal(9)/5 + 32 if target_unit == 'F' else (number-32)*5/9
-    return int((number + Decimal('0.5')).to_integral_value(rounding=ROUND_FLOOR))
+    if unit != city.settlement_unit:
+        number = number * Decimal(9)/5 + 32 if city.settlement_unit == 'F' else (number-32)*5/9
+    return int(SettlementSemantics.for_city(city).round_single(float(number)))
 
 def main():
     by_city={city.name: city for city in cities}
@@ -80,12 +86,12 @@ def main():
             resolver=last.get((city,'resolver',when))
             if resolver is None:
                 unpaired.append(when);continue
-            candidate_values=sorted({contract_value(r['value'],r['unit'],c.settlement_unit)
+            candidate_values=sorted({contract_value(r['value'],r['unit'],c)
                                     for r in stream[(city,ch,when)]})
-            resolver_values=sorted({contract_value(r['value'],r['unit'],c.settlement_unit)
+            resolver_values=sorted({contract_value(r['value'],r['unit'],c)
                                    for r in stream[(city,'resolver',when)]})
-            a=contract_value(candidate['value'],candidate['unit'],c.settlement_unit)
-            b=contract_value(resolver['value'],resolver['unit'],c.settlement_unit)
+            a=contract_value(candidate['value'],candidate['unit'],c)
+            b=contract_value(resolver['value'],resolver['unit'],c)
             pair={'city':city,'channel':ch,'station':c.wu_station,'time':when,
                   'candidate_raw':candidate['value'],'candidate_unit':candidate['unit'],
                   'candidate_contract':a,'resolver_raw':resolver['value'],
@@ -93,17 +99,15 @@ def main():
                   'candidate_versions':candidate_values,'resolver_versions':resolver_values}
             compared.append(pair);pairs.append(pair)
             if len(candidate_values)>1 or len(resolver_values)>1: corrected.append(pair)
-        if (city,ch)==('Toronto','eccc'):
-            # Independently retained five-hour native-SWOB/WRH pair audit from
-            # the interrupted turn. It lacks first-seen clocks, so contributes
-            # value pairs only, never availability timing or fake sample rows.
-            evidence=HERE/'recovered/eccc_expanded_identity.json'
+        evidence=VALUE_PAIR_AUDITS.get((city,ch))
+        if evidence is not None:
+            unit=c.settlement_unit
             for old in json.loads(evidence.read_text())['pairs']:
                 if any(r['time']==old['time'] for r in compared): continue
-                a=contract_value(old['candidate'],'C','C');b=contract_value(old['resolver'],'C','C')
+                a=contract_value(old['candidate'],unit,c);b=contract_value(old['resolver'],unit,c)
                 pair={'city':city,'channel':ch,'station':c.wu_station,'time':old['time'],
-                    'candidate_raw':old['candidate'],'candidate_unit':'C','candidate_contract':a,
-                    'resolver_raw':old['resolver'],'resolver_unit':'C','resolver_contract':b,'match':a==b,
+                    'candidate_raw':old['candidate'],'candidate_unit':unit,'candidate_contract':a,
+                    'resolver_raw':old['resolver'],'resolver_unit':unit,'resolver_contract':b,'match':a==b,
                     'candidate_versions':[a],'resolver_versions':[b],
                     'source_pair_audit_sha256':hashlib.sha256(evidence.read_bytes()).hexdigest()}
                 compared.append(pair);pairs.append(pair)

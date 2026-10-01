@@ -692,3 +692,17 @@ def test_target_plan_authorizes_only_settlement_roles():
         "jma_amedas", "eccc_swob", "imd_olbs_metar", "mgm_metar", "wu_station_history", "noaa_wrh"}
     assert all(r.role is SourceRole.PHYSICAL_ONLY for r in routes
                if r.provider in {"fmi_wfs", "imgw_synop", "dwd_cdc", "knmi_observations", "wu_station_current"})
+
+
+def test_audit_reducer_rounds_through_settlement_semantics():
+    import importlib.util
+    from src.config import cities_by_name
+    path = REGISTRY_PATH.parents[1] / "artifacts/fast_obs_audit/compare_sources.py"
+    spec = importlib.util.spec_from_file_location("compare_sources_audit", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    hko, toronto = cities_by_name["Hong Kong"], cities_by_name["Toronto"]
+    assert module.contract_value(28.7, "C", hko) == 28  # oracle_truncate, not half-up
+    assert module.contract_value(-0.5, "C", toronto) == 0  # WMO half-up toward +inf
+    assert module.contract_value(-1.5, "C", toronto) == -1
+    assert module.contract_value(18.5, "C", toronto) == 19
