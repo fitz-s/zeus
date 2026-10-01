@@ -2577,16 +2577,98 @@ def test_global_current_state_rejects_resealed_missing_execution_mode():
     ) == "current_state:global_execution_mode"
 
 
-def test_global_current_state_rejects_superseded_selection_revision():
-    cert = _global_current_qkernel_cert(side="NO")
-    cert["global_selection_revision"] = (
-        "global_single_order_posterior_mean_expected_growth_v1"
-    )
-    _seal_current_qkernel_cert(cert)
+_PRIOR_SELECTION_REVISION = (
+    "global_single_order_calibrated_q_continuous_maker_prefix_v6"
+)
 
+
+def _prior_law_sealed_cert() -> dict:
+    """A winner sealed under the selection law in force before the v7 bump."""
+
+    cert = _global_current_qkernel_cert(side="NO")
+    cert["global_selection_revision"] = _PRIOR_SELECTION_REVISION
+    _seal_current_qkernel_cert(cert)
+    return cert
+
+
+def test_sealed_prior_law_certificate_still_verifies_after_a_revision_bump():
+    """A sealed certificate is evidence of the law it was sealed under.
+
+    Re-verifying a filled position's entry certificate (recovery, revocation,
+    aggregate replay) checks its own sealed revision, so a bump never turns
+    every open position's authority invalid.
+    """
+
+    from src.decision_kernel import verifier
+
+    cert = _prior_law_sealed_cert()
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert, direction="buy_no",
+    ) is None
+    assert verifier._current_state_solve_payload(
+        {
+            "direction": "buy_no",
+            "selection_authority_applied": "qkernel_spine",
+            "qkernel_execution_economics": cert,
+        }
+    ) is True
+
+
+def test_admission_refuses_a_winner_sealed_under_a_superseded_law():
+    """New risk is admitted only under the current selection law."""
+
+    cert = _prior_law_sealed_cert()
     assert era.qkernel_global_current_state_rejection_reason(
         cert,
         direction="buy_no",
+        admitted_selection_revision=CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    ) == "global_selection_revision"
+    assert era._global_current_state_execution_economics_rejection_reason(
+        cert, direction="buy_no",
+    ) == "global_selection_revision"
+    assert era._valid_selected_qkernel_execution_economics_payload(
+        cert, direction="buy_no",
+    ) is None
+    current = _global_current_qkernel_cert(side="NO")
+    _seal_current_qkernel_cert(current)
+    assert era._global_current_state_execution_economics_rejection_reason(
+        current, direction="buy_no",
+    ) is None
+
+
+def test_admission_sites_name_the_current_law_and_reverification_does_not():
+    import inspect
+
+    from src.decision_kernel import canonicalization, verifier
+    from src.engine import event_bound_final_intent
+    from src.events import live_order_aggregate, opportunity_book
+    from src.execution import executor
+    from src.strategy.live_inference import live_admission
+
+    admits = "admitted_selection_revision=CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION"
+    assert admits in inspect.getsource(
+        era._global_current_state_execution_economics_rejection_reason
+    )
+    assert inspect.getsource(executor._entry_economics_component).count(admits) == 1
+    assert admits in inspect.getsource(executor._current_band_taker_quality_proof_valid)
+    assert admits in inspect.getsource(
+        event_bound_final_intent.conservative_submit_expected_edge
+    )
+    assert admits in inspect.getsource(
+        live_admission.live_buy_no_conservative_evidence_rejection_reason
+    )
+    for module in (verifier, live_order_aggregate, opportunity_book, canonicalization):
+        assert "CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION" not in inspect.getsource(
+            module
+        ), module.__name__
+
+
+def test_a_certificate_without_a_sealed_revision_never_verifies():
+    cert = _global_current_qkernel_cert(side="NO")
+    cert.pop("global_selection_revision")
+    _seal_current_qkernel_cert(cert)
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert, direction="buy_no",
     ) == "global_selection_revision"
 
 

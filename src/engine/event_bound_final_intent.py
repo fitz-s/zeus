@@ -9,6 +9,9 @@ import sqlite3
 from typing import Literal, Mapping
 
 from src.contracts.execution_price import ExecutionPrice
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+)
 from src.decision_kernel.canonicalization import (
     qkernel_global_current_state_rejection_reason,
     stable_hash,
@@ -131,6 +134,7 @@ def conservative_submit_expected_edge(
         and qkernel_global_current_state_rejection_reason(
             economics,
             direction=str(payload.get("direction") or ""),
+            admitted_selection_revision=CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
         )
         is None
     ):

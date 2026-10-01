@@ -53,7 +53,10 @@ from src.contracts.venue_submission_envelope import (
     assert_live_order_unit_price,
     resting_limit_violation,
 )
-from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    GlobalSellReceiptClosure,
+)
 from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
     NO_CURRENT_MONEY_RISK_CHAIN_STATES,
@@ -1298,7 +1301,11 @@ def _current_band_taker_quality_proof_valid(
     mean_action = bool(
         economics.get("global_probability_functional")
         == "POSTERIOR_PREDICTIVE_MEAN"
-        and qkernel_global_current_state_rejection_reason(economics) is None
+        and qkernel_global_current_state_rejection_reason(
+            economics,
+            admitted_selection_revision=CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        )
+        is None
     )
     sample_hash = str(economics.get("sample_hash") or "").strip()
     try:
@@ -1664,6 +1671,7 @@ def _entry_economics_component(
         and qkernel_global_current_state_rejection_reason(
             economics,
             direction=direction,
+            admitted_selection_revision=CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
         )
         is None
         and isinstance(durable_economics, Mapping)

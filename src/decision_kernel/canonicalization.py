@@ -11,10 +11,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
-from src.contracts.global_auction_receipt import (
-    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
-    GlobalAuctionReceiptRef,
-)
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 
 CANONICALIZATION_VERSION = "decision-kernel-json-v1"
@@ -320,8 +317,15 @@ def qkernel_global_current_state_rejection_reason(
     expected_selection_epoch_identity: str | None = None,
     expected_selection_cut_at: str | None = None,
     expected_selection_decision_at: str | None = None,
+    admitted_selection_revision: str | None = None,
 ) -> str | None:
-    """Validate one sealed global winner independent of legacy route fields."""
+    """Validate one sealed global winner independent of legacy route fields.
+
+    A sealed certificate is evidence of the selection law it was sealed under,
+    so re-verification only requires the revision it carries. Admission of new
+    risk passes ``admitted_selection_revision`` (the current law) and refuses a
+    winner sealed under any other.
+    """
 
     current_reason = qkernel_current_state_rejection_reason(economics)
     if current_reason is not None:
@@ -439,9 +443,10 @@ def qkernel_global_current_state_rejection_reason(
             return field
     if economics.get("global_optimum_semantics") != "CUT_TIME_GLOBAL_OPTIMUM":
         return "global_optimum_semantics"
-    if (
-        economics.get("global_selection_revision")
-        != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    sealed_revision = str(economics.get("global_selection_revision") or "").strip()
+    if not sealed_revision or (
+        admitted_selection_revision is not None
+        and sealed_revision != admitted_selection_revision
     ):
         return "global_selection_revision"
     execution_mode = economics.get("global_execution_mode")

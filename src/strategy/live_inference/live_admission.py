@@ -16,6 +16,9 @@ from collections.abc import Mapping
 from src.calibration.settlement_backward_coverage import (
     settlement_coverage_refutes_claim,
 )
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+)
 from src.decision_kernel.canonicalization import (
     qkernel_current_state_rejection_reason,
     qkernel_global_current_state_rejection_reason,
@@ -441,6 +444,7 @@ def live_buy_no_conservative_evidence_rejection_reason(
     global_current_reason = qkernel_global_current_state_rejection_reason(
         qkernel_execution_economics,
         direction=direction,
+        admitted_selection_revision=CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
         expected_candidate_id=candidate_id,
         expected_condition_id=condition_id,
         expected_token_id=token_id,

@@ -7232,11 +7232,12 @@ def _global_current_state_execution_economics_rejection_reason(
     *,
     direction: str | None = None,
 ) -> str | None:
-    """Validate the sealed global winner without legacy route fields."""
+    """Validate the sealed global winner for admission under the current law."""
 
     return qkernel_global_current_state_rejection_reason(
         cert,
         direction=direction,
+        admitted_selection_revision=CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
     )
 
 
