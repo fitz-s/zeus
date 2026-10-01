@@ -1237,6 +1237,180 @@ def _download_replacement_forecast_current_targets_if_needed(
     return result
 
 
+def _newest_covering_anchor_proof_debt(
+    forecast_db: Path,
+    scopes: Sequence[tuple[str, str, str]],
+    *,
+    raw_manifest_dir: Path,
+    decision_time: datetime,
+    deadline_monotonic: float | None,
+) -> dict[datetime, list[tuple[str, str, str]]]:
+    """Scopes whose newest day-covering canonical anchor lacks a local proof.
+
+    A run that starts inside a target's local day cannot cover it, so for such a
+    family the newest covering anchor is an older cycle the available-cycle
+    downloader never revisits. Only a locally witnessed cached body qualifies:
+    its proof is re-derived from those bytes, never fetched.
+    """
+    from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
+        _current_target_payload_file_materializable,
+        _current_target_witnessed_cached_path,
+        _safe_name,
+    )
+    from src.config import cities_by_name  # noqa: PLC0415
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID,
+    )
+    from src.data.raw_forecast_artifact_manifest import read_anchor_local_proof  # noqa: PLC0415
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+
+    debt: dict[datetime, list[tuple[str, str, str]]] = {}
+    conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
+    try:
+        for city, target_date, metric in scopes:
+            _check_source_preflight_deadline(deadline_monotonic)
+            city_cfg = cities_by_name.get(city)
+            if city_cfg is None:
+                continue
+            rows = conn.execute(
+                """
+                SELECT artifact_id, artifact_path, sha256, byte_size, source_cycle_time
+                FROM raw_forecast_artifacts
+                WHERE source_id = ? AND product_id = ?
+                  AND (CASE WHEN json_valid(artifact_metadata_json)
+                            THEN CAST(json_extract(artifact_metadata_json, '$.city') AS TEXT) END) = ?
+                  AND (CASE WHEN json_valid(artifact_metadata_json)
+                            THEN CAST(json_extract(artifact_metadata_json, '$.target_date') AS TEXT) END) = ?
+                  AND (CASE WHEN json_valid(artifact_metadata_json)
+                            THEN CAST(json_extract(artifact_metadata_json, '$.metric') AS TEXT) END) = ?
+                  AND data_version = ?
+                ORDER BY source_cycle_time DESC, artifact_id DESC
+                """,
+                (SOURCE_ID, PRODUCT_ID, city, target_date, metric,
+                 HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION),
+            ).fetchall()
+            for artifact_id, path, sha256, byte_size, raw_cycle in rows:
+                # A proof is written only for a full-local-day body, so the newest
+                # proven anchor already covers the day: nothing to drain.
+                try:
+                    if read_anchor_local_proof(
+                        conn, int(artifact_id), city=city, target_date=target_date,
+                        metric=metric, decision_at=decision_time,
+                        deadline_monotonic=deadline_monotonic,
+                    ) is not None:
+                        break
+                except (ValueError, OSError):
+                    break  # Damaged latest proof stays the producer's explicit debt.
+                cycle = datetime.fromisoformat(str(raw_cycle).replace("Z", "+00:00")).astimezone(timezone.utc)
+                if not _current_target_payload_file_materializable(
+                    Path(str(path)), city_timezone=city_cfg.timezone, target_date=target_date,
+                    cycle=cycle, expected_sha256=str(sha256), expected_byte_size=int(byte_size),
+                ):
+                    continue
+                stamp = cycle.strftime("%Y%m%dT%H%M%SZ")
+                base = (raw_manifest_dir / stamp
+                        / f"openmeteo_{_safe_name(city)}_{target_date}_{metric}_{stamp}.json")
+                witnessed, _block = _current_target_witnessed_cached_path(
+                    base, city=city, target_date=target_date, metric=metric,
+                    city_timezone=city_cfg.timezone, cycle=cycle, anchor_sigma_c=3.0,
+                )
+                if witnessed is not None:
+                    debt.setdefault(cycle, []).append((city, target_date, metric))
+                break  # Newest covering cycle decides; older cycles never drain.
+    finally:
+        conn.close()
+    return debt
+
+
+@_single_current_target_download
+def _drain_newest_covering_anchor_local_proofs_if_needed(
+    cfg: Mapping[str, object],
+    *,
+    max_wall_clock_seconds: float,
+) -> dict[str, object] | None:
+    """Append local proof for reachable families' newest covering anchor.
+
+    SCOPE: reachable families (``family_reachability``) whose newest day-covering
+    canonical anchor has a witnessed cached body but no local proof. DRAIN: the
+    ordinary downloader's same-body reuse path re-derives precision against the
+    current verified ground and appends the proof; no HTTP. RESET: the proof
+    exists, so the scope is skipped on every later tick.
+    """
+    forecast_db = cfg.get("forecast_db")
+    output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
+    if forecast_db is None or output_dir is None:
+        return None
+    from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
+        download_current_target_openmeteo_inputs,
+    )
+    from src.data.family_reachability import build_reachability, family  # noqa: PLC0415
+    from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+        _default_min_target_date,
+        replacement_forecast_current_target_keys,
+    )
+    from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+        held_position_family_priorities,
+    )
+
+    now = datetime.now(timezone.utc)
+    deadline = time.monotonic() + max(0.0, float(max_wall_clock_seconds))
+    forecast_db_path = Path(str(forecast_db))
+    keys = replacement_forecast_current_target_keys(
+        forecast_db_path, min_target_date=_default_min_target_date(now), now_utc=now,
+        require_local_day_not_ended=True, market_root=True, deadline_monotonic=deadline,
+    )
+    scopes = tuple(dict.fromkeys((  # Held exposure drains first.
+        *sorted(held_position_family_priorities(deadline_monotonic=deadline)),
+        *((key.city, key.target_date, key.temperature_metric) for key in keys),
+    )))
+    reachability = build_reachability(now=now)
+    scopes = tuple(scope for scope in scopes if reachability.reachable(family(*scope)))
+    debt = _newest_covering_anchor_proof_debt(
+        forecast_db_path, scopes, raw_manifest_dir=Path(str(output_dir)),
+        decision_time=now, deadline_monotonic=deadline,
+    )
+    report: dict[str, object] = {
+        "status": "ANCHOR_LOCAL_PROOF_DEBT_FOUND" if debt else "ANCHOR_LOCAL_PROOF_CURRENT",
+        "scope_count": len(scopes), "drains": [], "committed_families": (),
+    }
+    committed: list[tuple[str, str, str]] = []
+    # Each call is one write transaction that a deadline rolls back whole, so
+    # each family's proof commits alone and an expired tick keeps the rest.
+    batches = [
+        (cycle, (scope,))
+        for cycle, cycle_scopes in sorted(debt.items(), reverse=True)
+        for scope in cycle_scopes
+    ]
+    for cycle, batch in batches:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            report["status"] = "ANCHOR_LOCAL_PROOF_DRAIN_TIMEBOXED_INCOMPLETE"
+            break
+        try:
+            result = download_current_target_openmeteo_inputs(
+                forecast_db=forecast_db_path, output_dir=Path(str(output_dir)), cycle=cycle,
+                limit=None, write_db=True,
+                release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
+                anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
+                required_scopes=batch, expand_metric_siblings=False,
+                max_wall_clock_seconds=remaining,
+            )
+        except TimeoutError:
+            report["status"] = "ANCHOR_LOCAL_PROOF_DRAIN_TIMEBOXED_INCOMPLETE"
+            break
+        proven = set(_committed_current_target_anchor_scopes(
+            result.get("written_manifests") or (), cycle=cycle,
+        ))
+        committed.extend(scope for scope in batch if scope in proven)
+        report["drains"].append({  # type: ignore[union-attr]
+            "cycle": cycle.isoformat(), "scopes": [list(scope) for scope in batch],
+            "status": result.get("status"),
+            "local_proof_count": len(result.get("local_proof_artifact_ids") or ()),
+        })
+    report["committed_families"] = tuple(committed)
+    return report
+
+
 def _held_legacy_physical_proof_recovery_candidates(
     forecast_db: Path, held_priority: Mapping[tuple[str, str, str], int], *,
     decision_time: datetime, deadline_monotonic: float | None,

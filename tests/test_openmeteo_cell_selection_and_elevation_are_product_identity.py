@@ -505,7 +505,7 @@ def _normal_anchor_only_ifs9(tmp_path, monkeypatch, metric, *, city_name="Hong K
     return bound,raw_path,cut,scope
 
 
-def _normal_localproof_recovery(tmp_path, monkeypatch, metric, *, daemon_lane=None):
+def _normal_localproof_recovery(tmp_path, monkeypatch, metric, *, daemon_lane=None, via_drain=False):
     import scripts.download_replacement_forecast_current_targets as producer
     from src.config import runtime_cities_by_name
     from src.data.raw_forecast_artifact_manifest import write_manifest_to_db, read_anchor_local_proof
@@ -573,7 +573,10 @@ def _normal_localproof_recovery(tmp_path, monkeypatch, metric, *, daemon_lane=No
         legacy_precision.write_bytes(b'{"old_transport_without_ground":true}\n')
         producer.write_manifest(original,legacy_manifest)
         preserved={path:path.read_bytes() for path in (legacy_precision,legacy_manifest,owned_path)}
-    report = producer.download_current_target_raw_inputs(**args)
+    if via_drain:
+        report = _drain_newest_covering_anchor(scope, output, actual_family, cycle, monkeypatch)
+    else:
+        report = producer.download_current_target_raw_inputs(**args)
     assert all(path.read_bytes()==body for path,body in preserved.items())
     assert report["db_artifact_ids"] == [aid], json.dumps(report, default=str)
     assert report["downloaded"]["openmeteo_transport_fetch_count"] == 0
@@ -643,6 +646,45 @@ def _normal_localproof_recovery(tmp_path, monkeypatch, metric, *, daemon_lane=No
 @pytest.mark.parametrize("metric", ("high", "low"))
 def test_normal_anchor_producer_appends_local_proof_for_same_bytes_without_rewriting_original(tmp_path, monkeypatch, metric):
     _normal_localproof_recovery(tmp_path, monkeypatch, metric)
+
+
+def _drain_newest_covering_anchor(scope, output, family_key, cycle, monkeypatch):
+    """Run the ingest-lane drain organ; return its single downloader report."""
+    from src.data import replacement_forecast_production as production
+    from src.data.family_reachability import Reachability
+    import scripts.download_replacement_forecast_current_targets as producer
+
+    monkeypatch.setattr("src.data.replacement_forecast_current_target_plan.replacement_forecast_current_target_keys",
+        lambda *_a, **_k: ())
+    monkeypatch.setattr("src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda **_k: {family_key: 1})
+    reachable = Reachability(oldest_reachable_date="0000-00-00", open_families=frozenset())
+    monkeypatch.setattr("src.data.family_reachability.build_reachability", lambda **_k: reachable)
+    reports = []
+    real = producer.download_current_target_openmeteo_inputs
+    monkeypatch.setattr(producer, "download_current_target_openmeteo_inputs",
+        lambda **kwargs: reports.append(real(**kwargs)) or reports[-1])
+    cfg = {"forecast_db": scope["forecast_db"], "raw_manifest_dir": output}
+    first = production._drain_newest_covering_anchor_local_proofs_if_needed(cfg, max_wall_clock_seconds=60.0)
+    assert first["status"] == "ANCHOR_LOCAL_PROOF_DEBT_FOUND", first
+    assert first["drains"] == [{"cycle": cycle.isoformat(), "scopes": [list(family_key)],
+        "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED", "local_proof_count": 1}]
+    assert first["committed_families"] == (family_key,)
+    # Idempotent: a proven newest covering anchor is never redrained.
+    again = production._drain_newest_covering_anchor_local_proofs_if_needed(cfg, max_wall_clock_seconds=60.0)
+    assert again["status"] == "ANCHOR_LOCAL_PROOF_CURRENT" and len(reports) == 1
+    # Unreachable families are not drained.
+    monkeypatch.setattr("src.data.family_reachability.build_reachability",
+        lambda **_k: Reachability(oldest_reachable_date="9999-12-31", open_families=frozenset()))
+    assert production._drain_newest_covering_anchor_local_proofs_if_needed(
+        cfg, max_wall_clock_seconds=60.0)["scope_count"] == 0
+    return reports[0]
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_newest_covering_anchor_drain_appends_local_proof_once(tmp_path, monkeypatch, metric):
+    """A family whose only covering anchor predates ground proof gains it with no HTTP."""
+    _normal_localproof_recovery(tmp_path, monkeypatch, metric, via_drain=True)
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))

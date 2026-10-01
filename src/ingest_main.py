@@ -4113,6 +4113,7 @@ def _replacement_availability_poll_tick():
         _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed,
         _download_replacement_forecast_current_targets_if_needed,
         _enqueue_cycle_advance_reseeds_if_needed,
+        _drain_newest_covering_anchor_local_proofs_if_needed,
         _enqueue_fusion_upgrade_reseeds_if_needed,
         _recover_held_common_cycle_anchors_if_needed,
         _replacement_forecast_live_materialization_queue_config,
@@ -4296,6 +4297,32 @@ def _replacement_availability_poll_tick():
     except Exception as exc:  # noqa: BLE001 - next source-clock tick retries.
         _log_slow_stage("common_cycle_recovery", _stage_started)
         logger.warning("held common-cycle anchor recovery failed: %s", exc)
+
+    try:
+        # A family whose local day starts before the newest run can only be
+        # covered by an older anchor; prove that anchor from its cached bytes.
+        _stage_started = time.monotonic()
+        proof_drain = _drain_newest_covering_anchor_local_proofs_if_needed(
+            cfg,
+            max_wall_clock_seconds=min(
+                10.0,
+                _replacement_current_target_poll_timeout_seconds(
+                    _replacement_availability_poll_seconds()
+                ),
+            ),
+        )
+        _log_slow_stage("anchor_local_proof_drain", _stage_started)
+        if proof_drain and proof_drain.get("status") != "ANCHOR_LOCAL_PROOF_CURRENT":
+            proven_families = tuple(proof_drain.get("committed_families") or ())
+            if proven_families:
+                _attach_reseed_reports(
+                    proof_drain,
+                    scopes=proven_families,
+                    changed_sources=("ecmwf_ifs",),
+                )
+            logger.info("anchor local-proof drain report: %s", proof_drain)
+    except Exception as exc:  # noqa: BLE001 - next source-clock tick retries.
+        logger.warning("anchor local-proof drain failed: %s", exc)
 
     def _download_current_targets(
         *,
