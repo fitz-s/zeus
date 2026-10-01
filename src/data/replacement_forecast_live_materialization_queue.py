@@ -24,6 +24,7 @@ from typing import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.config import PROJECT_ROOT
+from src.data.versioned_file_read import UnsafeFile, VersionedFileReader
 from src.contracts.replacement_pipeline_files import (
     ContractViolation,
     validate_materialization_request,
@@ -586,6 +587,7 @@ def _timeout_result(
             {
                 "status": "ERROR",
                 "error_type": "TimeoutExpired",
+                "failure_category": FailureCategory.ENVIRONMENT_RETRY.value,
                 "error": (
                     "replacement materialization subprocess exceeded "
                     f"{effective_timeout:.1f}s"
@@ -644,6 +646,7 @@ def _batch_missing_envelope_result(
             {
                 "status": "ERROR",
                 "error_type": "MaterializationBatchMissingEnvelope",
+                "failure_category": FailureCategory.ENVIRONMENT_RETRY.value,
                 "error": "batch process exited without an envelope for this request",
                 "reason_codes": [_MATERIALIZATION_BATCH_MISSING_ENVELOPE_REASON],
                 "batch_returncode": batch_returncode,
@@ -815,11 +818,18 @@ _CLOCK_HEALABLE_SEED_BLOCKS = frozenset({
 })
 
 
-# Version of the failed-input identity. Markers of an earlier version (hashes
-# written by fc85ad238/dfbabe2b4, which omitted the derived precision transport
-# and hashed unreadable files as known) live at unversioned paths: kept as
-# evidence, never looked up, so they cannot fence anything.
-SEED_IDENTITY_SCHEMA = "v2"
+# Version of the failed-input identity. Markers of an earlier version live at
+# other paths: kept as evidence, never looked up, so they cannot fence anything.
+# Unversioned (fc85ad238/dfbabe2b4) omitted the derived precision transport; v2
+# keyed files on (mtime, size), blind to a size- and mtime-preserving repair, and
+# took a stat()able but unreadable file as known. v3 keys every file on the
+# sha256 of its bytes, read through the open file.
+SEED_IDENTITY_SCHEMA = "v3"
+
+# Digest-only, version-keyed: an unchanged file is opened and fstat()ed, not re-hashed.
+_SEED_INPUT_READER = VersionedFileReader(
+    max_bytes=64 * 1024 * 1024, keep_bodies=False, max_paths=8192,
+)
 
 
 @dataclass(frozen=True)
@@ -837,6 +847,8 @@ class SeedBuildDependencies:
     identity: str | None
     newest_possessed: datetime | None
     unknown: BaseException | None
+    # The file version of every hashed read, so a verdict can prove it judged them.
+    versions: tuple = ()
 
 
 class _UnknownSeedInput(Exception):
@@ -880,8 +892,9 @@ def seed_build_dependencies(
     this city's station identity/ground facts effective at ``decision_at``
     (precision guard) and its own logic. Producer labels, other cycles' bodies and
     proofs, and station-ground DB rows are not read, so their churn does not
-    reopen the fence. A missing file is a known state (its creation reopens);
-    an unreadable one makes the identity unknown.
+    reopen the fence. A file is identified by the sha256 of the bytes an open
+    read returns: absence is a known state (its creation reopens); any other
+    read failure (permission, I/O, a write racing the read) is unknown.
     """
     try:
         city = str(seed["city"]).strip()
@@ -898,17 +911,25 @@ def seed_build_dependencies(
         )
 
         newest = [datetime.min.replace(tzinfo=timezone.utc)]
+        versions: dict[str, tuple[int, ...] | None] = {}
 
-        def revision(path: Path, *, possessed: bool = True) -> tuple[int, int] | str:
+        def revision(path: Path, *, possessed: bool = True) -> str:
+            # The build reaches each file through both its metadata (exists /
+            # is_file / size) and its bytes; either read failing is unknown.
             try:
-                stat = path.stat()
+                path.stat()
+                read = _SEED_INPUT_READER.read(path)
             except (FileNotFoundError, NotADirectoryError):
+                versions[str(path)] = None
                 return "absent"
-            except OSError as exc:
+            except (OSError, UnsafeFile) as exc:
                 raise _UnknownSeedInput(f"{path}: {exc!r}") from exc
+            if not read.settled:
+                raise _UnknownSeedInput(f"{path}: written during the read")
+            versions[str(path)] = read.version
             if possessed:
-                newest.append(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
-            return stat.st_mtime_ns, stat.st_size
+                newest.append(datetime.fromtimestamp(read.version[3] / 1e9, tz=timezone.utc))
+            return read.sha256
 
         # The request build consumes this resolution; an I/O error inside it is
         # unknown state, raised below.
@@ -999,7 +1020,9 @@ def seed_build_dependencies(
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()
-    return SeedBuildDependencies(transport, digest, max(newest), None)
+    return SeedBuildDependencies(
+        transport, digest, max(newest), None, tuple(sorted(versions.items())),
+    )
 
 
 def blocked_seed_input_identity(
@@ -1222,14 +1245,21 @@ def _record_blocked_seed_identity(
         cut = _parse_utc_iso(seed.get("computed_at"))
         if cut is None:
             return None
+        if conn is None:
+            if forecast_db is None or not Path(forecast_db).exists():
+                return None
+            conn = owned = _queue_read_only_connection(Path(forecast_db))
+        now = seed_build_dependencies(
+            seed, seeds_dir=seed_json.parent, conn=conn, decision_at=cut,
+        )
+        # The build read its files itself. Its verdict counts against ``deps``
+        # only when every file still has the version ``deps`` hashed: then the
+        # build read exactly those bytes. Any write in between (ctime moves even
+        # on an A->B->A rewrite) makes the verdict about unknown bytes.
         if deps is None:
-            if conn is None:
-                if forecast_db is None or not Path(forecast_db).exists():
-                    return None
-                conn = owned = _queue_read_only_connection(Path(forecast_db))
-            deps = seed_build_dependencies(
-                seed, seeds_dir=seed_json.parent, conn=conn, decision_at=cut,
-            )
+            deps = now
+        elif now.identity != deps.identity or now.versions != deps.versions:
+            return None
         # An input possessed after the seed's cut may be exactly what the block
         # lacked; the next seed sees it, so this failure fences nothing.
         if (
@@ -3077,6 +3107,23 @@ def _cycle_advance_file_sort_key(
     return (*priority.get(path.name, (1, "")), path.name)
 
 
+def _request_file_sort_key(
+    path: Path,
+    priority: dict[str, tuple[float, str]],
+) -> tuple[float, int, str, str]:
+    """Priority tier, then turn: an unattempted request precedes every retained
+    one of its tier, and retained requests rotate by when each was last retained.
+
+    SCOPE: order within one priority tier only; the held/non-held tiers and the
+    interleaver are unchanged. A retained failure keeps its single ownership but
+    waits its turn behind its tier, so it cannot monopolize a slot. RESET: the
+    request leaves the queue. Order only: no delay, no attempt cap.
+    """
+    tier, request_time = priority.get(path.name, (1, ""))
+    turn = (_read_stage_receipt(path) or {}).get("retained_turn")
+    return tier, turn if isinstance(turn, int) else 0, request_time, path.name
+
+
 def _lane_matches(*, path: Path, priority_names: set[str], lane: str) -> bool:
     if lane not in {
         MATERIALIZATION_LANE_ALL,
@@ -4044,11 +4091,56 @@ def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str])
     return ()
 
 
-# A child ERROR of exactly this type is a verdict on the request's inputs,
-# mirroring the seed path's ``type(exc) is ValueError`` split. Every other error
-# type is transient or unknown: never an input-identity fence.
-_INPUT_VERDICT_ERROR_TYPES = frozenset({"ValueError"})
+class FailureCategory(str, Enum):
+    """What an ERROR outcome proves; emitted by the boundary that failed.
+
+    INPUT_VERDICT: a domain-validation boundary completed every required read
+    against a known input identity and found the request inadmissible. Fenced on
+    that identity (and the logic in it); only an identity change reopens.
+    ENVIRONMENT_RETRY: contention, an unavailable read, an interruption. The
+    request keeps its single owner and retries in turn; never fenced.
+    UNCLASSIFIED: no such proof. Retained and retried in turn like an environment
+    failure, with a visible error state and an alert. Repetition or elapsed time
+    never promotes it to a verdict; only an explicit domain classification does.
+    """
+
+    INPUT_VERDICT = "INPUT_VERDICT"
+    ENVIRONMENT_RETRY = "ENVIRONMENT_RETRY"
+    UNCLASSIFIED = "UNCLASSIFIED"
+
+
 _ERROR_RETAINED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_ERROR_RETAINED_BY_OWNER"
+_UNCLASSIFIED_ERROR_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_UNCLASSIFIED_ERROR_RETAINED"
+
+
+def _subprocess_result_failure_category(
+    completed: subprocess.CompletedProcess[str],
+) -> FailureCategory:
+    """The category the worker emitted; absent or unknown (older workers) is
+    UNCLASSIFIED, never INPUT_VERDICT."""
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, Mapping) and payload.get("status") not in (None, ""):
+                try:
+                    return FailureCategory(payload.get("failure_category"))
+                except ValueError:
+                    return FailureCategory.UNCLASSIFIED
+    return FailureCategory.UNCLASSIFIED
+
+
+def _record_retained_turn(
+    path: Path, *, category: FailureCategory, error_type: str | None,
+) -> None:
+    """Stamp a retained request's turn and failure beside it (non-authority)."""
+    receipt = _read_stage_receipt(path) or {"stage": "unknown", "deadline_at": None}
+    # A turn is an order key, never a wait: the request is claimable at once.
+    receipt["retained_turn"] = time.time_ns()
+    receipt["last_failure"] = {"failure_category": category.value, "error_type": error_type}
+    _write_stage_receipt_payload(path, receipt)
 
 
 def _subprocess_result_error_type(completed: subprocess.CompletedProcess[str]) -> str | None:
@@ -4333,7 +4425,7 @@ def _build_request_claim_read_plan(
                 for path in request_files
                 if _lane_matches(path=path, priority_names=priority_names, lane=lane)
             ),
-            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+            key=lambda path: _request_file_sort_key(path, priority),
         )
     )
     remaining, superseded = _plan_superseded_materialization_requests(requests)
@@ -6294,9 +6386,21 @@ def _prepare_seed_requests_with_connection(
                 "error": str(exc),
                 "request_written": False,
             }
-            # A ValueError is a verdict on the seed's inputs; sqlite/OS errors
-            # are transient and must stay retryable.
-            if type(exc) is ValueError and seed_json.exists():
+            # INPUT_VERDICT only where the request build validated a known
+            # identity and raised its ValueError; the record re-checks that the
+            # build read exactly the hashed versions. Everything else is no
+            # verdict: never fenced, so the producer's next seed retries.
+            category = (
+                FailureCategory.INPUT_VERDICT
+                if type(exc) is ValueError and deps is not None and deps.identity is not None
+                else FailureCategory.ENVIRONMENT_RETRY
+                if isinstance(exc, (OSError, sqlite3.Error))
+                else FailureCategory.UNCLASSIFIED
+            )
+            receipt["failure_category"] = category.value
+            if category is FailureCategory.UNCLASSIFIED:
+                _LOG.error("seed %s UNCLASSIFIED %r", seed_json.name, exc)
+            if category is FailureCategory.INPUT_VERDICT and seed_json.exists():
                 moved = _move_failed_seed(
                     seed_json, failed_path, seed,
                     {**receipt, "reason_codes": [f"ERROR:{exc}"[:200]]},
@@ -6499,7 +6603,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
                 and (payload := request_payloads.get(path)) is not None
                 and _claim_identity_witness(payload) is not None
             ),
-            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+            key=lambda path: _request_file_sort_key(path, priority),
         )
     )
     identity_deferred = sum(
@@ -6988,7 +7092,7 @@ def _process_claimed_materialization_batch(
     requests = tuple(
         sorted(
             request_files,
-            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+            key=lambda path: _request_file_sort_key(path, priority),
         )
     )
 
@@ -7008,6 +7112,7 @@ def _process_claimed_materialization_batch(
     already_covered: list[str] = []
     write_deferred: list[str] = []
     error_retained: list[str] = []
+    unclassified_retained: list[str] = []
     timed_out_requests: list[str] = []
     timeout_stage_reasons: list[str] = []
     deadline_deferred_reasons: list[str] = []
@@ -7401,8 +7506,8 @@ def _process_claimed_materialization_batch(
                 or _UNCHANGED_BLOCKED_REASON in result_reason_codes
                 or (
                     result_status == "ERROR"
-                    and _subprocess_result_error_type(completed)
-                    in _INPUT_VERDICT_ERROR_TYPES
+                    and _subprocess_result_failure_category(completed)
+                    is FailureCategory.INPUT_VERDICT
                 )
             )
         ):
@@ -7445,11 +7550,12 @@ def _process_claimed_materialization_batch(
                 )
             write_deferred.append(str(restored))
         elif item.request_payload is not None and result_status in ("ERROR", None):
-            # SCOPE: this one request. A transient or unknown error is no verdict
-            # on its inputs, so it is neither fenced nor surrendered: the request
-            # stays the family's single owner, retried by this queue, and
-            # producers that see it (``consumed_seed_request_owned``) publish no
-            # fresh seed. RESET: its own next outcome.
+            # SCOPE: this one request. An ENVIRONMENT_RETRY or UNCLASSIFIED error
+            # is no verdict on its inputs, so it is neither fenced nor
+            # surrendered: the request stays the family's single owner, retried
+            # by this queue in its tier's turn, and producers that see it
+            # (``consumed_seed_request_owned``) publish no fresh seed. RESET:
+            # its own next outcome.
             if retry_path is None or input_json.parent == retry_path:
                 restored = input_json
             else:
@@ -7458,14 +7564,24 @@ def _process_claimed_materialization_batch(
                     retry_path,
                     request_path.name,
                 )
-            _LOG.warning(
-                "materialize[%s] %s retained by its request: returncode=%s stderr=%s",
+            category = _subprocess_result_failure_category(completed)
+            error_type = _subprocess_result_error_type(completed)
+            try:
+                _record_retained_turn(restored, category=category, error_type=error_type)
+            except OSError:
+                pass  # no turn stamp: the request still retries, ordered as fresh
+            _LOG.log(
+                logging.ERROR if category is FailureCategory.UNCLASSIFIED else logging.WARNING,
+                "materialize[%s] %s %s retained by its request: returncode=%s stderr=%s",
                 input_json.name,
-                _subprocess_result_error_type(completed) or "unknown error",
+                category.value,
+                error_type or "unknown error",
                 completed.returncode,
                 (completed.stderr or "")[-500:],
             )
             error_retained.append(str(restored))
+            if category is FailureCategory.UNCLASSIFIED:
+                unclassified_retained.append(str(restored))
         else:
             moved = _move_request(input_json, failed_path)
             _write_sidecar(moved, payload)
@@ -7499,6 +7615,8 @@ def _process_claimed_materialization_batch(
             "replacement forecast writes deferred by transient contention: count=%d",
             len(write_deferred),
         )
+    if unclassified_retained:
+        reasons.append(_UNCLASSIFIED_ERROR_REASON)
     if error_retained:
         reasons.append(_ERROR_RETAINED_REASON)
         _LOG.warning(

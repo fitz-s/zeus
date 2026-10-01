@@ -21,16 +21,16 @@ from functools import lru_cache
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import re
-import stat
 import struct
 import time
 from typing import Mapping
 from uuid import uuid4
 
 import httpx
+
+from src.data.versioned_file_read import UnsafeFile, VersionedFileReader
 
 MAX_ASSET_BYTES = 8 * 1024 * 1024
 REVISION = "openmeteo_model_surface_v1"
@@ -163,15 +163,9 @@ def _read_file(path: Path) -> bytes:
     return _read_hashed(path)[0]
 
 
-def _file_version(info: os.stat_result) -> tuple[int, ...]:
-    # Any content write moves mtime/size, and ctime too, which no utime() can
-    # restore; an atomic rename moves the inode. Equal versions = equal bytes.
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-
-
-# path -> (file version, body, sha256). One entry per path ever read: a changed
-# version replaces its entry, so the memo is bounded by the distinct asset paths.
-_HASHED: dict[str, tuple[tuple[int, ...], bytes, str]] = {}
+# One version-keyed memo per asset path (shared helper, extracted from this
+# module): a changed (dev, ino, size, mtime, ctime) re-reads and re-hashes.
+_HASHED = VersionedFileReader(max_bytes=MAX_ASSET_BYTES, keep_bodies=True)
 
 
 def _read_hashed(path: Path) -> tuple[bytes, str]:
@@ -180,27 +174,15 @@ def _read_hashed(path: Path) -> tuple[bytes, str]:
     The ASSET_CHANGED check compares this digest with the manifest; keying the
     digest on the open file's version keeps that a check on the current file.
     """
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        size = info.st_size
-        if not stat.S_ISREG(info.st_mode):
-            raise _Invalid("MODEL_SURFACE_UNSAFE_PATH")
-        if not 0 < size <= MAX_ASSET_BYTES:
-            raise _Invalid("MODEL_SURFACE_INVALID_SIZE")
-        version = _file_version(info)
-        known = _HASHED.get(str(path))
-        if known is not None and known[0] == version:
-            return known[1], known[2]
-        body = handle.read(MAX_ASSET_BYTES + 1)
-        # A write racing the read moves the version; such bytes are never memoized.
-        settled = _file_version(os.fstat(handle.fileno())) == version
-    if len(body) != size or len(body) > MAX_ASSET_BYTES:
+    try:
+        read = _HASHED.read(path)
+    except UnsafeFile as exc:
+        raise _Invalid(
+            "MODEL_SURFACE_UNSAFE_PATH" if str(exc) == "NOT_REGULAR" else "MODEL_SURFACE_INVALID_SIZE"
+        ) from exc
+    if not read.body:
         raise _Invalid("MODEL_SURFACE_INVALID_SIZE")
-    digest = _sha(body)
-    if settled:
-        _HASHED[str(path)] = (version, body, digest)
-    return body, digest
+    return read.body, read.sha256
 
 
 def _decode(body: bytes, profile: Mapping[str, object], *, x: int | None = None, y: int | None = None) -> float | None:
