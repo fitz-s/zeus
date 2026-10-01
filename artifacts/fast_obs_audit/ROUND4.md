@@ -88,3 +88,7 @@ All Round4 implementation/evidence is confined to `feat/fast-obs-survey-r4`. Pri
 ## Post-round disposition: Moscow route withdrawn (2026-10-01)
 
 The Moscow UUWW route (`metaviatelecom_metar`, `http://display.meteocenter.ru/219`) is removed from the registry and code before merge. Its only reachable transport is plaintext HTTP. Re-check on 2026-10-01: HTTPS still fails certificate verification (curl `ssl_verify_result=18`, self-signed). Value identity (4/4, plus 04:00Z 6°C = AWC 6°C) cannot authenticate future responses in transit. Requiring an AWC/WRH corroboration per value would remove the publication lead that justified the route. Moscow stays on its existing AWC/WRH path; UUWW AWC vs WRH agreed 46/46 over the prior 24h. Re-admit only with an authenticated transport.
+
+## Post-round disposition: Lucknow IMD route withdrawn (2026-10-01)
+
+The Lucknow VILK route (`imd_olbs_metar`) is removed from the registry before merge. Its parser scanned concatenated page text from the requested station header to the next `=`, so `METAR VILK ... NIL` followed by another station's report produced a VILK value from the foreign report (external review REQ-20261001-001836-85dd89). Value identity (2/2) cannot protect a parser that crosses report boundaries. Lucknow stays on its existing AWC/WRH path. Re-admit only after a bounded single-report parser rejects the NIL/foreign-report payload and the recorded value-identity/latency evidence still binds.
