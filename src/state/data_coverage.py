@@ -180,6 +180,26 @@ WHERE
 """
 
 
+# Evidence-bearing variant: only ``record_failed(evidence=...)`` binds it, so
+# every other writer keeps working on a DB that predates ``evidence_json``.
+_EVIDENCE_UPSERT_SQL = _UPSERT_SQL.replace(
+    "retry_after\n) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "retry_after, evidence_json\n) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+).replace(
+    "    retry_after = excluded.retry_after\n",
+    "    retry_after = excluded.retry_after,\n    evidence_json = excluded.evidence_json\n",
+)
+assert _EVIDENCE_UPSERT_SQL.count("evidence_json") == 3
+
+
+def has_evidence_column(conn: sqlite3.Connection) -> bool:
+    """Whether the canonical coverage table carries ``evidence_json``."""
+    ref = _coverage_table_ref(conn)
+    schema, _, table = ref.rpartition(".")
+    pragma = f"PRAGMA {schema}.table_info({table})" if schema else f"PRAGMA table_info({table})"
+    return any(str(row[1]) == "evidence_json" for row in conn.execute(pragma).fetchall())
+
+
 def _coverage_table_ref(conn: sqlite3.Connection) -> str:
     """Resolve the canonical coverage owner across plain and attached connections."""
     attached = {
@@ -280,29 +300,39 @@ def record_failed(
     reason: str,
     retry_after: datetime,
     sub_key: str = "",
+    evidence: str | None = None,
 ) -> None:
     """Record a transient fetch failure with an embargo before the next retry.
 
     Scanner and live appenders must check `retry_after` before re-attempting
     a FAILED row, otherwise a tight retry loop on a rate-limited API would
     hammer the upstream and burn quota.
+
+    ``evidence`` (JSON text) persists the proof a reason stands on with the
+    row; it requires the ``evidence_json`` column (``has_evidence_column``).
     """
     if retry_after.tzinfo is None:
         raise ValueError("retry_after must be a timezone-aware UTC datetime")
+    params = (
+        data_table.value,
+        city,
+        data_source,
+        _coerce_target_date(target_date),
+        sub_key,
+        CoverageStatus.FAILED.value,
+        reason,
+        _now_utc_iso(),
+        None,
+        retry_after.astimezone(timezone.utc).isoformat(),
+    )
+    if evidence is None:
+        conn.execute(_coverage_upsert_sql(conn), params)
+        return
     conn.execute(
-        _coverage_upsert_sql(conn),
-        (
-            data_table.value,
-            city,
-            data_source,
-            _coerce_target_date(target_date),
-            sub_key,
-            CoverageStatus.FAILED.value,
-            reason,
-            _now_utc_iso(),
-            None,
-            retry_after.astimezone(timezone.utc).isoformat(),
+        _EVIDENCE_UPSERT_SQL.replace(
+            "INSERT INTO data_coverage", f"INSERT INTO {_coverage_table_ref(conn)}", 1
         ),
+        (*params, evidence),
     )
 
 

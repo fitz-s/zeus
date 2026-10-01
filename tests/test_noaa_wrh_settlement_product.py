@@ -618,7 +618,22 @@ def _live_schema_db_pair(tmp_path: Path) -> tuple[Path, Path]:
         conn.commit()
         conn.close()
         paths[label] = path
+    # The captured live DDL predates the absence-proof column; apply the
+    # shipped migration exactly as deploy does.
+    conn = sqlite3.connect(paths["world"])
+    _evidence_migration().up(conn)
+    conn.close()
     return paths["forecasts"], paths["world"]
+
+
+def _evidence_migration():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts/migrations/202610_data_coverage_evidence_json.py"
+    spec = importlib.util.spec_from_file_location("migration_202610_evidence_json", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _temp_forecasts_pair(tmp_path: Path) -> tuple[Path, Path]:

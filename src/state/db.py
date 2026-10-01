@@ -3569,6 +3569,8 @@ def init_schema(
 
     """)
     _ensure_job_run_release_key_identity(conn)
+    # Versioned absence proof bound to its coverage row (nullable, O(1) ADD).
+    _add_column_if_missing(conn, "data_coverage", "evidence_json", "TEXT")
     # Residue dissolve 2026-07-23: init_snapshot_schema is NOT called here.
     # executable_market_snapshots is trade-class (all writers/readers use the
     # trade connection; registry entry on world is legacy_archived/non-owning),

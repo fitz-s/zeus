@@ -2705,6 +2705,36 @@ scripts:
     required_tests:
       - tests/test_migration_runner_idempotent.py
       - tests/test_belief_recency_index_migration.py
+  202610_data_coverage_evidence_json.py:
+    class: migration
+    status: active
+    lifecycle: one_shot
+    authority_scope: schema_migration
+    dangerous_if_run: true
+    dry_run_default: false
+    apply_flag: "python3 -m scripts.migrations apply --target=202610_data_coverage_evidence_json"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 -m scripts.migrations apply --target=202610_data_coverage_evidence_json --db-path /tmp/zeus-world.db --db-identity world"
+    external_inputs: []
+    delete_policy: retain_for_audit
+    reuse_when: >
+      Add the nullable data_coverage.evidence_json column that carries the
+      versioned NOAA WRH absence proof. O(1) metadata-only ALTER; no row is
+      read or rewritten. Until applied, no new absence witness is minted
+      (fail closed); legacy reason-only rows never authorize WU fallback.
+    do_not_use_when: >
+      Do not run against a canonical live DB from this worktree or while its
+      world writer is unfenced; use an isolated fixture or the stopped-daemon
+      fenced migration path for live application.
+    promotion_barrier: "Apply under the world BULK writer lock on a fenced mesh; re-run is a no-op."
+    unguarded_write_rationale: "Single additive nullable ADD COLUMN on world data_coverage; no row rewrite or cross-DB write."
+    required_helpers:
+      - src.state.db_writer_lock.db_writer_lock
+    required_tests:
+      - tests/test_migration_runner_idempotent.py
+      - tests/test_settlement_fallback_hierarchy.py
   scripts/ops/vacuum_reset_trades_db.py:
     class: migration
     status: active
