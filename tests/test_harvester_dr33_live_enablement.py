@@ -1,5 +1,5 @@
 # Created: 2026-04-23
-# Last reused/audited: 2026-09-05
+# Last reused/audited: 2026-10-01
 # Authority basis: docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md
 #                  + P-D §6.1 (_find_winning_bin fix)
 #                  + P-E canonical authority pattern (INV-14 + provenance_json + SettlementSemantics gate)
@@ -181,6 +181,8 @@ def scratch_db(tmp_path):
         low_temp REAL,
         unit TEXT,
         fetched_at TEXT,
+        station_id TEXT,
+        authority TEXT,
         UNIQUE(city, target_date, source)
     );
 
@@ -351,9 +353,9 @@ def test_T9_canonical_labels_never_contain_unicode_shoulders():
 def test_T10_lookup_obs_wu_branch(scratch_db):
     """_lookup_settlement_obs: wu_icao city finds wu_icao_history row."""
     scratch_db.execute(
-        "INSERT INTO observations (city, target_date, source, high_temp, unit, fetched_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("London", "2026-04-15", "wu_icao_history", 17.3, "C", "2026-04-15T12:00:00Z"),
+        "INSERT INTO observations (city, target_date, source, high_temp, unit, fetched_at, station_id, authority) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("London", "2026-04-15", "wu_icao_history", 17.3, "C", "2026-04-15T12:00:00Z", "EGLC", "VERIFIED"),
     )
     row = _lookup_settlement_obs(scratch_db, _mock_city("London", unit="C", st="wu_icao"), "2026-04-15")
     assert row is not None
@@ -376,9 +378,9 @@ def test_T10b_lookup_obs_noaa_branch(scratch_db):
 def test_T10c_lookup_obs_hko_branch(scratch_db):
     """_lookup_settlement_obs: hko city finds hko_daily_api row."""
     scratch_db.execute(
-        "INSERT INTO observations (city, target_date, source, high_temp, unit, fetched_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("Hong Kong", "2026-04-15", "hko_daily_api", 28.5, "C", "2026-04-15T12:00:00Z"),
+        "INSERT INTO observations (city, target_date, source, high_temp, unit, fetched_at, station_id, authority) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("Hong Kong", "2026-04-15", "hko_daily_api", 28.5, "C", "2026-04-15T12:00:00Z", "HKO", "VERIFIED"),
     )
     row = _lookup_settlement_obs(scratch_db, _mock_city("Hong Kong", unit="C", st="hko"), "2026-04-15")
     assert row is not None

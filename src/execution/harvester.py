@@ -811,7 +811,9 @@ def _lookup_settlement_obs(
     if not columns:
         return None
     metric_field = metric_identity.observation_field
-    if metric_field not in columns:
+    # Station identity and authority are mandatory settlement-read columns; a
+    # schema without them cannot prove either, so it yields no settlement row.
+    if not {metric_field, "station_id", "authority"} <= columns:
         return None
     rows = conn.execute(
         """SELECT *
@@ -829,9 +831,9 @@ def _lookup_settlement_obs(
                                           metric=temperature_metric)
         if selection is None:
             continue
-        if "authority" in columns and str(_row_value(r, "authority") or "").upper() != "VERIFIED":
+        if str(_row_value(r, "authority") or "").upper() != "VERIFIED":
             continue
-        if "station_id" in columns and not _station_matches_city(_row_value(r, "station_id"), city):
+        if not _station_matches_city(_row_value(r, "station_id"), city):
             continue
         if _row_value(r, metric_field) is None:
             continue

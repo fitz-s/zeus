@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-01
 # Authority: all 48 NOAA market descriptions captured for 2026-09-29; REQ-20260929-223929-bf51a2.
 """An unavailable local service is not an unavailable settlement product."""
 from datetime import datetime, timedelta, timezone
@@ -123,3 +123,34 @@ def test_prefetched_wu_fallback_writes_canonical_atom_pair_without_http(monkeypa
     assert row["high_local_time"].startswith(DAY+"T14:")
     assert observation_selection(conn,city,DAY,"wu_icao_history",row=row)[1]["selected"]=="FALLBACK_WU"
     conn.close()
+
+
+_PRIMARY = ("noaa_wrh_kbkf", "KBKF", "VERIFIED")
+
+
+def _primary_database(*, drop=None, station="KBKF", authority="VERIFIED"):
+    columns = ["id INTEGER", "city TEXT", "target_date TEXT", "source TEXT", "high_temp REAL",
+               "low_temp REAL", "unit TEXT", "station_id TEXT", "authority TEXT", "fetched_at TEXT"]
+    columns = [c for c in columns if c.split()[0] != drop]
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE data_coverage(data_table TEXT,city TEXT,data_source TEXT,target_date TEXT,sub_key TEXT,status TEXT,reason TEXT,fetched_at TEXT)")
+    conn.execute(f"CREATE TABLE observations({','.join(columns)})")
+    row = {"id": 1, "city": "fixture", "target_date": DAY, "source": "noaa_wrh_kbkf",
+           "high_temp": 70, "low_temp": 50, "unit": "F", "station_id": station,
+           "authority": authority, "fetched_at": "2026-09-28T12:00:00+00:00"}
+    names = [c.split()[0] for c in columns]
+    conn.execute(f"INSERT INTO observations({','.join(names)}) VALUES ({','.join('?' for _ in names)})",
+                 [row[n] for n in names])
+    return conn
+
+
+@pytest.mark.parametrize("module", ["src.ingest.harvester_truth_writer", "src.execution.harvester"])
+@pytest.mark.parametrize("fixture", [
+    {"drop": "station_id"}, {"drop": "authority"},
+    {"station": ""}, {"station": None}, {"station": "KDEN"}, {"station": "KBKFX"},
+    {"authority": "UNVERIFIED"}, {"authority": None},
+])
+def test_both_harvesters_require_station_and_authority(module, fixture):
+    lookup = importlib.import_module(module)._lookup_settlement_obs
+    assert lookup(_primary_database(), CITY, DAY)["source"] == "noaa_wrh_kbkf"
+    assert lookup(_primary_database(**fixture), CITY, DAY) is None

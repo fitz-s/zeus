@@ -1,5 +1,5 @@
 # Created: 2026-06-02
-# Last reused or audited: 2026-06-06
+# Last reused or audited: 2026-10-01
 # Authority basis: lock-storm antibody (data-ingest bootout 2026-05-27, "database is locked" flood); 2026-06-05 HKO realtime settlement ingestion gap
 """Relationship test: write_settlement_truth_for_open_markets releases the write lock between events.
 
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     city TEXT NOT NULL, target_date TEXT NOT NULL,
     source TEXT NOT NULL, high_temp REAL, low_temp REAL,
-    unit TEXT, fetched_at TEXT, authority TEXT,
+    unit TEXT, fetched_at TEXT, station_id TEXT, authority TEXT,
     UNIQUE(city, target_date, source)
 );
 """
@@ -138,8 +138,8 @@ def test_hko_settlement_rejects_rhrread_coverage_and_accepts_daily_extract():
     conn.execute(
         """
         INSERT INTO observations
-            (city, target_date, source, high_temp, low_temp, unit, fetched_at, authority)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (city, target_date, source, high_temp, low_temp, unit, fetched_at, station_id, authority)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "Hong Kong",
@@ -149,6 +149,7 @@ def test_hko_settlement_rejects_rhrread_coverage_and_accepts_daily_extract():
             26.4,
             "C",
             "2026-06-06T03:00:00Z",
+            "HKO",
             "VERIFIED",
         ),
     )
