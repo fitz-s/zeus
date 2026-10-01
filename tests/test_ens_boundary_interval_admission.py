@@ -1,5 +1,5 @@
 # Created: 2026-09-25
-# Last reused/audited: 2026-09-25
+# Last reused/audited: 2026-10-01
 # Authority basis: docs/authority/statistical_calibration_addendum_2026-06-13.md D2 (CAR
 #   interval-widening); docs/operations/current/plans/ens_boundary_interval_2026-09-25.md.
 """Antibodies for interval-censored ENS boundary-member admission.
@@ -135,13 +135,16 @@ def _issued_after_day_start(payload: dict) -> dict:
     return payload
 
 
-@pytest.mark.parametrize("defect", ["gap", "nonfinite", "causality"])
+@pytest.mark.parametrize("defect", ["issued_inside_day", "nonfinite", "causality"])
 def test_unrecoverable_high_ambiguity_stays_excluded(defect: str) -> None:
     payload = _boundary_high_interval_payload()
-    if defect == "gap":  # issued after local-day start: elapsed part invisible (D2 fallback)
+    if defect == "issued_inside_day":
+        # Issued after local-day start: the run owns only the remaining window
+        # (Day0 suffix law), so its native windows have no gap there; whole-day
+        # interval bounds still cannot exist for it (D2 is whole-day only).
         payload = _issued_after_day_start(payload)
         assert ingest._high_local_day_max_boundary_certificate(payload)["reasons"] == [
-            "boundary_can_exceed_inner", "native_interval_gap",
+            "boundary_can_exceed_inner",
         ]
     elif defect == "nonfinite":
         payload["members"][7]["inner_max_native_unit"] = float("nan")
@@ -951,3 +954,200 @@ def test_bounds_parser_fails_closed_on_legacy_and_malformed_rows() -> None:
         assert authority.member_interval_bounds_from_row(
             _row(INTERVAL, json.loads(json.dumps(broken, allow_nan=True)))
         ) is None
+
+
+# --- Day0 owned-window (suffix) law for runs issued inside the target day -----------------
+
+
+def test_owned_window_is_the_one_shared_day0_suffix_law() -> None:
+    from src.data.forecast_target_contract import intervals_cover_window, owned_window_start_utc
+
+    start = datetime(2026, 9, 30, 16, tzinfo=UTC)
+    end = start + timedelta(days=1)
+
+    def owned(at):
+        return owned_window_start_utc(day_start_utc=start, day_end_utc=end, remaining_from_utc=at)
+
+    assert owned(None) == start
+    assert owned(start - timedelta(hours=4)) == start  # not started: whole day
+    assert owned(start + timedelta(hours=8)) == start + timedelta(hours=8)  # in progress
+    assert owned(end) == start  # ended: whole-day law
+    windows = [(start + timedelta(hours=h), start + timedelta(hours=h + 3)) for h in (8, 11, 14, 20)]
+    assert not intervals_cover_window(windows, start=start + timedelta(hours=8), end=end)
+    windows.append((start + timedelta(hours=17), start + timedelta(hours=20)))
+    windows.append((start + timedelta(hours=23), start + timedelta(hours=26)))
+    assert intervals_cover_window(windows, start=start + timedelta(hours=8), end=end)
+    assert not intervals_cover_window(windows, start=start, end=end)
+
+
+def test_ens_and_om9_suffix_law_call_the_one_owned_window() -> None:
+    source = (ROOT / "src/data/openmeteo_ecmwf_ifs9_anchor.py").read_text()
+    body = source.split("def _assert_complete_localday_hourly_slots", 1)[1].split("\ndef ", 1)[0]
+    assert "owned_window_start_utc(" in body
+    ingest_source = (ROOT / "scripts/ingest_grib_to_snapshots.py").read_text()
+    remaining = ingest_source.split("def _remaining_window_start", 1)[1].split("\ndef ", 1)[0]
+    assert "owned_window_start_utc(" in remaining
+
+
+def _exact_high_issued_inside_day() -> dict:
+    return _issued_after_day_start(_high_payload())
+
+
+def test_high_run_issued_inside_day_certifies_only_its_remaining_window() -> None:
+    payload = _exact_high_issued_inside_day()
+    certificate = ingest._high_local_day_max_boundary_certificate(payload)
+    assert certificate["status"] == "REMAINING_EXACT"
+    assert certificate["owned_window_start_utc"] == payload["issue_time_utc"]
+    evidence, provenance = _evidence(payload, HIGH_LOCALDAY_MAX)
+    # A remaining-window extreme is a different random variable from the daily
+    # extreme: typed, never a point contributor, never interval bounds.
+    assert evidence["forecast_window_attribution_status"] == authority.REMAINING_WINDOW_ATTRIBUTION_STATUS
+    assert evidence["contributes_to_target_extrema"] == 0
+    assert evidence["forecast_window_start_utc"] == payload["issue_time_utc"]
+    assert "member_interval_bounds" not in provenance
+
+
+def test_remaining_window_still_requires_no_gap_inside_the_owned_window() -> None:
+    payload = _exact_high_issued_inside_day()
+    payload["members"][3]["inner_step_ranges"].pop(2)
+    certificate = ingest._high_local_day_max_boundary_certificate(payload)
+    assert certificate["status"] == "UNKNOWN"
+    assert "native_interval_gap" in certificate["reasons"]
+
+
+def test_pre_start_run_keeps_the_full_day_certificate() -> None:
+    payload = _high_payload()
+    assert ingest._remaining_window_start(payload) is None
+    assert ingest._high_local_day_max_boundary_certificate(payload)["status"] == "EXACT"
+    payload["members"][0]["inner_step_ranges"].pop(0)
+    certificate = ingest._high_local_day_max_boundary_certificate(payload)
+    assert certificate["status"] == "UNKNOWN"
+    assert "native_interval_gap" in certificate["reasons"]
+    assert "owned_window_start_utc" not in certificate
+
+
+def test_low_run_issued_inside_day_covers_only_its_remaining_window() -> None:
+    target = "2026-09-29"  # NYC local day starts 04Z
+    inside = _complete_low_window_payload("NYC", "America/New_York", target, "2026-09-29T12:00:00+00:00")
+    assert ingest._low_native_windows_cover_day(
+        inside, city_timezone="America/New_York", target_date=target,
+    )
+    pre_start = _complete_low_window_payload("NYC", "America/New_York", target, "2026-09-29T00:00:00+00:00")
+    for member in pre_start["members"]:
+        for key in ("inner_step_ranges", "boundary_step_ranges"):
+            member[key] = [r for r in member[key] if r[0] >= 12]
+    assert not ingest._low_native_windows_cover_day(
+        pre_start, city_timezone="America/New_York", target_date=target,
+    )
+
+
+def test_classifier_types_remaining_window_rows_as_current_evidence_not_point() -> None:
+    row = {
+        "contributes_to_target_extrema": 0,
+        "forecast_window_attribution_status": authority.REMAINING_WINDOW_ATTRIBUTION_STATUS,
+        "boundary_ambiguous": 0,
+    }
+    eligibility = authority.classify_forecast_extrema_authority(row).eligibility
+    assert eligibility == authority.ForecastExtremaEligibility.REMAINING_WINDOW_CONTRIBUTOR
+    assert eligibility in authority.CURRENT_EVIDENCE_ELIGIBILITIES
+    assert eligibility not in authority.POINT_EXTREMA_ELIGIBILITIES
+    for damaged in (dict(row, boundary_ambiguous=1),
+                    dict(row, forecast_window_attribution_status="UNKNOWN")):
+        assert (authority.classify_forecast_extrema_authority(damaged).eligibility
+                == authority.ForecastExtremaEligibility.NON_CONTRIBUTOR)
+
+
+def _authority_chain_db(tmp: str, status: str, *, contributes: int, provenance: dict | None = None):
+    from src.data.ecmwf_open_data import _write_source_authority_chain
+    from src.state.db import init_schema_forecasts
+    from tests.test_opendata_observed_members_aggregation import _DATA_VERSION, _insert_snapshot
+
+    conn = sqlite3.connect(Path(tmp) / "forecasts.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    run = "ecmwf_open_data:mx2t6_high:2026-05-30T00Z:remaining"
+    _insert_snapshot(
+        conn, snapshot_id=51, city="London", target_date="2026-05-31", source_run_id=run,
+        members_json=json.dumps([20.0] * 51), contributes=contributes, attribution_status=status,
+        local_day_start_utc="2026-05-30T23:00:00+00:00",
+    )
+    if provenance is not None:
+        conn.execute("UPDATE ensemble_snapshots SET provenance_json = ? WHERE snapshot_id = 51",
+                     (json.dumps(provenance),))
+    cycle = datetime(2026, 5, 30, 0, tzinfo=UTC)
+    _write_source_authority_chain(
+        conn, summary={"written": 1, "errors": 0}, status="ok", source_run_id=run,
+        source_cycle_time=cycle, source_release_time=cycle,
+        release_calendar_key="2026-05-30T00Z", forecast_track="mx2t6_high",
+        data_version=_DATA_VERSION, computed_at=cycle,
+    )
+    return conn, run, _DATA_VERSION
+
+
+@pytest.mark.parametrize(
+    "status,contributes,current,point",
+    [
+        ("REMAINING_WINDOW_TARGET_LOCAL_DAY", 0, True, False),
+        ("FULLY_INSIDE_TARGET_LOCAL_DAY", 1, True, True),
+        ("UNKNOWN", 0, False, False),
+    ],
+)
+def test_writer_and_reader_share_one_extrema_classifier(status, contributes, current, point) -> None:
+    import tempfile
+
+    from src.data.executable_forecast_reader import read_executable_forecast_snapshot
+    from src.data.forecast_target_contract import ForecastTargetScope
+
+    with tempfile.TemporaryDirectory() as tmp:
+        conn, run, version = _authority_chain_db(tmp, status, contributes=contributes)
+        coverage = conn.execute(
+            "SELECT readiness_status FROM source_run_coverage WHERE source_run_id = ?", (run,)
+        ).fetchone()
+        scope = ForecastTargetScope(
+            city_id="LONDON", city_name="London", city_timezone="Europe/London",
+            target_local_date=datetime(2026, 5, 31).date(), temperature_metric="high",
+            source_cycle_time=datetime(2026, 5, 30, 0, tzinfo=UTC), data_version=version,
+            target_window_start_utc=datetime(2026, 5, 30, 23, tzinfo=UTC),
+            target_window_end_utc=datetime(2026, 5, 31, 23, tzinfo=UTC),
+            required_step_hours=(24,), market_refs=(),
+        )
+        # A non-ECMWF source id skips the grid-surface revision gate that precedes
+        # the extrema gate, so this exercises the classifier decision alone.
+        conn.execute("UPDATE ensemble_snapshots SET source_id = 'extrema_gate_probe'")
+        reads = {
+            required: read_executable_forecast_snapshot(
+                conn, scope=scope, source_id="extrema_gate_probe", source_run_id=run,
+                point_extrema_required=required,
+            ).reason_code
+            for required in (True, False)
+        }
+        conn.close()
+    blocked = "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+    assert (coverage["readiness_status"] == "LIVE_ELIGIBLE") is current
+    assert (reads[False] != blocked) is current
+    # A point daily-extreme consumer never reads a remaining-window row's members.
+    assert (reads[True] != blocked) is point
+
+
+def test_interval_row_writer_and_classifier_agree() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        conn, run, _version = _authority_chain_db(
+            tmp, INTERVAL, contributes=0,
+            provenance={"manifest_sha256": "m" * 64, **_interval_provenance()},
+        )
+        row = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = 51").fetchone())
+        coverage = conn.execute(
+            "SELECT readiness_status FROM source_run_coverage WHERE source_run_id = ?", (run,)
+        ).fetchone()
+        conn.close()
+    assert (authority.classify_forecast_extrema_authority(row).eligibility
+            == authority.ForecastExtremaEligibility.INTERVAL_CONTRIBUTOR)
+    assert coverage["readiness_status"] == "LIVE_ELIGIBLE"
+
+
+def test_only_the_day0_base_read_admits_current_evidence_rows() -> None:
+    source = (ROOT / "src/engine/event_reactor_adapter.py").read_text()
+    body = source.split("def _executable_forecast_reader_authority_block_reason", 1)[1].split("\ndef ", 1)[0]
+    assert "point_extrema_required=not allow_latest" in body

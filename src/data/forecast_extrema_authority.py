@@ -43,6 +43,12 @@ class ForecastExtremaEligibility(Enum):
     # predates the contribution extractor; we pass it through (prior behavior)
     # rather than fail-closed, but record the passthrough so it is auditable.
     LEGACY_NULL_PASSTHROUGH = "LEGACY_NULL_PASSTHROUGH"
+    # Current evidence that is NOT a point daily extreme. Members are bounded
+    # (INTERVAL) or are the extreme of only the run's owned remaining window of a
+    # day in progress (REMAINING_WINDOW). Coverage may certify them; a point
+    # daily-extreme consumer never reads their members.
+    INTERVAL_CONTRIBUTOR = "INTERVAL_CONTRIBUTOR"
+    REMAINING_WINDOW_CONTRIBUTOR = "REMAINING_WINDOW_CONTRIBUTOR"
 
 
 # P0 follow-up §2: NULL contribution must fail closed for CURRENT data_versions.
@@ -139,6 +145,23 @@ _POSITIVE_ATTRIBUTION_STATUSES = POSITIVE_ATTRIBUTION_STATUSES
 # re-classify rows written under the old revision.
 INTERVAL_CENSORED_ATTRIBUTION_STATUS = "INTERVAL_CENSORED_TARGET_LOCAL_DAY"
 MEMBER_INTERVAL_BOUNDS_REVISION = "ens_member_interval_bounds_v1"
+# A run issued after its target local day began owns only [issue, local-day end)
+# (Day0 law H = max(H_confirmed, H_remaining)); its members are exact extremes of
+# that remaining window. The single writer is scripts/ingest_grib_to_snapshots.
+REMAINING_WINDOW_ATTRIBUTION_STATUS = "REMAINING_WINDOW_TARGET_LOCAL_DAY"
+
+# Classes whose members are point daily extremes (legacy passthrough keeps its
+# prior behaviour). Every other admitted class is current evidence only.
+POINT_EXTREMA_ELIGIBILITIES: frozenset[ForecastExtremaEligibility] = frozenset({
+    ForecastExtremaEligibility.FULL_CONTRIBUTOR,
+    ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH,
+})
+# Every class that is current evidence for the target day: coverage certifies these.
+CURRENT_EVIDENCE_ELIGIBILITIES: frozenset[ForecastExtremaEligibility] = frozenset({
+    ForecastExtremaEligibility.FULL_CONTRIBUTOR,
+    ForecastExtremaEligibility.INTERVAL_CONTRIBUTOR,
+    ForecastExtremaEligibility.REMAINING_WINDOW_CONTRIBUTOR,
+})
 
 
 def member_interval_bounds_from_row(
@@ -275,6 +298,35 @@ def classify_forecast_extrema_authority(
     forecast_window_end_utc: str | None = (
         row.get("forecast_window_end_utc") or None
     )
+
+    if contributes_int == 0:
+        # An interval LOW row may carry Law 1's boundary_ambiguous training label;
+        # its bounds already encode that ambiguity (interval_ensemble_eligibility_sql).
+        if member_interval_bounds_from_row(row) is not None:
+            eligibility, reason = (
+                ForecastExtremaEligibility.INTERVAL_CONTRIBUTOR,
+                "interval-censored members with current bounds",
+            )
+        elif (
+            attribution_status == REMAINING_WINDOW_ATTRIBUTION_STATUS
+            and not boundary_ambiguous
+        ):
+            eligibility, reason = (
+                ForecastExtremaEligibility.REMAINING_WINDOW_CONTRIBUTOR,
+                "exact extremes of the owned remaining window of a day in progress",
+            )
+        else:
+            eligibility = None
+        if eligibility is not None:
+            return ForecastExtremaAuthority(
+                eligibility=eligibility,
+                contributes_to_target_extrema=False,
+                attribution_status=attribution_status,
+                forecast_window_start_utc=forecast_window_start_utc,
+                forecast_window_end_utc=forecast_window_end_utc,
+                boundary_ambiguous=boundary_ambiguous,
+                reason=reason,
+            )
 
     # Explicit non-contributor.
     if contributes_int is not None and contributes_int == 0:

@@ -52579,6 +52579,11 @@ def _executable_forecast_reader_authority_block_reason(
             condition_id=condition_id,
             decision_time=decision_time,
             require_entry_readiness=False,
+            # The Day0 base read (allow_latest) prices the remaining hours from
+            # hourly vectors composed with the observed extreme; it never reads
+            # these members as daily extremes, so remaining-window and interval
+            # current evidence is admitted there and nowhere else.
+            point_extrema_required=not allow_latest,
         )
     except GlobalValueFault:
         raise

@@ -28,6 +28,8 @@ from src.data.forecast_extrema_authority import (
     LEGACY_NULL_PASSTHROUGH_VALIDATION,
     POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST,
     classify_forecast_extrema_authority,
+    CURRENT_EVIDENCE_ELIGIBILITIES,
+    POINT_EXTREMA_ELIGIBILITIES,
 )
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 from src.data.forecast_target_contract import ForecastTargetScope
@@ -965,7 +967,11 @@ def read_executable_forecast_snapshot(
     source_transport: str = SOURCE_TRANSPORT,
     source_run_id: str | None = None,
     now_utc: datetime | None = None,
+    point_extrema_required: bool = True,
 ) -> ExecutableForecastReadResult:
+    """``point_extrema_required`` is True for every consumer of the members as
+    daily extremes. The Day0 base read prices remaining hours from hourly vectors,
+    so it also admits interval and remaining-window current evidence."""
     if source_id == "ecmwf_open_data":
         parsed = split_coordinate_bound_data_version(scope.data_version)
         base = parsed[0] if parsed is not None else scope.data_version
@@ -1006,14 +1012,17 @@ def read_executable_forecast_snapshot(
     # not pass).  A NULL flag on a LEGACY data_version classifies as
     # LEGACY_NULL_PASSTHROUGH and is allowed through (prior behavior preserved).
     # data_version is read from the row by the classifier.
-    _extrema_auth = classify_forecast_extrema_authority(row)
-    if _extrema_auth.eligibility == ForecastExtremaEligibility.NON_CONTRIBUTOR:
-        return ExecutableForecastReadResult(
-            "BLOCKED", "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
-        )
-    if _extrema_auth.eligibility == ForecastExtremaEligibility.UNKNOWN:
+    eligibility = classify_forecast_extrema_authority(row).eligibility
+    if eligibility == ForecastExtremaEligibility.UNKNOWN:
         return ExecutableForecastReadResult(
             "BLOCKED", "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
+        )
+    admitted = POINT_EXTREMA_ELIGIBILITIES if point_extrema_required else (
+        POINT_EXTREMA_ELIGIBILITIES | CURRENT_EVIDENCE_ELIGIBILITIES
+    )
+    if eligibility not in admitted:
+        return ExecutableForecastReadResult(
+            "BLOCKED", "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
         )
     grid_reason = _station_grid_provenance_reason(row)
     if grid_reason is None and source_id == "ecmwf_open_data":
@@ -1132,6 +1141,7 @@ def _evaluate_candidate(
     condition_id: str,
     now: datetime,
     require_entry_readiness: bool,
+    point_extrema_required: bool = True,
 ) -> tuple[ExecutableForecastBundleCandidate | None, str | None]:
     """Run the per-bundle causality + completeness + member-floor + coverage-
     membership gates for a single ``coverage`` row.
@@ -1225,6 +1235,7 @@ def _evaluate_candidate(
         source_transport=source_transport,
         source_run_id=str(coverage["source_run_id"]),
         now_utc=now,
+        point_extrema_required=point_extrema_required,
     )
     if not snapshot_result.ok or snapshot_result.snapshot is None:
         return None, snapshot_result.reason_code
@@ -1422,6 +1433,7 @@ def _candidate_forecast_bundles(
     condition_id: str,
     now: datetime,
     require_entry_readiness: bool,
+    point_extrema_required: bool = True,
 ) -> list[ExecutableForecastBundleCandidate]:
     """Enumerate every gate-passing forecast bundle for the scope.
 
@@ -1457,6 +1469,7 @@ def _candidate_forecast_bundles(
             condition_id=condition_id,
             now=now,
             require_entry_readiness=require_entry_readiness,
+            point_extrema_required=point_extrema_required,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -1480,6 +1493,7 @@ def read_executable_forecast(
     condition_id: str,
     decision_time: datetime,
     require_entry_readiness: bool = True,
+    point_extrema_required: bool = True,
 ) -> ExecutableForecastBundleResult:
     """Read and validate a live-eligible executable forecast bundle.
 
@@ -1561,6 +1575,7 @@ def read_executable_forecast(
         condition_id=condition_id,
         now=now,
         require_entry_readiness=require_entry_readiness,
+        point_extrema_required=point_extrema_required,
     )
     if not candidates:
         # No candidate passed every gate.
@@ -1590,6 +1605,7 @@ def read_executable_forecast(
             condition_id=condition_id,
             now=now,
             require_entry_readiness=require_entry_readiness,
+            point_extrema_required=point_extrema_required,
         )
         return ExecutableForecastBundleResult(
             "BLOCKED", drop_reason or "SOURCE_RUN_COVERAGE_MISSING"

@@ -83,7 +83,11 @@ from src.state.canonical_write import commit_then_export
 from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection  # K1-batch2 fix 2026-05-17: ensemble_snapshots + source_run are forecast_class
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.state.schema.v2_schema import apply_canonical_schema
-from src.data.forecast_extrema_authority import INTERVAL_CENSORED_ATTRIBUTION_STATUS
+from src.data.forecast_extrema_authority import (
+    INTERVAL_CENSORED_ATTRIBUTION_STATUS,
+    REMAINING_WINDOW_ATTRIBUTION_STATUS,
+)
+from src.data.forecast_target_contract import intervals_cover_window, owned_window_start_utc
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
 logger = logging.getLogger(__name__)
@@ -354,6 +358,22 @@ def _low_local_day_min_interval_evidence(
     }
 
 
+def _remaining_window_start(payload: dict) -> datetime | None:
+    """Owned-window start of a run issued inside its target local day, else None.
+
+    One Day0 law for ENS and OM9 (forecast_target_contract.owned_window_start_utc):
+    observations own the elapsed hours; such a run owns only [issue, local-day end),
+    and its members are extremes of that window, never daily extremes.
+    """
+    start = _parse_iso_datetime(payload.get("local_day_start_utc"))
+    end = _parse_iso_datetime(payload.get("local_day_end_utc"))
+    issue = _parse_iso_datetime(payload.get("issue_time_utc"))
+    if start is None or end is None or issue is None or issue.tzinfo is None:
+        return None
+    owned = owned_window_start_utc(day_start_utc=start, day_end_utc=end, remaining_from_utc=issue)
+    return owned if owned > start else None
+
+
 def _high_local_day_max_boundary_certificate(payload: dict) -> dict[str, Any] | None:
     """Prove all 51 native daily maxima without assigning cross-midnight maxima."""
     from src.contracts.ensemble_snapshot_provenance import (
@@ -387,6 +407,7 @@ def _high_local_day_max_boundary_certificate(payload: dict) -> dict[str, Any] | 
             raise ValueError("local_day_bounds")
         if payload.get("unit") not in {"C", "F"}:
             raise ValueError("native_unit")
+        remaining_start = _remaining_window_start(payload)
         members = payload.get("members")
         if (not isinstance(members, list) or len(members) != 51
                 or any(not isinstance(m, dict) or type(m.get("member")) is not int for m in members)
@@ -420,12 +441,7 @@ def _high_local_day_max_boundary_certificate(payload: dict) -> dict[str, Any] | 
                     valid.append(list(interval))
                     intervals.append((max(start, left), min(end, right)))
                 canonical_ranges[key] = sorted(valid)
-            frontier = start
-            for left, right in sorted(intervals):
-                if left > frontier:
-                    errors.append("native_interval_gap")
-                frontier = max(frontier, right)
-            if frontier != end:
+            if not intervals_cover_window(intervals, start=remaining_start or start, end=end):
                 errors.append("native_interval_gap")
             native: dict[tuple[int, int], float] = {}
             try:
@@ -476,10 +492,14 @@ def _high_local_day_max_boundary_certificate(payload: dict) -> dict[str, Any] | 
             reasons.extend(errors)
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         reasons.append(f"invalid_certificate:{exc}")
+        remaining_start = None
+    exact = len(records) == 51 and not reasons
     certificate = {
         "revision": "high_native_boundary_v2",
         "data_version": version,
-        "status": "EXACT" if len(records) == 51 and not reasons else "UNKNOWN",
+        "status": (
+            "UNKNOWN" if not exact else "REMAINING_EXACT" if remaining_start else "EXACT"
+        ),
         "unit": payload.get("unit"), "issue_time_utc": payload.get("issue_time_utc"),
         "local_day_start_utc": payload.get("local_day_start_utc"),
         "local_day_end_utc": payload.get("local_day_end_utc"),
@@ -487,6 +507,8 @@ def _high_local_day_max_boundary_certificate(payload: dict) -> dict[str, Any] | 
         "members": records, "exact_member_count": sum(r["exact"] for r in records),
         "reasons": sorted(set(reasons)),
     }
+    if remaining_start is not None:
+        certificate["owned_window_start_utc"] = remaining_start.isoformat()
     certificate["identity_sha256"] = _canonical_json_sha256(certificate)
     return certificate
 
@@ -513,6 +535,8 @@ def _member_interval_bounds(payload: dict, *, city_timezone: str) -> dict[str, A
 
     if (payload.get("causality") or {}).get("status") != "OK":
         return None
+    if _remaining_window_start(payload) is not None:
+        return None  # bounds are whole-day by construction; a suffix run has none
     high_certificate = _high_local_day_max_boundary_certificate(payload)
     if high_certificate is not None:
         if (
@@ -1005,6 +1029,7 @@ def _low_native_windows_cover_day(payload: dict, *, city_timezone: str, target_d
         members = payload.get("members")
         if issue is None or issue.tzinfo is None or not isinstance(members, list):
             return False
+        owned_start = _remaining_window_start(payload) or start
         if (len(members) != 51 or any(not isinstance(m, dict) for m in members)
                 or any(type(m.get("member")) is not int for m in members)
                 or {m["member"] for m in members} != set(range(51))):
@@ -1027,12 +1052,7 @@ def _low_native_windows_cover_day(payload: dict, *, city_timezone: str, target_d
                     left, right = (issue + timedelta(hours=h) for h in interval)
                     if left < end and right > start:
                         intervals.append((max(start, left), min(end, right)))
-            frontier = start
-            for left, right in sorted(intervals):
-                if left > frontier:
-                    return False
-                frontier = max(frontier, right)
-            if frontier != end:
+            if not intervals_cover_window(intervals, start=owned_start, end=end):
                 return False
         return True
     except (TypeError, ValueError, OverflowError, ZoneInfoNotFoundError):
@@ -1089,10 +1109,14 @@ def _contract_evidence_fields(
             block_reasons.append("low_native_local_day_window_incomplete")
     high_certificate = _high_local_day_max_boundary_certificate(payload)
     if high_certificate is not None:
-        if high_certificate["status"] == "EXACT":
+        if high_certificate["status"] in {"EXACT", "REMAINING_EXACT"}:
             # The clipped native-window union and member-wise dominance prove
-            # this derived quantity over the entire local day, including its edges.
-            start = _parse_iso_datetime(payload["local_day_start_utc"])
+            # this derived quantity over the owned window (the entire local day,
+            # or [issue, day end) for a run issued inside it), including its edges.
+            start = _parse_iso_datetime(
+                high_certificate.get("owned_window_start_utc")
+                or payload["local_day_start_utc"]
+            )
             end = _parse_iso_datetime(payload["local_day_end_utc"])
             zone = ZoneInfo(city_timezone)
             window_fields = {
@@ -1186,10 +1210,16 @@ def _contract_evidence_fields(
     if not evidence.contributes_to_target_extrema and not evidence_block_reasons:
         evidence_block_reasons.append(evidence.attribution_status.lower())
     contributes = evidence.contributes_to_target_extrema and not evidence_block_reasons
+    attribution_status = evidence.attribution_status
+    if contributes and _remaining_window_start(payload) is not None:
+        # Exact extremes of the owned remaining window, not daily extremes: a
+        # distinct random variable no point daily-extreme reader may consume.
+        attribution_status = REMAINING_WINDOW_ATTRIBUTION_STATUS
+        contributes = False
     return {
         **base,
         "forecast_window_local_day_overlap_hours": evidence.local_day_overlap_hours,
-        "forecast_window_attribution_status": evidence.attribution_status,
+        "forecast_window_attribution_status": attribution_status,
         "contributes_to_target_extrema": 1 if contributes else 0,
         "forecast_window_block_reasons_json": json.dumps(evidence_block_reasons),
     }
@@ -1381,6 +1411,8 @@ def ingest_json_file(
     high_certificate = _high_local_day_max_boundary_certificate(payload)
     if high_certificate is not None and high_certificate["status"] != "EXACT":
         training_allowed = 0
+    if contract_evidence["forecast_window_attribution_status"] == REMAINING_WINDOW_ATTRIBUTION_STATUS:
+        training_allowed = 0  # a remaining-window extreme never trains a daily-extreme model
     if "low_native_local_day_window_incomplete" in json.loads(
         contract_evidence["forecast_window_block_reasons_json"]
     ):

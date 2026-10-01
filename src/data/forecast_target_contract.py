@@ -7,6 +7,7 @@ collapsing source-cycle freshness into live market coverage.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from math import ceil
@@ -101,6 +102,37 @@ def compute_target_local_day_window_utc(
         start_utc=start_local.astimezone(UTC),
         end_utc=end_local.astimezone(UTC),
     )
+
+
+def owned_window_start_utc(
+    *, day_start_utc: datetime, day_end_utc: datetime, remaining_from_utc: datetime | None,
+) -> datetime:
+    """Start of the local-day span a forecast owns at a causal boundary.
+
+    Day0 law H = max(H_confirmed, H_remaining): once the day is in progress at
+    the boundary, observations own the elapsed hours and the forecast owns only
+    [boundary, local-day end). A day not yet started, or already ended, is owned
+    whole. HIGH and LOW share this geometry, never their quantities.
+    """
+    if remaining_from_utc is None:
+        return day_start_utc
+    boundary = _to_utc(remaining_from_utc, "remaining_from_utc")
+    return boundary if day_start_utc <= boundary < day_end_utc else day_start_utc
+
+
+def intervals_cover_window(
+    intervals: Iterable[tuple[datetime, datetime]], *, start: datetime, end: datetime,
+) -> bool:
+    """Whether the union of ``[left, right)`` intervals covers ``[start, end)`` with no gap."""
+    frontier = start
+    for left, right in sorted(
+        (max(start, left), min(end, right)) for left, right in intervals
+        if left < end and right > start
+    ):
+        if left > frontier:
+            return False
+        frontier = max(frontier, right)
+    return frontier >= end
 
 
 def required_period_end_steps(

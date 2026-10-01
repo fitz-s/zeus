@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-09-30
+# Last reused or audited: 2026-10-01
 # Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
@@ -15796,3 +15796,70 @@ def test_ordinary_wrh_amber_current_kernel_ignores_age_fit(tmp_path, monkeypatch
             fixture.conn.close()
             fixture.builtin.close()
         next(native, None)
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_day0_never_reads_the_elected_snapshot_members_as_the_daily_extreme(monkeypatch, metric):
+    """A remaining-window ENS row elected as the Day0 base carries [issue, day end)
+    extremes, not daily extremes. Day0 q is max/min(H_confirmed, H_remaining) built
+    from the hourly vectors and the observation; the snapshot's members never enter."""
+    import src.engine.event_reactor_adapter as era
+    from src.data.forecast_extrema_authority import REMAINING_WINDOW_ATTRIBUTION_STATUS
+
+    conn, original, recaptured, _witness, _vectors, _window = _capture_equivalence_fixture()
+    original = build_day0_causal_evidence_bundle(
+        city="Paris", target_date="2026-06-10", metric=metric,
+        observation_context=original["observation_context"], cutoff_utc=original["cutoff_utc"],
+        vector_witness=dict(original["carrier_vector_witness"], metric=metric),
+    )
+    import src.data.replacement_forecast_bundle_reader as reader
+
+    conn.execute("""CREATE TABLE forecast_posteriors (
+        posterior_id INTEGER, city TEXT, target_date TEXT, temperature_metric TEXT,
+        source_id TEXT, product_id TEXT, data_version TEXT, training_allowed INTEGER,
+        runtime_layer TEXT, source_available_at TEXT, computed_at TEXT,
+        posterior_identity_hash TEXT, provenance_json TEXT, bundle_identity TEXT
+    )""")
+    conn.execute("INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        1, "Paris", "2026-06-10", metric, reader.SOURCE_ID, reader.PRODUCT_ID,
+        reader._data_version_for_metric(metric), 0, reader.LIVE_RUNTIME_LAYER,
+        "2026-06-10T09:00:00+00:00", original["cutoff_utc"], "original-identity",
+        json.dumps({"day0_causal_evidence_bundle": original}), original["bundle_identity"],
+    ))
+    conn.execute("DELETE FROM day0_hourly_vectors WHERE vector_id = ?",
+                 (recaptured["carrier_vector_ids_by_model"]["icon_d2"],))
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+    monkeypatch.setattr("src.data.day0_hourly_vectors.day0_hourly_models_for_city", lambda _city: ("icon_d2",))
+    monkeypatch.setattr(era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ())
+    bins = [Bin(low=None, high=17, label="17 or below", unit="C"),
+            Bin(low=18, high=18, label="18", unit="C"),
+            Bin(low=19, high=None, label="19 or above", unit="C")]
+    family = SimpleNamespace(city="Paris", target_date="2026-06-10", metric=metric,
+                             family_id=f"Paris|2026-06-10|{metric}", event_type="DAY0_EXTREME_UPDATED", bins=bins)
+    family.candidates = [SimpleNamespace(condition_id=f"condition-{i}", bin=b,
+                                        yes_token_id=f"yes-{i}", no_token_id=f"no-{i}") for i, b in enumerate(bins)]
+    costs = {(f"condition-{i}", side): (None, EP(0.5, "ask", fee_deducted=True, currency="probability_units"), 0.5, None, None)
+             for i in range(3) for side in ("buy_yes", "buy_no")}
+
+    def analyze(snapshot_members, observed):
+        snapshot = {"settlement_unit": "C", "temperature_metric": metric,
+                    "members_json": json.dumps(snapshot_members), "members_precision": 1.0,
+                    "source_id": "test", "issue_time": "2026-06-10T06:00:00+00:00",
+                    "dataset_id": "test_v1", "data_version": "test_v1",
+                    "forecast_window_attribution_status": REMAINING_WINDOW_ATTRIBUTION_STATUS,
+                    "contributes_to_target_extrema": 0}
+        payload = {"_edli_day0_causal_evidence_bundle": original, "metric": metric,
+                   "settlement_unit": "C", "observation_time": "2026-06-10T08:00:00+00:00",
+                   "rounded_value": observed, ("high_so_far" if metric == "high" else "low_so_far"): observed}
+        return era._market_analysis_from_event_snapshot(
+            calibration_conn=None, hourly_vector_conn=conn, snapshot=snapshot, family=family,
+            native_costs=costs, payload=payload, decision_time=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+            entry_authority=True,
+        ).p_posterior
+
+    base = analyze([18.0] * 51, 18.0)
+    # Snapshot members at the far tail would swing a daily-extreme reader to one bin.
+    assert np.array_equal(base, analyze([40.0 if metric == "high" else -5.0] * 51, 18.0))
+    # The confirmed extreme composes with the remaining path: it moves q.
+    assert not np.array_equal(base, analyze([18.0] * 51, 20.0 if metric == "high" else 16.0))
+    conn.close()

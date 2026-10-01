@@ -12,6 +12,10 @@ from zoneinfo import ZoneInfo
 
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
+from src.data.forecast_target_contract import (
+    compute_target_local_day_window_utc,
+    owned_window_start_utc,
+)
 
 
 SINGLE_RUNS_FORECAST_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
@@ -146,11 +150,12 @@ def _assert_complete_localday_hourly_slots(
     if actual == expected:
         return
     if remaining_from_utc is not None and expected:
-        boundary = remaining_from_utc.astimezone(UTC)
-        # Only a day in progress at the boundary; an ended day keeps the full law.
-        in_progress = expected[0] <= boundary < expected[-1] + timedelta(hours=1)
-        owned_from = max((at for at in expected if at <= boundary), default=None)
-        if in_progress and owned_from is not None:
+        day = compute_target_local_day_window_utc(
+            city_timezone=city_timezone, target_local_date=target_local_date)
+        owned_start = owned_window_start_utc(day_start_utc=day.start_utc,
+            day_end_utc=day.end_utc, remaining_from_utc=remaining_from_utc)
+        owned_from = max((at for at in expected if at <= owned_start), default=None)
+        if owned_from is not None:
             suffix = tuple(at for at in expected if at >= owned_from)
             if actual and actual[-len(suffix):] == suffix and actual == tuple(
                 at for at in expected if at >= actual[0]

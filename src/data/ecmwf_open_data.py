@@ -84,7 +84,8 @@ from src.data.forecast_target_contract import (
     evaluate_producer_coverage,
 )
 from src.data.forecast_extrema_authority import (
-    POSITIVE_ATTRIBUTION_STATUSES,
+    CURRENT_EVIDENCE_ELIGIBILITIES,
+    classify_forecast_extrema_authority,
     member_interval_bounds_from_row,
 )
 from src.data.producer_readiness import build_producer_readiness_for_scope
@@ -2645,14 +2646,13 @@ def _write_source_authority_chain(
         if snapshot_window_start != scope.target_window_start_utc:
             reason_codes.append("SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH")
         attribution_status = str(row.get("forecast_window_attribution_status") or "")
-        # An interval row contributes current-evidence shape, never a point extreme.
-        contributes_to_target_extrema = interval_bounds is not None or (
-            int(row.get("contributes_to_target_extrema") or 0) == 1
+        # One classifier for writer and reader: point, interval and remaining-window
+        # rows are current evidence; only the reader's consumer decides which it reads.
+        current_evidence = (
+            classify_forecast_extrema_authority(row).eligibility
+            in CURRENT_EVIDENCE_ELIGIBILITIES
         )
-        positive_attribution = interval_bounds is not None or (
-            attribution_status in POSITIVE_ATTRIBUTION_STATUSES
-        )
-        if not (contributes_to_target_extrema and positive_attribution):
+        if not current_evidence:
             if (
                 attribution_status == "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
                 and int(row.get("boundary_ambiguous") or 0) == 1
@@ -2668,8 +2668,7 @@ def _write_source_authority_chain(
             and horizon_decision.status == "LIVE_ELIGIBLE"
             and coverage_decision.status == "LIVE_ELIGIBLE"
             and snapshot_window_start == scope.target_window_start_utc
-            and contributes_to_target_extrema
-            and positive_attribution
+            and current_evidence
             and grid_reason is None
         )
         if live_eligible:
