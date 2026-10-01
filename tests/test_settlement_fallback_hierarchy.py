@@ -173,6 +173,8 @@ def test_both_harvesters_require_station_and_authority(module, fixture):
     None,  # pre-proof writer: reason only
     "not json",
     proof(fallback_deadline(DAY), proof_version="noaa_wrh_absence_proof_v0"),
+    # v1 admitted a malformed top-level UNITS container as "unlabelled".
+    proof(fallback_deadline(DAY), proof_version="noaa_wrh_absence_proof_v1"),
     proof(fallback_deadline(DAY), station_id="KDEN"),
     proof(fallback_deadline(DAY), unit="C"),
     proof(fallback_deadline(DAY), response_sha256="short"),

@@ -647,8 +647,12 @@ def product_from_response(body: bytes, station: str, *, unit: Unit) -> WrhProduc
         raise WrhPayloadInvalid(f"{station}: response body is not JSON") from exc
     rows = _parse_rows(payload, station)
     summary = payload.get("SUMMARY")
-    units = payload.get("UNITS")
-    unit_label = units.get("air_temp") if isinstance(units, dict) else None
+    # Absent UNITS is the documented sparse case; a present non-object is a
+    # malformed product, never "no label" (that would license absence).
+    units = payload.get("UNITS", {})
+    if not isinstance(units, dict):
+        raise WrhPayloadInvalid(f"{station}: response UNITS is not an object")
+    unit_label = units.get("air_temp")
     if unit_label is not None and not isinstance(unit_label, str):
         raise WrhPayloadInvalid(f"{station}: response unit label is not a string")
     if rows and unit_label != _UNIT_LABELS[unit]:

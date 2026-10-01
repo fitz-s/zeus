@@ -1367,6 +1367,9 @@ def day_start_plus(day, *, hours):
     _empty_product_body(unit_label="Celsius"),
     _empty_product_body(response_code=True),
     _empty_product_body(unit_label={"unexpected": "object"}),
+    # A present UNITS that is not an object is malformed, not "unlabelled".
+    *(json.dumps({**json.loads(_empty_product_body()), "UNITS": bad}).encode()
+      for bad in ([], ["Fahrenheit"], "Fahrenheit", 1, True, None)),
     json.dumps({"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {"air_temp": "Fahrenheit"},
                 "STATION": [{"STID": "KHOU"}]}).encode(),
     json.dumps({"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {"air_temp": "Fahrenheit"},
@@ -1394,6 +1397,10 @@ def test_documented_sparse_empty_shape_still_confirms_empty():
     body = json.dumps({"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {},
                        "STATION": [{"STID": "KHOU", "OBSERVATIONS": {"date_time": []}}]})
     product = product_from_response(body.encode(), "KHOU", unit="F")
+    assert product.confirms_empty(target_date_local="2026-09-11", view="hourly")
+    absent = json.dumps({"SUMMARY": {"RESPONSE_CODE": 1},
+                         "STATION": [{"STID": "KHOU", "OBSERVATIONS": {"date_time": []}}]})
+    product = product_from_response(absent.encode(), "KHOU", unit="F")
     assert product.confirms_empty(target_date_local="2026-09-11", view="hourly")
 
 

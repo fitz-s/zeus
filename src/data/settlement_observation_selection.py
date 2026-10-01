@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-01 (versioned durable absence proof)
+# Last reused/audited: 2026-10-01 (absence proof v2: typed UNITS container)
 """The resolver's hierarchy, not a hierarchy of convenient weather mirrors.
 
 The 48 NOAA descriptions captured for 2026-09-29 prescribe WRH, then WU
@@ -22,7 +22,9 @@ from zoneinfo import ZoneInfo
 
 EMPTY_AFTER_DEADLINE = "SOURCE_CONFIRMED_EMPTY_AFTER_CONTRACT_DEADLINE"
 RULE = "noaa_wrh_then_wu_next_day_2359_ET_v1"
-PROOF_VERSION = "noaa_wrh_absence_proof_v1"
+# v1 was minted while a malformed top-level UNITS container parsed as "no
+# label"; v1 rows stay as evidence but authorize nothing until re-fetched.
+PROOF_VERSION = "noaa_wrh_absence_proof_v2"
 PRODUCT = "weather.gov_wrh_timeseries"
 
 
