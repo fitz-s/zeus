@@ -7757,6 +7757,37 @@ def _current_held_weather_families(
     return tuple(sorted(families))
 
 
+def _post_local_day_family_keys(
+    families: tuple[tuple[str, str, str], ...],
+    *,
+    at: datetime,
+) -> frozenset[str]:
+    """Family keys whose city-local target day has ended at ``at``.
+
+    A city without a resolvable timezone or date is never treated as ended,
+    so its required-held veto stays exact.
+    """
+
+    from zoneinfo import ZoneInfoNotFoundError
+
+    from src.config import runtime_cities_by_name
+    from src.engine.time_context import has_city_local_day_ended
+
+    cities = runtime_cities_by_name()
+    ended: set[str] = set()
+    for city, target_date, metric in families:
+        tz = str(getattr(cities.get(city), "timezone", "") or "")
+        try:
+            if not tz or not has_city_local_day_ended(target_date, tz, at):
+                continue
+        except (ValueError, ZoneInfoNotFoundError):
+            continue
+        ended.add(
+            weather_family_id(city=city, target_date=target_date, metric=metric)
+        )
+    return frozenset(ended)
+
+
 def _current_selection_portfolio_state(
     trade_conn: object,
     portfolio_state_provider: Callable[[], object] | None,
@@ -9100,6 +9131,15 @@ def process_current_global_batch(
                 economic_cut_completed=True,
             )
         scope_at = current_time()
+        # A held family whose city-local target day has ended can never get a
+        # new posterior, so it cannot gate a cut that its debt (often requested
+        # before day-end) names. It stays a held obligation: this cut still
+        # prices it when final-day evidence exists and otherwise HOLDs it,
+        # while the probability-independent hard-fact/settlement lanes own its
+        # redecision. An open local day keeps the exact INV-47 veto below.
+        required_held_family_keys = required_held_family_keys.difference(
+            _post_local_day_family_keys(held_families, at=scope_at)
+        )
         proof_buy_candidates_enabled = (
             proof_candidate_policy_rejection_resolver is not None
         )

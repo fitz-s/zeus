@@ -739,10 +739,12 @@ def test_generic_family_completion_requires_canonical_held_target_before_cut():
     )
 
 
-def test_generic_family_completion_does_not_clear_when_other_family_prepares(
+def _run_required_chicago_completion_with_failed_held_prepare(
     monkeypatch,
+    decision_at,
+    required_keys=None,
 ):
-    """A target preparation failure remains incomplete even with another q."""
+    """Generic completion naming Chicago 05-24 high whose held q fails to prepare."""
     import src.data.replacement_input_hwm as replacement_hwm
 
     from src.engine import global_batch_runtime
@@ -762,7 +764,6 @@ def test_generic_family_completion_does_not_clear_when_other_family_prepares(
         entity_key="Dallas|2026-05-24|high|required-other",
         payload_json=json.dumps(other_payload, sort_keys=True),
     )
-    decision_at = datetime(2026, 5, 24, 18, 5, tzinfo=timezone.utc)
     target_key = weather_family_id(
         city="Chicago",
         target_date="2026-05-24",
@@ -871,11 +872,43 @@ def test_generic_family_completion_does_not_clear_when_other_family_prepares(
             venue_submit_count=lambda: 0,
             current_execution=lambda *_args: None,
             current_time_provider=lambda: decision_at,
-            required_held_family_keys=frozenset({target_key}),
+            required_held_family_keys=(
+                frozenset({target_key})
+                if required_keys is None
+                else frozenset(required_keys)
+            ),
             dependency_scope_observer=observed_scopes.append,
         )
     finally:
         conn.close()
+
+    return SimpleNamespace(
+        result=result,
+        target=target,
+        other=other,
+        target_key=target_key,
+        prepared_calls=prepared_calls,
+        held_calls=held_calls,
+        observed_scopes=observed_scopes,
+        observed_before_prepare=observed_before_prepare,
+    )
+
+
+def test_generic_family_completion_does_not_clear_when_other_family_prepares(
+    monkeypatch,
+):
+    """A target preparation failure remains incomplete even with another q."""
+    # 13:05 Chicago time: the required target's local day is still open.
+    run = _run_required_chicago_completion_with_failed_held_prepare(
+        monkeypatch,
+        datetime(2026, 5, 24, 18, 5, tzinfo=timezone.utc),
+    )
+    result = run.result
+    prepared_calls = run.prepared_calls
+    held_calls = run.held_calls
+    observed_scopes = run.observed_scopes
+    observed_before_prepare = run.observed_before_prepare
+    target, other = run.target, run.other
 
     assert set(prepared_calls) == {target.event_id, other.event_id}
     assert held_calls == [target.event_id]
@@ -890,6 +923,56 @@ def test_generic_family_completion_does_not_clear_when_other_family_prepares(
             "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_PREPARATION_INCOMPLETE:"
         )
         for receipt in result.receipts.values()
+    )
+
+
+
+def test_post_local_day_held_family_debt_does_not_block_the_cut(
+    monkeypatch,
+    tmp_path,
+):
+    """Debt requested before day-end cannot veto a cut consumed after it.
+
+    Once the city-local target day has ended no new posterior can exist, so a
+    family-scoped completion wake published while the day was open must not
+    keep every later cut INCOMPLETE. The family stays a held obligation whose
+    preparation is attempted; only the required-held veto releases it.
+    """
+    from src.events.candidate_binding import weather_family_id
+    from src.events.reactor import request_global_auction_completion
+    from src.runtime.reactor_wake import (
+        is_strict_generic_held_family_completion_wake,
+        reactor_wakes_since,
+    )
+
+    wake_path = tmp_path / "wake.json"
+    # Requested at 13:05 Chicago time, while 2026-05-24 is still open.
+    assert request_global_auction_completion(
+        reason="GLOBAL_AUCTION_STATISTICAL_SELL_FULL_FAMILY_PREPARATION_REQUIRED",
+        position_id="held-chicago",
+        family=("Chicago", "2026-05-24", "high"),
+        wake_path=wake_path,
+    )
+    (wake,) = reactor_wakes_since(None, path=wake_path)
+    assert is_strict_generic_held_family_completion_wake(wake)
+    required = frozenset(
+        weather_family_id(city=city, target_date=target_date, metric=metric)
+        for city, target_date, metric in wake.forecast_families
+    )
+
+    # Consumed at 01:05 Chicago time on 2026-05-25: the target day has ended.
+    run = _run_required_chicago_completion_with_failed_held_prepare(
+        monkeypatch,
+        datetime(2026, 5, 25, 6, 5, tzinfo=timezone.utc),
+        required_keys=required,
+    )
+
+    assert required == {run.target_key}
+    assert run.held_calls == [run.target.event_id]
+    assert not any(
+        "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_PREPARATION_INCOMPLETE"
+        in str(receipt.reason)
+        for receipt in run.result.receipts.values()
     )
 
 
