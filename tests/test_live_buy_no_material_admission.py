@@ -22,10 +22,12 @@ import pytest
 
 import src.engine.event_reactor_adapter as era
 from src.calibration.qlcb_provenance import CALIBRATION_SOURCES
-from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    GlobalAuctionReceiptRef,
+)
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel.canonicalization import (
-    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
     qkernel_current_state_identity_hash,
     stable_hash,
 )
