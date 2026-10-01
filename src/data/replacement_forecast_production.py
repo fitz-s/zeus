@@ -1256,6 +1256,7 @@ def _newest_covering_anchor_proof_debt(
         _current_target_payload_file_materializable,
         _current_target_witnessed_cached_path,
         _safe_name,
+        anchor_local_proof_covers_full_localday,
     )
     from src.config import cities_by_name  # noqa: PLC0415
     from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
@@ -1314,8 +1315,16 @@ def _newest_covering_anchor_proof_debt(
                     base, city=city, target_date=target_date, metric=metric,
                     city_timezone=city_cfg.timezone, cycle=cycle, anchor_sigma_c=3.0,
                 )
-                if witnessed is not None:
-                    debt.setdefault(cycle, []).append((city, target_date, metric))
+                # The writer's own law: a proof is appended only for a body that
+                # covers the full local day. A Day0-suffix body is not a covering
+                # anchor here; an older cycle may still be.
+                if witnessed is None or not anchor_local_proof_covers_full_localday(
+                    witnessed.read_bytes(),
+                    {"timezone_name": city_cfg.timezone, "target_local_date": target_date},
+                    cycle=cycle,
+                ):
+                    continue
+                debt.setdefault(cycle, []).append((city, target_date, metric))
                 break  # Newest covering cycle decides; older cycles never drain.
     finally:
         conn.close()
@@ -1398,6 +1407,14 @@ def _drain_newest_covering_anchor_local_proofs_if_needed(
         except TimeoutError:
             report["status"] = "ANCHOR_LOCAL_PROOF_DRAIN_TIMEBOXED_INCOMPLETE"
             break
+        except Exception as exc:  # noqa: BLE001 - one family's debt never starves the rest.
+            report["status"] = "ANCHOR_LOCAL_PROOF_DRAIN_PARTIAL"
+            report["drains"].append({  # type: ignore[union-attr]
+                "cycle": cycle.isoformat(), "scopes": [list(scope) for scope in batch],
+                "status": "ANCHOR_LOCAL_PROOF_FAMILY_FAILED",
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+            })
+            continue
         proven = set(_committed_current_target_anchor_scopes(
             result.get("written_manifests") or (), cycle=cycle,
         ))

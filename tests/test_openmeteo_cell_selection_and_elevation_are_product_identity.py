@@ -681,6 +681,53 @@ def _drain_newest_covering_anchor(scope, output, family_key, cycle, monkeypatch)
     return reports[0]
 
 
+def test_anchor_local_proof_drain_isolates_one_family_failure(tmp_path, monkeypatch):
+    """One family's writer rejection is recorded; the next family still drains."""
+    from src.data import replacement_forecast_production as production
+    from src.data.family_reachability import Reachability
+    import scripts.download_replacement_forecast_current_targets as producer
+
+    cycle = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    bad, good = ("Seoul", "2026-10-01", "low"), ("Guangzhou", "2026-10-01", "low")
+    monkeypatch.setattr("src.data.replacement_forecast_current_target_plan.replacement_forecast_current_target_keys",
+        lambda *_a, **_k: ())
+    monkeypatch.setattr("src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda **_k: {bad: 1, good: 1})
+    monkeypatch.setattr("src.data.family_reachability.build_reachability",
+        lambda **_k: Reachability(oldest_reachable_date="0000-00-00", open_families=frozenset()))
+    monkeypatch.setattr(production, "_newest_covering_anchor_proof_debt",
+        lambda *_a, **_k: {cycle: [bad, good]})
+    calls = []
+
+    def download(**kwargs):
+        calls.append(tuple(kwargs["required_scopes"]))
+        if kwargs["required_scopes"] == (bad,):
+            raise ValueError("partial local-day coverage: missing, duplicate or unordered hourly slots")
+        return {"status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED", "written_manifests": [],
+                "local_proof_artifact_ids": [7]}
+
+    monkeypatch.setattr(producer, "download_current_target_openmeteo_inputs", download)
+    report = production._drain_newest_covering_anchor_local_proofs_if_needed(
+        {"forecast_db": tmp_path / "f.db", "raw_manifest_dir": tmp_path}, max_wall_clock_seconds=60.0)
+    assert calls == [(bad,), (good,)]
+    assert report["status"] == "ANCHOR_LOCAL_PROOF_DRAIN_PARTIAL"
+    assert report["drains"][0]["status"] == "ANCHOR_LOCAL_PROOF_FAMILY_FAILED"
+    assert "partial local-day coverage" in report["drains"][0]["error"]
+    assert report["drains"][1]["local_proof_count"] == 1
+
+
+def test_covering_anchor_scan_shares_the_writer_full_localday_law():
+    """A Day0-suffix body is not a covering anchor for proof debt (twin routing)."""
+    import inspect
+    from src.data import replacement_forecast_production as production
+    import scripts.download_replacement_forecast_current_targets as producer
+
+    scan = inspect.getsource(production._newest_covering_anchor_proof_debt)
+    writer = inspect.getsource(producer.download_current_target_raw_inputs)
+    assert "anchor_local_proof_covers_full_localday(" in scan
+    assert "anchor_local_proof_covers_full_localday(" in writer
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 def test_newest_covering_anchor_drain_appends_local_proof_once(tmp_path, monkeypatch, metric):
     """A family whose only covering anchor predates ground proof gains it with no HTTP."""
