@@ -14490,6 +14490,164 @@ def test_live_adapter_reuses_ineligible_probability_until_authority_db_changes(
     assert len(prepare_calls) == 3
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=current_value_serving_physical_proof_dependency_changed:"
+        "model=ecmwf_ifs:consumed_raw_id=7",
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=source_cycle_time_raw_forecast_artifacts_lag:"
+        "latest_raw_cycle=2026-07-10T06:00:00+00:00",
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_LIVE_READINESS_EXPIRED",
+    ],
+)
+def test_live_adapter_reuses_superseded_posterior_until_its_frontier_moves(
+    monkeypatch,
+    reason,
+):
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    callbacks = []
+    prepare_calls = []
+    revision = {"value": (1, 1, 1)}
+    frontier = {"value": (41, "readiness-a", "READY")}
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
+    monkeypatch.setattr(
+        era,
+        "_global_probability_family_cache_revision",
+        lambda _connections: revision["value"],
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_probability_posterior_frontier",
+        lambda _conn, **_kwargs: frontier["value"],
+    )
+
+    def fail_prepare(*_args, **_kwargs):
+        prepare_calls.append(1)
+        raise ValueError(reason)
+
+    monkeypatch.setattr(
+        era, "_prepare_current_global_probability_family", fail_prepare
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: (
+            callbacks.append(kwargs["prepare_event"])
+            or SimpleNamespace(events=tuple(events))
+        ),
+    )
+
+    def cut(event, seconds, *, batch=None):
+        at = _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
+        at += _dt.timedelta(seconds=seconds)
+        era.event_bound_live_adapter_from_trade_conn(
+            trade,
+            get_current_level=lambda: era.RiskLevel.GREEN,
+            forecast_conn=forecast,
+            topology_conn=topology,
+            calibration_conn=world,
+        ).process_global_batch(batch or (event,), at)
+        return callbacks[-1](event, at)
+
+    scope_event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    first = cut(scope_event, 0)
+    assert first.prepared_global_family is None
+    assert reason in first.reason
+    assert len(prepare_calls) == 1
+
+    # An unrelated forecast-DB commit leaves this family's verdict standing,
+    # whether or not the batch names the family.
+    revision["value"] = (2, 1, 1)
+    assert cut(scope_event, 1) is first
+    book_event = replace(scope_event, event_type="BOOK_SNAPSHOT")
+    assert cut(scope_event, 2, batch=(book_event,)) is first
+    assert len(prepare_calls) == 1
+
+    # A new live posterior re-proves on the very next cut.
+    frontier["value"] = (42, "readiness-a", "READY")
+    cut(scope_event, 3)
+    assert len(prepare_calls) == 2
+    cut(scope_event, 4)
+    assert len(prepare_calls) == 2
+
+    # So does a new readiness certificate for the same posterior.
+    frontier["value"] = (42, "readiness-b", "READY")
+    cut(scope_event, 5)
+    assert len(prepare_calls) == 3
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=HWM_READ_DEADLINE",
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=current_value_serving_read_unavailable:sqlite_error=locked",
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+        "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE",
+    ],
+)
+def test_superseded_posterior_cache_excludes_transient_and_other_reasons(reason):
+    receipt = era.EventSubmissionReceipt(
+        False,
+        "event",
+        "snapshot",
+        reason=(
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            f"{era._FAMILY_AUTHORITY_UNAVAILABLE}:{reason}"
+        ),
+    )
+    assert not era._superseded_posterior_ineligible(receipt)
+
+
+def test_day0_ineligible_verdict_is_not_bound_to_the_posterior_frontier(
+    monkeypatch,
+):
+    namespace = "ns"
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
+    receipt = era.EventSubmissionReceipt(
+        False,
+        "event",
+        "snapshot",
+        reason=(
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            f"{era._FAMILY_AUTHORITY_UNAVAILABLE}:"
+            "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+            "REPLACEMENT_LIVE_READINESS_EXPIRED"
+        ),
+    )
+    key = dict(family_key="Dallas|2026-07-11|high", event_id="event",
+               causal_snapshot_id="snapshot")
+    # A Day0 caller supplies no frontier, so nothing is stored for it.
+    era._store_global_probability_family_ineligible_cache(
+        namespace, **key, revision=(1,), receipt=receipt,
+    )
+    assert era._probe_global_probability_family_ineligible_cache(
+        namespace, **key, revision=(1,),
+    ) is None
+    era._store_global_probability_family_ineligible_cache(
+        namespace, **key, revision=(1,), receipt=receipt,
+        posterior_frontier=(7, "r", "READY"),
+    )
+    # A frontier-keyed entry never hits without a frontier to compare.
+    assert era._probe_global_probability_family_ineligible_cache(
+        namespace, **key, revision=(1,),
+    ) is None
+    assert era._probe_global_probability_family_ineligible_cache(
+        namespace, **key, revision=(1,),
+        posterior_frontier=lambda: (7, "r", "READY"),
+    ) is receipt
+
+
 def test_live_adapter_reuses_book_cache_after_probability_rebind(
     monkeypatch,
     tmp_path,
