@@ -1,7 +1,7 @@
 # Created: 2026-09-17
 # Last reused/audited: 2026-09-30
 # Authority basis: distance-conditioned maker fill bands; thin early market
-#   maker price menu (one far-edge price per band, operator law 2026-09-30).
+#   maker price menu (one near-edge price per band, operator law 2026-09-30).
 """A maker fill probability that ignores distance turns the objective into an edge sort.
 
 EV = p_fill x edge. With p_fill constant the ranking depends only on edge, so the winner is
@@ -155,21 +155,22 @@ def _menu(bid, ask, tick="0.01"):
 @pytest.mark.parametrize(
     ("bid", "ask", "tick", "expected"),
     (
-        # Each band's far edge ceil_tick(ask - edge), clipped into (bid, ask).
-        ("0.30", "0.40", "0.01", ("0.38", "0.35", "0.31")),
-        # Thin early book with no bid: down to the lowest in-band price.
-        (None, "0.40", "0.01", ("0.38", "0.35", "0.25", "0.05")),
-        # The live band ceiling 0.95 binds hi; 0.92 / 0.82 / 0.47 are far edges.
-        (None, "0.97", "0.01", ("0.95", "0.92", "0.82", "0.47")),
+        # Each band's near edge ceil_tick(ask - previous_edge) - tick, clipped into
+        # (bid, ask); band 3's 0.24 falls under the bid and leaves its band.
+        ("0.30", "0.40", "0.01", ("0.39", "0.37", "0.34")),
+        # Thin early book with no bid: every band is reachable at its near edge.
+        (None, "0.40", "0.01", ("0.39", "0.37", "0.34", "0.24")),
+        # The live band ceiling 0.95 binds hi; 0.94 / 0.91 / 0.81 are near edges.
+        (None, "0.97", "0.01", ("0.95", "0.94", "0.91", "0.81")),
         # A bid below the band floor never lowers lo under 0.05.
-        ("0.02", "0.90", "0.001", ("0.88", "0.85", "0.75", "0.40")),
+        ("0.02", "0.90", "0.001", ("0.899", "0.879", "0.849", "0.749")),
         # Clipping to lo can leave a band: 0.05 on a 0.06 ask is band 0 only.
         (None, "0.06", "0.01", ("0.05",)),
         # One-tick spread: no price strictly inside it.
         ("0.39", "0.40", "0.01", ()),
     ),
 )
-def test_maker_menu_is_one_far_edge_price_per_reachable_band(bid, ask, tick, expected):
+def test_maker_menu_is_one_near_edge_price_per_reachable_band(bid, ask, tick, expected):
     menu = _menu(bid, ask, tick)
     assert menu == tuple(Decimal(price) for price in expected)
     assert len(set(menu)) == len(menu)
@@ -181,15 +182,15 @@ def test_maker_menu_is_one_far_edge_price_per_reachable_band(bid, ask, tick, exp
     assert bands == sorted(set(bands))
 
 
-def test_maker_menu_far_edge_is_the_cheapest_price_with_the_same_fill_band():
-    """Within a band the fill model is constant, so one tick lower would leave it."""
+def test_maker_menu_near_edge_is_the_band_price_nearest_the_ask():
+    """A band's bound is measured across the band and fill odds fall with distance, so
+    the bound holds only at the band's nearest price: one tick nearer leaves the band."""
 
     ask = Decimal("0.40")
     for price in _menu(None, "0.40"):
         band = _maker_fill_distance_band(ask - price)
-        lower = price - Decimal("0.01")
-        if lower >= Decimal("0.05"):
-            assert _maker_fill_distance_band(ask - lower) != band
+        nearer = price + Decimal("0.01")
+        assert nearer >= ask or _maker_fill_distance_band(ask - nearer) != band
 
 
 def _live_shaped_conn(bands):
@@ -330,9 +331,9 @@ def test_no_bid_book_prices_its_band_three_rest_with_band_three_evidence():
         samples={"BUY": sample}, issued_at_utc=cut,
     )
     by_limit = {key[5]: witness for key, witness in rebound["event"].maker_fill_witnesses.items()}
-    # Ask 0.60, no bid: band-3 far edge ceil(0.60 - 0.50) = 0.10.
-    band_three = by_limit[Decimal("0.10")]
+    # Ask 0.60, no bid: band-3 near edge ceil(0.60 - 0.15) - 0.01 = 0.44.
+    band_three = by_limit[Decimal("0.44")]
     own = Decimal(str(wilson_lower_bound(2, 17, z=Z_TWO_SIDED_95)))
     assert band_three.fill_probability == pytest.approx(float(own))
-    band_two = by_limit[Decimal("0.45")]
+    band_two = by_limit[Decimal("0.54")]
     assert band_three.fill_probability < band_two.fill_probability

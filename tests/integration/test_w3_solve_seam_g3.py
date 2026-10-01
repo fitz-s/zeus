@@ -4352,16 +4352,16 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
             issued_at_utc=at,
         )
     )
-    # Book bid 0.30 / ask 0.40 / tick 0.01: each fill-distance band's far edge,
+    # Book bid 0.30 / ask 0.40 / tick 0.01: each fill-distance band's near edge,
     # clipped to (bid, ask) and kept only inside its own band, deduplicated.
     menu = sorted(
         key[5] for key in rebound["event"].maker_fill_witnesses
     )
-    assert menu == [Decimal("0.31"), Decimal("0.35"), Decimal("0.38")]
+    assert menu == [Decimal("0.34"), Decimal("0.37"), Decimal("0.39")]
     assert sorted(
         key[5] for key in witnessed_epoch.maker_fill_witness_identities
     ) == menu
-    key = ("bin", "condition", "YES", "yes-token", None, Decimal("0.38"))
+    key = ("bin", "condition", "YES", "yes-token", None, Decimal("0.39"))
     maker_witness = rebound["event"].maker_fill_witnesses[key]
     native = SimpleNamespace(
         no_trade_reason=None,
@@ -44746,12 +44746,10 @@ def test_global_buy_jit_rebinds_exact_maker_witness_to_current_book():
 @pytest.mark.parametrize(
     ("side", "fresh_ask"),
     (
-        ("YES", "0.421"),
         ("YES", "0.951"),
-        ("NO", "0.421"),
         ("NO", "0.951"),
     ),
-    ids=("yes-nearer", "yes-farther", "no-nearer", "no-farther"),
+    ids=("yes-farther", "no-farther"),
 )
 def test_global_buy_jit_maker_distance_band_change_supersedes_exact_witness(
     side, fresh_ask
@@ -44780,6 +44778,32 @@ def test_global_buy_jit_maker_distance_band_change_supersedes_exact_witness(
     assert era._global_preflight_block_status(
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:" + str(exc_info.value)
     ) == "MARKET_AUTHORITY_SUPERSEDED"
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_buy_jit_maker_ask_moving_nearer_keeps_the_selected_witness(side):
+    """Fill odds only fall with distance, so a nearer ask leaves the selected
+    band's bound a valid lower bound: keep the limit and its witness."""
+
+    selected = _current_maker_buy_candidate(side=side)
+    authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")
+    rebound = era._global_buy_candidate_from_raw_book(
+        selected,
+        {
+            "asset_id": selected.token_id,
+            "tick_size": "0.001",
+            "min_order_size": "5",
+            "bids": [{"price": "0.40", "size": "100"}],
+            "asks": [{"price": "0.421", "size": "100"}],
+        },
+        captured_at_utc=authority.snapshot.captured_at,
+        market_authority=authority,
+    )
+    assert rebound.maker_fill_witness.limit_price == Decimal("0.401")
+    assert (
+        rebound.maker_fill_witness.outcomes
+        == selected.maker_fill_witness.outcomes
+    )
 
 
 @pytest.mark.parametrize(

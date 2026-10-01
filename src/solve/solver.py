@@ -356,14 +356,18 @@ def maker_buy_price_menu(
     band_edges: Sequence[Decimal],
     band_of: Callable[[Decimal], int],
 ) -> tuple[Decimal, ...]:
-    """One post-only BUY limit per fill-distance band: that band's far edge.
+    """One post-only BUY limit per fill-distance band: that band's near edge.
 
-    The fill model is constant within a band, so the lowest price in it is the
-    best BUY at the same fill odds; ``q`` then chooses across bands. Each
-    ``ceil_tick(ask - edge)`` is clipped to ``[lo, hi]`` (``lo`` one tick above
-    the bid and never below the lowest in-band price; ``hi`` one tick inside
-    the ask and the band ceiling) and dropped if clipping leaves its band.
-    A band whose measured fill bound is zero gets no witness downstream.
+    Fill odds fall with distance to the ask, so a band's bound, measured over
+    rests spread across the band, holds only at its nearest distance. Quoting
+    the far edge would credit the cheapest price with the whole band's odds:
+    live, band (0.05, 0.15] bound 0.147 against 3/47 filled at 0.14-0.15.
+    The near edge is the highest tick strictly beyond the previous edge,
+    ``ceil_tick(ask - previous_edge) - tick``, clipped to ``[lo, hi]`` (``lo``
+    one tick above the bid and never below the lowest in-band price; ``hi``
+    one tick inside the ask and the band ceiling) and dropped if clipping
+    leaves its band; ``q`` then chooses across bands. A band whose measured
+    fill bound is zero gets no witness downstream.
     """
 
     ask = Decimal(best_ask)
@@ -376,10 +380,10 @@ def maker_buy_price_menu(
     lo = floor if best_bid is None else max(Decimal(best_bid) + step, floor)
     hi = min(ask - step, LIVE_ORDER_MAX_UNIT_PRICE)
     menu: list[Decimal] = []
-    for band, edge in enumerate(band_edges):
+    for band, near in enumerate((Decimal("0"), *band_edges[:-1])):
         if lo > hi:
             break
-        price = min(max(ceil_tick(ask - Decimal(edge)), lo), hi)
+        price = min(max(ceil_tick(ask - Decimal(near)) - step, lo), hi)
         if band_of(ask - price) == band and price not in menu:
             menu.append(price)
     return tuple(menu)

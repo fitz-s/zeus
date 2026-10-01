@@ -60,7 +60,8 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   `CurrentMakerFillWitness` with a causal zero/partial/full fill distribution;
   a historical scalar or implicit full fill is never current executable truth.
   A BUY token carries one maker per fill-distance band (`maker_buy_price_menu`:
-  the band's far edge below the ask, clipped into the spread and the live band),
+  the band's near edge below the ask, where the band's bound holds, clipped into
+  the spread and the live band),
   each sized by spendable cash at its limit; the limit is part of its slot key.
   Before sizing a new BUY, the current owner strategy's
   native entry-price floor removes unlicensed longshots from the feasible set. Inside that set,
