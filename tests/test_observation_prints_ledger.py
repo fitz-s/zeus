@@ -1,5 +1,5 @@
 # Created: 2026-07-16
-# Last reused/audited: 2026-10-01 (exact-microsecond receipt order)
+# Last reused/audited: 2026-10-01 (every accepted receipt is SQL-readable)
 # Authority basis: day0 defects 1-5 (Paris 2026-07-14 monotonicity regression,
 #   WU-backfill-frozen hour buckets, climatology-band self-blinding, HKO
 #   accumulator never folding its own spot read, Seoul binary exclusion where
@@ -333,6 +333,26 @@ class TestAppendOnly:
             f"SELECT {receipt_us_sql('?1')}", (text,)
         ).fetchone()
         assert got == receipt_us(datetime.fromisoformat(text.replace("Z", "+00:00")))
+
+    @pytest.mark.parametrize("text,stored", [
+        ("2026-08-09T18:10:00,000123+00:00", "2026-08-09T18:10:00.000123+00:00"),
+        ("20260809T181000.000123+00:00", "2026-08-09T18:10:00.000123+00:00"),
+        ("2026-08-09|18:10:00.000123+00:00", "2026-08-09T18:10:00.000123+00:00"),
+        ("2026-08-09 18:10:00.000123+00:00", "2026-08-09 18:10:00.000123+00:00"),
+        ("2026-08-09T18:10+00:00", "2026-08-09T18:10+00:00"),
+    ])
+    def test_every_accepted_receipt_is_stored_sql_readable(self, text, stored):
+        """Python-only spellings are canonicalized; SQL-readable ones stay byte-stable."""
+        from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
+
+        conn = sqlite3.connect(":memory:")
+        ensure_table(conn)
+        append_print(conn, city="Austin", station_id="KAUS", source_channel="noaa_wrh_kaus",
+                     publish_ts_utc="2026-08-09T18:00:00+00:00", value_native=68, unit="F",
+                     fetched_at_utc=text)
+        got, key = conn.execute(f"SELECT fetched_at_utc, {RECEIPT_US_SQL} FROM observation_prints").fetchone()
+        assert got == stored
+        assert key == receipt_us(datetime.fromisoformat(text))
 
     def test_legacy_identity_index_is_migrated_without_row_rewrite(self):
         conn = sqlite3.connect(":memory:")

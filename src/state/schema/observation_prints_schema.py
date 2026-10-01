@@ -1,5 +1,5 @@
 # Created: 2026-07-16
-# Last reused/audited: 2026-10-01 (receipt order: exact UTC microseconds)
+# Last reused/audited: 2026-10-01 (every accepted receipt is SQL-readable)
 # Authority basis: day0 defects 1-5 (Paris 2026-07-14 monotonicity regression,
 #   WU-backfill-frozen hour buckets, climatology-band self-blinding, HKO
 #   accumulator never folding its own spot read, Seoul binary exclusion where
@@ -38,6 +38,7 @@ normalized to UTC ISO-8601; naive or unparseable clocks are rejected.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -141,6 +142,11 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)
 
 
+# The UTC spellings ``receipt_us_sql`` reads exactly (extended date, 'T' or
+# space, optional seconds with optional '.' fraction, '+00:00').
+_SQL_READABLE_UTC = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?\+00:00")
+
+
 def _utc_iso(name: str, value: str) -> str:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -148,8 +154,10 @@ def _utc_iso(name: str, value: str) -> str:
         raise ValueError(f"observation_prints {name} is not ISO-8601: {value!r}") from exc
     if parsed.tzinfo is None:
         raise ValueError(f"observation_prints {name} is naive: {value!r}")
-    if parsed.utcoffset() == timedelta(0) and str(value).endswith("+00:00"):
-        return str(value)  # already canonical; keep stored identities byte-stable
+    if _SQL_READABLE_UTC.fullmatch(str(value)):
+        return str(value)  # SQL reads it exactly; keep stored identities byte-stable
+    # Any other accepted spelling (',' fraction, basic format, odd separator)
+    # would read NULL in RECEIPT_US_SQL; store its canonical UTC form instead.
     return parsed.astimezone(timezone.utc).isoformat()
 
 
