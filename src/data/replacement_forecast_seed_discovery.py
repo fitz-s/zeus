@@ -1294,6 +1294,20 @@ def discover_replacement_forecast_materialization_seeds(
                 )
                 continue
             seed_file = seed_path / _seed_name(target, computed_at=computed)
+            from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+                blocked_seed_identity_fenced,
+            )
+
+            if blocked_seed_identity_fenced(
+                seed_result.seed,
+                seed_name=seed_file.name,
+                queue_root=seed_path.parent,
+                conn=conn,
+            ):
+                reasons.append(
+                    "REPLACEMENT_SEED_DISCOVERY_UNCHANGED_BLOCKED_INPUT_SKIPPED"
+                )
+                continue
             if _unchanged_blocked_seed_attempt(
                 seed=seed_result.seed,
                 seed_file=seed_file,

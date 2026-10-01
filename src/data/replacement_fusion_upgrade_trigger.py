@@ -1175,6 +1175,10 @@ def _reserve_enqueues(
         ).fetchone()
         for transition_key in transition_keys
     }
+    from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+        failed_seed_identity_fenced,
+    )
+
     reclaimable_markers: dict[str, str] = {}
     for transition_key, row in observed_before_lock.items():
         if row is None:
@@ -1191,7 +1195,12 @@ def _reserve_enqueues(
             metric=metric,
             source_cycle_iso=source_cycle_iso,
         )
-        if queue_state is False:
+        # A consumed seed whose request build failed on still-current inputs is
+        # not reclaimable: republishing it re-fails identically. Any input change
+        # moves the identity and reopens the transition.
+        if queue_state is False and not failed_seed_identity_fenced(
+            Path(marker_value), conn=conn,
+        ):
             reclaimable_markers[transition_key] = marker_value
     try:
         conn.execute("BEGIN IMMEDIATE")

@@ -1254,6 +1254,26 @@ def _enqueue_decision(
         ):
             return _CycleAdvanceEnqueueDecision.RETRY_PENDING
         return _CycleAdvanceEnqueueDecision.ADMIT
+    from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+        failed_seed_identity_fenced,
+    )
+
+    newer_observation = (
+        day0_observed_extreme_observation_time is not None
+        and incoming_version is not None
+        and (recorded_version is None or incoming_version > recorded_version)
+    )
+    if (
+        not newer_observation
+        and visible_seed_file is not None
+        and not visible_seed_file.exists()
+        and failed_seed_identity_fenced(visible_seed_file, conn=conn)
+    ):
+        # SCOPE: this family/cycle marker. Its consumed seed failed request build
+        # and every input it read is unchanged, so a rebuild re-fails identically.
+        # DRAIN/RESET: a new observation (above) or any changed input identity
+        # (anchor, proof, ground, files, logic) reopens it; there is no clock.
+        return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
     if incoming_identity is not None:
         if visible_seed_file is not None and visible_seed_file.exists():
             return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED

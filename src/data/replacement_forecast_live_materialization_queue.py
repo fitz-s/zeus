@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import fcntl
+import re
 import sqlite3
 import subprocess
 import sys
@@ -788,6 +789,251 @@ def _seed_terminal_receipt_index_path(seed_path: Path) -> Path | None:
         return None
     digest = hashlib.sha256(seed_path.name.encode("utf-8")).hexdigest()
     return seed_path.parent.parent / "seed_receipts" / digest[:2] / f"{digest}.json"
+
+
+BLOCKED_SEED_IDENTITY_DIR = "seed_blocked_identities"
+# Producer labels and decision clocks: two seeds that differ only here are the
+# same attempt on the same inputs.
+_SEED_IDENTITY_EXCLUDED_FIELDS = frozenset({
+    "computed_at", "expires_at", "upgrade_trigger", "cycle_advance_enqueue_owner",
+    "input_revision_sources",
+})
+_SEED_IDENTITY_PATH_FIELDS = (
+    "openmeteo_payload_json", "precision_metadata_json", "openmeteo_manifest_json",
+)
+# Request-build blocks that heal with the decision clock alone (a dependency that
+# becomes available, a local day that starts, a static snapshot possessed after the
+# cut) or that also cover transient reads. Identity cannot see them heal.
+_CLOCK_HEALABLE_SEED_BLOCKS = frozenset({
+    "REPLACEMENT_MATERIALIZATION_REQUEST_HAS_FUTURE_DEPENDENCY",
+    "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE",
+    "OM9_SOURCE_GEOMETRY_DECISION_CUT_REQUIRED",
+    "OM9_SOURCE_GEOMETRY_PROOF_UNAVAILABLE",
+    "OM9_SOURCE_RESPONSE_GEOMETRY_UNAVAILABLE",
+    "OM9_STATION_SOURCE_UNAVAILABLE",
+})
+
+
+def blocked_seed_input_identity(
+    seed: Mapping[str, object],
+    *,
+    seed_name: str,
+    seeds_dir: Path,
+    conn: sqlite3.Connection,
+) -> tuple[str, datetime] | None:
+    """Hash everything a seed's request build reads, except its decision clock.
+
+    Also returns the newest input possession time: a failure is only a verdict on
+    its inputs when every input was already possessed at the seed's own cut.
+
+    SCOPE: one city/date/metric seed. The identity moves with any new seed field
+    (observation/current-temperature revision, anchor cycle/run, baseline), any
+    rewritten anchor or precision file, any new anchor body or local proof for the
+    family (one indexed range), any new station-ground evidence row, the station
+    registry, the request-build logic, or the producer's transition key (the
+    changed input-revision set named in the seed file). Unknown state returns
+    None: no fence.
+    """
+    try:
+        city = str(seed["city"]).strip()
+        target_date = str(seed["target_date"]).strip()
+        metric = str(seed["temperature_metric"]).strip()
+        from src.config import (  # noqa: PLC0415
+            CONFIG_DIR, runtime_cities_by_name, runtime_station_geometry_for_city,
+        )
+        from src.data.openmeteo_ecmwf_ifs9_anchor import PRODUCT_ID, SOURCE_ID as OM9  # noqa: PLC0415
+
+        newest = [datetime.min.replace(tzinfo=timezone.utc)]
+
+        def revision(path: Path, *, possessed: bool = True) -> tuple[int, int] | None:
+            try:
+                stat = path.stat()
+            except OSError:
+                return None
+            if possessed:
+                newest.append(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
+            return stat.st_mtime_ns, stat.st_size
+
+        def frontier(sql: str, params: tuple[object, ...]) -> tuple[int | None, int]:
+            rows = conn.execute(sql, params).fetchall()
+            for row in rows:
+                recorded = _parse_utc_iso(row[1])
+                if recorded is None:
+                    raise ValueError("unparseable recorded_at")
+                newest.append(recorded)
+            return max((int(row[0]) for row in rows), default=None), len(rows)
+
+        family_sql = "(CASE WHEN json_valid(artifact_metadata_json) THEN CAST(json_extract(artifact_metadata_json, '$.{}') AS TEXT) END) = ?"
+        anchor = frontier(
+            "SELECT artifact_id, recorded_at FROM raw_forecast_artifacts "
+            "WHERE source_id = ? AND product_id = ? AND "
+            + " AND ".join(family_sql.format(key) for key in ("city", "target_date", "metric")),
+            (OM9, PRODUCT_ID, city, target_date, metric),
+        )
+        city_cfg = runtime_cities_by_name().get(city)
+        station = (
+            None if city_cfg is None
+            else runtime_station_geometry_for_city(city_cfg).get("station_id")
+        )
+        ground = frontier(
+            "SELECT artifact_id, recorded_at FROM raw_forecast_artifacts WHERE source_id = ?",
+            (f"station_ground::{station}",),
+        )
+        files = {}
+        for field in _SEED_IDENTITY_PATH_FIELDS:
+            if seed.get(field) in (None, ""):
+                continue
+            path = Path(str(seed[field]))
+            files[field] = revision(path if path.is_absolute() else seeds_dir / path)
+        # Code and config are identity, not possessed data: a deploy reopens
+        # every fence through the hash, never through the possession clock.
+        logic = {
+            path.name: revision(path, possessed=False)
+            for path in (
+                CONFIG_DIR / "station_precise_coords.json",
+                CONFIG_DIR / "settings.json",
+                PROJECT_ROOT / "src/data/replacement_forecast_materialization_request_builder.py",
+                PROJECT_ROOT / "src/data/openmeteo_ecmwf_ifs9_precision_guard.py",
+                PROJECT_ROOT / "src/data/raw_forecast_artifact_manifest.py",
+            )
+        }
+    except _ClaimReadDeadlineExceeded:
+        raise
+    except Exception:  # noqa: BLE001 - unknown identity must retry, never suppress
+        return None
+    transition = re.search(r"\.transition-([0-9a-f]{64})\.", seed_name)
+    identity = {
+        "transition": None if transition is None else transition.group(1),
+        "seed": {k: v for k, v in seed.items() if k not in _SEED_IDENTITY_EXCLUDED_FIELDS},
+        "files": files,
+        "anchor_family_frontier": tuple(anchor),
+        "station_ground_frontier": [station, *tuple(ground)],
+        "logic": logic,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    return digest, max(newest)
+
+
+def _blocked_seed_identity_path(queue_root: Path, seed: Mapping[str, object], identity: str) -> Path:
+    city = str(seed["city"]).strip().replace("/", "_").replace(" ", "_")
+    return (
+        queue_root / BLOCKED_SEED_IDENTITY_DIR
+        / f"{city}.{seed['target_date']}.{seed['temperature_metric']}.{identity}.json"
+    )
+
+
+def blocked_seed_identity_fenced(
+    seed: Mapping[str, object],
+    *,
+    seed_name: str,
+    queue_root: Path,
+    conn: sqlite3.Connection,
+) -> bool:
+    """Whether this exact input identity already failed request build.
+
+    SCOPE: one family + input identity. DRAIN: none needed; the record is a
+    fact about immutable inputs. RESET: any input change yields a new identity,
+    which is not fenced. Unknown identity is never fenced.
+    """
+    identity = blocked_seed_input_identity(
+        seed, seed_name=seed_name, seeds_dir=queue_root / "seeds", conn=conn,
+    )
+    return identity is not None and _blocked_seed_identity_path(
+        queue_root, seed, identity[0],
+    ).is_file()
+
+
+def failed_seed_identity_fenced(seed_file: Path, *, conn: sqlite3.Connection) -> bool:
+    """A producer's consumed seed failed on inputs that are still current."""
+    index_path = _seed_terminal_receipt_index_path(seed_file)
+    if index_path is None:
+        return False
+    try:
+        receipt = json.loads(index_path.read_text(encoding="utf-8"))
+        if receipt.get("seed_file") != str(seed_file) or not receipt.get("blocked_seed_identity"):
+            return False
+        seed = json.loads(Path(str(receipt["moved_file"])).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, KeyError, AttributeError):
+        return False
+    return isinstance(seed, Mapping) and blocked_seed_identity_fenced(
+        seed, seed_name=seed_file.name, queue_root=seed_file.parent.parent, conn=conn,
+    )
+
+
+def _record_blocked_seed_identity(
+    seed_json: Path,
+    seed: Mapping[str, object] | None,
+    *,
+    reason_codes: Sequence[str],
+    conn: sqlite3.Connection | None,
+    forecast_db: Path | str | None,
+) -> str | None:
+    """Durably record a request-build failure's input identity before its move."""
+    if (
+        not isinstance(seed, Mapping)
+        or seed_json.parent.name != "seeds"
+        or _CLOCK_HEALABLE_SEED_BLOCKS.intersection(reason_codes)
+    ):
+        return None
+    owned = None
+    try:
+        if conn is None:
+            if forecast_db is None or not Path(forecast_db).exists():
+                return None
+            conn = owned = _queue_read_only_connection(Path(forecast_db))
+        computed = blocked_seed_input_identity(
+            seed, seed_name=seed_json.name, seeds_dir=seed_json.parent, conn=conn,
+        )
+        cut = _parse_utc_iso(seed.get("computed_at"))
+        # An input possessed after the seed's cut may be exactly what the block
+        # lacked; the next seed sees it, so this failure fences nothing.
+        if computed is None or cut is None or computed[1] > cut:
+            return None
+        identity = computed[0]
+        target = _blocked_seed_identity_path(seed_json.parent.parent, seed, identity)
+        _ensure_directory_entry_durable(target.parent, durable_ancestor=seed_json.parent.parent)
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump({"seed_file": str(seed_json), "reason_codes": list(reason_codes)},
+                      handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        _fsync_directory(target.parent)
+        return identity
+    except _ClaimReadDeadlineExceeded:
+        raise
+    except Exception:  # noqa: BLE001 - no record means the next seed retries
+        return None
+    finally:
+        if owned is not None:
+            owned.close()
+
+
+def _move_failed_seed(
+    seed_json: Path,
+    failed_path: Path,
+    seed: Mapping[str, object] | None,
+    receipt: dict[str, object],
+    *,
+    conn: sqlite3.Connection | None,
+    forecast_db: Path | str | None,
+) -> Path:
+    """Move a request-build failure; a fenced identity also gets an indexed receipt."""
+    identity = _record_blocked_seed_identity(
+        seed_json, seed, reason_codes=tuple(receipt.get("reason_codes") or ()),
+        conn=conn, forecast_db=forecast_db,
+    )
+    if identity is None:
+        moved = _move_request(seed_json, failed_path)
+        _write_sidecar(moved, receipt)
+        return moved
+    return _move_request(
+        seed_json, failed_path,
+        terminal_receipt={**receipt, "blocked_seed_identity": identity},
+    )
 
 
 def _write_seed_terminal_receipts(
@@ -5442,6 +5688,7 @@ def _prepare_seed_requests_with_connection(
         if actionable_count >= actionable_limit or inspected_count >= inspection_cap:
             break
         inspected_count += 1
+        seed = None
         try:
             seed = _load_seed_json(seed_json)
             if not _looks_like_seed(seed):
@@ -5635,14 +5882,17 @@ def _prepare_seed_requests_with_connection(
                     request_seed.update(transport)
             result = build_replacement_forecast_materialization_request(request_seed, base_dir=seed_json.parent)
             if not result.ok or result.request is None:
-                moved = _move_request(seed_json, failed_path)
-                _write_sidecar(
-                    moved,
+                moved = _move_failed_seed(
+                    seed_json,
+                    failed_path,
+                    seed,
                     {
                         "status": result.status,
                         "reason_codes": list(result.reason_codes),
                         "request_written": False,
                     },
+                    conn=forecast_conn,
+                    forecast_db=forecast_db,
                 )
                 failed.append(str(moved))
                 actionable_count += 1
@@ -5722,16 +5972,23 @@ def _prepare_seed_requests_with_connection(
         except _ClaimReadDeadlineExceeded:
             raise
         except Exception as exc:
-            moved = _move_request(seed_json, failed_path)
-            _write_sidecar(
-                moved,
-                {
-                    "status": "ERROR",
-                    "error_type": exc.__class__.__name__,
-                    "error": str(exc),
-                    "request_written": False,
-                },
-            )
+            receipt = {
+                "status": "ERROR",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+                "request_written": False,
+            }
+            # A ValueError is a verdict on the seed's inputs; sqlite/OS errors
+            # are transient and must stay retryable.
+            if type(exc) is ValueError and seed_json.exists():
+                moved = _move_failed_seed(
+                    seed_json, failed_path, seed,
+                    {**receipt, "reason_codes": [f"ERROR:{exc}"[:200]]},
+                    conn=forecast_conn, forecast_db=forecast_db,
+                )
+            else:
+                moved = _move_request(seed_json, failed_path)
+                _write_sidecar(moved, receipt)
             failed.append(str(moved))
             actionable_count += 1
     if (

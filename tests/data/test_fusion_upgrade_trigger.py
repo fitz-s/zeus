@@ -1,8 +1,8 @@
 # Created: 2026-06-11
-# Lifecycle: created=2026-06-11; last_reviewed=2026-09-27; last_reused=2026-09-27
+# Lifecycle: created=2026-06-11; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Purpose: Lock provider-set and exact-input revision reseeding for replacement posteriors.
 # Reuse: Run for fusion upgrade, current-value serving, source callback, or station source changes.
-# Last reused/audited: 2026-09-27
+# Last reused/audited: 2026-10-01 (blocked-seed input-identity fence; CURRENT_REUSABLE)
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL-fusion upgrade trigger. Relationship
 #   pins for the SINGLE instrument-set comparison + the idempotency bound:
 #     - a posterior fused from {A,B} with capture later containing {A,B,C} for the SAME cycle ⇒
@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -3296,3 +3297,202 @@ def test_enqueue_fusion_upgrade_reseeds_does_not_pass_explicit_utc_only_min_targ
 
     assert report["status"] == "FUSION_UPGRADE_PLAN_BLOCKED"
     assert "min_target_date" not in captured
+
+
+def _blocked_identity_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Real fusion publisher + real seed consumer; only the verdict and the
+    precision-guarded request build are stubbed (the build always BLOCKS)."""
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    queue_root = tmp_path / "replacement_forecast_live"
+    seed_dir = queue_root / "seeds"
+    kwargs["seed_dir"] = seed_dir
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "openmeteo.json").write_text("{}\n", encoding="utf-8")
+    (raw / "precision.json").write_text("{}\n", encoding="utf-8")
+    possessed = datetime(2026, 7, 24, 12, 30, tzinfo=UTC).timestamp()
+    for name in ("openmeteo.json", "precision.json"):
+        os.utime(raw / name, (possessed, possessed))
+    revision = {"value": 91}
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_a, **_k: {
+            **_revision_upgrade_verdict(),
+            "changed_input_revisions": {_DWD: revision["value"]},
+        },
+    )
+
+    def _build(_conn, **build_kwargs):
+        stage = Path(build_kwargs["seed_file"])
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text(json.dumps({
+            "city": "Seoul", "target_date": "2026-07-25", "temperature_metric": "high",
+            "computed_at": build_kwargs["computed_at"].isoformat(),
+            "source_cycle_time": "2026-07-24T12:00:00+00:00",
+            "baseline_source_run_id": "baseline:test",
+            "openmeteo_source_run_id": "openmeteo:test",
+            "openmeteo_payload_json": str(raw / "openmeteo.json"),
+            "precision_metadata_json": str(raw / "precision.json"),
+            "bins": [{"bin_id": "20C"}],
+            "upgrade_trigger": "instrument_set_expansion",
+        }) + "\n", encoding="utf-8")
+        return stage
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+    monkeypatch.setattr(
+        queue, "_upgrade_day0_seed_has_current_enqueue_ownership",
+        lambda **_k: SimpleNamespace(ownership=None, witness=None),
+    )
+    monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue, "_instrument_set_expansion_already_applied", lambda **_k: False)
+    monkeypatch.setattr(
+        queue, "build_replacement_forecast_materialization_request",
+        lambda *_a, **_k: SimpleNamespace(
+            ok=False, request=None, status="BLOCKED",
+            reason_codes=("OM9_PRECISION_GUARD_NOT_LIVE_PASS_REQUEST_BUILD",
+                          "OM9_STATION_GROUND_PROOF_UNPROVEN"),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.data.station_ground_evidence.archive_station_ground_evidence",
+        lambda *_a, **_k: None,
+    )
+    clock = {"now": datetime(2026, 7, 24, 13, 0, tzinfo=UTC)}
+
+    def tick() -> int:
+        clock["now"] += timedelta(seconds=7)
+        published = trigger.enqueue_fusion_upgrade_reseeds(
+            **{**kwargs, "computed_at": clock["now"]},
+        )["seeds_enqueued"]
+        queue._prepare_seed_requests(
+            seed_dir=seed_dir,
+            seed_processed_dir=queue_root / "seed_processed",
+            seed_failed_dir=queue_root / "seed_failed",
+            request_dir=queue_root / "requests",
+            forecast_db=db,
+            limit=5,
+        )
+        return int(published)
+
+    return db, raw, revision, tick, queue_root
+
+
+def test_failed_transition_identity_seeds_once_then_reopens_on_input_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production storm 2026-10-01: one blocked transition republished every tick.
+
+    A failed identity seeds exactly once with no clock; a new revision, a new
+    local anchor proof, or new ground evidence each seed immediately once.
+    """
+    db, _raw, revision, tick, queue_root = _blocked_identity_harness(tmp_path, monkeypatch)
+
+    assert sum(tick() for _ in range(40)) == 1
+    assert len(list((queue_root / "seed_failed").glob("*.json"))) == 2  # seed + receipt
+
+    revision["value"] = 92  # a new observation revision: new transition key
+    assert tick() == 1
+    assert sum(tick() for _ in range(20)) == 0
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """INSERT INTO raw_forecast_artifacts (source_id, product_id, data_version,
+           source_cycle_time, source_available_at, captured_at, artifact_path, sha256,
+           byte_size, request_params_json, artifact_metadata_json, training_allowed, recorded_at)
+           VALUES ('openmeteo_ecmwf_ifs_9km', 'openmeteo_ecmwf_ifs9_deterministic_anchor_v1',
+           'openmeteo_anchor_local_proof_possession_v1', ?, ?, ?, 'p', 's', 1, '{}', ?, 0, ?)""",
+        ("2026-07-24T12:00:00+00:00",) * 3
+        + (json.dumps({"city": "Seoul", "target_date": "2026-07-25", "metric": "high"}),
+           "2026-07-24T13:00:00+00:00"),
+    )
+    conn.commit()
+    assert tick() == 1  # a newly derived local proof is an input change
+    assert sum(tick() for _ in range(20)) == 0
+
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+    station = runtime_station_geometry_for_city(runtime_cities_by_name()["Seoul"])["station_id"]
+    conn.execute(
+        """INSERT INTO raw_forecast_artifacts (source_id, product_id, data_version,
+           source_cycle_time, source_available_at, captured_at, artifact_path, sha256,
+           byte_size, request_params_json, artifact_metadata_json, training_allowed, recorded_at)
+           VALUES (?, 'g', 'g', ?, ?, ?, 'g', 'g', 1, '{}', '{}', 0, ?)""",
+        (f"station_ground::{station}",) + ("2026-07-24T12:00:00+00:00",) * 3
+        + ("2026-07-24T13:00:00+00:00",),
+    )
+    conn.commit()
+    conn.close()
+    assert tick() == 1  # new ground evidence is an input change
+    assert sum(tick() for _ in range(20)) == 0
+
+
+def test_failed_identity_survives_restart_and_unknown_identity_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fence is durable on disk (restart neither forgets nor re-storms) and an
+    unreadable identity never suppresses work."""
+    _db, _raw, _revision, tick, queue_root = _blocked_identity_harness(tmp_path, monkeypatch)
+    assert tick() == 1
+    assert list((queue_root / queue.BLOCKED_SEED_IDENTITY_DIR).glob("*.json"))
+    # A fresh process has no memory beyond disk + DB; the harness holds none either.
+    assert sum(tick() for _ in range(10)) == 0
+    monkeypatch.setattr(queue, "blocked_seed_input_identity", lambda *_a, **_k: None)
+    assert tick() == 1
+
+
+def test_clock_healable_block_is_not_fenced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _db, _raw, _revision, tick, queue_root = _blocked_identity_harness(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        queue, "build_replacement_forecast_materialization_request",
+        lambda *_a, **_k: SimpleNamespace(
+            ok=False, request=None, status="BLOCKED",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_HAS_FUTURE_DEPENDENCY",),
+        ),
+    )
+    assert sum(tick() for _ in range(3)) == 3
+    assert not (queue_root / queue.BLOCKED_SEED_IDENTITY_DIR).exists()
+
+
+def test_cycle_advance_marker_with_failed_current_identity_is_not_rebuilt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same producer storm through cycle_advance_enqueues: a consumed `.enqueue-`
+    seed that failed on still-current inputs stays enqueued; a newer observation
+    version or a changed input identity re-admits it immediately."""
+    from src.data import replacement_cycle_advance_trigger as cycle_advance
+
+    seeds = tmp_path / "replacement_forecast_live" / "seeds"
+    seeds.mkdir(parents=True)
+    seed_file = seeds / "Seoul.2026-07-25.high.20260724T130000Z.enqueue-ab.json"
+    seed_file.write_text("{}\n", encoding="utf-8")
+    conn = _conn()
+    cycle = "2026-07-24T12:00:00+00:00"
+    cycle_advance._record_enqueue(
+        conn, city="Seoul", target_date="2026-07-25", metric="high",
+        consumed_cycle_iso="2026-07-24T06:00:00+00:00", target_cycle_iso=cycle,
+        held_position=False, seed_file=str(seed_file),
+        day0_observed_extreme_observation_time="2026-07-24T12:50:00+00:00",
+    )
+    conn.commit()
+    seed_file.unlink()  # consumed by the queue
+    fenced = {"value": True}
+    monkeypatch.setattr(
+        queue, "failed_seed_identity_fenced",
+        lambda path, **_k: fenced["value"] and Path(path) == seed_file,
+    )
+    decide = lambda **obs: cycle_advance._enqueue_decision(  # noqa: E731
+        conn, city="Seoul", target_date="2026-07-25", metric="high",
+        target_cycle_iso=cycle, allow_missing_seed_file_reenqueue=True, **obs,
+    )
+    Decision = cycle_advance._CycleAdvanceEnqueueDecision
+    assert decide() is Decision.ALREADY_ENQUEUED
+    assert decide(
+        day0_observed_extreme_observation_time="2026-07-24T12:50:00+00:00",
+    ) is Decision.ALREADY_ENQUEUED
+    assert decide(
+        day0_observed_extreme_observation_time="2026-07-24T13:20:00+00:00",
+    ) is Decision.ADMIT
+    fenced["value"] = False  # any input identity change
+    assert decide() is Decision.ADMIT
