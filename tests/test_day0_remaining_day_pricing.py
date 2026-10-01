@@ -3146,6 +3146,38 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples(operator
         assert replay.tolist() == pytest.approx(expected["q"])
         assert replay.sum() == pytest.approx(1.0)
         assert np.isfinite(replay).all()
+        if conditional_high:
+            # A later decision recomputes current state and conditional shape at
+            # its own clock (obs age, remaining window) and overwrites the
+            # top-level keys. Verification reads the carrier's written inputs.
+            later_time = decision_time + timedelta(minutes=37)
+            later_witness = {**conditional_witness, "latency_margin_c": 0.4}
+            later = {
+                **payload,
+                "_edli_day0_carrier_written_inputs": era._day0_carrier_written_inputs(payload),
+                "_edli_day0_current_temperature_observed_at_utc": later_time.isoformat(),
+                "_edli_day0_conditional_high_shape_witness": later_witness,
+                "_edli_day0_conditional_high_shape_identity": hashlib.sha256(json.dumps(
+                    later_witness, sort_keys=True, separators=(",", ":"),
+                ).encode()).hexdigest(),
+            }
+            later_replay = era._day0_remaining_p_raw_vector(
+                np.asarray(future), city=city,
+                settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[Bin(None, 30, "C", "30C or below"), Bin(31, 31, "C", "31C"),
+                      Bin(32, 32, "C", "32C"), Bin(33, None, "C", "33C or above")],
+                payload=later, extra_member_sigma=0.0, decision_time=later_time,
+            )
+            assert later_replay.tolist() == pytest.approx(expected["q"])
+            unbound = {k: v for k, v in later.items() if k != "_edli_day0_carrier_written_inputs"}
+            with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISMATCH"):
+                era._day0_remaining_p_raw_vector(
+                    np.asarray(future), city=city,
+                    settlement_semantics=SettlementSemantics.for_city(city),
+                    bins=[Bin(None, 30, "C", "30C or below"), Bin(31, 31, "C", "31C"),
+                          Bin(32, 32, "C", "32C"), Bin(33, None, "C", "33C or above")],
+                    payload=unbound, extra_member_sigma=0.0, decision_time=later_time,
+                )
         if operator.endswith("_v1"):
             assert replay[-1] == pytest.approx(0.9508620689655143, abs=0.005)
             assert replay[-1] != pytest.approx(0.5326328498, abs=1e-9)
@@ -5718,13 +5750,25 @@ def test_pure_hourly_high_current_shape_rebuild_replays_its_persisted_witness(
     assert payload["_edli_day0_decision_carrier_rebuild_basis"] == (
         "held_shared_current_remaining_path_vector_witness_v1"
     )
+    # Replay verifies the carrier's written inputs; the top-level keys are the
+    # latest recompute and may move on without touching verification.
+    written = payload["_edli_day0_carrier_written_inputs"]
+    assert written["conditional_high_shape_identity"] == (
+        payload["_edli_day0_conditional_high_shape_identity"]
+    )
+    recomputed = {**payload, "_edli_day0_conditional_high_shape_identity": "a" * 64}
+    assert era._day0_remaining_p_raw_vector(
+        np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+        city=city, settlement_semantics=SettlementSemantics.for_city(city),
+        bins=[candidate.bin for candidate in family.candidates], payload=recomputed,
+        extra_member_sigma=0.0, decision_time=decision,
+    ).tolist() == pytest.approx(q.tolist())
     for missing in (
-        "_edli_day0_conditional_high_shape_identity",
-        "_edli_day0_conditional_high_shape_witness",
-        "_edli_day0_remaining_variance_basis",
+        "conditional_high_shape_identity",
+        "conditional_high_shape_witness",
+        "remaining_variance_basis",
     ):
-        broken = dict(payload)
-        broken.pop(missing)
+        broken = {**payload, "_edli_day0_carrier_written_inputs": {**written, missing: None}}
         with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_INVALID"):
             era._day0_remaining_p_raw_vector(
                 np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
@@ -5733,13 +5777,13 @@ def test_pure_hourly_high_current_shape_rebuild_replays_its_persisted_witness(
                 extra_member_sigma=0.0, decision_time=decision,
             )
     for tampered in (
-        {"_edli_day0_conditional_high_shape_identity": "a" * 64},
-        {"_edli_day0_conditional_high_shape_witness": {
-            **payload["_edli_day0_conditional_high_shape_witness"],
+        {"conditional_high_shape_identity": "a" * 64},
+        {"conditional_high_shape_witness": {
+            **written["conditional_high_shape_witness"],
             "forged_source": "unbound",
         }},
     ):
-        broken = {**payload, **tampered}
+        broken = {**payload, "_edli_day0_carrier_written_inputs": {**written, **tampered}}
         with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_MISMATCH"):
             era._day0_remaining_p_raw_vector(
                 np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),

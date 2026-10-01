@@ -6337,6 +6337,44 @@ def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
     assert rebound["_edli_global_day0_binding"]["posterior_id"] == 29914
 
 
+def test_global_day0_binding_freezes_the_persisted_carrier_identity_inputs():
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    witness = {"semantics": "day0_conditional_high_equal_provider_v1", "latency_margin_c": 0.1}
+    state = {"value_native": 27.0, "observed_at_utc": "2026-07-10T19:00:00+00:00",
+             "source": "ogimet_metar_uuww"}
+    conditioning = {
+        "active": True, "metric": "high", "observation_time": "2026-07-10T19:00:00+00:00",
+        "observed_extreme_c": 27.0, "sample_count": 2,
+        "source": "durable_observation_instants", "unit": "C",
+        "day0_remaining_carrier_content_identity": "carrier-identity",
+        "day0_current_temperature_state": state,
+        "day0_conditional_high_shape_identity": "shape-identity",
+        "day0_conditional_high_shape_witness": witness,
+        "day0_remaining_variance_basis": "conditional_ens_within_plus_provider_center_delta_v1",
+    }
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(city="Moscow", target_date="2026-07-10", metric="high"),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+        conditioning=conditioning,
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        posterior_id=29914,
+    )
+    conn.close()
+    written = {
+        "current_path_state": state,
+        "conditional_high_shape_identity": "shape-identity",
+        "conditional_high_shape_witness": witness,
+        "remaining_variance_basis": "conditional_ens_within_plus_provider_center_delta_v1",
+    }
+    assert rebound["_edli_day0_carrier_written_inputs"] == written
+    # A later fresh-decision recompute overwrites only the top-level keys.
+    rebound["_edli_day0_conditional_high_shape_identity"] = "recomputed-later"
+    rebound["_edli_day0_current_temperature_observed_at_utc"] = "2026-07-10T20:30:00+00:00"
+    assert era._day0_carrier_written_inputs(rebound) == written
+
+
 def test_day0_fast_conditioning_expires_for_entry_but_not_held_redecision():
     bundle = SimpleNamespace(
         provenance_json={

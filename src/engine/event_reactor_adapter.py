@@ -39006,6 +39006,8 @@ def _global_day0_execution_payload(
             ):
                 if field in current_state:
                     payload[destination] = current_state[field]
+        if "day0_remaining_carrier_content_identity" in conditioning:
+            _bind_day0_carrier_written_inputs(payload)
         carrier_likelihood = conditioning.get("day0_remaining_carrier_likelihood")
         if isinstance(carrier_likelihood, Mapping):
             survival = carrier_likelihood.get("boundary_survival_probability")
@@ -47159,24 +47161,14 @@ def _day0_remaining_p_raw_vector(
         from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
 
         identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
-        current_value = payload.get("_edli_day0_current_temperature_native")
-        current_observed_at = payload.get(
-            "_edli_day0_current_temperature_observed_at_utc"
-        )
-        current_source = payload.get("_edli_day0_current_temperature_source")
-        if (
-            current_value is not None
-            and current_observed_at is not None
-            and current_source is not None
-        ):
-            identity_inputs["current_path_state"] = {
-                "value_native": float(current_value),
-                "observed_at_utc": str(current_observed_at),
-                "source": str(current_source),
-            }
-        conditional_identity = payload.get("_edli_day0_conditional_high_shape_identity")
-        conditional_witness = payload.get("_edli_day0_conditional_high_shape_witness")
-        conditional_basis = payload.get("_edli_day0_remaining_variance_basis")
+        # Verify what was written: the carrier's own current state and shape,
+        # never a later recompute at this replay's clock.
+        written = _day0_carrier_written_inputs(payload)
+        if written["current_path_state"] is not None:
+            identity_inputs["current_path_state"] = dict(written["current_path_state"])
+        conditional_identity = written["conditional_high_shape_identity"]
+        conditional_witness = written["conditional_high_shape_witness"]
+        conditional_basis = written["remaining_variance_basis"]
         if conditional_identity is not None or conditional_witness is not None or conditional_basis is not None:
             if (
                 not isinstance(conditional_identity, str) or not conditional_identity
@@ -48669,6 +48661,47 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     )
 
 
+def _day0_carrier_written_inputs(payload: Mapping[str, object]) -> dict[str, object]:
+    """The identity inputs a Day0 carrier's writer hashed.
+
+    A fresh decision recomputes the current state and conditional-high shape at
+    its own clock and overwrites the top-level keys; verification must not read
+    that recompute. The persisted-carrier binding and the rebuild writer record
+    their inputs under one key; without it the top-level keys are the written ones.
+    """
+    written = payload.get("_edli_day0_carrier_written_inputs")
+    if isinstance(written, Mapping):
+        return dict(written)
+    value = payload.get("_edli_day0_current_temperature_native")
+    observed_at = payload.get("_edli_day0_current_temperature_observed_at_utc")
+    source = payload.get("_edli_day0_current_temperature_source")
+    return {
+        "current_path_state": (
+            None if value is None or observed_at is None or source is None
+            else {
+                "value_native": float(value),
+                "observed_at_utc": str(observed_at),
+                "source": str(source),
+            }
+        ),
+        "conditional_high_shape_identity": payload.get(
+            "_edli_day0_conditional_high_shape_identity"
+        ),
+        "conditional_high_shape_witness": payload.get(
+            "_edli_day0_conditional_high_shape_witness"
+        ),
+        "remaining_variance_basis": payload.get("_edli_day0_remaining_variance_basis"),
+    }
+
+
+def _bind_day0_carrier_written_inputs(payload: dict[str, object]) -> None:
+    """Freeze a persisted carrier's identity inputs before any recompute."""
+    payload.pop("_edli_day0_carrier_written_inputs", None)
+    payload["_edli_day0_carrier_written_inputs"] = deepcopy(
+        _day0_carrier_written_inputs(payload)
+    )
+
+
 def _snapshot_day0_source_clock_carrier_provenance(
     payload: dict[str, object],
 ) -> None:
@@ -48989,6 +49022,19 @@ def _rebuild_decision_time_day0_carrier(
             "_edli_day0_remaining_bias_status": "unshifted_live_policy",
             "_edli_day0_remaining_bias_artifact": None,
             "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
+            "_edli_day0_carrier_written_inputs": {
+                "current_path_state": deepcopy(identity_inputs.get("current_path_state")),
+                "conditional_high_shape_identity": (
+                    None if conditional_high is None else conditional_high.identity
+                ),
+                "conditional_high_shape_witness": (
+                    None if conditional_high is None else dict(conditional_high.witness)
+                ),
+                "remaining_variance_basis": (
+                    None if conditional_high is None
+                    else "conditional_ens_within_plus_provider_center_delta_v1"
+                ),
+            },
             "_edli_day0_decision_carrier_rebuild_basis": rebuild_basis,
             "_edli_day0_remaining_path_center_sigma_native": float(
                 np.std(np.asarray((*values_native, *final_values_native), dtype=float), ddof=0)
