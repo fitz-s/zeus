@@ -2757,3 +2757,50 @@ def test_retired_low_revision_allows_only_the_proven_cycle_rollback(
     assert _cycle_monotone_block_reasons(conn, req, metric='low') == ()
     monkeypatch.setattr(materializer, 'retired_low_uncertified_incumbent_yields_to_current_ensemble', lambda *_a, **_k: False)
     assert _REGRESSION_REASON in _cycle_monotone_block_reasons(conn, req, metric='low')
+
+
+
+def test_retained_failure_waits_its_turn_within_its_tier(tmp_path, monkeypatch) -> None:
+    """Round-3 Q3: with one slot, a retained failing request rotates behind the
+    other equal-priority family instead of monopolizing the slot. Order only:
+    each request stays claimable at once (no delay), and the failing one keeps
+    retrying (no cap)."""
+    import subprocess
+
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "queue"
+    requests = root / "requests"
+    requests.mkdir(parents=True)
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    for name, city in (("A.json", "Austin"), ("B.json", "Chicago")):
+        (requests / name).write_text(json.dumps({
+            "city": city, "target_date": "2026-10-01", "temperature_metric": "high",
+            "source_cycle_time": "2026-10-01T06:00:00+00:00",
+            "computed_at": "2026-10-01T06:05:00+00:00",
+            "baseline_source_run_id": "baseline", "openmeteo_source_run_id": "om",
+            "openmeteo_payload_json": "payload.json", "precision_metadata_json": "precision.json",
+            "bins": [{"bin_id": "30C"}],
+        }), encoding="utf-8")
+    monkeypatch.setattr(queue, "_priority_map_with_names", lambda *_a, **_k: ({}, set()))
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **k: "fp-" + k["payload"]["city"])
+    monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+    calls: list[str] = []
+
+    def runner(argv):
+        file = next(Path(x) for x in argv if str(x).endswith(".json") and Path(x).is_file())
+        calls.append(json.loads(file.read_text())["city"])
+        return subprocess.CompletedProcess(argv, 2, stdout=json.dumps(
+            {"status": "ERROR", "error_type": "RuntimeError"}), stderr="")
+
+    for _ in range(4):
+        report = queue.process_replacement_forecast_live_materialization_queue(
+            request_dir=requests, processed_dir=root / "processed", failed_dir=root / "failed",
+            forecast_db=db, limit=1, runner=runner, discover=False, seed_limit=0,
+        )
+        assert queue._UNCLASSIFIED_ERROR_REASON in report.reason_codes
+    assert calls == ["Austin", "Chicago", "Austin", "Chicago"]
+    assert sorted(p.name for p in requests.glob("*.json")) == ["A.json", "B.json"]
