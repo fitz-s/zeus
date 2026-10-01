@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-25; last_reused=2026-09-25
+# Lifecycle: created=2026-06-06; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Purpose: Materialize replacement live forecast posteriors and publish commit wakes.
 # Reuse: Inspect forecast materialization and reactor-wake contracts before changing.
 """Materialize Open-Meteo ECMWF IFS 9km + Bayes fusion posterior."""
@@ -56,6 +56,7 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
     write_prepared_replacement_forecast_live,
 )
 from src.data.raw_forecast_artifact_manifest import read_manifest, write_manifest_to_db  # noqa: E402
+from src.data.replacement_forecast_live_materialization_queue import FailureCategory  # noqa: E402
 
 
 UTC = timezone.utc
@@ -75,6 +76,23 @@ class MaterializationDeadlineExceeded(RuntimeError):
         self.stage = stage
         self.deadline_at = deadline_at
         super().__init__(f"REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_{stage.upper()}")
+
+
+class RequestInputInvalid(ValueError):
+    """Validation of the inputs this request names found it inadmissible."""
+
+
+@contextlib.contextmanager
+def _validating_request_inputs():
+    """SCOPE: reads and checks of the request JSON and the files it names. A
+    ValueError here is a verdict on those inputs (INPUT_VERDICT); one raised
+    later, by the computation, proves nothing about them."""
+    try:
+        yield
+    except RequestInputInvalid:
+        raise
+    except ValueError as exc:
+        raise RequestInputInvalid(str(exc)) from exc
 
 
 class _SQLiteDeadlineGuard:
@@ -993,6 +1011,17 @@ def _dry_run_from_read_snapshot(
     raise RuntimeError("REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED")
 
 
+def _failure_category(exc: BaseException) -> FailureCategory:
+    if isinstance(exc, RequestInputInvalid):
+        return FailureCategory.INPUT_VERDICT
+    if isinstance(exc, (
+        OSError, sqlite3.Error, MaterializationDeadlineExceeded,
+        ReplacementForecastWriteDeferred,
+    )):
+        return FailureCategory.ENVIRONMENT_RETRY
+    return FailureCategory.UNCLASSIFIED
+
+
 def _error_response(
     exc: Exception,
     receipt: _DurablePreparationReceipt | None = None,
@@ -1000,6 +1029,7 @@ def _error_response(
     response: dict[str, object] = {
         "status": "ERROR",
         "error_type": exc.__class__.__name__,
+        "failure_category": _failure_category(exc).value,
         "error": str(exc),
     }
     if isinstance(exc, ReplacementForecastWriteDeferred):
@@ -1067,6 +1097,56 @@ def _materialize(
     if commit and writer_lock is None:
         raise RuntimeError("REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED")
     effective_writer_lock = writer_lock or contextlib.nullcontext
+    with _validating_request_inputs():
+        payload, openmeteo_manifest, metric, target_date, source_cycle_time, \
+            anchor_cycle_time, anchor_artifact_id, openmeteo_payload, \
+            openmeteo_raw_payload_bytes = _validated_named_inputs(input_json)
+    if openmeteo_payload is None:
+        if "latitude" not in payload or "longitude" not in payload:
+            raise RequestInputInvalid("Open-Meteo direct fetch requires latitude and longitude")
+        # A network fetch, not a named input: its failures are no input verdict.
+        openmeteo_payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(
+            build_anchor_request(
+                latitude=float(payload["latitude"]),
+                longitude=float(payload["longitude"]),
+                run=anchor_cycle_time,
+                timezone_name=str(payload["city_timezone"]),
+            )
+        )
+        # The direct route has no pre-existing file. Seal the same target-scoped
+        # canonical artifact representation as the current-target downloader;
+        # external precision proof must independently name these exact bytes.
+        scoped_payload = dict(openmeteo_payload)
+        scoped_payload["_zeus_current_target_scope"] = {
+            "city": str(payload["city"]),
+            "target_date": target_date.isoformat(),
+            "metric": metric,
+        }
+        openmeteo_raw_payload_bytes = (
+            json.dumps(scoped_payload, indent=2, sort_keys=True, default=str) + "\n"
+        ).encode("utf-8")
+        openmeteo_payload = scoped_payload
+    with _validating_request_inputs():
+        request = _validated_request(
+            payload,
+            base_dir=input_json.parent,
+            metric=metric,
+            target_date=target_date,
+            source_cycle_time=source_cycle_time,
+            anchor_cycle_time=anchor_cycle_time,
+            openmeteo_payload=openmeteo_payload,
+            openmeteo_raw_payload_bytes=openmeteo_raw_payload_bytes,
+        )
+    return _materialize_request(
+        conn, request,
+        commit=commit, init_schema=init_schema, publish_wake=publish_wake,
+        schema_ready=schema_ready, effective_writer_lock=effective_writer_lock,
+        stage_receipt=stage_receipt, openmeteo_manifest=openmeteo_manifest,
+        anchor_artifact_id=anchor_artifact_id,
+    )
+
+
+def _validated_named_inputs(input_json: Path):
     payload = _load_json(input_json)
     if not isinstance(payload, Mapping):
         raise ValueError("input JSON must decode to an object")
@@ -1093,6 +1173,7 @@ def _materialize(
         if payload.get("openmeteo_anchor_artifact_id") in (None, "")
         else int(payload["openmeteo_anchor_artifact_id"])
     )
+    openmeteo_payload = openmeteo_raw_payload_bytes = None
     if "openmeteo_payload_json" in payload:
         openmeteo_raw_payload_bytes = _resolve_input_path(
             payload["openmeteo_payload_json"], base_dir=base_dir
@@ -1100,30 +1181,24 @@ def _materialize(
         openmeteo_payload = json.loads(openmeteo_raw_payload_bytes)
         if not isinstance(openmeteo_payload, Mapping):
             raise ValueError("Open-Meteo payload JSON must decode to an object")
-    else:
-        if "latitude" not in payload or "longitude" not in payload:
-            raise ValueError("Open-Meteo direct fetch requires latitude and longitude")
-        openmeteo_payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(
-            build_anchor_request(
-                latitude=float(payload["latitude"]),
-                longitude=float(payload["longitude"]),
-                run=anchor_cycle_time,
-                timezone_name=str(payload["city_timezone"]),
-            )
-        )
-        # The direct route has no pre-existing file. Seal the same target-scoped
-        # canonical artifact representation as the current-target downloader;
-        # external precision proof must independently name these exact bytes.
-        scoped_payload = dict(openmeteo_payload)
-        scoped_payload["_zeus_current_target_scope"] = {
-            "city": str(payload["city"]),
-            "target_date": target_date.isoformat(),
-            "metric": metric,
-        }
-        openmeteo_raw_payload_bytes = (
-            json.dumps(scoped_payload, indent=2, sort_keys=True, default=str) + "\n"
-        ).encode("utf-8")
-        openmeteo_payload = scoped_payload
+    return (
+        payload, openmeteo_manifest, metric, target_date, source_cycle_time,
+        anchor_cycle_time, anchor_artifact_id, openmeteo_payload,
+        openmeteo_raw_payload_bytes,
+    )
+
+
+def _validated_request(
+    payload: Mapping[str, Any],
+    *,
+    base_dir: Path,
+    metric: str,
+    target_date: date,
+    source_cycle_time: datetime,
+    anchor_cycle_time: datetime,
+    openmeteo_payload: Mapping[str, Any],
+    openmeteo_raw_payload_bytes: bytes,
+) -> ReplacementForecastMaterializeRequest:
     openmeteo_anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
         openmeteo_payload,
         city_timezone=str(payload["city_timezone"]),
@@ -1212,6 +1287,22 @@ def _materialize(
             payload
         ),
     )
+    return request
+
+
+def _materialize_request(
+    conn,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    commit: bool,
+    init_schema: bool,
+    publish_wake: bool,
+    schema_ready: bool,
+    effective_writer_lock: _WriterLockFactory,
+    stage_receipt: _StageReceipt,
+    openmeteo_manifest,
+    anchor_artifact_id: int | None,
+) -> tuple[int, dict[str, object]]:
     wake_published = False
     receipt: _DurablePreparationReceipt | None = None
     try:
@@ -1429,7 +1520,7 @@ def _resident_worker() -> int:
                 returncode = main(arguments)
         except Exception as exc:
             returncode = 2
-            errors.write(json.dumps({"status": "ERROR", "error_type": type(exc).__name__}))
+            errors.write(json.dumps(_error_response(exc), sort_keys=True))
         print(json.dumps({"request_id": message["request_id"], "returncode": returncode,
                           "stdout": output.getvalue(), "stderr": errors.getvalue(),
                           "worker_pid": os.getpid()}), flush=True)
