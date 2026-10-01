@@ -51091,6 +51091,8 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
         monkeypatch.setattr(im,"datetime",WriteClock)
         poller = hko.HkoExtremaPoller(client=Client())
         monkeypatch.setattr(im,"_day0_hko_poller",lambda:poller)
+        # Both metric parametrizations share one print identity; keep each run's record private.
+        monkeypatch.setattr(im,"_HKO_CURRENT_PUBLICATION_FILE",f"hko-current-publication-{tmp_path.name}.json")
         before = [tuple(row) for row in fixture.conn.execute(
             "SELECT utc_timestamp,running_max,running_min FROM observation_instants ORDER BY utc_timestamp")]
         result = im._k2_hko_tick.__wrapped__()
@@ -51255,8 +51257,9 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
                 assert _current_global_held_point_probability(position,held.probability_witness) == pytest.approx(
                     family_payoff_point_q(exited.probability_witness,bin_id=binding.bin_id,side=side),abs=1e-12)
         count = fixture.conn.execute("SELECT COUNT(*) FROM observation_prints WHERE source_channel='hko_current_1min_mean'").fetchone()[0]
-        replay = im._replay_hko_current_temperature_redecision()
-        assert next(item for item in replay if item.get("metric")==metric)["enqueued"] is False
+        # The live commit recorded this print's identity: a replay owes nothing,
+        # neither a reseed nor a second wake for the unchanged fact.
+        assert im._replay_hko_current_temperature_redecision() == ()
         assert fixture.conn.execute("SELECT COUNT(*) FROM observation_prints WHERE source_channel='hko_current_1min_mean'").fetchone()[0] == count
     finally:
         fixture.conn.close()

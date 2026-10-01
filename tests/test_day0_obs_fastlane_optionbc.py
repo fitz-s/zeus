@@ -1,6 +1,6 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-09-22
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Last reused/audited: 2026-10-01 (HKO current-print replay publishes once per committed identity)
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Purpose: Protect Day0 fast-observation source, coverage, and scheduler contracts.
 # Reuse: Run when WU, same-station fast-tail, or Day0 source-clock routing changes.
 # Authority basis: day0_obs_fastlane_plan.md §4.2 (Option B) and §4.3 (Option C);
@@ -37,8 +37,11 @@ Relationship contracts tested:
 from __future__ import annotations
 
 import dataclasses
+import json
+import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timezone, timedelta
 from types import SimpleNamespace
@@ -126,12 +129,204 @@ def test_hko_current_commit_wake_requires_successor_computation_without_fake_ext
         lambda **kwargs: calls.append(kwargs) or {"status":"CYCLE_ADVANCE_ENQUEUED"})
     wakes = []
     monkeypatch.setattr(wake,"publish_reactor_wake",lambda **kwargs:wakes.append(kwargs))
-    im._bridge_committed_hko_current_temperature(target_date="2026-09-30",written_at=written)
+    monkeypatch.setattr(im,"_HKO_CURRENT_PUBLICATION_FILE",f"hko-current-publication-{uuid.uuid4().hex}.json")
+    im._bridge_committed_hko_current_temperature(target_date="2026-09-30",written_at=written,identity="print-1")
     assert [call["metric"] for call in calls] == ["high","low"]
     assert all(call["minimum_posterior_computed_at"] == written for call in calls)
     assert all("day0_observed_extreme_c" not in call for call in calls)
     assert wakes[0]["event_ids"] == ()
     assert wakes[0]["reason"] == "current_temperature_print_committed"
+
+
+class _HkoCurrentReplayHarness:
+    """A real observation_prints ledger plus a recording seed/wake transport."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        import src.ingest_main as im
+        import src.data.replacement_forecast_production as production
+        import src.data.replacement_cycle_advance_trigger as trigger
+        import src.runtime.reactor_wake as wake
+        import src.state.db as db
+        from src.state.schema.observation_prints_schema import ensure_table
+
+        self.im, self.tmp_path = im, tmp_path
+        self.record_name = f"hko-current-publication-{uuid.uuid4().hex}.json"
+        monkeypatch.setattr(im,"_HKO_CURRENT_PUBLICATION_FILE",self.record_name)
+        self.db = tmp_path/"world.db"
+        conn = sqlite3.connect(self.db)
+        ensure_table(conn)
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(db,"get_world_connection_read_only",lambda: sqlite3.connect(self.db))
+        self.seeds, self.wakes, self.seed_status = [], [], "CYCLE_ADVANCE_ENQUEUED"
+        monkeypatch.setattr(production,"_replacement_forecast_live_materialization_queue_config",
+            lambda:{"forecast_db":"private.db","seed_dir":"private-seeds","raw_manifest_dir":"private-raw"})
+        monkeypatch.setattr(trigger,"enqueue_single_family_cycle_advance_reseed",
+            lambda **kwargs: self.seeds.append(kwargs) or {"status":self.seed_status})
+        monkeypatch.setattr(wake,"publish_reactor_wake",lambda **kwargs: self.wakes.append(kwargs))
+        self.minute = datetime.now(UTC).replace(second=0,microsecond=0)-timedelta(minutes=3)
+
+    def commit_print(self, value, *, minutes_after=0):
+        from email.utils import format_datetime
+        from scripts.hko_ingest_tick import append_hko_current_temperature_print
+
+        observed = self.minute+timedelta(minutes=minutes_after)
+        body = ("Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
+            f"{observed.astimezone(ZoneInfo('Asia/Hong_Kong')).strftime('%Y%m%d%H%M')},HK Observatory,{value}\n").encode()
+        fetched = observed+timedelta(seconds=40)
+        live = dict(body=body,last_modified=format_datetime(observed+timedelta(seconds=10),usegmt=True),
+            fetched_at=fetched,written_at=fetched+timedelta(seconds=1))
+        conn = sqlite3.connect(self.db)
+        assert append_hko_current_temperature_print(conn,**live)
+        conn.commit()
+        conn.close()
+        return live
+
+    def replay(self):
+        return self.im._replay_hko_current_temperature_redecision()
+
+    @property
+    def record_path(self):
+        from src.config import state_path
+        return state_path(self.record_name)
+
+
+@pytest.fixture
+def hko_replay(tmp_path, monkeypatch):
+    harness = _HkoCurrentReplayHarness(tmp_path, monkeypatch)
+    yield harness
+    harness.record_path.unlink(missing_ok=True)
+
+
+def test_hko_current_replay_of_one_committed_print_wakes_once(hko_replay):
+    hko_replay.commit_print(28.8)
+    for _ in range(6):
+        hko_replay.replay()
+    assert len(hko_replay.wakes) == 1
+    assert [call["metric"] for call in hko_replay.seeds] == ["high","low"]
+    assert hko_replay.wakes[0]["reason"] == "current_temperature_print_committed"
+
+
+def test_hko_current_live_commit_identity_equals_replay_identity(hko_replay):
+    """_k2_hko_tick derives the identity from the live evidence; replay must read back the same."""
+    from src.data.day0_hourly_vectors import hko_current_temperature_evidence
+
+    live = hko_replay.commit_print(28.8)
+    proof = hko_current_temperature_evidence(**live)
+    hko_replay.im._bridge_committed_hko_current_temperature(
+        target_date=datetime.fromisoformat(proof["observed_at_utc"]).astimezone(
+            ZoneInfo("Asia/Hong_Kong")).date().isoformat(),
+        written_at=live["written_at"],identity=hko_replay.im._hko_current_print_identity(proof))
+    assert len(hko_replay.wakes) == 1
+    for _ in range(3):
+        assert hko_replay.replay() == ()
+    assert len(hko_replay.wakes) == 1 and len(hko_replay.seeds) == 2
+
+
+def test_hko_current_new_committed_print_wakes_exactly_once(hko_replay):
+    hko_replay.commit_print(28.8)
+    hko_replay.replay()
+    hko_replay.replay()
+    hko_replay.commit_print(28.9, minutes_after=1)
+    for _ in range(4):
+        hko_replay.replay()
+    assert len(hko_replay.wakes) == 2
+    assert len(hko_replay.seeds) == 4
+
+
+def test_hko_current_a_b_a_correction_at_one_source_clock_is_a_new_identity(hko_replay):
+    """Same value, new receipt: the row identity differs, so the fact is announced again."""
+    hko_replay.commit_print(28.8)
+    hko_replay.replay()
+    from scripts.hko_ingest_tick import append_hko_current_temperature_print
+    from email.utils import format_datetime
+    observed = hko_replay.minute
+    body = ("Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
+        f"{observed.astimezone(ZoneInfo('Asia/Hong_Kong')).strftime('%Y%m%d%H%M')},HK Observatory,28.7\n").encode()
+    conn = sqlite3.connect(hko_replay.db)
+    assert append_hko_current_temperature_print(conn,body=body,
+        last_modified=format_datetime(observed+timedelta(seconds=10),usegmt=True),
+        fetched_at=observed+timedelta(seconds=50),written_at=observed+timedelta(seconds=51))
+    conn.commit()
+    conn.close()
+    hko_replay.replay()
+    hko_replay.replay()
+    assert len(hko_replay.wakes) == 2
+
+
+def test_hko_current_commit_then_crash_before_record_publishes_once_then_never(hko_replay, monkeypatch):
+    """Process dies after the print commits and before any publish is recorded."""
+    import src.state.paths as paths
+
+    hko_replay.commit_print(28.8)
+    with monkeypatch.context() as crash:
+        crash.setattr(paths,"write_json_atomic",lambda *_a,**_kw: (_ for _ in ()).throw(OSError("died")))
+        hko_replay.replay()
+    assert not hko_replay.record_path.exists()
+    assert len(hko_replay.wakes) == 1  # the pre-crash publish itself
+    hko_replay.replay()  # restart: nothing durable names this print
+    assert len(hko_replay.wakes) == 2
+    for _ in range(4):
+        hko_replay.replay()
+    assert len(hko_replay.wakes) == 2
+
+
+def test_hko_current_crash_before_any_publish_leaves_replay_the_only_publisher(hko_replay):
+    hko_replay.commit_print(28.8)
+    assert not hko_replay.record_path.exists()
+    assert hko_replay.wakes == []
+    hko_replay.replay()
+    hko_replay.replay()
+    assert len(hko_replay.wakes) == 1
+
+
+def test_hko_current_failed_wake_retries_without_reseeding(hko_replay, monkeypatch):
+    import src.runtime.reactor_wake as wake
+
+    hko_replay.commit_print(28.8)
+    with monkeypatch.context() as down:
+        down.setattr(wake,"publish_reactor_wake",lambda **_kw: (_ for _ in ()).throw(OSError("wake dir")))
+        hko_replay.replay()
+    assert len(hko_replay.seeds) == 2
+    hko_replay.replay()
+    assert len(hko_replay.seeds) == 2 and len(hko_replay.wakes) == 1
+    hko_replay.replay()
+    assert len(hko_replay.seeds) == 2 and len(hko_replay.wakes) == 1
+
+
+def test_hko_current_unsettled_seed_retries_without_rewaking(hko_replay):
+    hko_replay.seed_status = "CYCLE_ADVANCE_RETRY_PENDING"
+    hko_replay.commit_print(28.8)
+    hko_replay.replay()
+    hko_replay.replay()
+    assert len(hko_replay.seeds) == 4 and len(hko_replay.wakes) == 1
+    hko_replay.seed_status = "CYCLE_ADVANCE_ENQUEUED"
+    hko_replay.replay()
+    hko_replay.replay()
+    assert len(hko_replay.seeds) == 6 and len(hko_replay.wakes) == 1
+
+
+@pytest.mark.parametrize("damage", ("garbage", "list", "directory", "wrong_identity"))
+def test_hko_current_unreadable_record_publishes(hko_replay, damage):
+    hko_replay.commit_print(28.8)
+    hko_replay.replay()
+    assert len(hko_replay.wakes) == 1
+    path = hko_replay.record_path
+    if damage == "garbage":
+        path.write_text("{not json")
+    elif damage == "list":
+        path.write_text("[1, 2]")
+    elif damage == "directory":
+        path.unlink()
+        path.mkdir()
+    else:
+        path.write_text(json.dumps({"seeded":"other","woken":"other"}))
+    try:
+        hko_replay.replay()
+        assert len(hko_replay.wakes) == 2
+    finally:
+        if path.is_dir():
+            path.rmdir()
 
 
 # ---------------------------------------------------------------------------

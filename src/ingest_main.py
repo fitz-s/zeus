@@ -2656,7 +2656,8 @@ def _k2_hko_tick():
             written_at=current_written_at,response_headers=current_prefetch.response_headers)
         target_date = datetime.fromisoformat(proof["observed_at_utc"]).astimezone(
             ZoneInfo("Asia/Hong_Kong")).date().isoformat()
-        current_redecision = _bridge_committed_hko_current_temperature(target_date=target_date,written_at=current_written_at)
+        current_redecision = _bridge_committed_hko_current_temperature(target_date=target_date,written_at=current_written_at,
+            identity=_hko_current_print_identity(proof))
     logger.info(
         "K2 hko_source_clock: observed_at=%s target_date=%s written=%s "
         "events_emitted=%d",
@@ -2674,45 +2675,98 @@ def _k2_hko_tick():
     }
 
 
-def _bridge_committed_hko_current_temperature(*, target_date: str, written_at: datetime) -> tuple[dict, ...]:
+_HKO_CURRENT_PUBLICATION_FILE = "hko_current_publication.json"
+# Seed reports meaning the request did not reach the materialization queue for a
+# transient reason: the print stays owed until a replay gets past them. Every other
+# status (enqueued, pending, not needed, expired, manifest missing) is the queue's or
+# the next cycle poll's to resolve, not a replay's.
+_HKO_CURRENT_SEED_TRANSIENT = frozenset({
+    "HKO_CURRENT_RESEED_UNAVAILABLE", "CYCLE_ADVANCE_RETRY_PENDING",
+    "SAME_CYCLE_RECOMPUTE_RETRY_PENDING", "CYCLE_ADVANCE_PUBLISH_RETRY_PENDING",
+    "CYCLE_ADVANCE_ENSEMBLE_HWM_UNREADABLE", "CYCLE_ADVANCE_FAILSOFT_SKIPPED",
+    "DAY0_STATION_RESEED_DEADLINE_EXCEEDED",
+})
+
+
+def _hko_current_print_identity(proof: dict) -> str:
+    """observation_prints row identity (ux_observation_prints_identity) of the committed print.
+
+    A new row commits iff this changes, so it names exactly the fact a wake announces.
+    """
+    return "|".join((proof["representation_updated_at_utc"],repr(proof["value_native"]),proof["available_at_utc"]))
+
+
+def _bridge_committed_hko_current_temperature(*, target_date: str, written_at: datetime, identity: str) -> tuple[dict, ...]:
     """Reprice unchanged extrema through the existing same-cycle seed transport.
 
     Current-only mean never emits DAY0_EXTREME_UPDATED. The real possession cut
     requires a successor computation even when the absorbing boundary is the
     same. ``held_position`` here selects existing repair queue priority, not
     trading authority (the existing ENTRY mismatch caller uses this same API).
-    """
-    from src.data.replacement_cycle_advance_trigger import (
-        enqueue_single_family_cycle_advance_reseed, _DAY0_STATION_RESEED_DEADLINE_SECONDS,
-    )
-    from src.data.replacement_forecast_production import _replacement_forecast_live_materialization_queue_config
-    from src.runtime.reactor_wake import publish_reactor_wake
 
+    SCOPE: one committed print identity; its seeds and its wake are each published
+    once, recorded in state/hko_current_publication.json after the publish.
+    DRAIN: the live commit or a 304/restart replay publishes whatever the record
+    lacks, so a crash between commit and record republishes once; seeds a failed
+    enqueue left owed retry next tick. RESET: a new print identity. An unreadable
+    record publishes (liveness: it costs one wake).
+    """
+    from src.config import state_path
+    from src.state.paths import write_json_atomic
+
+    path = state_path(_HKO_CURRENT_PUBLICATION_FILE)
     try:
-        cfg = _replacement_forecast_live_materialization_queue_config()
-    except Exception:
-        logger.warning("HKO current redecision config unavailable",exc_info=True)
-        return ({"status":"HKO_CURRENT_RESEED_UNAVAILABLE"},)
-    if any(cfg.get(key) is None for key in ("forecast_db","seed_dir","raw_manifest_dir")):
-        return ({"status":"HKO_CURRENT_RESEED_NOT_CONFIGURED"},)
-    families = tuple(("Hong Kong",target_date,metric) for metric in ("high","low"))
-    deadline = time.monotonic()+_DAY0_STATION_RESEED_DEADLINE_SECONDS
+        done = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError,ValueError):
+        done = {}
+    if not isinstance(done,dict):
+        done = {}
     reports = []
-    for city, target, metric in families:
+
+    def record(step: str) -> None:
+        done[step] = identity
         try:
-            reports.append(enqueue_single_family_cycle_advance_reseed(
-                forecast_db=Path(str(cfg["forecast_db"])),seed_dir=Path(str(cfg["seed_dir"])),
-                raw_manifest_dir=Path(str(cfg["raw_manifest_dir"])),city=city,target_date=target,metric=metric,
-                computed_at=datetime.now(timezone.utc),held_position=True,
-                minimum_posterior_computed_at=written_at,deadline_monotonic=deadline))
+            write_json_atomic(path,done)
+        except OSError:
+            logger.warning("HKO current publication record unwritable; replay republishes",exc_info=True)
+
+    families = tuple(("Hong Kong",target_date,metric) for metric in ("high","low"))
+    if done.get("seeded") != identity:
+        from src.data.replacement_cycle_advance_trigger import (
+            enqueue_single_family_cycle_advance_reseed, _DAY0_STATION_RESEED_DEADLINE_SECONDS,
+        )
+        from src.data.replacement_forecast_production import _replacement_forecast_live_materialization_queue_config
+
+        try:
+            cfg = _replacement_forecast_live_materialization_queue_config()
         except Exception:
-            logger.warning("HKO current redecision seed unavailable metric=%s",metric,exc_info=True)
-            reports.append({"status":"HKO_CURRENT_RESEED_UNAVAILABLE","metric":metric})
-    try:
-        publish_reactor_wake(source="hko_current_1min_mean",reason="current_temperature_print_committed",
-            event_ids=(),forecast_families=families)
-    except Exception:
-        logger.warning("HKO current redecision wake unavailable; periodic recompute remains",exc_info=True)
+            logger.warning("HKO current redecision config unavailable",exc_info=True)
+            return ({"status":"HKO_CURRENT_RESEED_UNAVAILABLE"},)
+        if any(cfg.get(key) is None for key in ("forecast_db","seed_dir","raw_manifest_dir")):
+            return ({"status":"HKO_CURRENT_RESEED_NOT_CONFIGURED"},)
+        deadline = time.monotonic()+_DAY0_STATION_RESEED_DEADLINE_SECONDS
+        for city, target, metric in families:
+            try:
+                reports.append(enqueue_single_family_cycle_advance_reseed(
+                    forecast_db=Path(str(cfg["forecast_db"])),seed_dir=Path(str(cfg["seed_dir"])),
+                    raw_manifest_dir=Path(str(cfg["raw_manifest_dir"])),city=city,target_date=target,metric=metric,
+                    computed_at=datetime.now(timezone.utc),held_position=True,
+                    minimum_posterior_computed_at=written_at,deadline_monotonic=deadline))
+            except Exception:
+                logger.warning("HKO current redecision seed unavailable metric=%s",metric,exc_info=True)
+                reports.append({"status":"HKO_CURRENT_RESEED_UNAVAILABLE","metric":metric})
+        if not any(report.get("status") in _HKO_CURRENT_SEED_TRANSIENT for report in reports):
+            record("seeded")
+    if done.get("woken") != identity:
+        from src.runtime.reactor_wake import publish_reactor_wake
+
+        try:
+            publish_reactor_wake(source="hko_current_1min_mean",reason="current_temperature_print_committed",
+                event_ids=(),forecast_families=families)
+        except Exception:
+            logger.warning("HKO current redecision wake unavailable; periodic recompute remains",exc_info=True)
+        else:
+            record("woken")
     return tuple(reports)
 
 
@@ -2720,7 +2774,8 @@ def _replay_hko_current_temperature_redecision() -> tuple[dict, ...]:
     """A 304/restart retries a possessed fresh current print, without new clocks.
 
     SCOPE: one current local-day HQ print. DRAIN: the existing exact seed/owner
-    marker, queue and materializer. RESET: a posterior computed after possession
+    marker, queue and materializer; the bridge publishes only what its durable
+    per-identity record lacks. RESET: a posterior computed after possession
     makes the same-cycle request a no-op. Stale/malformed source remains absent.
     """
     from src.state.db import get_world_connection_read_only
@@ -2753,7 +2808,8 @@ def _replay_hko_current_temperature_redecision() -> tuple[dict, ...]:
             continue
         return _bridge_committed_hko_current_temperature(
             target_date=state.observed_at.astimezone(ZoneInfo("Asia/Hong_Kong")).date().isoformat(),
-            written_at=datetime.fromisoformat(proof["written_at_utc"]))
+            written_at=datetime.fromisoformat(proof["written_at_utc"]),
+            identity=_hko_current_print_identity(proof))
     return ()
 
 
