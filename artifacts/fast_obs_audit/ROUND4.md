@@ -84,3 +84,7 @@ $PY -B -m pytest -q tests/test_station_temperature_adapters.py tests/test_fast_o
 ## Publication and operator-only boundary
 
 All Round4 implementation/evidence is confined to `feat/fast-obs-survey-r4`. Principal implementation commits before the final evidence/report update are `634266ae9` (public adapters/Moscow), `cb7e91572` (IMD/cumulative proof), and `c45e04c77` (Ankara/Istanbul). No action is requested on `live` or the prior feature branch. Future deployment and any registration are operator-controlled and unexecuted; verify locally. There is no delegated task to redo the connector-accessible work already completed. The delivery response supplies the verified published branch HEAD.
+
+## Post-round disposition: Moscow route withdrawn (2026-10-01)
+
+The Moscow UUWW route (`metaviatelecom_metar`, `http://display.meteocenter.ru/219`) is removed from the registry and code before merge. Its only reachable transport is plaintext HTTP. Re-check on 2026-10-01: HTTPS still fails certificate verification (curl `ssl_verify_result=18`, self-signed). Value identity (4/4, plus 04:00Z 6°C = AWC 6°C) cannot authenticate future responses in transit. Requiring an AWC/WRH corroboration per value would remove the publication lead that justified the route. Moscow stays on its existing AWC/WRH path; UUWW AWC vs WRH agreed 46/46 over the prior 24h. Re-admit only with an authenticated transport.

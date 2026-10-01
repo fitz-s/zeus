@@ -19,7 +19,7 @@ def _public_route(provider="mgm_metar", station="LTAC"):
     from src.data.physical_current_sources import PhysicalCurrentSource
     from src.data.station_temperature_adapters import CHANNELS
     return PhysicalCurrentSource(provider, CHANNELS[provider], station, ("noaa",),
-        "C", 60., None, {"provider_station": station, "display_id": "219"}, True)
+        "C", 60., None, {"provider_station": station}, True)
 
 
 def _public_fixture(name):
@@ -31,7 +31,6 @@ def _public_fixture(name):
 
 @pytest.mark.parametrize("provider,station,name", [
     ("mgm_metar", "LTAC", "mgm_public"),
-    ("metaviatelecom_metar", "UUWW", "metaviatelecom"),
     ("imd_olbs_metar", "VILK", "imd_olbs_public"),
 ])
 def test_public_native_metar_real_response_reaches_current_reader(monkeypatch,provider,station,name):
@@ -112,15 +111,6 @@ def test_imd_public_form_contract_and_cache(monkeypatch):
     client=Client()
     first=_fetch_public_metar(route,client);second=_fetch_public_metar(route,client)
     assert first==second and len(calls)==1
-
-
-def test_public_metar_route_cannot_inject_host_or_path():
-    from src.data.station_temperature_adapters import fetch_station_temperature
-    route=replace(_public_route("metaviatelecom_metar","UUWW"),identity={"provider_station":"UUWW","display_id":"../secret"})
-    class Client:
-        def get(self,*a,**k):raise AssertionError("network must not be reached")
-    with pytest.raises(ValueError,match="DISPLAY_ID_INVALID"):
-        fetch_station_temperature(route,start=NOW,end=NOW,client=Client())
 
 
 def test_public_mgm_batch_never_exceeds_ten_stations(monkeypatch):
@@ -464,7 +454,6 @@ def test_wrh_rate_limit_is_deferred_without_secret_in_error(monkeypatch):
 
 @pytest.mark.parametrize("city_name,provider,value,unit", [
     ("Chicago","noaa_wrh",62.6,"F"),
-    ("Moscow","metaviatelecom_metar",8.0,"C"),
     ("Lucknow","imd_olbs_metar",24.0,"C"),
     ("Ankara","mgm_metar",12.0,"C"),
     ("Istanbul","mgm_metar",19.0,"C"),

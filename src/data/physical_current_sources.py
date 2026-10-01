@@ -78,9 +78,7 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
                 or unit not in ({"C", "F"} if row["provider"] == "noaa_wrh" else {"C"})
                 or (row["provider"] == "noaa_wrh" and
                     (native_id != row["station_id"] or identity.get("resolver_view") not in {"hourly", "all"}))
-                or (row["provider"] in {"mgm_metar", "metaviatelecom_metar", "imd_olbs_metar"} and native_id != row["station_id"])
-                or (row["provider"] == "metaviatelecom_metar" and
-                    not re.fullmatch(r"[0-9]{1,8}", str(identity.get("display_id", ""))))
+                or (row["provider"] in {"mgm_metar", "imd_olbs_metar"} and native_id != row["station_id"])
                 or not kinds or any(t not in {"noaa", "wu_icao"} for t in kinds)):
                 raise ValueError("PHYSICAL_CURRENT_ADAPTER_INVALID")
             sources.append(PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
