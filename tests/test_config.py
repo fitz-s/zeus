@@ -629,6 +629,37 @@ def test_coordinate_manifest_identity_excludes_station_audit_only_edits(monkeypa
         assert config.runtime_coordinate_manifest_json() == baseline
 
 
+def test_coordinate_manifest_replays_each_ground_claim_once(monkeypatch) -> None:
+    """Per-scope source identity reads must not re-parse every official page.
+
+    Unmemoized replay cost ~60 ms per manifest; one manifest per scope starved
+    the current-target anchor preflight past its 20 s deadline (2026-10-01).
+    """
+    import src.config as config
+
+    calls: list[str] = []
+    real = config.station_ground_facts_from_bytes
+
+    def counted(**kwargs):
+        calls.append(kwargs["station_id"])
+        return real(**kwargs)
+
+    config._registry_claim_ground_facts.cache_clear()
+    monkeypatch.setattr(config, "station_ground_facts_from_bytes", counted)
+    first = config.runtime_coordinate_manifest_json()
+    replays = len(calls)
+    assert replays > 0
+    for _ in range(3):
+        assert config.runtime_coordinate_manifest_json() == first
+    assert len(calls) == replays
+
+    city = config.runtime_cities_by_name()["Hong Kong"]
+    station = config.runtime_station_geometry_for_city(city)
+    assert station["ground_status"] == "VERIFIED"
+    station["ground_facts"]["elevation_m"] = -1.0
+    assert config.runtime_station_geometry_for_city(city)["ground_facts"]["elevation_m"] != -1.0
+
+
 def test_station_geometry_wrong_station_degrades_only_that_city(tmp_path) -> None:
     import json
     from src.config import runtime_cities_by_name, runtime_station_geometry_for_city

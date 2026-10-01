@@ -8,6 +8,8 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 # Last reused/audited: 2026-04-30
 # Authority basis: Phase 10 DT-close B001 — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B001_config_contract.md
 
+import copy
+import functools
 import json
 import hashlib
 import logging
@@ -1031,6 +1033,23 @@ def station_ground_facts_from_bytes(
         return None
 
 
+@functools.cache
+def _registry_claim_ground_facts(
+    kind: str, station_id: str, raw: bytes, bridge_raw: bytes | None, checked: datetime,
+) -> dict[str, object] | None:
+    """Replay one registry claim's own bytes at its own possession clock.
+
+    Pure in its key. Every coordinate-identity read replays all stations' pages,
+    so an unmemoized replay (~60 ms per manifest) starved per-scope anchor reads
+    past their acquisition deadline. Bounded by the distinct registry claims and
+    config asset bodies a process observes; decision-cutoff replays stay uncached.
+    """
+    return station_ground_facts_from_bytes(
+        source_kind=kind, station_id=station_id, raw_body=raw,
+        identity_bridge_bytes=bridge_raw, effective_at=checked,
+    )
+
+
 def _station_ground_for_entry(
     entry: dict, station_id: str, *, effective_at: datetime | None = None,
 ) -> dict[str, object]:
@@ -1087,10 +1106,7 @@ def _station_ground_for_entry(
             bridge_audit = {key: bridge[key] for key in (
                 "source_kind", "artifact_ref", "body_sha256", "checked_at", "source_url",
             )}
-        facts = station_ground_facts_from_bytes(
-            source_kind=kind, station_id=station_id, raw_body=raw,
-            identity_bridge_bytes=bridge_raw, effective_at=checked,
-        )
+        facts = copy.deepcopy(_registry_claim_ground_facts(kind, station_id, raw, bridge_raw, checked))
         if facts is None:
             raise ValueError("official ground source facts unavailable")
         audit_keys = ["artifact_ref", "body_sha256", "checked_at"]
@@ -1150,6 +1166,12 @@ def _station_ground_for_entry(
     return result
 
 
+@functools.cache
+def _station_registry(raw: bytes) -> tuple[object, str]:
+    """Pure parse keyed by exact registry bytes; bounded by distinct registry versions."""
+    return json.loads(raw), hashlib.sha256(raw).hexdigest()
+
+
 def runtime_station_geometry_for_city(
     city: City, *, registry_path: Path | None = None, effective_at: datetime | None = None,
 ) -> dict[str, object]:
@@ -1180,10 +1202,9 @@ def runtime_station_geometry_for_city(
     if not expected_id:
         return proof
     try:
-        raw = path.read_bytes()
-        rows = json.loads(raw)
-        entry = rows[city.name]
-        proof["registry_sha256"] = hashlib.sha256(raw).hexdigest()
+        rows, registry_sha = _station_registry(path.read_bytes())
+        entry = copy.deepcopy(rows[city.name])
+        proof["registry_sha256"] = registry_sha
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         proof["validity_reason"] = "STATION_REGISTRY_ROW_UNAVAILABLE"
         return proof
