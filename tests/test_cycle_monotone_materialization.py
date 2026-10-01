@@ -2874,3 +2874,74 @@ def test_retained_failure_waits_its_turn_within_its_tier(tmp_path, monkeypatch) 
         assert queue._UNCLASSIFIED_ERROR_REASON in report.reason_codes
     assert calls == ["Austin", "Chicago", "Austin", "Chicago"]
     assert sorted(p.name for p in requests.glob("*.json")) == ["A.json", "B.json"]
+
+
+
+@pytest.mark.parametrize(("body", "category"), (
+    ('{"temperature_metric": "high", "target_date": "not-a-date"}', "INPUT_VERDICT"),
+    ("[1, 2]", "INPUT_VERDICT"),  # input JSON is not an object
+    # A missing field is a KeyError, not a validation ValueError: no verdict, retained.
+    ('{"city": "Panama City"}', "UNCLASSIFIED"),
+))
+def test_worker_input_verdict_is_emitted_and_fenced_by_the_queue(
+    tmp_path, monkeypatch, body, category,
+) -> None:
+    """Round-3 Q4: the real worker classifies its own failure. A malformed input
+    yields ERROR + INPUT_VERDICT, and the queue fences that exact attempt instead
+    of retaining it for another full subprocess run."""
+    import subprocess
+
+    import scripts.materialize_replacement_forecast_live as worker
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "replacement_forecast_live"
+    requests = root / "requests"
+    requests.mkdir(parents=True)
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    bad = tmp_path / "bad.json"
+    bad.write_text(body, encoding="utf-8")
+    with sqlite3.connect(":memory:") as worker_conn:
+        returncode, stdout, stderr = worker._run_one(
+            bad, commit=False, init_schema=False, conn=worker_conn,
+        )
+    emitted = json.loads(stderr.strip().splitlines()[-1])
+    assert (returncode, emitted["status"], emitted["failure_category"]) == (2, "ERROR", category)
+
+    name = "Panama_City.2026-06-22.high.20260621T060500Z.json"
+    (requests / name).write_text(json.dumps({
+        "city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high",
+        "source_cycle_time": "2026-06-21T06:00:00+00:00",
+        "computed_at": "2026-06-21T06:05:00+00:00",
+        "baseline_source_run_id": "baseline-run", "openmeteo_source_run_id": "om-run",
+        "openmeteo_payload_json": "payload.json", "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
+    monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+    report = queue._process_claimed_materialization_batch(
+        request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
+        forecast_db=db, limit=1,
+        runner=lambda argv: subprocess.CompletedProcess(list(argv), returncode, stdout, stderr),
+        marker_dir=root / "blocked_attempts", seed_dir=root / "seeds",
+    )
+    fenced = category == "INPUT_VERDICT"
+    assert (requests / name).exists() is not fenced, "a verdict is fenced; anything else is retained"
+    assert (queue._UNCHANGED_BLOCKED_SKIP_REASON in report.reason_codes) is fenced
+    assert (queue._ERROR_RETAINED_REASON in report.reason_codes) is not fenced
+
+
+def test_worker_categories_name_what_each_failure_proves() -> None:
+    import sqlite3 as _sqlite3
+
+    import scripts.materialize_replacement_forecast_live as worker
+
+    category = lambda exc: worker._error_response(exc)["failure_category"]  # noqa: E731
+    assert category(worker.RequestInputInvalid("bins[] entries must be objects")) == "INPUT_VERDICT"
+    assert category(ValueError("raised by the computation")) == "UNCLASSIFIED"
+    assert category(_sqlite3.OperationalError("database is locked")) == "ENVIRONMENT_RETRY"
+    assert category(PermissionError("unreadable")) == "ENVIRONMENT_RETRY"
+    assert category(worker.ReplacementForecastWriteDeferred("busy")) == "ENVIRONMENT_RETRY"
+    assert category(RuntimeError("unexpected")) == "UNCLASSIFIED"
