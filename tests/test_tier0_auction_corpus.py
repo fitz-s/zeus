@@ -1,5 +1,5 @@
 # Created: 2026-09-27
-# Last audited: 2026-09-28
+# Last audited: 2026-09-30
 # Authority basis: correction design review REQ-20260925-223704 §2 (every cut,
 #   raw q before any rejection), §3 (complete ordered family simplex, quotes
 #   stored with reasons, never patched), §10 (idempotent immutable identities,
@@ -262,7 +262,7 @@ def _no_winner_decision(witness):
         _rejected("b-mid", "NO", witness, "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"),
         # Duplicate NO leg (same bin/side, maker mode): one fit unit, two legs.
         _rejected("b-mid", "NO", witness, "FAMILY_JOINT_NO_POSITIVE_TARGET", "MAKER_REST"),
-        _rejected("b-low", "NO", witness, "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"),
+        _rejected("b-low", "NO", witness, "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"),
     )
     return GlobalSingleOrderDecision(
         candidate=None, shares=Decimal("0"), cost_usd=Decimal("0"),
@@ -642,7 +642,7 @@ def test_no_winner_cut_persists_cut_row_and_every_leg_with_raw_q(tmp_path):
         (0, "YES", "TAKER_LIMIT", "NON_POSITIVE_EXPECTED_OBJECTIVE"),
         (0, "NO", "TAKER_LIMIT", "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"),
         (0, "NO", "MAKER_REST", "FAMILY_JOINT_NO_POSITIVE_TARGET"),
-        (1, "NO", "TAKER_LIMIT", "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"),
+        (1, "NO", "TAKER_LIMIT", "GLOBAL_ENTRY_FEASIBILITY_QUOTE_INVALID"),
     ])
     # The winner-only per-candidate table stays winner-only (frozen population).
     assert _count(conn, "tier0_candidate_set_provenance") == 0
