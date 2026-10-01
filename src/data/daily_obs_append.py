@@ -2596,10 +2596,36 @@ def catch_up_missing(
     longer applies to the city are reported and skipped. Use days_back=7 for
     routine post-downtime catch-up; use days_back=30 for audit passes.
     """
-    from src.state.data_coverage import find_pending_fills
+    from src.state.data_coverage import (
+        find_gaps_with_reason,
+        find_pending_fills,
+        reopen_obsolete_gaps,
+    )
 
     if rebuild_run_id is None:
         rebuild_run_id = f"catch_up_{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+    # The WRH lane (pre-ccdcfad8d) pinned days older than its recent= window as
+    # LEGITIMATE_GAP/OUTSIDE_LANE_REQUEST_WINDOW; it now fetches them by
+    # explicit start/end, so that reason is obsolete for NOAA-settled scopes.
+    # Reopen exactly those keys; no other gap is touched.
+    wrh_tags = {noaa_wrh_source_tag(t.station) for t in OGIMET_CITIES.values()}
+    obsolete = [
+        tuple(row)
+        for row in find_gaps_with_reason(
+            conn, data_table=DataTable.OBSERVATIONS,
+            reason=CoverageReason.OUTSIDE_LANE_REQUEST_WINDOW,
+        )
+        if row[1] in wrh_tags
+        and settlement_source_type_for_city(
+            cities_by_name.get(row[0]), date.fromisoformat(row[2])
+        ) == "noaa"
+    ]
+    if obsolete and reopen_obsolete_gaps(
+        conn, data_table=DataTable.OBSERVATIONS,
+        reason=CoverageReason.OUTSIDE_LANE_REQUEST_WINDOW, keys=obsolete,
+    ):
+        conn.commit()
 
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=days_back)
     rows = find_pending_fills(conn, data_table=DataTable.OBSERVATIONS, max_rows=10_000)

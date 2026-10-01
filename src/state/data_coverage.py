@@ -103,6 +103,9 @@ class CoverageReason:
 
     # MISSING reasons — scanner-detected holes awaiting first fetch.
     SCANNER_DETECTED = "SCANNER_DETECTED"
+    # A LEGITIMATE_GAP whose reason a later code change made fetchable,
+    # reopened by ``reopen_obsolete_gaps`` (the explicit re-ingest pass).
+    OBSOLETE_GAP_REOPENED = "OBSOLETE_GAP_REOPENED"
 
 
 def _now_utc_iso() -> str:
@@ -368,6 +371,53 @@ def record_missing(
             None,
         ),
     )
+
+
+def reopen_obsolete_gaps(
+    conn: WorldConnection,
+    *,
+    data_table: DataTable,
+    reason: str,
+    keys: Iterable[tuple[str, str, str, str]],
+) -> int:
+    """Reopen exact LEGITIMATE_GAP rows whose ``reason`` is no longer permanent.
+
+    The explicit re-ingest pass the upsert's terminal-gap rule defers to: only
+    rows still LEGITIMATE_GAP with exactly ``reason`` at the given
+    (city, data_source, target_date, sub_key) keys become MISSING, so the
+    normal fill path retries them. Every other gap stays terminal. Idempotent.
+    Returns the number of rows reopened.
+    """
+    table_ref = _coverage_table_ref(conn)
+    now_iso = _now_utc_iso()
+    reopened = 0
+    for city, data_source, target_date, sub_key in keys:
+        reopened += conn.execute(
+            f"UPDATE {table_ref} SET status = ?, reason = ?, fetched_at = ?, retry_after = NULL "
+            "WHERE data_table = ? AND city = ? AND data_source = ? AND target_date = ? "
+            "AND sub_key = ? AND status = ? AND reason = ?",
+            (
+                CoverageStatus.MISSING.value, CoverageReason.OBSOLETE_GAP_REOPENED, now_iso,
+                data_table.value, city, data_source, _coerce_target_date(target_date), sub_key,
+                CoverageStatus.LEGITIMATE_GAP.value, reason,
+            ),
+        ).rowcount
+    return reopened
+
+
+def find_gaps_with_reason(
+    conn: WorldConnection,
+    *,
+    data_table: DataTable,
+    reason: str,
+) -> list[sqlite3.Row]:
+    """LEGITIMATE_GAP rows carrying exactly ``reason`` (read-only)."""
+    table_ref = _coverage_table_ref(conn)
+    return conn.execute(
+        f"SELECT city, data_source, target_date, sub_key FROM {table_ref} "
+        "WHERE data_table = ? AND status = ? AND reason = ?",
+        (data_table.value, CoverageStatus.LEGITIMATE_GAP.value, reason),
+    ).fetchall()
 
 
 # ---------------------------------------------------------------------------

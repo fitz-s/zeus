@@ -1522,3 +1522,46 @@ def test_aged_valid_empty_product_mints_absence_only_after_the_deadline(tmp_path
             "FAILED", "SOURCE_CONFIRMED_EMPTY_AFTER_CONTRACT_DEADLINE")
     finally:
         conn.close()
+
+
+def test_pre_fix_outside_window_gap_reopens_for_wrh_only(tmp_path, monkeypatch):
+    """Only the obsolete WRH OUTSIDE_LANE_REQUEST_WINDOW gap is reopened."""
+    from src.data import daily_obs_append as appender
+    from src.state.data_coverage import CoverageReason, DataTable, record_legitimate_gap
+
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        for source, day, reason in (
+            ("noaa_wrh_khou", "2026-09-11", CoverageReason.OUTSIDE_LANE_REQUEST_WINDOW),
+            ("ogimet_metar_khou", "2026-09-11", CoverageReason.OUTSIDE_LANE_REQUEST_WINDOW),
+            ("noaa_wrh_khou", "2026-09-10", CoverageReason.GUARD_REJECTED),
+        ):
+            record_legitimate_gap(
+                conn, data_table=DataTable.OBSERVATIONS, city="Houston",
+                data_source=source, target_date=day, reason=reason,
+            )
+        conn.commit()
+        calls = []
+
+        def collect(city, dates, *args, **kwargs):
+            calls.append((city, list(dates)))
+            return {"inserted": 0, "guard_rejected": 0}
+
+        monkeypatch.setattr(appender, "append_noaa_wrh_city", collect)
+        monkeypatch.setattr(appender, "append_ogimet_city",
+                            lambda *a, **k: pytest.fail("non-WRH gap reopened"))
+        appender.catch_up_missing(conn, days_back=3650)
+        appender.catch_up_missing(conn, days_back=3650)  # reopen is idempotent
+        assert calls == [("Houston", [date(2026, 9, 11)])] * 2
+        rows = {
+            (r[0], r[1]): r[2] for r in conn.execute(
+                "SELECT data_source, target_date, status FROM world.data_coverage "
+                "WHERE city='Houston'")
+        }
+        assert rows == {
+            ("noaa_wrh_khou", "2026-09-11"): "MISSING",
+            ("ogimet_metar_khou", "2026-09-11"): "LEGITIMATE_GAP",
+            ("noaa_wrh_khou", "2026-09-10"): "LEGITIMATE_GAP",
+        }
+    finally:
+        conn.close()

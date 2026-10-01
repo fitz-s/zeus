@@ -378,6 +378,11 @@ def test_R2_ogimet_catch_up_is_bounded_per_run(monkeypatch) -> None:
         "src.state.data_coverage.find_pending_fills",
         lambda *args, **kwargs: rows,
     )
+    # No obsolete outside-window WRH gaps to reopen in this fixture.
+    monkeypatch.setattr(
+        "src.state.data_coverage.find_gaps_with_reason",
+        lambda *args, **kwargs: [],
+    )
     monkeypatch.setattr(
         daily_obs_append,
         "append_ogimet_city",
