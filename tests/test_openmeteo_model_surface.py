@@ -573,7 +573,9 @@ def test_missing_system_float_math_is_typed_and_does_not_fetch(ordinary_static_h
 
 def _count_asset_hashes(monkeypatch, asset_path):
     body_hashes = []
-    real_sha = surface._sha
+    from src.data import versioned_file_read
+
+    real_sha = versioned_file_read._sha256
     asset_size = Path(asset_path).stat().st_size
 
     def counting_sha(value):
@@ -581,7 +583,7 @@ def _count_asset_hashes(monkeypatch, asset_path):
             body_hashes.append(1)
         return real_sha(value)
 
-    monkeypatch.setattr(surface, "_sha", counting_sha)
+    monkeypatch.setattr(versioned_file_read, "_sha256", counting_sha)
     return body_hashes
 
 
