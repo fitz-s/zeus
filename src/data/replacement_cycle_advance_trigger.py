@@ -78,7 +78,6 @@ UTC = timezone.utc
 RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED = "RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED"
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
-_HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
 _HELD_DAY0_OWNER_LOCK_WAIT_SECONDS = 2.0
 _CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS = 120.0
 _DAY0_CONDITIONING_IDENTITY_COLUMN = "day0_conditioning_identity_json"
@@ -572,12 +571,21 @@ def consumed_cycle_dt(value: str) -> datetime:
     return parsed
 
 
-def _fresh_enough_to_retry_held_reheal(enqueued_at: object, *, now: datetime | None = None) -> bool:
-    """Bound same-scope held re-heal retries so one failed materialization cannot flood the queue."""
-    parsed = _parse_cycle(enqueued_at)
-    if parsed is None:
-        return True
-    return (now or datetime.now(tz=UTC)).astimezone(UTC) - parsed >= _HELD_REHEAL_COOLDOWN
+def _held_target_local_day_ended(city: str, target_date: str, now: datetime) -> bool:
+    """A held family past its city-local target day can never be rebuilt.
+
+    Unknown city/timezone or a malformed date is "not ended": it never
+    suppresses a re-heal.
+    """
+    from src.config import runtime_cities_by_name  # noqa: PLC0415
+
+    city_cfg = runtime_cities_by_name().get(city)
+    if city_cfg is None or not getattr(city_cfg, "timezone", None):
+        return False
+    try:
+        return has_city_local_day_ended(target_date, city_cfg.timezone, now)
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
 
 
 def _per_leg_max_cycle(conn: sqlite3.Connection, source_id: str) -> datetime | None:
@@ -1267,7 +1275,9 @@ def _enqueue_decision(
         not newer_observation
         and visible_seed_file is not None
         and not visible_seed_file.exists()
-        and failed_seed_identity_fenced(visible_seed_file, conn=conn)
+        and failed_seed_identity_fenced(
+            visible_seed_file, conn=conn, decision_at=decision_as_of,
+        )
     ):
         # SCOPE: this family/cycle marker. Its consumed seed failed request build
         # and every input it read is unchanged, so a rebuild re-fails identically.
@@ -1381,18 +1391,17 @@ def _enqueue_decision(
     # single_runs serving race materializes BLOCKED on REQUIREMENTS_NOT_MET — must NOT suppress
     # re-enqueue forever, else the held belief freezes (Panama City 2026-06-22 stuck 13h+) ->
     # BELIEF_AUTHORITY_FAULT fail-closed HOLD -> reversal exit starved ("observe but not act").
-    # Auto-enable the missing-seed re-enqueue for held rows, mirroring the day0 escape hatch.
-    # Bounded by the upstream needs_advance/coverage gate, so a successfully materialized cycle
-    # (posterior present) never reaches here to churn; a still-PRESENT pending seed also suppresses.
+    # SCOPE: this family/cycle marker. DRAIN/RESET: the input-identity fence above already
+    # suppressed a seed whose request build or materialization failed on inputs a rebuild would
+    # re-read unchanged; reaching here means some read input changed (or is unknown), so re-heal
+    # at once. There is no clock. A held family whose target local day ended is never rebuilt.
     if (allow_missing_seed_file_reenqueue or held) and seed_file and not Path(seed_file).exists():
-        # A moved seed file is normal after the queue processed it. Re-enqueueing immediately every
-        # poll tick creates a live backlog of identical failed work. Only Day0 observation-version
-        # advancement bypasses this cooldown above; otherwise retry the same scope/cycle after the
-        # cooling period or when a newer model cycle changes the idempotency key.
-        if held and not allow_missing_seed_file_reenqueue:
-            enqueued_at = row["enqueued_at"] if hasattr(row, "keys") else row[4]
-            if not _fresh_enough_to_retry_held_reheal(enqueued_at):
-                return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
+        if (
+            held
+            and not allow_missing_seed_file_reenqueue
+            and _held_target_local_day_ended(city, target_date, decision_as_of)
+        ):
+            return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
         return _CycleAdvanceEnqueueDecision.ADMIT
     return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
 

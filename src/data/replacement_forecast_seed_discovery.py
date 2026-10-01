@@ -1300,9 +1300,9 @@ def discover_replacement_forecast_materialization_seeds(
 
             if blocked_seed_identity_fenced(
                 seed_result.seed,
-                seed_name=seed_file.name,
                 queue_root=seed_path.parent,
                 conn=conn,
+                decision_at=computed,
             ):
                 reasons.append(
                     "REPLACEMENT_SEED_DISCOVERY_UNCHANGED_BLOCKED_INPUT_SKIPPED"

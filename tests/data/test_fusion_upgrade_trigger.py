@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-06-11; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Purpose: Lock provider-set and exact-input revision reseeding for replacement posteriors.
 # Reuse: Run for fusion upgrade, current-value serving, source callback, or station source changes.
-# Last reused/audited: 2026-10-01 (blocked-seed input-identity fence; CURRENT_REUSABLE)
+# Last reused/audited: 2026-10-01 (blocked-seed fence narrowed to build-read inputs; CURRENT_REUSABLE)
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL-fusion upgrade trigger. Relationship
 #   pins for the SINGLE instrument-set comparison + the idempotency bound:
 #     - a posterior fused from {A,B} with capture later containing {A,B,C} for the SAME cycle ⇒
@@ -3313,7 +3313,9 @@ def _blocked_identity_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     possessed = datetime(2026, 7, 24, 12, 30, tzinfo=UTC).timestamp()
     for name in ("openmeteo.json", "precision.json"):
         os.utime(raw / name, (possessed, possessed))
-    revision = {"value": 91}
+    # revision: the producer's transition key only (a label the build never reads).
+    # read: a seed field the request build reads (current-temperature state).
+    revision = {"value": 91, "read": 20.0}
     monkeypatch.setattr(
         trigger,
         "scope_capture_offers_larger_provider_set",
@@ -3332,8 +3334,10 @@ def _blocked_identity_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "source_cycle_time": "2026-07-24T12:00:00+00:00",
             "baseline_source_run_id": "baseline:test",
             "openmeteo_source_run_id": "openmeteo:test",
+            "openmeteo_source_cycle_time": "2026-07-24T12:00:00+00:00",
             "openmeteo_payload_json": str(raw / "openmeteo.json"),
             "precision_metadata_json": str(raw / "precision.json"),
+            "day0_current_temperature_state": {"value_c": revision["read"]},
             "bins": [{"bin_id": "20C"}],
             "upgrade_trigger": "instrument_set_expansion",
         }) + "\n", encoding="utf-8")
@@ -3346,14 +3350,17 @@ def _blocked_identity_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
     monkeypatch.setattr(queue, "_instrument_set_expansion_already_applied", lambda **_k: False)
-    monkeypatch.setattr(
-        queue, "build_replacement_forecast_materialization_request",
-        lambda *_a, **_k: SimpleNamespace(
+    builds: list[str] = []
+
+    def _blocked_build(*_a, **_k):
+        builds.append("build")
+        return SimpleNamespace(
             ok=False, request=None, status="BLOCKED",
             reason_codes=("OM9_PRECISION_GUARD_NOT_LIVE_PASS_REQUEST_BUILD",
                           "OM9_STATION_GROUND_PROOF_UNPROVEN"),
-        ),
-    )
+        )
+
+    monkeypatch.setattr(queue, "build_replacement_forecast_materialization_request", _blocked_build)
     monkeypatch.setattr(
         "src.data.station_ground_evidence.archive_station_ground_evidence",
         lambda *_a, **_k: None,
@@ -3375,7 +3382,38 @@ def _blocked_identity_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         )
         return int(published)
 
-    return db, raw, revision, tick, queue_root
+    return db, raw, revision, tick, queue_root, builds
+
+
+_SEOUL_ANCHOR_CYCLE = "2026-07-24T12:00:00+00:00"
+
+
+def _insert_anchor_artifact(
+    db: Path, *, data_version: str, cycle: str, metadata: dict[str, object],
+    path: str = "p",
+) -> int:
+    from src.data.openmeteo_ecmwf_ifs9_anchor import PRODUCT_ID, SOURCE_ID
+
+    with sqlite3.connect(db) as conn:
+        cursor = conn.execute(
+            """INSERT INTO raw_forecast_artifacts (source_id, product_id, data_version,
+               source_cycle_time, source_available_at, captured_at, artifact_path, sha256,
+               byte_size, request_params_json, artifact_metadata_json, training_allowed,
+               recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, '{}', ?, 0, '2026-07-24T12:40:00+00:00')""",
+            (SOURCE_ID, PRODUCT_ID, data_version, cycle, cycle, cycle, path,
+             f"sha-{path}-{data_version}-{cycle}", json.dumps(metadata)),
+        )
+        return int(cursor.lastrowid)
+
+
+def _insert_local_proof(db: Path, *, original_id: int, cycle: str, n: int = 1) -> None:
+    _insert_anchor_artifact(
+        db, data_version="openmeteo_anchor_local_proof_possession_v1", cycle=cycle,
+        metadata={"original_artifact_id": original_id, "city": "Seoul",
+                  "target_date": "2026-07-25", "metric": "high"},
+        path=f"x/openmeteo_anchor_local_proof_{original_id}_{n}.json",
+    )
 
 
 def test_failed_transition_identity_seeds_once_then_reopens_on_input_change(
@@ -3383,47 +3421,88 @@ def test_failed_transition_identity_seeds_once_then_reopens_on_input_change(
 ) -> None:
     """Production storm 2026-10-01: one blocked transition republished every tick.
 
-    A failed identity seeds exactly once with no clock; a new revision, a new
-    local anchor proof, or new ground evidence each seed immediately once.
+    A failed identity seeds exactly once with no clock. The identity is what the
+    request build reads: a new transition key over byte-identical seed content
+    does not rebuild; a changed read seed field or a new local proof of this
+    seed's own anchor body each rebuild immediately once.
     """
-    db, _raw, revision, tick, queue_root = _blocked_identity_harness(tmp_path, monkeypatch)
+    db, _raw, revision, tick, queue_root, builds = _blocked_identity_harness(
+        tmp_path, monkeypatch,
+    )
+    body = _insert_anchor_artifact(
+        db, data_version="openmeteo_ecmwf_ifs9_anchor_localday_high",
+        cycle=_SEOUL_ANCHOR_CYCLE,
+        metadata={"city": "Seoul", "target_date": "2026-07-25", "metric": "high"},
+    )
 
     assert sum(tick() for _ in range(40)) == 1
-    assert len(list((queue_root / "seed_failed").glob("*.json"))) == 2  # seed + receipt
+    assert len(builds) == 1
 
-    revision["value"] = 92  # a new observation revision: new transition key
+    revision["value"] = 92  # producer transition key only: same bytes, same reads
+    for _ in range(20):
+        tick()
+    assert len(builds) == 1
+
+    revision["read"] = 21.0  # a seed field the build reads (its revision names it)
+    revision["value"] = 93
     assert tick() == 1
-    assert sum(tick() for _ in range(20)) == 0
+    assert len(builds) == 2
+    for _ in range(20):
+        tick()
+    assert len(builds) == 2
 
-    conn = sqlite3.connect(db)
-    conn.execute(
-        """INSERT INTO raw_forecast_artifacts (source_id, product_id, data_version,
-           source_cycle_time, source_available_at, captured_at, artifact_path, sha256,
-           byte_size, request_params_json, artifact_metadata_json, training_allowed, recorded_at)
-           VALUES ('openmeteo_ecmwf_ifs_9km', 'openmeteo_ecmwf_ifs9_deterministic_anchor_v1',
-           'openmeteo_anchor_local_proof_possession_v1', ?, ?, ?, 'p', 's', 1, '{}', ?, 0, ?)""",
-        ("2026-07-24T12:00:00+00:00",) * 3
-        + (json.dumps({"city": "Seoul", "target_date": "2026-07-25", "metric": "high"}),
-           "2026-07-24T13:00:00+00:00"),
+    _insert_local_proof(db, original_id=body, cycle=_SEOUL_ANCHOR_CYCLE)
+    assert tick() == 1  # a new local proof of this seed's own anchor body
+    assert len(builds) == 3
+    for _ in range(20):
+        tick()
+    assert len(builds) == 3
+
+
+def test_unrelated_frontier_advance_does_not_reopen_failed_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G1 (2026-10-01 Seoul low ec81d2404d / Wuhan high 228cbff15f): the old
+    identity hashed the whole family anchor/local-proof frontier and the
+    station-ground evidence frontier. A concurrent drain advancing rows this
+    build never reads moved the identity, so the same seed failed again ~70s
+    later. Rows outside this seed's reads must not reopen it."""
+    db, _raw, revision, tick, _root, builds = _blocked_identity_harness(tmp_path, monkeypatch)
+    body = _insert_anchor_artifact(
+        db, data_version="openmeteo_ecmwf_ifs9_anchor_localday_high",
+        cycle=_SEOUL_ANCHOR_CYCLE,
+        metadata={"city": "Seoul", "target_date": "2026-07-25", "metric": "high"},
     )
-    conn.commit()
-    assert tick() == 1  # a newly derived local proof is an input change
-    assert sum(tick() for _ in range(20)) == 0
+    assert tick() == 1
+    assert len(builds) == 1
 
     from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
     station = runtime_station_geometry_for_city(runtime_cities_by_name()["Seoul"])["station_id"]
-    conn.execute(
-        """INSERT INTO raw_forecast_artifacts (source_id, product_id, data_version,
-           source_cycle_time, source_available_at, captured_at, artifact_path, sha256,
-           byte_size, request_params_json, artifact_metadata_json, training_allowed, recorded_at)
-           VALUES (?, 'g', 'g', ?, ?, ?, 'g', 'g', 1, '{}', '{}', 0, ?)""",
-        (f"station_ground::{station}",) + ("2026-07-24T12:00:00+00:00",) * 3
-        + ("2026-07-24T13:00:00+00:00",),
-    )
-    conn.commit()
-    conn.close()
-    assert tick() == 1  # new ground evidence is an input change
-    assert sum(tick() for _ in range(20)) == 0
+    for step in range(30):
+        other_cycle = f"2026-07-2{step // 10}T0{step % 10}:00:00+00:00"
+        other = _insert_anchor_artifact(
+            db, data_version="openmeteo_ecmwf_ifs9_anchor_localday_high", cycle=other_cycle,
+            metadata={"city": "Seoul", "target_date": "2026-07-25", "metric": "high"},
+            path=f"body-{step}",
+        )
+        _insert_local_proof(db, original_id=other, cycle=other_cycle)  # other body's proof
+        with sqlite3.connect(db) as conn:  # station-ground evidence drain
+            conn.execute(
+                """INSERT INTO raw_forecast_artifacts (source_id, product_id, data_version,
+                   source_cycle_time, source_available_at, captured_at, artifact_path, sha256,
+                   byte_size, request_params_json, artifact_metadata_json, training_allowed,
+                   recorded_at)
+                   VALUES (?, 'g', 'g', ?, ?, ?, 'g', ?, 1, '{}', '{}', 0, ?)""",
+                (f"station_ground::{station}",) + (_SEOUL_ANCHOR_CYCLE,) * 3
+                + (f"g-{step}", "2026-07-24T12:40:00+00:00"),
+            )
+        revision["value"] = 100 + step  # every producer tick names a new transition
+        tick()
+    assert len(builds) == 1, "unrelated frontier churn must not rebuild the same seed"
+
+    _insert_local_proof(db, original_id=body, cycle=_SEOUL_ANCHOR_CYCLE)
+    tick()
+    assert len(builds) == 2, "a change to a row the build reads reseeds immediately"
 
 
 def test_failed_identity_survives_restart_and_unknown_identity_retries(
@@ -3431,7 +3510,9 @@ def test_failed_identity_survives_restart_and_unknown_identity_retries(
 ) -> None:
     """The fence is durable on disk (restart neither forgets nor re-storms) and an
     unreadable identity never suppresses work."""
-    _db, _raw, _revision, tick, queue_root = _blocked_identity_harness(tmp_path, monkeypatch)
+    _db, _raw, _revision, tick, queue_root, _builds = _blocked_identity_harness(
+        tmp_path, monkeypatch,
+    )
     assert tick() == 1
     assert list((queue_root / queue.BLOCKED_SEED_IDENTITY_DIR).glob("*.json"))
     # A fresh process has no memory beyond disk + DB; the harness holds none either.
@@ -3443,7 +3524,9 @@ def test_failed_identity_survives_restart_and_unknown_identity_retries(
 def test_clock_healable_block_is_not_fenced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _db, _raw, _revision, tick, queue_root = _blocked_identity_harness(tmp_path, monkeypatch)
+    _db, _raw, _revision, tick, queue_root, _builds = _blocked_identity_harness(
+        tmp_path, monkeypatch,
+    )
     monkeypatch.setattr(
         queue, "build_replacement_forecast_materialization_request",
         lambda *_a, **_k: SimpleNamespace(

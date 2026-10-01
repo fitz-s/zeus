@@ -817,22 +817,22 @@ _CLOCK_HEALABLE_SEED_BLOCKS = frozenset({
 def blocked_seed_input_identity(
     seed: Mapping[str, object],
     *,
-    seed_name: str,
     seeds_dir: Path,
     conn: sqlite3.Connection,
+    decision_at: datetime,
 ) -> tuple[str, datetime] | None:
-    """Hash everything a seed's request build reads, except its decision clock.
+    """Hash exactly what a request build of this seed at ``decision_at`` reads.
 
     Also returns the newest input possession time: a failure is only a verdict on
     its inputs when every input was already possessed at the seed's own cut.
 
-    SCOPE: one city/date/metric seed. The identity moves with any new seed field
-    (observation/current-temperature revision, anchor cycle/run, baseline), any
-    rewritten anchor or precision file, any new anchor body or local proof for the
-    family (one indexed range), any new station-ground evidence row, the station
-    registry, the request-build logic, or the producer's transition key (the
-    changed input-revision set named in the seed file). Unknown state returns
-    None: no fence.
+    SCOPE: one city/date/metric seed. The build reads its seed fields, its
+    anchor/precision files, the family's anchor bodies at the seed's anchor cycle
+    and their local proofs (``anchor_local_proof_seed_transport``), this city's
+    station identity/ground facts effective at ``decision_at`` (precision guard)
+    and its own logic. Producer labels (transition key, trigger), other cycles'
+    bodies and proofs, and station-ground DB rows are not read, so their churn
+    does not reopen the fence. Unknown state returns None.
     """
     try:
         city = str(seed["city"]).strip()
@@ -841,7 +841,12 @@ def blocked_seed_input_identity(
         from src.config import (  # noqa: PLC0415
             CONFIG_DIR, runtime_cities_by_name, runtime_station_geometry_for_city,
         )
-        from src.data.openmeteo_ecmwf_ifs9_anchor import PRODUCT_ID, SOURCE_ID as OM9  # noqa: PLC0415
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+            HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID as OM9,
+        )
+        from src.data.raw_forecast_artifact_manifest import (  # noqa: PLC0415
+            ANCHOR_LOCAL_PROOF_REVISION,
+        )
 
         newest = [datetime.min.replace(tzinfo=timezone.utc)]
 
@@ -854,31 +859,56 @@ def blocked_seed_input_identity(
                 newest.append(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
             return stat.st_mtime_ns, stat.st_size
 
-        def frontier(sql: str, params: tuple[object, ...]) -> tuple[int | None, int]:
-            rows = conn.execute(sql, params).fetchall()
+        def possessed(rows: list[tuple]) -> list[tuple]:
             for row in rows:
                 recorded = _parse_utc_iso(row[1])
                 if recorded is None:
                     raise ValueError("unparseable recorded_at")
                 newest.append(recorded)
-            return max((int(row[0]) for row in rows), default=None), len(rows)
+            return rows
 
-        family_sql = "(CASE WHEN json_valid(artifact_metadata_json) THEN CAST(json_extract(artifact_metadata_json, '$.{}') AS TEXT) END) = ?"
-        anchor = frontier(
-            "SELECT artifact_id, recorded_at FROM raw_forecast_artifacts "
-            "WHERE source_id = ? AND product_id = ? AND "
-            + " AND ".join(family_sql.format(key) for key in ("city", "target_date", "metric")),
-            (OM9, PRODUCT_ID, city, target_date, metric),
-        )
+        # The transport reads the family's anchor bodies at this seed's own anchor
+        # cycle and the local proofs of exactly those bodies (_local_proof_rows);
+        # without an anchor cycle it reads none. A new provider run reaches a
+        # rebuild through the next seed's own anchor fields. Other cycles' bodies
+        # and proofs, and station-ground DB rows (the guard reads ground facts
+        # from the registry), are not read by this build, so not identity.
+        anchor_cycle = _parse_utc_iso(seed.get("openmeteo_source_cycle_time"))
+        bodies: list[tuple] = []
+        if anchor_cycle is not None:
+            family_sql = "(CASE WHEN json_valid(artifact_metadata_json) THEN CAST(json_extract(artifact_metadata_json, '$.{}') AS TEXT) END) = ?"
+            bodies = possessed([
+                row for row in conn.execute(
+                    "SELECT artifact_id, recorded_at, source_cycle_time FROM raw_forecast_artifacts "
+                    "WHERE source_id = ? AND product_id = ? AND data_version = ? AND "
+                    + " AND ".join(family_sql.format(key) for key in ("city", "target_date", "metric")),
+                    (OM9, PRODUCT_ID, HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
+                     city, target_date, metric),
+                ).fetchall()
+                if _parse_utc_iso(row[2]) == anchor_cycle
+            ])
+        proofs: list[tuple] = []
+        for artifact_id, _recorded, body_cycle in bodies:
+            proofs += possessed(conn.execute(
+                "SELECT artifact_id, recorded_at FROM raw_forecast_artifacts "
+                "WHERE source_id = ? AND product_id = ? AND source_cycle_time = ? "
+                "AND data_version = ? AND ((json_valid(artifact_metadata_json) "
+                "AND json_extract(artifact_metadata_json, '$.original_artifact_id') = ?) "
+                "OR artifact_path GLOB ?)",
+                (OM9, PRODUCT_ID, body_cycle, ANCHOR_LOCAL_PROOF_REVISION,
+                 artifact_id, f"*/openmeteo_anchor_local_proof_{artifact_id}_*.json"),
+            ).fetchall())
+        # This city's station row and ground facts as the precision guard reads
+        # them at the decision cut. The whole-registry hash is audit provenance
+        # the guard never compares, so another city's row edit is not identity.
         city_cfg = runtime_cities_by_name().get(city)
-        station = (
-            None if city_cfg is None
-            else runtime_station_geometry_for_city(city_cfg).get("station_id")
-        )
-        ground = frontier(
-            "SELECT artifact_id, recorded_at FROM raw_forecast_artifacts WHERE source_id = ?",
-            (f"station_ground::{station}",),
-        )
+        station = None if city_cfg is None else {
+            key: value
+            for key, value in runtime_station_geometry_for_city(
+                city_cfg, effective_at=decision_at,
+            ).items()
+            if key != "registry_sha256"
+        }
         files = {}
         for field in _SEED_IDENTITY_PATH_FIELDS:
             if seed.get(field) in (None, ""):
@@ -890,24 +920,25 @@ def blocked_seed_input_identity(
         logic = {
             path.name: revision(path, possessed=False)
             for path in (
-                CONFIG_DIR / "station_precise_coords.json",
+                CONFIG_DIR / "cities.json",
                 CONFIG_DIR / "settings.json",
                 PROJECT_ROOT / "src/data/replacement_forecast_materialization_request_builder.py",
                 PROJECT_ROOT / "src/data/openmeteo_ecmwf_ifs9_precision_guard.py",
                 PROJECT_ROOT / "src/data/raw_forecast_artifact_manifest.py",
+                PROJECT_ROOT / "src/data/openmeteo_ecmwf_ifs9_bucket_transport.py",
+                PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
             )
         }
     except _ClaimReadDeadlineExceeded:
         raise
     except Exception:  # noqa: BLE001 - unknown identity must retry, never suppress
         return None
-    transition = re.search(r"\.transition-([0-9a-f]{64})\.", seed_name)
     identity = {
-        "transition": None if transition is None else transition.group(1),
         "seed": {k: v for k, v in seed.items() if k not in _SEED_IDENTITY_EXCLUDED_FIELDS},
         "files": files,
-        "anchor_family_frontier": tuple(anchor),
-        "station_ground_frontier": [station, *tuple(ground)],
+        "anchor_bodies": sorted(int(row[0]) for row in bodies),
+        "anchor_local_proofs": sorted(int(row[0]) for row in proofs),
+        "station": station,
         "logic": logic,
     }
     digest = hashlib.sha256(
@@ -924,42 +955,118 @@ def _blocked_seed_identity_path(queue_root: Path, seed: Mapping[str, object], id
     )
 
 
+_FENCED_BLOCKED_SEED_SKIP_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_SEED_FENCED_BLOCKED_INPUT"
+
+
+def _fenced_seed_identity(
+    seed: Mapping[str, object],
+    *,
+    seed_json: Path,
+    conn: sqlite3.Connection | None,
+) -> str | None:
+    """The recorded failed identity this seed's build at its own cut would re-read."""
+    cut = _parse_utc_iso(seed.get("computed_at"))
+    if conn is None or cut is None or seed_json.parent.name != "seeds":
+        return None
+    identity = blocked_seed_input_identity(
+        seed, seeds_dir=seed_json.parent, conn=conn, decision_at=cut,
+    )
+    if identity is None or not _blocked_seed_identity_path(
+        seed_json.parent.parent, seed, identity[0],
+    ).is_file():
+        return None
+    return identity[0]
+
+
 def blocked_seed_identity_fenced(
     seed: Mapping[str, object],
     *,
-    seed_name: str,
     queue_root: Path,
     conn: sqlite3.Connection,
+    decision_at: datetime,
 ) -> bool:
-    """Whether this exact input identity already failed request build.
+    """Whether a request build at ``decision_at`` re-reads an identity that failed.
 
     SCOPE: one family + input identity. DRAIN: none needed; the record is a
     fact about immutable inputs. RESET: any input change yields a new identity,
     which is not fenced. Unknown identity is never fenced.
     """
     identity = blocked_seed_input_identity(
-        seed, seed_name=seed_name, seeds_dir=queue_root / "seeds", conn=conn,
+        seed, seeds_dir=queue_root / "seeds", conn=conn, decision_at=decision_at,
     )
     return identity is not None and _blocked_seed_identity_path(
         queue_root, seed, identity[0],
     ).is_file()
 
 
-def failed_seed_identity_fenced(seed_file: Path, *, conn: sqlite3.Connection) -> bool:
-    """A producer's consumed seed failed on inputs that are still current."""
+def failed_seed_identity_fenced(
+    seed_file: Path, *, conn: sqlite3.Connection, decision_at: datetime,
+) -> bool:
+    """A producer's consumed seed failed on inputs a rebuild now would re-read.
+
+    Two terminal stages share this fence: a request build that failed
+    (``blocked_seed_identity``) and a materialization that produced no posterior
+    (``materialization_blocked``: the request and its attempt fingerprint).
+    Either is re-evaluated at the producer's ``decision_at``, so any input a
+    rebuild then would newly read reopens the family at once; unknown state
+    never fences.
+    """
     index_path = _seed_terminal_receipt_index_path(seed_file)
     if index_path is None:
         return False
     try:
         receipt = json.loads(index_path.read_text(encoding="utf-8"))
-        if receipt.get("seed_file") != str(seed_file) or not receipt.get("blocked_seed_identity"):
+        if receipt.get("seed_file") != str(seed_file):
+            return False
+        blocked = receipt.get("materialization_blocked")
+        if isinstance(blocked, Mapping):
+            from src.data.station_ground_evidence import (  # noqa: PLC0415
+                forecast_db_from_connection,
+            )
+
+            request = blocked["request"]
+            recorded = blocked["attempt_fingerprint"]
+            forecast_db = forecast_db_from_connection(conn)
+            return (
+                isinstance(request, Mapping) and bool(recorded) and forecast_db is not None
+                and _blocked_attempt_fingerprint(
+                    input_json=seed_file.parent.parent / "requests" / seed_file.name,
+                    forecast_db=forecast_db,
+                    payload={**request, "computed_at": decision_at.isoformat()},
+                ) == recorded
+            )
+        if not receipt.get("blocked_seed_identity"):
             return False
         seed = json.loads(Path(str(receipt["moved_file"])).read_text(encoding="utf-8"))
     except (OSError, TypeError, ValueError, KeyError, AttributeError):
         return False
     return isinstance(seed, Mapping) and blocked_seed_identity_fenced(
-        seed, seed_name=seed_file.name, queue_root=seed_file.parent.parent, conn=conn,
+        seed, queue_root=seed_file.parent.parent, conn=conn, decision_at=decision_at,
     )
+
+
+def _record_materialization_blocked_identity(
+    input_json: Path,
+    *,
+    seed_dir: Path | None,
+    request_payload: Mapping[str, object],
+    attempt_fingerprint: str | None,
+) -> None:
+    """Index a no-posterior request outcome under its seed for producer fences."""
+    if seed_dir is None or attempt_fingerprint is None:
+        return
+    seed_path = seed_dir / _stable_request_id(input_json)
+    try:
+        _write_seed_index_receipt(seed_path, {
+            "status": "MATERIALIZATION_BLOCKED",
+            "seed_file": str(seed_path),
+            "materialization_blocked": {
+                "request": dict(request_payload),
+                "attempt_fingerprint": attempt_fingerprint,
+            },
+        })
+    except (OSError, ValueError):
+        pass  # no record means the producer's next seed retries
 
 
 def _record_blocked_seed_identity(
@@ -983,13 +1090,15 @@ def _record_blocked_seed_identity(
             if forecast_db is None or not Path(forecast_db).exists():
                 return None
             conn = owned = _queue_read_only_connection(Path(forecast_db))
-        computed = blocked_seed_input_identity(
-            seed, seed_name=seed_json.name, seeds_dir=seed_json.parent, conn=conn,
-        )
         cut = _parse_utc_iso(seed.get("computed_at"))
+        if cut is None:
+            return None
+        computed = blocked_seed_input_identity(
+            seed, seeds_dir=seed_json.parent, conn=conn, decision_at=cut,
+        )
         # An input possessed after the seed's cut may be exactly what the block
         # lacked; the next seed sees it, so this failure fences nothing.
-        if computed is None or cut is None or computed[1] > cut:
+        if computed is None or computed[1] > cut:
             return None
         identity = computed[0]
         target = _blocked_seed_identity_path(seed_json.parent.parent, seed, identity)
@@ -1048,6 +1157,24 @@ def _write_seed_terminal_receipts(
         "moved_file": str(moved_path),
     }
     moved_receipt = moved_path.with_suffix(moved_path.suffix + ".receipt.json")
+    if _seed_terminal_receipt_index_path(seed_path) is None:
+        raise ValueError(f"terminal seed receipt requires a seeds path: {seed_path}")
+    _write_durable_json(moved_receipt, receipt_payload)
+    _write_seed_index_receipt(seed_path, index_payload)
+
+
+def _write_durable_json(target: Path, body: Mapping[str, object]) -> None:
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(body, handle, sort_keys=True, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    _fsync_directory(target.parent)
+
+
+def _write_seed_index_receipt(seed_path: Path, body: Mapping[str, object]) -> None:
     index_path = _seed_terminal_receipt_index_path(seed_path)
     if index_path is None:
         raise ValueError(f"terminal seed receipt requires a seeds path: {seed_path}")
@@ -1055,18 +1182,7 @@ def _write_seed_terminal_receipts(
         index_path.parent,
         durable_ancestor=seed_path.parent.parent,
     )
-    for target, body in (
-        (moved_receipt, receipt_payload),
-        (index_path, index_payload),
-    ):
-        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(body, handle, sort_keys=True, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        _fsync_directory(target.parent)
+    _write_durable_json(index_path, body)
 
 
 def _move_request(
@@ -5874,6 +5990,26 @@ def _prepare_seed_requests_with_connection(
                 processed.append(str(moved))
                 actionable_count += 1
                 continue
+            fenced_identity = _fenced_seed_identity(
+                seed, seed_json=seed_json, conn=forecast_conn,
+            )
+            if fenced_identity is not None:
+                # SCOPE: this seed. Every producer (any transition key, trigger
+                # or owner) reaches here; its build would re-read an identity
+                # that already failed. DRAIN/RESET: any read input change.
+                moved = _move_request(
+                    seed_json, failed_path,
+                    terminal_receipt={
+                        "status": "SKIPPED_FENCED_BLOCKED_INPUT",
+                        "reason_codes": [_FENCED_BLOCKED_SEED_SKIP_REASON],
+                        "request_written": False,
+                        "blocked_seed_identity": fenced_identity,
+                    },
+                )
+                failed.append(str(moved))
+                reasons.append(_FENCED_BLOCKED_SEED_SKIP_REASON)
+                actionable_count += 1
+                continue
             request_seed = dict(seed)
             if forecast_conn is not None:
                 from src.data.raw_forecast_artifact_manifest import anchor_local_proof_seed_transport
@@ -5915,6 +6051,10 @@ def _prepare_seed_requests_with_connection(
                     "request_written": False,
                     "attempt_fingerprint": _fingerprint,
                     "blocked_attempt_marker": str(marker_path),
+                    "materialization_blocked": {
+                        "request": dict(result.request),
+                        "attempt_fingerprint": _fingerprint,
+                    },
                 }
                 moved = _move_request(
                     seed_json,
@@ -6594,6 +6734,7 @@ def process_replacement_forecast_live_materialization_queue(
             runner=runner,
             marker_dir=request_path.parent / "blocked_attempts",
             retry_path=request_path,
+            seed_dir=None if seed_dir is None else Path(seed_dir),
         )
     finally:
         _remove_empty_claim_batch(claim.batch_path)
@@ -6642,6 +6783,7 @@ def _process_claimed_materialization_batch(
     runner: Runner | None = None,
     marker_dir: Path | None = None,
     retry_path: Path | None = None,
+    seed_dir: Path | None = None,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     if not request_path.exists():
         return ReplacementForecastLiveMaterializationQueueReport(
@@ -6853,6 +6995,10 @@ def _process_claimed_materialization_batch(
             else (None, None, False)
         )
         if unchanged:
+            _record_materialization_blocked_identity(
+                input_json, seed_dir=seed_dir, request_payload=request_payload,
+                attempt_fingerprint=attempt_fingerprint,
+            )
             receipt = _record_latest_terminal_request(
                 input_json,
                 processed_path=processed_path,
@@ -6886,6 +7032,10 @@ def _process_claimed_materialization_batch(
                 )
             except OSError:
                 pass
+            _record_materialization_blocked_identity(
+                input_json, seed_dir=seed_dir, request_payload=request_payload,
+                attempt_fingerprint=attempt_fingerprint,
+            )
             receipt = _record_latest_terminal_request(
                 input_json,
                 processed_path=processed_path,
@@ -7082,6 +7232,10 @@ def _process_claimed_materialization_batch(
                 )
             except OSError:
                 pass
+            _record_materialization_blocked_identity(
+                input_json, seed_dir=seed_dir, request_payload=item.request_payload,
+                attempt_fingerprint=item.attempt_fingerprint,
+            )
             receipt = _record_latest_terminal_request(
                 input_json,
                 processed_path=processed_path,

@@ -2,7 +2,8 @@
 # Last reused or audited: 2026-09-15 (causal baseline completion witness;
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
-# Lifecycle: created=2026-06-12; last_reviewed=2026-09-23; last_reused=2026-09-23
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-01; last_reused=2026-10-01
+#   (held re-heal: 30-min cooldown replaced by the input-identity fence)
 # Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.
 # Reuse: Run when replacement cycle-advance, materialization reseed, or freshness gates change.
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
@@ -1621,38 +1622,128 @@ def test_held_marker_with_present_seed_still_suppresses(tmp_path) -> None:
     ) is True, "a held marker with a present (pending) seed must suppress re-enqueue (no churn)"
 
 
-def test_recent_held_marker_with_moved_seed_cools_down(tmp_path) -> None:
-    """COOLDOWN GUARD: a moved held seed is re-healable, but not every 5-minute poll tick.
+def test_held_reheal_has_no_clock_cooldown() -> None:
+    """Operator law: no timers. The held re-heal is bounded by input identity only."""
+    assert not hasattr(cycle_advance, "_HELD_REHEAL_COOLDOWN")
+    assert not hasattr(cycle_advance, "_fresh_enough_to_retry_held_reheal")
 
-    This prevents one transient materialization failure from flooding seeds/failed with identical
-    same-scope same-cycle work. A genuinely old marker still heals; Day0 observation-version
-    advancement has its own immediate bypass.
-    """
-    conn = _conn()
-    target_cycle = "2026-06-21T06:00:00+00:00"
-    moved_seed = tmp_path / "seeds_processed" / "PanamaCity.moved.json"
+
+def _held_blocked_harness(
+    tmp_path: Path, monkeypatch, *, target_date: str = "2026-06-22", owner: str = "",
+):
+    """A held Panama City marker whose consumed seed reached the REAL batch consumer and
+    materialized BLOCKED (REQUIREMENTS_NOT_MET, no posterior). ``owner=""`` routes the
+    decision through the HELD-POSITION RE-HEAL branch; ``".enqueue-ab"`` through the
+    owned-stage branch. Both sit behind the same identity fence."""
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "replacement_forecast_live"
+    seeds, requests = root / "seeds", root / "requests"
+    requests.mkdir(parents=True)
+    seeds.mkdir()
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    seed_file = seeds / f"Panama_City.{target_date}.high.20260621T060500Z{owner}.json"
+    request = {
+        "city": "Panama City", "target_date": target_date, "temperature_metric": "high",
+        "source_cycle_time": "2026-06-21T06:00:00+00:00",
+        "computed_at": "2026-06-21T06:05:00+00:00",
+        "baseline_source_run_id": "baseline-run", "openmeteo_source_run_id": "om-run",
+        "openmeteo_payload_json": "payload.json", "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    (requests / seed_file.name).write_text(json.dumps(request), encoding="utf-8")
+    inputs = {"value": "a"}
+    monkeypatch.setattr(
+        queue, "_blocked_attempt_fingerprint",
+        lambda **kwargs: f"fp-{inputs['value']}",  # stands in for every read input
+    )
+    monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+    spawned: list[str] = []
+
+    def blocked_runner(argv):
+        import subprocess
+
+        spawned.append(argv[-1])
+        return subprocess.CompletedProcess(
+            list(argv), 2,
+            stdout=json.dumps({"status": "BLOCKED",
+                               "reason_codes": ["REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"]}),
+            stderr="",
+        )
+
+    report = queue._process_claimed_materialization_batch(
+        request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
+        forecast_db=db, limit=1, runner=blocked_runner,
+        marker_dir=root / "blocked_attempts", seed_dir=seeds,
+    )
+    assert report.processed_count == 1 and len(spawned) == 1
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
     conn.execute(
         """INSERT INTO cycle_advance_enqueues
            (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
             held_position, seed_file, reason)
-           VALUES ('2999-06-21T06:05:00+00:00','PanamaCity','2026-06-22','high',
-                   '2026-06-20T18:00:00+00:00', ?, 1, ?, NULL)""",
-        (target_cycle, str(moved_seed)),
+           VALUES ('2026-06-21T06:05:00+00:00','Panama City',?,'high',
+                   '2026-06-20T18:00:00+00:00','2026-06-21T06:00:00+00:00', 1, ?, NULL)""",
+        (target_date, str(seed_file)),
     )
     conn.commit()
-    assert cycle_advance._already_enqueued(
-        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
-        target_cycle_iso=target_cycle,
-    ) is True, "recent moved held seed must cool down before re-enqueue"
 
-    conn.execute(
-        "UPDATE cycle_advance_enqueues SET enqueued_at='2000-06-21T05:00:00+00:00'"
+    def decide(now: datetime) -> bool:
+        return cycle_advance._enqueue_decision(
+            conn, city="Panama City", target_date=target_date, metric="high",
+            target_cycle_iso="2026-06-21T06:00:00+00:00", as_of=now,
+        ) is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
+
+    return decide, inputs, conn
+
+
+@pytest.mark.parametrize("owner", ("", ".enqueue-ab"))
+def test_held_blocked_materialization_stays_fenced_across_ticks_and_restart(
+    tmp_path, monkeypatch, owner,
+) -> None:
+    """G2 (Panama City 06-22 freeze class): a held family whose seed materialized BLOCKED
+    must not re-heal on unchanged inputs, for any number of ticks or a restart, and must
+    re-heal on the very next tick once any read input changes. No clock participates."""
+    decide, inputs, conn = _held_blocked_harness(tmp_path, monkeypatch, owner=owner)
+    start = datetime(2026, 6, 21, 6, 6, tzinfo=timezone.utc)
+    assert not any(decide(start + timedelta(minutes=5 * n)) for n in range(200)), (
+        "unchanged identity must stay fenced (no 30-minute cooldown reopen)"
     )
-    conn.commit()
-    assert cycle_advance._already_enqueued(
-        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
-        target_cycle_iso=target_cycle,
-    ) is False, "old moved held seed must re-heal after cooldown"
+    conn.close()  # restart: the fence is on disk, nothing lives in process memory
+    conn = sqlite3.connect(tmp_path / "forecasts.db")
+    conn.row_factory = sqlite3.Row
+    restarted = lambda now: cycle_advance._enqueue_decision(  # noqa: E731
+        conn, city="Panama City", target_date="2026-06-22", metric="high",
+        target_cycle_iso="2026-06-21T06:00:00+00:00", as_of=now,
+    ) is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
+    assert not restarted(start + timedelta(hours=17))
+
+    inputs["value"] = "b"  # any read input changes
+    assert restarted(start + timedelta(hours=17, seconds=1)), (
+        "a held family must re-heal immediately on a read-input change"
+    )
+
+
+def test_held_family_whose_local_day_ended_is_never_readmitted(tmp_path, monkeypatch) -> None:
+    """An ended-day held family can never be rebuilt: re-heal never re-admits it, whatever
+    its inputs do, across many ticks (has_city_local_day_ended is the one predicate)."""
+    decide, inputs, _conn = _held_blocked_harness(
+        tmp_path, monkeypatch, target_date="2026-06-20",
+    )
+    start = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)  # Panama 06-20 has ended
+    for n in range(100):
+        inputs["value"] = f"changed-{n}"
+        assert not decide(start + timedelta(minutes=5 * n))
+
+
+def test_held_reheal_unknown_city_timezone_is_not_ended() -> None:
+    assert cycle_advance._held_target_local_day_ended(
+        "Nowhere City", "2000-01-01", datetime(2026, 6, 21, tzinfo=timezone.utc),
+    ) is False
 
 
 def test_nonheld_marker_with_moved_seed_still_suppresses(tmp_path) -> None:

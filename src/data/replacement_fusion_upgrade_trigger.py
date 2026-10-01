@@ -1149,6 +1149,7 @@ def _reserve_enqueues(
     served_family_key: str,
     transition_keys: Sequence[str],
     publication: _SeedPublication,
+    decision_at: datetime,
 ) -> tuple[str, tuple[str, ...]]:
     """Durably claim all unresolved transition rows as one fenced ownership set."""
     _recover_pending_publications(
@@ -1199,7 +1200,7 @@ def _reserve_enqueues(
         # not reclaimable: republishing it re-fails identically. Any input change
         # moves the identity and reopens the transition.
         if queue_state is False and not failed_seed_identity_fenced(
-            Path(marker_value), conn=conn,
+            Path(marker_value), conn=conn, decision_at=decision_at,
         ):
             reclaimable_markers[transition_key] = marker_value
     try:
@@ -1806,6 +1807,7 @@ def enqueue_fusion_upgrade_reseeds(
                     served_family_key=served_key,
                     transition_keys=transition_keys,
                     publication=publication,
+                    decision_at=now,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 report["reservation_failed"] = int(

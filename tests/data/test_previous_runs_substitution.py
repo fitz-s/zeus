@@ -498,6 +498,12 @@ def test_queue_preserves_unchanged_blocked_seed_as_terminal_receipt(
     assert receipt == {
         "attempt_fingerprint": "same-fingerprint",
         "blocked_attempt_marker": str(marker),
+        # The producer fences (fusion reclaim, held re-heal) re-evaluate this
+        # exact request's attempt fingerprint; no clock reopens it.
+        "materialization_blocked": {
+            "attempt_fingerprint": "same-fingerprint",
+            "request": {"city": "Beijing"},
+        },
         "reason_codes": [queue_mod._UNCHANGED_BLOCKED_SEED_SKIP_REASON],
         "request_written": False,
         "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
