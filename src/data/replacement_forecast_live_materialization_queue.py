@@ -4793,15 +4793,6 @@ def _interleave_current_priority_request_files(
         ),
         None,
     )
-    expansion_path = next(
-        (
-            path
-            for path in ordered
-            if _request_family_scope(payloads.get(path))
-            not in (current_money_risk | current_global_scope)
-        ),
-        None,
-    )
     if global_path is None:
         # ``paths`` is already filtered to the priority lane. A never-priced
         # family cannot enter the global auction until its first posterior is
@@ -4816,6 +4807,16 @@ def _interleave_current_priority_request_files(
             ),
             None,
         )
+    expansion_path = next(
+        (
+            path
+            for path in ordered
+            if path != global_path
+            and _request_family_scope(payloads.get(path))
+            not in (current_money_risk | current_global_scope)
+        ),
+        None,
+    )
     if held is None or global_path is None:
         return ordered
     head = (

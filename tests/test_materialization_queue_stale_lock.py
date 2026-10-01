@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused/audited: 2026-09-27
+# Last reused/audited: 2026-09-30
 # Authority basis: materialization pre-claim deadline hotfix (2026-08-24)
 """Relationship tests for the persistent flock-backed materialization lock."""
 from __future__ import annotations
@@ -108,6 +108,56 @@ def _materialization_request() -> dict[str, object]:
         "precision_metadata_json": "precision.json",
         "bins": [{"bin_id": "30C"}],
     }
+
+
+@pytest.mark.parametrize("limit", (2, 3))
+@pytest.mark.parametrize("third_slot", ("none", "expansion", "global"))
+def test_priority_fallback_reserves_each_request_only_once(tmp_path, limit, third_slot):
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    requests = tmp_path / "requests"
+    requests.mkdir()
+    held = requests / "London.high.json"
+    expansion = requests / "Hong_Kong.high.json"
+    payloads = {
+        held: _materialization_request(),
+        expansion: dict(_materialization_request(), city="Hong Kong"),
+    }
+    third = requests / "Paris.high.json"
+    if third_slot != "none":
+        payloads[third] = dict(_materialization_request(), city="Paris")
+    for path, payload in payloads.items():
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    before = {path: (path.stat().st_ino, path.read_bytes()) for path in payloads}
+    selected = queue._interleave_current_priority_request_files(
+        tuple(payloads), payloads,
+        current_money_risk=frozenset({("London", "2026-08-25", "high")}),
+        current_global_scope=(frozenset({("Paris", "2026-08-25", "high")})
+                              if third_slot == "global" else frozenset()),
+        limit=limit,
+    )[:limit]
+    # The ordinary flocked claim must not move a fallback/global reservation
+    # twice. The old three-slot head fails here with the actual rename ENOENT.
+    with queue._queue_lock(tmp_path / ".materialization_queue.lock") as acquired:
+        assert acquired
+        batch = queue._new_claim_batch(tmp_path / queue.MATERIALIZATION_INFLIGHT_DIR_NAME, selected)
+    expected = ((held, third, expansion) if third_slot == "global"
+                else (held, expansion, third) if third_slot == "expansion"
+                else (held, expansion))[:limit]
+    assert selected == expected
+    assert len(queue._claim_request_files(batch)) == len(expected)
+    for path in selected:
+        inode, body = before[path]
+        claimed = batch / path.name
+        assert not path.exists()
+        assert (claimed.stat().st_ino, claimed.read_bytes()) == (inode, body)
+    keys, recovered, unknown = queue._recover_stale_claims(
+        request_path=requests, inflight_path=batch.parent,
+    )
+    assert recovered == 0 and not unknown and len(keys) == len(expected)
+    assert len(queue._claim_request_files(batch)) == len(expected)
+    for path in set(payloads) - set(selected):
+        assert (path.stat().st_ino, path.read_bytes()) == before[path]
 
 
 def test_empty_request_plan_skips_forecast_db_reads(tmp_path, monkeypatch):
