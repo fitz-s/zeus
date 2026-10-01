@@ -3485,6 +3485,16 @@ def _pending_entry_endowments(
     incremental fill is included in an unchanged aggregate balance.
     """
 
+    return pending_entry_endowments_from_rows(
+        entry_obligation_rows(trade_conn),
+        positions=positions,
+        native_holdings_micro=native_holdings_micro,
+    )
+
+
+def entry_obligation_rows(trade_conn: sqlite3.Connection) -> list[tuple]:
+    """Every entry exposure obligation joined to its command and fill facts."""
+
     event_columns = {
         str(row[1])
         for row in trade_conn.execute(
@@ -3531,6 +3541,27 @@ def _pending_entry_endowments(
          ORDER BY obligation.command_id
         """
     ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+def pending_entry_endowments_from_rows(
+    rows: Sequence[tuple],
+    *,
+    positions: tuple[object, ...],
+    native_holdings_micro: Mapping[str, int],
+    resolved_command_ids: frozenset[str] = frozenset(),
+) -> tuple[
+    tuple[tuple[str, str, int], ...],
+    tuple[tuple[str, ...], ...],
+    Mapping[str, int],
+    frozenset[str],
+]:
+    """``_pending_entry_endowments`` over already-read obligation rows.
+
+    ``resolved_command_ids`` reads those OPEN obligations as RESOLVED: the
+    counterfactual in which their own durable lifecycle has already resolved.
+    Live wealth never passes it.
+    """
 
     positions_by_id: dict[str, object] = {}
     projected_by_token: dict[str, int] = {}
@@ -3561,6 +3592,8 @@ def _pending_entry_endowments(
     for row in rows:
         command_id = str(row[0] or "").strip()
         status = str(row[1] or "").strip().upper()
+        if status == "OPEN" and command_id in resolved_command_ids:
+            status = "RESOLVED"
         obligation_token = str(row[2] or "").strip()
         command_position_id = str(row[7] or "").strip()
         command_token = str(row[8] or "").strip()

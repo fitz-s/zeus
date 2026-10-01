@@ -7826,6 +7826,81 @@ def resolve_candidate_payoff_q_correction(
     return correction
 
 
+CapitalActionMode = Literal[
+    "SETTLEMENT_LOCKED_BUY",
+    "CONTINGENT_MAKER_REST_BUY",
+    "CONTINGENT_MAKER_REST_SELL",
+    "IMMEDIATE_TAKER_SELL",
+]
+
+
+def bind_score_capital_horizon(
+    score: GlobalSingleOrderDecision,
+    *,
+    resolution_at: datetime | None,
+    probability_witness: FamilyPayoffWitness | None,
+    decision_at_utc: datetime,
+    action_mode: CapitalActionMode,
+) -> tuple[GlobalSingleOrderDecision | None, str | None]:
+    """Bind one proposal to the common expected-growth axis.
+
+    ``(bound, None)``: selectable. ``(None, reason)``: either epoch authority
+    is lost (the selector supersedes the cut), or the proposal fails its own
+    common-axis law: ``NON_POSITIVE_EXPECTED_GROWTH`` or
+    ``COMMON_SCORE_BINDING_INVALID:*``, which the selector records as this
+    proposal's rejection and drops from the argmax, because an order that
+    cannot pass its own invariant is not in the feasible set.
+    """
+    if resolution_at is None:
+        return None, "CAPITAL_HORIZON_AUTHORITY_MISSING"
+    capital_lock_hours = (
+        resolution_at - decision_at_utc.astimezone(timezone.utc)
+    ).total_seconds() / 3600.0
+    if not math.isfinite(capital_lock_hours) or (
+        capital_lock_hours <= 0.0
+        and action_mode != "IMMEDIATE_TAKER_SELL"
+    ):
+        return None, "CAPITAL_HORIZON_NON_POSITIVE"
+    candidate = score.candidate
+    if candidate is None:
+        return None, "EXPECTED_COMPARISON_CANDIDATE_MISSING"
+    if probability_witness is None:
+        return None, "EXPECTED_COMPARISON_PROBABILITY_MISSING"
+    try:
+        expected_growth = _expected_growth_comparison(
+            score,
+            probability_witness=probability_witness,
+            capital_lock_hours=capital_lock_hours,
+        )
+    except Exception:
+        return None, "EXPECTED_COMPARISON_UNAVAILABLE"
+    if not score.rejection_reasons and not _positive_common_expected_growth(
+        expected_growth,
+        capital_lock_hours=expected_growth.capital_lock_hours,
+    ):
+        return None, _NON_POSITIVE_EXPECTED_GROWTH
+    mean_action = score.expected_terminal_wealth is not None
+    try:
+        bound = replace(
+            score,
+            capital_action_mode=action_mode,
+            resolution_at_utc=resolution_at,
+            capital_lock_hours=expected_growth.capital_lock_hours,
+            robust_log_growth_per_hour=(
+                None
+                if mean_action
+                else score.robust_delta_log_wealth
+                / expected_growth.capital_lock_hours
+            ),
+            expected_growth=expected_growth,
+        )
+    except ValueError as exc:
+        # SCOPE: this proposal's own bound-order invariant. DRAIN: the next
+        # cut rescores it. RESET: a coherent bound order.
+        return None, f"COMMON_SCORE_BINDING_INVALID:{exc}"
+    return bound, None
+
+
 def select_global_single_order(
     candidates: Sequence[GlobalSingleOrderAnyCandidate],
     *,
@@ -8101,73 +8176,22 @@ def select_global_single_order(
         score: GlobalSingleOrderDecision,
         *,
         family_key: str,
-        action_mode: Literal[
-            "SETTLEMENT_LOCKED_BUY",
-            "CONTINGENT_MAKER_REST_BUY",
-            "CONTINGENT_MAKER_REST_SELL",
-            "IMMEDIATE_TAKER_SELL",
-        ],
+        action_mode: CapitalActionMode,
     ) -> tuple[GlobalSingleOrderDecision | None, str | None]:
-        """Bind one proposal to the common expected-growth axis.
-
-        ``(bound, None)``: selectable. ``(None, reason)``: epoch authority is
-        lost and the caller supersedes the cut. ``(None, None)``: this proposal
-        fails its own common-axis law; it is recorded in ``rejections`` and
-        leaves the argmax, because an order that cannot pass its own invariant
-        is not in the feasible set.
-        """
-        resolution_at = universe_witness.resolution_at_by_family.get(family_key)
-        if resolution_at is None:
-            return None, "CAPITAL_HORIZON_AUTHORITY_MISSING"
-        capital_lock_hours = (
-            resolution_at - decision_at_utc.astimezone(timezone.utc)
-        ).total_seconds() / 3600.0
-        if not math.isfinite(capital_lock_hours) or (
-            capital_lock_hours <= 0.0
-            and action_mode != "IMMEDIATE_TAKER_SELL"
+        bound, reason = bind_score_capital_horizon(
+            score,
+            resolution_at=universe_witness.resolution_at_by_family.get(family_key),
+            probability_witness=probability_witnesses.get(family_key),
+            decision_at_utc=decision_at_utc,
+            action_mode=action_mode,
+        )
+        if bound is None and reason is not None and score.candidate is not None and (
+            reason == _NON_POSITIVE_EXPECTED_GROWTH
+            or reason.startswith("COMMON_SCORE_BINDING_INVALID:")
         ):
-            return None, "CAPITAL_HORIZON_NON_POSITIVE"
-        candidate = score.candidate
-        if candidate is None:
-            return None, "EXPECTED_COMPARISON_CANDIDATE_MISSING"
-        probability_witness = probability_witnesses.get(family_key)
-        if probability_witness is None:
-            return None, "EXPECTED_COMPARISON_PROBABILITY_MISSING"
-        try:
-            expected_growth = _expected_growth_comparison(
-                score,
-                probability_witness=probability_witness,
-                capital_lock_hours=capital_lock_hours,
-            )
-        except Exception:
-            return None, "EXPECTED_COMPARISON_UNAVAILABLE"
-        if not score.rejection_reasons and not _positive_common_expected_growth(
-            expected_growth,
-            capital_lock_hours=expected_growth.capital_lock_hours,
-        ):
-            rejections[candidate.candidate_id] = _NON_POSITIVE_EXPECTED_GROWTH
+            rejections[score.candidate.candidate_id] = reason
             return None, None
-        mean_action = score.expected_terminal_wealth is not None
-        try:
-            bound = replace(
-                score,
-                capital_action_mode=action_mode,
-                resolution_at_utc=resolution_at,
-                capital_lock_hours=expected_growth.capital_lock_hours,
-                robust_log_growth_per_hour=(
-                    None
-                    if mean_action
-                    else score.robust_delta_log_wealth
-                    / expected_growth.capital_lock_hours
-                ),
-                expected_growth=expected_growth,
-            )
-        except ValueError as exc:
-            # SCOPE: this proposal's own bound-order invariant. DRAIN: the next
-            # cut rescores it. RESET: a coherent bound order.
-            rejections[candidate.candidate_id] = f"COMMON_SCORE_BINDING_INVALID:{exc}"
-            return None, None
-        return bound, None
+        return bound, reason
 
     if selection_cancelled():
         return cancelled_decision()

@@ -30,6 +30,7 @@ from src.solve.solver import (
     CurrentFamilyProbabilityAuthority,
     CurrentMakerFillWitness,
     DeterministicBinPayoffWitness,
+    FamilyPayoffWitness,
     FamilyPortfolioEndowment,
     FamilyJointBuyPlan,
     GlobalSingleOrderAnyCandidate,
@@ -644,6 +645,48 @@ def _no_trade(reason: str) -> PreparedGlobalAuctionResult:
         actuation=None,
         evaluated=False,
     )
+
+
+def day0_saturated_sides_by_family(
+    prepared_by_family: Mapping[str, object],
+    probability_witnesses: Mapping[str, FamilyPayoffWitness],
+) -> dict[str, frozenset[tuple[str, str]]]:
+    """Day0-saturated statistical (bin, side) claims bound to the current witness."""
+
+    return {
+        family_key: frozenset(prepared.day0_saturated_statistical_sides)
+        for family_key, prepared in prepared_by_family.items()
+        if getattr(prepared, "day0_saturation_witness_identity", None)
+        == probability_witnesses[family_key].witness_identity
+    }
+
+
+def buy_probability_rejection(
+    candidate: GlobalSingleOrderCandidate,
+    payoff_probability_mean: float,
+    *,
+    saturated_sides: Mapping[str, frozenset[tuple[str, str]]],
+    payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float] | None,
+) -> str | None:
+    """The selector's post-calibration statistical BUY refutation.
+
+    SCOPE: this statistical BUY after calibration, never its family/SELL.
+    DRAIN: score the remaining claims now. RESET: each prepared witness
+    recomputes the bound; identity changes invalidate these refutations.
+    """
+
+    from src.events.day0_authority import DAY0_REMAINING_DAY_LCB_TOLERANCE
+
+    tightened_cap = (payoff_q_lcb_by_candidate or {}).get((
+        candidate.family_key, candidate.bin_id, candidate.side, candidate.token_id,
+    ))
+    if tightened_cap is not None and tightened_cap < 1.0 - DAY0_REMAINING_DAY_LCB_TOLERANCE:
+        return None
+    if payoff_probability_mean == 1.0 and (
+        candidate.bin_id, candidate.side
+    ) in saturated_sides.get(candidate.family_key, ()):
+        return "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED"
+    return None
 
 
 def single_position_capital_limit(
@@ -1608,31 +1651,19 @@ def select_prepared_global_auction(
             wealth_witness=wealth_witness,
         )
 
-    saturated_sides = {
-        family_key: frozenset(prepared.day0_saturated_statistical_sides)
-        for family_key, prepared in prepared_by_family.items()
-        if getattr(prepared, "day0_saturation_witness_identity", None)
-        == probability_witnesses[family_key].witness_identity
-    }
+    saturated_sides = day0_saturated_sides_by_family(
+        prepared_by_family, probability_witnesses
+    )
 
     def _buy_probability_rejection(
         candidate: GlobalSingleOrderCandidate, payoff_probability_mean: float,
     ) -> str | None:
-        # SCOPE: this statistical BUY after calibration, never its family/SELL.
-        # DRAIN: score the remaining claims now. RESET: each prepared witness
-        # recomputes the bound; identity changes invalidate these refutations.
-        from src.events.day0_authority import DAY0_REMAINING_DAY_LCB_TOLERANCE
-
-        tightened_cap = (payoff_q_lcb_by_candidate or {}).get((
-            candidate.family_key, candidate.bin_id, candidate.side, candidate.token_id,
-        ))
-        if tightened_cap is not None and tightened_cap < 1.0 - DAY0_REMAINING_DAY_LCB_TOLERANCE:
-            return None
-        if payoff_probability_mean == 1.0 and (
-            candidate.bin_id, candidate.side
-        ) in saturated_sides.get(candidate.family_key, ()):
-            return "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED"
-        return None
+        return buy_probability_rejection(
+            candidate,
+            payoff_probability_mean,
+            saturated_sides=saturated_sides,
+            payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
+        )
 
     _LOG.info(
         "global auction materialization timing: families=%d candidates=%d "

@@ -1502,6 +1502,16 @@ def _proven_filled_size(conn: sqlite3.Connection, command_id: str) -> Decimal:
     return max(order_total, trade_total)
 
 
+def filled_reservation_amount(amount: int, *, order_size: Decimal, filled: Decimal) -> int:
+    """The reserved amount a terminal fill converts: its filled fraction, floored."""
+
+    if order_size <= 0 or filled <= 0:
+        return 0
+    ratio = min(Decimal("1"), filled / order_size)
+    converted = int((Decimal(amount) * ratio).to_integral_value(rounding=ROUND_FLOOR))
+    return max(0, min(amount, converted))
+
+
 def convert_reservation_on_fill(
     conn: sqlite3.Connection,
     command_id: str,
@@ -1554,13 +1564,9 @@ def convert_reservation_on_fill(
 
     order_size = Decimal(str(cmd_row[0])) if cmd_row and cmd_row[0] is not None else Decimal("0")
     price = Decimal(str(cmd_row[1])) if cmd_row and cmd_row[1] is not None else Decimal("0")
-    proven_filled = _proven_filled_size(conn, command_id)
-
-    converted = 0
-    if order_size > 0 and proven_filled > 0:
-        ratio = min(Decimal("1"), proven_filled / order_size)
-        converted = int((Decimal(amount) * ratio).to_integral_value(rounding=ROUND_FLOOR))
-        converted = max(0, min(amount, converted))
+    converted = filled_reservation_amount(
+        amount, order_size=order_size, filled=_proven_filled_size(conn, command_id)
+    )
 
     release_reason = "CONVERTED_ON_FILL" if converted > 0 else str(state_after).upper()
 
