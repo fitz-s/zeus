@@ -5889,7 +5889,8 @@ def test_wu_and_raw_noaa_fast_are_provisional_until_wrh_authority() -> None:
     assert materializer_mod._day0_absorbing_observed_extreme_c(settlement_page) == 31.0
 
 
-def _assert_remaining_suffix_cannot_supply_full_day_prior(conn, monkeypatch, request, *, first_hour, captured):
+def _assert_remaining_suffix_cannot_supply_full_day_prior(conn, monkeypatch, request, *, first_hour, captured,
+                                                         day_in_progress=False):
     """Actual scalar/parser and vector-store roles, not a complete q license."""
     from src.config import runtime_cities_by_name
     from src.data import day0_hourly_vectors as hourly
@@ -5938,8 +5939,14 @@ def _assert_remaining_suffix_cannot_supply_full_day_prior(conn, monkeypatch, req
         selected_cells={model:_selected_test_cell(model,city.lat,city.lon)
                         for model in ("icon_global","ukmo_global_deterministic_10km")})
     assert candidate.openmeteo_precision_guard.passable_for_live_materialization
-    refused=materialize_replacement_forecast_live(conn,candidate)
-    assert refused.ok is False and refused.reason_codes==("OM9_SOURCE_RESPONSE_INVALID",)
+    result=materialize_replacement_forecast_live(conn,candidate)
+    if day_in_progress:
+        # Day0 law H = max(H_confirmed, H_remaining): the observed extreme owns
+        # the elapsed slots, so a run owning the exact remaining window is lawful.
+        assert result.ok is True, result
+        return suffix
+    # An ended day keeps the full-day law: a suffix cannot replace yesterday's prior.
+    assert result.ok is False and result.reason_codes==("OM9_SOURCE_RESPONSE_INVALID",)
     assert tuple(tuple(row) for row in conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id"))==before
     return suffix
 
@@ -5960,8 +5967,8 @@ def test_materializer_day0_requires_full_prior_even_with_elapsed_observed_extrem
     assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" not in result.reason_codes
     rows = tuple(tuple(row) for row in conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id"))
     _assert_remaining_suffix_cannot_supply_full_day_prior(conn,monkeypatch,request,first_hour=2,
-        captured=request.computed_at-timedelta(minutes=1))
-    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id"))==rows
+        captured=request.computed_at-timedelta(minutes=1),day_in_progress=True)
+    assert tuple(tuple(row) for row in conn.execute("SELECT * FROM forecast_posteriors ORDER BY posterior_id"))[:len(rows)]==rows
 
 
 @pytest.mark.usefixtures("_hko_source_surface")

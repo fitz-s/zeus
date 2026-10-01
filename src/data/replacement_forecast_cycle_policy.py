@@ -411,9 +411,7 @@ def _anchor_ifs9_response_has_authority(geometry: Mapping[str, object], audit: o
             return False
         extracted = extract_openmeteo_ecmwf_ifs9_localday_anchor(payload,
             city_timezone=metadata.timezone_name, target_local_date=date.fromisoformat(str(metadata.target_local_date)),
-            source_cycle_time=stamps[0], require_full_localday=True)
-        if extracted.sample_count < 23:
-            return False
+            source_cycle_time=stamps[0], require_full_localday=True, remaining_from_utc=decision)
         if not isinstance(metadata.source_geometry_proof, Mapping):
             return False
         stable_proof = {key:value for key,value in metadata.source_geometry_proof.items()

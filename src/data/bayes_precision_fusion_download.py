@@ -2736,6 +2736,11 @@ def _parse_batched_single_runs_payload(
                 city_timezone=timezone_name,
                 target_local_date=target_local_date,
                 require_full_localday=True,
+                # Day0 law: once the local day has started, observations own
+                # the elapsed hours; the run must own only the remaining ones.
+                remaining_from_utc=(
+                    datetime.now(UTC) if decision_at is None else _utc_datetime(decision_at)
+                ),
             )
             result[model] = (float(anchor.high_c), float(anchor.low_c))
         except Exception as exc:

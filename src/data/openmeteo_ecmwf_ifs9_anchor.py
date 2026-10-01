@@ -126,13 +126,37 @@ def _localday_hourly_slots(*, phase_utc: datetime, target_local_date: date, city
     return tuple(expected)
 
 
-def _assert_complete_localday_hourly_slots(times_utc: Sequence[datetime], *, target_local_date: date, city_timezone: str) -> None:
+def _assert_complete_localday_hourly_slots(
+    times_utc: Sequence[datetime], *, target_local_date: date, city_timezone: str,
+    remaining_from_utc: datetime | None = None,
+) -> None:
+    """Exact hourly axis the forecast owns for this local day.
+
+    Before the day starts at ``remaining_from_utc`` the forecast owns every slot.
+    Once it has started, observations own the elapsed hours (Day0 law
+    H = max(H_confirmed, H_remaining)), so the forecast must own exactly the
+    slots from the one at or before that boundary through local-day end, with
+    no gap or duplicate. Earlier slots, when present, must still be exact.
+    """
     if not times_utc:
         raise ValueError("partial local-day coverage: no hourly slots")
     expected = _localday_hourly_slots(phase_utc=times_utc[0],
         target_local_date=target_local_date, city_timezone=city_timezone)
-    if tuple(times_utc) != expected:
-        raise ValueError("partial local-day coverage: missing, duplicate or unordered hourly slots")
+    actual = tuple(times_utc)
+    if actual == expected:
+        return
+    if remaining_from_utc is not None and expected:
+        boundary = remaining_from_utc.astimezone(UTC)
+        # Only a day in progress at the boundary; an ended day keeps the full law.
+        in_progress = expected[0] <= boundary < expected[-1] + timedelta(hours=1)
+        owned_from = max((at for at in expected if at <= boundary), default=None)
+        if in_progress and owned_from is not None:
+            suffix = tuple(at for at in expected if at >= owned_from)
+            if actual and actual[-len(suffix):] == suffix and actual == tuple(
+                at for at in expected if at >= actual[0]
+            ):
+                return
+    raise ValueError("partial local-day coverage: missing, duplicate or unordered hourly slots")
 
 
 @dataclass(frozen=True)
@@ -588,6 +612,7 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
     source_cycle_time: datetime | None = None,
     min_hourly_samples: int = 1,
     require_full_localday: bool = False,
+    remaining_from_utc: datetime | None = None,
 ) -> OpenMeteoIfs9LocalDayAnchor:
     """Extract deterministic local-day high/low from a run-pinned Open-Meteo response.
 
@@ -596,6 +621,8 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
     DST yields 23/25 slots; fractional-offset zones retain their actual phase.
     This is an hourly-sampled proxy, not a native continuous daily extreme.
     False serves only callers with an independently specified partial-anchor role.
+    remaining_from_utc: the causal boundary (last observation / decision). For a
+    day already started there, require only the exact remaining-hours suffix.
     """
 
     if min_hourly_samples <= 0:
@@ -647,7 +674,8 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
 
     if require_full_localday:
         _assert_complete_localday_hourly_slots(contributing_valid_times_utc,
-            target_local_date=target_local_date, city_timezone=city_timezone)
+            target_local_date=target_local_date, city_timezone=city_timezone,
+            remaining_from_utc=remaining_from_utc)
 
     return OpenMeteoIfs9LocalDayAnchor(
         city_timezone=city_timezone,

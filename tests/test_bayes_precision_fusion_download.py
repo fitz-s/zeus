@@ -166,7 +166,7 @@ def test_full_day_scalar_replays_header_utc_axis_through_dst_and_fractional_zone
     assert got["icon_global"] == (float(count - 1), 0.0)
 
 
-@pytest.mark.parametrize("damage", ("missing", "duplicate", "early", "late", "both_edges", "today_suffix"))
+@pytest.mark.parametrize("damage", ("missing", "duplicate", "late", "both_edges"))
 def test_full_day_scalar_never_accepts_incomplete_or_duplicate_slots(damage):
     from src.data import bayes_precision_fusion_download as dl
     day = date(2026, 9, 4)
@@ -185,6 +185,26 @@ def test_full_day_scalar_never_accepts_incomplete_or_duplicate_slots(damage):
         decision_at=datetime(2026, 9, 4, 12, tzinfo=UTC))
     assert "icon_global" not in got
     assert "partial local-day coverage" in got[dl._BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY]["icon_global"]
+
+
+@pytest.mark.parametrize(("first", "decision_hour", "accepted"), (
+    (1, 12, True),    # elapsed first hour is observation-owned at noon
+    (6, 12, True),    # today's remaining suffix from the boundary slot
+    (13, 12, False),  # hole between the boundary slot and the suffix
+    (1, 0, False),    # at 00:xx the run still owns slot 00
+))
+def test_day0_scalar_owns_exactly_the_remaining_suffix(first, decision_hour, accepted):
+    """Day0 law: observations own elapsed hours; the run owns only the remainder."""
+    from src.data import bayes_precision_fusion_download as dl
+    day = date(2026, 9, 4)
+    payload = _complete_hourly_local_day_payload(day)
+    times, values = payload["hourly"]["time"], payload["hourly"]["temperature_2m"]
+    payload["hourly"] = {"time": times[first:], "temperature_2m": values[first:]}
+    got = dl._parse_batched_single_runs_payload(payload, ["icon_global"], day, "UTC",
+        decision_at=datetime(2026, 9, 4, decision_hour, 30, tzinfo=UTC))
+    assert ("icon_global" in got) is accepted
+    if not accepted:
+        assert "partial local-day coverage" in got[dl._BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY]["icon_global"]
 
 
 def test_naive_hourly_axis_without_original_response_offset_is_unproven():
@@ -458,9 +478,9 @@ def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypa
 @pytest.mark.parametrize(
     ("target_date", "decision_at", "first_hour", "last_hour", "expected"),
     (
-        # A remaining-day vector is a different quantity. This full-day
-        # scalar cannot obtain authority from an elapsed-prefix-only suffix.
-        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 23, False),
+        # Day0 law: observations own the elapsed prefix; a run owning every
+        # slot from the boundary hour (19:00 local) to day end is admitted.
+        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 23, True),
         # A clipped suffix can omit the unresolved peak and remains forbidden.
         (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 18, False),
         # A run that starts after the decision does not cover the current-to-end window.

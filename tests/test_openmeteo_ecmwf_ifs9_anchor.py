@@ -358,3 +358,68 @@ def test_anchor_response_fails_closed_for_malformed_payload_or_coverage() -> Non
             city_timezone="UTC",
             target_local_date=date(2026, 6, 6),
         )
+
+
+def _shanghai_day(start_local_hour: int, *, gap_at: int | None = None) -> dict:
+    hours = [hour for hour in range(start_local_hour, 24) if hour != gap_at]
+    return {"utc_offset_seconds": 28800, "hourly_units": {"temperature_2m": "°C"},
+            "hourly": {"time": [f"2026-10-01T{hour:02d}:00" for hour in hours],
+                       "temperature_2m": [20.0 + hour * 0.1 for hour in hours]}}
+
+
+def _shanghai_local(hour: int, minute: int = 30) -> datetime:
+    from zoneinfo import ZoneInfo
+    return datetime(2026, 10, 1, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+@pytest.mark.parametrize(
+    ("start", "boundary_hour", "gap", "accepted"),
+    [
+        (0, None, None, True),    # full day, no boundary
+        (9, None, None, False),   # a suffix without a causal boundary stays rejected
+        (9, 9, None, True),       # the run owns exactly the remaining suffix
+        (9, 13, None, True),      # elapsed slots present are still exact
+        (14, 13, None, False),    # suffix starts after the boundary slot: a hole
+        (9, 13, 17, False),       # gap inside the owned window
+    ],
+)
+def test_day0_remaining_suffix_is_the_only_partial_axis(start, boundary_hour, gap, accepted) -> None:
+    kwargs = {} if boundary_hour is None else {"remaining_from_utc": _shanghai_local(boundary_hour)}
+
+    def extract():
+        return extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            _shanghai_day(start, gap_at=gap), city_timezone="Asia/Shanghai",
+            target_local_date=date(2026, 10, 1), require_full_localday=True, **kwargs)
+
+    if accepted:
+        assert extract().sample_count == 24 - start - (gap is not None)
+    else:
+        with pytest.raises(ValueError, match="partial local-day coverage"):
+            extract()
+
+
+def test_day_not_yet_started_still_requires_the_full_local_day() -> None:
+    from zoneinfo import ZoneInfo
+    before = datetime(2026, 9, 30, 18, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with pytest.raises(ValueError, match="partial local-day coverage"):
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            _shanghai_day(9), city_timezone="Asia/Shanghai", target_local_date=date(2026, 10, 1),
+            require_full_localday=True, remaining_from_utc=before)
+
+
+def test_every_full_day_extraction_names_its_causal_boundary() -> None:
+    """One coverage law: no caller demands the full day for a day in progress."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for path in [*(root / "src").rglob("*.py"), *(root / "scripts").rglob("*.py")]:
+        for node in ast.walk(ast.parse(path.read_text())):
+            name = getattr(getattr(node, "func", None), "id", None) or getattr(getattr(node, "func", None), "attr", None)
+            if isinstance(node, ast.Call) and name == "extract_openmeteo_ecmwf_ifs9_localday_anchor":
+                keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+                full = keywords.get("require_full_localday")
+                if isinstance(full, ast.Constant) and full.value is True and "remaining_from_utc" not in keywords:
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert offenders == []

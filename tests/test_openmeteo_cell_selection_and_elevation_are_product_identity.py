@@ -724,8 +724,8 @@ def test_covering_anchor_scan_shares_the_writer_full_localday_law():
 
     scan = inspect.getsource(production._newest_covering_anchor_proof_debt)
     writer = inspect.getsource(producer.download_current_target_raw_inputs)
-    assert "anchor_local_proof_covers_full_localday(" in scan
-    assert "anchor_local_proof_covers_full_localday(" in writer
+    assert "anchor_local_proof_covers_owned_window(" in scan
+    assert "anchor_local_proof_covers_owned_window(" in writer
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
@@ -2501,19 +2501,23 @@ def test_normal_held_revision_missing_producer_recaptures_original_archive_cycle
     report = _normal_capture_producer(tmp_path, monkeypatch, world, planning_cycle=world.run+timedelta(hours=6))
     assert "coherent_archive_capture" in report, report
     assert report["coherent_archive_capture"]["attempted_target_group_count"] == 1
-    assert report["written_row_count"] == 0
+    assert report["written_row_count"] == 1  # Day0 law: the later run owns the remaining window.
     assert report["committed_families"] == ((target.city,target.target_date,target.metric),)
     assert report["physical_capture_recovered_raw_ids"] == (raw_id,)
     assert len(world.calls) == before_calls + 2  # Exact old repair plus ordinary latest suffix.
     assert datetime.fromisoformat(world.calls[-2]["run"]).replace(tzinfo=UTC) == world.run
     with sqlite3.connect(world.db) as conn:
-        assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()==original
+        rows = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
+        assert rows[:len(original)]==original and len(rows)==len(original)+1  # Original untouched; later run appended.
         assert conn.execute("SELECT * FROM forecast_posteriors").fetchall()==original_cert
-        assert conn.execute("SELECT DISTINCT source_cycle_time FROM raw_forecast_artifacts WHERE product_id LIKE '%icon_global%'").fetchall()==[(world.run.isoformat(),)]
+        assert {row[0] for row in conn.execute("SELECT DISTINCT source_cycle_time FROM raw_forecast_artifacts WHERE product_id LIKE '%icon_global%'")} == {
+            world.run.isoformat(), (world.run+timedelta(hours=6)).isoformat()}
         served=read_current_instrument_values(conn,city=target.city,metric=target.metric,target_date=target.target_date,
             source_cycle_time_iso=world.run.isoformat(),decision_time_iso=world.clock[0].isoformat())
         assert set(served)=={"icon_global"}
-        assert served["icon_global"].physical_response["revalidated_legacy_product"]
+        # The newer run owning the remaining window now serves; the recovered
+        # original archive stays immutable beside it (asserted above).
+        assert not served["icon_global"].physical_response.get("revalidated_legacy_product")
 
 
 def _normal_capture_producer(tmp_path, monkeypatch, world, *, planning_cycle=None):

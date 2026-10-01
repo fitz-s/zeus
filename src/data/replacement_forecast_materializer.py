@@ -766,6 +766,9 @@ def _precision_guard_block_reason(
                 field_name="openmeteo_source_cycle_time",
             ),
             require_full_localday=True,
+            # The request's own decision cut; the observed-slot law in
+            # _om9_localday_hourly_coverage_ok still binds the suffix.
+            remaining_from_utc=_to_utc(request.computed_at, field_name="computed_at"),
         )
         if extracted != request.openmeteo_anchor:
             return ("OM9_SOURCE_RESPONSE_ANCHOR_MISMATCH",)

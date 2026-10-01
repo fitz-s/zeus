@@ -1256,7 +1256,7 @@ def _newest_covering_anchor_proof_debt(
         _current_target_payload_file_materializable,
         _current_target_witnessed_cached_path,
         _safe_name,
-        anchor_local_proof_covers_full_localday,
+        anchor_local_proof_covers_owned_window,
     )
     from src.config import cities_by_name  # noqa: PLC0415
     from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
@@ -1291,8 +1291,8 @@ def _newest_covering_anchor_proof_debt(
                  HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION),
             ).fetchall()
             for artifact_id, path, sha256, byte_size, raw_cycle in rows:
-                # A proof is written only for a full-local-day body, so the newest
-                # proven anchor already covers the day: nothing to drain.
+                # A proof is written only for a body covering the owned window,
+                # so the newest proven anchor already covers it: nothing to drain.
                 try:
                     if read_anchor_local_proof(
                         conn, int(artifact_id), city=city, target_date=target_date,
@@ -1315,13 +1315,12 @@ def _newest_covering_anchor_proof_debt(
                     base, city=city, target_date=target_date, metric=metric,
                     city_timezone=city_cfg.timezone, cycle=cycle, anchor_sigma_c=3.0,
                 )
-                # The writer's own law: a proof is appended only for a body that
-                # covers the full local day. A Day0-suffix body is not a covering
-                # anchor here; an older cycle may still be.
-                if witnessed is None or not anchor_local_proof_covers_full_localday(
+                # The writer's own law (full day, or the Day0 remaining suffix):
+                # a body it would reject is not a covering anchor here.
+                if witnessed is None or not anchor_local_proof_covers_owned_window(
                     witnessed.read_bytes(),
                     {"timezone_name": city_cfg.timezone, "target_local_date": target_date},
-                    cycle=cycle,
+                    cycle=cycle, decision_at=decision_time,
                 ):
                     continue
                 debt.setdefault(cycle, []).append((city, target_date, metric))

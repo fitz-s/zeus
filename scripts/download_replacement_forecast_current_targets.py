@@ -805,14 +805,20 @@ def _current_target_payload_materializable(
     return True
 
 
-def anchor_local_proof_covers_full_localday(raw: bytes, precision: Mapping[str, object], *, cycle: datetime) -> bool:
-    """The one coverage law a local proof is written under: the full local day."""
+def anchor_local_proof_covers_owned_window(
+    raw: bytes, precision: Mapping[str, object], *, cycle: datetime, decision_at: datetime,
+) -> bool:
+    """The one coverage law a local proof is written under.
+
+    A day not yet started at ``decision_at`` needs the full local day; a day in
+    progress needs the exact remaining-hours suffix (Day0 law).
+    """
 
     try:
         extract_openmeteo_ecmwf_ifs9_localday_anchor(
             json.loads(raw), city_timezone=str(precision["timezone_name"]),
             target_local_date=date.fromisoformat(str(precision["target_local_date"])),
-            source_cycle_time=cycle, require_full_localday=True,
+            source_cycle_time=cycle, require_full_localday=True, remaining_from_utc=decision_at,
         )
     except (TypeError, ValueError, KeyError):
         return False
@@ -2634,7 +2640,7 @@ def download_current_target_raw_inputs(
                 )
                 if not guard.passable_for_live_materialization:
                     raise ValueError("anchor local proof precision invalid: " + ";".join(guard.reason_codes))
-                if not anchor_local_proof_covers_full_localday(raw, precision, cycle=manifest.source_cycle_time):
+                if not anchor_local_proof_covers_owned_window(raw, precision, cycle=manifest.source_cycle_time, decision_at=cut):
                     raise ValueError("partial local-day coverage: missing, duplicate or unordered hourly slots")
                 local_proof_artifact_ids.append(write_anchor_local_proof(
                     conn, artifact_id, manifest, precision_metadata=precision,
