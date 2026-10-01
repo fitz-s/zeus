@@ -28797,6 +28797,7 @@ def _forecast_authority_payload_from_posterior(
     try:
         from src.data.replacement_forecast_bundle_reader import (
             _current_ensemble_snapshot_identity_reason,
+            _json_mapping,
         )
 
         current_snapshot_reason = _current_ensemble_snapshot_identity_reason(
@@ -28805,6 +28806,7 @@ def _forecast_authority_payload_from_posterior(
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,
+            provenance=_json_mapping(p_provenance_json, field_name="provenance_json"),
         )
     except Exception:  # noqa: BLE001 — identity authority is fail-closed
         current_snapshot_reason = "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"

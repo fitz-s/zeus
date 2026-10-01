@@ -985,7 +985,7 @@ def _current_ensemble_snapshot_identity_reason(
     city: str,
     target_date: str,
     metric: str,
-    provenance: Mapping[str, Any] | None = None,
+    provenance: Mapping[str, Any],
 ) -> str | None:
     """Require the posterior's current ENS snapshot to be current and target-covered.
 
@@ -996,6 +996,11 @@ def _current_ensemble_snapshot_identity_reason(
     source-run/coverage semantics.  SCOPE is this posterior's exact snapshot and
     city/date/metric; DRAIN is the next source-run coverage publication; RESET is
     a current target-local-day coverage row that is LIVE_ELIGIBLE before expiry.
+
+    ``provenance`` is the posterior's own parsed ``provenance_json``; it carries the
+    current-evidence shape this check binds to the snapshot.  It has no default so a
+    caller cannot omit it and block every posterior; a non-Mapping value or a shape
+    that is absent or names another snapshot stays fail-closed (IDENTITY_MISMATCH).
     """
     expected_dataset_id = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version
     if (

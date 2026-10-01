@@ -2066,6 +2066,66 @@ def test_replacement_posterior_refuses_old_current_evidence_semantics():
         )
 
 
+def _bind_current_evidence_shape_to_snapshot(conn: sqlite3.Connection, *, bound: bool = True) -> None:
+    """Make the fixture posterior carry the shape a materialized live row carries.
+
+    The identity gate replays the shape against the snapshot it names, and reads
+    wall-clock coverage; neither is part of the shared fixture's minimal rows.
+    """
+    if "provenance_json" not in {r[1] for r in conn.execute("PRAGMA table_info(ensemble_snapshots)")}:
+        conn.execute("ALTER TABLE ensemble_snapshots ADD COLUMN provenance_json TEXT")
+    conn.execute("UPDATE source_run_coverage SET expires_at = '2099-01-01T00:00:00+00:00'")
+    row = conn.execute(
+        "SELECT posterior_id, provenance_json FROM forecast_posteriors ORDER BY posterior_id DESC LIMIT 1"
+    ).fetchone()
+    provenance = json.loads(str(row["provenance_json"]))
+    if bound:
+        provenance["bayes_precision_fusion"]["current_evidence_shape"]["snapshot_id"] = 1
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+        (json.dumps(provenance), row["posterior_id"]),
+    )
+
+
+def _identity_gate_outcome(conn: sqlite3.Connection) -> str:
+    reason: dict[str, str] = {}
+    try:
+        _forecast_authority_payload_from_posterior(
+            conn,
+            event=_replacement_forecast_event(),
+            family=SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high"),
+            payload={"source_id": REPLACEMENT_SOURCE_ID, "source_run_id": "run-1"},
+            decision_time=DECISION_TIME,
+            reason_out=reason,
+        )
+    except ValueError as exc:  # raised by a gate downstream of identity
+        return str(exc)
+    return reason.get("reason", "")
+
+
+def test_replacement_posterior_with_bound_current_evidence_shape_passes_identity_gate():
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+    _bind_current_evidence_shape_to_snapshot(conn)
+
+    assert "REPLACEMENT_CURRENT_COORDINATE" not in _identity_gate_outcome(conn)
+
+
+@pytest.mark.parametrize("damage", ["shape_unbound", "provenance_unparseable"])
+def test_replacement_posterior_without_bound_current_evidence_shape_fails_identity_gate(damage):
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+    _bind_current_evidence_shape_to_snapshot(conn, bound=damage != "shape_unbound")
+    if damage == "provenance_unparseable":
+        conn.execute("UPDATE forecast_posteriors SET provenance_json = '{malformed'")
+
+    assert _identity_gate_outcome(conn) == (
+        "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
+        if damage == "shape_unbound"
+        else "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"
+    )
+
+
 def test_decision_source_context_preserves_posterior_identity_hash_for_capability_details():
     ctx = DecisionSourceContext.from_forecast_context(
         {

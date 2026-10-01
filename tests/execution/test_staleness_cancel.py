@@ -415,7 +415,7 @@ def _seed_posterior(
     family,
     posterior_identity_hash: str,
     source_cycle_time: str,
-    provenance_json: str = "{}",
+    provenance_json: str | None = None,
     snapshot_id: int = 1,
     snapshot_dataset: str | None = None,
 ) -> None:
@@ -427,6 +427,12 @@ def _seed_posterior(
     )
 
     city, target_date, metric = family
+    if provenance_json is None:
+        # A materialized posterior binds its own current-evidence shape to the
+        # snapshot it consumed; the identity reader replays that binding.
+        provenance_json = json.dumps(
+            {"bayes_precision_fusion": {"current_evidence_shape": {"snapshot_id": snapshot_id}}}
+        )
     expected_dataset = expected_replacement_dependency_identity_by_role(metric)[
         "baseline_b0"
     ].data_version
@@ -923,6 +929,43 @@ class TestReadCurrentFamilyQVersions:
             "__Q_AUTHORITY_BLOCKED__:q-covered:REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
         )
 
+
+    def test_posterior_carrying_its_current_evidence_shape_is_servable(self):
+        conn = _forecasts_db()
+        _seed_posterior(
+            conn, family=FAMILY, posterior_identity_hash="q-shaped",
+            source_cycle_time="2026-07-03T12:00:00+00:00",
+        )
+        _certify_latest_posterior(conn, FAMILY)
+
+        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] == "q-shaped"
+
+    @pytest.mark.parametrize(
+        "provenance_json, reason",
+        [
+            ("{}", "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"),
+            (
+                json.dumps({"bayes_precision_fusion": {"current_evidence_shape": {"snapshot_id": 2}}}),
+                "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH",
+            ),
+            ("[]", "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"),
+        ],
+        ids=["shape_absent", "shape_names_other_snapshot", "provenance_not_an_object"],
+    )
+    def test_posterior_without_a_bound_current_evidence_shape_stays_blocked(
+        self, provenance_json, reason
+    ):
+        conn = _forecasts_db()
+        _seed_posterior(
+            conn, family=FAMILY, posterior_identity_hash="q-unshaped",
+            source_cycle_time="2026-07-03T12:00:00+00:00",
+            provenance_json=provenance_json,
+        )
+        _certify_latest_posterior(conn, FAMILY)
+
+        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] == (
+            f"__Q_AUTHORITY_BLOCKED__:q-unshaped:{reason}"
+        )
 
     def test_freshest_posterior_wins(self):
         conn = _forecasts_db()

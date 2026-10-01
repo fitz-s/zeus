@@ -367,6 +367,7 @@ def _certified_replacement_posterior_row(
         return refuse(f"posterior_dependencies_invalid:posterior_id={posterior_id}")
     from src.data.replacement_forecast_bundle_reader import (
         _current_ensemble_snapshot_identity_reason,
+        _json_mapping,
     )
 
     try:
@@ -376,6 +377,7 @@ def _certified_replacement_posterior_row(
             city=city,
             target_date=target_date,
             metric=metric,
+            provenance=_json_mapping(row["provenance_json"], field_name="provenance_json"),
         )
     except Exception:  # noqa: BLE001 — held belief is fail-closed on identity faults
         current_snapshot_reason = "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"

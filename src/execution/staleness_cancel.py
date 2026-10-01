@@ -483,6 +483,7 @@ def read_current_family_q_versions(
     """
     from src.data.replacement_forecast_bundle_reader import (
         _current_ensemble_snapshot_identity_reason,
+        _json_mapping,
         _readiness_posterior_id,
     )
     from src.data.replacement_forecast_readiness import (
@@ -533,7 +534,7 @@ def read_current_family_q_versions(
             row = forecasts_conn.execute(
                 """
                 SELECT posterior_identity_hash, source_cycle_time, computed_at
-                       , dependency_source_run_ids_json
+                       , dependency_source_run_ids_json, provenance_json
                   FROM forecast_posteriors
                  WHERE posterior_id = ? AND source_id = ? AND product_id = ?
                    AND data_version = ? AND runtime_layer = ? AND training_allowed = 0
@@ -566,6 +567,7 @@ def read_current_family_q_versions(
                 city=city,
                 target_date=target_date,
                 metric=metric,
+                provenance=_json_mapping(row[4], field_name="provenance_json"),
             )
         except Exception:  # noqa: BLE001 — q authority must stay blocked on identity faults
             current_snapshot_reason = "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"

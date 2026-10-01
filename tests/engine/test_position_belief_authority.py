@@ -2207,3 +2207,65 @@ def test_monitor_loader_requests_held_continuity_exemption(forecasts_db, monkeyp
     assert belief is not None
     assert seen, "loader must consult the raw-input HWM check"
     assert seen.get("held_redecision") is True
+
+
+def _certified_row_for(conn, family):
+    from src.engine.position_belief import _certified_replacement_posterior_row
+
+    city, target_date, metric = family
+    return _certified_replacement_posterior_row(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=metric,
+        decision_time=datetime(2026, 7, 3, 22, 0, tzinfo=timezone.utc),
+        posterior_columns={r[1] for r in conn.execute("PRAGMA table_info(forecast_posteriors)")},
+    )
+
+
+def test_certified_posterior_row_passes_identity_gate_with_its_own_current_evidence_shape():
+    from tests.execution.test_staleness_cancel import (
+        FAMILY, _certify_latest_posterior, _forecasts_db, _seed_posterior,
+    )
+
+    conn = _forecasts_db()
+    _seed_posterior(
+        conn, family=FAMILY, posterior_identity_hash="q-shaped",
+        source_cycle_time="2026-07-03T12:00:00+00:00",
+    )
+    _certify_latest_posterior(conn, FAMILY)
+
+    row = _certified_row_for(conn, FAMILY)
+
+    assert row is not None
+    assert row["posterior_id"] == 1
+
+
+@pytest.mark.parametrize(
+    "provenance_json",
+    [
+        "{}",
+        json.dumps({"bayes_precision_fusion": {"current_evidence_shape": {"snapshot_id": 2}}}),
+        "[]",
+    ],
+    ids=["shape_absent", "shape_names_other_snapshot", "provenance_not_an_object"],
+)
+def test_certified_posterior_row_refused_without_a_bound_current_evidence_shape(
+    provenance_json, caplog,
+):
+    from tests.execution.test_staleness_cancel import (
+        FAMILY, _certify_latest_posterior, _forecasts_db, _seed_posterior,
+    )
+
+    conn = _forecasts_db()
+    _seed_posterior(
+        conn, family=FAMILY, posterior_identity_hash="q-unshaped",
+        source_cycle_time="2026-07-03T12:00:00+00:00",
+        provenance_json=provenance_json,
+    )
+    _certify_latest_posterior(conn, FAMILY)
+
+    with caplog.at_level("WARNING", logger="src.engine.position_belief"):
+        assert _certified_row_for(conn, FAMILY) is None
+
+    assert "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_" in caplog.text
