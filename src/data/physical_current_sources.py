@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-01 (finite bound speed proof; per-route isolation)
 """Station-bound current observations and their settlement roles.
 
 Adapters own fixed endpoints. Configuration cannot inject URLs, SQL, or code.
@@ -79,6 +79,22 @@ def _role(row: dict[str, Any]) -> SourceRole:
     return role
 
 
+def _lag_interval(interval: Any) -> tuple[float, float] | None:
+    """Finite, ordered ``(lag_lower_ms, lag_upper_ms)``, or None.
+
+    An infinite or inverted bound proves nothing about speed: -inf would beat
+    every comparator and +inf would lose to none. A negative lower bound is a
+    valid loose bound (the last negative probe preceded the nominal clock).
+    """
+    try:
+        lower, upper = float(interval["lag_lower_ms"]), float(interval["lag_upper_ms"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (math.isfinite(lower) and math.isfinite(upper) and lower <= upper):
+        return None
+    return lower, upper
+
+
 def fast_admission_defect(row: dict[str, Any], rivals: frozenset[str] = frozenset()) -> str | None:
     """Return why a fast-admission row is not proven, or None when it is.
 
@@ -112,16 +128,68 @@ def fast_admission_defect(row: dict[str, Any], rivals: frozenset[str] = frozense
     semantics = SettlementSemantics.for_city(city)
     if semantics.round_single(sides[0]["value"]) != semantics.round_single(sides[1]["value"]):
         return "LEAD_VALUE_MISMATCH"
-    try:
-        upper = float(candidate["lag_upper_ms"])
-        beaten = {c["channel"] for c in lead.get("comparators", ())
-                  if c["interval"]["observed_at"] == when
-                  and c["interval"].get("station", station) == station
-                  and upper < float(c["interval"]["lag_lower_ms"])}
-    except (KeyError, TypeError, ValueError):
-        return "LEAD_COMPARATOR_MALFORMED"
+    own = _lag_interval(candidate)
+    if own is None:
+        return "LEAD_INTERVAL_INVALID"
+    beaten = set()
+    for comparator in lead.get("comparators", ()):
+        interval = comparator.get("interval") if isinstance(comparator, dict) else None
+        rival = _lag_interval(interval) if isinstance(interval, dict) else None
+        if rival is None:
+            return "LEAD_COMPARATOR_MALFORMED"
+        # Bound identity: the interval names this comparator, station, instant.
+        if (interval.get("channel"), interval.get("station"), interval.get("observed_at")) != (
+                comparator.get("channel"), station, when):
+            return "LEAD_COMPARATOR_IDENTITY"
+        if own[1] < rival[0]:
+            beaten.add(comparator["channel"])
     missing = (set(CURRENT_COMPARATORS) | set(rivals)) - beaten
     return "LEAD_NOT_FASTER:" + ",".join(sorted(missing)) if missing else None
+
+
+def _source(row: dict[str, Any], role: SourceRole, seen: set) -> PhysicalCurrentSource:
+    """Validate one registry row into its adapter source; raise on invalid."""
+    if row["provider"] != "fmi_wfs":
+        from src.data.station_temperature_adapters import CHANNELS
+        identity = row["identity"]
+        native_id = str(identity["provider_station"])
+        key = (row["station_id"], row["source_channel"])
+        seconds = float(row["minimum_poll_seconds"])
+        kinds = tuple(row["settlement_source_types"])
+        expected_channel = (f"noaa_wrh_{row['station_id'].lower()}" if row["provider"] == "noaa_wrh"
+                            else CHANNELS.get(row["provider"]))
+        unit = row["unit"]
+        if (row["source_channel"] != expected_channel
+            or key in seen or not re.fullmatch(r"[A-Z]{4}", row["station_id"])
+            or not re.fullmatch(r"[A-Za-z0-9:]+", native_id)
+            or not math.isfinite(seconds) or seconds < 60
+            or unit not in ({"C", "F"} if row["provider"] == "noaa_wrh" else {"C"})
+            or (row["provider"] == "noaa_wrh" and
+                (native_id != row["station_id"] or identity.get("resolver_view") not in {"hourly", "all"}))
+            or (row["provider"] in {"mgm_metar", "imd_olbs_metar"} and native_id != row["station_id"])
+            or not kinds or any(t not in {"noaa", "wu_icao"} for t in kinds)):
+            raise ValueError("PHYSICAL_CURRENT_ADAPTER_INVALID")
+        seen.add(key)
+        return PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
+                                     kinds, unit, seconds, None, dict(identity), role)
+    if row["provider"] != "fmi_wfs" or row["source_channel"] != SOURCE_CHANNEL or row["unit"] != "C":
+        raise ValueError("PHYSICAL_CURRENT_ADAPTER_UNKNOWN")
+    key = (row["station_id"], row["source_channel"])
+    identity = row["identity"]
+    latitude, longitude = float(identity["latitude"]), float(identity["longitude"])
+    seconds = float(row["minimum_poll_seconds"])
+    types = tuple(row["settlement_source_types"])
+    if (key in seen or not re.fullmatch(r"[A-Z]{4}", row["station_id"])
+        or not str(identity["fmisid"]).isdigit() or not str(identity["wmo"]).isdigit()
+        or not identity["name"] or not -90 <= latitude <= 90 or not -180 <= longitude <= 180
+        or not math.isfinite(seconds) or seconds < 1 or not types
+        or any(t not in {"noaa", "wu_icao"} for t in types)):
+        raise ValueError("PHYSICAL_CURRENT_STATION_INVALID")
+    seen.add(key)
+    station = FmiStation(row["station_id"], str(identity["fmisid"]), str(identity["wmo"]),
+                         identity["name"], latitude, longitude)
+    return PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
+                                 types, row["unit"], seconds, station, dict(identity), role)
 
 
 @lru_cache(maxsize=4)
@@ -136,56 +204,21 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
         by_station.setdefault(row["station_id"], set()).add(row["provider"])
     for row in data["sources"]:
         role = _role(row)
-        if role is SourceRole.FAST_ADMISSION:
-            defect = fast_admission_defect(row, frozenset(by_station[row["station_id"]] - {row["provider"]}))
-            if defect is not None:
-                # SCOPE: this one optional route. DRAIN/RESET: a config with
-                # bound evidence on restart. Incumbent channels keep serving.
-                logger.error("PHYSICAL_CURRENT_FAST_ADMISSION_OMITTED provider=%s station=%s reason=%s",
-                             row["provider"], row["station_id"], defect)
-                continue
-        if row["provider"] != "fmi_wfs":
-            from src.data.station_temperature_adapters import CHANNELS
-            identity = row["identity"]
-            native_id = str(identity["provider_station"])
-            key = (row["station_id"], row["source_channel"])
-            seconds = float(row["minimum_poll_seconds"])
-            kinds = tuple(row["settlement_source_types"])
-            expected_channel = (f"noaa_wrh_{row['station_id'].lower()}" if row["provider"] == "noaa_wrh"
-                                else CHANNELS.get(row["provider"]))
-            unit = row["unit"]
-            if (row["source_channel"] != expected_channel
-                or key in seen or not re.fullmatch(r"[A-Z]{4}", row["station_id"])
-                or not re.fullmatch(r"[A-Za-z0-9:]+", native_id)
-                or not math.isfinite(seconds) or seconds < 60
-                or unit not in ({"C", "F"} if row["provider"] == "noaa_wrh" else {"C"})
-                or (row["provider"] == "noaa_wrh" and
-                    (native_id != row["station_id"] or identity.get("resolver_view") not in {"hourly", "all"}))
-                or (row["provider"] in {"mgm_metar", "imd_olbs_metar"} and native_id != row["station_id"])
-                or not kinds or any(t not in {"noaa", "wu_icao"} for t in kinds)):
-                raise ValueError("PHYSICAL_CURRENT_ADAPTER_INVALID")
-            sources.append(PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
-                                                  kinds, unit, seconds, None, dict(identity), role))
-            seen.add(key)
+        if role is not SourceRole.FAST_ADMISSION:
+            sources.append(_source(row, role, seen))
             continue
-        if row["provider"] != "fmi_wfs" or row["source_channel"] != SOURCE_CHANNEL or row["unit"] != "C":
-            raise ValueError("PHYSICAL_CURRENT_ADAPTER_UNKNOWN")
-        key = (row["station_id"], row["source_channel"])
-        identity = row["identity"]
-        latitude, longitude = float(identity["latitude"]), float(identity["longitude"])
-        seconds = float(row["minimum_poll_seconds"])
-        types = tuple(row["settlement_source_types"])
-        if (key in seen or not re.fullmatch(r"[A-Z]{4}", row["station_id"])
-            or not str(identity["fmisid"]).isdigit() or not str(identity["wmo"]).isdigit()
-            or not identity["name"] or not -90 <= latitude <= 90 or not -180 <= longitude <= 180
-            or not math.isfinite(seconds) or seconds < 1 or not types
-            or any(t not in {"noaa", "wu_icao"} for t in types)):
-            raise ValueError("PHYSICAL_CURRENT_STATION_INVALID")
-        seen.add(key)
-        station = FmiStation(row["station_id"], str(identity["fmisid"]), str(identity["wmo"]),
-                             identity["name"], latitude, longitude)
-        sources.append(PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
-                                              types, row["unit"], seconds, station, dict(identity), role))
+        # SCOPE: this one optional route. DRAIN/RESET: a config with bound,
+        # well-formed evidence on restart. Incumbent channels keep serving;
+        # a malformed optional row never takes the rest of the registry down.
+        try:
+            defect = fast_admission_defect(row, frozenset(by_station[row["station_id"]] - {row["provider"]}))
+            if defect is None:
+                sources.append(_source(row, role, seen))
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
+            defect = f"MALFORMED:{type(exc).__name__}"
+        if defect is not None:
+            logger.error("PHYSICAL_CURRENT_FAST_ADMISSION_OMITTED provider=%s station=%s reason=%s",
+                         row.get("provider"), row.get("station_id"), defect)
     budget = data["providers"]["fmi_wfs"]
     fraction = float(budget["budget_fraction"])
     per_day, per_window = int(budget["requests_per_day"]), int(budget["requests_per_five_minutes"])

@@ -644,6 +644,14 @@ def test_every_configured_role_satisfies_its_law():
     ("lead_value_mismatch", "LEAD_VALUE_MISMATCH"),
     ("overlapping_comparator", "LEAD_NOT_FASTER:awc"),
     ("rival_registry_route", "LEAD_NOT_FASTER:jma_amedas"),
+    ("neg_inf_upper", "LEAD_INTERVAL_INVALID"),
+    ("nan_upper", "LEAD_INTERVAL_INVALID"),
+    ("inverted_candidate", "LEAD_INTERVAL_INVALID"),
+    ("inf_comparator_lower", "LEAD_COMPARATOR_MALFORMED"),
+    ("comparator_missing_interval", "LEAD_COMPARATOR_MALFORMED"),
+    ("comparator_wrong_channel", "LEAD_COMPARATOR_IDENTITY"),
+    ("comparator_unbound_station", "LEAD_COMPARATOR_IDENTITY"),
+    ("comparators_not_a_list", "MALFORMED:TypeError"),
 ])
 def test_invalid_fast_admission_is_omitted_and_incumbents_keep_serving(tmp_path, caplog, forge, reason):
     from src.data.physical_current_sources import fast_admission_defect
@@ -665,9 +673,30 @@ def test_invalid_fast_admission_is_omitted_and_incumbents_keep_serving(tmp_path,
     elif forge == "overlapping_comparator":
         awc = next(c for c in lead["comparators"] if c["channel"] == "awc")
         awc["interval"]["lag_lower_ms"] = lead["candidate"]["lag_upper_ms"] - 1
+    elif forge == "neg_inf_upper":
+        lead["candidate"]["lag_upper_ms"] = -float("inf")
+    elif forge == "nan_upper":
+        lead["candidate"]["lag_upper_ms"] = float("nan")
+    elif forge == "inverted_candidate":
+        lead["candidate"]["lag_lower_ms"] = lead["candidate"]["lag_upper_ms"] + 1
+    elif forge == "inf_comparator_lower":
+        lead["comparators"][0]["interval"]["lag_lower_ms"] = float("inf")
+    elif forge == "comparator_missing_interval":
+        del lead["comparators"][0]["interval"]
+    elif forge == "comparator_wrong_channel":
+        lead["comparators"][0]["interval"]["channel"] = "resolver"
+    elif forge == "comparator_unbound_station":
+        del lead["comparators"][0]["interval"]["station"]
+    elif forge == "comparators_not_a_list":
+        lead["comparators"] = 7
     else:
         rivals = frozenset({"jma_amedas"})
-    assert fast_admission_defect(row, rivals) == reason
+    if forge == "comparators_not_a_list":
+        # Raises inside the validator; the loader isolates it to this route.
+        with pytest.raises(TypeError):
+            fast_admission_defect(row, rivals)
+    else:
+        assert fast_admission_defect(row, rivals) == reason
     if forge == "rival_registry_route":
         return
     path = tmp_path / "forged.json"
