@@ -7,7 +7,7 @@ Official profiles/sentinels: open-meteo/open-meteo b06f4760fd1f997e5559bb380f64c
 """
 
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-01
 # Authority basis: finite_evidence_probability_symmetry Sep29 native surface; INV-14/47.
 
 from __future__ import annotations
@@ -159,6 +159,26 @@ def _manifest_name(manifest: Mapping[str, object]) -> str:
 
 
 def _read_file(path: Path) -> bytes:
+    return _read_hashed(path)[0]
+
+
+def _file_version(info: os.stat_result) -> tuple[int, ...]:
+    # Any content write moves mtime/size, and ctime too, which no utime() can
+    # restore; an atomic rename moves the inode. Equal versions = equal bytes.
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+# path -> (file version, body, sha256). One entry per path ever read: a changed
+# version replaces its entry, so the memo is bounded by the distinct asset paths.
+_HASHED: dict[str, tuple[tuple[int, ...], bytes, str]] = {}
+
+
+def _read_hashed(path: Path) -> tuple[bytes, str]:
+    """Bytes and sha256 of one regular file, re-read and re-hashed only when it changed.
+
+    The ASSET_CHANGED check compares this digest with the manifest; keying the
+    digest on the open file's version keeps that a check on the current file.
+    """
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
@@ -167,10 +187,19 @@ def _read_file(path: Path) -> bytes:
             raise _Invalid("MODEL_SURFACE_UNSAFE_PATH")
         if not 0 < size <= MAX_ASSET_BYTES:
             raise _Invalid("MODEL_SURFACE_INVALID_SIZE")
+        version = _file_version(info)
+        known = _HASHED.get(str(path))
+        if known is not None and known[0] == version:
+            return known[1], known[2]
         body = handle.read(MAX_ASSET_BYTES + 1)
+        # A write racing the read moves the version; such bytes are never memoized.
+        settled = _file_version(os.fstat(handle.fileno())) == version
     if len(body) != size or len(body) > MAX_ASSET_BYTES:
         raise _Invalid("MODEL_SURFACE_INVALID_SIZE")
-    return body
+    digest = _sha(body)
+    if settled:
+        _HASHED[str(path)] = (version, body, digest)
+    return body, digest
 
 
 def _decode(body: bytes, profile: Mapping[str, object], *, x: int | None = None, y: int | None = None) -> float | None:
@@ -222,8 +251,8 @@ def _capture(manifest: Mapping[str, object], raw: bytes) -> SurfaceAssetCapture:
 
 def _load(asset: Mapping[str, object], profile: Mapping[str, object]) -> tuple[Mapping[str, object], bytes]:
     manifest_path = _owned_path(asset["manifest_path"])
-    raw = _read_file(manifest_path)
-    if _sha(raw) != asset["manifest_sha256"]:
+    raw, raw_sha = _read_hashed(manifest_path)
+    if raw_sha != asset["manifest_sha256"]:
         raise _Invalid("MODEL_SURFACE_MANIFEST_CHANGED")
     manifest = json.loads(raw)
     _check_manifest(manifest, profile)
@@ -235,8 +264,8 @@ def _load(asset: Mapping[str, object], profile: Mapping[str, object]) -> tuple[M
     path = _owned_path(asset["asset_path"])
     if path.name != _asset_name(manifest):
         raise _Invalid("MODEL_SURFACE_MODEL_MISMATCH")
-    body = _read_file(path)
-    if len(body) != manifest["byte_size"] or _sha(body) != manifest["whole_sha256"]:
+    body, body_sha = _read_hashed(path)
+    if len(body) != manifest["byte_size"] or body_sha != manifest["whole_sha256"]:
         raise _Invalid("MODEL_SURFACE_ASSET_CHANGED")
     return manifest, body
 

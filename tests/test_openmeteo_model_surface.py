@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-01
 # Authority basis: finite_evidence_probability_symmetry Sep29 native surface slice; INV-14/47.
 """Real OM entity decoding and immutable static-evidence clock relationships."""
 
@@ -569,3 +569,59 @@ def test_missing_system_float_math_is_typed_and_does_not_fetch(ordinary_static_h
         assert surface.ensure_model_surface("gfs_hrrr").reason == "MODEL_SURFACE_FLOAT_MATH_UNAVAILABLE"
         assert not entity["calls"]
     surface._float_math_function.cache_clear()
+
+
+def _count_asset_hashes(monkeypatch, asset_path):
+    body_hashes = []
+    real_sha = surface._sha
+    asset_size = Path(asset_path).stat().st_size
+
+    def counting_sha(value):
+        if len(value) == asset_size:
+            body_hashes.append(1)
+        return real_sha(value)
+
+    monkeypatch.setattr(surface, "_sha", counting_sha)
+    return body_hashes
+
+
+def test_unchanged_asset_is_hashed_once_and_still_validates(ordinary_static_http, monkeypatch):
+    capture = surface.ensure_model_surface("icon_global")
+    proof = _proof(capture)
+    surface._HASHED.clear()
+    hashes = _count_asset_hashes(monkeypatch, capture.asset["asset_path"])
+    for _ in range(5):
+        assert _validate(proof) is None
+    assert len(hashes) == 1  # memo hit on the unchanged (dev, ino, size, mtime, ctime)
+
+
+@pytest.mark.parametrize("rewrite", ["in_place_same_size", "in_place_same_size_restored_mtime", "atomic_rename"])
+def test_any_rewrite_of_the_asset_is_rehashed_and_rejected(ordinary_static_http, monkeypatch, rewrite):
+    import os
+
+    capture = surface.ensure_model_surface("icon_global")
+    proof = _proof(capture)
+    path = Path(capture.asset["asset_path"])
+    assert _validate(proof) is None  # memoizes the verified version
+    original = path.read_bytes()
+    before = path.stat()
+    tampered = bytes([original[0] ^ 0xFF]) + original[1:]  # same size, other content
+    if rewrite == "atomic_rename":
+        staged = path.with_name("staged.om")
+        staged.write_bytes(tampered)
+        os.replace(staged, path)
+    else:
+        with open(path, "r+b") as handle:
+            handle.write(tampered[:1])
+        if rewrite == "in_place_same_size_restored_mtime":
+            # A writer that forges size and mtime still moves ctime.
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert after.st_size == before.st_size
+    hashes = _count_asset_hashes(monkeypatch, path)
+    assert _validate(proof) == "MODEL_SURFACE_ASSET_CHANGED"
+    assert len(hashes) == 1
+    # Restoring the exact bytes is a further change: hashed again, valid again.
+    path.write_bytes(original)
+    assert _validate(proof) is None
+    assert len(hashes) == 2
