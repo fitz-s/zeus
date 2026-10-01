@@ -1,0 +1,186 @@
+[
+  {
+    "tag": "IN_user",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/user.js",
+    "request_at": "2026-09-30T23:13:46.221886+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:13:48.140324+00:00",
+    "sha256": "4e03ee606077c29a2d247f1827d8a07c55477ba31df1ee39cdb64035bfc18d86",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_user_4e03ee606077c29a2d247f1827d8a07c55477ba31df1ee39cdb64035bfc18d86.gz",
+    "content_type": "text/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "let ua = window.navigator.userAgent;\nlet msie = ua.indexOf(\"MSIE\");\nif (msie > 0) {\n        jQuery.ajaxSetup({ cache: false });\n} else {\n        jQuery.ajaxSetup({ cache : true});\n}\n\n/* \n * Constructor for a global timer object that can \n * be used to execute a function on a specified interval\n */\nfunction GlobalTimer () {\n        // A refference to the timer object\n        this.timerRef = {};\n        /*\n         * The amount of time that will ellapse between \n         * executing the function in  milliseconds\n         */\n        this.interval = 10000;\n        /* \n         * This variable reflects if the timer \n         * is running or not\n         */\n        this.isRunning = false;\n        // The function that will be executed\n        this.timerFn = {};\n};\n// List the funtions associated with the GlobalTimer object\nGlobalTimer.prototype = {\n        constructor: GlobalTimer,\n        // Set the function to be executed\n        setFunction: function(fn) {\n                this.timerFn = fn;\n        },\n        // Set the interval between executions of the function\n        setInterval: fun",
+    "station_snippets": {
+      "showOPMETQuery": [
+        "\n\twindow.registerHistory('showSIGMET');\n};\nwindow.showOPMETQuery = function(list, type) {\n        if (typeof type == 'undefined')\n                type = '';\n        showLoading('divContent');\n        $(\"#divContent\").load('showopmetquery.php', {icaos: list, type: type});\n        window.registerHistory('showOPMETQuery?icaos=' + icaos + '&type=' + type, {functionName: s",
+        "st, type: type});\n        window.registerHistory('showOPMETQuery?icaos=' + icaos + '&type=' + type, {functionName: showOPMETQuery, args: [list, type]});\n};\nwindow.showCityForecast = function() {\n        showLoading('divContent');\n        $(\"#divContent\").load('regional/showcityforecast.php');\n        window.registerHistory('showCityForecast');\n};\nwindow.showTakeOff = "
+      ],
+      "showopmetquery": [
+        "ing('divContent');\n        $(\"#divContent\").load('showopmetquery.php', {icaos: list, type: type});\n        window.registerHistory('showOPMETQuery?icaos=' + icaos + '&type=' + type, {functionName: showOPMETQuery, args: [list, type]});\n};\nwindow.showCityForecast = function() {\n        showLoading('divContent');\n        $(\"#divContent\").load('regional/showcityforecast.ph"
+      ]
+    }
+  },
+  {
+    "tag": "IN_history",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/history.js",
+    "request_at": "2026-09-30T23:13:46.222308+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:13:47.835417+00:00",
+    "sha256": "81725f6b24ef9b2930da2878a17e325a8501cc9928daac048df5bc8cb80327ba",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_history_81725f6b24ef9b2930da2878a17e325a8501cc9928daac048df5bc8cb80327ba.gz",
+    "content_type": "text/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "function historyListener(newLocation, historyData)\n{\n        if (typeof historyData != 'undefined' && historyData && typeof historyData.functionName == 'function')\n        {\n                if (typeof historyData.args != 'undefined')\n                {\n                        switch (historyData.args.length)\n                        {\n                                case 1:\n                                        historyData.functionName(historyData.args[0]);\n                                        break;\n                                case 2:\n                                        historyData.functionName(historyData.args[0], historyData.args[1]);\n                                        break;\n                                case 3:\n                                        historyData.functionName(historyData.args[0], historyData.args[1], historyData.args[2]);\n                                        break;\n                                default:\n                                        historyData.functionName();\n                                        break;\n                        ",
+    "station_snippets": {
+      "showOPMETQuery": [],
+      "showopmetquery": []
+    }
+  },
+  {
+    "tag": "IN_thirdparty",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/thirdparty.js",
+    "request_at": "2026-09-30T23:13:46.222469+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:13:47.897618+00:00",
+    "sha256": "c46342016d8870934652f12f058abbceec528af3d1871ca1445fd47e4b00eeef",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_thirdparty_c46342016d8870934652f12f058abbceec528af3d1871ca1445fd47e4b00eeef.gz",
+    "content_type": "text/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "/**\n*  http://www.webtoolkit.info/\n**/\n\nfunction SHA1 (msg) {\n\n\tfunction rotate_left(n,s) {\n\t\tvar t4 = ( n< >>(32-s));\n\t\treturn t4;\n\t};\n\n\tfunction lsb_hex(val) {\n\t\tvar str=\"\";\n\t\tvar i;\n\t\tvar vh;\n\t\tvar vl;\n\n\t\tfor( i=0; i<=6; i+=2 ) {\n\t\t\tvh = (val>>>(i*4+4))&0x0f;\n\t\t\tvl = (val>>>(i*4))&0x0f;\n\t\t\tstr += vh.toString(16) + vl.toString(16);\n\t\t}\n\t\treturn str;\n\t};\n\n\tfunction cvt_hex(val) {\n\t\tvar str=\"\";\n\t\tvar i;\n\t\tvar v;\n\n\t\tfor( i=7; i>=0; i-- ) {\n\t\t\tv = (val>>>(i*4))&0x0f;\n\t\t\tstr += v.toString(16);\n\t\t}\n\t\treturn str;\n\t};\n\n\n\tfunction Utf8Encode(string) {\n\t\tif (typeof string == 'undefined')\n\t\t\treturn \"\";\n\t\tstring = string.replace(/\\r\\n/g,\"\\n\");\n\t\tvar utftext = \"\";\n\n\t\tfor (var n = 0; n < string.length; n++) {\n\n\t\t\tvar c = string.charCodeAt(n);\n\n\t\t\tif (c < 128) {\n\t\t\t\tutftext += String.fromCharCode(c);\n\t\t\t}\n\t\t\telse if((c > 127) && (c < 2048)) {\n\t\t\t\tutftext += String.fromCharCode((c >> 6) | 192);\n\t\t\t\tutftext += String.fromCharCode((c & 63) | 128);\n\t\t\t}\n\t\t\telse {\n\t\t\t\tutftext += String.fromCharCode((c >> 12) | 224);\n\t\t\t\tutftext += String.fromCharCode(((c >> 6) & 63) | 128);\n\t\t\t\tutftext += String.fromC",
+    "station_snippets": {
+      "showOPMETQuery": [],
+      "showopmetquery": []
+    }
+  },
+  {
+    "tag": "AR_meteoaero",
+    "url": "https://www.smn.gob.ar/metar",
+    "request_at": "2026-09-30T23:13:46.222598+00:00",
+    "status": 403,
+    "receipt_at": "2026-09-30T23:13:46.380357+00:00",
+    "sha256": "1708ee4009c446c73eb58adce9510f96540b2ae412aa731aa7e906f1ec698c39",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/AR_meteoaero_1708ee4009c446c73eb58adce9510f96540b2ae412aa731aa7e906f1ec698c39.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "Just a moment...",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "Just a moment... Enable JavaScript and cookies to continue",
+    "station_snippets": {
+      "SAEZ": [],
+      "iframe": []
+    }
+  },
+  {
+    "tag": "ZA_aero",
+    "url": "https://aviation.weathersa.co.za/aviationold/avmobile.php",
+    "request_at": "2026-09-30T23:13:46.383968+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "MY_data",
+    "url": "https://www.met.gov.my/en/info/data-terbuka/",
+    "request_at": "2026-09-30T23:13:46.901867+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:13:48.063057+00:00",
+    "sha256": "519e136ebe465e05e077d636c4e43d9b9d88a915172f7ac5879a3a7b5b8d80fd",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/MY_data_519e136ebe465e05e077d636c4e43d9b9d88a915172f7ac5879a3a7b5b8d80fd.gz",
+    "content_type": "text/html",
+    "title": "METMalaysia - Open Data",
+    "scripts": [
+      "https://unpkg.com/feather-icons",
+      "https://www.met.gov.my/js/site.js",
+      "https://www.met.gov.my/js/lunr.js",
+      "https://www.googletagmanager.com/gtag/js?id=G-V6YZ3KD467"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "https://www.met.gov.my/en/info/data-terbuka/",
+        "method": "GET",
+        "fields": []
+      },
+      {
+        "action": "https://www.met.gov.my/en/info/data-terbuka/",
+        "method": "GET",
+        "fields": []
+      },
+      {
+        "action": "https://www.met.gov.my/en/info/data-terbuka/",
+        "method": "GET",
+        "fields": []
+      }
+    ],
+    "links": [
+      {
+        "text": "Observation",
+        "url": "https://www.met.gov.my/en/info/data-terbuka/"
+      },
+      {
+        "text": "Observation",
+        "url": "https://myclimate.met.gov.my/fdrsWmsObsMsiaMetPortal"
+      },
+      {
+        "text": "Observation",
+        "url": "https://myclimate.met.gov.my/fdrsWmsObsAseanMetPortal"
+      },
+      {
+        "text": "Synoptic",
+        "url": "https://www.met.gov.my/data/research/synoptic-climatology.pdf"
+      },
+      {
+        "text": "Ozone Layer",
+        "url": "https://www.met.gov.my/en/pendidikan/lapisan-ozon"
+      },
+      {
+        "text": "Observation",
+        "url": "https://www.met.gov.my/en/info/data-terbuka/"
+      },
+      {
+        "text": "Observation",
+        "url": "https://myclimate.met.gov.my/fdrsWmsObsMsiaMetPortal"
+      },
+      {
+        "text": "Observation",
+        "url": "https://myclimate.met.gov.my/fdrsWmsObsAseanMetPortal"
+      },
+      {
+        "text": "Synoptic",
+        "url": "https://www.met.gov.my/data/research/synoptic-climatology.pdf"
+      },
+      {
+        "text": "Ozone Layer",
+        "url": "https://www.met.gov.my/en/pendidikan/lapisan-ozon"
+      },
+      {
+        "text": "https://api.met.gov.my",
+        "url": "https://api.met.gov.my"
+      },
+      {
+        "text": "Weather Forecast and Warnings",
+        "url": "https://developer.data.gov.my/realtime-api/weather"
+      }
+    ],
+    "preview": "METMalaysia - Open Data OFFICIAL WEBSITE OF MALAYSIAN METEOROLOGICAL DEPARTMENT Talian Hotline 1-300-22-1638 F.A.Q Contact Us Complaint & Feedback Sitemap Home Corporate Profile Corporate Information Top Management Chief Digital Officer (CDO) Organization Chart Services Meteorological Offices Client Charter Policies & Roadmaps Forecast Main Forecast Country State District Town Tourist Destination Marine Forecast Waters Shipping Interactive Weather Peninsula Sabah & Sarawak Waters Shipping Aviation Weather Nowcasting Warning Criteria Continuous Rain Strong Wind & Rough Seas Thunderstorm Earthquake Observation Surface Temperature Rain Visibility Humidity Radar Malaysia Peninsula Sabah & Sarawak Nowcasting Satellite Peninsular Malaysia Sabah & Sarawak Asean Asia Atmospheric Science Suspended Particulate (TEOM PM-10/PM-2.5) Ultra Violet Index (UVI) Space Weather Acid Deposition Climate FDRS System WMS Malaysia Observation Forecast WMS Asean Observation Forecast Drought Heat Wave Status Drought Monitoring Agrometeorological Agroclimate Analysis & Review Seasonal Forecast Long Range Weathe",
+    "station_snippets": {
+      "API": [
+        "t</em> principle, MET Malaysia introduced the MET API Web Services (<a href=\"https://api.met.gov.my\" class=\"link\">https://api.met.gov.my</a>) in 2014 as a real-time data-sharing platform that is accurate, fast, and relevant. All open datasets provided through this platform are accessible for integration and reuse by the public, government agencies, and private entitie",
+        "  \n            <H5 class=\"  text-text-left \">\n    API Categories</H5>\n\n        \n        \n        \n        \n        \n        \n        \n        \n<script>\n    document.addEventListener('DOMContentLoaded', function() {\n        var main = new Splide('.slide-main', {\n            type: 'fade',\n            rewind: true,\n            pagination: false,\n            arrows: false"
+      ],
+      "observ": []
+    }
+  }
+]

@@ -1,0 +1,12 @@
+[
+  "tests/test_station_temperature_adapters.py",
+  "tests/test_fast_obs_receipt_chain.py",
+  "tests/test_current_temperature_delivery.py",
+  "tests/test_observation_reaction_chain.py",
+  "tests/test_day0_fast_obs_lane.py",
+  "tests/test_fmi_airport_temperature.py",
+  "tests/test_observation_prints_ledger.py",
+  "tests/test_noaa_wrh_settlement_product.py",
+  "tests/test_ingest_main_boot_resilience.py",
+  "tests/data/test_fusion_upgrade_trigger.py"
+]

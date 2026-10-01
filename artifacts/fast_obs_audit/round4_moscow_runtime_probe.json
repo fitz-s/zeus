@@ -1,0 +1,20 @@
+[
+  {
+    "observed_at": "2026-09-30T23:00:00+00:00",
+    "fetched_at": "2026-09-30T23:28:22.047892+00:00",
+    "value_native": 8.0,
+    "unit": "C",
+    "raw_report": {
+      "observed_at": "2026-09-30T23:00:00+00:00",
+      "payload_sha256": "76ded356fd275e72542f05e675089b8db80e07a0dcd6b9ee4ce5b6ff69d32c1a",
+      "provider_observed_at_ms": 1790809200000,
+      "provider_published_at_ms": null,
+      "provider_station": "UUWW",
+      "received_at_ms": 1790810902047,
+      "source_channel": "metaviatelecom_metar_temperature",
+      "station_id": "UUWW",
+      "unit": "C",
+      "value_native": 8.0
+    }
+  }
+]

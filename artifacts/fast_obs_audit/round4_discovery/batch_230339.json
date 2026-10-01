@@ -1,0 +1,260 @@
+[
+  {
+    "tag": "IN_root",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/",
+    "request_at": "2026-09-30T23:03:36.361400+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:03:39.600853+00:00",
+    "sha256": "2863054db56c1f03adb991a30065c39fa6eb5ad9edc15c339b3f227a04c01e5a",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_root_2863054db56c1f03adb991a30065c39fa6eb5ad9edc15c339b3f227a04c01e5a.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "",
+    "scripts": [
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery-1.7.1.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery-ui.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/json.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/rsh.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/facebox/facebox.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/printData.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/globals.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/language.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/thirdparty.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/history.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/user.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/gui.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/ctrl.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery.cookie.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery.progressbar.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery.progressbar.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/alerts.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/validate.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery.qtip-1.0.0-rc3.min.js"
+    ],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "New aerodrome warning(s) available for . View now nsWEBPIB release CVS | India Meteorological Department METEOROLOGICAL WATCH OFFICE Loading... You need to have JavaScript support to view this website, and it seems that it is disabled or not supported on your browser. Please enable JavaScript or use another browser, and try again.",
+    "station_snippets": {
+      "showOPMETQuery": []
+    }
+  },
+  {
+    "tag": "IN_query",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php?icaos=VILK&type=metar",
+    "request_at": "2026-09-30T23:03:36.361752+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:03:38.055920+00:00",
+    "sha256": "8b7e3af2038c536797c9dd81bbf10c88b57288d9473d8f747db19fb22c593ad6",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_query_8b7e3af2038c536797c9dd81bbf10c88b57288d9473d8f747db19fb22c593ad6.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "METAR/TAF query Date : 2026-09-30 Time : 22:58:40 Query: METAR: Long TAF: Short TAF:",
+    "station_snippets": {
+      "VILK": []
+    }
+  },
+  {
+    "tag": "FR_apiinfo",
+    "url": "https://www.data.gouv.fr/dataservices/api-package-observations",
+    "request_at": "2026-09-30T23:03:36.361882+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:03:37.370267+00:00",
+    "sha256": "1bda1f14a1eeb8320b255e6abc9d1eb31b2f1aa2892b3772e0188461fe861c93",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/FR_apiinfo_1bda1f14a1eeb8320b255e6abc9d1eb31b2f1aa2892b3772e0188461fe861c93.gz",
+    "content_type": "text/html;charset=utf-8",
+    "title": "API - API Package Observations | data.gouv.fr",
+    "scripts": [
+      "https://www.data.gouv.fr/_nuxt/CTFsbiS3.js"
+    ],
+    "frames": [],
+    "forms": [],
+    "links": [
+      {
+        "text": "Se connecter",
+        "url": "https://www.data.gouv.fr/login?next=/dataservices/api-package-observations"
+      },
+      {
+        "text": "S'enregistrer",
+        "url": "https://www.data.gouv.fr/register?next=/dataservices/api-package-observations"
+      },
+      {
+        "text": "API",
+        "url": "https://www.data.gouv.fr/dataservices"
+      },
+      {
+        "text": "API",
+        "url": "https://www.data.gouv.fr/dataservices"
+      },
+      {
+        "text": "Support API Météo-France",
+        "url": "mailto:contact.api@meteo.fr"
+      },
+      {
+        "text": "Demander un accès",
+        "url": "https://portail-api.meteofrance.fr/accountrecoveryendpoint/register.do"
+      },
+      {
+        "text": "https://portail-api.meteofrance.fr/web/fr/api/DonneesPubliquesPaquetObservation",
+        "url": "https://portail-api.meteofrance.fr/web/fr/api/DonneesPubliquesPaquetObservation"
+      },
+      {
+        "text": "Documentation métier",
+        "url": "https://confluence-meteofrance.atlassian.net/wiki/spaces/OpenDataMeteoFrance/pages/854851588/API+Paquet+Observations"
+      },
+      {
+        "text": "Informations",
+        "url": "https://www.data.gouv.fr/dataservices/api-package-observations"
+      },
+      {
+        "text": "Réutilisations ( 0 )",
+        "url": "https://www.data.gouv.fr/dataservices/api-package-observations/reuses"
+      },
+      {
+        "text": "Discussions ( 0 )",
+        "url": "https://www.data.gouv.fr/dataservices/api-package-observations/discussions"
+      },
+      {
+        "text": "API du portail",
+        "url": "https://guides.data.gouv.fr/api-de-data.gouv.fr/reference"
+      }
+    ],
+    "preview": "API - API Package Observations | data.gouv.fr ✨ Participez à la prochaine démo publique de data.gouv.fr ! République Française Se connecter S'enregistrer Rechercher Données API Réutilisations Organisations Nouveautés Nous écrire Accueil API API Package Observations API Package Observations Accès aux données d'observation sur plus de 2000 stations françaises (métropole et outre mer) au pas de temps 6min ou horaire, pour les 24 dernières heures. Les paquets proposés regroupent les données sur 24h par station ou par départements ; ou agrègent les données de l'ensemble des stations pour un horaire donné. Producteur Météo-France Contact Support API Météo-France (Contact) Conditions d'accès Accès Ouvert avec compte Demander un accès Caractéristiques techniques URL de base de l'API https://portail-api.meteofrance.fr/web/fr/api/DonneesPubliquesPaquetObservation Limite d'appels 100 req/min Taux de disponibilité 99.9% Documentation métier Swagger Données renvoyées Swagger Informations Réutilisations ( 0 ) Discussions ( 0 ) 5 jeux de données associés Données climatologiques de base - quotidienn",
+    "station_snippets": {
+      "compte": [
+        "itespace-nowrap\"><!----><span><!--[-->Ouvert avec compte<!--]--></span><!----></span></dd><!----><div class=\"mt-2.5\"><a href=\"https://portail-api.meteofrance.fr/accountrecoveryendpoint/register.do\" rel=\"noopener noreferrer\" target=\"_blank\" class=\"inline-flex items-center justify-center font-marianne font-medium border !bg-none !no-underline after:content-none outline-",
+        ",guidesCreateAccount:\"https://guides.data.gouv.fr/compte-utilisateur/creer-un-compte-utilisateur\",guidesHarvestingUrl:\"https://guides.data.gouv.fr/moissonnage\",guidesLabelsUrl:\"\",guidesCommunityResources:\"https://guides.data.gouv.fr/jeux-de-donnees/ressource-communautaire\",supportUrl:\"https://support.data.gouv.fr/\",catalogUrl:\"https://guides.data.gouv.fr/autres-ressou"
+      ],
+      "gratuit": []
+    }
+  },
+  {
+    "tag": "NL_nrt",
+    "url": "https://www.knmi.nl/nederland-nu/weer/waarnemingen",
+    "request_at": "2026-09-30T23:03:36.362009+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:03:37.063465+00:00",
+    "sha256": "7906042163a69d00619a5b2742a2cdffa25b36f15302d442cf723c26a58f9ff3",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/NL_nrt_7906042163a69d00619a5b2742a2cdffa25b36f15302d442cf723c26a58f9ff3.gz",
+    "content_type": "text/html; charset=utf-8",
+    "title": "KNMI - Weer - Waarnemingen",
+    "scripts": [
+      "https://www.knmi.nl/assets/application-6a04d7793de7eadd33c25ec70ef546324bda6ac6178a211fe356f8228a1a8428.js"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "https://www.knmi.nl/zoeken",
+        "method": "GET",
+        "fields": [
+          {
+            "name": "context",
+            "value": "/zoeken",
+            "type": "radio"
+          },
+          {
+            "name": "context",
+            "value": "/kennis-en-datacentrum/zoekresultaten",
+            "type": "radio"
+          },
+          {
+            "name": "q",
+            "value": null,
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "links": [],
+    "preview": "KNMI - Weer - Waarnemingen Naar de hoofd content English Home Nederland nu Weer Seismologie Maritiem Luchtvaart Klimatologie Caribisch Nederland Klimaat Producten & diensten Kennis & uitleg Research Over het KNMI Over het KNMI Bestuur Kerntaken Internationaal Werken bij Nieuws Agenda Pers Contact Zoek binnen de site binnen de hele site binnen het kennis- & datacentrum Trefwoord Zoek Menu Weer Seismologie Maritiem Luchtvaart Klimatologie Caribisch Nederland Sluiten Home Nederland nu Weer Waarnemingen Waarnemingen Bekijk weersverwachting Bekijk waarschuwingen Temperatuur (°C) Windsnelheid (m/s) Windkracht (bft) Windstoten (km/uur) Zicht (m) Relatieve vochtigheid (%) Actuele waarnemingen Om een weersverwachting te kunnen opstellen en het klimaat te monitoren, verzamelen meteorologen over de hele wereld waarnemingen en metingen. Het KNMI beheert in Nederland automatische weerstations die continu de windrichting en –sterkte, de temperatuur, de relatieve vochtigheid, de neerslag, de globale straling van de zon, zicht en luchtdruk meten, evenals neerslagsoort en weertype. Actuele metingen v",
+    "station_snippets": {
+      "Schiphol": [
+        "\t\t\t\t\t\t\t\t</tr>\n\t\t\t\t\t\t\t\t<tr>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">Schiphol</td>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">af en toe lichte regen</td>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">19.3</td>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">3 (18.4)</td>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">92</td>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">ZO 2</td>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">2.51</td>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">13</td>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">31000</td>\n\t\t\t\t\t\t\t\t\t\t<td class=\"\">"
+      ]
+    }
+  },
+  {
+    "tag": "ES_access",
+    "url": "https://opendata.aemet.es/centrodedescargas/altaUsuario?",
+    "request_at": "2026-09-30T23:03:37.097818+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:03:37.513186+00:00",
+    "sha256": "bbc9843fdcf2f1b886e73d180ca391fdbc37804678c57b36769c62323a08d792",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/ES_access_bbc9843fdcf2f1b886e73d180ca391fdbc37804678c57b36769c62323a08d792.gz",
+    "content_type": "text/html;charset=ISO-8859-15",
+    "title": "Aemet OpenData",
+    "scripts": [
+      "https://opendata.aemet.es/centrodedescargas/ruxitagentjs_ICA7NVfqrux_10345260810170330.js",
+      "https://opendata.aemet.es/centrodedescargas/js/jquery-1.12.3.min.js",
+      "https://opendata.aemet.es/centrodedescargas/js/bootstrap.min.js",
+      "https://opendata.aemet.es/centrodedescargas/js/bootstrap-select.min.js",
+      "https://opendata.aemet.es/centrodedescargas/media/js/jquery.dataTables.min.js",
+      "https://opendata.aemet.es/centrodedescargas/media/js/dataTables.bootstrap.min.js",
+      "https://opendata.aemet.es/centrodedescargas/js/bootstrap-datetimepicker.js",
+      "https://www.google.com/recaptcha/api.js"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "https://opendata.aemet.es/centrodedescargas/altaUsuario?",
+        "method": "post",
+        "fields": [
+          {
+            "name": "email",
+            "value": null,
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "links": [],
+    "preview": "Aemet OpenData Obtención API Key Email: Comprobación: Enviar Volver © Aemet. Autorizado el uso de la información y su reproducción citando a Aemet como autora de la misma.  \n\t\t\t\t\t\t| Nota legal Contactar",
+    "station_snippets": {
+      "correo": [
+        "= \"\"){\n    \t\t// Expresion regular para validar el correo\n    \t    var regex = /[\\w-\\.]{2,}@([\\w-]{2,}\\.)*([\\w-]{2,}\\.)[\\w-]{2,4}/;\n\n    \t    // Se utiliza la funcion test() nativa de JavaScript\n    \t    if (!regex.test($('#email').val().trim())) {\t    \t        \n    \t        alert('La dirección de correo no es valida');\t\n    \t        return false;\n    \t    }\n    \t    \n",
+        "    \t        \n    \t        alert('La dirección de correo no es valida');\t\n    \t        return false;\n    \t    }\n    \t    \n    \t}\n    \t\n    \tif(grecaptcha.getResponse().length == 0){\n            alert(\"Por favor, haga click en el reCAPTCHA\");\n            return false;\n        }\n    \n    \t\t    \t\t\n\t\t$( \"#loginForm\" ).attr(\"action\",\"obtencionAPIKey\");\n\t\t$( \"#loginForm\" )."
+      ]
+    }
+  },
+  {
+    "tag": "GB_free",
+    "url": "https://datahub.metoffice.gov.uk/pricing/observations",
+    "request_at": "2026-09-30T23:03:37.387750+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:03:37.863669+00:00",
+    "sha256": "cea69bae355970e2636e4cd5f0af2166781fdde2dde138d019511d1dd98550a4",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/GB_free_cea69bae355970e2636e4cd5f0af2166781fdde2dde138d019511d1dd98550a4.gz",
+    "content_type": "text/html;charset=UTF-8",
+    "title": "Weather DataHub | Observations pricing",
+    "scripts": [
+      "https://datahub.metoffice.gov.uk/js/main-b36b0c9f8c46c45a69800b336485d680.js"
+    ],
+    "frames": [
+      "https://www.googletagmanager.com/ns.html?id=GTM-5D5BWPNW"
+    ],
+    "forms": [],
+    "links": [
+      {
+        "text": "Login/Register",
+        "url": "https://datahub.metoffice.gov.uk/profile/subscriptions"
+      },
+      {
+        "text": "Observations",
+        "url": "https://datahub.metoffice.gov.uk/pricing/observations"
+      },
+      {
+        "text": "Register",
+        "url": "https://datahub.metoffice.gov.uk/profile/subscriptions"
+      }
+    ],
+    "preview": "Weather DataHub | Observations pricing Skip to main content Copied to clipboard Close lightbox Lightbox title GRIB2 Code GRIB2 Code value Unit Unit value Time steps Hourly 3 Hourly 6 Hourly Daily Time interpretation Time interpretation value Bits per value The bitsPerValue determines the relative size of the data download required for each\n                                            parameter. The bitsPerValue ranges from 1 to 20 bits for our current parameters. Note the data download size is not a direct multiplier of the bitsPerValue as there are\n                                            standard overheads within the generated GRIB files which are common for all parameters.\n                                            However, the bitsPerValue is a good guide to the relative cost of each parameter. The bits per value may differ across level types. BitsPerValue value Bits per value The bitsPerValue determines the relative size of the data download required for each\n                                            parameter. The bitsPerValue ranges from 1 to 20 bits for our current param",
+    "station_snippets": {
+      "Free": [
+        " id=\"land-obs\">Land Observations</h1>\n        <h3>Free plan</h3>\n        <p>Up to 360 calls per day.</p>\n        <h3 class=\"margin-bottom-6\">Monthly subscription</h3>\n        <div class=\"flex-container margin-bottom-3\">\n            <div class=\"scroll-pane\">\n                <table class=\"table text-align-left styled-table pale-green-striped-table\">\n                    "
+      ]
+    }
+  }
+]

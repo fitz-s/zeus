@@ -1,0 +1,62 @@
+{
+  "base": "6824cbc06d37340964e286a66b56e0eb45e0786a",
+  "source_revision": "c45e04c77c2783200b06f186053a1fbc2f983e03",
+  "suite_results": {
+    "round4_resume_validation": {
+      "tests": 436,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "passed": 435,
+      "seconds": 17.225
+    },
+    "round4_final_validation": {
+      "tests": 1060,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "passed": 1059,
+      "seconds": 67.589
+    },
+    "round4_final_proof_validation": {
+      "tests": 110,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "passed": 109,
+      "seconds": 8.472
+    }
+  },
+  "baseline_comparison": "Operator supplied 1041 passed / one optional skip at 921b12db1; no unrelated baseline debt changed in Round4. This round executed the same 15 changed modules with added adapter assertions.",
+  "source_comparisons": {
+    "city_count": 54,
+    "city_channel_rows": 111,
+    "exact_time_pairs": 2367,
+    "exact_matches": 2341,
+    "availability_brackets": 503
+  },
+  "production_side_effects": {
+    "database_writes": false,
+    "deployments": false,
+    "forbidden_branch_pushes": false
+  },
+  "coverage_boundary": "Reference/redistributor evidence and access decisions cover all cities; not all domestic origins yielded exact station pairs or finite first-availability intervals. HKO comparison is of spot products, not final daily settlement.",
+  "security_boundary": "Moscow public origin is plaintext HTTP; checksum evidence does not authenticate transit.",
+  "paths": [
+    "tests/data/test_fusion_upgrade_trigger.py",
+    "tests/test_current_temperature_delivery.py",
+    "tests/test_day0_fast_obs_lane.py",
+    "tests/test_exit_safety.py",
+    "tests/test_fast_obs_receipt_chain.py",
+    "tests/test_fmi_airport_temperature.py",
+    "tests/test_noaa_wrh_settlement_product.py",
+    "tests/test_observation_prints_ledger.py",
+    "tests/test_observation_reaction_chain.py",
+    "tests/test_order_truth_reducer.py",
+    "tests/test_replacement_forecast_materializer.py",
+    "tests/test_review_work_delivery.py",
+    "tests/test_settlement_fallback_hierarchy.py",
+    "tests/test_station_temperature_adapters.py",
+    "tests/test_warm_materializer.py"
+  ]
+}

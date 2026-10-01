@@ -1,0 +1,430 @@
+[
+  {
+    "tag": "ES_hourly",
+    "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09",
+    "request_at": "2026-09-30T22:55:26.992009+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T22:55:27.474401+00:00",
+    "sha256": "39708e0264aa74f1865eb8f2a2832e41a995b7e22cda801f32a5f556e5097505",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/ES_hourly_39708e0264aa74f1865eb8f2a2832e41a995b7e22cda801f32a5f556e5097505.gz",
+    "content_type": "text/html;charset=ISO-8859-15",
+    "title": "Hoy y últimos días: Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España",
+    "scripts": [
+      "https://www.aemet.es/ruxitagentjs_ICA7NVfqrux_10345260810170330.js",
+      "https://www.aemet.es/js/jquery.min.js",
+      "https://www.aemet.es/js/jquery.cookie.js",
+      "https://www.aemet.es/js/owl-carousel/owl.carousel.min.js",
+      "https://www.aemet.es/js/wow/wow.min.js",
+      "https://www.aemet.es/js/doubletaptogo.min.js",
+      "https://www.aemet.es/js/comun/semaforo-cabecera.js"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "https://www.aemet.es/es/buscador",
+        "method": "get",
+        "fields": [
+          {
+            "name": "str",
+            "value": "Introduzca texto",
+            "type": null
+          },
+          {
+            "name": "modo",
+            "value": "and",
+            "type": "hidden"
+          },
+          {
+            "name": "orden",
+            "value": "n",
+            "type": "hidden"
+          },
+          {
+            "name": "tipo",
+            "value": "sta",
+            "type": "hidden"
+          },
+          {
+            "name": null,
+            "value": " ",
+            "type": "submit"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "text": "es",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "ca",
+        "url": "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "gl",
+        "url": "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "va",
+        "url": "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "eu",
+        "url": "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "en",
+        "url": "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "fr",
+        "url": "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "Bienvenido",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "Benvinguts",
+        "url": "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "Benvidos",
+        "url": "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "Benvinguts",
+        "url": "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "Ongi etorri",
+        "url": "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "Welcome",
+        "url": "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "Bienvenue",
+        "url": "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09"
+      },
+      {
+        "text": "Observación",
+        "url": "https://www.aemet.es/es/eltiempo/observacion"
+      },
+      {
+        "text": "Hoy y últimos días",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos"
+      },
+      {
+        "text": "SINOBAS",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/sinobas"
+      },
+      {
+        "text": "Radar",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/radar"
+      },
+      {
+        "text": "Satélites",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/satelite/infra"
+      },
+      {
+        "text": "Rayos",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/rayos"
+      },
+      {
+        "text": "Radiación y ozono",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/radiacion/radiacion"
+      },
+      {
+        "text": "Contaminación de fondo",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/contaminacionfondo"
+      },
+      {
+        "text": "Campañas Antárticas",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/camp_antarticas"
+      },
+      {
+        "text": "Tiempo espacial",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/tiempo_espacial"
+      },
+      {
+        "text": "Observación",
+        "url": "https://www.aemet.es/es/idi/observacion"
+      },
+      {
+        "text": "El Observador",
+        "url": "https://www.aemet.es/es/conocermas/recursos_en_linea/elobservador"
+      }
+    ],
+    "preview": "Hoy y últimos días: Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España Aceptar cookies Información sobre uso de cookies Este sitio web utiliza cookies propias y de terceros para mejorar la experiencia de navegación, y ofrecer contenidos y funcionalidades de interés. Para más información sobre las cookies utilizadas consulta nuestra política de cookies Agencia Estatal de Meteorología C - Ir a contenido 0 - Accesibilidad web 1 - Inicio 2 - Mapa web 3 - Ayuda web 4 - Contactar - Atención al ciudadano 5 - Municipios 6 - Avisos es es ca gl va eu en fr Bienvenido Bienvenido Benvinguts Benvidos Benvinguts Ongi etorri Welcome Bienvenue Buscador oculto Menú El tiempo Observación Hoy y últimos días SINOBAS Radar Satélites Rayos Radiación y ozono Contaminación de fondo Campañas Antárticas Tiempo espacial Predicción Avisos Municipios Playas Montaña CC. AA. España Ciudades del mundo Marítima Aeronáutica Mapas con frentes Temperaturas máx/mín Modelos numéricos Mapas probabilísticos Radiación ultravioleta Composición química de la atmósfera Incendios MeteoRuta Intrusion",
+    "station_snippets": {
+      "3129": [
+        "imosdatos?datos=det&amp;f=humedad&amp;k=mad&amp;l=3129&amp;w=0&amp;x=h09\" />\r\n<link rel=\"canonical\" href=\"https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&amp;f=humedad&amp;k=mad&amp;l=3129&amp;w=0&amp;x=h09\" />\r\n<link rel=\"help\" href=\"/es/ayuda\" />\r\n<link rel=\"copyright\" href=\"/es/nota_legal\" />\r\n<link rel=\"shortcut icon\" type=\"image/ico\" href=\"/fa",
+        "imosdatos?datos=det&amp;f=humedad&amp;k=mad&amp;l=3129&amp;w=0&amp;x=h09\" />\r\n<link rel=\"help\" href=\"/es/ayuda\" />\r\n<link rel=\"copyright\" href=\"/es/nota_legal\" />\r\n<link rel=\"shortcut icon\" type=\"image/ico\" href=\"/favicon.ico\" />\r\n<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\"/>\r\n<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon-precomposed.png\"/>\r\n<link"
+      ]
+    }
+  },
+  {
+    "tag": "NL_xml",
+    "url": "https://cdn.knmi.nl/knmi/map/page/weer/actueel-weer/actueel_weer.xml",
+    "request_at": "2026-09-30T22:55:26.992391+00:00",
+    "status": 403,
+    "receipt_at": "2026-09-30T22:55:27.702121+00:00",
+    "sha256": "a824bc7739e226e1b40ea0f8c4e4f4c6f796fc3b4abfa6e9abe3bd119a30d938",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/NL_xml_a824bc7739e226e1b40ea0f8c4e4f4c6f796fc3b4abfa6e9abe3bd119a30d938.gz",
+    "content_type": "application/xml",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "AccessDenied Access Denied",
+    "station_snippets": {
+      "Schiphol": [],
+      "06240": []
+    }
+  },
+  {
+    "tag": "NL_keys",
+    "url": "https://developer.dataplatform.knmi.nl/open-data-api",
+    "request_at": "2026-09-30T22:55:26.992548+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:55:27.871213+00:00",
+    "sha256": "d99e5fddc0a1b279da13cdf288d7c96364ac46e6eede76f88a46bb6275eda237",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/NL_keys_d99e5fddc0a1b279da13cdf288d7c96364ac46e6eede76f88a46bb6275eda237.gz",
+    "content_type": "text/html; charset=utf-8",
+    "title": "Open Data API",
+    "scripts": [
+      "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.1.2/highlight.min.js",
+      "https://developer.dataplatform.knmi.nl/custom/portal_settings.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/jquery-3.5.1.min.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/jquery-migrate-3.3.2.min.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/jquery.twbsPagination.min.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/bootstrap.min.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/ie10-viewport-bug-workaround.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/key-request-flow.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/selectable-list.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/dynamic-inputs.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/copy-to-clipboard.js",
+      "https://developer.dataplatform.knmi.nl/portal-assets/js/custom.js",
+      "https://developer.dataplatform.knmi.nl/custom/custom.js"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "https://tyk-cdn.dataplatform.knmi.nl/open-data/index.html",
+        "method": "GET",
+        "fields": []
+      }
+    ],
+    "links": [
+      {
+        "text": "Open Data API",
+        "url": "https://developer.dataplatform.knmi.nl/open-data-api"
+      },
+      {
+        "text": "Dataset Content API",
+        "url": "https://developer.dataplatform.knmi.nl/dataset-content-api"
+      },
+      {
+        "text": "EDR API",
+        "url": "https://developer.dataplatform.knmi.nl/edr-api"
+      },
+      {
+        "text": "WMS API",
+        "url": "https://developer.dataplatform.knmi.nl/wms"
+      },
+      {
+        "text": "API Catalogue",
+        "url": "https://developer.dataplatform.knmi.nl/apis/"
+      },
+      {
+        "text": "Register",
+        "url": "https://developer.dataplatform.knmi.nl/register/"
+      }
+    ],
+    "preview": "Open Data API Toggle navigation Tyk Developer Portal News FAQ Open Data API Notification Service Dataset Content API EDR API WMS API API Catalogue Register Login Open Data API Welcome to the KNMI Data Platform (KDP) Open Data API. This guide will walk you through the functionalities of our API, how to use it effectively, and provide you with practical examples to get you started. Each dataset available in the Open Data API consists of files. The Open Data API is a file-based API that allows users to list and query across files in datasets and create download links for a file in a dataset. The available datasets can be found on the KNMI Data Platform .\nAll endpoints are protected and can be accessed using a valid API key, passed in the Authorization header of the HTTP request. IMPORTANT NOTE : The fastest way to get new files as soon as they are available is to use the Notification Service .\nYou will receive a message for every new file, which will have the Open Data API URL you can use to download it.\nWe consider excessive polling of the Open Data API to check for new files as abuse ",
+    "station_snippets": {}
+  },
+  {
+    "tag": "BR_old",
+    "url": "https://redemet.decea.mil.br/api/consulta_automatica/index.php?local=sbgr&msg=metar",
+    "request_at": "2026-09-30T22:55:26.992722+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:55:28.353856+00:00",
+    "sha256": "313cdd97e4009f7142fb535023911c8e1bcf5a9600fe4045a9a68c965d3195c4",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/BR_old_313cdd97e4009f7142fb535023911c8e1bcf5a9600fe4045a9a68c965d3195c4.gz",
+    "content_type": "application/octet-stream, text/plain",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "https://ajuda.decea.mil.br/base-de-conhecimento/api-redemet-o-que-e/",
+    "station_snippets": {
+      "SBGR": []
+    }
+  },
+  {
+    "tag": "ID_free",
+    "url": "https://web-aviation.bmkg.go.id/web/metar_speci.php",
+    "request_at": "2026-09-30T22:55:27.505982+00:00",
+    "status": 403,
+    "receipt_at": "2026-09-30T22:55:27.634851+00:00",
+    "sha256": "aa980112e01a98c2f1011e7d5c50046e73792daa1861bc1b6a57674b1674abec",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/ID_free_aa980112e01a98c2f1011e7d5c50046e73792daa1861bc1b6a57674b1674abec.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "Just a moment...",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "Just a moment... Enable JavaScript and cookies to continue",
+    "station_snippets": {
+      "WIHH": []
+    }
+  },
+  {
+    "tag": "TR_result",
+    "url": "https://rasat.mgm.gov.tr/result?hours=24&obsType=1&stations=LTAC&stations=LTFM",
+    "request_at": "2026-09-30T22:55:27.636304+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:55:30.122557+00:00",
+    "sha256": "f0a52ac2f71217f7764efb0b5ee904144eb414f80c7ac3be0a49da9b23123beb",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/TR_result_f0a52ac2f71217f7764efb0b5ee904144eb414f80c7ac3be0a49da9b23123beb.gz",
+    "content_type": "text/html; charset=utf-8",
+    "title": "Hezarfen Rasat Görüntüleme",
+    "scripts": [
+      "https://rasat.mgm.gov.tr/_next/static/chunks/polyfills-5cd94c89d3acac5f.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/webpack-043901969ab14c5d.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/framework-3ccec772d1fa8b6b.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/main-404bdd3acbdd01ab.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/pages/_app-73d623a1dda1fb8f.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/8710b798-379c90188a0c6886.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/cb1608f2-55bdc91dba3d0168.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/468-8a96365eb755255c.js",
+      "https://rasat.mgm.gov.tr/_next/static/chunks/pages/result-a8e9900981a7bb1f.js",
+      "https://rasat.mgm.gov.tr/_next/static/T8mkW-IVCJLnn0LMMsebO/_buildManifest.js",
+      "https://rasat.mgm.gov.tr/_next/static/T8mkW-IVCJLnn0LMMsebO/_ssgManifest.js",
+      "https://rasat.mgm.gov.tr/_next/static/T8mkW-IVCJLnn0LMMsebO/_middlewareManifest.js"
+    ],
+    "frames": [],
+    "forms": [],
+    "links": [
+      {
+        "text": "HEZARFEN Rasat",
+        "url": "https://rasat.mgm.gov.tr/result"
+      }
+    ],
+    "preview": "Hezarfen Rasat Görüntüleme Favori istasyonlar S.S.S. HEZARFEN Rasat Decoder Favorilerim İstasyonlar LTAC LTFM Periyot Son 24 Saat Metar - Speci Taf Sinoptik Sigmet Gamet Temizle Getir LTAC, LTFM için rasatlar listelenmektedir. Favorilerime Ekle LTAC ESENBOğA MEYDAN METAR 302220 METAR LTAC 302220Z 05009KT 9999 SCT035 BKN100 11/07 Q1021 NOSIG RMK RWY21C 05009KT RWY03L 04009KT RWY21R 03009KT RWY03R 05012KT RWY21L 06009KT 302150 METAR LTAC 302150Z 06011KT 9999 SCT030 BKN100 12/07 Q1021 NOSIG RMK RWY21C 04008KT RWY03L 04008KT RWY21R 03008KT RWY03R 06011KT RWY21L 08010KT 302120 METAR LTAC 302120Z 07009KT 040V100 9999 SCT030 BKN100 12/07 Q1021 NOSIG RMK RWY21C 08007KT RWY03L 07008KT RWY21R 07008KT RWY03R 06010KT RWY21L 07012KT 302050 METAR LTAC 302050Z 05008KT 9999 SCT030 BKN100 12/08 Q1022 NOSIG RMK RWY21C 05009KT RWY03L 05007KT RWY21R 03009KT RWY03R 04010KT 010V070 RWY21L 04006KT 010V070 302020 METAR LTAC 302020Z 05009KT 9999 SCT030 BKN100 12/09 Q1022 NOSIG RMK RWY21C 04008KT RWY03L 04010KT RWY21R 02008KT RWY03R 03008KT RWY21L 03007KT 301950 METAR LTAC 301950Z 04010KT 9999 SCT025 BKN100 1",
+    "station_snippets": {
+      "LTAC": [
+        "=\"css-1rhbuit-multiValue\"><div class=\"css-593qxg\">LTAC</div><div role=\"button\" class=\"css-xb97g8\" aria-label=\"Remove LTAC\"><style data-emotion=\"css 8mmkcg\">.css-8mmkcg{display:inline-block;fill:currentColor;line-height:1;stroke:currentColor;stroke-width:0;}</style><svg height=\"14\" width=\"14\" viewBox=\"0 0 20 20\" aria-hidden=\"true\" focusable=\"false\" class=\"css-8mmkcg\"><",
+        "le=\"button\" class=\"css-xb97g8\" aria-label=\"Remove LTAC\"><style data-emotion=\"css 8mmkcg\">.css-8mmkcg{display:inline-block;fill:currentColor;line-height:1;stroke:currentColor;stroke-width:0;}</style><svg height=\"14\" width=\"14\" viewBox=\"0 0 20 20\" aria-hidden=\"true\" focusable=\"false\" class=\"css-8mmkcg\"><path d=\"M14.348 14.849c-0.469 0.469-1.229 0.469-1.697 0l-2.651-3.03"
+      ],
+      "LTFM": [
+        "=\"css-1rhbuit-multiValue\"><div class=\"css-593qxg\">LTFM</div><div role=\"button\" class=\"css-xb97g8\" aria-label=\"Remove LTFM\"><svg height=\"14\" width=\"14\" viewBox=\"0 0 20 20\" aria-hidden=\"true\" focusable=\"false\" class=\"css-8mmkcg\"><path d=\"M14.348 14.849c-0.469 0.469-1.229 0.469-1.697 0l-2.651-3.030-2.651 3.029c-0.469 0.469-1.229 0.469-1.697 0-0.469-0.469-0.469-1.229 0-1.",
+        "le=\"button\" class=\"css-xb97g8\" aria-label=\"Remove LTFM\"><svg height=\"14\" width=\"14\" viewBox=\"0 0 20 20\" aria-hidden=\"true\" focusable=\"false\" class=\"css-8mmkcg\"><path d=\"M14.348 14.849c-0.469 0.469-1.229 0.469-1.697 0l-2.651-3.030-2.651 3.029c-0.469 0.469-1.229 0.469-1.697 0-0.469-0.469-0.469-1.229 0-1.697l2.758-3.15-2.759-3.152c-0.469-0.469-0.469-1.228 0-1.697s1.228-0"
+      ]
+    }
+  },
+  {
+    "tag": "IT_metar",
+    "url": "https://www.meteoam.it/it/metar-taf",
+    "request_at": "2026-09-30T22:55:27.703142+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:55:28.707562+00:00",
+    "sha256": "dbf95ac0d030f39ba503e131df21ac363061c3a7296985f71fbc6596bdcd08f7",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IT_metar_dbf95ac0d030f39ba503e131df21ac363061c3a7296985f71fbc6596bdcd08f7.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "Bolletini di Meteorologia Aeronautica Metar e Taf | Meteo Aeronautica Militare",
+    "scripts": [
+      "https://embeds.iubenda.com/widgets/71968a5a-2228-4929-a9f8-d5f53296e11c.js",
+      "https://www-static.meteoam.it/675/AMwebcomponents.bundle.js",
+      "https://www-static.meteoam.it/675/AMcustomJS.bundle.js"
+    ],
+    "frames": [],
+    "forms": [],
+    "links": [
+      {
+        "text": "Metar e Taf",
+        "url": "https://www.meteoam.it/it/metar-taf"
+      },
+      {
+        "text": "Metar e Taf",
+        "url": "https://www.meteoam.it/it/metar-taf"
+      }
+    ],
+    "preview": "Bolletini di Meteorologia Aeronautica Metar e Taf | Meteo Aeronautica Militare You need to enable JavaScript to run this app. Nella pagina è possibile ricercare i bollettini di Meteorologia Aeronautica METAR e TAF emessi dalle stazioni meteorologiche di tutto il mondo. Le stazioni sono identificate da un codice loro assegnato dall’International Civil Aviation Organization (ICAO). La ricerca può avvenire con l’utilizzo del codice, se noto, oppure selezionando l’area geografica di interesse, tuttavia, per difformità di orario di apertura o di attività presente nei diversi siti cui è assegnato un codice, non tutti i bollettini sono sempre disponili. Il bollettino di osservazione METAR (Meteorological Aerodrome Report), espresso in codice aeronautico, indica i principali parametri meteorologici osservati dalle stazioni meteorologiche quali copertura nuvolosa, vento, pressione, temperatura e umidità. Il bollettino è aggiornato con frequenza oraria o semioraria. Il TAF (Terminal Aerodrome Forecast) è una previsione puntuale di aeroporto, espressa anch’essa in codice aeronautico e finalizza",
+    "station_snippets": {
+      "LIMC": []
+    }
+  },
+  {
+    "tag": "TW_free",
+    "url": "https://aoaws.anws.gov.tw/?index=2&lang=tw&voice_alarm=0",
+    "request_at": "2026-09-30T22:55:27.882600+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "RU_display",
+    "url": "http://display.meteocenter.ru/",
+    "request_at": "2026-09-30T22:55:28.354306+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:55:29.340004+00:00",
+    "sha256": "78fa79d2679c51ce4e5d2930dda57ca47e1076f7a29f3d86e4c8ab3d40c4a59e",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/RU_display_78fa79d2679c51ce4e5d2930dda57ca47e1076f7a29f3d86e4c8ab3d40c4a59e.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "Метавиа дисплей - погода в аэропортах",
+    "scripts": [
+      "http://display.meteocenter.ru/js/preloader.js?id=a8851ea544511be81e78",
+      "http://display.meteocenter.ru/js/libs/offline.min.js",
+      "http://display.meteocenter.ru/js/main.js?id=02f266c45bed446b423f"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "http://display.meteocenter.ru/",
+        "method": "GET",
+        "fields": [
+          {
+            "name": null,
+            "value": null,
+            "type": null
+          }
+        ]
+      }
+    ],
+    "links": [],
+    "preview": "Метавиа дисплей - погода в аэропортах ФГБУ Авиаметтелеком Росгидромета ФГБУ Авиаметтелеком Росгидромета Абакан Айхал Алдан Амдерма Анадырь (Угольный) Анапа (Витязево) Андрюшкино Архангельск (Васьково) Архангельск (Талаги) Астрахань Аян (Мунук) Байкит Барнаул Батагай Бегишево Белая Гора Белгород Белоярский Березово Беринговский Благовещенск (Игнатьево) Бованенково Бодайбо Братск Бугульма Бугуруслан (Главный) Бухта Провидения Ванавара Варандей Великий Устюг Верхневилюйск Владивосток (Кневичи) Владикавказ (Беслан) Владимир (Семязино) Волгоград (Гумрак) Вологда Воркута Воронеж (Придача) Воронеж (Чертовицкое) Вуктыл Геленджик Горно-Алтайск Грозный Депутатский Диксон (Остров) Екатеринбург (Кольцово) Жуковский (Раменское) Залив Лаврентия Зырянка Иваново (Южный) Игарка Ижевск Иркутск Итуруп Йошкар-Ола Казань (Сокол) Калининград (Храброво) Калуга (Грабцево) Кемерово Кепервеем Киренск Киров (Победилово) Кировск (Апатиты) Когалым Комсомольск-н-А (Дземги) Комсомольск-н-А (Хурба) Кондинское (heliport) Кострома (Сокеркино) Котлас Краснодар (Пашковский) Красноярск (Емельяново) Красноярск (Черемшанк",
+    "station_snippets": {
+      "UUWW": [
+        "неральные Воды</a> </span> </li>   <li data-icao=\"UUWW\" id=\"airport_219\" class=\"\"> <span> <a href=\"/219\"> Москва (Внуково)</a> </span> </li>   <li data-icao=\"UUDD\" id=\"airport_208\" class=\"\"> <span> <a href=\"/208\"> Москва (Домодедово)</a> </span> </li>   <li data-icao=\"UUMO\" id=\"airport_211\" class=\"\"> <span> <a href=\"/211\"> Москва (Остафьево)</a> </span> </li>   <li da"
+      ]
+    }
+  },
+  {
+    "tag": "FI_queries",
+    "url": "https://opendata.fmi.fi/wfs?request=ListStoredQueries&service=WFS&version=2.0.0",
+    "request_at": "2026-09-30T22:55:28.680606+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:55:29.362395+00:00",
+    "sha256": "6f435e81ab689c2ddcdc2f5d9c181d5d9a105426d71fecb6a0b7575ac8a9c140",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/FI_queries_6f435e81ab689c2ddcdc2f5d9c181d5d9a105426d71fecb6a0b7575ac8a9c140.gz",
+    "content_type": "text/xml; charset=UTF-8",
+    "title": "ECMWF Pressure Grid",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "ECMWF Pressure Grid wfstype:GridSeriesObservation ECMWF weather forecast for cities in Finland as multipointcoverage wfstype:GridSeriesObservation ECMWF weather forecast for cities in Finland as simple features wfstype:BsWfsElement ECMWF weather forecast for cities in Finland as time value pairs wfstype:PointTimeSeriesObservation ECMWF surface level weather forecast for Finland as a grid. wfstype:GridSeriesObservation ECMWF Surface Grid wfstype:GridSeriesObservation ECMWF weather forecast for observation stations as multipointcoverage. wfstype:GridSeriesObservation ECMWF weather forecast for observation stations as simple feature. wfstype:BsWfsElement ECMWF weather forecast for observation stations as time value pairs. wfstype:PointTimeSeriesObservation ECMWF Point Weather Forecast as multipointcoverage wfstype:GridSeriesObservation ECMWF Point Weather Forecast as simple features wfstype:BsWfsElement ECMWF Point Weather Forecast as time value pairs wfstype:PointTimeSeriesObservation Environmental Monitoring Networks wfstype:EnvironmentalMonitoringNetwork Environmental Monitoring Stat",
+    "station_snippets": {
+      "avi": [
+        "dQuery id=\"fmi::forecast::edited::weather::scandinavia::grid\">\n    <Title>Edited Scandinavia Weather Forecast Grid</Title>\n    <ReturnFeatureType xmlns:wfstype=\"http://inspire.ec.europa.eu/schemas/omso/3.0\"  xsi:schemaLocation=\"http://inspire.ec.europa.eu/schemas/omso/3.0 https://inspire.ec.europa.eu/schemas/omso/3.0/SpecialisedObservations.xsd\">wfstype:GridSeriesObse",
+        "her::scandinavia::grid\">\n    <Title>Edited Scandinavia Weather Forecast Grid</Title>\n    <ReturnFeatureType xmlns:wfstype=\"http://inspire.ec.europa.eu/schemas/omso/3.0\"  xsi:schemaLocation=\"http://inspire.ec.europa.eu/schemas/omso/3.0 https://inspire.ec.europa.eu/schemas/omso/3.0/SpecialisedObservations.xsd\">wfstype:GridSeriesObservation</ReturnFeatureType>\n  </Stored"
+      ]
+    }
+  }
+]

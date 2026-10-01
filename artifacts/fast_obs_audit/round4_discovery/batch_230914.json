@@ -1,0 +1,102 @@
+[
+  {
+    "tag": "ES_maps",
+    "url": "https://www.aemet.es/js/maps/maps.js",
+    "request_at": "2026-09-30T23:09:11.008751+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:09:11.174082+00:00",
+    "sha256": "5407150882654a7d89629a69373c0ffd11d42c13b7f689b7959c5db2ddd388d4",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/ES_maps_5407150882654a7d89629a69373c0ffd11d42c13b7f689b7959c5db2ddd388d4.gz",
+    "content_type": "application/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [
+      {
+        "text": "'+b[\"ultimos.literal.exportar_csv\"]+\"",
+        "url": "https://www.aemet.es/js/maps/maps.js#"
+      }
+    ],
+    "preview": "var $jscomp=$jscomp||{};$jscomp.scope={};$jscomp.arrayIteratorImpl=function(b){var d=0;return function(){return d =g}},\"es6\",\"es3\");$jscomp.findInternal=function(b,d,e){b instanceof String&&(b=String(b));for(var f=b.length,g=0;g =m}},\"es6\",\"es3\");$jscomp.owns=function(b,d){return Object.prototype.hasOwnProperty.call(b,d)};\n$jscomp.polyfill(\"Object.values\",function(b){return b?b:function(b){var d=[],f;for(f in b)$jscomp.owns(b,f)&&d.push(b[f]);return d}},\"es8\",\"es3\");$jscomp.checkEs6ConformanceViaProxy=function(){try{var b={},d=Object.create(new $jscomp.global.Proxy(b,{get:function(e,f,g){return e==b&&\"q\"==f&&g==d}}));return!0===d.q}catch(e){return!1}};$jscomp.USE_PROXY_FOR_ES6_CONFORMANCE_CHECKS=!1;$jscomp.ES6_CONFORMANCE=$jscomp.USE_PROXY_FOR_ES6_CONFORMANCE_CHECKS&&$jscomp.checkEs6ConformanceViaProxy();\n$jscomp.polyfill(\"WeakMap\",function(b){function d(){if(!b||!Object.seal)return!1;try{var d=Object.seal({}),e=Object.seal({}),f=new b([[d,2],[e,3]]);if(2!=f.get(d)||3!=f.get(e))return!1;f.delete(d);f.set(e,4);return!f.has(d)&&4==f.get(e)}catch(z){return!1}}function e(){}function f(b)",
+    "station_snippets": {
+      "UdatService": [
+        "fecha.substring(0,7);return this._httpGet(b)};var UdatService=function(){PrediccionService.call(this)};UdatService.prototype=Object.create(PrediccionService.prototype);UdatService.prototype.getTimeLine=function(b){a=\"/udat/timeline/\"+b.tipo+\"/\"+b.param;return this._httpGet(a)};\nUdatService.prototype.getVariables=function(b){var d={6:\"GENR\",7:\"CCAA\",8:\"PROV\",9:\"LOCL\",1",
+        "tService=function(){PrediccionService.call(this)};UdatService.prototype=Object.create(PrediccionService.prototype);UdatService.prototype.getTimeLine=function(b){a=\"/udat/timeline/\"+b.tipo+\"/\"+b.param;return this._httpGet(a)};\nUdatService.prototype.getVariables=function(b){var d={6:\"GENR\",7:\"CCAA\",8:\"PROV\",9:\"LOCL\",10:\"LOCL\"}[String(b.zoom)]||\"GENR\",e=(b.fich||\"\").repl"
+      ],
+      "getJSON": [],
+      "udat/": [
+        "UdatService.prototype.getTimeLine=function(b){a=\"/udat/timeline/\"+b.tipo+\"/\"+b.param;return this._httpGet(a)};\nUdatService.prototype.getVariables=function(b){var d={6:\"GENR\",7:\"CCAA\",8:\"PROV\",9:\"LOCL\",10:\"LOCL\"}[String(b.zoom)]||\"GENR\",e=(b.fich||\"\").replace(\"????\",d);e===(b.fich||\"\")&&(e=e.replace(/^((?:[^_]+_){3})/,\"$1\"+d+\"_\"));b.param&&-1!==b.param.indexOf(\"-\")&&(e",
+        "e.replace(b.param.replace(/-/g,\"_\"),b.param));b=\"/udat/datos/\"+[encodeURIComponent(b.tipo||\"\"),encodeURIComponent(b.param||\"\"),encodeURIComponent(e),encodeURIComponent(String(b.zoom||6))].join(\"/\");var f=$.Deferred();$.when($.get(\"/es/api-eltiempo\"+\nb),\"json\").then(function(b){f.resolve(b)}).fail(function(b){f.reject(b.responseText,b.status)});return f.promise()};Udat"
+      ]
+    }
+  },
+  {
+    "tag": "IT_icaochunk",
+    "url": "https://www-static.meteoam.it/675/Others-ICAO-index-js.bundle.js",
+    "request_at": "2026-09-30T23:09:11.009091+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:09:14.276572+00:00",
+    "sha256": "b43ca91a1819f20f464202de44822918f242076cae0b176031a837880794f235",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IT_icaochunk_b43ca91a1819f20f464202de44822918f242076cae0b176031a837880794f235.gz",
+    "content_type": "application/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "(self.webpackChunkstatic_meteoam=self.webpackChunkstatic_meteoam||[]).push([[4173],{16812:function(a,t,i){\"use strict\";i.d(t,{Ji:function(){return o},ph:function(){return n},qw:function(){return r},kk:function(){return c},mC:function(){return A},_e:function(){return l}});var e=i(39920),o=function(a){a.start({from:{opacity:0},to:{opacity:1}})},n=function(a,t){a.start({from:{paddingLeft:0},to:{paddingLeft:t||10}})},r=function(a,t){a.start({from:{paddingRight:0},to:{paddingRight:t||10}})},c=function(a){a.start({paddingLeft:0,paddingTop:0,paddingRight:0})},A=function(a,t,i,o,n,r,c){return(0,e.useSpring)({minWidth:i?\"240px\":\"0\",width:i?\"240px\":\"0\",maxWidth:i?\"240px\":\"0\",onChange:function(){document.querySelectorAll(\"path\").forEach((function(a){a.style.transition=\"all 0s\"})),!i&&a.updateSlides(),i&&t===a.clickedIndex&&a.updateSlides(),c()},onRest:function(){document.querySelectorAll(\"path\").forEach((function(a){a.style.transition=\"all 0s\"})),o(!1),c()}})},l=function(a,t,i,o,n,r){return(0,e.useTransition)(a,{from:{opacity:n,x:i},enter:{opacity:r,x:o},trail:t,config:e.config.molasses})}},919",
+    "station_snippets": {
+      "serviceURL": [
+        "l,2),y=m[0],C=m[1],U=a.varname&&window[a.varname].serviceURL||(null==a?void 0:a.serviceURL)||H.x||{},I=a.varname&&window[a.varname].Labels||(null==a?void 0:a.Labels)||H.R||{},f=(0,r.useState)((null==y||null===(t=y.continents)||void 0===t||null===(t=t[0])||void 0===t?void 0:t.id)||null),b=(0,n.Z)(f,2),v=b[0],B=b[1],F=(0,r.useState)(null),M=(0,n.Z)(F,2),K=M[0],R=M[1],L=",
+        "&&window[a.varname].serviceURL||(null==a?void 0:a.serviceURL)||H.x||{},I=a.varname&&window[a.varname].Labels||(null==a?void 0:a.Labels)||H.R||{},f=(0,r.useState)((null==y||null===(t=y.continents)||void 0===t||null===(t=t[0])||void 0===t?void 0:t.id)||null),b=(0,n.Z)(f,2),v=b[0],B=b[1],F=(0,r.useState)(null),M=(0,n.Z)(F,2),K=M[0],R=M[1],L=function(a){var t=a.children,i"
+      ],
+      "time1": [],
+      "fetch": [
+        "3220),y=i(99490),C=i(10266),U=(0,i(29122).J)({id:\"fetch\",initial:\"idle\",context:{data:[],error:void 0},states:{idle:{on:{FETCH:\"loading\"}},loading:{invoke:{src:\"fetchData\",onDone:{target:\"success\"},onError:{target:\"failure\"}}},success:{on:{RESET:\"idle\"}},failure:{on:{RESET:\"idle\"}}}}),I=i(14289),f=i(83916),D=i(91136),b=i(14691),v=i(41244),B=i(28752),F=i(75103),M=i(534",
+        "idle:{on:{FETCH:\"loading\"}},loading:{invoke:{src:\"fetchData\",onDone:{target:\"success\"},onError:{target:\"failure\"}}},success:{on:{RESET:\"idle\"}},failure:{on:{RESET:\"idle\"}}}}),I=i(14289),f=i(83916),D=i(91136),b=i(14691),v=i(41244),B=i(28752),F=i(75103),M=i(53439),K=i(96101),R=i(85893);function L(a){let t;return(0,M.Ed)(a,(a=>{null==t&&(t=a.props.eventKey)})),t}function"
+      ]
+    }
+  },
+  {
+    "tag": "IN_gui",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/gui.js",
+    "request_at": "2026-09-30T23:09:11.009273+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:09:12.627181+00:00",
+    "sha256": "b986de533c8325c9bd905857db125d229c9da8a0c932d5fbd85e1cd6142d7450",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_gui_b986de533c8325c9bd905857db125d229c9da8a0c932d5fbd85e1cd6142d7450.gz",
+    "content_type": "text/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "function trim(str)\n{\n\tvar ret;\n\tret = str.replace(/^\\s+/g, \"\");\n\tret = ret.replace(/\\s+$/g, \"\");\n\treturn ret;\n}\n\nfunction simplifyWhiteSpace(str)\n{\n\tvar ret;\n\tret = str.replace(/^\\s+/g, \"\");\n\tret = ret.replace(/\\s+$/g, \"\");\n\tret = ret.replace(/\\s+/g, \" \");\n\tret = ret.replace(/\\ \\ /g, \" \");\n\treturn ret;\n}\n\nfunction addslashes(str) {\n\tstr=str.replace(/\\\\/g,'\\\\\\\\');\n\tstr=str.replace(/\\'/g,'\\\\\\'');\n\tstr=str.replace(/\\\"/g,'\\\\\"');\n\tstr=str.replace(/\\0/g,'\\\\0');\n\treturn str;\n}\nfunction stripslashes(str) {\n\tstr=str.replace(/\\\\'/g,'\\'');\n\tstr=str.replace(/\\\\\"/g,'\"');\n\tstr=str.replace(/\\\\0/g,'\\0');\n\tstr=str.replace(/\\\\\\\\/g,'\\\\');\n\treturn str;\n}\n\nfunction streamFile(fname)\n{\n\tvar f = URLEncode(\"Docs/\" + fname);\n\tvar url = \"getfile.php?f=\" + f;\n\tdocument.getElementById('iframeFileStream').src = url;\n\n}\n\nwindow.downloadFile = function(fname, displayname) {\n\tvar url = \"getfile.php?f=\" + fname + '&n=' + displayname;\n\tdocument.getElementById('iframeFileStream').src = url;\n};\n\nfunction PrependDebug(str)\n{\n\tvar el = document.getElementById('divDebug');\n\tif (el)\n\t\tel.innerHTML = str + \" \\n\" + el.innerH",
+    "station_snippets": {
+      "showOPMETQuery": []
+    }
+  },
+  {
+    "tag": "HK_csv",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_air_temp.csv",
+    "request_at": "2026-09-30T23:09:11.009420+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T23:09:13.364862+00:00",
+    "sha256": "ea5565b8cfabd90e87c2dc45e8edfb466e4084755698f529986592d528d1685c",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/HK_csv_ea5565b8cfabd90e87c2dc45e8edfb466e4084755698f529986592d528d1685c.gz",
+    "content_type": "text/html; charset=utf-8",
+    "title": "Hong Kong Observatory",
+    "scripts": [
+      "https://www.hko.gov.hk/js/jquery.min.js",
+      "https://www.hko.gov.hk/js/jquery-ui.min.js"
+    ],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "Hong Kong Observatory 對不起，我們找不到你要的網頁。 你將於 秒內被轉往香港天文台網站。你亦可按以下連結瀏覽 香港天文台網站 。 对不起，我们找不到你要的网页。 你将于 秒内被转往香港天文台网站。你亦可按以下连结浏览 香港天文台网站 。 Sorry, the page you requested cannot be found. You will be re-directed to HKO Website in seconds. You can also click the following link to go to HKO Website . 香港天文台網站已全面翻新，你將於 秒內被轉往新網站相關頁面。如有需要，請更新網址書籤，以便日後更快捷地瀏覽香港天文台網站。 香港天文台网站已全面翻新，你将於 秒内被转往新网站相关页面。如有需要，请更新网址书签，以便日後更快捷地浏览香港天文台网站。 HKO Website has been revamped, and you will be re-directed to the relevant page on the new website in seconds. Please update your bookmarks as appropriate for more direct access to HKO Website.",
+    "station_snippets": {
+      "HK Observatory": []
+    }
+  }
+]

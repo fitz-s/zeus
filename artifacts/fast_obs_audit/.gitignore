@@ -9,3 +9,5 @@
 /resume_measurements/*.body
 /resume_measurements/*.json
 # Already tracked sanitized evidence remains tracked despite these patterns.
+# Keep authorization/signing examples out of the published discovery bundle.
+/round4_discovery/NL_keys_d99e5fddc0a1b279da13cdf288d7c96364ac46e6eede76f88a46bb6275eda237.gz

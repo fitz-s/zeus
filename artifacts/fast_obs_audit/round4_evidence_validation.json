@@ -3,5 +3,7 @@
   "bodies_absent_from_standard_name": [],
   "excluded_document": "round4_discovery/NL_keys_d99e5fddc0a1b279da13cdf288d7c96364ac46e6eede76f88a46bb6275eda237.gz",
   "exclusion_reason": "Documentation contains signing/authorization examples; no credential-bearing documentation blob is published. Its URL and digest remain in discovery metadata.",
-  "scope": "No production databases; original completed Round4 HTTP metadata and weather response bodies."
+  "scope": "No production databases; original completed Round4 HTTP metadata and weather response bodies.",
+  "resume_http_body_checks": 324,
+  "resume_credential_pattern_findings": 0
 }

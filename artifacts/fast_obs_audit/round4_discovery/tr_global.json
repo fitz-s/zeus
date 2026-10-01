@@ -1,0 +1,35 @@
+{
+  "tag": "TR_global",
+  "url": "https://rasat.mgm.gov.tr/result?hours=24&obsType=1&stations=ZBAA&stations=EGLC&stations=WMKK&stations=LLBG",
+  "request_at": "2026-09-30T22:57:32.937786+00:00",
+  "status": 200,
+  "receipt_at": "2026-09-30T22:57:35.419055+00:00",
+  "sha256": "ac1672048e8fc2d0bbb35f4cda999bc64ee3030c2f41ffde19d2e9d47bfb51a7",
+  "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/TR_global_ac1672048e8fc2d0bbb35f4cda999bc64ee3030c2f41ffde19d2e9d47bfb51a7.gz",
+  "content_type": "text/html; charset=utf-8",
+  "title": "Hezarfen Rasat Görüntüleme",
+  "scripts": [
+    "https://rasat.mgm.gov.tr/_next/static/chunks/polyfills-5cd94c89d3acac5f.js",
+    "https://rasat.mgm.gov.tr/_next/static/chunks/webpack-043901969ab14c5d.js",
+    "https://rasat.mgm.gov.tr/_next/static/chunks/framework-3ccec772d1fa8b6b.js",
+    "https://rasat.mgm.gov.tr/_next/static/chunks/main-404bdd3acbdd01ab.js",
+    "https://rasat.mgm.gov.tr/_next/static/chunks/pages/_app-73d623a1dda1fb8f.js",
+    "https://rasat.mgm.gov.tr/_next/static/chunks/8710b798-379c90188a0c6886.js",
+    "https://rasat.mgm.gov.tr/_next/static/chunks/cb1608f2-55bdc91dba3d0168.js",
+    "https://rasat.mgm.gov.tr/_next/static/chunks/468-8a96365eb755255c.js",
+    "https://rasat.mgm.gov.tr/_next/static/chunks/pages/result-a8e9900981a7bb1f.js",
+    "https://rasat.mgm.gov.tr/_next/static/T8mkW-IVCJLnn0LMMsebO/_buildManifest.js",
+    "https://rasat.mgm.gov.tr/_next/static/T8mkW-IVCJLnn0LMMsebO/_ssgManifest.js",
+    "https://rasat.mgm.gov.tr/_next/static/T8mkW-IVCJLnn0LMMsebO/_middlewareManifest.js"
+  ],
+  "frames": [],
+  "forms": [],
+  "links": [
+    {
+      "text": "HEZARFEN Rasat",
+      "url": "https://rasat.mgm.gov.tr/result"
+    }
+  ],
+  "preview": "Hezarfen Rasat Görüntüleme Favori istasyonlar S.S.S. HEZARFEN Rasat Decoder Favorilerim İstasyonlar ZBAA EGLC WMKK LLBG Periyot Son 24 Saat Metar - Speci Taf Sinoptik Sigmet Gamet Temizle Getir ZBAA, EGLC, WMKK, LLBG için rasatlar listelenmektedir. Favorilerime Ekle ZBAA Beijing METAR 302230 ZBAA 302230Z 28004MPS 260V320 CAVOK 14/M09 Q1023 NOSIG 302200 ZBAA 302200Z 29005MPS CAVOK 14/M10 Q1022 NOSIG 302130 ZBAA 302130Z 30006MPS CAVOK 14/M10 Q1022 NOSIG 302100 ZBAA 302100Z 30006MPS CAVOK 14/M10 Q1022 NOSIG 302030 ZBAA 302030Z 29005MPS CAVOK 14/M09 Q1022 NOSIG 302000 ZBAA 302000Z 30005MPS CAVOK 14/M09 Q1022 NOSIG 301930 ZBAA 301930Z 31004MPS CAVOK 14/M08 Q1022 NOSIG 301900 ZBAA 301900Z 31005MPS CAVOK 14/M08 Q1022 NOSIG 301830 ZBAA 301830Z 31005MPS CAVOK 14/M08 Q1022 NOSIG 301800 ZBAA 301800Z 32006MPS CAVOK 14/M09 Q1022 NOSIG 301730 ZBAA 301730Z 30005MPS CAVOK 15/M08 Q1022 NOSIG 301700 ZBAA 301700Z 31004MPS CAVOK 12/M06 Q1022 NOSIG 301630 ZBAA 301630Z 34004MPS CAVOK 10/M03 Q1022 NOSIG 301600 ZBAA 301600Z 34004MPS CAVOK 10/M04 Q1022 NOSIG 301530 ZBAA 301530Z 31004MPS 240V040 CAVOK 16/M09 ",
+  "station_snippets": {}
+}

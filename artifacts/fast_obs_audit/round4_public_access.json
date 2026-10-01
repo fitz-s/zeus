@@ -1,0 +1,622 @@
+{
+  "acquisition": "anonymous public HTTP; no login, account, or paid API purchase",
+  "scope": "access and endpoint discovery, not paired weather evidence",
+  "entries": [
+    {
+      "tag": "ES_hourly",
+      "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?datos=det&f=humedad&k=mad&l=3129&w=0&x=h09",
+      "status": 404,
+      "request_at": "2026-09-30T22:55:26.992009+00:00",
+      "receipt_at": "2026-09-30T22:55:27.474401+00:00",
+      "sha256": "39708e0264aa74f1865eb8f2a2832e41a995b7e22cda801f32a5f556e5097505",
+      "title": "Hoy y últimos días: Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España"
+    },
+    {
+      "tag": "NL_xml",
+      "url": "https://cdn.knmi.nl/knmi/map/page/weer/actueel-weer/actueel_weer.xml",
+      "status": 403,
+      "request_at": "2026-09-30T22:55:26.992391+00:00",
+      "receipt_at": "2026-09-30T22:55:27.702121+00:00",
+      "sha256": "a824bc7739e226e1b40ea0f8c4e4f4c6f796fc3b4abfa6e9abe3bd119a30d938",
+      "title": ""
+    },
+    {
+      "tag": "NL_keys",
+      "url": "https://developer.dataplatform.knmi.nl/open-data-api",
+      "status": 200,
+      "request_at": "2026-09-30T22:55:26.992548+00:00",
+      "receipt_at": "2026-09-30T22:55:27.871213+00:00",
+      "sha256": "d99e5fddc0a1b279da13cdf288d7c96364ac46e6eede76f88a46bb6275eda237",
+      "title": "Open Data API"
+    },
+    {
+      "tag": "BR_old",
+      "url": "https://redemet.decea.mil.br/api/consulta_automatica/index.php?local=sbgr&msg=metar",
+      "status": 200,
+      "request_at": "2026-09-30T22:55:26.992722+00:00",
+      "receipt_at": "2026-09-30T22:55:28.353856+00:00",
+      "sha256": "313cdd97e4009f7142fb535023911c8e1bcf5a9600fe4045a9a68c965d3195c4",
+      "title": ""
+    },
+    {
+      "tag": "ID_free",
+      "url": "https://web-aviation.bmkg.go.id/web/metar_speci.php",
+      "status": 403,
+      "request_at": "2026-09-30T22:55:27.505982+00:00",
+      "receipt_at": "2026-09-30T22:55:27.634851+00:00",
+      "sha256": "aa980112e01a98c2f1011e7d5c50046e73792daa1861bc1b6a57674b1674abec",
+      "title": "Just a moment..."
+    },
+    {
+      "tag": "TR_result",
+      "url": "https://rasat.mgm.gov.tr/result?hours=24&obsType=1&stations=LTAC&stations=LTFM",
+      "status": 200,
+      "request_at": "2026-09-30T22:55:27.636304+00:00",
+      "receipt_at": "2026-09-30T22:55:30.122557+00:00",
+      "sha256": "f0a52ac2f71217f7764efb0b5ee904144eb414f80c7ac3be0a49da9b23123beb",
+      "title": "Hezarfen Rasat Görüntüleme"
+    },
+    {
+      "tag": "IT_metar",
+      "url": "https://www.meteoam.it/it/metar-taf",
+      "status": 200,
+      "request_at": "2026-09-30T22:55:27.703142+00:00",
+      "receipt_at": "2026-09-30T22:55:28.707562+00:00",
+      "sha256": "dbf95ac0d030f39ba503e131df21ac363061c3a7296985f71fbc6596bdcd08f7",
+      "title": "Bolletini di Meteorologia Aeronautica Metar e Taf | Meteo Aeronautica Militare"
+    },
+    {
+      "tag": "TW_free",
+      "url": "https://aoaws.anws.gov.tw/?index=2&lang=tw&voice_alarm=0",
+      "request_at": "2026-09-30T22:55:27.882600+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "RU_display",
+      "url": "http://display.meteocenter.ru/",
+      "status": 200,
+      "request_at": "2026-09-30T22:55:28.354306+00:00",
+      "receipt_at": "2026-09-30T22:55:29.340004+00:00",
+      "sha256": "78fa79d2679c51ce4e5d2930dda57ca47e1076f7a29f3d86e4c8ab3d40c4a59e",
+      "title": "Метавиа дисплей - погода в аэропортах"
+    },
+    {
+      "tag": "FI_queries",
+      "url": "https://opendata.fmi.fi/wfs?request=ListStoredQueries&service=WFS&version=2.0.0",
+      "status": 200,
+      "request_at": "2026-09-30T22:55:28.680606+00:00",
+      "receipt_at": "2026-09-30T22:55:29.362395+00:00",
+      "sha256": "6f435e81ab689c2ddcdc2f5d9c181d5d9a105426d71fecb6a0b7575ac8a9c140",
+      "title": "ECMWF Pressure Grid"
+    },
+    {
+      "tag": "IN_delhi",
+      "url": "https://olbs.amssdelhi.gov.in/nsweb/FlightBriefing/generateregional.php?id=69",
+      "request_at": "2026-09-30T22:56:18.082666+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "RU_uuww",
+      "url": "http://display.meteocenter.ru/219",
+      "status": 200,
+      "request_at": "2026-09-30T22:56:18.083147+00:00",
+      "receipt_at": "2026-09-30T22:56:19.328025+00:00",
+      "sha256": "9b90ace1b7968ba9e5739ec62c69e69d6e31b9342f20e2c013f736b5a49c92b7",
+      "title": "Погода в аэропорту - Москва (Внуково)"
+    },
+    {
+      "tag": "TR_js",
+      "url": "https://rasat.mgm.gov.tr/_next/static/chunks/pages/result-a8e9900981a7bb1f.js",
+      "status": 200,
+      "request_at": "2026-09-30T22:56:18.083441+00:00",
+      "receipt_at": "2026-09-30T22:56:19.470516+00:00",
+      "sha256": "6a4947897b40693fedba248af3ae47d8c0f288d3b93ded9714e3a65c0562af70",
+      "title": "Hezarfen Rasatlar"
+    },
+    {
+      "tag": "IT_js",
+      "url": "https://www-static.meteoam.it/675/AMcustomJS.bundle.js",
+      "status": 200,
+      "request_at": "2026-09-30T22:56:18.083672+00:00",
+      "receipt_at": "2026-09-30T22:56:19.689032+00:00",
+      "sha256": "48c3ac8659976c08446563811a26ebcdf7fc1e53d7a3a2091357187a0436795a",
+      "title": ""
+    },
+    {
+      "tag": "ES_csv",
+      "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x=",
+      "status": 404,
+      "request_at": "2026-09-30T22:56:19.363900+00:00",
+      "receipt_at": "2026-09-30T22:56:19.849831+00:00",
+      "sha256": "601e67e55c5198f895ad6e0e1466d1fd096647f3a25acef9abb91396eb3fccb7",
+      "title": "Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España"
+    },
+    {
+      "tag": "FR_synop",
+      "url": "https://donneespubliques.meteofrance.fr/donnees_libres/Txt/Synop/synop.202609302100.csv",
+      "status": 200,
+      "request_at": "2026-09-30T22:56:19.472894+00:00",
+      "receipt_at": "2026-09-30T22:56:20.635674+00:00",
+      "sha256": "1c7ac122667ce9a6b057602c91369929b7dfe3005eea09a2cab7c755d2a0dd28",
+      "title": "Données Publiques de Météo-France - Données non disponibles"
+    },
+    {
+      "tag": "SA_doc",
+      "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server",
+      "status": 200,
+      "request_at": "2026-09-30T22:56:19.693475+00:00",
+      "receipt_at": "2026-09-30T22:56:20.023355+00:00",
+      "sha256": "e602073ad06ef9345de53b04509097fe9fc7c8a06e4ef7004be4a17ba7a9a66b",
+      "title": "Vector Tile Server | NCM | NCM API Documentation"
+    },
+    {
+      "tag": "PK_pmd",
+      "url": "https://rmcsindh.pmd.gov.pk/Services_Aviation.html",
+      "status": 200,
+      "request_at": "2026-09-30T22:56:19.869750+00:00",
+      "receipt_at": "2026-09-30T22:56:21.774491+00:00",
+      "sha256": "e23a154eef02c1863ae4e09d2207edb1445410b0d9b5e7c9d1d84ae2c209a74e",
+      "title": "Services-Aviation"
+    },
+    {
+      "tag": "IL_xml",
+      "url": "https://ims.gov.il/sites/default/files/ims_data/xml_files/imslasthour.xml",
+      "status": 200,
+      "request_at": "2026-09-30T22:56:20.026182+00:00",
+      "receipt_at": "2026-09-30T22:56:20.883634+00:00",
+      "sha256": "057ebf4d13d044a7581761eb3e1a5b49153a0f4b8356f029a00e9e4817df1bf6",
+      "title": "שגיאה"
+    },
+    {
+      "tag": "DE_aviation",
+      "url": "https://opendata.dwd.de/weather/weather_reports/aviation/",
+      "status": 404,
+      "request_at": "2026-09-30T22:56:20.646804+00:00",
+      "receipt_at": "2026-09-30T22:56:21.120699+00:00",
+      "sha256": "55f7d9e99b8e2d4e0e193b2f0275501e6d9c1ebd29cadbea6a0da48a8587e3e0",
+      "title": "404 Not Found"
+    },
+    {
+      "tag": "IN_form",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php",
+      "status": 200,
+      "request_at": "2026-09-30T22:59:08.427087+00:00",
+      "receipt_at": "2026-09-30T22:59:10.353660+00:00",
+      "sha256": "449edd404deb79be1b4e4b278a785094b7f8ca1d24b9f91e526b103b6311da0b",
+      "title": ""
+    },
+    {
+      "tag": "IT_widget",
+      "url": "https://www-static.meteoam.it/675/AMwebcomponents.bundle.js",
+      "status": 200,
+      "request_at": "2026-09-30T22:59:08.427408+00:00",
+      "receipt_at": "2026-09-30T22:59:10.255122+00:00",
+      "sha256": "f811a291f014859405a701f45f38edfd41cc7f4335b4e4b252a17b7856f8dc25",
+      "title": ""
+    },
+    {
+      "tag": "AR_smn",
+      "url": "https://ws2.smn.gob.ar/metar",
+      "request_at": "2026-09-30T22:59:08.427561+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "MX_seneam",
+      "url": "https://www.gob.mx/seneam/acciones-y-programas/informacion-de-vuelo",
+      "status": 200,
+      "request_at": "2026-09-30T22:59:08.427645+00:00",
+      "receipt_at": "2026-09-30T22:59:08.607389+00:00",
+      "sha256": "63c15644678a19f1cb181acfcbd990c32fd4e956c1848e07e5b1677badc6c778",
+      "title": "Challenge Validation"
+    },
+    {
+      "tag": "CN_aviation",
+      "url": "https://aviation.nmc.cn/",
+      "request_at": "2026-09-30T22:59:08.537081+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "MY_aviation",
+      "url": "https://aviation.met.gov.my/",
+      "request_at": "2026-09-30T22:59:08.611284+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "NZ_awys",
+      "url": "https://www.metservice.com/aviation",
+      "status": 200,
+      "request_at": "2026-09-30T22:59:09.208865+00:00",
+      "receipt_at": "2026-09-30T22:59:10.354559+00:00",
+      "sha256": "a9a3d0e94fe98cd5e81cdb1bd03f151c3086514efa2125a8dd83a7412efeb540",
+      "title": "MetService - Te Ratonga Tirorangi"
+    },
+    {
+      "tag": "NG_aviation",
+      "url": "https://nimet.gov.ng/",
+      "status": 307,
+      "request_at": "2026-09-30T22:59:09.717301+00:00",
+      "receipt_at": "2026-09-30T22:59:10.852350+00:00",
+      "sha256": "5ac7b2961fafb56e082337d330ed3c14f549e1cfa887134a260c0c0ff4890e0c",
+      "title": "You are being redirected..."
+    },
+    {
+      "tag": "ZA_aviation",
+      "url": "https://aviation.weathersa.co.za/",
+      "request_at": "2026-09-30T22:59:10.277760+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "RU_https",
+      "url": "https://display.meteocenter.ru/219",
+      "request_at": "2026-09-30T22:59:10.354255+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "IN_root",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/",
+      "status": 200,
+      "request_at": "2026-09-30T23:03:36.361400+00:00",
+      "receipt_at": "2026-09-30T23:03:39.600853+00:00",
+      "sha256": "2863054db56c1f03adb991a30065c39fa6eb5ad9edc15c339b3f227a04c01e5a",
+      "title": ""
+    },
+    {
+      "tag": "IN_query",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php?icaos=VILK&type=metar",
+      "status": 200,
+      "request_at": "2026-09-30T23:03:36.361752+00:00",
+      "receipt_at": "2026-09-30T23:03:38.055920+00:00",
+      "sha256": "8b7e3af2038c536797c9dd81bbf10c88b57288d9473d8f747db19fb22c593ad6",
+      "title": ""
+    },
+    {
+      "tag": "FR_apiinfo",
+      "url": "https://www.data.gouv.fr/dataservices/api-package-observations",
+      "status": 200,
+      "request_at": "2026-09-30T23:03:36.361882+00:00",
+      "receipt_at": "2026-09-30T23:03:37.370267+00:00",
+      "sha256": "1bda1f14a1eeb8320b255e6abc9d1eb31b2f1aa2892b3772e0188461fe861c93",
+      "title": "API - API Package Observations | data.gouv.fr"
+    },
+    {
+      "tag": "NL_nrt",
+      "url": "https://www.knmi.nl/nederland-nu/weer/waarnemingen",
+      "status": 200,
+      "request_at": "2026-09-30T23:03:36.362009+00:00",
+      "receipt_at": "2026-09-30T23:03:37.063465+00:00",
+      "sha256": "7906042163a69d00619a5b2742a2cdffa25b36f15302d442cf723c26a58f9ff3",
+      "title": "KNMI - Weer - Waarnemingen"
+    },
+    {
+      "tag": "ES_access",
+      "url": "https://opendata.aemet.es/centrodedescargas/altaUsuario?",
+      "status": 200,
+      "request_at": "2026-09-30T23:03:37.097818+00:00",
+      "receipt_at": "2026-09-30T23:03:37.513186+00:00",
+      "sha256": "bbc9843fdcf2f1b886e73d180ca391fdbc37804678c57b36769c62323a08d792",
+      "title": "Aemet OpenData"
+    },
+    {
+      "tag": "GB_free",
+      "url": "https://datahub.metoffice.gov.uk/pricing/observations",
+      "status": 200,
+      "request_at": "2026-09-30T23:03:37.387750+00:00",
+      "receipt_at": "2026-09-30T23:03:37.863669+00:00",
+      "sha256": "cea69bae355970e2636e4cd5f0af2166781fdde2dde138d019511d1dd98550a4",
+      "title": "Weather DataHub | Observations pricing"
+    },
+    {
+      "tag": "IT_api",
+      "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/",
+      "status": 404,
+      "request_at": "2026-09-30T23:04:01.538718+00:00",
+      "receipt_at": "2026-09-30T23:04:02.433254+00:00",
+      "sha256": "37ec4665a8102d115ffd1ac20dae94c98b4dac64b0c1a68228aa2a531caeb35d",
+      "title": ""
+    },
+    {
+      "tag": "IT_code",
+      "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC",
+      "status": 404,
+      "request_at": "2026-09-30T23:04:01.539062+00:00",
+      "receipt_at": "2026-09-30T23:04:02.404514+00:00",
+      "sha256": "37ec4665a8102d115ffd1ac20dae94c98b4dac64b0c1a68228aa2a531caeb35d",
+      "title": ""
+    },
+    {
+      "tag": "IT_icao",
+      "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/?icao=LIMC",
+      "status": 404,
+      "request_at": "2026-09-30T23:04:01.539197+00:00",
+      "receipt_at": "2026-09-30T23:04:02.647660+00:00",
+      "sha256": "37ec4665a8102d115ffd1ac20dae94c98b4dac64b0c1a68228aa2a531caeb35d",
+      "title": ""
+    },
+    {
+      "tag": "IN_root2",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/index.php",
+      "status": 200,
+      "request_at": "2026-09-30T23:04:01.539307+00:00",
+      "receipt_at": "2026-09-30T23:04:04.710533+00:00",
+      "sha256": "2863054db56c1f03adb991a30065c39fa6eb5ad9edc15c339b3f227a04c01e5a",
+      "title": ""
+    },
+    {
+      "tag": "ES_tablebase",
+      "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?k=mad&l=3129",
+      "status": 200,
+      "request_at": "2026-09-30T23:04:02.412462+00:00",
+      "receipt_at": "2026-09-30T23:04:03.041631+00:00",
+      "sha256": "5a36a311ffaffae1b95d7f06f7dcf6ffcac4fb00c6eb153f0d5714b8a61b00c9",
+      "title": "Hoy y últimos días: Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España"
+    },
+    {
+      "tag": "IN_ctrl",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/ctrl.js",
+      "status": 200,
+      "request_at": "2026-09-30T23:04:43.690106+00:00",
+      "receipt_at": "2026-09-30T23:04:45.372299+00:00",
+      "sha256": "e24c4c1dc5e25cfd26c13abdd5265221eaaea1dc6b04a7e2610d6282a916fe10",
+      "title": ""
+    },
+    {
+      "tag": "ES_js",
+      "url": "https://www.aemet.es/js/mpb/mpb_udat_horarios.js",
+      "status": 200,
+      "request_at": "2026-09-30T23:04:43.690473+00:00",
+      "receipt_at": "2026-09-30T23:04:43.870251+00:00",
+      "sha256": "6b1f92d011afe12af2096d332fd87726c97fce361eaa5c83dd085b779bc7865a",
+      "title": ""
+    },
+    {
+      "tag": "IT_openapi",
+      "url": "https://api.meteoam.it/deda-ows/openapi.json",
+      "status": 200,
+      "request_at": "2026-09-30T23:04:43.690614+00:00",
+      "receipt_at": "2026-09-30T23:04:44.544969+00:00",
+      "sha256": "aae44ef100696d25f943f6fafe3cfd404211a124c2089f7171b875bdc58979a9",
+      "title": ""
+    },
+    {
+      "tag": "FI_avimet",
+      "url": "https://aviationweather.fmi.fi/",
+      "request_at": "2026-09-30T23:04:43.690740+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "HK_instant",
+      "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en",
+      "status": 200,
+      "request_at": "2026-09-30T23:04:43.884195+00:00",
+      "receipt_at": "2026-09-30T23:04:45.137116+00:00",
+      "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e",
+      "title": ""
+    },
+    {
+      "tag": "ES_maps",
+      "url": "https://www.aemet.es/js/maps/maps.js",
+      "status": 200,
+      "request_at": "2026-09-30T23:09:11.008751+00:00",
+      "receipt_at": "2026-09-30T23:09:11.174082+00:00",
+      "sha256": "5407150882654a7d89629a69373c0ffd11d42c13b7f689b7959c5db2ddd388d4",
+      "title": ""
+    },
+    {
+      "tag": "IT_icaochunk",
+      "url": "https://www-static.meteoam.it/675/Others-ICAO-index-js.bundle.js",
+      "status": 200,
+      "request_at": "2026-09-30T23:09:11.009091+00:00",
+      "receipt_at": "2026-09-30T23:09:14.276572+00:00",
+      "sha256": "b43ca91a1819f20f464202de44822918f242076cae0b176031a837880794f235",
+      "title": ""
+    },
+    {
+      "tag": "IN_gui",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/gui.js",
+      "status": 200,
+      "request_at": "2026-09-30T23:09:11.009273+00:00",
+      "receipt_at": "2026-09-30T23:09:12.627181+00:00",
+      "sha256": "b986de533c8325c9bd905857db125d229c9da8a0c932d5fbd85e1cd6142d7450",
+      "title": ""
+    },
+    {
+      "tag": "HK_csv",
+      "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_air_temp.csv",
+      "status": 404,
+      "request_at": "2026-09-30T23:09:11.009420+00:00",
+      "receipt_at": "2026-09-30T23:09:13.364862+00:00",
+      "sha256": "ea5565b8cfabd90e87c2dc45e8edfb466e4084755698f529986592d528d1685c",
+      "title": "Hong Kong Observatory"
+    },
+    {
+      "tag": "ES_stationxml",
+      "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+      "status": 200,
+      "request_at": "2026-09-30T23:10:21.130501+00:00",
+      "receipt_at": "2026-09-30T23:10:21.365874+00:00",
+      "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62",
+      "title": ""
+    },
+    {
+      "tag": "ES_timeline",
+      "url": "https://www.aemet.es/es/api-eltiempo/udat/timeline/horario/temp",
+      "status": 200,
+      "request_at": "2026-09-30T23:10:21.130849+00:00",
+      "receipt_at": "2026-09-30T23:10:21.251982+00:00",
+      "sha256": "5a027f5173fecd68fce21d0d07ef5523082588b00e2fa3be1e4b0fdcd82ca9f8",
+      "title": ""
+    },
+    {
+      "tag": "IT_history",
+      "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-30T00:00:00Z/2026-09-30T23:59:59Z",
+      "status": 200,
+      "request_at": "2026-09-30T23:10:21.130984+00:00",
+      "receipt_at": "2026-09-30T23:10:21.906258+00:00",
+      "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404",
+      "title": ""
+    },
+    {
+      "tag": "IN_globals",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/globals.js",
+      "status": 200,
+      "request_at": "2026-09-30T23:10:21.131113+00:00",
+      "receipt_at": "2026-09-30T23:10:22.700316+00:00",
+      "sha256": "9696b6ecf179172dccf83b98acaf0934392e8b01028ff0c511153c19ada979a3",
+      "title": ""
+    },
+    {
+      "tag": "HK_csvcorrect",
+      "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+      "status": 200,
+      "request_at": "2026-09-30T23:10:21.255437+00:00",
+      "receipt_at": "2026-09-30T23:10:22.057054+00:00",
+      "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05",
+      "title": ""
+    },
+    {
+      "tag": "IN_user",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/user.js",
+      "status": 200,
+      "request_at": "2026-09-30T23:13:46.221886+00:00",
+      "receipt_at": "2026-09-30T23:13:48.140324+00:00",
+      "sha256": "4e03ee606077c29a2d247f1827d8a07c55477ba31df1ee39cdb64035bfc18d86",
+      "title": ""
+    },
+    {
+      "tag": "IN_history",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/history.js",
+      "status": 200,
+      "request_at": "2026-09-30T23:13:46.222308+00:00",
+      "receipt_at": "2026-09-30T23:13:47.835417+00:00",
+      "sha256": "81725f6b24ef9b2930da2878a17e325a8501cc9928daac048df5bc8cb80327ba",
+      "title": ""
+    },
+    {
+      "tag": "IN_thirdparty",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/thirdparty.js",
+      "status": 200,
+      "request_at": "2026-09-30T23:13:46.222469+00:00",
+      "receipt_at": "2026-09-30T23:13:47.897618+00:00",
+      "sha256": "c46342016d8870934652f12f058abbceec528af3d1871ca1445fd47e4b00eeef",
+      "title": ""
+    },
+    {
+      "tag": "AR_meteoaero",
+      "url": "https://www.smn.gob.ar/metar",
+      "status": 403,
+      "request_at": "2026-09-30T23:13:46.222598+00:00",
+      "receipt_at": "2026-09-30T23:13:46.380357+00:00",
+      "sha256": "1708ee4009c446c73eb58adce9510f96540b2ae412aa731aa7e906f1ec698c39",
+      "title": "Just a moment..."
+    },
+    {
+      "tag": "ZA_aero",
+      "url": "https://aviation.weathersa.co.za/aviationold/avmobile.php",
+      "request_at": "2026-09-30T23:13:46.383968+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "MY_data",
+      "url": "https://www.met.gov.my/en/info/data-terbuka/",
+      "status": 200,
+      "request_at": "2026-09-30T23:13:46.901867+00:00",
+      "receipt_at": "2026-09-30T23:13:48.063057+00:00",
+      "sha256": "519e136ebe465e05e077d636c4e43d9b9d88a915172f7ac5879a3a7b5b8d80fd",
+      "title": "METMalaysia - Open Data"
+    },
+    {
+      "tag": "IN_post",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php",
+      "status": 200,
+      "request_at": "2026-09-30T23:18:24.524702+00:00",
+      "receipt_at": "2026-09-30T23:18:26.299771+00:00",
+      "sha256": "2fc1919aa1567662193657d2312d031cea966a596d22579e029b76eb3eeb5714",
+      "title": ""
+    },
+    {
+      "tag": "IN_postroot",
+      "url": "https://olbs.amsschennai.gov.in/nsweb/showopmetquery.php",
+      "status": 404,
+      "request_at": "2026-09-30T23:18:24.525403+00:00",
+      "receipt_at": "2026-09-30T23:18:26.272468+00:00",
+      "sha256": "ba8cce1ec543b5820141f374813f2f69628afc889d894e1778642f6db99c7815",
+      "title": "Access Denied"
+    },
+    {
+      "tag": "NL_metar",
+      "url": "https://www.knmi.nl/nederland-nu/luchtvaart/vliegveldwaarnemingen",
+      "status": 200,
+      "request_at": "2026-09-30T23:27:10.645640+00:00",
+      "receipt_at": "2026-09-30T23:27:11.311716+00:00",
+      "sha256": "866017895875068891a7004350f4c5aa8fadf9ffcb4f7b22fb73ea235bb21eb5",
+      "title": "KNMI - Vliegveldwaarnemingen Nederland - (AUTO) METAR"
+    },
+    {
+      "tag": "TW_report",
+      "url": "https://aoaws.anws.gov.tw/Report",
+      "request_at": "2026-09-30T23:27:10.645940+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "MX_weather",
+      "url": "https://meteorologia.seneam.gob.mx/",
+      "request_at": "2026-09-30T23:27:10.646077+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "MX_services",
+      "url": "https://servicios.seneam.gob.mx/",
+      "request_at": "2026-09-30T23:27:10.646213+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "tag": "TR_global",
+      "url": "https://rasat.mgm.gov.tr/result?hours=24&obsType=1&stations=ZBAA&stations=EGLC&stations=WMKK&stations=LLBG",
+      "status": 200,
+      "request_at": "2026-09-30T22:57:32.937786+00:00",
+      "receipt_at": "2026-09-30T22:57:35.419055+00:00",
+      "sha256": "ac1672048e8fc2d0bbb35f4cda999bc64ee3030c2f41ffde19d2e9d47bfb51a7",
+      "title": "Hezarfen Rasat Görüntüleme"
+    },
+    {
+      "channel": "anws_report",
+      "url": "https://aoaws.anws.gov.tw/Report",
+      "request_at": "2026-09-30T23:58:15.774062+00:00",
+      "error": "ConnectError"
+    },
+    {
+      "channel": "ims_aviation",
+      "url": "https://ims.gov.il/en/aviation",
+      "status": 200,
+      "request_at": "2026-09-30T23:58:15.773606+00:00",
+      "receipt_at": "2026-09-30T23:58:16.666248+00:00",
+      "sha256": "602aaae45650618aeb7f0407e74469d0a183b15336f264ab43cea219cf60e0e3"
+    },
+    {
+      "channel": "ims_aviation",
+      "url": "https://ims.gov.il/he/aviation",
+      "status": 200,
+      "request_at": "2026-09-30T23:58:15.773902+00:00",
+      "receipt_at": "2026-09-30T23:58:16.776177+00:00",
+      "sha256": "7698728fad33f331b7ea31507097f6eeb7e36a587a0b9624400c70f5c80efe70"
+    }
+  ],
+  "primary_documentation": [
+    {
+      "url": "https://datahub.metoffice.gov.uk/pricing/observations",
+      "finding": "Free 360 calls/day plan; registration required. No registration completed."
+    },
+    {
+      "url": "https://www.data.gouv.fr/dataservices/api-package-observations",
+      "finding": "Meteo-France public observations API: 6-minute/hourly latest24h; open with account. No account completed."
+    },
+    {
+      "url": "https://www.aviation.govt.nz/airspace-and-aerodromes/meteorology/aviation-weather-products/frequency-of-issue/",
+      "finding": "NZAA/NZWN METAR AUTO every30min; cadence is not transport latency. Commercial MetService route excluded."
+    },
+    {
+      "url": "https://www.aviamettelecom.ru/services/pogoda-v-aeroportah-rossii/",
+      "finding": "Official producer points to free display.meteocenter.ru; the reachable UUWW transport was plaintext HTTP."
+    }
+  ]
+}

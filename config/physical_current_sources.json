@@ -285,8 +285,8 @@
       "value_identity_proof": {
         "city": "Tokyo",
         "channel": "jma_amedas",
-        "n_pairs": 151,
-        "n_exact": 151,
+        "n_pairs": 152,
+        "n_exact": 152,
         "mismatches": [],
         "report_path": "artifacts/fast_obs_audit/round4_cumulative_identity.json"
       },
@@ -1084,8 +1084,8 @@
       "value_identity_proof": {
         "city": "Moscow",
         "channel": "metaviatelecom_display",
-        "n_pairs": 3,
-        "n_exact": 3,
+        "n_pairs": 4,
+        "n_exact": 4,
         "mismatches": [],
         "report_path": "artifacts/fast_obs_audit/round4_moscow_proof.json"
       },

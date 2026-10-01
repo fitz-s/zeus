@@ -102,11 +102,47 @@
               "lag_upper_ms": 330559.757
             }
           }
-        ]
+        ],
+        "paired_value_identity": true
+      },
+      {
+        "observation": "2026-10-01T00:00:00+00:00",
+        "candidate": {
+          "city": "Lucknow",
+          "station": "VILK",
+          "channel": "imd_olbs_metar",
+          "observed_at": "2026-10-01T00:00:00+00:00",
+          "value": 24.0,
+          "unit": "C",
+          "negative_request_at": "2026-10-01T00:03:51.541011+00:00",
+          "positive_receipt_at": "2026-10-01T00:05:00.096280+00:00",
+          "lag_lower_ms": 231541.011,
+          "lag_upper_ms": 300096.27999999997
+        },
+        "comparators": [
+          {
+            "channel": "awc",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Lucknow",
+              "station": "VILK",
+              "channel": "awc",
+              "observed_at": "2026-10-01T00:00:00+00:00",
+              "value": 24.0,
+              "unit": "C",
+              "negative_request_at": "2026-10-01T00:05:47.076126+00:00",
+              "positive_receipt_at": "2026-10-01T00:06:46.652864+00:00",
+              "lag_lower_ms": 347076.126,
+              "lag_upper_ms": 406652.864
+            }
+          }
+        ],
+        "paired_value_identity": false
       }
     ],
     "required_speed_comparators": [
-      "awc"
+      "awc",
+      "resolver"
     ],
     "verdict": "VALUE_IDENTICAL_FASTER_OBSERVED"
   }

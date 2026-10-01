@@ -1,0 +1,143 @@
+[
+  {
+    "tag": "IN_form",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php",
+    "request_at": "2026-09-30T22:59:08.427087+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:59:10.353660+00:00",
+    "sha256": "449edd404deb79be1b4e4b278a785094b7f8ca1d24b9f91e526b103b6311da0b",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_form_449edd404deb79be1b4e4b278a785094b7f8ca1d24b9f91e526b103b6311da0b.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "METAR/TAF query Date : 2026-09-30 Time : 22:54:12 Query: METAR: Long TAF: Short TAF:",
+    "station_snippets": {
+      "form": [],
+      "name=": [
+        "ht\">\n        Query: <input type=\"text\" id=\"icaos\" name=\"icaos\"\n                      value=\"\"\n                      pattern=\"[A-Za-z\\s]+\"\n                      title=\"Only alphabets and spaces allowed\"\n                      style=\"width: 400px;\" /><br />\n        <input type=\"button\" value=\"TAF/METAR\" onclick=\"window.submitQuerytafmetar('')\" />\n        <input type=\"but"
+      ]
+    }
+  },
+  {
+    "tag": "IT_widget",
+    "url": "https://www-static.meteoam.it/675/AMwebcomponents.bundle.js",
+    "request_at": "2026-09-30T22:59:08.427408+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:59:10.255122+00:00",
+    "sha256": "f811a291f014859405a701f45f38edfd41cc7f4335b4e4b252a17b7856f8dc25",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IT_widget_f811a291f014859405a701f45f38edfd41cc7f4335b4e4b252a17b7856f8dc25.gz",
+    "content_type": "application/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "!function(){var e,t,n,r,a,o,i={8679:function(e,t,n){\"use strict\";var r=n(59864),a={childContextTypes:!0,contextType:!0,contextTypes:!0,defaultProps:!0,displayName:!0,getDefaultProps:!0,getDerivedStateFromError:!0,getDerivedStateFromProps:!0,mixins:!0,propTypes:!0,type:!0},o={name:!0,length:!0,prototype:!0,caller:!0,callee:!0,arguments:!0,arity:!0},i={$$typeof:!0,compare:!0,defaultProps:!0,displayName:!0,propTypes:!0,type:!0},l={};function u(e){return r.isMemo(e)?i:l[e.$$typeof]||a}l[r.ForwardRef]={$$typeof:!0,render:!0,defaultProps:!0,displayName:!0,propTypes:!0},l[r.Memo]=i;var c=Object.defineProperty,s=Object.getOwnPropertyNames,f=Object.getOwnPropertySymbols,d=Object.getOwnPropertyDescriptor,p=Object.getPrototypeOf,m=Object.prototype;e.exports=function e(t,n,r){if(\"string\"!=typeof n){if(m){var a=p(n);a&&a!==m&&e(t,a,r)}var i=s(n);f&&(i=i.concat(f(n)));for(var l=u(t),h=u(n),g=0;g 0){var i=n.indexOf(this);~i?n.splice(i+1):n.push(this),~i?r.splice(i,1/0,a):r.push(a),~n.indexOf(o)&&(o=t.call(this,a,o))}else n.push(o);return null==e?o:e.call(this,a,o)}}(e.exports=function(e,t,r,a){retu",
+    "station_snippets": {
+      "point_metar": [
+        "emeridi\"},{label:\"METAR e TAF\",value:\"2000\",name:\"point_metar\"},{label:\"Previsioni di punto\",value:\"1006\",name:\"point_fcs\"},{label:\"Fulmini\",value:\"3200\",name:\"lampinet\"},{label:\"Stazioni METAR\",value:\"2000\",name:\"point_obs\"},{label:\"Stazioni METEOMONT\",value:\"5002\",name:\"point_meteomont\"},{label:\"Stazioni ISPRA\",value:\"7003\",name:\"ispra\"},{label:\"Messaggio METEOMAR\","
+      ],
+      "metar-taf": []
+    }
+  },
+  {
+    "tag": "AR_smn",
+    "url": "https://ws2.smn.gob.ar/metar",
+    "request_at": "2026-09-30T22:59:08.427561+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "MX_seneam",
+    "url": "https://www.gob.mx/seneam/acciones-y-programas/informacion-de-vuelo",
+    "request_at": "2026-09-30T22:59:08.427645+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:59:08.607389+00:00",
+    "sha256": "63c15644678a19f1cb181acfcbd990c32fd4e956c1848e07e5b1677badc6c778",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/MX_seneam_63c15644678a19f1cb181acfcbd990c32fd4e956c1848e07e5b1677badc6c778.gz",
+    "content_type": "text/html",
+    "title": "Challenge Validation",
+    "scripts": [
+      "https://www.gob.mx/KLY-AgD6GX/XHWmeWka/Xq/pX/XUF2Jw/fDpIR/mx1Gxct"
+    ],
+    "frames": [
+      "https://www.gob.mx/KLY-AgD6GX/XHWmeWka/Xq/pX/XUF2Jw/UmICG/CsOICwCAQ",
+      "https://www.gob.mx/KLY-AgD6GX/XHWmeWka/Xq/pX/XUF2Jw/Zm0cM/itzBTMAAQ"
+    ],
+    "forms": [],
+    "links": [],
+    "preview": "Challenge Validation",
+    "station_snippets": {
+      "METAR": []
+    }
+  },
+  {
+    "tag": "CN_aviation",
+    "url": "https://aviation.nmc.cn/",
+    "request_at": "2026-09-30T22:59:08.537081+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "MY_aviation",
+    "url": "https://aviation.met.gov.my/",
+    "request_at": "2026-09-30T22:59:08.611284+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "NZ_awys",
+    "url": "https://www.metservice.com/aviation",
+    "request_at": "2026-09-30T22:59:09.208865+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:59:10.354559+00:00",
+    "sha256": "a9a3d0e94fe98cd5e81cdb1bd03f151c3086514efa2125a8dd83a7412efeb540",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/NZ_awys_a9a3d0e94fe98cd5e81cdb1bd03f151c3086514efa2125a8dd83a7412efeb540.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "MetService - Te Ratonga Tirorangi",
+    "scripts": [
+      "https://micro.rubiconproject.com/prebid/dynamic/13178.js",
+      "https://www.googletagservices.com/tag/js/gpt.js",
+      "https://www.metservice.com/assets/index-D6Oq2mc3.js",
+      "https://www.metservice.com/assets/polyfills-legacy-DjOgjjB0.js"
+    ],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "MetService - Te Ratonga Tirorangi",
+    "station_snippets": {
+      "METAR": []
+    }
+  },
+  {
+    "tag": "NG_aviation",
+    "url": "https://nimet.gov.ng/",
+    "request_at": "2026-09-30T22:59:09.717301+00:00",
+    "status": 307,
+    "receipt_at": "2026-09-30T22:59:10.852350+00:00",
+    "sha256": "5ac7b2961fafb56e082337d330ed3c14f549e1cfa887134a260c0c0ff4890e0c",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/NG_aviation_5ac7b2961fafb56e082337d330ed3c14f549e1cfa887134a260c0c0ff4890e0c.gz",
+    "content_type": "text/html",
+    "title": "You are being redirected...",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "You are being redirected... Javascript is required. Please enable javascript before you are allowed to see this page.",
+    "station_snippets": {
+      "aviation": []
+    }
+  },
+  {
+    "tag": "ZA_aviation",
+    "url": "https://aviation.weathersa.co.za/",
+    "request_at": "2026-09-30T22:59:10.277760+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "RU_https",
+    "url": "https://display.meteocenter.ru/219",
+    "request_at": "2026-09-30T22:59:10.354255+00:00",
+    "error": "ConnectError"
+  }
+]

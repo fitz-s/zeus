@@ -1,0 +1,43 @@
+[
+  {
+    "tag": "IN_post",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php",
+    "request_at": "2026-09-30T23:18:24.524702+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:18:26.299771+00:00",
+    "sha256": "2fc1919aa1567662193657d2312d031cea966a596d22579e029b76eb3eeb5714",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_post_2fc1919aa1567662193657d2312d031cea966a596d22579e029b76eb3eeb5714.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "METAR/TAF query Date : 2026-09-30 Time : 23:13:28 Query: METAR: METAR VILK 302300Z 26003KT 3000 BR FEW020 24/24 Q1010 NOSIG=",
+    "station_snippets": {
+      "VILK": [
+        "\"icaos\" name=\"icaos\"\n                      value=\"VILK\"\n                      pattern=\"[A-Za-z\\s]+\"\n                      title=\"Only alphabets and spaces allowed\"\n                      style=\"width: 400px;\" /><br />\n        <input type=\"button\" value=\"TAF/METAR\" onclick=\"window.submitQuerytafmetar('')\" />\n        <input type=\"button\" value=\"Query TAF\" onclick=\"window",
+        "div><div align=\"left\"><pre><b>METAR:</b><br>METAR VILK 302300Z 26003KT 3000 BR FEW020 24/24 Q1010 NOSIG=\n</pre></div><script language=\"javascript\" type=\"text/javascript\">\n$(function() {\n\twindow.fillMenu('default');\n\t$(\"#icaos\").keypress(function(e) { if (e.which == 13) window.submitQuerytafmetar(); });\n});\nwindow.submitQuerytafmetar = function(type) {\n\twindow.showOPME"
+      ]
+    }
+  },
+  {
+    "tag": "IN_postroot",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/showopmetquery.php",
+    "request_at": "2026-09-30T23:18:24.525403+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T23:18:26.272468+00:00",
+    "sha256": "ba8cce1ec543b5820141f374813f2f69628afc889d894e1778642f6db99c7815",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_postroot_ba8cce1ec543b5820141f374813f2f69628afc889d894e1778642f6db99c7815.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "Access Denied",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "Access Denied The requested resource could not be loaded. Please navigate back to the main portal or contact your system administrator.",
+    "station_snippets": {
+      "VILK": []
+    }
+  }
+]

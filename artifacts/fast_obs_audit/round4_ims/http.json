@@ -1,0 +1,24 @@
+[
+  {
+    "channel": "anws_report",
+    "url": "https://aoaws.anws.gov.tw/Report",
+    "request_at": "2026-09-30T23:58:15.774062+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "channel": "ims_aviation",
+    "url": "https://ims.gov.il/en/aviation",
+    "request_at": "2026-09-30T23:58:15.773606+00:00",
+    "receipt_at": "2026-09-30T23:58:16.666248+00:00",
+    "status": 200,
+    "sha256": "602aaae45650618aeb7f0407e74469d0a183b15336f264ab43cea219cf60e0e3"
+  },
+  {
+    "channel": "ims_aviation",
+    "url": "https://ims.gov.il/he/aviation",
+    "request_at": "2026-09-30T23:58:15.773902+00:00",
+    "receipt_at": "2026-09-30T23:58:16.776177+00:00",
+    "status": 200,
+    "sha256": "7698728fad33f331b7ea31507097f6eeb7e36a587a0b9624400c70f5c80efe70"
+  }
+]

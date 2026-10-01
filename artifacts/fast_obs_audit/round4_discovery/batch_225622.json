@@ -1,0 +1,533 @@
+[
+  {
+    "tag": "IN_delhi",
+    "url": "https://olbs.amssdelhi.gov.in/nsweb/FlightBriefing/generateregional.php?id=69",
+    "request_at": "2026-09-30T22:56:18.082666+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "RU_uuww",
+    "url": "http://display.meteocenter.ru/219",
+    "request_at": "2026-09-30T22:56:18.083147+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:56:19.328025+00:00",
+    "sha256": "9b90ace1b7968ba9e5739ec62c69e69d6e31b9342f20e2c013f736b5a49c92b7",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/RU_uuww_9b90ace1b7968ba9e5739ec62c69e69d6e31b9342f20e2c013f736b5a49c92b7.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "Погода в аэропорту - Москва (Внуково)",
+    "scripts": [
+      "http://display.meteocenter.ru/js/preloader.js?id=a8851ea544511be81e78",
+      "http://display.meteocenter.ru/js/libs/offline.min.js",
+      "http://display.meteocenter.ru/js/main.js?id=02f266c45bed446b423f"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "http://display.meteocenter.ru/219",
+        "method": "GET",
+        "fields": [
+          {
+            "name": null,
+            "value": null,
+            "type": null
+          }
+        ]
+      }
+    ],
+    "links": [],
+    "preview": "Погода в аэропорту - Москва (Внуково) ФГБУ Авиаметтелеком Росгидромета ФГБУ Авиаметтелеком Росгидромета Абакан Айхал Алдан Амдерма Анадырь (Угольный) Анапа (Витязево) Андрюшкино Архангельск (Васьково) Архангельск (Талаги) Астрахань Аян (Мунук) Байкит Барнаул Батагай Бегишево Белая Гора Белгород Белоярский Березово Беринговский Благовещенск (Игнатьево) Бованенково Бодайбо Братск Бугульма Бугуруслан (Главный) Бухта Провидения Ванавара Варандей Великий Устюг Верхневилюйск Владивосток (Кневичи) Владикавказ (Беслан) Владимир (Семязино) Волгоград (Гумрак) Вологда Воркута Воронеж (Придача) Воронеж (Чертовицкое) Вуктыл Геленджик Горно-Алтайск Грозный Депутатский Диксон (Остров) Екатеринбург (Кольцово) Жуковский (Раменское) Залив Лаврентия Зырянка Иваново (Южный) Игарка Ижевск Иркутск Итуруп Йошкар-Ола Казань (Сокол) Калининград (Храброво) Калуга (Грабцево) Кемерово Кепервеем Киренск Киров (Победилово) Кировск (Апатиты) Когалым Комсомольск-н-А (Дземги) Комсомольск-н-А (Хурба) Кондинское (heliport) Кострома (Сокеркино) Котлас Краснодар (Пашковский) Красноярск (Емельяново) Красноярск (Черемшанк",
+    "station_snippets": {
+      "UUWW": [
+        "age\"  style=\"background-image: url('/img/airports/UUWW.jpg')\">\n    </div>\n  </div>\n  <div id=\"sideRight\">\n    <div>\n      <div id=\"weather_day\">\n        <h3>\n          <span id=\"weather_condition\">Состояние погоды на</span> <span id=\"weather_date\">01.10.2026 01:30</span>\n          <span id=\"mobileGMT\">GMT(<span class=\"GMT\">+3:00</span>)</span>\n          <span id=\"main",
+        "неральные Воды</a> </span> </li>   <li data-icao=\"UUWW\" id=\"airport_219\" class=\"current\"> <span> <a href=\"/219\"> Москва (Внуково)</a> </span> </li>   <li data-icao=\"UUDD\" id=\"airport_208\" class=\"\"> <span> <a href=\"/208\"> Москва (Домодедово)</a> </span> </li>   <li data-icao=\"UUMO\" id=\"airport_211\" class=\"\"> <span> <a href=\"/211\"> Москва (Остафьево)</a> </span> </li>  "
+      ]
+    }
+  },
+  {
+    "tag": "TR_js",
+    "url": "https://rasat.mgm.gov.tr/_next/static/chunks/pages/result-a8e9900981a7bb1f.js",
+    "request_at": "2026-09-30T22:56:18.083441+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:56:19.470516+00:00",
+    "sha256": "6a4947897b40693fedba248af3ae47d8c0f288d3b93ded9714e3a65c0562af70",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/TR_js_6a4947897b40693fedba248af3ae47d8c0f288d3b93ded9714e3a65c0562af70.gz",
+    "content_type": "application/javascript; charset=UTF-8",
+    "title": "Hezarfen Rasatlar",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "(self.webpackChunk_N_E=self.webpackChunk_N_E||[]).push([[968],{11:function(a,b,c){(window.__NEXT_P=window.__NEXT_P||[]).push([\"/result\",function(){return c(7473)}])},7473:function(a,b,c){\"use strict\";c.r(b),c.d(b,{\"__N_SSP\":function(){return M},\"default\":function(){return N}});var d=c(5893),e=c(7294),f=c(3157),g=c(4704),h=c(782),i=c(3044),j={ı:\"I\",İ:\"I\",i:\"I\",ş:\"S\",Ş:\"S\",ğ:\"G\",Ğ:\"G\",ü:\"U\",Ü:\"U\",ö:\"O\",Ö:\"O\",ç:\"C\",Ç:\"C\"},k=function(a,b,c){for(var d=\"\",e=0;e 24&&(c=24),d+=\"hours=\".concat(c)},l=\"localS\",m=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,],n=c(9821),o=function(a){var b,c=a.options,f=a.children,g=a.maxHeight,h=a.getValue,i=function(a){if(Array.isArray(a))return a}(b=h())||function(a,b){var c=[],d=!0,e=!1,f=void 0;try{for(var g,h=a[Symbol.iterator]();!(d=(g=h.next()).done)&&(c.push(g.value),!b||c.length!==b);d=!0);}catch(i){e=!0,f=i}finally{try{d||null==h.return||h.return()}finally{if(e)throw f}}return c}(b,1)||function(){throw new TypeError(\"Invalid attempt to destructure non-iterable instance\")}(),j=i[0],k=50*c.indexOf(j),l=f.length?f.findIndex(function(a",
+    "station_snippets": {
+      "http": [
+        ":w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Hezarfen Rasatlar</title></head><body>\"+document.getElementById(\"resultDD\").innerHTML+\"</body></html>\",e=\"hezarfen_rasatlar:\".concat(Date.now(),\".doc\");if(b=document.createElement(\"a\"),document.body.appendChild(b),navigator.msSaveOrOpenBlob){var f=new "
+      ],
+      "api": [],
+      "getServerSideProps": []
+    }
+  },
+  {
+    "tag": "IT_js",
+    "url": "https://www-static.meteoam.it/675/AMcustomJS.bundle.js",
+    "request_at": "2026-09-30T22:56:18.083672+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:56:19.689032+00:00",
+    "sha256": "48c3ac8659976c08446563811a26ebcdf7fc1e53d7a3a2091357187a0436795a",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IT_js_48c3ac8659976c08446563811a26ebcdf7fc1e53d7a3a2091357187a0436795a.gz",
+    "content_type": "application/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "!function(){var e={15577:function(e){\n/*!\n  * Bootstrap v5.1.3 (https://getbootstrap.com/)\n  * Copyright 2011-2021 The Bootstrap Authors (https://github.com/twbs/bootstrap/graphs/contributors)\n  * Licensed under MIT (https://github.com/twbs/bootstrap/blob/main/LICENSE)\n  */\ne.exports=function(){\"use strict\";const e=1e6,t=1e3,i=\"transitionend\",s=e=>null==e?`${e}`:{}.toString.call(e).match(/\\s([a-z]+)/i)[1].toLowerCase(),n=t=>{do{t+=Math.floor(Math.random()*e)}while(document.getElementById(t));return t},r=e=>{let t=e.getAttribute(\"data-bs-target\");if(!t||\"#\"===t){let i=e.getAttribute(\"href\");if(!i||!i.includes(\"#\")&&!i.startsWith(\".\"))return null;i.includes(\"#\")&&!i.startsWith(\"#\")&&(i=`#${i.split(\"#\")[1]}`),t=i&&\"#\"!==i?i.trim():null}return t},o=e=>{const t=r(e);return t&&document.querySelector(t)?t:null},a=e=>{const t=r(e);return t?document.querySelector(t):null},l=e=>{if(!e)return 0;let{transitionDuration:i,transitionDelay:s}=window.getComputedStyle(e);const n=Number.parseFloat(i),r=Number.parseFloat(s);return n||r?(i=i.split(\",\")[0],s=s.split(\",\")[0],(Number.parseFloat(i)+Number.pa",
+    "station_snippets": {
+      "point_metar": [],
+      "point_obs": [],
+      "http": [
+        "r e={15577:function(e){\n/*!\n  * Bootstrap v5.1.3 (https://getbootstrap.com/)\n  * Copyright 2011-2021 The Bootstrap Authors (https://github.com/twbs/bootstrap/graphs/contributors)\n  * Licensed under MIT (https://github.com/twbs/bootstrap/blob/main/LICENSE)\n  */\ne.exports=function(){\"use strict\";const e=1e6,t=1e3,i=\"transitionend\",s=e=>null==e?`${e}`:{}.toString.call(e)",
+        "/)\n  * Copyright 2011-2021 The Bootstrap Authors (https://github.com/twbs/bootstrap/graphs/contributors)\n  * Licensed under MIT (https://github.com/twbs/bootstrap/blob/main/LICENSE)\n  */\ne.exports=function(){\"use strict\";const e=1e6,t=1e3,i=\"transitionend\",s=e=>null==e?`${e}`:{}.toString.call(e).match(/\\s([a-z]+)/i)[1].toLowerCase(),n=t=>{do{t+=Math.floor(Math.random("
+      ]
+    }
+  },
+  {
+    "tag": "ES_csv",
+    "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x=",
+    "request_at": "2026-09-30T22:56:19.363900+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T22:56:19.849831+00:00",
+    "sha256": "601e67e55c5198f895ad6e0e1466d1fd096647f3a25acef9abb91396eb3fccb7",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/ES_csv_601e67e55c5198f895ad6e0e1466d1fd096647f3a25acef9abb91396eb3fccb7.gz",
+    "content_type": "text/html;charset=ISO-8859-15",
+    "title": "Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España",
+    "scripts": [
+      "https://www.aemet.es/ruxitagentjs_ICA7NVfqrux_10345260810170330.js",
+      "https://www.aemet.es/js/jquery.min.js",
+      "https://www.aemet.es/js/jquery.cookie.js",
+      "https://www.aemet.es/js/owl-carousel/owl.carousel.min.js",
+      "https://www.aemet.es/js/wow/wow.min.js",
+      "https://www.aemet.es/js/doubletaptogo.min.js",
+      "https://www.aemet.es/js/comun/semaforo-cabecera.js"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "https://www.aemet.es/es/buscador",
+        "method": "get",
+        "fields": [
+          {
+            "name": "str",
+            "value": "Introduzca texto",
+            "type": null
+          },
+          {
+            "name": "modo",
+            "value": "and",
+            "type": "hidden"
+          },
+          {
+            "name": "orden",
+            "value": "n",
+            "type": "hidden"
+          },
+          {
+            "name": "tipo",
+            "value": "sta",
+            "type": "hidden"
+          },
+          {
+            "name": null,
+            "value": " ",
+            "type": "submit"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "text": "es",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "ca",
+        "url": "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "gl",
+        "url": "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "va",
+        "url": "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "eu",
+        "url": "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "en",
+        "url": "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "fr",
+        "url": "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "Bienvenido",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "Benvinguts",
+        "url": "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "Benvidos",
+        "url": "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "Benvinguts",
+        "url": "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "Ongi etorri",
+        "url": "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "Welcome",
+        "url": "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "Bienvenue",
+        "url": "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos_3129_datos-horarios.csv?k=mad&l=3129&datos=det&w=0&f=temperatura&x="
+      },
+      {
+        "text": "Observación",
+        "url": "https://www.aemet.es/es/eltiempo/observacion"
+      },
+      {
+        "text": "Hoy y últimos días",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos"
+      },
+      {
+        "text": "SINOBAS",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/sinobas"
+      },
+      {
+        "text": "Radar",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/radar"
+      },
+      {
+        "text": "Satélites",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/satelite/infra"
+      },
+      {
+        "text": "Rayos",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/rayos"
+      },
+      {
+        "text": "Radiación y ozono",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/radiacion/radiacion"
+      },
+      {
+        "text": "Contaminación de fondo",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/contaminacionfondo"
+      },
+      {
+        "text": "Campañas Antárticas",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/camp_antarticas"
+      },
+      {
+        "text": "Tiempo espacial",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/tiempo_espacial"
+      },
+      {
+        "text": "Observación",
+        "url": "https://www.aemet.es/es/idi/observacion"
+      },
+      {
+        "text": "El Observador",
+        "url": "https://www.aemet.es/es/conocermas/recursos_en_linea/elobservador"
+      }
+    ],
+    "preview": "Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España Aceptar cookies Información sobre uso de cookies Este sitio web utiliza cookies propias y de terceros para mejorar la experiencia de navegación, y ofrecer contenidos y funcionalidades de interés. Para más información sobre las cookies utilizadas consulta nuestra política de cookies Agencia Estatal de Meteorología C - Ir a contenido 0 - Accesibilidad web 1 - Inicio 2 - Mapa web 3 - Ayuda web 4 - Contactar - Atención al ciudadano 5 - Municipios 6 - Avisos es es ca gl va eu en fr Bienvenido Bienvenido Benvinguts Benvidos Benvinguts Ongi etorri Welcome Bienvenue Buscador oculto Menú El tiempo Observación Hoy y últimos días SINOBAS Radar Satélites Rayos Radiación y ozono Contaminación de fondo Campañas Antárticas Tiempo espacial Predicción Avisos Municipios Playas Montaña CC. AA. España Ciudades del mundo Marítima Aeronáutica Mapas con frentes Temperaturas máx/mín Modelos numéricos Mapas probabilísticos Radiación ultravioleta Composición química de la atmósfera Incendios MeteoRuta Intrusiones de polvo mineral ",
+    "station_snippets": {
+      "Temperatura": [
+        "vl\" href=\"/es/eltiempo/prediccion/temperaturas\"  >Temperaturas máx/mín</a></li>\n\n<li><a class=\"enlace_3er_nvl\" href=\"/es/eltiempo/prediccion/modelosnumericos/harmonie_arome\"  >Modelos numéricos</a></li>\n\n<li><a class=\"enlace_3er_nvl\" href=\"/es/eltiempo/prediccion/mapas_probabilisticos\"  >Mapas probabilísticos</a></li>\n\n<li><a class=\"enlace_3er_nvl\" href=\"/es/eltiempo/"
+      ]
+    }
+  },
+  {
+    "tag": "FR_synop",
+    "url": "https://donneespubliques.meteofrance.fr/donnees_libres/Txt/Synop/synop.202609302100.csv",
+    "request_at": "2026-09-30T22:56:19.472894+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:56:20.635674+00:00",
+    "sha256": "1c7ac122667ce9a6b057602c91369929b7dfe3005eea09a2cab7c755d2a0dd28",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/FR_synop_1c7ac122667ce9a6b057602c91369929b7dfe3005eea09a2cab7c755d2a0dd28.gz",
+    "content_type": "text/html; charset=utf-8",
+    "title": "Données Publiques de Météo-France - Données non disponibles",
+    "scripts": [
+      "https://donneespubliques.meteofrance.fr/template/meta-script-1345.js"
+    ],
+    "frames": [
+      "https://www.googletagmanager.com/ns.html?id=GTM-NSZD4X8",
+      "https://donneespubliques.meteofrance.fr/?fond=donnee_indisponible"
+    ],
+    "forms": [
+      {
+        "action": "https://donneespubliques.meteofrance.fr/?fond=recherche",
+        "method": "post",
+        "fields": [
+          {
+            "name": "motcle",
+            "value": "",
+            "type": "search"
+          },
+          {
+            "name": null,
+            "value": null,
+            "type": "image"
+          }
+        ]
+      },
+      {
+        "action": "https://donneespubliques.meteofrance.fr/?fond=donnee_indisponible",
+        "method": "post",
+        "fields": [
+          {
+            "name": "login",
+            "value": "",
+            "type": "hidden"
+          },
+          {
+            "name": "mdpE",
+            "value": "",
+            "type": "hidden"
+          }
+        ]
+      },
+      {
+        "action": "https://donneespubliques.meteofrance.fr/?fond=donnee_indisponible",
+        "method": "post",
+        "fields": [
+          {
+            "name": "action",
+            "value": "connexion",
+            "type": "hidden"
+          },
+          {
+            "name": "urlok",
+            "value": "https://donneespubliques.meteofrance.fr/?fond=donnee_indisponible",
+            "type": "hidden"
+          },
+          {
+            "name": "urlerr",
+            "value": "https://donneespubliques.meteofrance.fr/?fond=donnee_indisponible&errconnex=1&depuisbandeau=1",
+            "type": "hidden"
+          },
+          {
+            "name": "email",
+            "value": "",
+            "type": "text"
+          },
+          {
+            "name": null,
+            "value": "OK",
+            "type": "submit"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "text": "Institutionnel",
+        "url": "https://meteofrance.fr/"
+      }
+    ],
+    "preview": "﻿ Données Publiques de Météo-France - Données non disponibles Aller au contenu principal Météo France Météo Outremer Guadeloupe & Iles du Nord Martinique Guyane La Réunion Mayotte Nouvelle-Calédonie Polynésie française Saint-Pierre-et-Miquelon Comprendre Institutionnel Éducation Open Data Offres et Services Autres sites Sites météo spécialisés Vigilance météorologique Aviation Climat Services climatiques DRIAS les futurs du climat Pluies extrêmes Ressources Portail documentaire HAL Météo-France Entités Météo-France École nationale de la météorologie Centre de recherches Centre de météorologie spatiale Données publiques Accueil Textes officiels et conditions d'accès Catalogue Informations sur les stations Géoservices F.A.Q. Rechercher Déjà inscrit ? Identifiant Mot de passe > Mot de passe oublié ? Fichier non trouvé Guide de démarrage Catalogue Climatologie Autres données libres Simulations scénarios climatiques Images du Centre de Météorologie Spatiale ClimatHD - Le climat d'hier et de demain Jeu de données METEONET Fichier non trouvé Les données auxquelles vous essayez d'accéder ne ",
+    "station_snippets": {
+      "07150": []
+    }
+  },
+  {
+    "tag": "SA_doc",
+    "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server",
+    "request_at": "2026-09-30T22:56:19.693475+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:56:20.023355+00:00",
+    "sha256": "e602073ad06ef9345de53b04509097fe9fc7c8a06e4ef7004be4a17ba7a9a66b",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/SA_doc_e602073ad06ef9345de53b04509097fe9fc7c8a06e4ef7004be4a17ba7a9a66b.gz",
+    "content_type": "text/html; charset=utf-8",
+    "title": "Vector Tile Server | NCM | NCM API Documentation",
+    "scripts": [
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/4bd1b696-0ea860eb2523fa69.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/684-a82a4fa965f61466.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/main-app-037964b5d318d5f2.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/07b5dd1e-bc8fa23b29716606.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/992-97aef3ee391077bf.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/726-8d0099e46ff05757.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/app/%5B...url%5D/page-3a7f87cd833d49f6.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/app/layout-061dbe3d5b856009.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/polyfills-42372ed130431b0a.js",
+      "https://api-doc.ncm.gov.sa/_next/static/chunks/webpack-1382574b7b00c5e4.js"
+    ],
+    "frames": [],
+    "forms": [],
+    "links": [
+      {
+        "text": "Getting started with the NCM Weather API",
+        "url": "https://api-doc.ncm.gov.sa/en/api/getting-started"
+      },
+      {
+        "text": "Available Parameters",
+        "url": "https://api-doc.ncm.gov.sa/en/api/available-parameters"
+      },
+      {
+        "text": "API Request",
+        "url": "https://api-doc.ncm.gov.sa/en/api/request"
+      },
+      {
+        "text": "API Response",
+        "url": "https://api-doc.ncm.gov.sa/en/api/response"
+      },
+      {
+        "text": "WMS Interface",
+        "url": "https://api-doc.ncm.gov.sa/en/api/wms"
+      },
+      {
+        "text": "WFS Interface",
+        "url": "https://api-doc.ncm.gov.sa/en/api/wfs"
+      },
+      {
+        "text": "Vector Tile Server",
+        "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server"
+      },
+      {
+        "text": "Data Connectors",
+        "url": "https://api-doc.ncm.gov.sa/en/api/data-connectors"
+      },
+      {
+        "text": "URL Creator",
+        "url": "https://api-doc.ncm.gov.sa/en/api/url-creator-2"
+      },
+      {
+        "text": "Gallery",
+        "url": "https://api-doc.ncm.gov.sa/en/api/overview"
+      },
+      {
+        "text": "FAQ",
+        "url": "https://api-doc.ncm.gov.sa/en/api/faq"
+      },
+      {
+        "text": "Appendix",
+        "url": "https://api-doc.ncm.gov.sa/en/api/appendix"
+      },
+      {
+        "text": "Isolines Request",
+        "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server/isolines-request-meteomatics/"
+      },
+      {
+        "text": "Symbols Request",
+        "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server/symbols-request-meteomatics/"
+      },
+      {
+        "text": "Wind Barbs Request",
+        "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server/wind-barbs-request-meteomatics/"
+      },
+      {
+        "text": "TAF Request",
+        "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server/taf-request-meteomatics/"
+      },
+      {
+        "text": "METAR Request",
+        "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server/metar-request-meteomatics/"
+      },
+      {
+        "text": "SIGMET Request",
+        "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server/sigmet-request-meteomatics/"
+      },
+      {
+        "text": "Compatibility with ArcGIS online",
+        "url": "https://api-doc.ncm.gov.sa/en/api/vector-tile-server/compatibility-with-arcgis-online-meteomatics/"
+      }
+    ],
+    "preview": "Vector Tile Server | NCM | NCM API Documentation Search documentation... Documentation Getting started with the NCM Weather API Available Parameters API Request API Response WMS Interface WFS Interface Vector Tile Server Data Connectors URL Creator Gallery FAQ Appendix Vector Tile Server Vector tiles contain geo-data packed in vector format to be efficiently transmitted over the web, they are delivered together with a style file that tells the web client how to render them. We serve the geo-data as Mapbox Vector tiles encoded as Google Protobufs (PBF). Vector data is a better alternative to raster data in terms of both quality and efficiency when displaying text, line geometry, and symbols. Isolines Request Symbols Request Wind Barbs Request TAF Request METAR Request SIGMET Request Compatibility with ArcGIS online",
+    "station_snippets": {
+      "METAR": [
+        "r-tile-server/metar-request-meteomatics/\"><strong>METAR Request</strong></a></li>\r\n  <li><a href=\"https://api-doc.ncm.gov.sa/en/api/vector-tile-server/sigmet-request-meteomatics/\"><strong>SIGMET Request</strong></a></li>\r\n  <li><a href=\"https://api-doc.ncm.gov.sa/en/api/vector-tile-server/compatibility-with-arcgis-online-meteomatics/\"><strong>Compatibility with ArcGIS",
+        "tar-request-meteomatics/\\\"\\u003e\\u003cstrong\\u003eMETAR Request\\u003c/strong\\u003e\\u003c/a\\u003e\\u003c/li\\u003e\\r\\n  \\u003cli\\u003e\\u003ca href=\\\"https://api-doc.ncm.gov.sa/en/api/vector-tile-server/sigmet-request-meteomatics/\\\"\\u003e\\u003cstrong\\u003eSIGMET Request\\u003c/strong\\u003e\\u003c/a\\u003e\\u003c/li\\u003e\\r\\n  \\u003cli\\u003e\\u003ca href=\\\"https://api-doc.ncm.g"
+      ]
+    }
+  },
+  {
+    "tag": "PK_pmd",
+    "url": "https://rmcsindh.pmd.gov.pk/Services_Aviation.html",
+    "request_at": "2026-09-30T22:56:19.869750+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:56:21.774491+00:00",
+    "sha256": "e23a154eef02c1863ae4e09d2207edb1445410b0d9b5e7c9d1d84ae2c209a74e",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/PK_pmd_e23a154eef02c1863ae4e09d2207edb1445410b0d9b5e7c9d1d84ae2c209a74e.gz",
+    "content_type": "text/html",
+    "title": "Services-Aviation",
+    "scripts": [
+      "https://rmcsindh.pmd.gov.pk/js/jquery-3.1.1.js",
+      "https://rmcsindh.pmd.gov.pk/js/jquery-3.1.1.min.js",
+      "https://rmcsindh.pmd.gov.pk/js/hor_menu.js",
+      "https://rmcsindh.pmd.gov.pk/js/ver_menu.js",
+      "https://use.edgefonts.net/montserrat:n4:default;source-sans-pro:n2:default.js",
+      "https://rmcsindh.pmd.gov.pk/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"
+    ],
+    "frames": [
+      "https://www.google.com/maps/embed?pb=!1m14!1m8!1m3!1d28954.73665714431!2d67.1401213!3d24.8863106!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x0%3A0xeb56636678c20ad0!2sR.M.C+Karachi!5e0!3m2!1sen!2s!4v1485291567289"
+    ],
+    "forms": [],
+    "links": [],
+    "preview": "Services-Aviation MENU HOME ABOUT SERVICES NETWORK LINKS CONTACT SERVICES Weather Forecasting Aviation Climatology Seismology Agrometeorology Drought AVIATION AVIATION PRODUCTS RESPONSIBILITIES AVIATION SERVICES Regional Meteorological Center (RMC), Karachi under Pakistan Meteorological Department (PMD), is responsible to provide Meteorological Services (Weather Information) to the National / International Airlines and Civil Aviation Authority (CAA) according to the rules/regulations defined by the International Civil Aviation Organization (ICAO) and World Meteorological Organization (WMO). These services are provided through different Meteorological Watch offices (MWOs) under RMC, Karachi, functioning at different Airports of Sindh region. METEOROLOGIAL PRODUCTS FOR AVIATION The Meteorological products/information provided by the RMC, Karachi for aviation activities are: Current weather observation on hourly and half hourly basis. i.e METAR, SPECI. Forecasts; Terminal Aerodrome Forecast (TAFs), Area/Local forecasts, Route Forecast, Landing and take off forecasts (TREND). Warnings; A",
+    "station_snippets": {
+      "METAR": [
+        " observation on hourly and half hourly basis. i.e METAR, SPECI.</li>\r\n                            <li><strong>Forecasts;</strong> Terminal Aerodrome Forecast (TAFs), Area/Local forecasts, Route Forecast, Landing and take off forecasts (TREND).\r\n                            </li>\r\n                            <li><strong>Warnings;</strong> Aerodrome warning, Warning for ",
+        "    <li>Supply of Met. Information in the form of METAR, SPECI, TAFORS, RVR observations, landing and take off reports, pressure data, RADAR and Satellite pictures, SIGMETs, Air reports (AIREP), Wind shear and turbulence informations.\r\n                            </li>\r\n                            <li>Display of all Meteorological Information</li>\r\n                   "
+      ],
+      "OPKC": []
+    }
+  },
+  {
+    "tag": "IL_xml",
+    "url": "https://ims.gov.il/sites/default/files/ims_data/xml_files/imslasthour.xml",
+    "request_at": "2026-09-30T22:56:20.026182+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T22:56:20.883634+00:00",
+    "sha256": "057ebf4d13d044a7581761eb3e1a5b49153a0f4b8356f029a00e9e4817df1bf6",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IL_xml_057ebf4d13d044a7581761eb3e1a5b49153a0f4b8356f029a00e9e4817df1bf6.gz",
+    "content_type": "text/html",
+    "title": "שגיאה",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "שגיאה האתר לשירותים ולמידע ממשלתי האתר המבוקש אינו נמצא אנא בדוק כי כתובת האתר שהזנת נכונה (5B)7315926336488451384 לאתר GOV.IL",
+    "station_snippets": {
+      "BEN": [],
+      "LOD": []
+    }
+  },
+  {
+    "tag": "DE_aviation",
+    "url": "https://opendata.dwd.de/weather/weather_reports/aviation/",
+    "request_at": "2026-09-30T22:56:20.646804+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T22:56:21.120699+00:00",
+    "sha256": "55f7d9e99b8e2d4e0e193b2f0275501e6d9c1ebd29cadbea6a0da48a8587e3e0",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/DE_aviation_55f7d9e99b8e2d4e0e193b2f0275501e6d9c1ebd29cadbea6a0da48a8587e3e0.gz",
+    "content_type": "text/html",
+    "title": "404 Not Found",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "404 Not Found 404 Not Found nginx",
+    "station_snippets": {
+      "METAR": []
+    }
+  }
+]

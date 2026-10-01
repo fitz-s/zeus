@@ -1,0 +1,336 @@
+[
+  {
+    "tag": "IT_api",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/",
+    "request_at": "2026-09-30T23:04:01.538718+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T23:04:02.433254+00:00",
+    "sha256": "37ec4665a8102d115ffd1ac20dae94c98b4dac64b0c1a68228aa2a531caeb35d",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IT_api_37ec4665a8102d115ffd1ac20dae94c98b4dac64b0c1a68228aa2a531caeb35d.gz",
+    "content_type": "application/json",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "{\"detail\":\"Not Found\"}",
+    "station_snippets": {
+      "LIMC": []
+    }
+  },
+  {
+    "tag": "IT_code",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC",
+    "request_at": "2026-09-30T23:04:01.539062+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T23:04:02.404514+00:00",
+    "sha256": "37ec4665a8102d115ffd1ac20dae94c98b4dac64b0c1a68228aa2a531caeb35d",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IT_code_37ec4665a8102d115ffd1ac20dae94c98b4dac64b0c1a68228aa2a531caeb35d.gz",
+    "content_type": "application/json",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "{\"detail\":\"Not Found\"}",
+    "station_snippets": {
+      "LIMC": []
+    }
+  },
+  {
+    "tag": "IT_icao",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/?icao=LIMC",
+    "request_at": "2026-09-30T23:04:01.539197+00:00",
+    "status": 404,
+    "receipt_at": "2026-09-30T23:04:02.647660+00:00",
+    "sha256": "37ec4665a8102d115ffd1ac20dae94c98b4dac64b0c1a68228aa2a531caeb35d",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IT_icao_37ec4665a8102d115ffd1ac20dae94c98b4dac64b0c1a68228aa2a531caeb35d.gz",
+    "content_type": "application/json",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "{\"detail\":\"Not Found\"}",
+    "station_snippets": {
+      "LIMC": []
+    }
+  },
+  {
+    "tag": "IN_root2",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/index.php",
+    "request_at": "2026-09-30T23:04:01.539307+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:04:04.710533+00:00",
+    "sha256": "2863054db56c1f03adb991a30065c39fa6eb5ad9edc15c339b3f227a04c01e5a",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_root2_2863054db56c1f03adb991a30065c39fa6eb5ad9edc15c339b3f227a04c01e5a.gz",
+    "content_type": "text/html; charset=UTF-8",
+    "title": "",
+    "scripts": [
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery-1.7.1.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery-ui.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/json.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/rsh.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/facebox/facebox.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/printData.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/globals.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/language.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/thirdparty.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/history.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/user.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/gui.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/ctrl.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery.cookie.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery.progressbar.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery.progressbar.min.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/alerts.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/validate.js",
+      "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/jquery.qtip-1.0.0-rc3.min.js"
+    ],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "New aerodrome warning(s) available for . View now nsWEBPIB release CVS | India Meteorological Department METEOROLOGICAL WATCH OFFICE Loading... You need to have JavaScript support to view this website, and it seems that it is disabled or not supported on your browser. Please enable JavaScript or use another browser, and try again.",
+    "station_snippets": {
+      "showOPMETQuery": []
+    }
+  },
+  {
+    "tag": "ES_tablebase",
+    "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?k=mad&l=3129",
+    "request_at": "2026-09-30T23:04:02.412462+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:04:03.041631+00:00",
+    "sha256": "5a36a311ffaffae1b95d7f06f7dcf6ffcac4fb00c6eb153f0d5714b8a61b00c9",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/ES_tablebase_5a36a311ffaffae1b95d7f06f7dcf6ffcac4fb00c6eb153f0d5714b8a61b00c9.gz",
+    "content_type": "text/html;charset=ISO-8859-15",
+    "title": "Hoy y últimos días: Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España",
+    "scripts": [
+      "https://www.aemet.es/ruxitagentjs_ICA7NVfqrux_10345260810170330.js",
+      "https://www.aemet.es/js/jquery.min.js",
+      "https://www.aemet.es/js/jquery.cookie.js",
+      "https://www.aemet.es/js/owl-carousel/owl.carousel.min.js",
+      "https://www.aemet.es/js/wow/wow.min.js",
+      "https://www.aemet.es/js/doubletaptogo.min.js",
+      "https://www.aemet.es/js/animacion.js",
+      "https://www.aemet.es/js/jquery-ui.js",
+      "https://www.aemet.es/js/leaflet/leaflet.js",
+      "https://www.aemet.es/js/leaflet/leaflet-extend.js",
+      "https://www.aemet.es/js/jquery-ui.js",
+      "https://www.aemet.es/js/topojson/topojson.min.js",
+      "https://www.aemet.es/js/maps/maps.js",
+      "https://www.aemet.es/js/jquery.flot.js",
+      "https://www.aemet.es/js/jquery.flot.stacks.js",
+      "https://www.aemet.es/js/xlsx.mini.min.js",
+      "https://www.aemet.es/js/mpb/mpb_udat_horarios.js",
+      "https://www.aemet.es/js/comun/semaforo-cabecera.js"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "https://www.aemet.es/es/buscador",
+        "method": "get",
+        "fields": [
+          {
+            "name": "str",
+            "value": "Introduzca texto",
+            "type": null
+          },
+          {
+            "name": "modo",
+            "value": "and",
+            "type": "hidden"
+          },
+          {
+            "name": "orden",
+            "value": "n",
+            "type": "hidden"
+          },
+          {
+            "name": "tipo",
+            "value": "sta",
+            "type": "hidden"
+          },
+          {
+            "name": null,
+            "value": " ",
+            "type": "submit"
+          }
+        ]
+      },
+      {
+        "action": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos",
+        "method": "get",
+        "fields": [
+          {
+            "name": "modo",
+            "value": "and",
+            "type": "hidden"
+          },
+          {
+            "name": "orden",
+            "value": "n",
+            "type": "hidden"
+          },
+          {
+            "name": "tipo",
+            "value": "sta",
+            "type": "hidden"
+          },
+          {
+            "name": "w",
+            "value": "1",
+            "type": "hidden"
+          },
+          {
+            "name": "str",
+            "value": "Introduzca un texto a buscar",
+            "type": "text"
+          },
+          {
+            "name": null,
+            "value": "Buscar",
+            "type": "submit"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "text": "es",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "ca",
+        "url": "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "gl",
+        "url": "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "va",
+        "url": "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "eu",
+        "url": "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "en",
+        "url": "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "fr",
+        "url": "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "Bienvenido",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "Benvinguts",
+        "url": "https://www.aemet.es/ca/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "Benvidos",
+        "url": "https://www.aemet.es/gl/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "Benvinguts",
+        "url": "https://www.aemet.es/va/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "Ongi etorri",
+        "url": "https://www.aemet.es/eu/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "Welcome",
+        "url": "https://www.aemet.es/en/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "Bienvenue",
+        "url": "https://www.aemet.es/fr/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      },
+      {
+        "text": "Observación",
+        "url": "https://www.aemet.es/es/eltiempo/observacion"
+      },
+      {
+        "text": "Hoy y últimos días",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos"
+      },
+      {
+        "text": "SINOBAS",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/sinobas"
+      },
+      {
+        "text": "Radar",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/radar"
+      },
+      {
+        "text": "Satélites",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/satelite/infra"
+      },
+      {
+        "text": "Rayos",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/rayos"
+      },
+      {
+        "text": "Radiación y ozono",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/radiacion/radiacion"
+      },
+      {
+        "text": "Contaminación de fondo",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/contaminacionfondo"
+      },
+      {
+        "text": "Campañas Antárticas",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/camp_antarticas"
+      },
+      {
+        "text": "Tiempo espacial",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/tiempo_espacial"
+      },
+      {
+        "text": "Observación",
+        "url": "https://www.aemet.es/es/idi/observacion"
+      },
+      {
+        "text": "El Observador",
+        "url": "https://www.aemet.es/es/conocermas/recursos_en_linea/elobservador"
+      },
+      {
+        "text": "Observación",
+        "url": "https://www.aemet.es/es/eltiempo/observacion"
+      },
+      {
+        "text": "Hoy y últimos días",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos"
+      },
+      {
+        "text": "",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos/ayuda"
+      },
+      {
+        "text": "Datos diarios",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?w=2"
+      },
+      {
+        "text": "SINOBAS: SIstema de Notificación de OBservaciones Atmosféricas Singulares",
+        "url": "https://www.aemet.es/es/eltiempo/observacion/sinobas"
+      },
+      {
+        "text": "",
+        "url": "whatsapp://send?text=https://www.aemet.es/es/eltiempo/observacion/ultimosdatos?k=mad&l=3129"
+      }
+    ],
+    "preview": "Hoy y últimos días: Madrid Aeropuerto - Agencia Estatal de Meteorología - AEMET. Gobierno de España Aceptar cookies Información sobre uso de cookies Este sitio web utiliza cookies propias y de terceros para mejorar la experiencia de navegación, y ofrecer contenidos y funcionalidades de interés. Para más información sobre las cookies utilizadas consulta nuestra política de cookies Agencia Estatal de Meteorología C - Ir a contenido 0 - Accesibilidad web 1 - Inicio 2 - Mapa web 3 - Ayuda web 4 - Contactar - Atención al ciudadano 5 - Municipios 6 - Avisos es es ca gl va eu en fr Bienvenido Bienvenido Benvinguts Benvidos Benvinguts Ongi etorri Welcome Bienvenue Buscador oculto Menú El tiempo Observación Hoy y últimos días SINOBAS Radar Satélites Rayos Radiación y ozono Contaminación de fondo Campañas Antárticas Tiempo espacial Predicción Avisos Municipios Playas Montaña CC. AA. España Ciudades del mundo Marítima Aeronáutica Mapas con frentes Temperaturas máx/mín Modelos numéricos Mapas probabilísticos Radiación ultravioleta Composición química de la atmósfera Incendios MeteoRuta Intrusion",
+    "station_snippets": {
+      "Temperatura": [
+        "vl\" href=\"/es/eltiempo/prediccion/temperaturas\"  >Temperaturas máx/mín</a></li>\n\n<li><a class=\"enlace_3er_nvl\" href=\"/es/eltiempo/prediccion/modelosnumericos/harmonie_arome\"  >Modelos numéricos</a></li>\n\n<li><a class=\"enlace_3er_nvl\" href=\"/es/eltiempo/prediccion/mapas_probabilisticos\"  >Mapas probabilísticos</a></li>\n\n<li><a class=\"enlace_3er_nvl\" href=\"/es/eltiempo/",
+        "alt\":\"Poco nuboso\",\"ultimos.literal.temperatura\":\"Temperatura (&#176;C)\",\"bal\":\"Illes Balears\",\"ultimos.literal.imagen_etiqueta.grp_pre\":\"\",\"ultimos.literal.abbr.preacumulada\":\"Pre. acu.\",\"imagenes.26.alt\":\"Cubierto con lluvia\",\"ultimos.literal.ver_municipio\":\"Ver predicción\",\"ultimos.literal.ocultar_tabla\":\"Ocultar tabla\",\"ccaa.prediccion.literal.espanha\":\"Seleccione"
+      ]
+    }
+  }
+]

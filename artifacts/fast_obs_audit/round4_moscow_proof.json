@@ -5,8 +5,8 @@
     "channel": "metaviatelecom_display",
     "reference_channel": "resolver",
     "comparison_role": "EXACT_RESOLVER_VALUE_COMPARISON",
-    "n_pairs": 3,
-    "n_exact": 3,
+    "n_pairs": 4,
+    "n_exact": 4,
     "mismatches": [],
     "pairs": [
       {
@@ -55,6 +55,28 @@
       },
       {
         "time": "2026-09-30T23:30:00+00:00",
+        "candidate_raw": [
+          {
+            "value": 8.0,
+            "unit": "C"
+          }
+        ],
+        "resolver_raw": [
+          {
+            "value": 8.0,
+            "unit": "C"
+          }
+        ],
+        "candidate_contract": [
+          8
+        ],
+        "resolver_contract": [
+          8
+        ],
+        "match": true
+      },
+      {
+        "time": "2026-10-01T00:00:00+00:00",
         "candidate_raw": [
           {
             "value": 8.0,
@@ -123,8 +145,25 @@
               "lag_lower_ms": 270899.696,
               "lag_upper_ms": 330657.554
             }
+          },
+          {
+            "channel": "mgm_metar",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Moscow",
+              "station": "UUWW",
+              "channel": "mgm_metar",
+              "observed_at": "2026-09-30T23:00:00+00:00",
+              "value": 8.0,
+              "unit": "C",
+              "negative_request_at": "2026-09-30T23:08:31.359554+00:00",
+              "positive_receipt_at": "2026-09-30T23:09:30.507286+00:00",
+              "lag_lower_ms": 511359.554,
+              "lag_upper_ms": 570507.2860000001
+            }
           }
-        ]
+        ],
+        "paired_value_identity": true
       },
       {
         "observation": "2026-09-30T23:30:00+00:00",
@@ -173,11 +212,63 @@
               "lag_upper_ms": 330559.757
             }
           }
-        ]
+        ],
+        "paired_value_identity": true
+      },
+      {
+        "observation": "2026-10-01T00:00:00+00:00",
+        "candidate": {
+          "city": "Moscow",
+          "station": "UUWW",
+          "channel": "metaviatelecom_display",
+          "observed_at": "2026-10-01T00:00:00+00:00",
+          "value": 8.0,
+          "unit": "C",
+          "negative_request_at": "2026-10-01T00:00:53.422943+00:00",
+          "positive_receipt_at": "2026-10-01T00:01:53.595180+00:00",
+          "lag_lower_ms": 53422.943,
+          "lag_upper_ms": 113595.18
+        },
+        "comparators": [
+          {
+            "channel": "awc",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Moscow",
+              "station": "UUWW",
+              "channel": "awc",
+              "observed_at": "2026-10-01T00:00:00+00:00",
+              "value": 8.0,
+              "unit": "C",
+              "negative_request_at": "2026-10-01T00:03:47.072407+00:00",
+              "positive_receipt_at": "2026-10-01T00:04:47.505962+00:00",
+              "lag_lower_ms": 227072.407,
+              "lag_upper_ms": 287505.962
+            }
+          },
+          {
+            "channel": "resolver",
+            "verdict": "FASTER",
+            "interval": {
+              "city": "Moscow",
+              "station": "UUWW",
+              "channel": "resolver",
+              "observed_at": "2026-10-01T00:00:00+00:00",
+              "value": 8.0,
+              "unit": "C",
+              "negative_request_at": "2026-10-01T00:05:47.081354+00:00",
+              "positive_receipt_at": "2026-10-01T00:06:47.822246+00:00",
+              "lag_lower_ms": 347081.354,
+              "lag_upper_ms": 407822.246
+            }
+          }
+        ],
+        "paired_value_identity": true
       }
     ],
     "required_speed_comparators": [
-      "awc"
+      "awc",
+      "resolver"
     ],
     "verdict": "VALUE_IDENTICAL_FASTER_OBSERVED"
   }

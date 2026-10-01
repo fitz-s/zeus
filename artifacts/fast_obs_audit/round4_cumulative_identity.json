@@ -3,8 +3,8 @@
     "city": "Tokyo",
     "station": "RJTT",
     "channel": "jma_amedas",
-    "n_pairs": 151,
-    "n_exact": 151,
+    "n_pairs": 152,
+    "n_exact": 152,
     "mismatches": [],
     "pairs": [
       {
@@ -1973,6 +1973,19 @@
         "source_reports": [
           "round4_comparison.json"
         ]
+      },
+      {
+        "time": "2026-09-30T23:30:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
       }
     ],
     "verdict": "RETAIN_EXISTING_ADMISSION"
@@ -2733,8 +2746,8 @@
     "city": "Seoul",
     "station": "RKSI",
     "channel": "kma_amo_raw_metar",
-    "n_pairs": 50,
-    "n_exact": 50,
+    "n_pairs": 51,
+    "n_exact": 51,
     "mismatches": [],
     "pairs": [
       {
@@ -3396,6 +3409,19 @@
         "source_reports": [
           "round4_comparison.json"
         ]
+      },
+      {
+        "time": "2026-10-01T00:00:00+00:00",
+        "candidate_contract": [
+          18
+        ],
+        "resolver_contract": [
+          18
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
       }
     ],
     "verdict": "RETAIN_EXISTING_ADMISSION"
@@ -3404,8 +3430,8 @@
     "city": "Busan",
     "station": "RKPK",
     "channel": "kma_amo_raw_metar",
-    "n_pairs": 27,
-    "n_exact": 27,
+    "n_pairs": 28,
+    "n_exact": 28,
     "mismatches": [],
     "pairs": [
       {
@@ -3758,6 +3784,19 @@
         ],
         "resolver_contract": [
           21
+        ],
+        "match": true,
+        "source_reports": [
+          "round4_comparison.json"
+        ]
+      },
+      {
+        "time": "2026-10-01T00:00:00+00:00",
+        "candidate_contract": [
+          22
+        ],
+        "resolver_contract": [
+          22
         ],
         "match": true,
         "source_reports": [

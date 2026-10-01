@@ -1,0 +1,93 @@
+[
+  {
+    "tag": "IN_ctrl",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/ctrl.js",
+    "request_at": "2026-09-30T23:04:43.690106+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:04:45.372299+00:00",
+    "sha256": "e24c4c1dc5e25cfd26c13abdd5265221eaaea1dc6b04a7e2610d6282a916fe10",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_ctrl_e24c4c1dc5e25cfd26c13abdd5265221eaaea1dc6b04a7e2610d6282a916fe10.gz",
+    "content_type": "text/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "$.ctrl = function(key, callback, args) {\n    var isCtrl = false;\n    $(document).keydown(function(e) {\n        if(!args) args=[]; // IE barks when args is null\n\n        if(e.ctrlKey) isCtrl = true;\n        if(e.keyCode == key.charCodeAt(0) && isCtrl) {\n            callback.apply(this, args);\n            return false;\n        }\n    }).keyup(function(e) {\n        if(e.ctrlKey) isCtrl = false;\n    });\n};",
+    "station_snippets": {
+      "showOPMETQuery": []
+    }
+  },
+  {
+    "tag": "ES_js",
+    "url": "https://www.aemet.es/js/mpb/mpb_udat_horarios.js",
+    "request_at": "2026-09-30T23:04:43.690473+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:04:43.870251+00:00",
+    "sha256": "6b1f92d011afe12af2096d332fd87726c97fce361eaa5c83dd085b779bc7865a",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/ES_js_6b1f92d011afe12af2096d332fd87726c97fce361eaa5c83dd085b779bc7865a.gz",
+    "content_type": "application/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "$(document).ready(function(){function p(){if(!h){h=!0;var a=window.innerWidth,b=$(\"#mapa\");b.removeClass(r.join(\" \"));480>=a?b.addClass(\"impr-mapa-480\"):540>=a?b.addClass(\"impr-mapa-540\"):600>=a?b.addClass(\"impr-mapa-600\"):657>=a?b.addClass(\"impr-mapa-657\"):768>=a?b.addClass(\"impr-mapa-768\"):b.addClass(\"impr-mapa\");$(\"[data-hide-print=true]\").hide();$(\"[data-hide-print=false]\").show();$(\"#fecha-seleccionada\").length&&c&&(\"diario\"===c.state.tipo?$(\"#fecha-seleccionada\").text(c.getDateSelectedFormatted(l,\n{weekday:\"long\",year:\"numeric\",month:\"long\",day:\"numeric\"})+\" 00-24h\"):$(\"#fecha-seleccionada\").text(c.getDateSelectedFormatted(l)));$(\"#variable-seleccionada\").length&&c&&(a=$(\"#lista-variables .lista-variables .tl-selected\").html()||$(\"#lista-variables .ui-selectmenu-text\").html(),$(\".variable-selec\").html(\"\"+a),$(\".variable-selec\").show());return function(){$(\"#mapa\").removeClass(r.join(\" \"));$(\"[data-hide-print=true]\").show();$(\"[data-hide-print=false]\").hide();h=!1}}}var b=new Mediator,l=$(\"#locale-id\").val(),\nk={PB:$(\"#fecha-inicio-PB\").val()},e={param:\"temp\",ambito:$(\"#selector",
+    "station_snippets": {
+      "json": [],
+      "3129": [],
+      "ajax": [],
+      "url:": []
+    }
+  },
+  {
+    "tag": "IT_openapi",
+    "url": "https://api.meteoam.it/deda-ows/openapi.json",
+    "request_at": "2026-09-30T23:04:43.690614+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:04:44.544969+00:00",
+    "sha256": "aae44ef100696d25f943f6fafe3cfd404211a124c2089f7171b875bdc58979a9",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IT_openapi_aae44ef100696d25f943f6fafe3cfd404211a124c2089f7171b875bdc58979a9.gz",
+    "content_type": "application/json",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"Deda OWS Next API\",\"description\":\"Deda OWS Next API\",\"version\":\"1.0.0\"},\"paths\":{\"/\":{\"get\":{\"summary\":\"Index\",\"operationId\":\"index__get\",\"responses\":{\"200\":{\"description\":\"Successful Response\",\"content\":{\"application/json\":{\"schema\":{}}}}}}},\"/ows\":{\"get\":{\"summary\":\"Ows\",\"description\":\"Ritorna un file geojson secondo specifiche della chiamata\\nhttps://docs.opengeospatial.org/is/14-055r2/14-055r2.html\",\"operationId\":\"ows_ows_get\",\"parameters\":[{\"name\":\"request\",\"in\":\"query\",\"required\":true,\"schema\":{\"type\":\"string\",\"minLength\":1,\"title\":\"Request\"}},{\"name\":\"service\",\"in\":\"query\",\"required\":false,\"schema\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"title\":\"Service\"}},{\"name\":\"layers\",\"in\":\"query\",\"required\":false,\"schema\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"title\":\"Layers\"}},{\"name\":\"version\",\"in\":\"query\",\"required\":false,\"schema\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"title\":\"Version\"}},{\"name\":\"time\",\"in\":\"query\",\"required\":false,\"schema\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"title\":\"Time\"}},{\"name\":\"zoom\",\"in\":\"query\",",
+    "station_snippets": {
+      "metar": [
+        "/components/schemas/HTTPValidationError\"}}}}}}},\"/metar-taf-icao/{icao}/{time1}/{time2}\":{\"get\":{\"summary\":\"Api Get Metar Taf Icao Json\",\"operationId\":\"api_get_metar_taf_icao_json_metar_taf_icao__icao___time1___time2__get\",\"parameters\":[{\"name\":\"icao\",\"in\":\"path\",\"required\":true,\"schema\":{\"title\":\"Icao\"}},{\"name\":\"time1\",\"in\":\"path\",\"required\":true,\"schema\":{\"title\":\"",
+        "i Get Metar Taf Icao Json\",\"operationId\":\"api_get_metar_taf_icao_json_metar_taf_icao__icao___time1___time2__get\",\"parameters\":[{\"name\":\"icao\",\"in\":\"path\",\"required\":true,\"schema\":{\"title\":\"Icao\"}},{\"name\":\"time1\",\"in\":\"path\",\"required\":true,\"schema\":{\"title\":\"Time1\"}},{\"name\":\"time2\",\"in\":\"path\",\"required\":true,\"schema\":{\"title\":\"Time2\"}}],\"responses\":{\"200\":{\"descrip"
+      ]
+    }
+  },
+  {
+    "tag": "FI_avimet",
+    "url": "https://aviationweather.fmi.fi/",
+    "request_at": "2026-09-30T23:04:43.690740+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "HK_instant",
+    "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en",
+    "request_at": "2026-09-30T23:04:43.884195+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:04:45.137116+00:00",
+    "sha256": "4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/HK_instant_4caafa1190c1e8611f0639af5d175282c738c5857f3859b77dc3bd98cf9b161e.gz",
+    "content_type": "application/json; charset=utf-8",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "{\"rainfall\":{\"data\":[{\"unit\":\"mm\",\"place\":\"Central & Western District\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Eastern District\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Kwai Tsing\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Islands District\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"North District\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Sai Kung\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Sha Tin\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Southern District\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Tai Po\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Tsuen Wan\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Tuen Mun\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Wan Chai\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Yuen Long\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Yau Tsim Mong\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Sham Shui Po\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Kowloon City\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Wong Tai Sin\",\"max\":0,\"main\":\"FALSE\"},{\"unit\":\"mm\",\"place\":\"Kwun Tong\",\"max\":0,\"main\":\"FALSE\"}],\"s",
+    "station_snippets": {
+      "Hong Kong Observatory": [
+        "e\":\"King's Park\",\"value\":28,\"unit\":\"C\"},{\"place\":\"Hong Kong Observatory\",\"value\":29,\"unit\":\"C\"},{\"place\":\"Wong Chuk Hang\",\"value\":27,\"unit\":\"C\"},{\"place\":\"Ta Kwu Ling\",\"value\":25,\"unit\":\"C\"},{\"place\":\"Lau Fau Shan\",\"value\":27,\"unit\":\"C\"},{\"place\":\"Tai Po\",\"value\":27,\"unit\":\"C\"},{\"place\":\"Sha Tin\",\"value\":27,\"unit\":\"C\"},{\"place\":\"Tuen Mun\",\"value\":28,\"unit\":\"C\"},{\"plac",
+        "00\",\"data\":[{\"unit\":\"percent\",\"value\":83,\"place\":\"Hong Kong Observatory\"}]}}"
+      ]
+    }
+  }
+]

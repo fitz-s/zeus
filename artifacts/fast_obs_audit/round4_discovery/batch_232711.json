@@ -1,0 +1,70 @@
+[
+  {
+    "tag": "NL_metar",
+    "url": "https://www.knmi.nl/nederland-nu/luchtvaart/vliegveldwaarnemingen",
+    "request_at": "2026-09-30T23:27:10.645640+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:27:11.311716+00:00",
+    "sha256": "866017895875068891a7004350f4c5aa8fadf9ffcb4f7b22fb73ea235bb21eb5",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/NL_metar_866017895875068891a7004350f4c5aa8fadf9ffcb4f7b22fb73ea235bb21eb5.gz",
+    "content_type": "text/html; charset=utf-8",
+    "title": "KNMI - Vliegveldwaarnemingen Nederland - (AUTO) METAR",
+    "scripts": [
+      "https://www.knmi.nl/assets/application-6a04d7793de7eadd33c25ec70ef546324bda6ac6178a211fe356f8228a1a8428.js"
+    ],
+    "frames": [],
+    "forms": [
+      {
+        "action": "https://www.knmi.nl/zoeken",
+        "method": "GET",
+        "fields": [
+          {
+            "name": "context",
+            "value": "/zoeken",
+            "type": "radio"
+          },
+          {
+            "name": "context",
+            "value": "/kennis-en-datacentrum/zoekresultaten",
+            "type": "radio"
+          },
+          {
+            "name": "q",
+            "value": null,
+            "type": "text"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "text": "Vliegveldverwachtingen (TAF)",
+        "url": "https://www.knmi.nl/nederland-nu/luchtvaart/vliegveldverwachtingen"
+      }
+    ],
+    "preview": "KNMI - Vliegveldwaarnemingen Nederland - (AUTO) METAR Naar de hoofd content English Home Nederland nu Weer Seismologie Maritiem Luchtvaart Klimatologie Caribisch Nederland Klimaat Producten & diensten Kennis & uitleg Research Over het KNMI Over het KNMI Bestuur Kerntaken Internationaal Werken bij Nieuws Agenda Pers Contact Zoek binnen de site binnen de hele site binnen het kennis- & datacentrum Trefwoord Zoek Menu Weer Seismologie Maritiem Luchtvaart Klimatologie Caribisch Nederland Sluiten Home Nederland nu Luchtvaart Vliegveldwaarnemingen Neder... Vliegveldwaarnemingen Nederland - (AUTO) METAR Luchtvaartmeteorologische informatie voor operationeel gebruik en vluchtvoorbereiding is beschikbaar op www.luchtvaartmeteo.nl. ZCZC\nSA302255 EHKD     DE KOOY/DE KOOY   NLD   1 m.\nMETAR EHKD 302255Z AUTO 15005KT 120V180 9999 FEW042 BKN052 OVC059\n19/18 Q1016 BLU=\n\nZCZC\nSA302255 EHFD     F3-FB-1   NLD   50 m.\nMETAR EHFD 302255Z AUTO 16014KT 8000 FEW001/// 18/18 Q1016 W///H11=\n\nZCZC\nSA302255 EHAM     AMSTERDAM/SCHIPHOL   NLD   -3 m.\nMETAR EHAM 302255Z 14005KT 9999 -RA FEW038 19/18 Q1016 NOSIG=\n\n",
+    "station_snippets": {
+      "METAR EHAM": [
+        "A302255 EHAM     AMSTERDAM/SCHIPHOL   NLD   -3 m.\nMETAR EHAM 302255Z 14005KT 9999 -RA FEW038 19/18 Q1016 NOSIG=\n\nZCZC\nSA302255 EHVL     VLIELAND   NLD   10 m.\nMETAR EHVL 302255Z AUTO 12007KT 5000 BR FEW049 SCT077 OVC093 18/18\nQ1016 WHT=\n\nZCZC\nSA302255 EHJR     K13-A   NLD   37 m.\nMETAR EHJR 302255Z AUTO 16017KT //// // ///////// 19/18 Q1013 RE//\nW18/H10=\n\nZCZC\nSA30225"
+      ]
+    }
+  },
+  {
+    "tag": "TW_report",
+    "url": "https://aoaws.anws.gov.tw/Report",
+    "request_at": "2026-09-30T23:27:10.645940+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "MX_weather",
+    "url": "https://meteorologia.seneam.gob.mx/",
+    "request_at": "2026-09-30T23:27:10.646077+00:00",
+    "error": "ConnectError"
+  },
+  {
+    "tag": "MX_services",
+    "url": "https://servicios.seneam.gob.mx/",
+    "request_at": "2026-09-30T23:27:10.646213+00:00",
+    "error": "ConnectError"
+  }
+]

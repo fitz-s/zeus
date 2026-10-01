@@ -1,0 +1,60 @@
+Toronto eccc_swob 4/4 VALUE_IDENTICAL_FASTER_OBSERVED races 3
+Toronto mgm_metar 28/28 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 3
+Lagos mgm_metar 22/22 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 0
+Munich dwd_cdc 34/45 PHYSICAL_ONLY_MISMATCH races 0
+Munich mgm_metar 49/49 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 2
+Helsinki fmi_wfs 40/48 PHYSICAL_ONLY_MISMATCH races 0
+Helsinki mgm_metar 50/50 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 2
+London mgm_metar 50/50 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Amsterdam knmi_observations 0/0 UNMEASURED_NO_EXACT_PAIRS races 0
+Amsterdam knmi_public_metar 2/2 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 0
+Amsterdam mgm_metar 50/50 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 2
+Warsaw imgw_synop 2/2 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Warsaw mgm_metar 49/49 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Cape Town mgm_metar 25/25 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Hong Kong hko_native_csv 0/0 UNMEASURED_NO_EXACT_PAIRS races 0
+Hong Kong hko_rhr_json 0/1 PHYSICAL_ONLY_MISMATCH races 0
+Madrid aemet_station_xml 22/25 PHYSICAL_ONLY_MISMATCH races 0
+Madrid mgm_metar 49/49 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Paris mgm_metar 38/38 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 0
+Milan meteoam_metar 48/48 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 0
+Milan mgm_metar 50/50 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Tel Aviv mgm_metar 50/50 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 2
+Ankara mgm_metar 50/50 VALUE_IDENTICAL_FASTER_OBSERVED races 3
+Istanbul mgm_metar 49/49 VALUE_IDENTICAL_FASTER_OBSERVED races 2
+Mexico City meteoam_metar 23/23 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 0
+Panama City aac_metar 2/2 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Panama City mgm_metar 24/24 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Auckland mgm_metar 48/48 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Wellington mgm_metar 45/45 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Jeddah mgm_metar 24/24 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Karachi mgm_metar 49/49 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Taipei mgm_metar 39/39 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Tokyo jma_amedas 6/6 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Tokyo mgm_metar 24/24 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Busan kma_amo_raw_metar 27/27 VALUE_IDENTICAL_FASTER_OBSERVED races 1
+Busan mgm_metar 27/27 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Seoul kma_amo_raw_metar 50/50 VALUE_IDENTICAL_FASTER_OBSERVED races 2
+Seoul mgm_metar 49/49 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Manila mgm_metar 24/24 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Manila pagasa_metar 38/38 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Buenos Aires mgm_metar 26/26 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Sao Paulo meteoam_metar 24/24 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Moscow metaviatelecom_display 3/3 VALUE_IDENTICAL_FASTER_OBSERVED races 2
+Moscow mgm_metar 49/49 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Lucknow imd_olbs_metar 2/2 VALUE_IDENTICAL_FASTER_OBSERVED races 1
+Lucknow mgm_metar 47/47 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Jakarta mgm_metar 44/44 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Kuala Lumpur mgm_metar 39/39 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Singapore mgm_metar 37/37 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Beijing mgm_metar 49/49 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Guangzhou mgm_metar 48/48 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Shenzhen mgm_metar 24/24 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Zhengzhou mgm_metar 24/24 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Wuhan mgm_metar 24/24 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Jinan mgm_metar 23/23 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 0
+Shanghai mgm_metar 46/46 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Qingdao mgm_metar 24/24 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Chongqing mgm_metar 12/12 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+Chengdu mgm_metar 23/23 VALUE_IDENTICAL_SPEED_NOT_PROVEN races 1
+ROWS 91199 intervals 441 cities_with_pairs 54

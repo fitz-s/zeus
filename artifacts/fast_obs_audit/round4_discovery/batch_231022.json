@@ -1,0 +1,105 @@
+[
+  {
+    "tag": "ES_stationxml",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/tablas-graficas/horario/9/3129",
+    "request_at": "2026-09-30T23:10:21.130501+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:10:21.365874+00:00",
+    "sha256": "263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/ES_stationxml_263059ced3d9fbaab32fe5613192fd10625c07bc3d0692d5fd532bf53dd20b62.gz",
+    "content_type": "application/xml;charset=ISO-8859-15",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "20.6 2 E 4 N 0.0 950.7 61.0 0.5 20.1 6 N 9 NW 0.0 950.8 66.0 0.2 20.0 5 NW 950.7 67.0 0.0 19.0 5 N 11 NE 0.0 950.7 72.0 0.0 17.8 5 NW 9 NW 0.0 950.8 76.0 0.0 17.6 4 E 9 NW 0.0 950.5 77.0 -0.2 17.9 5 N 8 N 0.0 951.0 76.0 0.3 17.9 4 N 8 N 0.0 951.5 75.0 0.7 17.9 5 NE 8 NE 0.0 951.9 79.0 1.4 18.8 4 N 18 NW 0.0 952.8 76.0 1.8 19.6 3 N 11 N 0.0 953.0 70.0 1.5 21.0 2 NW 11 N 0.0 952.9 64.0 1.0 23.4 5 SW 18 W 0.0 952.8 56.0 0.0 25.9 13 S 30 SW 0.0 952.2 47.0 -0.8 27.7 15 S 28 S 0.0 951.6 39.0 -1.3 28.5 15 SW 42 SW 0.0 951.0 34.0 -1.8 28.5 18 SW 45 SW 0.0 951.0 34.0 -1.2 27.9 17 SW 37 S 0.0 950.7 36.0 -0.9 27.4 15 SW 35 SW 0.0 950.7 37.0 -0.3 26.1 11 W 26 W 0.0 951.0 38.0 0.0 24.7 7 W 13 W 0.0 951.3 41.0 0.6 23.2 6 SW 13 SW 0.0 951.7 45.0 1.0 23.3 10 W 18 SW 0.0 952.2 44.0 1.2 21.0 8 N 11 W 0.0 952.7 50.0 1.4",
+    "station_snippets": {
+      "3129": [
+        "\" local=\"2026-10-01T00:59:15\"/>\n  <estacion id_s=\"3129\" id_c=\"3129\" nombre=\"Madrid Aeropuerto\" ccaa=\"mad\" hora_ultimo_dato_disponible=\"2026-10-01T00:50:00\">\n    <periodo utc=\"2026-09-29T23:00:00\" local=\"2026-09-30T01:00:00\">\n      <temperatura>20.6</temperatura>\n      <vel_viento>2</vel_viento>\n      <dir_viento>E</dir_viento>\n      <vel_racha>4</vel_racha>\n      <dir",
+        "6-10-01T00:59:15\"/>\n  <estacion id_s=\"3129\" id_c=\"3129\" nombre=\"Madrid Aeropuerto\" ccaa=\"mad\" hora_ultimo_dato_disponible=\"2026-10-01T00:50:00\">\n    <periodo utc=\"2026-09-29T23:00:00\" local=\"2026-09-30T01:00:00\">\n      <temperatura>20.6</temperatura>\n      <vel_viento>2</vel_viento>\n      <dir_viento>E</dir_viento>\n      <vel_racha>4</vel_racha>\n      <dir_racha>N</di"
+      ],
+      "TEMP": []
+    }
+  },
+  {
+    "tag": "ES_timeline",
+    "url": "https://www.aemet.es/es/api-eltiempo/udat/timeline/horario/temp",
+    "request_at": "2026-09-30T23:10:21.130849+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:10:21.251982+00:00",
+    "sha256": "5a027f5173fecd68fce21d0d07ef5523082588b00e2fa3be1e4b0fdcd82ca9f8",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/ES_timeline_5a027f5173fecd68fce21d0d07ef5523082588b00e2fa3be1e4b0fdcd82ca9f8.gz",
+    "content_type": "application/json",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "{\"type\":\"FeatureCollection\",\"features\":{\"PB\":{\"DZ\":{\"lineaTiempo\":[{\"Fecha\":\"20260930T005000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T010000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T011000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T012000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T013000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T014000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T015000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T020000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T021000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T022000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T023000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T024000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T025000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T030000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T031000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T032000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T033000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T034000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T035000+0200\",\"interval\":\"00:10\"},{\"Fecha\":\"20260930T040000+0200\",\"interval\":\"0",
+    "station_snippets": {}
+  },
+  {
+    "tag": "IT_history",
+    "url": "https://api.meteoam.it/deda-ows/metar-taf-icao/LIMC/2026-09-30T00:00:00Z/2026-09-30T23:59:59Z",
+    "request_at": "2026-09-30T23:10:21.130984+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:10:21.906258+00:00",
+    "sha256": "85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IT_history_85f4fca9f35d11f19892562792eff5216bcdb82624e89fb44bbcd150bd7f7404.gz",
+    "content_type": "application/json",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "[{\"icao\":\"LIMC\",\"metar\":[{\"validity\":\"2026-09-30T22:50:00\",\"metar_message\":\"LIMC 302250Z 36003KT CAVOK 17/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T22:20:00\",\"metar_message\":\"LIMC 302220Z 04003KT CAVOK 17/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T21:50:00\",\"metar_message\":\"LIMC 302150Z 02005KT CAVOK 17/15 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T21:20:00\",\"metar_message\":\"LIMC 302120Z 03004KT 9999 SCT045 16/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T20:50:00\",\"metar_message\":\"LIMC 302050Z 02005KT 9999 SCT045 16/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T20:20:00\",\"metar_message\":\"LIMC 302020Z 01004KT CAVOK 16/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T19:50:00\",\"metar_message\":\"LIMC 301950Z VRB02KT CAVOK 17/13 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T19:20:00\",\"metar_message\":\"LIMC 301920Z 10002KT CAVOK 18/13 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T18:50:00\",\"metar_message\":\"LIMC 301850Z 05003KT CAVOK 18/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T18:20:00\",\"metar_message\":\"LIMC 301820Z VRB02KT CAVOK 19/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T17:50:00\",\"metar_message\":\"LIMC 301750Z VRB02KT CAVOK 19/14",
+    "station_snippets": {
+      "LIMC": [
+        "[{\"icao\":\"LIMC\",\"metar\":[{\"validity\":\"2026-09-30T22:50:00\",\"metar_message\":\"LIMC 302250Z 36003KT CAVOK 17/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T22:20:00\",\"metar_message\":\"LIMC 302220Z 04003KT CAVOK 17/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T21:50:00\",\"metar_message\":\"LIMC 302150Z 02005KT CAVOK 17/15 Q1025 NOSIG\"},{\"validity\"",
+        "\"validity\":\"2026-09-30T22:50:00\",\"metar_message\":\"LIMC 302250Z 36003KT CAVOK 17/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T22:20:00\",\"metar_message\":\"LIMC 302220Z 04003KT CAVOK 17/14 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T21:50:00\",\"metar_message\":\"LIMC 302150Z 02005KT CAVOK 17/15 Q1025 NOSIG\"},{\"validity\":\"2026-09-30T21:20:00\",\"metar_message\":\"LIMC 302120Z 03004KT 9999 "
+      ]
+    }
+  },
+  {
+    "tag": "IN_globals",
+    "url": "https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/js/globals.js",
+    "request_at": "2026-09-30T23:10:21.131113+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:10:22.700316+00:00",
+    "sha256": "9696b6ecf179172dccf83b98acaf0934392e8b01028ff0c511153c19ada979a3",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/IN_globals_9696b6ecf179172dccf83b98acaf0934392e8b01028ff0c511153c19ada979a3.gz",
+    "content_type": "text/javascript",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "//globals\nvar xmlHttp;\nvar Backlog = new Array();\nvar Waiting = false;\nvar ShadeDisabled = false; \nvar HistoryStarted = false; \n\nvar History = new Array();\nvar currentPage = \"\";\nvar Version = \"\";\n\nvar HistoryEvent = null;",
+    "station_snippets": {
+      "showOPMETQuery": [],
+      "showopmetquery": []
+    }
+  },
+  {
+    "tag": "HK_csvcorrect",
+    "url": "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv",
+    "request_at": "2026-09-30T23:10:21.255437+00:00",
+    "status": 200,
+    "receipt_at": "2026-09-30T23:10:22.057054+00:00",
+    "sha256": "e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05",
+    "body_path": "/Users/leofitz/zeus/.claude/worktrees/fast-obs-survey-r4/artifacts/fast_obs_audit/round4_discovery/HK_csvcorrect_e1f63b628a87be65256972ee7bc0cd982c7195f4fe2ae384c6542faa8d15ab05.gz",
+    "content_type": "application/octet-stream, text/csv",
+    "title": "",
+    "scripts": [],
+    "frames": [],
+    "forms": [],
+    "links": [],
+    "preview": "Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n202610010700,Chek Lap Kok,29.0\n202610010700,Cheung Chau,26.9\n202610010700,Clear Water Bay,28.0\n202610010700,Happy Valley,28.4\n202610010700,HK Observatory,28.5\n202610010700,HK Park,28.1\n202610010700,Kai Tak Runway Park,29.4\n202610010700,Kau Sai Chau,26.4\n202610010700,King's Park,28.0\n202610010700,Kowloon City,27.9\n202610010700,Kwun Tong,28.2\n202610010700,Lau Fau Shan,27.2\n202610010700,Ngong Ping,23.2\n202610010700,Pak Tam Chung,24.2\n202610010700,Peng Chau,27.2\n202610010700,Sai Kung,28.1\n202610010700,Sha Tin,26.6\n202610010700,Sham Shui Po,28.4\n202610010700,Shau Kei Wan,28.5\n202610010700,Shek Kong,26.2\n202610010700,Sheung Shui,26.8\n202610010700,Stanley,27.8\n202610010700,Ta Kwu Ling,25.6\n202610010700,Tai Lung,26.0\n202610010700,Tai Mei Tuk,26.9\n202610010700,Tai Mo Shan,21.8\n202610010700,Tai Po,27.2\n202610010700,Tate's Cairn,23.9\n202610010700,The Peak,25.1\n202610010700,Tseung Kwan O,26.8\n202610010700,Tsing Yi,27.2\n202610010700,Tsuen Wan Ho Koon,25.6\n202610010700,Tsuen Wan Shing Mun Valley,26.2\n202610010700,Tuen Mun,27.8\n202",
+    "station_snippets": {
+      "HK Observatory": [
+        ",28.0\n202610010700,Happy Valley,28.4\n202610010700,HK Observatory,28.5\n202610010700,HK Park,28.1\n202610010700,Kai Tak Runway Park,29.4\n202610010700,Kau Sai Chau,26.4\n202610010700,King's Park,28.0\n202610010700,Kowloon City,27.9\n202610010700,Kwun Tong,28.2\n202610010700,Lau Fau Shan,27.2\n202610010700,Ngong Ping,23.2\n202610010700,Pak Tam Chung,24.2\n202610010700,Peng Chau,2"
+      ]
+    }
+  }
+]
