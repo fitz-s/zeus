@@ -97,18 +97,15 @@ def test_mgm_future_or_nil_is_not_servable():
 def test_imd_public_form_contract_and_cache(monkeypatch):
     from src.data.station_temperature_adapters import _fetch_public_metar, _PUBLIC_METAR_CACHE
     route=_public_route('imd_olbs_metar','VILK');body,_=_public_fixture('imd_olbs_public')
+    import httpx
+    from urllib.parse import parse_qs
     calls=[];_PUBLIC_METAR_CACHE.clear()
-    class Response:
-        content=body
-        def raise_for_status(self):pass
-    class Client:
-        def get(self,*a,**kw):raise AssertionError('The public query requires POST')
-        def post(self,url,**kw):
-            assert url=='https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php'
-            assert kw['data']=={'icaos':'VILK','type':'metar'}
-            assert kw['follow_redirects'] is False
-            calls.append(kw);return Response()
-    client=Client()
+    def handler(request):
+        assert request.method=='POST','The public query requires POST'
+        assert str(request.url)=='https://olbs.amsschennai.gov.in/nsweb/FlightBriefing/showopmetquery.php'
+        assert parse_qs(request.content.decode())=={'icaos':['VILK'],'type':['metar']}
+        calls.append(request);return httpx.Response(200,content=body)
+    client=httpx.Client(transport=httpx.MockTransport(handler))
     first=_fetch_public_metar(route,client);second=_fetch_public_metar(route,client)
     assert first==second and len(calls)==1
 
@@ -117,17 +114,13 @@ def test_public_mgm_batch_never_exceeds_ten_stations(monkeypatch):
     from src.data.station_temperature_adapters import _fetch_public_metar,_PUBLIC_METAR_CACHE
     routes=tuple(_public_route(station="AA"+chr(65+i//26)+chr(65+i%26)) for i in range(21))
     monkeypatch.setattr("src.data.physical_current_sources.load_physical_current_sources",lambda:(routes,60.))
+    import httpx
     _PUBLIC_METAR_CACHE.clear();calls=[]
-    class Response:
-        content=b'<html></html>'
-        def raise_for_status(self):pass
-    class Client:
-        def get(self,url,**kw):
-            calls.append(kw);assert url=="https://rasat.mgm.gov.tr/result"
-            assert sum(k=="stations" for k,v in kw["params"])<=10
-            assert kw["follow_redirects"] is False
-            return Response()
-    client=Client()
+    def handler(request):
+        calls.append(request);assert request.url.copy_with(query=None)=="https://rasat.mgm.gov.tr/result"
+        assert len(request.url.params.get_list("stations"))<=10
+        return httpx.Response(200,content=b'<html></html>')
+    client=httpx.Client(transport=httpx.MockTransport(handler))
     for route in routes:_fetch_public_metar(route,client)
     assert len(calls)==3
 
@@ -418,12 +411,11 @@ def test_wrh_batch_shares_acquisition_across_registered_us_stations(monkeypatch)
     from src.data import noaa_wrh_timeseries as wrh
     routes = [r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh"]
     calls = []
-    class Client:
-        def get(self,url,**kwargs):
-            calls.append(kwargs)
-            return httpx.Response(200,json={"UNITS":{"air_temp":"Fahrenheit"},"STATION":[]},request=httpx.Request("GET",url))
+    def handler(request):
+        calls.append({"params": dict(request.url.params)})
+        return httpx.Response(200,json={"UNITS":{"air_temp":"Fahrenheit"},"STATION":[]})
     monkeypatch.setattr(wrh,"fetch_wrh_token",lambda:"test-token-not-persisted")
-    adapters._WRH_BATCH_CACHE.clear(); client=Client()
+    adapters._WRH_BATCH_CACHE.clear(); client=httpx.Client(transport=httpx.MockTransport(handler))
     for route in routes:
         data, receipt = adapters._fetch_wrh_batch(route,client)
         assert receipt.tzinfo is not None and data["STATION"] == []
@@ -438,12 +430,11 @@ def test_wrh_rate_limit_is_deferred_without_secret_in_error(monkeypatch):
     from src.data import noaa_wrh_timeseries as wrh
     route=next(r for r in load_physical_current_sources()[0] if r.provider=="noaa_wrh")
     calls=[]
-    class Client:
-        def get(self,url,**kwargs):
-            calls.append(1)
-            return httpx.Response(429,headers={"Retry-After":"600"},request=httpx.Request("GET",url,params={"token":"private-test-value"}))
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(429,headers={"Retry-After":"600"})
     monkeypatch.setattr(wrh,"fetch_wrh_token",lambda:"private-test-value")
-    adapters._WRH_BATCH_CACHE.clear(); client=Client()
+    adapters._WRH_BATCH_CACHE.clear(); client=httpx.Client(transport=httpx.MockTransport(handler))
     for _ in range(2):
         with pytest.raises(ValueError,match="TRANSPORT_DEFERRED") as exc:
             adapters._fetch_wrh_batch(route,client)
@@ -507,3 +498,124 @@ def test_native_temperature_ingest_reseeds_after_durable_world_commit(monkeypatc
 def test_imd_route_withdrawn_until_single_report_parser_lands():
     # IMD page text crossed report boundaries (NIL VILK read VIDP's 40 C).
     assert not any(r.provider == "imd_olbs_metar" for r in load_physical_current_sources()[0])
+
+
+# ---------------------------------------------------------------------------
+# Bounded single-report public METAR parsing (review REQ-20261001-001836-85dd89)
+# ---------------------------------------------------------------------------
+
+_IMD_RECEIPT = datetime(2026, 10, 1, 0, 1, tzinfo=timezone.utc)
+
+
+def _imd_parse(html):
+    return parse_station_payload(_public_route('imd_olbs_metar', 'VILK'), html.encode(),
+                                 received_at=_IMD_RECEIPT)
+
+
+@pytest.mark.parametrize("html", [
+    # NIL report followed by another station's report in a later element.
+    '<p>METAR VILK 010000Z NIL</p><p>METAR VIDP 010000Z 00000KT CAVOK 40/20 Q1010=</p>',
+    # Same, inside one text node.
+    '<pre>METAR VILK 010000Z NIL METAR VIDP 010000Z 00000KT CAVOK 40/20 Q1010=</pre>',
+    # Terminated NIL.
+    '<pre>METAR VILK 010000Z NIL=</pre>',
+    # The requested report lives only in script/style text.
+    '<script>var r="METAR VILK 010000Z 00000KT CAVOK 40/20 Q1010=";</script>',
+    '<style>/* METAR VILK 010000Z 00000KT CAVOK 40/20 Q1010= */</style>',
+    # Truncated report without its terminator.
+    '<pre>METAR VILK 010000Z 00000KT CAVOK 40/20 Q1010</pre>',
+])
+def test_imd_page_never_borrows_a_value_from_outside_one_report(html):
+    assert _imd_parse(html) == ()
+
+
+def test_imd_report_with_embedded_second_station_header_is_rejected():
+    with pytest.raises(ValueError, match="EMBEDDED_REPORT"):
+        _imd_parse('<pre>METAR VILK 010000Z 00000KT VIDP 010000Z 40/20 Q1010=</pre>')
+
+
+def test_imd_single_report_value_and_clock_are_its_own():
+    samples = _imd_parse('<pre>METAR VIDP 010000Z 00000KT CAVOK 40/20 Q1010=\n'
+                         'METAR VILK 010000Z 26003KT 3000 BR 24/24 Q1010 NOSIG=</pre>')
+    assert [(s.observed_at, s.value_native) for s in samples] == [
+        (datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc), 24.0)]
+
+
+def test_imd_recorded_proof_bodies_still_reproduce_their_values():
+    import gzip
+    root = Path(__file__).parents[1] / "artifacts" / "fast_obs_audit"
+    recorded = [s for s in json.loads(gzip.decompress((root / "round4_all_samples.json.gz").read_bytes()))
+                if s["channel"] == "imd_olbs_metar"]
+    assert recorded
+    for sample in recorded:
+        body = next(root.glob(f"*/{sample['sha256']}.body.gz"))
+        parsed = parse_station_payload(_public_route('imd_olbs_metar', 'VILK'),
+            gzip.decompress(body.read_bytes()),
+            received_at=datetime.fromisoformat(sample["receipt_at"]))
+        assert (datetime.fromisoformat(sample["observed_at"]), sample["value"]) in [
+            (s.observed_at, s.value_native) for s in parsed]
+
+
+def test_mgm_raw_report_carrying_a_second_station_is_rejected():
+    raw = "METAR LTAC 302220Z 05010KT LTFM 302220Z 40/10 Q1023"
+    with pytest.raises(ValueError, match="EMBEDDED_REPORT"):
+        parse_station_payload(_public_route(), _mgm_body([_mgm_row(raw=raw)]),
+            received_at=datetime(2026, 9, 30, 23, tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize("header,expected", [
+    ("inf", 300.0), ("nan", 300.0), ("-inf", 300.0), ("not-a-date", 300.0),
+    ("120", 120.0), ("99999999", 3600.0), (None, 300.0),
+])
+def test_retry_after_is_finite_and_bounded(header, expected):
+    from src.data.station_temperature_adapters import _retry_after_seconds
+    assert _retry_after_seconds(header, floor=60.0) == expected
+
+
+def test_retry_after_http_date_is_relative_to_now():
+    from email.utils import format_datetime
+    from src.data.station_temperature_adapters import _retry_after_seconds
+    when = datetime.now(timezone.utc) + timedelta(seconds=900)
+    assert 800 <= _retry_after_seconds(format_datetime(when, usegmt=True), floor=60.0) <= 900
+
+
+def test_oversized_body_is_refused_while_streaming(monkeypatch):
+    import httpx
+    from src.data import station_temperature_adapters as adapters
+    monkeypatch.setattr(adapters, "_RESPONSE_BYTE_LIMIT", 1024)
+    seen = []
+
+    def chunks():
+        for _ in range(64):
+            seen.append(1)
+            yield b"x" * 256
+
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=chunks())))
+    with pytest.raises(ValueError, match="TOO_LARGE"):
+        adapters._bounded_body(client, "GET", "https://example.invalid/")
+    assert len(seen) < 64  # refused before the whole body was buffered
+
+
+def test_declared_oversize_is_refused_without_reading(monkeypatch):
+    import httpx
+    from src.data import station_temperature_adapters as adapters
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, headers={"Content-Length": str(adapters._RESPONSE_BYTE_LIMIT + 1)}, content=b"")))
+    with pytest.raises(ValueError, match="TOO_LARGE"):
+        adapters._bounded_body(client, "GET", "https://example.invalid/")
+
+
+def test_shared_cache_lock_is_free_during_network_io():
+    import httpx
+    from src.data import station_temperature_adapters as adapters
+    route = _public_route('imd_olbs_metar', 'VILK')
+    adapters._PUBLIC_METAR_CACHE.clear()
+
+    def handler(request):
+        assert adapters._FETCH_CACHE_LOCK.acquire(blocking=False)
+        adapters._FETCH_CACHE_LOCK.release()
+        return httpx.Response(200, content=b"<pre></pre>")
+
+    adapters._fetch_public_metar(route, httpx.Client(transport=httpx.MockTransport(handler)))
+    adapters._PUBLIC_METAR_CACHE.clear()

@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-01
 """Fixed-endpoint station observations with independent receipt and valid clocks.
 
 Provider names select parsers, never arbitrary URLs or executable config. Native
@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import io
 from html.parser import HTMLParser
@@ -64,8 +65,89 @@ def native_sample_value(sample, unit: str) -> float:
     return float(sample.temperature_c) if unit == "C" else float(sample.temperature_c) * 1.8 + 32.0
 
 
-_WRH_BATCH_LOCK = threading.Lock()
-_WRH_BATCH_CACHE: dict[tuple, tuple[float, dict, datetime, str | None]] = {}
+_RESPONSE_BYTE_LIMIT = 10_000_000
+_RESPONSE_DEADLINE_SECONDS = 15.0
+_RETRY_AFTER_DEFAULT_SECONDS = 300.0
+_RETRY_AFTER_CAP_SECONDS = 3600.0
+
+
+def _bounded_body(client, method: str, url: str, **kwargs) -> bytes:
+    """Read one response body under a byte limit and a total deadline.
+
+    The limit is enforced while streaming, before the body is buffered; a
+    declared Content-Length over the limit is refused without reading.
+    """
+    started = time.monotonic()
+    with client.stream(method, url, **kwargs) as response:
+        response.raise_for_status()
+        declared = response.headers.get("Content-Length")
+        if declared is not None and declared.isdigit() and int(declared) > _RESPONSE_BYTE_LIMIT:
+            raise ValueError("STATION_RESPONSE_TOO_LARGE")
+        chunks, size = [], 0
+        for chunk in response.iter_bytes():
+            size += len(chunk)
+            if size > _RESPONSE_BYTE_LIMIT:
+                raise ValueError("STATION_RESPONSE_TOO_LARGE")
+            if time.monotonic() - started > _RESPONSE_DEADLINE_SECONDS:
+                raise ValueError("STATION_RESPONSE_DEADLINE")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _retry_after_seconds(value: str | None, *, floor: float) -> float:
+    """Finite deferral from a Retry-After header: delta-seconds or HTTP-date."""
+    seconds = None
+    if value:
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(value)
+            except (TypeError, ValueError, IndexError):
+                when = None
+            if when is not None and when.tzinfo is not None:
+                seconds = (when - datetime.now(UTC)).total_seconds()
+    if seconds is None or not math.isfinite(seconds):
+        seconds = _RETRY_AFTER_DEFAULT_SECONDS
+    return min(_RETRY_AFTER_CAP_SECONDS, max(floor, seconds))
+
+
+_FETCH_CACHE_LOCK = threading.Lock()
+_FETCH_KEY_LOCKS: dict[tuple, threading.Lock] = {}
+
+
+def _cached_fetch(cache: dict, key: tuple, fetch, *, prefix: str, retry_floor: float):
+    """Single-flight per key; the shared lock never spans network I/O.
+
+    Errors are cached as errors, never as source-empty evidence.
+    """
+    with _FETCH_CACHE_LOCK:
+        key_lock = _FETCH_KEY_LOCKS.setdefault(key, threading.Lock())
+    with key_lock:
+        with _FETCH_CACHE_LOCK:
+            cached = cache.get(key)
+        if cached is not None and time.monotonic() < cached[0]:
+            if cached[3]:
+                raise ValueError(prefix + cached[3])
+            return cached[1], cached[2]
+        try:
+            value = fetch()
+            received = datetime.now(UTC)
+        except Exception as exc:
+            delay = 60.0
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                delay = _retry_after_seconds(
+                    exc.response.headers.get("Retry-After"), floor=retry_floor
+                )
+            with _FETCH_CACHE_LOCK:
+                cache[key] = (time.monotonic() + delay, None, datetime.now(UTC), type(exc).__name__)
+            raise ValueError(prefix + type(exc).__name__) from None
+        with _FETCH_CACHE_LOCK:
+            cache[key] = (time.monotonic() + 60.0, value, received, None)
+        return value, received
+
+
+_WRH_BATCH_CACHE: dict[tuple, tuple[float, dict | None, datetime, str | None]] = {}
 
 
 def _fetch_wrh_batch(route, client):
@@ -79,75 +161,108 @@ def _fetch_wrh_batch(route, client):
     from src.data.physical_current_sources import load_physical_current_sources
     ids = tuple(sorted({r.station_id for r in load_physical_current_sources()[0]
                         if r.provider == "noaa_wrh" and r.unit == route.unit} | {route.station_id}))
-    key = (route.unit, ids, id(client))
-    with _WRH_BATCH_LOCK:
-        now = time.monotonic()
-        cached = _WRH_BATCH_CACHE.get(key)
-        if cached is not None and now < cached[0]:
-            if cached[3]:
-                raise ValueError("WRH_CURRENT_TRANSPORT_DEFERRED:" + cached[3])
-            return cached[1], cached[2]
-        try:
-            response = client.get(wrh.WRH_TIMESERIES_URL,
-                params=wrh._query_params(",".join(ids),unit=route.unit,start_utc=None,end_utc=None,
-                                         recent_minutes=180,token=wrh.fetch_wrh_token()),
-                headers=wrh._page_headers(ids[0]),timeout=6)
-            response.raise_for_status()
-            receipt = datetime.now(UTC)
-            payload = response.json()
-            if len(response.content) > 10_000_000:
-                raise ValueError("WRH_CURRENT_RESPONSE_TOO_LARGE")
-            _WRH_BATCH_CACHE[key] = (now + 60.0, payload, receipt, None)
-            return payload, receipt
-        except Exception as exc:
-            delay = 60.0
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
-                try: delay = max(delay, float(exc.response.headers.get("Retry-After", "300")))
-                except ValueError: delay = 300.0
-            _WRH_BATCH_CACHE[key] = (now + delay, {}, datetime.now(UTC), type(exc).__name__)
-            raise ValueError("WRH_CURRENT_TRANSPORT_DEFERRED:" + type(exc).__name__) from None
+
+    def fetch():
+        return json.loads(_bounded_body(
+            client, "GET", wrh.WRH_TIMESERIES_URL,
+            params=wrh._query_params(",".join(ids), unit=route.unit, start_utc=None, end_utc=None,
+                                     recent_minutes=180, token=wrh.fetch_wrh_token()),
+            headers=wrh._page_headers(ids[0]), timeout=6))
+
+    return _cached_fetch(_WRH_BATCH_CACHE, (route.unit, ids, id(client)), fetch,
+                         prefix="WRH_CURRENT_TRANSPORT_DEFERRED:", retry_floor=60.0)
 
 
 class _PublicMetarPage(HTMLParser):
-    """Extract data, never execute the national service's JavaScript/HTML."""
+    """Extract data, never execute the national service's JavaScript/HTML.
+
+    ``plain_text`` holds one entry per visible text node; script/style content
+    is never weather data. ``next_data`` is MGM's JSON island only.
+    """
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.next_data: list[str] = []
         self.plain_text: list[str] = []
-        self._script = False
+        self._next_data = False
+        self._hidden = None
 
     def handle_starttag(self, tag, attrs):
-        attributes = dict(attrs)
-        if tag == "script" and attributes.get("id") == "__NEXT_DATA__":
-            self._script = True
+        if tag in ("script", "style"):
+            self._hidden = tag
+            self._next_data = tag == "script" and dict(attrs).get("id") == "__NEXT_DATA__"
 
     def handle_endtag(self, tag):
-        if tag == "script": self._script = False
+        if tag == self._hidden:
+            self._hidden = None
+            self._next_data = False
 
     def handle_data(self, data):
-        self.plain_text.append(data)
-        if self._script: self.next_data.append(data)
+        if self._next_data:
+            self.next_data.append(data)
+        elif self._hidden is None:
+            self.plain_text.append(data)
+
+
+_REPORT_HEADER_RE = re.compile(r"^(?:(?:METAR|SPECI)\s+)?(?:COR\s+)?([A-Z]{4})\s+(\d{6}Z)\b")
+_EMBEDDED_HEADER_RE = re.compile(r"\b(?:METAR|SPECI)\b|\b[A-Z]{4}\s+\d{6}Z\b")
+_REPORT_START_RE = re.compile(r"\b(?:METAR|SPECI)\b")
 
 
 def _public_metar_value(raw: str, station: str, receipt: datetime):
+    """Temperature of exactly one bounded report, or None for NIL/no value.
+
+    Station and source-issued UTC clock are validated inside this report. A
+    second report header inside it is a boundary failure, never a value source.
+    """
     from src.data.metar_temperature import metar_temperature_c
     from src.data.day0_fast_obs import _kma_observation_time
-    # Station and source-issued UTC clock are both mandatory. Do not match a
-    # foreign report merely because the page title names the requested airport.
-    match = re.match(r"^(?:(?:METAR|SPECI)\s+)?(?:COR\s+)?([A-Z]{4})\s+(\d{6}Z)\b", raw.strip())
+    report = raw.strip()
+    if report.endswith("="):
+        report = report[:-1].rstrip()
+    if "=" in report:
+        raise ValueError("PUBLIC_METAR_REPORT_BOUNDARY")
+    match = _REPORT_HEADER_RE.match(report)
     if match is None or match[1] != station:
         raise ValueError("PUBLIC_METAR_STATION_CLOCK_MISMATCH")
+    body = report[match.end():]
+    if _EMBEDDED_HEADER_RE.search(body):
+        raise ValueError("PUBLIC_METAR_EMBEDDED_REPORT")
+    if re.search(r"\bNIL\b", body):
+        return None
     observed = _kma_observation_time(match[2], as_of=receipt)
-    value = metar_temperature_c(raw)
+    value = metar_temperature_c(report)
     if observed is None or value is None: return None
     return observed, value
 
 
+def _page_reports(text_nodes: list[str], station: str) -> list[str]:
+    """Terminated reports for ``station`` from visible text, one per report.
+
+    A report runs from a METAR/SPECI header to its own '='; it never crosses a
+    text-node boundary or the next report header. An unterminated report
+    (truncated, or NIL without '=') carries no value.
+    """
+    reports = []
+    for node in text_nodes:
+        starts = [m.start() for m in _REPORT_START_RE.finditer(node)]
+        for index, start in enumerate(starts):
+            end = starts[index + 1] if index + 1 < len(starts) else len(node)
+            segment = node[start:end]
+            header = _REPORT_HEADER_RE.match(segment)
+            if header is None or header[1] != station:
+                continue
+            terminator = segment.find("=")
+            if terminator < 0:
+                continue
+            reports.append(" ".join(segment[:terminator + 1].split()))
+    return reports
+
+
 def _public_metar_values(route, body: bytes, receipt: datetime):
-    if len(body) > 10_000_000: raise ValueError("STATION_RESPONSE_TOO_LARGE")
+    if len(body) > _RESPONSE_BYTE_LIMIT: raise ValueError("STATION_RESPONSE_TOO_LARGE")
     if route.unit != "C" or route.identity["provider_station"] != route.station_id:
         raise ValueError("STATION_ID_OR_UNIT_MISMATCH")
-    page = _PublicMetarPage(); page.feed(body.decode("utf-8"))
+    page = _PublicMetarPage(); page.feed(body.decode("utf-8")); page.close()
     values: dict[datetime, float] = {}
     if route.provider == "mgm_metar":
         payload = json.loads("".join(page.next_data))
@@ -174,9 +289,8 @@ def _public_metar_values(route, body: bytes, receipt: datetime):
                 raise ValueError("PUBLIC_METAR_VERSION_CONFLICT")
             values[observed] = value
     else:
-        text = " ".join(page.plain_text)
-        for raw in re.finditer(r"(?:(?:METAR|SPECI)\s+)?(?:COR\s+)?" + re.escape(route.station_id) + r"\s+\d{6}Z[^=]+=", text):
-            sample = _public_metar_value(raw[0], route.station_id, receipt)
+        for raw in _page_reports(page.plain_text, route.station_id):
+            sample = _public_metar_value(raw, route.station_id, receipt)
             if sample is None: continue
             observed, value = sample
             if observed in values and values[observed] != value:
@@ -185,8 +299,7 @@ def _public_metar_values(route, body: bytes, receipt: datetime):
     return [(stamp, value, None) for stamp, value in sorted(values.items())]
 
 
-_PUBLIC_METAR_LOCK = threading.Lock()
-_PUBLIC_METAR_CACHE: dict[tuple, tuple[float, bytes, datetime, str | None]] = {}
+_PUBLIC_METAR_CACHE: dict[tuple, tuple[float, bytes | None, datetime, str | None]] = {}
 
 
 def _fetch_public_metar(route, client):
@@ -209,28 +322,17 @@ def _fetch_public_metar(route, client):
         key = (route.provider, route.station_id, id(client))
     else:
         raise ValueError("PUBLIC_METAR_PROVIDER_UNKNOWN")
-    with _PUBLIC_METAR_LOCK:
-        now = time.monotonic(); old = _PUBLIC_METAR_CACHE.get(key)
-        if old and now < old[0]:
-            if old[3]: raise ValueError("PUBLIC_METAR_TRANSPORT_DEFERRED:" + old[3])
-            return old[1], old[2]
-        try:
-            headers = {"User-Agent": "zeus-free-public-obs/4"}
-            r = (client.post(url, data=post_data, headers=headers, timeout=6, follow_redirects=False)
-                 if post_data is not None else
-                 client.get(url, params=params, headers=headers, timeout=6, follow_redirects=False))
-            r.raise_for_status()
-            if len(r.content) > 10_000_000: raise ValueError("STATION_RESPONSE_TOO_LARGE")
-            received = datetime.now(UTC)
-            _PUBLIC_METAR_CACHE[key] = (time.monotonic() + 60, r.content, received, None)
-            return r.content, received
-        except Exception as exc:
-            delay = 60.0
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
-                try: delay = max(300.0, float(exc.response.headers.get("Retry-After", "300")))
-                except ValueError: delay = 300.0
-            _PUBLIC_METAR_CACHE[key] = (time.monotonic() + delay, b"", datetime.now(UTC), type(exc).__name__)
-            raise ValueError("PUBLIC_METAR_TRANSPORT_DEFERRED:" + type(exc).__name__) from None
+    headers = {"User-Agent": "zeus-free-public-obs/4"}
+
+    def fetch():
+        if post_data is not None:
+            return _bounded_body(client, "POST", url, data=post_data, headers=headers,
+                                 timeout=6, follow_redirects=False)
+        return _bounded_body(client, "GET", url, params=params, headers=headers,
+                             timeout=6, follow_redirects=False)
+
+    return _cached_fetch(_PUBLIC_METAR_CACHE, key, fetch,
+                         prefix="PUBLIC_METAR_TRANSPORT_DEFERRED:", retry_floor=300.0)
 
 
 def _utc(value: str) -> datetime:
@@ -416,10 +518,7 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
             raise ValueError("KNMI_DOWNLOAD_HOST_INVALID")
     else:
         raise ValueError("STATION_ADAPTER_UNKNOWN")
-    response = client.get(url, params=params, headers=headers, timeout=6)
-    response.raise_for_status()
+    body = _bounded_body(client, "GET", url, params=params, headers=headers, timeout=6)
     received = datetime.now(UTC)
-    if len(response.content) > 10_000_000:
-        raise ValueError("STATION_RESPONSE_TOO_LARGE")
-    return tuple(s for s in parse_station_payload(route, response.content, received_at=received)
+    return tuple(s for s in parse_station_payload(route, body, received_at=received)
                  if start <= s.observed_at <= end)
