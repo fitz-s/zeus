@@ -363,11 +363,13 @@ def maker_buy_price_menu(
     the far edge would credit the cheapest price with the whole band's odds:
     live, band (0.05, 0.15] bound 0.147 against 3/47 filled at 0.14-0.15.
     The near edge is the highest tick strictly beyond the previous edge,
-    ``ceil_tick(ask - previous_edge) - tick``, clipped to ``[lo, hi]`` (``lo``
-    one tick above the bid and never below the lowest in-band price; ``hi``
-    one tick inside the ask and the band ceiling) and dropped if clipping
-    leaves its band; ``q`` then chooses across bands. A band whose measured
-    fill bound is zero gets no witness downstream.
+    ``ceil_tick(ask - previous_edge) - tick``. It is quoted only where it is
+    legal as is: inside ``[lo, hi]`` (``lo`` one tick above the bid and never
+    below the lowest in-band price; ``hi`` one tick inside the ask and the
+    band ceiling). Clipping would move it off the distance its bound was
+    earned at, so a band whose near edge is not legal offers no price; ``q``
+    then chooses across bands. A band whose measured fill bound is zero gets
+    no witness downstream.
     """
 
     ask = Decimal(best_ask)
@@ -381,10 +383,8 @@ def maker_buy_price_menu(
     hi = min(ask - step, LIVE_ORDER_MAX_UNIT_PRICE)
     menu: list[Decimal] = []
     for band, near in enumerate((Decimal("0"), *band_edges[:-1])):
-        if lo > hi:
-            break
-        price = min(max(ceil_tick(ask - Decimal(near)) - step, lo), hi)
-        if band_of(ask - price) == band and price not in menu:
+        price = ceil_tick(ask - Decimal(near)) - step
+        if lo <= price <= hi and band_of(ask - price) == band:
             menu.append(price)
     return tuple(menu)
 

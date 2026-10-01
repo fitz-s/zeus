@@ -13821,15 +13821,13 @@ def _global_buy_candidate_from_raw_book(
             )
             if proposal is None:
                 raise ValueError("current_limit_or_cashflow_changed")
-            from src.engine.global_batch_runtime import _maker_fill_distance_band
-
             # BUY fill authority is conditioned on ask-to-limit distance, and
-            # fill odds only fall with distance: a band's bound still holds when
-            # the ask has moved nearer, never when it has moved the limit farther.
-            if _maker_fill_distance_band(
+            # fill odds only fall with distance: the selected bound still holds
+            # when the ask has moved nearer, never once the limit sits farther,
+            # even inside the same band (the bound is earned at its near edge).
+            if (
                 curve.levels[0].price - proposal.levels[0].price
-            ) > _maker_fill_distance_band(
-                selected_curve.levels[0].price - selected_witness.limit_price
+                > selected_curve.levels[0].price - selected_witness.limit_price
             ):
                 raise ValueError("current_fill_distance_band_changed")
             current_binding = maker_fill_candidate_binding_identity(

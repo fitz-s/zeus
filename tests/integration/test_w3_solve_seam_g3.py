@@ -44808,12 +44808,18 @@ def test_global_buy_jit_maker_ask_moving_nearer_keeps_the_selected_witness(side)
 
 @pytest.mark.parametrize(
     ("fresh_ask", "superseded"),
-    (("0.901", False), ("0.902", True)),
-    ids=("equal-upper-edge-keeps-band", "above-upper-edge-changes-band"),
+    (("0.600", False), ("0.601", True), ("0.901", True)),
+    ids=(
+        "same-distance-keeps-witness",
+        "one-tick-farther-in-band-supersedes",
+        "band-edge-farther-supersedes",
+    ),
 )
-def test_global_buy_jit_maker_distance_band_edge_is_inclusive(
+def test_global_buy_jit_maker_witness_never_survives_a_farther_distance(
     fresh_ask, superseded
 ):
+    """The selected bound is earned at its own distance; fill odds fall with
+    distance, so any farther limit, even inside the same band, re-auctions."""
     selected = _current_maker_buy_candidate()
     authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")
     raw_book = {

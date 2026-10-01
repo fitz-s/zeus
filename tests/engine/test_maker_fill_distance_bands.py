@@ -160,8 +160,10 @@ def _menu(bid, ask, tick="0.01"):
         ("0.30", "0.40", "0.01", ("0.39", "0.37", "0.34")),
         # Thin early book with no bid: every band is reachable at its near edge.
         (None, "0.40", "0.01", ("0.39", "0.37", "0.34", "0.24")),
-        # The live band ceiling 0.95 binds hi; 0.94 / 0.91 / 0.81 are near edges.
-        (None, "0.97", "0.01", ("0.95", "0.94", "0.91", "0.81")),
+        # Band 0's near edge 0.96 is above the live ceiling 0.95. Clipping it to
+        # 0.95 would quote distance 0.02 at a bound earned at 0.01, so band 0
+        # offers no price; 0.94 / 0.91 / 0.81 are the other near edges.
+        (None, "0.97", "0.01", ("0.94", "0.91", "0.81")),
         # A bid below the band floor never lowers lo under 0.05.
         ("0.02", "0.90", "0.001", ("0.899", "0.879", "0.849", "0.749")),
         # Clipping to lo can leave a band: 0.05 on a 0.06 ask is band 0 only.
