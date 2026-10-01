@@ -6,11 +6,12 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, fields, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -448,14 +449,19 @@ def write_manifest_to_db(
     if verify_artifact:
         manifest.verify_artifact(root=root)
     payload = manifest.to_dict()
+    recorded_column = next((row for row in conn.execute("PRAGMA table_info(raw_forecast_artifacts)")
+                            if row[1] == "recorded_at"), None)
+    legacy_recorded = recorded_column is not None and str(recorded_column[4]).strip().upper() == "CURRENT_TIMESTAMP"
+    recorded_field = ", recorded_at" if legacy_recorded else ""
+    recorded_value = ", ?" if legacy_recorded else ""
     conn.execute(
-        """
+        f"""
         INSERT INTO raw_forecast_artifacts (
             source_id, product_id, data_version, source_cycle_time,
             source_available_at, captured_at, artifact_path, sha256,
             byte_size, request_url, request_params_json,
-            artifact_metadata_json, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            artifact_metadata_json, training_allowed{recorded_field}
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{recorded_value})
         ON CONFLICT(source_id, product_id, data_version, source_cycle_time, sha256)
         DO NOTHING
         """,
@@ -473,7 +479,7 @@ def write_manifest_to_db(
             json.dumps(dict(manifest.request_params), sort_keys=True, separators=(",", ":"), default=str),
             json.dumps(dict(manifest.product_metadata), sort_keys=True, separators=(",", ":"), default=str),
             1 if manifest.training_allowed else 0,
-        ),
+        ) + ((datetime.now(UTC).isoformat(),) if legacy_recorded else ()),
     )
     row = conn.execute(
         """
@@ -647,7 +653,12 @@ def _proof_original(conn: sqlite3.Connection, artifact_id: int) -> dict[str, Any
                for key in ("artifact_metadata_json", "request_params_json")):
             raise _proof_error("original_descriptor_byte_budget")
         clocks = [_parse_utc(body[key], field_name=key) for key in
-                  ("source_cycle_time", "source_available_at", "captured_at", "recorded_at")]
+                  ("source_cycle_time", "source_available_at", "captured_at")]
+        clocks.append(_original_recorded_clock(conn, body))
+        if (isinstance(body["recorded_at"], str)
+                and re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", body["recorded_at"])
+                and clocks[2] >= clocks[3]):
+            raise _proof_error("capture_after_storage_interval")
         metadata = json.loads(body["artifact_metadata_json"])
         params = json.loads(body["request_params_json"])
         if not isinstance(metadata, dict) or not isinstance(params, dict) or not isinstance(params.get("run"), str):
@@ -675,6 +686,21 @@ def _proof_original(conn: sqlite3.Connection, artifact_id: int) -> dict[str, Any
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise _proof_error("invalid_original") from exc
     return body
+
+
+def _original_recorded_clock(conn: sqlite3.Connection, body: Mapping[str, Any]) -> datetime:
+    """Only legacy SQLite CURRENT_TIMESTAMP storage is UTC second precision.
+
+    Preserve its literal descriptor, using the interval upper bound for causal
+    authorization. Source, capture, decision and new proof clocks stay strict.
+    """
+    value = body["recorded_at"]
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value):
+        column = next((row for row in conn.execute("PRAGMA table_info(raw_forecast_artifacts)")
+                       if row[1] == "recorded_at"), None)
+        if column is not None and str(column[4]).strip().upper() == "CURRENT_TIMESTAMP":
+            return datetime.strptime(value,"%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC) + timedelta(seconds=1)
+    return _parse_utc(value, field_name="original_recorded_at")
 
 
 def _proof_scope(body: Mapping[str, Any]) -> dict[str, str]:
@@ -845,7 +871,7 @@ def read_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int,
                 or doc.get("clock_resolution") != "milliseconds" or "recorded_at" in doc
                 or possessed.microsecond % 1000 or prepared.microsecond % 1000
                 or recorded is None or not possessed <= prepared <= recorded <= cut
-                or _parse_utc(body["recorded_at"], field_name="original_recorded_at") > possessed
+                or _original_recorded_clock(conn, body) > possessed
                 or row["source_available_at"] != doc["local_possessed_at"] or row["captured_at"] != doc["local_possessed_at"]
                 or row["request_url"] != body["request_url"] or row["request_params_json"] != body["request_params_json"]
                 or row["training_allowed"] != 0 or metadata != expected_metadata
@@ -924,7 +950,7 @@ def write_anchor_local_proof(conn: sqlite3.Connection, original_artifact_id: int
     # Actual verification is complete. Sample the canonical SQL clock at its
     # millisecond resolution; do not round any original provider/source clock.
     verified_at = conn.execute(f"SELECT {_PROOF_CLOCK_SQL}").fetchone()[0]
-    if _parse_utc(body["recorded_at"], field_name="original_recorded_at") > _parse_utc(verified_at, field_name="verified_at"):
+    if _original_recorded_clock(conn, body) > _parse_utc(verified_at, field_name="verified_at"):
         raise _proof_error("original_recorded_in_future")
     doc = {"revision": ANCHOR_LOCAL_PROOF_REVISION, "original_body_artifact": body,
            "scope": scope, "request_params": json.loads(body["request_params_json"]), "owned_body": owned,

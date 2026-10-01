@@ -215,6 +215,87 @@ def _read_local(conn, original_id, manifest, decision_at):
 
 
 @pytest.mark.parametrize("data_version", (HIGH_DATA_VERSION, LOW_DATA_VERSION))
+def test_legacy_current_timestamp_original_preserves_sql_literal_and_second_interval(tmp_path, monkeypatch, data_version):
+    modern, _oid, original, candidate, precision = _local_proof_case(tmp_path,data_version)
+    ddl=modern.execute("SELECT sql FROM sqlite_master WHERE name='raw_forecast_artifacts'").fetchone()[0]
+    ddl=ddl.replace("(strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))","CURRENT_TIMESTAMP")
+    conn=sqlite3.connect(tmp_path/"legacy-storage.db");conn.row_factory=sqlite3.Row
+    conn.execute(ddl)
+    payload=original.to_dict()
+    columns=("source_id","product_id","data_version","source_cycle_time","source_available_at",
+        "captured_at","artifact_path","sha256","byte_size","request_url","request_params_json",
+        "artifact_metadata_json","training_allowed")
+    # Genuine DEFAULT CURRENT_TIMESTAMP INSERT, not a mutation of old clocks.
+    sql_second=datetime.strptime(conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0],"%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    same_second=replace(original,captured_at=sql_second+timedelta(microseconds=1))
+    values=(original.source_id,original.product_id,data_version,payload["source_cycle_time"],
+        payload["source_available_at"],same_second.captured_at.isoformat(),original.artifact_path,original.sha256,
+        original.byte_size,original.request_url,json.dumps(dict(original.request_params)),
+        json.dumps(dict(original.product_metadata)),0)
+    conn.execute("INSERT INTO raw_forecast_artifacts ("+",".join(columns)+") VALUES ("+",".join("?" for _ in columns)+")",values)
+    conn.commit()
+    row=dict(conn.execute("SELECT * FROM raw_forecast_artifacts").fetchone())
+    assert len(row["recorded_at"])==19 and " " in row["recorded_at"]
+    lower=datetime.strptime(row["recorded_at"],"%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    upper=lower+timedelta(seconds=1)
+    assert lower < same_second.captured_at < upper
+    oid=conn.execute("SELECT artifact_id FROM raw_forecast_artifacts").fetchone()[0]
+    before=dict(conn.execute("SELECT * FROM raw_forecast_artifacts").fetchone())
+    assert manifest_module._proof_original(conn,oid)==before
+    clock=[upper-timedelta(microseconds=1)]
+    real=sqlite3.connect(":memory:")
+    conn.create_function("strftime",2,lambda fmt,value:clock[0].isoformat(timespec="milliseconds")
+        if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else real.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+    same_candidate=replace(same_second,artifact_path=candidate.artifact_path)
+    conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(ValueError,match="original_recorded_in_future"):
+        manifest_module.write_anchor_local_proof(conn,oid,same_candidate,precision_metadata=precision)
+    conn.rollback()
+    clock[0]=upper+timedelta(milliseconds=1)
+    conn.execute("BEGIN IMMEDIATE")
+    proof=manifest_module.write_anchor_local_proof(conn,oid,same_candidate,precision_metadata=precision)
+    conn.commit()
+    assert _read_local(conn,oid,same_second,upper-timedelta(microseconds=1)) is None
+    assert _read_local(conn,oid,same_second,clock[0]).proof_artifact_id==proof
+    assert dict(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(oid,)).fetchone())==before
+    for field in ("source_cycle_time","source_available_at","captured_at"):
+        with pytest.raises(ValueError):
+            manifest_module._parse_utc(row["recorded_at"],field_name=field)
+    with pytest.raises(ValueError):
+        _read_local(conn,oid,same_second,row["recorded_at"])
+    for boundary in (upper,upper+timedelta(microseconds=1)):
+        conn.execute("UPDATE raw_forecast_artifacts SET captured_at=? WHERE artifact_id=?",(boundary.isoformat(),oid))
+        with pytest.raises(ValueError,match="invalid_original"):
+            manifest_module._proof_original(conn,oid)
+        conn.rollback()
+    # New normal writer on this same legacy schema records aware actual µs,
+    # so first-INSERT/localproof can succeed in its one real transaction.
+    new_cycle=original.source_cycle_time+timedelta(hours=6)
+    written=datetime.now(timezone.utc).replace(microsecond=500789)
+    fresh=replace(original,source_cycle_time=new_cycle,source_available_at=new_cycle+timedelta(minutes=5),
+        captured_at=written.replace(microsecond=500456),
+        request_params={**original.request_params,"run":new_cycle.strftime("%Y-%m-%dT%H:%M")})
+    fresh_candidate=replace(fresh,artifact_path=candidate.artifact_path)
+    class ActualWriteClock(datetime):
+        @classmethod
+        def now(cls,tz=None):
+            return written.astimezone(tz or timezone.utc)
+    monkeypatch.setattr(manifest_module,"datetime",ActualWriteClock)
+    clock[0]=written.replace(microsecond=501000)
+    conn.execute("BEGIN IMMEDIATE")
+    fresh_id=write_manifest_to_db(conn,fresh)
+    fresh_row=dict(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(fresh_id,)).fetchone())
+    assert fresh_row["recorded_at"]==written.isoformat()
+    assert fresh.captured_at.microsecond//1000==written.microsecond//1000
+    assert fresh.captured_at<datetime.fromisoformat(fresh_row["recorded_at"])
+    manifest_module.write_anchor_local_proof(conn,fresh_id,fresh_candidate,precision_metadata=precision)
+    conn.commit()
+    assert write_manifest_to_db(conn,fresh)==fresh_id
+    assert dict(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(fresh_id,)).fetchone())==fresh_row
+    conn.close();modern.close();real.close()
+
+
+@pytest.mark.parametrize("data_version", (HIGH_DATA_VERSION, LOW_DATA_VERSION))
 def test_seed_local_transport_binds_original_cycle_run_cut_and_immutable_precision(tmp_path, data_version):
     conn, original_id, original, candidate, precision = _local_proof_case(tmp_path, data_version)
     day = original.product_metadata["target_date"]
