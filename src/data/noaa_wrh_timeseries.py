@@ -198,7 +198,7 @@ class WrhProduct:
     unit: Unit
     rows: list[WrhRow]
     response_ok: bool
-    """``SUMMARY.RESPONSE_CODE == 1``: Synoptic itself reports success."""
+    """``SUMMARY.RESPONSE_CODE`` is the integer 1: Synoptic reports success."""
 
     unit_label: Optional[str]
     """``UNITS.air_temp`` verbatim, or None when the response carries none."""
@@ -374,12 +374,15 @@ def _parse_rows(payload: dict, station: str) -> list[WrhRow]:
     # SCOPE: this one response. DRAIN: the next request. RESET: a response
     # whose arrays align and parse. Silently skipping a bad element would turn
     # a malformed body into "no rows", which reads as a dark station.
+    # Accepted-shape contract (Synoptic time-series, showemptyvars=0): the
+    # requested station carries an OBSERVATIONS object with a ``date_time``
+    # array; an empty array is the documented explicit-empty product, and an
+    # omitted/null variable key is a documented empty variable. A missing or
+    # null OBSERVATIONS / date_time is an incomplete product, never "no rows".
     observations = response_station.get("OBSERVATIONS")
-    if observations is None:
-        observations = {}
     if not isinstance(observations, dict):
         raise WrhPayloadInvalid(f"{station}: OBSERVATIONS is not an object")
-    timestamps = observations.get("date_time", [])
+    timestamps = observations.get("date_time")
     if not isinstance(timestamps, list):
         raise WrhPayloadInvalid(f"{station}: date_time is not an array")
     size = len(timestamps)
@@ -646,13 +649,17 @@ def product_from_response(body: bytes, station: str, *, unit: Unit) -> WrhProduc
     summary = payload.get("SUMMARY")
     units = payload.get("UNITS")
     unit_label = units.get("air_temp") if isinstance(units, dict) else None
+    if unit_label is not None and not isinstance(unit_label, str):
+        raise WrhPayloadInvalid(f"{station}: response unit label is not a string")
     if rows and unit_label != _UNIT_LABELS[unit]:
         raise WrhPayloadInvalid(f"{station}: response unit {unit_label!r} is not {unit}")
+    code = summary.get("RESPONSE_CODE") if isinstance(summary, dict) else None
     return WrhProduct(
         station=station.strip().upper(),
         unit=unit,
         rows=rows,
-        response_ok=isinstance(summary, dict) and summary.get("RESPONSE_CODE") == 1,
-        unit_label=unit_label if isinstance(unit_label, str) else None,
+        # JSON ``true`` == 1 in Python; success is the integer 1 only.
+        response_ok=type(code) is int and code == 1,
+        unit_label=unit_label,
         response_sha256=hashlib.sha256(body).hexdigest(),
     )

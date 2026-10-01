@@ -80,8 +80,20 @@ def test_page_response_normalizes_station_case_without_changing_rows():
 
 
 def test_one_valid_station_with_no_observations_remains_a_dark_day():
-    payload = {"STATION": [{"STID": "KHOU", "OBSERVATIONS": {}}]}
+    payload = {"STATION": [{"STID": "KHOU", "OBSERVATIONS": {"date_time": []}}]}
     assert rows_from_payload(payload, "KHOU") == []
+
+
+@pytest.mark.parametrize("observations", [{}, None, "missing"])
+def test_station_without_an_observation_clock_array_is_incomplete(observations):
+    """Only the documented explicit-empty shape (date_time []) means no rows."""
+    from src.data.noaa_wrh_timeseries import WrhPayloadInvalid
+
+    station = {"STID": "KHOU"}
+    if observations != "missing":
+        station["OBSERVATIONS"] = observations
+    with pytest.raises(WrhPayloadInvalid):
+        rows_from_payload({"STATION": [station]}, "KHOU")
 
 
 def test_wrong_station_http_response_cannot_write_atoms_prints_or_success_coverage(
@@ -1338,6 +1350,14 @@ def day_start_plus(day, *, hours):
     b"not json",
     _empty_product_body(response_code=2),
     _empty_product_body(unit_label="Celsius"),
+    _empty_product_body(response_code=True),
+    _empty_product_body(unit_label={"unexpected": "object"}),
+    json.dumps({"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {"air_temp": "Fahrenheit"},
+                "STATION": [{"STID": "KHOU"}]}).encode(),
+    json.dumps({"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {"air_temp": "Fahrenheit"},
+                "STATION": [{"STID": "KHOU", "OBSERVATIONS": None}]}).encode(),
+    json.dumps({"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {"air_temp": "Fahrenheit"},
+                "STATION": [{"STID": "KHOU", "OBSERVATIONS": {}}]}).encode(),
 ])
 def test_invalid_product_after_deadline_writes_no_absence_and_admits_no_fallback(
     tmp_path, monkeypatch, body,
@@ -1350,6 +1370,16 @@ def test_invalid_product_after_deadline_writes_no_absence_and_admits_no_fallback
     assert stats["inserted"] == 0
     assert "SOURCE_CONFIRMED_EMPTY_AFTER_CONTRACT_DEADLINE" not in reasons
     assert witness is None and chosen is None
+
+
+def test_documented_sparse_empty_shape_still_confirms_empty():
+    """showemptyvars=0 omits empty variable keys; date_time [] stays valid."""
+    from src.data.noaa_wrh_timeseries import product_from_response
+
+    body = json.dumps({"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {},
+                       "STATION": [{"STID": "KHOU", "OBSERVATIONS": {"date_time": []}}]})
+    product = product_from_response(body.encode(), "KHOU", unit="F")
+    assert product.confirms_empty(target_date_local="2026-09-11", view="hourly")
 
 
 def test_valid_explicit_empty_product_after_deadline_mints_the_witness(tmp_path, monkeypatch):
