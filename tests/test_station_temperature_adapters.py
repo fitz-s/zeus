@@ -1,5 +1,8 @@
 # Created: 2026-09-29
 # Last reused/audited: 2026-10-01
+# Lifecycle: created=2026-09-29; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Purpose: Pin station adapter parsing and registry source roles, including fast-admission proof law.
+# Reuse: Run when physical_current_sources, station_temperature_adapters, or the registry JSON changes.
 # Authority: REQ-20260929-223929-bf51a2; recorded provider responses, 2026-09-30 UTC.
 """Real response shapes; wrong units/stations/time and false grade are rejected."""
 from dataclasses import replace

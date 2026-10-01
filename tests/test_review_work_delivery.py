@@ -1,5 +1,8 @@
 # Created: 2026-09-29
 # Last reused/audited: 2026-10-01
+# Lifecycle: created=2026-09-29; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Purpose: Pin review-debt retry ownership, attempt/authority CAS, and native-proof resolution.
+# Reuse: Run when review_work_delivery, review_work_items, or exit chain-truth debt changes.
 # Authority: REQ-20260929-223929-bf51a2; owner-local review retry/CAS law.
 from datetime import datetime,timedelta,timezone
 import json

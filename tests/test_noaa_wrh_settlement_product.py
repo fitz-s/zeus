@@ -1,5 +1,6 @@
 # Created: 2026-09-12
 # Last reused/audited: 2026-10-01
+# Lifecycle: created=2026-09-12; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Purpose: Pin the weather.gov/wrh/timeseries settlement product — page render law,
 #   per-city view selection, settlement-source precedence, and the backfill report.
 # Reuse: Read src/data/noaa_wrh_timeseries.py's measured facts and
