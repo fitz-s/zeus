@@ -280,7 +280,13 @@ def _native_product_residual_context(monkeypatch, *, city_name, product_c=14.0, 
         "date_time": timestamps, "air_temp_set_1": native_values,
         "sea_level_pressure_set_1": [1013.0] * pair_count, "metar_set_1": product_reports,
     }}]})
-    rows = wrh.rows_from_payload(json.loads(product_body), product_station)
+    if fault == "nonfinite_native":
+        # A non-finite native value invalidates the whole response; no row enters.
+        with pytest.raises(wrh.WrhPayloadInvalid):
+            wrh.rows_from_payload(json.loads(product_body), product_station)
+        rows = []
+    else:
+        rows = wrh.rows_from_payload(json.loads(product_body), product_station)
     reports = fast.parse_metar_api_payload(json.loads(json.dumps(awc_rows)))
     assert len(reports) == pair_count
     conn = sqlite3.connect(":memory:")

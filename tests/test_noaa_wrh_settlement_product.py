@@ -1,5 +1,5 @@
 # Created: 2026-09-12
-# Last reused/audited: 2026-09-27
+# Last reused/audited: 2026-10-01
 # Purpose: Pin the weather.gov/wrh/timeseries settlement product — page render law,
 #   per-city view selection, settlement-source precedence, and the backfill report.
 # Reuse: Read src/data/noaa_wrh_timeseries.py's measured facts and
@@ -94,9 +94,7 @@ def test_wrong_station_http_response_cannot_write_atoms_prints_or_success_covera
 
     class Response:
         status_code = 200
-
-        def json(self):
-            return payload
+        content = json.dumps(payload).encode()
 
     monkeypatch.setattr(wrh.httpx, "get", lambda *args, **kwargs: Response())
     monkeypatch.setattr(wrh, "_wait_for_request_slot", lambda: None)
@@ -1116,13 +1114,13 @@ def test_a_refused_request_retries_once_with_a_freshly_read_token(monkeypatch):
         return ["row"]
 
     monkeypatch.setattr(
-        "src.data.noaa_wrh_timeseries.fetch_wrh_timeseries", fake_fetch,
+        "src.data.noaa_wrh_timeseries.fetch_wrh_product", fake_fetch,
     )
     monkeypatch.setattr(
         "src.data.noaa_wrh_timeseries.fetch_wrh_token", lambda refresh=False: "fresh",
     )
 
-    rows = appender._fetch_wrh_rows_with_token_refresh(
+    rows = appender._fetch_wrh_product_with_token_refresh(
         "KLGA", unit="F", token="stale", recent_minutes=120,
     )
     assert rows == ["row"]
@@ -1141,14 +1139,14 @@ def test_a_quota_refusal_still_raises_when_the_token_did_not_change(monkeypatch)
         raise WrhTokenRefused("Invalid request per token rules")
 
     monkeypatch.setattr(
-        "src.data.noaa_wrh_timeseries.fetch_wrh_timeseries", always_refused,
+        "src.data.noaa_wrh_timeseries.fetch_wrh_product", always_refused,
     )
     monkeypatch.setattr(
         "src.data.noaa_wrh_timeseries.fetch_wrh_token", lambda refresh=False: "same",
     )
 
     with pytest.raises(WrhTokenRefused):
-        appender._fetch_wrh_rows_with_token_refresh(
+        appender._fetch_wrh_product_with_token_refresh(
             "KLGA", unit="F", token="same", recent_minutes=120,
         )
     # Exactly one request: the re-read returned the same token, so retrying
@@ -1246,3 +1244,126 @@ def test_backfill_is_registered_in_the_script_manifest():
     assert entry["apply_flag"] == "--apply"
     assert entry["dry_run_default"] is True
     assert "observations" in entry["write_targets"]
+
+
+# ---------------------------------------------------------------------------
+# Malformed product is uncertainty, never resolver absence
+# ---------------------------------------------------------------------------
+
+
+def _khou_payload():
+    return json.loads((FIXTURE_DIR / "syn_KHOU.json").read_text())
+
+
+@pytest.mark.parametrize("corrupt", [
+    "all_invalid_timestamps", "one_invalid_timestamp", "short_temperature_array",
+    "string_temperature", "nonfinite_temperature", "observations_not_object",
+    "rows_without_temperature",
+])
+def test_malformed_or_partial_arrays_raise_instead_of_dropping_rows(corrupt):
+    from src.data.noaa_wrh_timeseries import WrhPayloadInvalid
+
+    payload = _khou_payload()
+    obs = payload["STATION"][0]["OBSERVATIONS"]
+    if corrupt == "all_invalid_timestamps":
+        obs["date_time"] = ["invalid"] * len(obs["date_time"])
+    elif corrupt == "one_invalid_timestamp":
+        obs["date_time"][5] = "2026-09-11 05:00"
+    elif corrupt == "short_temperature_array":
+        obs["air_temp_set_1"] = obs["air_temp_set_1"][:-1]
+    elif corrupt == "string_temperature":
+        obs["air_temp_set_1"][3] = "82.4"
+    elif corrupt == "nonfinite_temperature":
+        obs["air_temp_set_1"][3] = float("nan")
+    elif corrupt == "observations_not_object":
+        payload["STATION"][0]["OBSERVATIONS"] = ["x"]
+    else:
+        del obs["air_temp_set_1"]
+    with pytest.raises(WrhPayloadInvalid):
+        rows_from_payload(payload, "KHOU")
+
+
+def _empty_product_body(*, response_code=1, unit_label="Fahrenheit", rows=None):
+    obs = {"date_time": [], "air_temp_set_1": []}
+    if rows:
+        obs = {"date_time": [r[0] for r in rows], "air_temp_set_1": [r[1] for r in rows]}
+    return json.dumps({
+        "SUMMARY": {"RESPONSE_CODE": response_code, "RESPONSE_MESSAGE": "OK"},
+        "UNITS": {"air_temp": unit_label},
+        "STATION": [{"STID": "KHOU", "OBSERVATIONS": obs}],
+    }).encode()
+
+
+def _run_houston_after_deadline(tmp_path, monkeypatch, body):
+    from src.data import daily_obs_append as appender
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.data.settlement_observation_selection import (
+        fallback_deadline, noaa_absence_witness, observation_selection,
+    )
+
+    class Response:
+        status_code = 200
+        content = body
+
+    monkeypatch.setattr(wrh.httpx, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(wrh, "_wait_for_request_slot", lambda: None)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "fixture-token")
+    monkeypatch.setattr(appender, "_build_atom_pair",
+                        lambda *a, **k: pytest.fail("no extreme may be written"))
+    day = date(2026, 9, 11)
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    stats = appender.append_noaa_wrh_city(
+        "Houston", [day], conn, now_utc=day_start_plus(day, hours=30),
+    )
+    # Coverage rows are stamped with the real wall clock; read them as of now.
+    after = datetime.now(timezone.utc)
+    assert after > fallback_deadline(day)
+    reasons = [r[0] for r in conn.execute(
+        "SELECT reason FROM world.data_coverage WHERE city='Houston' "
+        "AND data_source='noaa_wrh_khou' AND target_date='2026-09-11'")]
+    witness = noaa_absence_witness(conn, cities_by_name["Houston"], "2026-09-11", as_of=after)
+    selection = observation_selection(conn, cities_by_name["Houston"], "2026-09-11",
+                                      "wu_icao_history", as_of=after)
+    conn.close()
+    return stats, reasons, witness, selection
+
+
+def day_start_plus(day, *, hours):
+    return datetime(day.year, day.month, day.day, tzinfo=timezone.utc) + timedelta(hours=hours)
+
+
+@pytest.mark.parametrize("body", [
+    _empty_product_body(rows=[("invalid", 70.0)]),
+    b"not json",
+    _empty_product_body(response_code=2),
+    _empty_product_body(unit_label="Celsius"),
+])
+def test_invalid_product_after_deadline_writes_no_absence_and_admits_no_fallback(
+    tmp_path, monkeypatch, body,
+):
+    from src.data import settlement_observation_selection as selection
+    from src.data.settlement_observation_selection import fallback_deadline
+
+    monkeypatch.setattr(selection, "datetime", _FrozenAfterDeadline)
+    stats, reasons, witness, chosen = _run_houston_after_deadline(tmp_path, monkeypatch, body)
+    assert stats["inserted"] == 0
+    assert "SOURCE_CONFIRMED_EMPTY_AFTER_CONTRACT_DEADLINE" not in reasons
+    assert witness is None and chosen is None
+
+
+def test_valid_explicit_empty_product_after_deadline_mints_the_witness(tmp_path, monkeypatch):
+    from src.data import settlement_observation_selection as selection
+
+    monkeypatch.setattr(selection, "datetime", _FrozenAfterDeadline)
+    stats, reasons, witness, chosen = _run_houston_after_deadline(
+        tmp_path, monkeypatch, _empty_product_body(),
+    )
+    assert reasons == ["SOURCE_CONFIRMED_EMPTY_AFTER_CONTRACT_DEADLINE"]
+    assert witness is not None and witness["station_id"] == "KHOU"
+    assert chosen is not None and chosen[1]["selected"] == "FALLBACK_WU"
+
+
+class _FrozenAfterDeadline(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 9, 13, 4, 10, tzinfo=timezone.utc)

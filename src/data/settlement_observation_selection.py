@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-01
 """The resolver's hierarchy, not a hierarchy of convenient weather mirrors.
 
 The 48 NOAA descriptions captured for 2026-09-29 prescribe WRH, then WU
@@ -21,6 +21,44 @@ def fallback_deadline(target_date: str | date) -> datetime:
     target = date.fromisoformat(str(target_date))
     return datetime.combine(target + timedelta(days=1), time(23, 59),
                             ZoneInfo("America/New_York")).astimezone(timezone.utc)
+
+
+def record_confirmed_empty(conn, *, city, target_date, product, request_url: str,
+                           retry_after: datetime, now: datetime | None = None) -> bool:
+    """Mint the absence witness from one valid explicit-empty WRH product.
+
+    The product must be a :class:`WrhProduct` for exactly this city's station,
+    settlement unit and contract view, and must itself show no row for the day.
+    Returns False (writes nothing) before the contract deadline or when the
+    product does not prove the empty day. A parse failure never reaches here:
+    malformed/incomplete bodies raise ``WrhPayloadInvalid`` in the parser.
+    """
+    from src.data.noaa_wrh_timeseries import WrhProduct
+    from src.state.data_coverage import DataTable, record_failed
+    import logging
+
+    now = now or datetime.now(timezone.utc)
+    station = str(city.wu_station or "").strip().upper()
+    if (
+        not isinstance(product, WrhProduct)
+        or not station
+        or product.station != station
+        or product.unit != city.settlement_unit
+        or now < fallback_deadline(target_date)
+        or not product.confirms_empty(
+            target_date_local=str(target_date), view=city.settlement_page_view
+        )
+    ):
+        return False
+    record_failed(conn, data_table=DataTable.OBSERVATIONS, city=city.name,
+                  data_source="noaa_wrh_" + station.lower(), target_date=target_date,
+                  reason=EMPTY_AFTER_DEADLINE, retry_after=retry_after)
+    logging.getLogger(__name__).warning(
+        "noaa_wrh confirmed empty %s/%s view=%s unit=%s response_sha256=%s url=%s",
+        city.name, target_date, city.settlement_page_view, product.unit,
+        product.response_sha256, request_url,
+    )
+    return True
 
 
 def noaa_absence_witness(conn, city, target_date: str | date, *, as_of=None):

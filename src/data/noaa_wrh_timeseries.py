@@ -1,5 +1,5 @@
 # Created: 2026-09-12
-# Last audited: 2026-09-12
+# Last audited: 2026-10-01
 # Authority basis: docs/operations/current/noaa_settlement_page_truth/{PLAN.md,evidence.md};
 #   architecture/city_truth_contract.yaml NOAA rows; AGENTS.md §2 settlement law.
 """The settlement product for NOAA cities: the feed behind weather.gov/wrh/timeseries.
@@ -79,7 +79,10 @@ disagreement this module removes.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
 import re
 import threading
 import time
@@ -154,6 +157,15 @@ class WrhStationIdentityInvalid(WrhError):
     """The response does not prove the single station that was requested."""
 
 
+class WrhPayloadInvalid(WrhError):
+    """The response is malformed or incomplete: uncertainty, never absence.
+
+    Misaligned arrays, unparseable timestamps, non-numeric temperatures or a
+    non-JSON body cannot be reduced to "no rows"; an empty row list from such a
+    body would read as the station being dark and could mint resolver absence.
+    """
+
+
 @dataclass(frozen=True)
 class WrhRow:
     """One row of the page's feed, as the page itself would read it."""
@@ -176,6 +188,46 @@ class WrhRow:
     @property
     def local_date(self) -> str:
         return self.local_timestamp[:10]
+
+
+@dataclass(frozen=True)
+class WrhProduct:
+    """One validated response: rows plus the identity an absence must bind."""
+
+    station: str
+    unit: Unit
+    rows: list[WrhRow]
+    response_ok: bool
+    """``SUMMARY.RESPONSE_CODE == 1``: Synoptic itself reports success."""
+
+    unit_label: Optional[str]
+    """``UNITS.air_temp`` verbatim, or None when the response carries none."""
+
+    response_sha256: str
+
+    def confirms_empty(self, *, target_date_local: date | str, view: PageView) -> bool:
+        """True iff this response is a valid explicit-empty product for the day.
+
+        Requires provider success, the requested unit (when labelled) and zero
+        rows shown by the contract view on that local date. Station identity and
+        array integrity were already proven by the parser.
+        """
+        wanted = (
+            target_date_local
+            if isinstance(target_date_local, str)
+            else target_date_local.isoformat()
+        )
+        return (
+            self.response_ok
+            and self.unit_label in (None, _UNIT_LABELS[self.unit])
+            and not any(
+                row.local_date == wanted and (view == "all" or row.is_official_report)
+                for row in self.rows
+            )
+        )
+
+
+_UNIT_LABELS = {"F": "Fahrenheit", "C": "Celsius"}
 
 
 @dataclass(frozen=True)
@@ -319,31 +371,60 @@ def _parse_rows(payload: dict, station: str) -> list[WrhRow]:
     response_id = response_station.get("STID")
     if not isinstance(response_id, str) or response_id.strip().upper() != requested:
         raise WrhStationIdentityInvalid(f"{station}: response STID does not match request")
-    observations = response_station.get("OBSERVATIONS") or {}
-    timestamps = observations.get("date_time") or []
-    temps = observations.get("air_temp_set_1") or []
-    pressures = observations.get("sea_level_pressure_set_1") or [None] * len(timestamps)
-    metars = observations.get("metar_set_1") or [None] * len(timestamps)
+    # SCOPE: this one response. DRAIN: the next request. RESET: a response
+    # whose arrays align and parse. Silently skipping a bad element would turn
+    # a malformed body into "no rows", which reads as a dark station.
+    observations = response_station.get("OBSERVATIONS")
+    if observations is None:
+        observations = {}
+    if not isinstance(observations, dict):
+        raise WrhPayloadInvalid(f"{station}: OBSERVATIONS is not an object")
+    timestamps = observations.get("date_time", [])
+    if not isinstance(timestamps, list):
+        raise WrhPayloadInvalid(f"{station}: date_time is not an array")
+    size = len(timestamps)
+    columns = {}
+    for name in ("air_temp_set_1", "sea_level_pressure_set_1", "metar_set_1"):
+        column = observations.get(name)
+        if column is None:
+            column = [None] * size
+        if not isinstance(column, list) or len(column) != size:
+            raise WrhPayloadInvalid(f"{station}: {name} does not align with date_time")
+        columns[name] = column
+    if size and "air_temp_set_1" not in observations:
+        raise WrhPayloadInvalid(f"{station}: date_time rows carry no air_temp_set_1")
+    temps = columns["air_temp_set_1"]
+    pressures = columns["sea_level_pressure_set_1"]
+    metars = columns["metar_set_1"]
     prefix = requested
 
     rows: list[WrhRow] = []
     for index, local_timestamp in enumerate(timestamps):
-        if index >= len(temps) or temps[index] is None:
-            continue
         try:
             utc = datetime.strptime(
                 local_timestamp, "%Y-%m-%dT%H:%M:%S%z"
             ).astimezone(timezone.utc)
-        except (TypeError, ValueError):
-            continue
-        raw_metar = metars[index] if index < len(metars) else None
-        routine = index < len(pressures) and pressures[index] is not None
+        except (TypeError, ValueError) as exc:
+            raise WrhPayloadInvalid(
+                f"{station}: date_time[{index}] is not a local timestamp"
+            ) from exc
+        temp = temps[index]
+        if temp is None:
+            continue  # the station published the row without a reading
+        if (
+            isinstance(temp, bool)
+            or not isinstance(temp, (int, float))
+            or not math.isfinite(temp)
+        ):
+            raise WrhPayloadInvalid(f"{station}: air_temp_set_1[{index}] is not finite")
+        raw_metar = metars[index]
+        routine = pressures[index] is not None
         speci = bool(raw_metar) and str(raw_metar).upper().startswith(prefix)
         rows.append(
             WrhRow(
                 local_timestamp=str(local_timestamp),
                 utc=utc,
-                air_temp=float(temps[index]),
+                air_temp=float(temp),
                 is_routine_metar=routine,
                 is_official_report=routine or speci,
                 raw_metar=str(raw_metar) if raw_metar is not None else None,
@@ -361,6 +442,22 @@ def fetch_wrh_timeseries(
     token: str,
     recent_minutes: Optional[int] = None,
 ) -> list[WrhRow]:
+    """Rows of :func:`fetch_wrh_product` for callers that never mint absence."""
+    return fetch_wrh_product(
+        station, start_utc, end_utc,
+        unit=unit, token=token, recent_minutes=recent_minutes,
+    ).rows
+
+
+def fetch_wrh_product(
+    station: str,
+    start_utc: Optional[datetime] = None,
+    end_utc: Optional[datetime] = None,
+    *,
+    unit: Unit,
+    token: str,
+    recent_minutes: Optional[int] = None,
+) -> WrhProduct:
     """Fetch one window of the page's feed.
 
     Pass ``recent_minutes`` for the daily product (one small window per station
@@ -420,7 +517,7 @@ def fetch_wrh_timeseries(
                     f"{response.text[:200]}"
                 )
             if response.status_code == 200:
-                return _parse_rows(response.json(), station)
+                return product_from_response(response.content, station, unit=unit)
             last_error = f"HTTP {response.status_code}"
             if response.status_code < 500:
                 raise WrhFetchFailed(f"{station}: {last_error}")
@@ -537,3 +634,25 @@ def daily_extreme(
 def rows_from_payload(payload: dict, station: str) -> list[WrhRow]:
     """Parse a saved response body. Fixture and offline-replay entry point."""
     return _parse_rows(payload, station)
+
+
+def product_from_response(body: bytes, station: str, *, unit: Unit) -> WrhProduct:
+    """Validate one raw 200 body into a :class:`WrhProduct`."""
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise WrhPayloadInvalid(f"{station}: response body is not JSON") from exc
+    rows = _parse_rows(payload, station)
+    summary = payload.get("SUMMARY")
+    units = payload.get("UNITS")
+    unit_label = units.get("air_temp") if isinstance(units, dict) else None
+    if rows and unit_label != _UNIT_LABELS[unit]:
+        raise WrhPayloadInvalid(f"{station}: response unit {unit_label!r} is not {unit}")
+    return WrhProduct(
+        station=station.strip().upper(),
+        unit=unit,
+        rows=rows,
+        response_ok=isinstance(summary, dict) and summary.get("RESPONSE_CODE") == 1,
+        unit_label=unit_label if isinstance(unit_label, str) else None,
+        response_sha256=hashlib.sha256(body).hexdigest(),
+    )

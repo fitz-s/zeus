@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-10-01
 # Authority basis: K2 live ingestion; F3 PR 2/3 typed temperature boundary
 #                  per Path A (src/types/temperature.py).
 """K2 live daily-observation appender (WU ICAO + HKO + Ogimet METAR/SYNOP).
@@ -1973,7 +1973,7 @@ def noaa_wrh_source_tag(station: str) -> str:
     return f"noaa_wrh_{str(station).strip().lower()}"
 
 
-def _fetch_wrh_rows_with_token_refresh(station: str, **kwargs):
+def _fetch_wrh_product_with_token_refresh(station: str, **kwargs):
     """Fetch one window, re-reading the token once if the first attempt is refused.
 
     A 403 means either the per-IP quota or a token this process cached before an
@@ -1985,12 +1985,12 @@ def _fetch_wrh_rows_with_token_refresh(station: str, **kwargs):
     """
     from src.data.noaa_wrh_timeseries import (
         WrhTokenRefused,
-        fetch_wrh_timeseries,
+        fetch_wrh_product,
         fetch_wrh_token,
     )
 
     try:
-        return fetch_wrh_timeseries(station, **kwargs)
+        return fetch_wrh_product(station, **kwargs)
     except WrhTokenRefused:
         refreshed = fetch_wrh_token(refresh=True)
         if refreshed == kwargs.get("token"):
@@ -2001,7 +2001,7 @@ def _fetch_wrh_rows_with_token_refresh(station: str, **kwargs):
             "noaa_wrh token rotated upstream; retrying %s once with the new token",
             station,
         )
-        return fetch_wrh_timeseries(station, **{**kwargs, "token": refreshed})
+        return fetch_wrh_product(station, **{**kwargs, "token": refreshed})
 
 
 def _append_noaa_wrh_prints(
@@ -2091,7 +2091,6 @@ def append_noaa_wrh_city(
         WrhTokenRefused,
         WrhWindowTooOld,
         daily_extreme,
-        fetch_wrh_timeseries,
         fetch_wrh_token,
         recent_minutes_for_local_day,
         request_url_without_token,
@@ -2172,9 +2171,10 @@ def append_noaa_wrh_city(
             station, unit=unit, recent_minutes=recent_minutes,
         )
         try:
-            rows = _fetch_wrh_rows_with_token_refresh(
+            product = _fetch_wrh_product_with_token_refresh(
                 station, unit=unit, token=token, recent_minutes=recent_minutes,
             )
+            rows = product.rows
         except WrhTokenRefused as exc:
             # Quota or header contract, never "the station was dark". One
             # WARNING per run keeps a refused day visible without flooding.
@@ -2219,13 +2219,14 @@ def append_noaa_wrh_city(
                 "noaa_wrh %s/%s: no %s-view rows; leaving the day unwritten",
                 city_name, target_d, view,
             )
-            from src.data.settlement_observation_selection import fallback_deadline, EMPTY_AFTER_DEADLINE
-            # Only a successful station-validated empty reply enters this branch;
-            # a timeout, refused credential, or malformed response never does.
-            if datetime.now(timezone.utc) >= fallback_deadline(target_d):
-                record_failed(conn, data_table=DataTable.OBSERVATIONS, city=city_name,
-                              data_source=source_tag, target_date=target_d,
-                              reason=EMPTY_AFTER_DEADLINE, retry_after=_retry_embargo(hours=1))
+            from src.data.settlement_observation_selection import record_confirmed_empty
+            # Only a validated product that itself proves the day empty under
+            # the contract view may mint absence. A timeout, refused credential
+            # or malformed/incomplete body raised above and never reaches here.
+            if record_confirmed_empty(
+                conn, city=city_cfg, target_date=target_d, product=product,
+                request_url=request_url, retry_after=_retry_embargo(hours=1),
+            ):
                 conn.commit()
                 # The caller may own FORECAST/WORLD flocks even after commit.
                 # The separate post-lease pass fetches WU and rechecks this debt.
