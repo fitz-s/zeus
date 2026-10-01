@@ -7629,6 +7629,48 @@ def test_direct_cli_seals_one_source_artifact_and_refuses_old_proof_hash(
     assert captured == [sealed] * 2
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_cli_anchor_carries_its_own_om9_cycle_not_the_carrier_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The anchor natural key must name the artifact's own run.
+
+    Seed discovery points openmeteo_anchor_artifact_id at a newer OM9 run than the
+    ENS carrier cycle.  Stamping the carrier cycle on the anchor made
+    _insert_anchor return the older run's anchor row, so the public replay saw an
+    anchor_id whose artifact differs from the provenance artifact and refused
+    every such posterior.
+    """
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn, raw, _sealed, seed = _normal_hko_cli_inputs(tmp_path, monkeypatch)
+    om9_cycle = _hko_dt(0) + timedelta(hours=6)
+    seed = {**seed, "source_cycle_time": _hko_dt(0).isoformat(),
+            "openmeteo_source_cycle_time": om9_cycle.isoformat()}
+    input_path = tmp_path / "seed.json"
+    input_path.write_text(json.dumps(seed), encoding="utf-8")
+    runs: list[object] = []
+
+    def fetch(request):
+        runs.append(request.run)
+        return dict(raw)
+
+    monkeypatch.setattr(cli, "fetch_openmeteo_ecmwf_ifs9_anchor_payload", fetch)
+    seen: list[object] = []
+
+    def capture(_conn, request):
+        seen.append((request.openmeteo_anchor.source_cycle_time, request.source_cycle_time))
+        return materializer_mod.ReplacementForecastMaterializeResult(
+            status="READY", reason_codes=(), posterior_id=None, anchor_id=None, readiness_id=None,
+        )
+
+    monkeypatch.setattr(cli, "_dry_run_from_read_snapshot", capture)
+    cli._materialize(input_path, commit=False, init_schema=False, conn=conn)
+    conn.close()
+    assert seen == [(om9_cycle, _hko_dt(0))]
+    assert len(runs) == 1 and runs[0].replace(tzinfo=timezone.utc) == om9_cycle
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 def test_current_ensemble_requires_exact_complete_target_coverage(
     metric: str,

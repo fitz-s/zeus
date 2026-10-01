@@ -1082,6 +1082,12 @@ def _materialize(
     metric = str(payload["temperature_metric"])
     target_date = date.fromisoformat(str(payload["target_date"]))
     source_cycle_time = _dt(str(payload["source_cycle_time"]), field_name="source_cycle_time")
+    # The anchor is its own OM9 run, not the ENS carrier cycle: its cycle is the
+    # natural key _insert_anchor binds to openmeteo_anchor_artifact_id.
+    anchor_cycle_time = _dt(
+        str(payload.get("openmeteo_source_cycle_time") or payload["source_cycle_time"]),
+        field_name="openmeteo_source_cycle_time",
+    )
     anchor_artifact_id = (
         None
         if payload.get("openmeteo_anchor_artifact_id") in (None, "")
@@ -1101,7 +1107,7 @@ def _materialize(
             build_anchor_request(
                 latitude=float(payload["latitude"]),
                 longitude=float(payload["longitude"]),
-                run=source_cycle_time,
+                run=anchor_cycle_time,
                 timezone_name=str(payload["city_timezone"]),
             )
         )
@@ -1122,7 +1128,7 @@ def _materialize(
         openmeteo_payload,
         city_timezone=str(payload["city_timezone"]),
         target_local_date=target_date,
-        source_cycle_time=source_cycle_time,
+        source_cycle_time=anchor_cycle_time,
     )
     if "precision_metadata_json" not in payload:
         raise ValueError(
