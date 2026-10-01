@@ -1,9 +1,10 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-01
 """Bounded TRADE-owned rechecks of durable review debt, not forced resolution.
 
 Existing fill, chain and order reducers continue to create authoritative facts.
-This consumer closes only an absence dispute with a matching proven settlement.
+This consumer closes only an absence dispute with a matching proven settlement;
+the exit chain-truth owner closes its own absence debt from a balanceOf proof.
 All other debt retains explicit retry and age telemetry for its native owner.
 """
 from __future__ import annotations
@@ -39,6 +40,31 @@ def _resolution_evidence(conn,item):
     # Current display rows are not independently sufficient chain evidence.
     # Existing chain/fill owners resolve those disputes with their native proofs.
     return None
+
+def resolve_exit_absence_from_chain_proof(conn,*,subject_id:str,asset_id:str,balance_units:int,observed_at:datetime)->int:
+    """Resolve exit chain-absence debt that a definite balanceOf now answers.
+
+    A positive balance confirms exposure; zero proves absence. Either settles
+    the unknown. Only debt for the same position and asset, opened before the
+    observation, is eligible; each row resolves under its own authority CAS, so
+    debt opened at a newer revision after the proof stays OPEN. The caller owns
+    the TRADE transaction and never closes a position to empty this queue.
+    """
+    if observed_at.tzinfo is None:raise ValueError("chain proof time must be aware")
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_work_items'").fetchone() is None:return 0
+    refs=[str(subject_id),str(asset_id)]
+    evidence=f"chain_balanceof:asset={asset_id}:units={int(balance_units)}:observed_at={observed_at.isoformat()}"
+    resolved=0
+    for work_id,revision,first_seen,refs_json in conn.execute(
+            "SELECT work_id,authority_revision,first_seen_at,evidence_refs_json FROM review_work_items "
+            "WHERE owner_table='position_current' AND subject_id=? AND reason_code='TIMEOUT_ABSENCE_UNCONFIRMED' "
+            "AND status='OPEN'",(str(subject_id),)).fetchall():
+        start=_utc(first_seen)
+        if start is None or start>observed_at or json.loads(refs_json or "[]")!=refs:continue
+        resolved+=resolve_work_item(conn,work_id=work_id,authority_revision=int(revision),
+                                    resolver_identity="src.execution.exit_lifecycle.chain_truth",
+                                    resolution_evidence=evidence,resolved_at=observed_at.isoformat())
+    return resolved
 
 def reconcile_review_work_items(conn:sqlite3.Connection, *, now:datetime|None=None, limit:int=8):
     """Called by scheduled recovery using its existing short TRADE write lease."""

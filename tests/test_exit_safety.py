@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-30
+# Last reused/audited: 2026-10-01
 # Lifecycle: created=2026-04-27; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
@@ -18787,3 +18787,31 @@ def test_unknown_chain_absence_never_admin_closes_exposure(conn, monkeypatch, ex
     assert result["action"]=="skip"
     assert portfolio.recent_exits==[]
     assert conn.execute("SELECT COUNT(*) FROM review_work_items WHERE subject_id=? AND status='OPEN'",(position.trade_id,)).fetchone()[0]==1
+
+
+@pytest.mark.parametrize("units,action", [(10_000_000, "evaluate"), (0, "closed")])
+def test_exit_absence_debt_resolves_from_later_chain_proof(conn, monkeypatch, units, action):
+    """RPC-unknown opens family-blocking debt; the next definite balanceOf resolves it."""
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+    position = Position(
+        trade_id="unknown-then-proven", market_id="condition-test", condition_id="condition-test",
+        city="Seoul",cluster="asia",target_date="2026-09-29",bin_label="28C",
+        direction="buy_yes",token_id=YES_TOKEN,no_token_id=NO_TOKEN,
+        entry_price=0.51,size_usd=5.1,shares=10.0,cost_basis_usd=5.1,
+        state="pending_exit",pre_exit_state="day0_window",exit_state="retry_pending",
+        order_status="retry_pending",chain_state="exit_pending_missing",exit_retry_count=5,
+        strategy_key="forecast_qkernel_entry",env="live")
+    portfolio = PortfolioState(positions=[position])
+    monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", "0x"+"1"*40)
+    balance = [None]
+    monkeypatch.setattr(exit_lifecycle,"_query_ctf_balance",lambda *_a,**_k:balance[0])
+    assert exit_lifecycle.handle_exit_pending_missing(portfolio,position,conn)["action"]=="skip"
+    status = "SELECT status,resolver_identity FROM review_work_items WHERE subject_id=?"
+    assert [tuple(r) for r in conn.execute(status,(position.trade_id,))]==[("OPEN","")]
+    balance[0] = units
+    assert exit_lifecycle.handle_exit_pending_missing(portfolio,position,conn)["action"]==action
+    assert [tuple(r) for r in conn.execute(status,(position.trade_id,))]==[
+        ("RESOLVED","src.execution.exit_lifecycle.chain_truth")]
+    if units:
+        assert position in portfolio.positions and position.state=="day0_window"

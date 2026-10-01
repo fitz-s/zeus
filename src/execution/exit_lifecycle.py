@@ -6430,6 +6430,7 @@ def handle_exit_pending_missing(
             asset_id, safe_address, rpc_call=rpc_call
         )
         if on_chain_balance is not None:
+            observed_at = _utcnow()
             chain_balance_shares = _ctf_units_to_shares(on_chain_balance)
             if on_chain_balance == 0:
                 # Chain confirms zero balance: position is closed. Void it.
@@ -6438,7 +6439,20 @@ def handle_exit_pending_missing(
                     position.trade_id,
                     asset_id,
                 )
-                return _void_chain_confirmed_zero(portfolio, position, asset_id, conn)
+                if conn is None:
+                    return _void_chain_confirmed_zero(portfolio, position, asset_id, conn)
+                # One TRADE unit: the debt resolves only if the void commits.
+                conn.execute("SAVEPOINT sp_exit_chain_zero")
+                try:
+                    _resolve_exit_absence_debt(conn, position, asset_id, 0, observed_at)
+                    voided = _void_chain_confirmed_zero(portfolio, position, asset_id, conn)
+                except BaseException:
+                    conn.execute("ROLLBACK TO sp_exit_chain_zero")
+                    conn.execute("RELEASE sp_exit_chain_zero")
+                    raise
+                conn.execute("RELEASE sp_exit_chain_zero")
+                return voided
+            _resolve_exit_absence_debt(conn, position, asset_id, on_chain_balance, observed_at)
             if chain_balance_shares <= _CHAIN_BALANCE_DUST_SHARES:
                 dust_reason = "EXIT_CHAIN_DUST_STILL_HELD"
                 dust_error = (
@@ -6565,6 +6579,27 @@ def handle_exit_pending_missing(
         except Exception:
             logger.exception("exit chain review bookkeeping failed for %s", position.trade_id)
     return {"action": "skip", "position": position, "reason": "CHAIN_ABSENCE_UNCONFIRMED"}
+
+
+def _resolve_exit_absence_debt(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    asset_id: str,
+    balance_units: int,
+    observed_at: datetime,
+) -> None:
+    """A definite balanceOf answers the unknown that opened exit absence debt."""
+    if conn is None:
+        return
+    try:
+        from src.execution.review_work_delivery import resolve_exit_absence_from_chain_proof
+
+        resolve_exit_absence_from_chain_proof(
+            conn, subject_id=position.trade_id, asset_id=str(asset_id),
+            balance_units=int(balance_units), observed_at=observed_at,
+        )
+    except Exception:
+        logger.exception("exit chain review resolution failed for %s", position.trade_id)
 
 
 def _void_chain_confirmed_zero(
