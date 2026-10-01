@@ -89,11 +89,14 @@ from src.solve.solver import (
     family_payoff_point_q,
     family_payoff_q_lcb,
     family_payoff_q_samples,
+    maker_buy_capacity,
+    maker_buy_price_menu,
     maker_fill_candidate_binding_identity,
-    passive_buy_proposal_curve,
+    passive_buy_proposal_at_limit,
     passive_sell_proposal_curve,
 )
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+from src.state.snapshot_repo import ABSENT_ORDERBOOK_SIDE
 
 
 _GLOBAL_AUCTION_WRITE_FALLBACK_DEADLINE_MS = 1_000
@@ -510,7 +513,9 @@ _MAKER_FILL_SAMPLE_WINDOW_DAYS = 30
 _MAKER_FILL_MIN_SAMPLE_SIZE = {"BUY": 30, "SELL": 30}
 _MAKER_FILL_DKW_DELTA = Decimal("0.01")
 _MAKER_FILL_SAMPLE_SOURCE = "canonical_trade_db_actual_maker_outcomes_v1"
-_MAKER_FILL_SAMPLE_MODEL = "empirical_distance_conditioned_gtc_deadline_dkw99_v2"
+_MAKER_FILL_SAMPLE_MODEL = (
+    "empirical_distance_conditioned_sole_best_bid_gtc_deadline_dkw99_v3"
+)
 # A maker rest fills when the counterparty side comes to it, so the one variable that
 # decides the outcome is how far the quote sits from that side. Pooling every rest into a
 # single rate hides that entirely: it hands the unreachable quote the same probability as the
@@ -1684,9 +1689,7 @@ def _global_preflight_exhaustion_reason(
     no_trade_reason: str | None,
     *,
     excluded_by_family: Mapping[str, str],
-    excluded_by_candidate: Mapping[
-        tuple[str, str, str, str, str, str], str
-    ],
+    excluded_by_candidate: Mapping[GlobalCandidateKey, str],
 ) -> str:
     """Separate a proved CASH/HOLD optimum from an unfinished auction."""
 
@@ -1717,6 +1720,42 @@ def _global_candidate_execution_mode(candidate: object) -> str:
     action = str(getattr(candidate, "action", "BUY") or "BUY").upper()
     default = "TAKER_LIMIT" if action == "BUY" else "NOT_APPLICABLE"
     return str(getattr(candidate, "execution_mode", default) or default).upper()
+
+
+GlobalCandidateKey = tuple[str, str, str, str, str, str, str]
+
+
+def _global_candidate_key(candidate: object) -> GlobalCandidateKey:
+    """One proposal slot: action, family, bin, side, token, mode, maker limit.
+
+    A BUY maker's limit is part of its slot because one token carries one maker
+    per menu price; every other proposal has at most one slot per mode ("").
+    """
+
+    action = str(getattr(candidate, "action", "BUY") or "BUY").upper()
+    mode = _global_candidate_execution_mode(candidate)
+    limit = ""
+    if action == "BUY" and mode == "MAKER_REST":
+        levels = tuple(getattr(getattr(candidate, "economic_cost_curve", None), "levels", ()) or ())
+        limit = str(levels[0].price) if levels else ""
+    return (
+        action,
+        str(getattr(candidate, "family_key", "") or ""),
+        str(getattr(candidate, "bin_id", "") or ""),
+        str(getattr(candidate, "side", "") or ""),
+        str(getattr(candidate, "token_id", "") or ""),
+        mode,
+        limit,
+    )
+
+
+def _global_candidate_exclusion(
+    excluded: Mapping[GlobalCandidateKey, str],
+    key: GlobalCandidateKey,
+) -> str | None:
+    """This slot's exclusion; an empty limit excludes every price of its mode."""
+
+    return excluded.get(key) or excluded.get((*key[:6], ""))
 
 
 # Reasons for a cut that a probe cancelled, superseded or deferred. Each such
@@ -1886,6 +1925,9 @@ def _load_current_maker_fill_samples(
 ) -> dict[str, _CurrentMakerFillSample]:
     """Read actual-policy fill fractions available by one frozen decision cut.
 
+    The population is every rest that was the sole best bid when submitted:
+    above the prior best bid (or into an empty bid side) and below the ask.
+    That is the population a maker proposal at any menu price belongs to.
     Early cancels remain zero/partial outcomes.  Treating them as right-censored
     would overstate the fill rate of the policy Zeus actually executes.
     """
@@ -1967,10 +2009,12 @@ def _load_current_maker_fill_samples(
         created_at = _maker_fill_utc(row.get("created_at"))
         updated_at = _maker_fill_utc(row.get("updated_at"))
         observed_at = _maker_fill_utc(row.get("observed_at"))
+        raw_bid = str(row.get("orderbook_top_bid") or "").strip()
         try:
             size = Decimal(str(row.get("size")))
             price = Decimal(str(row.get("price")))
-            bid = Decimal(str(row.get("orderbook_top_bid")))
+            # The snapshot stores an empty bid side as ABSENT, never as zero.
+            bid = None if raw_bid.upper() == ABSENT_ORDERBOOK_SIDE else Decimal(raw_bid)
             ask = Decimal(str(row.get("orderbook_top_ask")))
             tick = Decimal(str(row.get("min_tick_size")))
             raw_matched = row.get("matched_size")
@@ -1991,13 +2035,14 @@ def _load_current_maker_fill_samples(
             or observed_at is None
             or not all(
                 value.is_finite()
-                for value in (size, price, bid, ask, tick, matched)
+                for value in (size, price, ask, tick, matched)
             )
+            or (bid is not None and (not bid.is_finite() or bid <= 0))
             or size <= 0
             or tick <= 0
-            or bid <= 0
-            or ask <= bid
-            or abs(price - (bid + tick)) > tolerance
+            # Sole best bid at submission: strictly above the prior bid.
+            or (bid is not None and price <= bid)
+            or price <= 0
             or price >= ask
             or matched < 0
             or matched > size + tolerance
@@ -2015,7 +2060,7 @@ def _load_current_maker_fill_samples(
                 "price": price,
                 "matched": Decimal("0"),
                 # The counterparty side this rest had to be reached from. Validation above
-                # already proved ask > bid and price == bid + tick, so this is positive.
+                # already proved price < ask, so this is positive.
                 "distance_to_ask": ask - price,
             },
         )
@@ -2108,7 +2153,7 @@ def _load_current_maker_fill_samples(
         sample_identity = hashlib.sha256(
             json.dumps(
                 {
-                    "schema": "current-maker-fill-sample-v1",
+                    "schema": "current-maker-fill-sample-v2-sole-best-bid",
                     "action": action,
                     "selection_cut_at_utc": cut.isoformat(),
                     "window_days": _MAKER_FILL_SAMPLE_WINDOW_DAYS,
@@ -2260,8 +2305,9 @@ def _bind_current_maker_fill_witnesses(
         levels = tuple(getattr(proposal, "levels", ()) or ())
         if sample is None or event_id is None or len(levels) != 1:
             return
-        prepared_key = (bin_id, condition_id, side, token_id, position_id)
-        epoch_key = (family_key, bin_id, side, token_id, position_id)
+        limit_price = Decimal(levels[0].price)
+        prepared_key = (bin_id, condition_id, side, token_id, position_id, limit_price)
+        epoch_key = (family_key, bin_id, side, token_id, position_id, limit_price)
         existing = witness_maps[event_id].get(prepared_key)
         if isinstance(existing, CurrentMakerFillWitness):
             epoch_witnesses.setdefault(epoch_key, existing.witness_identity)
@@ -2280,7 +2326,6 @@ def _bind_current_maker_fill_witnesses(
             asset_epoch_identity=book_epoch.witness_identity,
             proposal_identity=proposal_identity,
         )
-        limit_price = Decimal(levels[0].price)
         outcomes = _maker_fill_outcomes(
             sample,
             limit_price=limit_price,
@@ -2344,18 +2389,31 @@ def _bind_current_maker_fill_witnesses(
 
     if "BUY" in samples:
         for asset in book_epoch.assets:
-            proposal = passive_buy_proposal_curve(
-                asset.curve,
-                native_bid_levels=asset.bid_levels,
-                cash_usd=maker_cash,
-            )
-            if proposal is not None:
-                # No executable ask means no counterparty exists at any price, which is a
-                # strictly worse position to rest in than the furthest measured band — not an
-                # average one. Pricing it at the pooled rate is the same mistake the bands
-                # exist to remove, so the empty book withdraws the maker sibling outright.
-                ask_levels = tuple(getattr(asset.curve, "levels", ()) or ())
-                if not ask_levels:
+            # No executable ask means no counterparty exists at any price, which is a
+            # strictly worse position to rest in than the furthest measured band — not an
+            # average one. Pricing it at the pooled rate is the same mistake the bands
+            # exist to remove, so the empty book withdraws the maker sibling outright.
+            ask_levels = tuple(getattr(asset.curve, "levels", ()) or ())
+            if not ask_levels:
+                continue
+            best_ask = Decimal(ask_levels[0].price)
+            for limit in maker_buy_price_menu(
+                best_bid=max(
+                    (Decimal(level.price) for level in asset.bid_levels),
+                    default=None,
+                ),
+                best_ask=best_ask,
+                tick=Decimal(asset.curve.min_tick),
+                band_edges=_MAKER_FILL_DISTANCE_BAND_EDGES,
+                band_of=_maker_fill_distance_band,
+            ):
+                proposal = passive_buy_proposal_at_limit(
+                    asset.curve,
+                    native_bid_levels=asset.bid_levels,
+                    limit=limit,
+                    capacity=maker_buy_capacity(maker_cash, limit),
+                )
+                if proposal is None:
                     continue
                 attach(
                     action="BUY",
@@ -2367,7 +2425,7 @@ def _bind_current_maker_fill_witnesses(
                     position_id=None,
                     held_shares=None,
                     proposal=proposal,
-                    counterparty_price=Decimal(ask_levels[0].price),
+                    counterparty_price=best_ask,
                 )
     if "SELL" in samples:
         sell_asset_by_key = {
@@ -2694,17 +2752,14 @@ _LEGACY_CANDIDATE_SEMANTIC_KEY_FIELDS = (
     "token_id",
     "position_id",
 )
-_CANDIDATE_SEMANTIC_KEY_FIELDS = (
+_MODE_CANDIDATE_SEMANTIC_KEY_FIELDS = (
     *_LEGACY_CANDIDATE_SEMANTIC_KEY_FIELDS,
     "execution_mode",
 )
-_BUY_CANDIDATE_INDEX_KEY_FIELDS = (
-    "family_key",
-    "bin_id",
-    "condition_id",
-    "side",
-    "token_id",
-    "execution_mode",
+# One token carries one BUY maker per menu price, so its limit is in the slot.
+_CANDIDATE_SEMANTIC_KEY_FIELDS = (
+    *_MODE_CANDIDATE_SEMANTIC_KEY_FIELDS,
+    "maker_limit_price",
 )
 _LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS = (
     "family_key",
@@ -2712,6 +2767,28 @@ _LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS = (
     "condition_id",
     "side",
     "token_id",
+)
+_MODE_BUY_CANDIDATE_INDEX_KEY_FIELDS = (
+    *_LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS,
+    "execution_mode",
+)
+_BUY_CANDIDATE_INDEX_KEY_FIELDS = (
+    *_MODE_BUY_CANDIDATE_INDEX_KEY_FIELDS,
+    "maker_limit_price",
+)
+_READABLE_BUY_CANDIDATE_INDEX_KEY_FIELDS = frozenset(
+    {
+        _LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS,
+        _MODE_BUY_CANDIDATE_INDEX_KEY_FIELDS,
+        _BUY_CANDIDATE_INDEX_KEY_FIELDS,
+    }
+)
+_READABLE_CANDIDATE_SEMANTIC_KEY_FIELDS = frozenset(
+    {
+        _LEGACY_CANDIDATE_SEMANTIC_KEY_FIELDS,
+        _MODE_CANDIDATE_SEMANTIC_KEY_FIELDS,
+        _CANDIDATE_SEMANTIC_KEY_FIELDS,
+    }
 )
 
 
@@ -2725,10 +2802,7 @@ def _buy_candidate_index_map(
         str(field or "")
         for field in (key_fields or _BUY_CANDIDATE_INDEX_KEY_FIELDS)
     )
-    if fields not in {
-        _LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS,
-        _BUY_CANDIDATE_INDEX_KEY_FIELDS,
-    }:
+    if fields not in _READABLE_BUY_CANDIDATE_INDEX_KEY_FIELDS:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
@@ -2750,23 +2824,37 @@ def _buy_candidate_index_map(
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
         candidate_id = str(raw_row[0] or "")
         key = tuple(str(value or "") for value in raw_row[1:])
-        if normalize_legacy and len(raw_row) == 6:
-            key = (*key, "TAKER_LIMIT")
+        if normalize_legacy and len(key) < len(fields):
+            key = (*key, "TAKER_LIMIT", "")[: len(fields)]
+        mode = key[5] if len(key) > 5 else "TAKER_LIMIT"
         if (
             not candidate_id
             or candidate_id in candidate_ids
-            or not all(key)
+            or not all(key[:6])
             or key[3] not in {"YES", "NO"}
-            or (
-                fields == _BUY_CANDIDATE_INDEX_KEY_FIELDS
-                and key[5] not in {"TAKER_LIMIT", "MAKER_REST"}
-            )
+            or mode not in {"TAKER_LIMIT", "MAKER_REST"}
+            # A maker limit names exactly the maker slot of a limit-keyed row.
+            or (len(key) > 6 and bool(key[6]) != (mode == "MAKER_REST"))
             or key in mapped
         ):
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
         candidate_ids.add(candidate_id)
         mapped[key] = candidate_id
     return mapped
+
+
+def _declared_buy_index_key_fields(payload: Mapping[str, object]) -> tuple[str, ...]:
+    """The buy-index key layout a candidate payload declares for its rows."""
+
+    declared = payload.get("buy_candidate_index_fields")
+    if not isinstance(declared, Sequence) or isinstance(declared, (str, bytes)):
+        return _MODE_BUY_CANDIDATE_INDEX_KEY_FIELDS
+    fields = tuple(str(field or "") for field in declared[1:])
+    if not fields:
+        return _MODE_BUY_CANDIDATE_INDEX_KEY_FIELDS
+    if fields not in _READABLE_BUY_CANDIDATE_INDEX_KEY_FIELDS:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+    return fields
 
 
 def _condition_side_mask_map(rows: object) -> dict[str, int]:
@@ -2805,7 +2893,8 @@ def _delta_key(raw_key: object, *, size: int, error: str) -> tuple[str, ...]:
     ):
         raise ValueError(error)
     key = tuple(str(value or "") for value in raw_key)
-    if not all(key):
+    # Every identity field is required; a trailing maker limit is "" off-maker.
+    if not all(key[:6]):
         raise ValueError(error)
     return key
 
@@ -2853,10 +2942,7 @@ def _apply_candidate_evaluations_delta(
     ):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
     semantic_fields = tuple(str(field or "") for field in raw_semantic_fields)
-    if semantic_fields not in {
-        _LEGACY_CANDIDATE_SEMANTIC_KEY_FIELDS,
-        _CANDIDATE_SEMANTIC_KEY_FIELDS,
-    }:
+    if semantic_fields not in _READABLE_CANDIDATE_SEMANTIC_KEY_FIELDS:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
     indexed_delta = delta.get("buy_candidate_index")
     condition_delta = delta.get("buy_condition_side_masks")
@@ -2883,10 +2969,7 @@ def _apply_candidate_evaluations_delta(
         ):
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
         index_fields = tuple(str(field or "") for field in raw_index_fields)
-        if index_fields not in {
-            _LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS,
-            _BUY_CANDIDATE_INDEX_KEY_FIELDS,
-        }:
+        if index_fields not in _READABLE_BUY_CANDIDATE_INDEX_KEY_FIELDS:
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
         buy_rows = _buy_candidate_index_map(
             base.get("buy_candidate_index"),
@@ -3081,11 +3164,17 @@ def _candidate_evaluations_delta_receipt(
         current_rows, Sequence
     ):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_INVALID")
+    index_fields = _declared_buy_index_key_fields(current)
+    if _declared_buy_index_key_fields(base) != index_fields:
+        # A layout change is not a one-hop delta; the caller keeps it inline.
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_HASH_MISMATCH")
     base_details = _candidate_detail_map(base_rows)
     current_details = _candidate_detail_map(current_rows)
-    base_buy_index = _buy_candidate_index_map(base.get("buy_candidate_index"))
+    base_buy_index = _buy_candidate_index_map(
+        base.get("buy_candidate_index"), key_fields=index_fields
+    )
     current_buy_index = _buy_candidate_index_map(
-        current.get("buy_candidate_index")
+        current.get("buy_candidate_index"), key_fields=index_fields
     )
     base_condition_masks = _condition_side_mask_map(
         base.get("buy_condition_side_masks")
@@ -3137,7 +3226,7 @@ def _candidate_evaluations_delta_receipt(
         or base_buy_index[key] != current_buy_index[key]
     ]
     buy_index_delta: dict[str, object] = {
-        "key_fields": list(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
+        "key_fields": list(index_fields),
         "removed_keys": [
             list(key)
             for key in sorted(
@@ -3161,7 +3250,7 @@ def _candidate_evaluations_delta_receipt(
         except ValueError:
             packed_candidate_ids = b""
         packed_delta = {
-            "key_fields": list(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
+            "key_fields": list(index_fields),
             "removed_keys": buy_index_delta["removed_keys"],
             "patches": [
                 patch
@@ -4271,9 +4360,7 @@ def _store_global_auction_receipt(
     wealth_witness: object,
     fractional_kelly_multiplier: Decimal,
     excluded_by_family: Mapping[str, str] | None = None,
-    excluded_by_candidate: Mapping[
-        tuple[str, str, str, str, str, str], str
-    ] | None = None,
+    excluded_by_candidate: Mapping[GlobalCandidateKey, str] | None = None,
     book_captured_at_utc: datetime | None = None,
     book_max_age: timedelta | None = None,
     expected_holding_obligations: Sequence[_CurrentHeldObligation] = (),
@@ -4535,16 +4622,19 @@ def _store_global_auction_receipt(
             str(row.get("side") or ""),
             str(row.get("token_id") or ""),
             str(row.get("execution_mode") or ""),
+            str(row.get("maker_limit_price") or ""),
         ]
         for row in buy_rows
     )
     buy_candidate_index_complete = (
         len(buy_candidate_index) == len(buy_rows)
         and len({row[0] for row in buy_candidate_index}) == len(buy_rows)
+        and len({tuple(row[1:]) for row in buy_candidate_index}) == len(buy_rows)
         and all(
-            all(value for value in row)
+            all(value for value in row[:7])
             and row[4] in {"YES", "NO"}
             and row[6] in {"TAKER_LIMIT", "MAKER_REST"}
+            and bool(row[7]) == (row[6] == "MAKER_REST")
             for row in buy_candidate_index
         )
     )
@@ -4638,12 +4728,7 @@ def _store_global_auction_receipt(
         "buy_condition_side_masks": sorted(buy_condition_masks.items()),
         "buy_candidate_index_fields": [
             "candidate_id",
-            "family_key",
-            "bin_id",
-            "condition_id",
-            "side",
-            "token_id",
-            "execution_mode",
+            *_BUY_CANDIDATE_INDEX_KEY_FIELDS,
         ],
         "buy_candidate_index": buy_candidate_index,
     }
@@ -4754,9 +4839,8 @@ def _store_global_auction_receipt(
                 "bin_id": key[2],
                 "side": key[3],
                 "token_id": key[4],
-                "execution_mode": (
-                    key[5] if len(key) > 5 else "TAKER_LIMIT"
-                ),
+                "execution_mode": key[5],
+                "maker_limit_price": key[6] or None,
                 "reason": reason,
             }
             for key, reason in sorted((excluded_by_candidate or {}).items())
@@ -7099,9 +7183,7 @@ def _accounted_scope_identity(
 def _selection_epoch_identity_with_preflight_exclusions(
     selection_epoch_identity: str,
     excluded_by_family: Mapping[str, str],
-    excluded_by_candidate: Mapping[
-        tuple[str, str, str, str, str, str], str
-    ] | None = None,
+    excluded_by_candidate: Mapping[GlobalCandidateKey, str] | None = None,
     payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
     | None = None,
 ) -> str:
@@ -9873,9 +9955,7 @@ def process_current_global_batch(
             *,
             attempt_selection_epoch_identity: str = selection_epoch_identity,
             preflight_excluded_by_family: Mapping[str, str] | None = None,
-            preflight_excluded_by_candidate: Mapping[
-                tuple[str, str, str, str, str, str], str
-            ]
+            preflight_excluded_by_candidate: Mapping[GlobalCandidateKey, str]
             | None = None,
             payoff_q_lcb_by_candidate: Mapping[
                 tuple[str, str, str, str], float
@@ -9985,7 +10065,10 @@ def process_current_global_batch(
                     )
                     for execution_mode in ("TAKER_LIMIT", "MAKER_REST")
                 }
-                if not set(excluded_candidates).issubset(known_candidate_keys):
+                # The maker limit (key[6]) prices a slot on a known asset.
+                if not {key[:6] for key in excluded_candidates}.issubset(
+                    known_candidate_keys
+                ):
                     raise ValueError("GLOBAL_EXCLUDED_CANDIDATE_UNKNOWN")
 
             def candidate_policy(candidate):
@@ -9997,15 +10080,9 @@ def process_current_global_batch(
                 # fresh buy_candidates_enabled authority.
                 if not buy_candidates_enabled and action == "BUY":
                     return "GLOBAL_BUY_CANDIDATES_DISABLED"
-                key = (
-                    action,
-                    str(getattr(candidate, "family_key", "") or ""),
-                    str(getattr(candidate, "bin_id", "") or ""),
-                    str(getattr(candidate, "side", "") or ""),
-                    str(getattr(candidate, "token_id", "") or ""),
-                    _global_candidate_execution_mode(candidate),
+                reason = _global_candidate_exclusion(
+                    excluded_candidates, _global_candidate_key(candidate)
                 )
-                reason = excluded_candidates.get(key)
                 if reason is not None:
                     return f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"
                 if candidate_policy_rejection_resolver is None:
@@ -10013,18 +10090,9 @@ def process_current_global_batch(
                 return candidate_policy_rejection_resolver(candidate)
 
             def proof_candidate_policy(candidate):
-                action = str(
-                    getattr(candidate, "action", "BUY") or "BUY"
-                ).upper()
-                key = (
-                    action,
-                    str(getattr(candidate, "family_key", "") or ""),
-                    str(getattr(candidate, "bin_id", "") or ""),
-                    str(getattr(candidate, "side", "") or ""),
-                    str(getattr(candidate, "token_id", "") or ""),
-                    _global_candidate_execution_mode(candidate),
+                reason = _global_candidate_exclusion(
+                    excluded_candidates, _global_candidate_key(candidate)
                 )
-                reason = excluded_candidates.get(key)
                 if reason is not None:
                     return f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"
                 if proof_candidate_policy_rejection_resolver is None:
@@ -10720,15 +10788,11 @@ def process_current_global_batch(
                 attempt_book_epoch.captured_at_utc + attempt_book_epoch.max_age
             )
             excluded_by_family: dict[str, str] = {}
-            excluded_by_candidate: dict[
-                tuple[str, str, str, str, str, str], str
-            ] = {}
+            excluded_by_candidate: dict[GlobalCandidateKey, str] = {}
             payoff_q_lcb_by_candidate: dict[
                 tuple[str, str, str, str], float
             ] = dict(initial_payoff_q_lcb_by_candidate)
-            curve_supersession_count_by_candidate: dict[
-                tuple[str, str, str, str, str, str], int
-            ] = {}
+            curve_supersession_count_by_candidate: dict[GlobalCandidateKey, int] = {}
             wealth_reauction_count = 0
             wealth_reauction_audit = None
 
@@ -11279,16 +11343,9 @@ def process_current_global_batch(
                     candidate = selected.decision.candidate
                     if candidate is None or winner_id is None:
                         return reject("GLOBAL_PREFLIGHT_BLOCKED_CANDIDATE_MISSING")
-                    candidate_key = (
-                        str(getattr(candidate, "action", "BUY") or "BUY").upper(),
-                        str(getattr(candidate, "family_key", "") or ""),
-                        str(getattr(candidate, "bin_id", "") or ""),
-                        str(getattr(candidate, "side", "") or ""),
-                        str(getattr(candidate, "token_id", "") or ""),
-                        _global_candidate_execution_mode(candidate),
-                    )
+                    candidate_key = _global_candidate_key(candidate)
                     if (
-                        not all(candidate_key)
+                        not all(candidate_key[:6])
                         or candidate_key[0] not in {"BUY", "SELL"}
                         or candidate_key[3] not in {"YES", "NO"}
                     ):
@@ -11332,6 +11389,7 @@ def process_current_global_batch(
                                         str(getattr(asset, "side", "") or ""),
                                         str(getattr(asset, "token_id", "") or ""),
                                         execution_mode,
+                                        "",
                                     )
                                     for asset in tuple(
                                         getattr(attempt_book_epoch, "assets", ())
@@ -11361,6 +11419,7 @@ def process_current_global_batch(
                                         str(getattr(asset, "side", "") or ""),
                                         str(getattr(asset, "token_id", "") or ""),
                                         execution_mode,
+                                        "",
                                     )
                                     for asset in tuple(
                                         getattr(attempt_book_epoch, "assets", ())
@@ -11375,10 +11434,14 @@ def process_current_global_batch(
                         )
                     if (
                         not candidate_exclusion_keys
-                        or candidate_key not in candidate_exclusion_keys
+                        or _global_candidate_exclusion(
+                            dict.fromkeys(candidate_exclusion_keys, reason),
+                            candidate_key,
+                        )
+                        is None
                         or entry_scope_exclusion
                         and any(
-                            not all(key) or key[0] != "BUY"
+                            not all(key[:6]) or key[0] != "BUY"
                             for key in candidate_exclusion_keys
                         )
                     ):
@@ -11403,16 +11466,11 @@ def process_current_global_batch(
                     candidate = selected.decision.candidate
                     if candidate is None:
                         return reject("GLOBAL_REAUCTION_SELECTED_CANDIDATE_MISSING")
-                    candidate_key = (
-                        str(getattr(candidate, "action", "BUY") or "BUY").upper(),
-                        str(getattr(candidate, "family_key", "") or ""),
-                        str(getattr(candidate, "bin_id", "") or ""),
-                        str(getattr(candidate, "side", "") or ""),
-                        str(getattr(candidate, "token_id", "") or ""),
-                        _global_candidate_execution_mode(candidate),
-                    )
+                    # A moved book is a token fact: count and exclude every
+                    # proposal price of this mode together ("" limit).
+                    candidate_key = (*_global_candidate_key(candidate)[:6], "")
                     if (
-                        not all(candidate_key)
+                        not all(candidate_key[:6])
                         or candidate_key[0] not in {"BUY", "SELL"}
                         or candidate_key[3] not in {"YES", "NO"}
                     ):

@@ -253,17 +253,20 @@ class PreparedGlobalFamily:
     day0_exit_authority_status: str = "not_applicable"
     day0_exit_authority_reason: str = "non_day0_family"
     sell_action_authority_identity: str = "non_day0_default_authority"
+    # Keyed (bin, condition, side, token, position_id, limit): one witness per
+    # proposal price, so one token may carry a menu of maker proposals.
     maker_fill_witnesses: Mapping[
-        tuple[str, str, str, str, str | None], CurrentMakerFillWitness
+        tuple[str, str, str, str, str | None, Decimal], CurrentMakerFillWitness
     ] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         witnesses = dict(self.maker_fill_witnesses)
         if any(
             not isinstance(key, tuple)
-            or len(key) != 5
+            or len(key) != 6
             or not all(str(value or "").strip() for value in key[:4])
             or not isinstance(witness, CurrentMakerFillWitness)
+            or key[5] != witness.limit_price
             for key, witness in witnesses.items()
         ):
             raise ValueError("PREPARED_GLOBAL_MAKER_WITNESS_MAPPING_INVALID")

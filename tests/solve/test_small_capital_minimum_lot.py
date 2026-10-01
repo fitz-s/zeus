@@ -72,7 +72,7 @@ def _maker_leg(*, q=0.38, min_order="5", cid="live-maker"):
         book_captured_at_utc=seed.book_captured_at_utc,
         neg_risk=False,
         native_bid_levels=bids,
-        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
+        maker_cash_usd=_MAKER_TEST_CASH,
         asset_epoch_identity=f"{cid}-epoch",
         current_token_shares=Decimal("0"),
     )
@@ -81,9 +81,10 @@ def _maker_leg(*, q=0.38, min_order="5", cid="live-maker"):
         fill_probability_source="placeholder",
         rest_deadline_minutes=20.0,
         witness_identity="placeholder",
+        limit_price=Decimal("0.300"),
     )
     _taker, provisional = S.global_candidates_from_native(
-        native, maker_fill_witness=placeholder, **common
+        native, maker_fill_witnesses=(placeholder,), **common
     )
     price = provisional.proposal_cost_curve.levels[0].price
     witness = _current_maker_witness(
@@ -93,7 +94,7 @@ def _maker_leg(*, q=0.38, min_order="5", cid="live-maker"):
         outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), -price),),
     )
     taker, maker = S.global_candidates_from_native(
-        native, maker_fill_witness=witness, **common
+        native, maker_fill_witnesses=(witness,), **common
     )
     assert maker.execution_mode == "MAKER_REST"
     assert maker.economic_cost_curve.levels[0].price == Decimal("0.300")

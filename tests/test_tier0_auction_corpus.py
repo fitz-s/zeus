@@ -252,6 +252,7 @@ def _rejected(bin_id: str, side: str, witness, reason: str, mode="TAKER_LIMIT"):
         fill_probability_source="immediate_taker" if mode == "TAKER_LIMIT" else "maker_model",
         rest_deadline_minutes=None if mode == "TAKER_LIMIT" else 10.0,
         probability_witness_identity=witness.witness_identity,
+        maker_limit_price=None if mode == "TAKER_LIMIT" else Decimal("0.50"),
     )
 
 

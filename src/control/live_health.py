@@ -6523,15 +6523,25 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v14",
         }:
             buy_index = payload["buy_candidate_index"]
-            expected_buy_index_size = 7 if schema_version >= 20 else 6
-            if not isinstance(buy_index, list) or any(
-                not isinstance(row, list)
-                or len(row) != expected_buy_index_size
-                or (
-                    expected_buy_index_size == 7
-                    and row[6] not in {"TAKER_LIMIT", "MAKER_REST"}
+            # The row width is the payload's own declared field list: 6 before
+            # execution modes, 7 with them, 8 once maker limits key the slot.
+            expected_buy_index_size = len(
+                payload.get("buy_candidate_index_fields")
+                or ([None] * (7 if schema_version >= 20 else 6))
+            )
+            if (
+                not isinstance(buy_index, list)
+                or expected_buy_index_size not in {6, 7, 8}
+                or (schema_version >= 20 and expected_buy_index_size == 6)
+                or any(
+                    not isinstance(row, list)
+                    or len(row) != expected_buy_index_size
+                    or (
+                        expected_buy_index_size >= 7
+                        and row[6] not in {"TAKER_LIMIT", "MAKER_REST"}
+                    )
+                    for row in buy_index
                 )
-                for row in buy_index
             ):
                 return invalid("BUY_CANDIDATE_INDEX_INVALID")
             buy_candidate_ids = tuple(str(row[0] or "") for row in buy_index)

@@ -472,8 +472,9 @@ class CurrentGlobalBookEpoch:
     max_age: timedelta
     witness_identity: str
     sell_assets: tuple[CurrentGlobalSellAsset, ...] = ()
+    # (family, bin, side, token, position_id, limit) -> witness identity.
     maker_fill_witness_identities: Mapping[
-        tuple[str, str, str, str, str | None], str
+        tuple[str, str, str, str, str | None, Decimal], str
     ] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -494,8 +495,9 @@ class CurrentGlobalBookEpoch:
             or self.max_age <= timedelta(0)
             or any(
                 not isinstance(key, tuple)
-                or len(key) != 5
+                or len(key) != 6
                 or not all(str(value or "").strip() for value in key[:4])
+                or not isinstance(key[5], Decimal)
                 or not identity.strip()
                 for key, identity in maker_witnesses.items()
             )
@@ -563,13 +565,14 @@ class CurrentGlobalBookEpoch:
         if asset is None:
             return None
         maker_witness_identity = None
-        if action == "BUY" and getattr(candidate, "execution_mode", None) == "MAKER_REST":
+        if getattr(candidate, "execution_mode", None) == "MAKER_REST":
+            witness = getattr(candidate, "maker_fill_witness", None)
             maker_witness_identity = self.maker_fill_witness_identities.get(
-                (*key, None)
-            )
-        elif action == "SELL" and getattr(candidate, "execution_mode", None) == "MAKER_REST":
-            maker_witness_identity = self.maker_fill_witness_identities.get(
-                (*key, getattr(candidate, "position_id", None))
+                (
+                    *key,
+                    getattr(candidate, "position_id", None) if action == "SELL" else None,
+                    getattr(witness, "limit_price", None),
+                )
             )
         return CurrentExecutionAuthority(
             token_id=asset.token_id,

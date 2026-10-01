@@ -1049,7 +1049,7 @@ def select_prepared_global_auction(
             if reason.startswith("GLOBAL_NATIVE_HOLDINGS_BINDING_FAILED:")
         }
 
-        def maker_witness_for(
+        def maker_witnesses_for(
             *,
             family_key: str,
             bin_id: str,
@@ -1057,15 +1057,23 @@ def select_prepared_global_auction(
             side: str,
             token_id: str,
             position_id: str | None,
-        ) -> CurrentMakerFillWitness | None:
-            """Read only an upstream typed current witness; never reinterpret priors."""
+        ) -> tuple[CurrentMakerFillWitness, ...]:
+            """Upstream typed current witnesses for one proposal slot, by limit.
+
+            Never reinterprets priors; one witness per bound proposal price.
+            """
 
             witnesses = prepared_by_family[family_key].maker_fill_witnesses
             if not isinstance(witnesses, Mapping):
-                return None
-            key = (bin_id, condition_id, side, token_id, position_id)
-            witness = witnesses.get(key)
-            return witness if isinstance(witness, CurrentMakerFillWitness) else None
+                return ()
+            slot = (bin_id, condition_id, side, token_id, position_id)
+            return tuple(
+                witness
+                for key, witness in sorted(
+                    witnesses.items(), key=lambda item: item[0][5]
+                )
+                if key[:5] == slot and isinstance(witness, CurrentMakerFillWitness)
+            )
 
         book_state_row_by_key = {
             tuple(state[:5]): tuple(state) for state in book_epoch.asset_states
@@ -1090,7 +1098,7 @@ def select_prepared_global_auction(
                 ),
             )
             try:
-                maker_witness = maker_witness_for(
+                maker_witnesses = maker_witnesses_for(
                     family_key=asset.family_key,
                     bin_id=asset.bin_id,
                     condition_id=asset.condition_id,
@@ -1111,8 +1119,7 @@ def select_prepared_global_auction(
                         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
                         book_captured_at_utc=asset.captured_at_utc,
                         native_bid_levels=asset.bid_levels,
-                        include_maker=maker_witness is not None,
-                        maker_fill_witness=maker_witness,
+                        maker_fill_witnesses=maker_witnesses,
                         asset_epoch_identity=book_epoch.witness_identity,
                         current_token_shares=current_token_shares,
                         maker_cash_usd=wealth_witness.spendable_cash_usd,
@@ -1329,15 +1336,23 @@ def select_prepared_global_auction(
                                     prepared.sell_action_authority_identity
                                 ),
                                 execution_mode=mode,
-                                maker_fill_witness=maker_witness_for(
-                                    family_key=family_key,
-                                    bin_id=str(holding.bin_id),
-                                    condition_id=str(
-                                        holding_binding(holding, probability).condition_id
+                                # A held SELL binds one maker price (bid+tick).
+                                maker_fill_witness=next(
+                                    iter(
+                                        maker_witnesses_for(
+                                            family_key=family_key,
+                                            bin_id=str(holding.bin_id),
+                                            condition_id=str(
+                                                holding_binding(
+                                                    holding, probability
+                                                ).condition_id
+                                            ),
+                                            side=str(holding.side),
+                                            token_id=str(holding.token_id),
+                                            position_id=str(holding.position_id),
+                                        )
                                     ),
-                                    side=str(holding.side),
-                                    token_id=str(holding.token_id),
-                                    position_id=str(holding.position_id),
+                                    None,
                                 ),
                                 asset_epoch_identity=book_epoch.witness_identity,
                                 neg_risk=asset.neg_risk,

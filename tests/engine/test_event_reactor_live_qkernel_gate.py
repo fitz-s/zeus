@@ -2903,7 +2903,7 @@ def test_global_current_entry_feasibility_enforces_live_band_symmetrically(side)
 def test_global_maker_band_uses_passive_limit_not_opposite_ask(side, ask):
     from src.contracts.venue_submission_envelope import assert_live_order_unit_price
     from src.decision_kernel.certificates.execution import _branch_limit_price
-    from src.solve.solver import passive_buy_proposal_curve
+    from src.solve.solver import maker_buy_capacity, passive_buy_proposal_at_limit
     from tests.solve.test_solver_properties import _current_maker_witness, _global_candidate
 
     taker = _global_candidate(
@@ -2911,8 +2911,12 @@ def test_global_maker_band_uses_passive_limit_not_opposite_ask(side, ask):
         levels=((ask, "100"),), min_order="5",
     )
     bids = (BookLevel(price=Decimal("0.94"), size=Decimal("100")),)
-    proposal = passive_buy_proposal_curve(
-        taker.executable_cost_curve, native_bid_levels=bids, cash_usd=Decimal("12"),
+    limit = bids[0].price + taker.executable_cost_curve.min_tick
+    proposal = passive_buy_proposal_at_limit(
+        taker.executable_cost_curve,
+        native_bid_levels=bids,
+        limit=limit,
+        capacity=maker_buy_capacity(Decimal("12"), limit),
     )
     assert proposal is not None
     witness = _current_maker_witness(

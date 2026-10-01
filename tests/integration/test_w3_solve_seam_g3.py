@@ -112,7 +112,8 @@ from src.solve.solver import (
     joint_probability_content_identity,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
-    passive_buy_proposal_curve,
+    maker_buy_capacity,
+    passive_buy_proposal_at_limit,
     passive_sell_proposal_curve,
     maker_fill_candidate_binding_identity,
     MakerFillOutcome,
@@ -791,6 +792,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 "YES",
                 "token-buy",
                 "TAKER_LIMIT",
+                "",
             ): "jit depth insufficient"
         },
         proof_counterfactual={
@@ -1007,6 +1009,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "side": "YES",
             "token_id": "token-buy",
             "execution_mode": "TAKER_LIMIT",
+            "maker_limit_price": None,
             "reason": "jit depth insufficient",
         }
     ]
@@ -1145,6 +1148,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         "side",
         "token_id",
         "execution_mode",
+        "maker_limit_price",
     ]
     assert candidate_evaluations["buy_candidate_index"] == [
         [
@@ -1155,6 +1159,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "YES",
             "token-buy",
             "TAKER_LIMIT",
+            "",
         ]
     ]
     assert summary["buy_condition_membership_count"] == 1
@@ -1948,6 +1953,7 @@ def test_candidate_semantic_delta_does_not_rewrite_stable_action_slots():
 
 def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
     def candidate_row(index: int, candidate_id: str) -> list[str]:
+        maker = index % 3 == 0
         return [
             candidate_id,
             f"family-{index // 20}",
@@ -1955,7 +1961,8 @@ def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
             f"condition-{index // 2}",
             "YES" if index % 2 == 0 else "NO",
             f"token-{index}",
-            "TAKER_LIMIT" if index % 3 else "MAKER_REST",
+            "MAKER_REST" if maker else "TAKER_LIMIT",
+            "0.35" if maker else "",
         ]
 
     count = 1_024
@@ -1989,12 +1996,7 @@ def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
         "buy_condition_side_masks": base_masks,
         "buy_candidate_index_fields": [
             "candidate_id",
-            "family_key",
-            "bin_id",
-            "condition_id",
-            "side",
-            "token_id",
-            "execution_mode",
+            *global_batch_runtime._BUY_CANDIDATE_INDEX_KEY_FIELDS,
         ],
         "buy_candidate_index": sorted(base_index),
     }
@@ -2096,7 +2098,8 @@ def test_candidate_delta_packs_full_high_cardinality_id_rotation():
                 f"condition-{index // 2}",
                 "YES" if index % 2 == 0 else "NO",
                 f"token-{index}",
-                "TAKER_LIMIT" if index % 3 else "MAKER_REST",
+                "MAKER_REST" if index % 3 == 0 else "TAKER_LIMIT",
+                "0.35" if index % 3 == 0 else "",
             ]
             for index in range(count)
         )
@@ -2107,12 +2110,7 @@ def test_candidate_delta_packs_full_high_cardinality_id_rotation():
         "buy_condition_side_masks": [],
         "buy_candidate_index_fields": [
             "candidate_id",
-            "family_key",
-            "bin_id",
-            "condition_id",
-            "side",
-            "token_id",
-            "execution_mode",
+            *global_batch_runtime._BUY_CANDIDATE_INDEX_KEY_FIELDS,
         ],
         "buy_candidate_index": candidate_index("base"),
     }
@@ -2173,6 +2171,7 @@ def test_candidate_delta_packs_full_high_cardinality_id_rotation():
             "YES",
             "token-new",
             "TAKER_LIMIT",
+            "",
         ]
     )
     changed_keys_current = {
@@ -3844,7 +3843,7 @@ def test_global_preflight_exhaustion_distinguishes_cash_from_authority_failure()
         "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
         excluded_by_family={},
         excluded_by_candidate={
-            ("BUY", "family-a", "bin-a", "NO", "token-a"): thin_buy
+            ("BUY", "family-a", "bin-a", "NO", "token-a", "TAKER_LIMIT", ""): thin_buy
         },
     ) == (
         "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
@@ -4092,12 +4091,73 @@ def test_current_maker_fill_sample_is_point_in_time_and_action_specific():
     )
 
     assert set(samples) == {"BUY"}
-    assert len(samples["BUY"].fill_fractions) == 100
-    assert samples["BUY"].fill_fractions.count(Decimal("1")) == 20
+    # Row 1000 rests at 0.32: the sole best bid (0.30 < 0.32 < 0.40), so it is
+    # in the population even though it is not bid + tick.
+    assert len(samples["BUY"].fill_fractions) == 101
+    assert samples["BUY"].fill_fractions.count(Decimal("1")) == 21
     assert samples["BUY"].fill_fractions.count(Decimal("0.5")) == 10
     assert samples["BUY"].fill_fractions.count(Decimal("0")) == 70
     assert Decimal("0") < samples["BUY"].fill_probability_lcb < Decimal("0.29")
     assert samples["BUY"].training_cutoff_at_utc == cut
+
+
+def test_current_maker_fill_sample_is_the_sole_best_bid_population():
+    conn = _maker_fill_sample_conn()
+    conn.executescript(
+        """
+        INSERT INTO executable_market_snapshots
+        VALUES ('no-bid', 'ABSENT', '0.40', '0.01', 'CLOB', 0);
+        INSERT INTO executable_market_snapshots
+        VALUES ('zero-bid', '0', '0.40', '0.01', 'CLOB', 0);
+        """
+    )
+    cut = _dt.datetime(2026, 8, 11, 12, 0, tzinfo=_dt.timezone.utc)
+    created = cut - _dt.timedelta(days=1)
+    counter = iter(range(10_000))
+
+    def insert(snapshot: str, price: str, matched: str) -> None:
+        command_id = f"buy-{next(counter)}"
+        envelope_id = f"envelope-{command_id}"
+        conn.execute(
+            "INSERT INTO venue_submission_envelopes VALUES (?, 'GTC', 1)",
+            (envelope_id,),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                command_id, envelope_id, snapshot, "ENTRY", "BUY", 10.0,
+                float(price), f"venue-{command_id}", "CANCELLED",
+                created.isoformat(),
+                (created + _dt.timedelta(minutes=11)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_order_facts(command_id,matched_size,observed_at) "
+            "VALUES (?,?,?)",
+            (command_id, matched, (created + _dt.timedelta(minutes=10)).isoformat()),
+        )
+
+    for _ in range(30):
+        insert("snapshot", "0.31", "0")  # bid + tick: in
+    for _ in range(25):
+        insert("snapshot", "0.35", "10")  # inside the spread, sole best bid: in
+    for _ in range(25):
+        insert("no-bid", "0.20", "5")  # empty bid side, below the ask: in
+    for _ in range(3):
+        insert("snapshot", "0.30", "10")  # joins the bid, not the best: out
+    for _ in range(3):
+        insert("no-bid", "0.40", "10")  # at the ask: crossing, out
+    for _ in range(3):
+        insert("zero-bid", "0.20", "10")  # a stored zero bid is invalid: out
+
+    sample = global_batch_runtime._load_current_maker_fill_samples(
+        conn, selection_cut_at_utc=cut,
+    )["BUY"]
+
+    assert len(sample.fill_fractions) == 80
+    assert sample.fill_fractions.count(Decimal("1")) == 25
+    assert sample.fill_fractions.count(Decimal("0.5")) == 25
+    assert sample.fill_fractions.count(Decimal("0")) == 30
 
 
 def test_current_maker_fill_outcomes_close_exact_decimal_simplex():
@@ -4288,7 +4348,16 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
             issued_at_utc=at,
         )
     )
-    key = ("bin", "condition", "YES", "yes-token", None)
+    # Book bid 0.30 / ask 0.40 / tick 0.01: each fill-distance band's far edge,
+    # clipped to (bid, ask) and kept only inside its own band, deduplicated.
+    menu = sorted(
+        key[5] for key in rebound["event"].maker_fill_witnesses
+    )
+    assert menu == [Decimal("0.31"), Decimal("0.35"), Decimal("0.38")]
+    assert sorted(
+        key[5] for key in witnessed_epoch.maker_fill_witness_identities
+    ) == menu
+    key = ("bin", "condition", "YES", "yes-token", None, Decimal("0.38"))
     maker_witness = rebound["event"].maker_fill_witnesses[key]
     native = SimpleNamespace(
         no_trade_reason=None,
@@ -4307,8 +4376,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
-        maker_fill_witness=maker_witness,
+        maker_cash_usd=MAKER_TEST_CASH, maker_fill_witnesses=(maker_witness,),
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=Decimal("0"),
         neg_risk=False,
@@ -4345,8 +4413,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
-        maker_fill_witness=maker_witness,
+        maker_cash_usd=MAKER_TEST_CASH, maker_fill_witnesses=(maker_witness,),
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=Decimal("0"),
         neg_risk=False,
@@ -4373,8 +4440,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
             ledger_snapshot_id="ledger",
             book_captured_at_utc=at,
             native_bid_levels=asset.bid_levels,
-            include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
-            maker_fill_witness=maker_witness,
+            maker_cash_usd=MAKER_TEST_CASH, maker_fill_witnesses=(maker_witness,),
             asset_epoch_identity=epoch.witness_identity,
             current_token_shares=held,
             neg_risk=False,
@@ -4432,8 +4498,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
-        maker_fill_witness=maker_witness,
+        maker_cash_usd=MAKER_TEST_CASH, maker_fill_witnesses=(maker_witness,),
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=Decimal("0"),
         neg_risk=False,
@@ -4459,8 +4524,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
-        maker_fill_witness=maker_witness,
+        maker_cash_usd=MAKER_TEST_CASH, maker_fill_witnesses=(maker_witness,),
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=Decimal("0"),
         neg_risk=False,
@@ -4473,8 +4537,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
-        maker_fill_witness=maker_witness,
+        maker_cash_usd=MAKER_TEST_CASH, maker_fill_witnesses=(maker_witness,),
         asset_epoch_identity=epoch.witness_identity,
         neg_risk=False,
     )
@@ -4493,8 +4556,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         ledger_snapshot_id="ledger",
         book_captured_at_utc=at,
         native_bid_levels=asset.bid_levels,
-        include_maker=True, maker_cash_usd=MAKER_TEST_CASH,
-        maker_fill_witness=maker_witness,
+        maker_cash_usd=MAKER_TEST_CASH, maker_fill_witnesses=(maker_witness,),
         asset_epoch_identity=epoch.witness_identity,
         current_token_shares=seed_shares,
         neg_risk=False,
@@ -4528,7 +4590,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         _, dust_maker = global_candidates_from_native(
             native, probability_witness=probability, ledger_snapshot_id="ledger",
             book_captured_at_utc=at, native_bid_levels=asset.bid_levels,
-            include_maker=True, maker_cash_usd=MAKER_TEST_CASH, maker_fill_witness=maker_witness,
+            maker_cash_usd=MAKER_TEST_CASH, maker_fill_witnesses=(maker_witness,),
             asset_epoch_identity=epoch.witness_identity,
             current_token_shares=dust_seed, neg_risk=False,
         )
@@ -44434,9 +44496,11 @@ def _current_maker_buy_candidate(*, side: str = "YES") -> GlobalSingleOrderCandi
         min_order_size="5",
     )
     bids = (BookLevel(price=Decimal("0.40"), size=Decimal("100")),)
-    proposal = passive_buy_proposal_curve(
+    proposal = passive_buy_proposal_at_limit(
         base.executable_cost_curve,
-        native_bid_levels=bids, cash_usd=MAKER_TEST_CASH,
+        native_bid_levels=bids,
+        limit=Decimal("0.401"),
+        capacity=maker_buy_capacity(MAKER_TEST_CASH, Decimal("0.401")),
     )
     assert proposal is not None
     asset_epoch_identity = "asset-epoch-maker-buy"
@@ -44821,6 +44885,85 @@ def test_global_buy_jit_maker_limit_outside_current_spread_rejects(bid, ask):
         "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
         "ValueError:current_limit_or_cashflow_changed"
     )
+
+
+def test_global_buy_jit_accepts_a_still_legal_menu_price_not_bid_plus_tick():
+    """A far-band menu price is not bid + tick. JIT keeps it, at its own size,
+    while the current book still admits it, rather than recomputing bid + tick."""
+
+    selected = _current_maker_buy_candidate()
+    menu_limit = Decimal("0.45")
+    proposal = passive_buy_proposal_at_limit(
+        selected.executable_cost_curve,
+        native_bid_levels=selected.native_bid_levels,
+        limit=menu_limit,
+        capacity=maker_buy_capacity(MAKER_TEST_CASH, menu_limit),
+    )
+    binding = maker_fill_candidate_binding_identity(
+        action="BUY",
+        family_key=selected.family_key,
+        bin_id=selected.bin_id,
+        condition_id=selected.condition_id,
+        side=selected.side,
+        token_id=selected.token_id,
+        ledger_snapshot_id=selected.ledger_snapshot_id,
+        position_id=None,
+        held_shares=None,
+        asset_epoch_identity=selected.asset_epoch_identity,
+        proposal_identity=executable_curve_identity(proposal),
+    )
+    witness = selected.maker_fill_witness
+    outcomes = tuple(
+        replace(outcome, proceeds_per_share_usd=-menu_limit)
+        if outcome.fill_fraction > 0
+        else outcome
+        for outcome in witness.outcomes
+    )
+    fields = {
+        "candidate_binding_identity": binding,
+        "asset_epoch_identity": witness.asset_epoch_identity,
+        "book_snapshot_id": proposal.snapshot_id,
+        "book_hash": proposal.book_hash,
+        "limit_price": menu_limit,
+        "rest_deadline_minutes": witness.rest_deadline_minutes,
+        "source_identity": witness.source_identity,
+        "model_identity": witness.model_identity,
+        "sample_identity": witness.sample_identity,
+        "training_cutoff_at_utc": witness.training_cutoff_at_utc,
+        "issued_at_utc": witness.issued_at_utc,
+        "valid_until_at_utc": witness.valid_until_at_utc,
+        "outcomes": outcomes,
+    }
+    menu_witness = CurrentMakerFillWitness(
+        witness_identity=current_maker_fill_witness_identity(**fields), **fields
+    )
+    menu_maker = replace(
+        selected,
+        proposal_cost_curve=proposal,
+        maker_fill_witness=menu_witness,
+        fill_probability=menu_witness.fill_probability,
+        fill_probability_source=menu_witness.witness_identity,
+    )
+    authority = _jit_market_authority(menu_maker, tick="0.001", min_order_size="5")
+
+    rebound = era._global_buy_candidate_from_raw_book(
+        menu_maker,
+        {
+            "asset_id": menu_maker.token_id,
+            "tick_size": "0.001",
+            "min_order_size": "5",
+            # bid moved; 0.45 is still strictly inside (0.41, 0.60).
+            "bids": [{"price": "0.41", "size": "3"}],
+            "asks": [{"price": "0.60", "size": "80"}],
+        },
+        captured_at_utc=authority.snapshot.captured_at,
+        market_authority=authority,
+    )
+
+    assert rebound.proposal_cost_curve.levels == (
+        BookLevel(price=menu_limit, size=proposal.levels[0].size),
+    )
+    assert rebound.maker_fill_witness.limit_price == menu_limit
 
 
 def test_global_buy_jit_changed_maker_limit_requires_reauction():

@@ -1,3 +1,7 @@
+# Created: 2026-09-17
+# Last reused/audited: 2026-09-30
+# Authority basis: distance-conditioned maker fill bands; thin early market
+#   maker price menu (one far-edge price per band, operator law 2026-09-30).
 """A maker fill probability that ignores distance turns the objective into an edge sort.
 
 EV = p_fill x edge. With p_fill constant the ranking depends only on edge, so the winner is
@@ -137,3 +141,56 @@ def test_without_a_counterparty_price_the_pooled_bound_still_applies():
 def test_a_band_with_no_fill_is_exactly_zero_not_float_residue(trials):
     """0/48 read as 6.938893903907228e-18 live and minted a maker witness from it."""
     assert wilson_lower_bound(0, trials, z=Z_TWO_SIDED_95) == 0.0
+
+
+def _menu(bid, ask, tick="0.01"):
+    from src.engine.global_batch_runtime import _MAKER_FILL_DISTANCE_BAND_EDGES
+    from src.solve.solver import maker_buy_price_menu
+
+    return maker_buy_price_menu(
+        best_bid=None if bid is None else Decimal(bid),
+        best_ask=Decimal(ask),
+        tick=Decimal(tick),
+        band_edges=_MAKER_FILL_DISTANCE_BAND_EDGES,
+        band_of=_maker_fill_distance_band,
+    )
+
+
+@pytest.mark.parametrize(
+    ("bid", "ask", "tick", "expected"),
+    (
+        # Each band's far edge ceil_tick(ask - edge), clipped into (bid, ask).
+        ("0.30", "0.40", "0.01", ("0.38", "0.35", "0.31")),
+        # Thin early book with no bid: down to the lowest in-band price.
+        (None, "0.40", "0.01", ("0.38", "0.35", "0.25", "0.05")),
+        # The live band ceiling 0.95 binds hi; 0.92 / 0.82 / 0.47 are far edges.
+        (None, "0.97", "0.01", ("0.95", "0.92", "0.82", "0.47")),
+        # A bid below the band floor never lowers lo under 0.05.
+        ("0.02", "0.90", "0.001", ("0.88", "0.85", "0.75", "0.40")),
+        # Clipping to lo can leave a band: 0.05 on a 0.06 ask is band 0 only.
+        (None, "0.06", "0.01", ("0.05",)),
+        # One-tick spread: no price strictly inside it.
+        ("0.39", "0.40", "0.01", ()),
+    ),
+)
+def test_maker_menu_is_one_far_edge_price_per_reachable_band(bid, ask, tick, expected):
+    menu = _menu(bid, ask, tick)
+    assert menu == tuple(Decimal(price) for price in expected)
+    assert len(set(menu)) == len(menu)
+    for price in menu:
+        assert Decimal("0.05") <= price <= Decimal("0.95")
+        assert price < Decimal(ask)
+        assert bid is None or price > Decimal(bid)
+    bands = [_maker_fill_distance_band(Decimal(ask) - price) for price in menu]
+    assert bands == sorted(set(bands))
+
+
+def test_maker_menu_far_edge_is_the_cheapest_price_with_the_same_fill_band():
+    """Within a band the fill model is constant, so one tick lower would leave it."""
+
+    ask = Decimal("0.40")
+    for price in _menu(None, "0.40"):
+        band = _maker_fill_distance_band(ask - price)
+        lower = price - Decimal("0.01")
+        if lower >= Decimal("0.05"):
+            assert _maker_fill_distance_band(ask - lower) != band

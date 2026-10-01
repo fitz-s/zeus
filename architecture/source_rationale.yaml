@@ -1921,6 +1921,9 @@ files:
       settlement; missing current same-token bids cannot erase that explicit hold-to-settlement
       proposal. A maker-rest BUY is held to settlement too: its size is what spendable cash
       funds at its limit, sized down by Kelly and the capital limit, never by bid depth.
+      Each token offers one maker-rest BUY per measured fill-distance band, priced at that
+      band's far edge below the ask (an empty bid side admits prices down to the band
+      floor); each price is its own candidate and witness, and q chooses across them.
       SELL scoring rejects any maker proposal whose exact unit price is outside the absolute live
       price band. An immediate SELL may consume counterparty depth up to probability-domain one
       through an independently in-band submitted floor; quote economics never become permission

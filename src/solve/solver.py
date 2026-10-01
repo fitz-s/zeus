@@ -348,24 +348,41 @@ def passive_sell_proposal_curve(
     )
 
 
-def passive_buy_proposal_curve(
-    curve: ExecutableCostCurve,
+def maker_buy_price_menu(
     *,
-    native_bid_levels: Sequence[BidBookLevel | BookLevel],
-    cash_usd: Decimal,
-) -> ExecutableCostCurve | None:
-    """Price one post-only BUY one tick above the current best bid."""
+    best_bid: Decimal | None,
+    best_ask: Decimal,
+    tick: Decimal,
+    band_edges: Sequence[Decimal],
+    band_of: Callable[[Decimal], int],
+) -> tuple[Decimal, ...]:
+    """One post-only BUY limit per fill-distance band: that band's far edge.
 
-    bids = tuple(native_bid_levels)
-    if not bids:
-        return None
-    limit = max(Decimal(level.price) for level in bids) + Decimal(curve.min_tick)
-    return passive_buy_proposal_at_limit(
-        curve,
-        native_bid_levels=bids,
-        limit=limit,
-        capacity=maker_buy_capacity(cash_usd, limit),
-    )
+    The fill model is constant within a band, so the lowest price in it is the
+    best BUY at the same fill odds; ``q`` then chooses across bands. Each
+    ``ceil_tick(ask - edge)`` is clipped to ``[lo, hi]`` (``lo`` one tick above
+    the bid and never below the lowest in-band price; ``hi`` one tick inside
+    the ask and the band ceiling) and dropped if clipping leaves its band.
+    A band whose measured fill bound is zero gets no witness downstream.
+    """
+
+    ask = Decimal(best_ask)
+    step = Decimal(tick)
+
+    def ceil_tick(price: Decimal) -> Decimal:
+        return (price / step).to_integral_value(rounding=ROUND_CEILING) * step
+
+    floor = ceil_tick(LIVE_ORDER_MIN_UNIT_PRICE)
+    lo = floor if best_bid is None else max(Decimal(best_bid) + step, floor)
+    hi = min(ask - step, LIVE_ORDER_MAX_UNIT_PRICE)
+    menu: list[Decimal] = []
+    for band, edge in enumerate(band_edges):
+        if lo > hi:
+            break
+        price = min(max(ceil_tick(ask - Decimal(edge)), lo), hi)
+        if band_of(ask - price) == band and price not in menu:
+            menu.append(price)
+    return tuple(menu)
 
 
 def maker_buy_capacity(cash_usd: Decimal, limit: Decimal) -> Decimal:
@@ -2227,7 +2244,6 @@ def global_candidate_from_native(
         native_bid_levels=native_bid_levels,
         eligibility_reason=eligibility_reason,
         neg_risk=neg_risk,
-        include_maker=False,
     )[0]
 
 
@@ -2240,16 +2256,17 @@ def global_candidates_from_native(
     neg_risk: bool,
     native_bid_levels: Sequence[BidBookLevel | BookLevel] = (),
     eligibility_reason: GlobalEligibilityReason | None = None,
-    include_maker: bool = False,
-    maker_fill_witness: CurrentMakerFillWitness | None = None,
+    maker_fill_witnesses: Sequence[CurrentMakerFillWitness] = (),
     asset_epoch_identity: str | None = None,
     current_token_shares: Decimal | None = None,
     maker_cash_usd: Decimal | None = None,
 ) -> tuple[GlobalSingleOrderCandidate, ...]:
-    """Materialize current taker and, when fully witnessed, maker siblings.
+    """Materialize the current taker and one maker per witnessed limit.
 
-    A maker carries the size ``maker_cash_usd`` funds at its limit: the same
-    proposal the witness binder priced, never bounded by bid depth.
+    Each maker rests at its own witness's limit with the size
+    ``maker_cash_usd`` funds there: the proposal the witness binder priced,
+    never bounded by bid depth. A limit the current book no longer admits
+    yields no sibling.
     """
 
     if getattr(native, "no_trade_reason", None) is not None:
@@ -2318,45 +2335,50 @@ def global_candidates_from_native(
         settlement_locked_exact_payoff=settlement_locked_exact_payoff,
         **common,
     )
-    if include_maker:
-        if maker_cash_usd is None:
-            raise ValueError("maker proposal size requires current cash authority")
-        maker_curve = passive_buy_proposal_curve(
-            curve, native_bid_levels=bids, cash_usd=maker_cash_usd
+    if not maker_fill_witnesses or not asset_epoch_identity:
+        return (taker,)
+    if maker_cash_usd is None:
+        raise ValueError("maker proposal size requires current cash authority")
+    maker_eligibility_reason = eligibility_reason
+    if maker_eligibility_reason is None:
+        try:
+            witnessed_token_shares = Decimal(current_token_shares)
+        except (TypeError, ValueError, ArithmeticError):
+            witnessed_token_shares = Decimal("NaN")
+        if not witnessed_token_shares.is_finite() or witnessed_token_shares < 0:
+            maker_eligibility_reason = "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING"
+    makers: list[GlobalSingleOrderCandidate] = []
+    for witness in maker_fill_witnesses:
+        maker_curve = passive_buy_proposal_at_limit(
+            curve,
+            native_bid_levels=bids,
+            limit=witness.limit_price,
+            capacity=maker_buy_capacity(maker_cash_usd, witness.limit_price),
         )
-        if maker_curve is None or maker_fill_witness is None or not asset_epoch_identity:
-            return (taker,)
-        maker_eligibility_reason = eligibility_reason
-        if maker_eligibility_reason is None:
-            try:
-                witnessed_token_shares = Decimal(current_token_shares)
-            except (TypeError, ValueError, ArithmeticError):
-                witnessed_token_shares = Decimal("NaN")
-            if not witnessed_token_shares.is_finite() or witnessed_token_shares < 0:
-                maker_eligibility_reason = (
-                    "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING"
-                )
-        maker = GlobalSingleOrderCandidate(
-            candidate_id=_global_native_candidate_id(
-                probability_witness=probability_witness,
-                native=native,
-                binding=binding,
-                expected_token=str(expected_token),
+        if maker_curve is None:
+            continue
+        makers.append(
+            GlobalSingleOrderCandidate(
+                candidate_id=_global_native_candidate_id(
+                    probability_witness=probability_witness,
+                    native=native,
+                    binding=binding,
+                    expected_token=str(expected_token),
+                    execution_mode="MAKER_REST",
+                    proposal_identity=executable_curve_identity(maker_curve),
+                ),
+                **common,
                 execution_mode="MAKER_REST",
-                proposal_identity=executable_curve_identity(maker_curve),
-            ),
-            **common,
-            execution_mode="MAKER_REST",
-            proposal_cost_curve=maker_curve,
-            fill_probability=maker_fill_witness.fill_probability,
-            fill_probability_source=maker_fill_witness.witness_identity,
-            rest_deadline_minutes=maker_fill_witness.rest_deadline_minutes,
-            maker_fill_witness=maker_fill_witness,
-            asset_epoch_identity=asset_epoch_identity,
-            eligibility_reason=maker_eligibility_reason,
+                proposal_cost_curve=maker_curve,
+                fill_probability=witness.fill_probability,
+                fill_probability_source=witness.witness_identity,
+                rest_deadline_minutes=witness.rest_deadline_minutes,
+                maker_fill_witness=witness,
+                asset_epoch_identity=asset_epoch_identity,
+                eligibility_reason=maker_eligibility_reason,
+            )
         )
-        return (taker, maker)
-    return (taker,)
+    return (taker, *makers)
 
 
 @dataclass(frozen=True)
@@ -3645,8 +3667,15 @@ class GlobalSingleOrderCandidateEvaluation:
     q_served: float | None = None
     probability_semantics_revision: str | None = None
     probability_witness_identity: str | None = None
+    # A BUY maker's own proposal price: one token carries one maker per menu
+    # price, so the limit is part of the proposal slot. None for any other.
+    maker_limit_price: Decimal | None = None
 
     def __post_init__(self) -> None:
+        if (self.maker_limit_price is not None) != (
+            self.action == "BUY" and self.execution_mode == "MAKER_REST"
+        ):
+            raise ValueError("maker limit belongs to exactly the BUY maker slot")
         if (
             not math.isfinite(self.ruin_probability_reduction)
             or not 0.0 <= self.ruin_probability_reduction <= 1.0
@@ -4628,6 +4657,7 @@ def _global_candidate_evaluations(
                     probability_witness_identity=(
                         candidate.probability_witness_identity
                     ),
+                    maker_limit_price=_buy_maker_limit_price(candidate),
                 )
             )
             continue
@@ -4718,9 +4748,21 @@ def _global_candidate_evaluations(
                 probability_witness_identity=(
                     candidate.probability_witness_identity
                 ),
+                maker_limit_price=_buy_maker_limit_price(candidate),
             )
         )
     return tuple(evaluations)
+
+
+def _buy_maker_limit_price(candidate: GlobalSingleOrderAnyCandidate) -> Decimal | None:
+    """The proposal price that distinguishes one BUY maker from its siblings."""
+
+    if (
+        isinstance(candidate, GlobalSingleOrderSellCandidate)
+        or candidate.execution_mode != "MAKER_REST"
+    ):
+        return None
+    return Decimal(candidate.economic_cost_curve.levels[0].price)
 
 
 def validate_family_decision_contract(decision: "FamilyDecision") -> "FamilyDecision":

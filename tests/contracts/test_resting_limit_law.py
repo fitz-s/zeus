@@ -21,7 +21,7 @@ import pytest
 
 from src.contracts.executable_cost_curve import BidBookLevel, BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.venue_submission_envelope import resting_limit_violation
-from src.solve.solver import passive_buy_proposal_at_limit, passive_buy_proposal_curve
+from src.solve.solver import maker_buy_capacity, passive_buy_proposal_at_limit
 
 
 @pytest.mark.parametrize(
@@ -101,6 +101,21 @@ def _bids(price: str) -> tuple[BidBookLevel, ...]:
     return (BidBookLevel(price=Decimal(price), size=Decimal("50")),)
 
 
+def _bid_plus_tick_proposal(curve, *, native_bid_levels, cash_usd):
+    """A maker BUY one tick above the best bid, sized by cash (test fixture)."""
+
+    bids = tuple(native_bid_levels)
+    if not bids:
+        return None
+    limit = max(Decimal(level.price) for level in bids) + Decimal(curve.min_tick)
+    return passive_buy_proposal_at_limit(
+        curve,
+        native_bid_levels=bids,
+        limit=limit,
+        capacity=maker_buy_capacity(cash_usd, limit),
+    )
+
+
 def test_proposal_at_limit_keeps_limit_after_bid_retreat():
     proposal = passive_buy_proposal_at_limit(
         _curve("0.30"),
@@ -129,17 +144,17 @@ def test_proposal_at_limit_rejects_outside_spread(bid, ask):
 
 def test_bid_plus_tick_proposal_is_the_same_law_at_its_own_limit():
     cash = Decimal("12")
-    proposal = passive_buy_proposal_curve(
+    proposal = _bid_plus_tick_proposal(
         _curve("0.30"), native_bid_levels=_bids("0.26"), cash_usd=cash
     )
     assert proposal is not None and proposal.levels[0].price == Decimal("0.27")
     assert proposal.levels[0].size == Decimal("44.44")  # floor(12 / 0.27)
     # One-tick spread: bid+tick would cross.
-    assert passive_buy_proposal_curve(
+    assert _bid_plus_tick_proposal(
         _curve("0.27"), native_bid_levels=_bids("0.26"), cash_usd=cash
     ) is None
     # Above the band.
-    assert passive_buy_proposal_curve(
+    assert _bid_plus_tick_proposal(
         _curve("0.97"), native_bid_levels=_bids("0.95"), cash_usd=cash
     ) is None
 

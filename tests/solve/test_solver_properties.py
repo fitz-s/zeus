@@ -45,6 +45,21 @@ _DECISION_AT = datetime(2026, 7, 10, 6, 0, tzinfo=UTC)
 # A maker BUY's size is what the selecting wallet's spendable cash funds at its
 # limit; the default fixture wallet (_global_witness) holds $100.
 _MAKER_TEST_CASH = Decimal("100")
+
+
+def _bid_plus_tick_proposal(curve, *, native_bid_levels, cash_usd):
+    """A maker BUY one tick above the best bid, sized by cash (test fixture)."""
+
+    bids = tuple(native_bid_levels)
+    if not bids:
+        return None
+    limit = max(Decimal(level.price) for level in bids) + Decimal(curve.min_tick)
+    return S.passive_buy_proposal_at_limit(
+        curve,
+        native_bid_levels=bids,
+        limit=limit,
+        capacity=S.maker_buy_capacity(cash_usd, limit),
+    )
 def _global_curve(*, side, token, levels, fee="0", min_order="0.01"):
     return ExecutableCostCurve(
         token_id=token,
@@ -408,6 +423,7 @@ def _native_maker_candidates(*, side, current_token_shares):
         fill_probability_source="placeholder",
         rest_deadline_minutes=20.0,
         witness_identity="placeholder",
+        limit_price=Decimal("0.391"),
     )
     provisional_taker, provisional_maker = S.global_candidates_from_native(
         native,
@@ -418,8 +434,7 @@ def _native_maker_candidates(*, side, current_token_shares):
         native_bid_levels=(
             BookLevel(price=Decimal("0.39"), size=Decimal("100")),
         ),
-        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
-        maker_fill_witness=placeholder,
+        maker_cash_usd=_MAKER_TEST_CASH, maker_fill_witnesses=(placeholder,),
         asset_epoch_identity=asset_epoch,
         current_token_shares=current_token_shares,
     )
@@ -440,8 +455,7 @@ def _native_maker_candidates(*, side, current_token_shares):
         native_bid_levels=(
             BookLevel(price=Decimal("0.39"), size=Decimal("100")),
         ),
-        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
-        maker_fill_witness=witness,
+        maker_cash_usd=_MAKER_TEST_CASH, maker_fill_witnesses=(witness,),
         asset_epoch_identity=asset_epoch,
         current_token_shares=current_token_shares,
     )
@@ -2972,7 +2986,7 @@ def test_global_buy_generation_omits_untyped_maker_sibling():
         ledger_snapshot_id=seed.ledger_snapshot_id,
         book_captured_at_utc=seed.book_captured_at_utc,
         neg_risk=False,
-        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
+        maker_cash_usd=_MAKER_TEST_CASH,
     )
 
     assert len(proposals) == 1
@@ -3489,7 +3503,7 @@ def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
         q=0.80,
         levels=(("0.50", "100"),),
     )
-    maker_curve = S.passive_buy_proposal_curve(
+    maker_curve = _bid_plus_tick_proposal(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
         cash_usd=_MAKER_TEST_CASH,
@@ -3561,6 +3575,87 @@ def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
     )
 
 
+def _menu_maker(taker, *, limit, fill_probability, asset_epoch="menu-epoch"):
+    """One witnessed maker proposal at a menu price on the taker's token."""
+
+    proposal = S.passive_buy_proposal_at_limit(
+        taker.executable_cost_curve,
+        native_bid_levels=taker.native_bid_levels,
+        limit=Decimal(limit),
+        capacity=S.maker_buy_capacity(_MAKER_TEST_CASH, Decimal(limit)),
+    )
+    assert proposal is not None
+    provisional = replace(
+        taker,
+        candidate_id=f"{taker.candidate_id}-maker-{limit}",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal,
+        fill_probability=1.0,
+        fill_probability_source="unbound",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity=asset_epoch,
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=proposal,
+        asset_epoch=asset_epoch,
+        outcomes=(
+            S.MakerFillOutcome(Decimal(fill_probability), Decimal("1"), -Decimal(limit)),
+            S.MakerFillOutcome(1 - Decimal(fill_probability), Decimal("0"), Decimal("0")),
+        ),
+    )
+    return replace(
+        provisional,
+        maker_fill_witness=witness,
+        fill_probability=witness.fill_probability,
+        fill_probability_source=witness.witness_identity,
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize(
+    ("q", "expected_limit"),
+    # A thin early book: no bid, ask 0.40. The near band (0.38) fills 4x as
+    # often as the far band (0.25). A modest q edge only clears the cheap far
+    # price; a strong one is worth the near band's fill odds. q picks the band.
+    ((0.45, "0.25"), (0.90, "0.38")),
+)
+def test_thin_early_book_maker_menu_lets_q_choose_the_band(side, q, expected_limit):
+    taker = replace(
+        _global_candidate(
+            candidate_id=f"thin-early-{side}-{q}",
+            family=f"thin-early-{side}-{q}",
+            side=side,
+            q=q,
+            levels=(("0.40", "2"),),
+            min_order="5",
+        ),
+        native_bid_levels=(),
+    )
+    near = _menu_maker(taker, limit="0.38", fill_probability="0.20")
+    far = _menu_maker(taker, limit="0.25", fill_probability="0.05")
+
+    decision = _global_select(
+        (taker, near, far),
+        cap="5",
+        fractional_kelly_multiplier="0.125",
+        resolution_hours_by_family={taker.family_key: 48.0},
+    )
+
+    # Two ask shares are under the $1 marketable minimum: only a maker can
+    # enter, with no bid at all, and each menu price is its own candidate.
+    assert decision.rejection_reasons[taker.candidate_id] == "DEPTH_INFEASIBLE"
+    assert decision.candidate is not None
+    assert decision.candidate.execution_mode == "MAKER_REST"
+    assert decision.limit_price == Decimal(expected_limit)
+    evaluations = {row.candidate_id: row for row in decision.candidate_evaluations}
+    assert {evaluations[near.candidate_id].maker_limit_price,
+            evaluations[far.candidate_id].maker_limit_price} == {
+        Decimal("0.38"), Decimal("0.25"),
+    }
+    assert evaluations[taker.candidate_id].maker_limit_price is None
+
+
 def test_passive_buy_size_is_cash_bounded_not_bid_depth():
     taker = _global_candidate(
         candidate_id="maker-liquidation-cap-taker",
@@ -3570,7 +3665,7 @@ def test_passive_buy_size_is_cash_bounded_not_bid_depth():
         levels=(("0.50", "100"),),
     )
 
-    maker_curve = S.passive_buy_proposal_curve(
+    maker_curve = _bid_plus_tick_proposal(
         taker.executable_cost_curve,
         native_bid_levels=(
             BookLevel(price=Decimal("0.40"), size=Decimal("3")),
@@ -3597,7 +3692,7 @@ def test_passive_buy_uses_cash_capacity_when_taker_best_ask_is_subminimum():
         min_order="5",
     )
 
-    maker_curve = S.passive_buy_proposal_curve(
+    maker_curve = _bid_plus_tick_proposal(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("10")),),
         cash_usd=_MAKER_TEST_CASH,
@@ -3663,6 +3758,7 @@ def test_exact_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum(
         fill_probability_source="placeholder",
         rest_deadline_minutes=20.0,
         witness_identity="placeholder",
+        limit_price=Decimal("0.401"),
     )
 
     provisional_taker, provisional_maker = S.global_candidates_from_native(
@@ -3672,8 +3768,7 @@ def test_exact_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum(
         book_captured_at_utc=seed.book_captured_at_utc,
         neg_risk=False,
         native_bid_levels=bid_levels,
-        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
-        maker_fill_witness=placeholder,
+        maker_cash_usd=_MAKER_TEST_CASH, maker_fill_witnesses=(placeholder,),
         asset_epoch_identity=asset_epoch,
         current_token_shares=held_shares,
     )
@@ -3701,8 +3796,7 @@ def test_exact_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum(
         book_captured_at_utc=seed.book_captured_at_utc,
         neg_risk=False,
         native_bid_levels=bid_levels,
-        include_maker=True, maker_cash_usd=_MAKER_TEST_CASH,
-        maker_fill_witness=maker_witness,
+        maker_cash_usd=_MAKER_TEST_CASH, maker_fill_witnesses=(maker_witness,),
         asset_epoch_identity=asset_epoch,
         current_token_shares=held_shares,
     )
@@ -3735,7 +3829,7 @@ def test_passive_buy_rests_on_thin_bid_depth_and_refuses_sub_lot_cash():
         levels=(("0.50", "100"),),
     )
 
-    maker_curve = S.passive_buy_proposal_curve(
+    maker_curve = _bid_plus_tick_proposal(
         taker.executable_cost_curve,
         native_bid_levels=(
             BookLevel(price=Decimal("0.40"), size=Decimal("0.5")),
@@ -3748,7 +3842,7 @@ def test_passive_buy_rests_on_thin_bid_depth_and_refuses_sub_lot_cash():
     assert maker_curve is not None
     assert maker_curve.levels[0].size == Decimal("249.37")
     # Cash for less than one venue lot (1 share at 0.401) is no proposal.
-    assert S.passive_buy_proposal_curve(
+    assert _bid_plus_tick_proposal(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
         cash_usd=Decimal("0.40"),
@@ -3759,7 +3853,7 @@ def test_current_maker_witness_asset_epoch_drift_excludes_only_maker_sibling():
     taker = _global_candidate(
         candidate_id="maker-epoch-taker", family="maker-epoch-family", side="YES", q=0.80
     )
-    maker_curve = S.passive_buy_proposal_curve(
+    maker_curve = _bid_plus_tick_proposal(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
         cash_usd=_MAKER_TEST_CASH,
@@ -3802,7 +3896,7 @@ def test_current_maker_witness_rejects_reminted_non_limit_cashflow_only():
         q=0.80,
         levels=(("0.50", "100"),),
     )
-    maker_curve = S.passive_buy_proposal_curve(
+    maker_curve = _bid_plus_tick_proposal(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
         cash_usd=_MAKER_TEST_CASH,
@@ -3851,7 +3945,7 @@ def test_current_maker_witness_temporal_order_and_decision_window_fail_closed():
         side="YES",
         q=0.80,
     )
-    proposal = S.passive_buy_proposal_curve(
+    proposal = _bid_plus_tick_proposal(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
         cash_usd=_MAKER_TEST_CASH,
@@ -8207,7 +8301,7 @@ def test_calibrated_family_keeps_maker_and_taker_as_distinct_fixed_proposals():
         candidate_id="calibrated-mode-taker", family="calibrated-mode-family",
         side="YES", q=0.80, levels=(("0.40", "1000"),),
     ))
-    proposal = S.passive_buy_proposal_curve(
+    proposal = _bid_plus_tick_proposal(
         taker.executable_cost_curve, native_bid_levels=taker.native_bid_levels, cash_usd=_MAKER_TEST_CASH,
     )
     assert proposal is not None
@@ -8773,7 +8867,7 @@ def test_maker_reference_keeps_existing_fee_contract_without_taker_bound():
         candidate_id="risk-reference-taker-maker", family="risk-reference-taker-maker",
         side="YES", q=0.80, levels=(("0.50", "100"),), fee="0.10",
     )
-    proposal = S.passive_buy_proposal_curve(
+    proposal = _bid_plus_tick_proposal(
         taker.executable_cost_curve, native_bid_levels=taker.native_bid_levels, cash_usd=_MAKER_TEST_CASH,
     )
     assert proposal is not None
@@ -9181,7 +9275,7 @@ def _live_residue_maker_pair(prefix):
         q=0.80,
         levels=(("0.50", "100"),),
     )
-    maker_curve = S.passive_buy_proposal_curve(
+    maker_curve = _bid_plus_tick_proposal(
         taker.executable_cost_curve,
         native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
         cash_usd=_MAKER_TEST_CASH,
@@ -9559,12 +9653,19 @@ def _early_value_policy(which, *, blocked=None, enabled=True, excluded=None):
     module = ast.parse((Path(S.__file__).parents[1] / "engine/global_batch_runtime.py").read_text())
     scope = next(n for n in ast.walk(module) if isinstance(n, ast.FunctionDef) and n.name == "select_once")
     policy = next(n for n in scope.body if isinstance(n, ast.FunctionDef) and n.name == which)
-    helper_names = {"_global_candidate_execution_mode", "_global_maker_rest_escalation_rejection"}
+    helper_names = {
+        "_global_candidate_execution_mode",
+        "_global_candidate_key",
+        "_global_candidate_exclusion",
+    }
     nodes = [n for n in module.body if isinstance(n, ast.FunctionDef) and n.name in helper_names]
     nodes.append(policy)
+    from typing import Mapping
+
     env = {
+        "Mapping": Mapping,
+        "GlobalCandidateKey": tuple,
         "buy_candidates_enabled": enabled,
-        "armed_buy_maker_token_ids": frozenset({"token"}),
         "excluded_candidates": excluded or {},
         "candidate_policy_rejection_resolver": lambda _c: blocked,
         "proof_candidate_policy_rejection_resolver": lambda _c: blocked,
@@ -9589,7 +9690,7 @@ def test_early_value_actual_current_rejection_still_controls(which, mode):
     candidate = SimpleNamespace(action="BUY", execution_mode=mode, token_id="token",
                                 family_key="family-low", bin_id="bin", side="NO")
     assert _early_value_policy(which, blocked="CURRENT_PROBABILITY_AUTHORITY_BLOCKED")(candidate) == "CURRENT_PROBABILITY_AUTHORITY_BLOCKED"
-    key = ("BUY", "family-low", "bin", "NO", "token", mode)
+    key = ("BUY", "family-low", "bin", "NO", "token", mode, "")
     assert _early_value_policy(which, excluded={key: "QUOTE_EXPIRED"})(candidate) == "GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:QUOTE_EXPIRED"
 
 
