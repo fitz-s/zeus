@@ -443,7 +443,7 @@ def _wu_fast_pinned_carrier_reason(
     from src.config import ensemble_n_mc, settlement_source_type_for_city
     from src.contracts.settlement_semantics import SettlementSemantics
     from src.data.day0_fast_obs import (
-        FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+        is_fast_residual_tail_source,
         validated_fast_residual_day0_conditioning,
     )
     from src.data.day0_hourly_vectors import (
@@ -455,7 +455,7 @@ def _wu_fast_pinned_carrier_reason(
     provisional = provenance["day0_provisional_observation"]
     if (
         provenance.get("q_shape") != "fused_day0_fast_residual_likelihood"
-        or provisional.get("source") != FAST_RESIDUAL_CONDITIONING_SOURCE_ID
+        or not is_fast_residual_tail_source(provisional.get("source"))
         or provenance.get("day0_preliminary_report_survival_likelihood") != {}
     ):
         return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_SHAPE_INVALID"
@@ -689,9 +689,9 @@ def _held_pinned_provenance_reason(
     likelihood = provenance.get("day0_preliminary_report_survival_likelihood")
     if not isinstance(likelihood, Mapping):
         return "REPLACEMENT_PINNED_DAY0_LIKELIHOOD_MISSING"
-    from src.data.day0_fast_obs import FAST_RESIDUAL_CONDITIONING_SOURCE_ID
+    from src.data.day0_fast_obs import is_fast_residual_tail_source
 
-    if source == FAST_RESIDUAL_CONDITIONING_SOURCE_ID:
+    if is_fast_residual_tail_source(source):
         fast_reason = _wu_fast_pinned_carrier_reason(
             provenance, city=city, target_date=target_date, metric=metric,
             decision_time=decision_time,

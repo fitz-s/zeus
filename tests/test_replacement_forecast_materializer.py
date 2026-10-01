@@ -5389,9 +5389,12 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
             residual_identity, sort_keys=True, separators=(",", ":"),
         ).encode()).hexdigest(),
     )
+    # The live builder returns a residual for a raw NOAA METAR boundary too
+    # (f41739f6d). Only the producer's tail gate may keep it out of q: that
+    # METAR is already the preliminary-survival boundary.
     monkeypatch.setattr(
         "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
-        lambda *_args, **_kwargs: residual if source == "wu_api+same_station_fast_tail" else None,
+        lambda *_args, **_kwargs: residual,
     )
     if source == "wu_api+same_station_fast_tail":
         monkeypatch.setattr(
@@ -5543,6 +5546,17 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
     assert provenance["day0_remaining_carrier_content_identity"]
     assert provenance["day0_remaining_carrier_sample_count"] == 500
     assert provenance["day0_current_temperature_state"] == current_state.identity()
+    if source != "wu_api+same_station_fast_tail":
+        assert provenance["day0_preliminary_report_survival_likelihood"]
+        assert "fast_residual_likelihood" not in provenance["day0_provisional_observation"]
+        from src.data.replacement_forecast_cycle_policy import (
+            fast_residual_carrier_authority_reason,
+        )
+
+        assert fast_residual_carrier_authority_reason(
+            provenance, city="Chicago", target_date=target.isoformat(),
+            metric="high", materialized_at=computed_at,
+        ) is None
     if source == "wu_api+same_station_fast_tail":
         assert provenance["day0_preliminary_report_survival_likelihood"] == {}
         assert provenance["day0_provisional_observation"]["fast_residual_likelihood"]["unknown_weight"] == 0.2

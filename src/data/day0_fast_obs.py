@@ -96,6 +96,21 @@ FAST_OBS_SOURCE_ID = "aviationweather_metar"
 FAST_RESIDUAL_CONDITIONING_SOURCE_ID = DAY0_WU_FAST_RESIDUAL_SOURCE
 
 
+def is_fast_residual_tail_source(source: object) -> bool:
+    """Whether a Day0 conditioning source is the qualified same-station fast tail.
+
+    Only ``latest_fast_station_conditioning`` mints this source, and only when
+    the fast print advances beyond the settlement channel's own frontier, for
+    either settlement family (wu_icao or noaa). A raw ``aviationweather_metar``
+    print is NOT the tail: for a NOAA city that same METAR is already the
+    preliminary-survival boundary, so a fast residual likelihood on it would
+    condition on one observation twice. The materializer applies the residual
+    likelihood, and the pinned reader validates its shape, by this one test.
+    """
+
+    return str(source or "").strip().lower() == FAST_RESIDUAL_CONDITIONING_SOURCE_ID
+
+
 class Day0PublicationLedgerUnavailable(RuntimeError):
     """Raised when an event cannot bind its causal publication state."""
 

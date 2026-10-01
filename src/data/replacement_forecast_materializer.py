@@ -7195,13 +7195,21 @@ def _compute_posterior_payload(
                 and (_day0_obs_extreme_c is None or _noaa_preliminary_source)
                 else None
             )
+            from src.data.day0_fast_obs import (
+                build_fast_station_residual_likelihood,
+                is_fast_residual_tail_source,
+            )
+
+            # Only the qualified fast tail carries a residual likelihood. A raw
+            # NOAA METAR boundary is already conditioned by its preliminary
+            # survival likelihood; a second likelihood on it double-counts.
             if (
                 _provisional_extreme_c is not None
                 and request.day0_observed_extreme_observation_time is not None
-            ):
-                from src.data.day0_fast_obs import (
-                    build_fast_station_residual_likelihood,
+                and is_fast_residual_tail_source(
+                    request.day0_observed_extreme_source
                 )
+            ):
 
                 _fast_residual_likelihood = (
                     build_fast_station_residual_likelihood(
