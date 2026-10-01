@@ -13139,7 +13139,6 @@ def _finite_nonnegative_float(value: object) -> float | None:
 # cluster's rest-pull/pending-expiry helpers (no other main.py reader).
 # ---------------------------------------------------------------------------
 _edli_redecision_confirm_refresh_lock = threading.Lock()
-_REDECISION_REST_PULL_EXPIRY_GRACE_SECONDS = 20 * 60
 _REDECISION_PENDING_EXPIRY_GRACE_SECONDS = 300
 _REDECISION_FRESH_SCREEN_SUPERSEDE_GRACE_SECONDS = 75
 
@@ -13768,48 +13767,14 @@ def _edli_merge_condition_scopes(
     return out
 
 
-def _edli_rest_pull_condition_scope(
-    rest_pulls: Iterable[tuple[Any, Any]],
-    beliefs: Iterable[Any],
-) -> dict[tuple[str, str, str], set[str]]:
-    """Map live maker-rest pulls to the exact condition_ids being cancelled/repriced.
-
-    A family-optimum replacement pull cancels the current rest so the existing
-    reactor can re-certify a sibling. The confirmation refresh must therefore
-    prioritize both the cancelled condition and the replacement condition, or
-    the next pass can cancel correctly but still lack fresh substrate for the
-    better sibling.
-    """
-
-    by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
-    out: dict[tuple[str, str, str], set[str]] = {}
-    for rest, decision in rest_pulls or ():
-        family_key = _edli_family_key_from_rest(rest)
-        if family_key is None:
-            belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
-            family_key = _edli_family_key_from_belief(belief) if belief is not None else None
-        if family_key is None:
-            continue
-        condition_id = str(getattr(rest, "condition_id", "") or "").strip()
-        if condition_id:
-            out.setdefault(family_key, set()).add(condition_id)
-        replacement_condition_id = str(
-            getattr(decision, "replacement_condition_id", "") or ""
-        ).strip()
-        if replacement_condition_id:
-            out.setdefault(family_key, set()).add(replacement_condition_id)
-    return out
-
-
 def _edli_open_rest_condition_scope(
     open_rests: Iterable[Any],
     beliefs: Iterable[Any],
 ) -> dict[tuple[str, str, str], set[str]]:
     """Map all live maker rests to condition_ids that need price refresh.
 
-    A rest cannot decide whether to cancel/reprice from stale books. This scope is
-    intentionally built before ``screen_resting_orders`` so the confirmation
-    refresh can make the rest screen's price inputs current.
+    Open rests keep their families' executable substrate current for the
+    redecision a confirmed cancel or resize hands back to the reactor.
     """
 
     by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
@@ -14241,7 +14206,6 @@ def _edli_redecision_priority_condition_limit() -> int:
 
 def _edli_confirm_priority_condition_ids(
     *,
-    rest_condition_scope: dict[tuple[str, str, str], set[str]],
     held_condition_scope: dict[tuple[str, str, str], set[str]],
     entry_condition_scope: dict[tuple[str, str, str], set[str]],
     entry_refresh_condition_scope: dict[tuple[str, str, str], set[str]],
@@ -14280,7 +14244,6 @@ def _edli_confirm_priority_condition_ids(
                     return
 
     for scope in (
-        rest_condition_scope,
         held_condition_scope,
         entry_condition_scope,
         entry_refresh_condition_scope,
@@ -14386,121 +14349,6 @@ def _edli_reemittable_held_position_family_keys(
 
 def _redecision_payload_origin(payload: Mapping[str, Any]) -> str:
     return str(payload.get("redecision_origin") or "").strip().lower()
-
-
-def _preserve_recent_rest_pull_redecision(
-    payload: Mapping[str, Any],
-    *,
-    event_created_at: str,
-    decision_dt: datetime,
-) -> bool:
-    """Keep cancel/reprice redecision rows alive long enough for the fresh screen.
-
-    A pulled maker rest is removed from the open-rest input set as soon as the
-    terminal cancel/no-fill fact is reconciled. The follow-on redecision event is
-    the durable continuity proof for that family; expiring it on the next generic
-    no-edge screen erases the price-management chain before the reactor can
-    reprice/re-submit/decline from current evidence.
-    """
-
-    if _redecision_payload_origin(payload) != "rest_pull":
-        return False
-    try:
-        created_dt = datetime.fromisoformat(str(event_created_at).replace("Z", "+00:00"))
-        if created_dt.tzinfo is None:
-            created_dt = created_dt.replace(tzinfo=timezone.utc)
-        age_seconds = (decision_dt - created_dt.astimezone(timezone.utc)).total_seconds()
-    except Exception:  # noqa: BLE001
-        return False
-    return 0.0 <= age_seconds < float(_REDECISION_REST_PULL_EXPIRY_GRACE_SECONDS)
-
-
-def _edli_supersede_pending_redecisions_for_rest_pull_families(
-    world_conn,
-    rest_pull_families: set[tuple[str, str, str]],
-    *,
-    decision_time: str,
-) -> int:
-    """Expire generic pending redecision rows that would suppress a rest-pull emit.
-
-    A live OPEN maker rest that has fired ``rest_pull`` is command-management
-    evidence: the order must be cancelled/repriced through a durable
-    ``redecision_origin=rest_pull`` row. A generic market-price or entry-screen
-    pending event for the same family is not equivalent because the rest may
-    disappear from the open-rest set after cancel; if that generic row is the one
-    preserved, the cancel/reprice continuity proof can be lost.
-
-    Only unclaimed ``pending`` rows are superseded. Claimed/processing rows may
-    already be inside the reactor and are left to the normal lease/stale paths.
-    """
-
-    clean_families = {
-        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
-        for city, target_date, metric in rest_pull_families or set()
-        if str(city or "").strip()
-        and str(target_date or "").strip()
-        and str(metric or "").strip() in {"high", "low"}
-    }
-    if not clean_families:
-        return 0
-    from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
-
-    try:
-        rows = world_conn.execute(
-            """
-            SELECT e.event_id, e.payload_json
-              FROM opportunity_event_processing p
-                   INDEXED BY idx_opportunity_event_processing_status
-              JOIN opportunity_events e ON e.event_id = p.event_id
-             WHERE p.consumer_name = 'edli_reactor_v1'
-               AND p.processing_status = 'pending'
-               AND e.event_type = ?
-             ORDER BY p.updated_at ASC
-             LIMIT 5000
-            """,
-            (_REDECISION_EVENT_TYPE,),
-        ).fetchall()
-    except Exception:  # noqa: BLE001
-        return 0
-    expire_ids: list[str] = []
-    for row in rows:
-        try:
-            event_id = str(row[0] or "")
-            payload = json.loads(str(row[1] or "{}"))
-            family = (
-                str(payload.get("city") or "").strip(),
-                str(payload.get("target_date") or "").strip(),
-                str(payload.get("metric") or "").strip(),
-            )
-        except Exception:  # noqa: BLE001
-            continue
-        if not event_id or family not in clean_families:
-            continue
-        if _redecision_payload_origin(payload) == "rest_pull":
-            continue
-        expire_ids.append(event_id)
-    if not expire_ids:
-        return 0
-    now = str(decision_time)
-    changed = 0
-    for start in range(0, len(expire_ids), 250):
-        chunk = expire_ids[start : start + 250]
-        placeholders = ",".join("?" for _ in chunk)
-        cur = world_conn.execute(
-            f"""
-            UPDATE opportunity_event_processing
-               SET processing_status = 'expired',
-                   processed_at = ?,
-                   updated_at = ?,
-                   last_error = 'REDECISION_SUPERSEDED_BY_REST_PULL:open_rest_requires_cancel_reprice'
-             WHERE consumer_name = 'edli_reactor_v1'
-               AND processing_status = 'pending'
-               AND event_id IN ({placeholders})
-            """,
-            (now, now, *chunk),
-        )
-        changed += int(cur.rowcount or 0)
-    return changed
 
 
 def _edli_plan_unadmitted_redecision_expiry(
@@ -14654,7 +14502,6 @@ def _edli_plan_unadmitted_redecision_expiry(
         try:
             event_id = str(row[0] or "")
             payload = json.loads(str(row[5] or "{}"))
-            event_created_at = str(row[6] or "")
             family = (
                 str(payload.get("city") or "").strip(),
                 str(payload.get("target_date") or "").strip(),
@@ -14666,12 +14513,6 @@ def _edli_plan_unadmitted_redecision_expiry(
         if generation is None or not all(family):
             continue
         if family not in admitted_families:
-            if _preserve_recent_rest_pull_redecision(
-                payload,
-                event_created_at=event_created_at,
-                decision_dt=decision_dt,
-            ):
-                continue
             reason = "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value"
             expire_by_reason.setdefault(reason, []).append(generation)
         elif supersede_stale_admitted:
@@ -14771,11 +14612,11 @@ def run_edli_continuous_redecision_screen_cycle(
     Reads cached beliefs (world, RO) × freshest executable prices (trade, RO), runs the cheap edge
     screen, and ENQUEUES EDLI_REDECISION_PENDING events for families whose edge fired — so the
     reactor re-decides on PRICE movement between forecast cycles (the ~5-6h cadence gap the operator
-    flagged). ALSO screens OPEN maker rests (§4.5): a rest whose belief decayed on new evidence, or
-    whose book moved/went stale, is pulled (re-decide at fresh price) — the fix for "submitted then
-    abandoned" (Busan/Beijing). NO new HTTP: reads only what the warm/fast lanes already persisted;
-    the actual cancel reuses the shared venue-cancel-journal path. Fail-soft: never crashes
-    the scheduler.
+    flagged). Open maker rests are cancelled here only when current strategy policy no longer
+    admits their sealed decision; their value (keep/resize/cancel) is owned by the C3 standing
+    ENTRY valuation (src.execution.staleness_cancel). NO new HTTP: reads only what the warm/fast
+    lanes already persisted; the actual cancel reuses the shared venue-cancel-journal path.
+    Fail-soft: never crashes the scheduler.
 
     Wave-1 2026-06-12: the redecision_screen_enabled gate is DELETED. The screen is the
     fill-rate ORGAN, not an optional feature — it now runs whenever the reactor is LIVE and
@@ -14836,7 +14677,6 @@ def run_edli_continuous_redecision_screen_cycle(
             RepriceDecision,
             screen_entry_redecisions,
             screened_family_keys,
-            screen_resting_orders,
             REDECISION_EVENT_TYPE,
             SqliteDeadlineFence,
             sqlite_deadline_bound,
@@ -14942,12 +14782,11 @@ def run_edli_continuous_redecision_screen_cycle(
                 world_ro,
                 beliefs=management_beliefs,
             )
-            rest_pulls = screen_resting_orders(
-                world_ro,
-                trade_ro,
-                open_rests=open_rests,
-                decision_time=received_at,
-            )
+            # Value of an open ENTRY rest is owned by C3
+            # (src.execution.staleness_cancel): it keeps, resizes or cancels each
+            # rest on current fractional-Kelly value. Book drift, cached-belief
+            # identity and rest age are not cancellation authority here; only a
+            # sealed decision current policy no longer admits is cancelled.
             policy_blocks = _edli_policy_blocked_open_rest_commands(
                 trade_ro,
                 open_rests,
@@ -14967,17 +14806,9 @@ def run_edli_continuous_redecision_screen_cycle(
                 for rest in open_rests
                 if rest.command_id in policy_blocks
             ]
-            if policy_blocks:
-                rest_pulls = [
-                    pair for pair in rest_pulls
-                    if pair[0].command_id not in policy_blocks
-                ]
             open_rest_condition_scope = _edli_open_rest_condition_scope(
                 open_rests,
                 management_beliefs,
-            )
-            rest_condition_scope = _edli_rest_pull_condition_scope(
-                rest_pulls, management_beliefs
             )
 
             # Rest management owns a bounded share of the existing cycle budget.
@@ -15165,18 +14996,6 @@ def run_edli_continuous_redecision_screen_cycle(
                 policy_rest_pulls, deadline_fence=screen_fence
             )
 
-        # A rest-pull family must also re-decide (cancel + re-decide at fresh price). Add its
-        # family key to the re-emit restriction so the reactor re-certifies it; the cancel itself
-        # runs through the shared venue-cancel-journal path below.
-        rest_pull_families: set = set()
-        if rest_pulls:
-            by_family = {
-                b.family_id: (b.city, b.target_date, b.metric) for b in all_beliefs
-            }
-            for rest, _decision in rest_pulls:
-                key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
-                if key is not None and all(key):
-                    rest_pull_families.add(key)
         held_families = _edli_current_held_position_family_keys(
             deadline_fence=screen_fence
         )
@@ -15193,7 +15012,7 @@ def run_edli_continuous_redecision_screen_cycle(
         held_condition_scope = _edli_current_held_position_family_condition_scope(
             held_reemit_families, deadline_fence=screen_fence
         )
-        all_families = set(family_keys) | rest_pull_families | held_reemit_families
+        all_families = set(family_keys) | held_reemit_families
         confirmed_entry_scope = set(family_keys) | entry_refresh_families
         # Every submitted maker rest is a management obligation. A stale
         # same-side bid can correctly produce no pull on this pass, but it must
@@ -15216,10 +15035,7 @@ def run_edli_continuous_redecision_screen_cycle(
             deadline_fence=screen_fence,
         )
         fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
-            _edli_merge_condition_scopes(
-                open_rest_condition_scope,
-                rest_condition_scope,
-            ),
+            open_rest_condition_scope,
             now_utc=now,
             deadline_fence=screen_fence,
         )
@@ -15247,7 +15063,6 @@ def run_edli_continuous_redecision_screen_cycle(
                 }
 
             priority_condition_ids = _edli_confirm_priority_condition_ids(
-                rest_condition_scope=_missing_scope(rest_condition_scope),
                 held_condition_scope=_missing_scope(held_condition_scope),
                 entry_condition_scope=_missing_scope(entry_condition_scope),
                 entry_refresh_condition_scope=_missing_scope(
@@ -15291,7 +15106,7 @@ def run_edli_continuous_redecision_screen_cycle(
             _log.info(
                 "edli_redecision_screen: %s admitted fresh scoped families=%d/%d "
                 "entry_scope=%d rest_scope=%d held_scope=%d entry_conditions=%d "
-                "rest_conditions=%d held_conditions=%d summary=%r",
+                "held_conditions=%d summary=%r",
                 scoped_filter_reason,
                 len(fresh_confirmed_families),
                 len(requested_confirm_families),
@@ -15300,7 +15115,6 @@ def run_edli_continuous_redecision_screen_cycle(
                 len(confirmed_held_scope),
                 sum(len(v) for v in entry_condition_scope.values())
                 + sum(len(v) for v in entry_refresh_condition_scope.values()),
-                sum(len(v) for v in rest_condition_scope.values()),
                 sum(len(v) for v in held_condition_scope.values()),
                 confirm_refresh_summary,
             )
@@ -15369,11 +15183,6 @@ def run_edli_continuous_redecision_screen_cycle(
                     world_ro,
                     decision_time=received_at,
                     forecast_only_admissible=True,
-                    deadline_fence=screen_fence,
-                )
-                management_beliefs = _all_latest_beliefs(
-                    world_ro,
-                    decision_time=received_at,
                     deadline_fence=screen_fence,
                 )
                 beliefs = _edli_filter_beliefs_to_family_keys(
@@ -15459,24 +15268,10 @@ def run_edli_continuous_redecision_screen_cycle(
                     raw_entry_family_keys = screened_family_keys(
                         world_ro, entry_redecisions, beliefs=beliefs
                     )
-                open_rests = _edli_open_maker_rests_for_screen(
-                    trade_ro,
-                    world_ro,
-                    beliefs=management_beliefs,
-                )
-                rest_pulls = screen_resting_orders(
-                    world_ro,
-                    trade_ro,
-                    open_rests=open_rests,
-                    decision_time=received_at,
-                )
                 if not entry_screen_deferred:
                     entry_condition_scope = _edli_redecision_condition_scope(
                         entry_redecisions, beliefs
                     )
-                rest_condition_scope = _edli_rest_pull_condition_scope(
-                    rest_pulls, management_beliefs
-                )
             finally:
                 try:
                     world_ro.close()
@@ -15487,22 +15282,6 @@ def run_edli_continuous_redecision_screen_cycle(
                 except Exception:  # noqa: BLE001
                     pass
 
-            rest_pull_families = set()
-            if rest_pulls:
-                by_family = {
-                    b.family_id: (b.city, b.target_date, b.metric) for b in all_beliefs
-                }
-                for rest, _decision in rest_pulls:
-                    key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
-                    if key is not None and all(key):
-                        rest_pull_families.add(key)
-            rest_pull_families &= confirmed_rest_scope
-            if rest_pull_families:
-                rest_pull_families &= _edli_families_with_fresh_scoped_executable_substrate(
-                    rest_condition_scope,
-                    now_utc=now,
-                    deadline_fence=screen_fence,
-                )
             held_families = _edli_current_held_position_family_keys(
                 deadline_fence=screen_fence
             )
@@ -15531,10 +15310,9 @@ def run_edli_continuous_redecision_screen_cycle(
                     now_utc=now,
                     deadline_fence=screen_fence,
                 )
-            all_families = set(family_keys) | rest_pull_families | held_reemit_families
+            all_families = set(family_keys) | held_reemit_families
         expired_unadmitted = 0
         expired_stale_pending = 0
-        expired_rest_pull_blockers = 0
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
 
@@ -15587,13 +15365,12 @@ def run_edli_continuous_redecision_screen_cycle(
                     emit_mutex.release()
             _log.info(
                 "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
-                "entry_families=0 rest_pulls=%d "
+                "entry_families=0 "
                 "policy_rest_pulls=%d policy_rests_cancelled=%d "
                 "held_monitor_families=%d held_reemit_families=0 families_reemitted=0 "
-                "events_emitted=0 rests_cancelled=0 expired_unadmitted=%d reason=no_screened_families",
+                "events_emitted=0 expired_unadmitted=%d reason=no_screened_families",
                 len(redecisions),
                 len(entry_redecisions),
-                len(rest_pulls),
                 len(policy_rest_pulls),
                 policy_cancelled,
                 len(held_families),
@@ -15650,13 +15427,6 @@ def run_edli_continuous_redecision_screen_cycle(
                     stale_plan,
                     decision_time=received_at,
                 )
-                expired_rest_pull_blockers = (
-                    _edli_supersede_pending_redecisions_for_rest_pull_families(
-                        world_prune,
-                        rest_pull_families,
-                        decision_time=received_at,
-                    )
-                )
                 _screen_check_deadline()
                 world_prune.commit()
             finally:
@@ -15685,15 +15455,10 @@ def run_edli_continuous_redecision_screen_cycle(
                     already_pending_keys=pending,
                     event_type=REDECISION_EVENT_TYPE,
                     restrict_to_families=emit_families,
-                    # A pulled rest and a held position are existing capital
-                    # obligations, not new-entry discovery.  They must keep
-                    # re-deciding after the family enters Day0; otherwise the
-                    # forecast-phase filter drops the escalation event after a
-                    # venue-confirmed cancel and the next generic price event
-                    # can recreate the same maker rest.
-                    phase_filter_exempt_families=(
-                        set(rest_pull_families) | set(held_reemit_families)
-                    ),
+                    # A held position is an existing capital obligation, not
+                    # new-entry discovery: it keeps re-deciding after the
+                    # family enters Day0.
+                    phase_filter_exempt_families=set(held_reemit_families),
                 )
             else:
                 events_to_emit = []
@@ -15743,13 +15508,6 @@ def run_edli_continuous_redecision_screen_cycle(
                 expiry_plan,
                 decision_time=received_at,
             )
-            expired_rest_pull_blockers += (
-                _edli_supersede_pending_redecisions_for_rest_pull_families(
-                    world,
-                    rest_pull_families,
-                    decision_time=received_at,
-                )
-            )
             fresh_events = []
             for event in events_to_emit:
                 if event.entity_key in pending:
@@ -15763,9 +15521,7 @@ def run_edli_continuous_redecision_screen_cycle(
                     )
                 except Exception:  # noqa: BLE001
                     event_family = ("", "", "")
-                if event_family in rest_pull_families:
-                    fresh_events.append(_redecision_event_with_origin(event, "rest_pull"))
-                elif event_family in held_reemit_families:
+                if event_family in held_reemit_families:
                     fresh_events.append(_redecision_event_with_origin(event, "held_position"))
                 elif event_family in family_keys:
                     fresh_events.append(_redecision_event_with_origin(event, "entry_screen"))
@@ -15782,29 +15538,20 @@ def run_edli_continuous_redecision_screen_cycle(
             if emit_acquired:
                 emit_mutex.release()
 
-        # 3) CANCEL the pulled rests via the EXISTING shared venue-cancel-journal path (no new
-        #    venue call site). The next reactor cycle re-decides the re-emitted family at fresh price.
-        cancelled = 0
-        if rest_pulls and get_mode() == "live":
-            _screen_check_deadline()
-            cancelled = _edli_cancel_rest_pulls(rest_pulls, deadline_fence=screen_fence)
-
         _log.info(
             "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
-            "entry_families=%d rest_pulls=%d "
+            "entry_families=%d "
             "policy_rest_pulls=%d policy_rests_cancelled=%d "
             "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
             "pending_redecision_families=%d suppressed_existing_pending=%d "
-            "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d "
-            "expired_stale_pending=%d expired_rest_pull_blockers=%d",
-            len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls),
+            "events_emitted=%d expired_unadmitted=%d expired_stale_pending=%d",
+            len(redecisions), len(entry_redecisions), len(family_keys),
             len(policy_rest_pulls), policy_cancelled, len(held_families),
             len(held_reemit_families),
             len(all_families),
             len(pending_families),
             len(set(all_families) & pending_families),
-            len(emitted), cancelled, expired_unadmitted, expired_stale_pending,
-            expired_rest_pull_blockers,
+            len(emitted), expired_unadmitted, expired_stale_pending,
         )
         if confirm_refresh_summary:
             _log.info(

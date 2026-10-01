@@ -1953,9 +1953,13 @@ def _load_current_maker_fill_samples(
         or selection_cut_at_utc.tzinfo is None
     ):
         return {}
-    from src.state.order_state_predicates import bootstrap_rest_deadline_minutes
+    # The fill model's measurement period: fills observed within this many
+    # minutes of submission count. It is a sample horizon, never an order TTL.
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+    )
 
-    deadline_minutes = float(bootstrap_rest_deadline_minutes())
+    deadline_minutes = float(MAKER_REST_ESCALATION_DEADLINE_MINUTES)
     cut = selection_cut_at_utc.astimezone(UTC)
     try:
         cursor = conn.execute(

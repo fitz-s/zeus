@@ -875,8 +875,9 @@ REGISTRY: list[Entry] = [
         unit="hours",
         kind=Kind.TTL,
         operation=(
-            "how long a post_only GTC maker entry rests before the escalation job "
-            "cancels it and the next certified decision may cross as taker"
+            "maker fill-model period: fills within this window of submission count "
+            "toward the maker fill sample and rest-then-cross witness; no job cancels "
+            "an ENTRY rest on age (standing ENTRY keep-by-value, 2026-09-30)"
         ),
         source=_maker_rest_escalation_deadline_hours,
         source_ref=(

@@ -2206,6 +2206,145 @@ def test_monitor_loader_requests_held_continuity_exemption(forecasts_db, monkeyp
     assert seen.get("held_redecision") is True
 
 
+FAMILY = ("Miami", "2026-07-04", "high")
+
+
+def _forecasts_db() -> sqlite3.Connection:
+    from src.state.schema.v2_schema import apply_canonical_schema
+    from src.state.db import (
+        _create_readiness_state, _create_source_run, _create_source_run_coverage,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_canonical_schema(conn)
+    _create_source_run(conn)
+    _create_source_run_coverage(conn)
+    _create_readiness_state(conn)
+    return conn
+
+
+def _seed_posterior(
+    conn,
+    *,
+    family,
+    posterior_identity_hash: str,
+    source_cycle_time: str,
+    provenance_json: str | None = None,
+    snapshot_id: int = 1,
+    snapshot_dataset: str | None = None,
+) -> None:
+    from src.data.replacement_forecast_source_run_identity import (
+        expected_replacement_dependency_identity_by_role,
+    )
+    from src.data.replacement_forecast_readiness import (
+        HIGH_DATA_VERSION, LOW_DATA_VERSION, SOURCE_ID,
+    )
+
+    city, target_date, metric = family
+    if provenance_json is None:
+        # A materialized posterior binds its own current-evidence shape to the
+        # snapshot it consumed; the identity reader replays that binding.
+        provenance_json = json.dumps(
+            {"bayes_precision_fusion": {"current_evidence_shape": {"snapshot_id": snapshot_id}}}
+        )
+    expected_dataset = expected_replacement_dependency_identity_by_role(metric)[
+        "baseline_b0"
+    ].data_version
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric, physical_quantity,
+            observation_field, available_at, fetch_time, lead_hours, members_json,
+            model_version, dataset_id, source_id, authority, causality_status,
+            boundary_ambiguous, source_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, '[]', 'fixture', ?,
+                  'ecmwf_open_data', 'VERIFIED', 'OK', 0, ?)
+        """,
+        (
+            snapshot_id,
+            city,
+            target_date,
+            metric,
+            "mx2t3_local_calendar_day_max" if metric == "high" else "mn2t3_local_calendar_day_min",
+            "high_temp" if metric == "high" else "low_temp",
+            source_cycle_time,
+            source_cycle_time,
+            snapshot_dataset or expected_dataset or "fixture-current-dataset",
+            f"run-{snapshot_id}",
+        ),
+    )
+    conn.execute(
+        """INSERT OR IGNORE INTO source_run (
+            source_run_id, source_id, track, release_calendar_key, ingest_mode,
+            origin_mode, source_cycle_time, imported_at, completeness_status, status
+        ) VALUES (?, 'ecmwf_open_data', 'ensemble', 'fixture', 'SCHEDULED_LIVE',
+                  'SCHEDULED_LIVE', ?, ?, 'COMPLETE', 'SUCCESS')""",
+        (f"run-{snapshot_id}", source_cycle_time, source_cycle_time),
+    )
+    conn.execute(
+        """INSERT OR IGNORE INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, source_transport,
+            release_calendar_key, track, city_id, city, city_timezone,
+            target_local_date, temperature_metric, physical_quantity,
+            observation_field, data_version, expected_members, observed_members,
+            expected_steps_json, observed_steps_json, snapshot_ids_json,
+            target_window_start_utc, target_window_end_utc, completeness_status,
+            readiness_status, computed_at, expires_at, recorded_at
+        ) VALUES (?, ?, 'ecmwf_open_data', 'fixture', 'fixture', 'ensemble',
+                  'fixture-city', ?, 'UTC', ?, ?, ?, ?, ?, 1, 1, '[1]', '[1]', ?,
+                  ?, ?, 'COMPLETE', 'LIVE_ELIGIBLE', ?, ?, ?)""",
+        (f"coverage-{snapshot_id}", f"run-{snapshot_id}", city, target_date,
+         metric, "mx2t3_local_calendar_day_max" if metric == "high" else "mn2t3_local_calendar_day_min",
+         "high_temp" if metric == "high" else "low_temp",
+         snapshot_dataset or expected_dataset or "fixture-current-dataset",
+         json.dumps([snapshot_id]), source_cycle_time, "2099-01-01T00:00:00+00:00",
+         source_cycle_time, "2099-01-01T00:00:00+00:00", source_cycle_time),
+    )
+    conn.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, q_json, posterior_method,
+            posterior_identity_hash, provenance_json, dependency_source_run_ids_json
+        ) VALUES (?, 'openmeteo_ecmwf_ifs9_bayes_fusion_v1', ?, ?, ?, ?, ?, ?, ?, '{}', 'bayes', ?, ?, ?)
+        """,
+        (SOURCE_ID, HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
+         city, target_date, metric, source_cycle_time, source_cycle_time, source_cycle_time,
+         posterior_identity_hash, provenance_json, json.dumps({"current_ensemble_snapshot": snapshot_id})),
+    )
+    conn.commit()
+
+
+def _certify_latest_posterior(conn, family, *, computed_at: str = "2026-07-03T21:00:00+00:00") -> None:
+    from src.data.replacement_forecast_readiness import (
+        HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID, STRATEGY_KEY,
+    )
+
+    city, target_date, metric = family
+    row = conn.execute(
+        "SELECT posterior_id, source_available_at FROM forecast_posteriors ORDER BY posterior_id DESC LIMIT 1"
+    ).fetchone()
+    conn.execute(
+        """INSERT OR REPLACE INTO readiness_state (
+            readiness_id, scope_key, scope_type, city, target_local_date,
+            temperature_metric, source_id, data_version, strategy_key,
+            status, computed_at, expires_at, dependency_json
+        ) VALUES ('test-ready', 'test-scope', 'strategy', ?, ?, ?, ?, ?, ?, 'READY', ?, ?, ?)""",
+        (city, target_date, metric, SOURCE_ID,
+         HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
+         STRATEGY_KEY, computed_at, "2026-07-05T00:00:00+00:00",
+         json.dumps({"dependencies": [{
+             "role": "soft_anchor_posterior", "source_id": SOURCE_ID,
+             "product_id": PRODUCT_ID,
+             "data_version": HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
+             "status": "READY", "posterior_id": row[0],
+             "source_available_at": row[1],
+         }]})),
+    )
+    conn.commit()
+
+
 def _certified_row_for(conn, family):
     from src.engine.position_belief import _certified_replacement_posterior_row
 
@@ -2221,10 +2360,6 @@ def _certified_row_for(conn, family):
 
 
 def test_certified_posterior_row_passes_identity_gate_with_its_own_current_evidence_shape():
-    from tests.execution.test_staleness_cancel import (
-        FAMILY, _certify_latest_posterior, _forecasts_db, _seed_posterior,
-    )
-
     conn = _forecasts_db()
     _seed_posterior(
         conn, family=FAMILY, posterior_identity_hash="q-shaped",
@@ -2250,10 +2385,6 @@ def test_certified_posterior_row_passes_identity_gate_with_its_own_current_evide
 def test_certified_posterior_row_refused_without_a_bound_current_evidence_shape(
     provenance_json, caplog,
 ):
-    from tests.execution.test_staleness_cancel import (
-        FAMILY, _certify_latest_posterior, _forecasts_db, _seed_posterior,
-    )
-
     conn = _forecasts_db()
     _seed_posterior(
         conn, family=FAMILY, posterior_identity_hash="q-unshaped",

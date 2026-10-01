@@ -1,8 +1,9 @@
 # Created: 2026-07-03
+# Last reused/audited: 2026-10-01
 # Authority basis: cross-packet money/order seam proof requested by the full-branch consult
 #   review (§6 fix 3) before W4.2 merge-to-main — composes W1.1 (CAS collateral
 #   reservation/conversion, src/state/collateral_ledger.py), W2.1 (batch cancel gateway,
-#   src/execution/batch_order_submission.py), and W4.2 (C3 staleness/TTL cancel path,
+#   src/execution/batch_order_submission.py), and W4.2 (C3 standing ENTRY valuation,
 #   src/execution/staleness_cancel.py) in one interleaving: an open ENTRY rest with a
 #   partial-fill fact in flight, cancelled alongside a batch chunk whose SDK call raises,
 #   then replayed as if a duplicate SOURCE_RUN_ARRIVED drove a second cycle.
@@ -10,8 +11,10 @@
 reconciled-redecision gating compose correctly under one adversarial interleaving.
 
 Scenario (one MAX_ORDERS_PER_BATCH=15 chunk boundary, deliberately straddled):
-  - 16 open ENTRY rests, all past the TTL deadline (rest_deadline_exceeded), each with a
-    live PUSD_BUY collateral reservation.
+  - 16 open ENTRY rests whose families have NO current probability authority (no
+    readiness/posterior), so C3 cancels each protectively, each with a live PUSD_BUY
+    collateral reservation. (No age deadline exists: unavailable authority is the
+    cancel trigger.)
   - Command 1 ("c-partial", chunk 1) has a PARTIALLY_MATCHED venue_order_facts row recorded
     BEFORE the cancel cycle runs -- the partial-fill-fact-in-flight boundary case.
   - Commands 2-15 (chunk 1, 14 more) cancel cleanly.
@@ -57,7 +60,6 @@ from src.state.venue_command_repo import get_command
 from src.venue.batch_submit import MAX_ORDERS_PER_BATCH
 from tests.execution.test_staleness_cancel import (
     FAMILY,
-    DEADLINE_MIN,
     _forecasts_db,
     _seed_market_event,
     _seed_open_entry,
@@ -152,7 +154,7 @@ def test_cross_packet_partial_fill_batch_exception_seam():
         token_id = "tok-chunk2" if cid == chunk2_command_id else "tok-shared"
         _seed_open_entry(
             trade_conn, command_id=cid, token_id=token_id, venue_order_id=oid,
-            q_version="q-old", created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+            q_version="q-old", created_at=NOW - timedelta(hours=30),
         )
         _seed_reservation(trade_conn, command_id=cid, amount_micro=_RESERVE_AMOUNT_MICRO)
     _seed_market_event(forecasts_conn, token_id="tok-shared", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
@@ -161,7 +163,7 @@ def test_cross_packet_partial_fill_batch_exception_seam():
     )
 
     # Partial-fill fact IN FLIGHT before the cancel cycle runs: a real matched
-    # amount already on file when TTL classification and terminalization see it.
+    # amount already on file when C3 valuation and terminalization see it.
     trade_conn.execute(
         "INSERT INTO venue_order_facts (venue_order_id, command_id, state, remaining_size, matched_size, "
         "source, observed_at, local_sequence, raw_payload_hash) "
@@ -175,7 +177,8 @@ def test_cross_packet_partial_fill_batch_exception_seam():
     )
 
     result = run_c3_staleness_cancel_cycle(
-        trade_conn, trade_conn, forecasts_conn, client, now=NOW,
+        trade_conn, trade_conn, forecasts_conn, client,
+        world_conn_ro=sqlite3.connect(":memory:"), now=NOW,
     )
 
     # --- chunk-1 command with the in-flight partial fill: durably cancelled,
@@ -231,7 +234,8 @@ def test_cross_packet_partial_fill_batch_exception_seam():
     # journal entries, zero collateral mutation. ---
     replay_client = _AdversarialGatewayClient(chunk1_order_ids=[], raise_on_chunk2=False)
     replay_result = run_c3_staleness_cancel_cycle(
-        trade_conn, trade_conn, forecasts_conn, replay_client, now=NOW,
+        trade_conn, trade_conn, forecasts_conn, replay_client,
+        world_conn_ro=sqlite3.connect(":memory:"), now=NOW,
     )
 
     assert replay_result["cancel_set_size"] == 0
@@ -264,12 +268,12 @@ def test_cross_packet_same_family_mixed_outcomes_suppress_whole_family_confirmat
 
     _seed_open_entry(
         trade_conn, command_id="c-partial", token_id="tok-partial", venue_order_id="v-partial",
-        q_version="q-old", created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        q_version="q-old", created_at=NOW - timedelta(hours=30),
     )
     _seed_reservation(trade_conn, command_id="c-partial", amount_micro=_RESERVE_AMOUNT_MICRO)
     _seed_open_entry(
         trade_conn, command_id="c-ambiguous", token_id="tok-ambiguous", venue_order_id="v-ambiguous",
-        q_version="q-old", created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
+        q_version="q-old", created_at=NOW - timedelta(hours=30),
     )
     _seed_reservation(trade_conn, command_id="c-ambiguous", amount_micro=_RESERVE_AMOUNT_MICRO)
     # BOTH tokens resolve to the SAME family.
@@ -297,7 +301,10 @@ def test_cross_packet_same_family_mixed_outcomes_suppress_whole_family_confirmat
 
     client = _MixedOutcomeClient()
 
-    result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
+    result = run_c3_staleness_cancel_cycle(
+        trade_conn, trade_conn, forecasts_conn, client,
+        world_conn_ro=sqlite3.connect(":memory:"), now=NOW,
+    )
 
     assert len(client.cancel_calls) == 1  # both commands fit in one chunk, one batch call
 

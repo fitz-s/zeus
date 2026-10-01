@@ -1,9 +1,9 @@
 # Created: 2026-07-03
-# Last reused or audited: 2026-07-03
+# Last reused or audited: 2026-10-01
 # Authority basis: W4.2 (SCH-W1.2-ORDER-STATE cross-reference, docs/rebuild/schema_packets/
 #   w1_2_order_state_extension_schema_packet_2026-07-02.md:197-198) — relocated verbatim out of
-#   src/execution/maker_rest_escalation.py as part of that module's TTL-ownership handover to
-#   src.state.order_state_predicates.rest_deadline_exceeded + src.execution.staleness_cancel.
+#   src/execution/maker_rest_escalation.py; the ENTRY rest age deadline it once logged is retired
+#   (standing ENTRY keep-by-value law, 2026-09-30).
 """Durable command-journal cancel executor, shared by every "cancel a snapshotted list of
 already-open orders" caller.
 
@@ -1172,17 +1172,12 @@ def run_persisted_cancels_for_expired_rests(
     *,
     conn_factory: Callable[[], sqlite3.Connection],
     close_connections: bool = True,
-    deadline_minutes: float | None = None,
     collect_cancelled: list[dict[str, Any]] | None = None,
     deadline_monotonic: float | None = None,
 ) -> dict[str, int]:
     """Cancel each already-snapshotted candidate with durable command-journal truth
-    around the venue side effect.
-
-    ``deadline_minutes`` is accepted only for the log line's benefit (callers whose
-    candidates were built by a deadline classifier pass it through); this function
-    itself does no deadline reasoning — it is a pure "cancel what you were told to
-    cancel, durably" executor.
+    around the venue side effect. This is a pure "cancel what you were told to
+    cancel, durably" executor; it does no order-age reasoning.
 
     1. append CANCEL_REQUESTED and commit,
     2. close the connection before the HTTP cancel,
@@ -1395,27 +1390,14 @@ def run_persisted_cancels_for_expired_rests(
                 entry.get("matched_size"),
             )
         elif event_type == "CANCEL_ACKED":
-            if deadline_minutes is not None:
-                logged_deadline_minutes = float(deadline_minutes)
-            else:
-                # No caller-supplied deadline: fall back to the live TTL owner's
-                # operating value (src.state.order_state_predicates, the
-                # successor to this module's own retired deadline read) rather
-                # than a hardcoded stand-in, so this log line stays truthful for
-                # on-call even when a caller (e.g. the invalid-entry-authority
-                # lanes) never had a deadline to pass in the first place.
-                from src.state.order_state_predicates import bootstrap_rest_deadline_minutes
-
-                logged_deadline_minutes = bootstrap_rest_deadline_minutes()
             logger.info(
-                "venue_cancel_journal: cancelled expired rest command=%s order=%s "
-                "rested_since=%s fact_state=%s matched=%s (deadline=%.0fmin)",
+                "venue_cancel_journal: cancelled rest command=%s order=%s "
+                "rested_since=%s fact_state=%s matched=%s (no cancel_reason)",
                 command_id,
                 order_id,
                 entry.get("created_at"),
                 entry.get("fact_state"),
                 entry.get("matched_size"),
-                logged_deadline_minutes,
             )
     return stats
 

@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-06-29
+# Last reused or audited: 2026-10-01
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, review-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). Implements P1 (belief cache) + P2
 #   (cheap screen + enqueue). screen_exit/screen_exit_cancel deleted Wave 3 (zero live callers —
@@ -8,9 +8,10 @@
 #   DEADLOCK-FREE — the belief is buffered in-process by the kernel (no DB write there) and
 #   persisted by the reactor through its EXISTING world conn inside the open SAVEPOINT (NOT a second
 #   connection, NOT a separate commit). P2 screen wired to a scheduler job + the reactor now CONSUMES
-#   EDLI_REDECISION_PENDING. §4.5 resting-order management wired (belief-decay / moved-book
-#   pulls reuse the maker_rest_escalation cancel machinery). Flat constants replaced by the canonical
-#   price-dependent fee model + documented economic bases.
+#   EDLI_REDECISION_PENDING. Flat constants replaced by the canonical price-dependent fee model +
+#   documented economic bases.
+#   2026-10-01: resting-order value pulls (belief-decay, moved-book, confirmed-value refresh,
+#   family optimum shift) deleted; open ENTRY rest value is the C3 standing valuation.
 #   2026-06-17: entry admission cooldown keys use stable market identity
 #   (city,target_date,metric,bin_label,direction), not dynamic EDLI family hashes.
 #
@@ -152,15 +153,8 @@ TICK_SIZE: float = 0.01
 # clears one tick) plus one fee-quantum of slack ≈ the worst-case fee swing across a one-tick move.
 # 2*0.01 = 0.02. This REPLACES the prior bare 0.02 magic number with a derived quantity.
 IMPROVE_DELTA: float = 2.0 * TICK_SIZE
-# §4.5 (Dimension 3) belief-WORSENING re-price threshold — the mirror of IMPROVE_DELTA on the
-# adverse side. A resting favorable order is pulled when NEW EVIDENCE has decayed its belief by
-# >= this. Basis: it must be STRICTLY LARGER than the entry friction (IMPROVE_DELTA) so we never
-# pull a rest for a move we would not have re-entered on — set to IMPROVE_DELTA + one tick of
-# hysteresis (3*tick = 0.03) so a single-tick belief flutter against a fresh-snapshot rest does not
-# thrash the order. This REPLACES the prior bare 0.03 magic number.
-BELIEF_REPRICE_DELTA: float = 3.0 * TICK_SIZE
-# Submit-side quote freshness bound. Resting GTC orders are not cancelled by age alone here;
-# the rest screen requires new evidence or book drift, and deadline ownership stays in execution.
+# Submit-side quote freshness bound. Resting ENTRY orders are never cancelled by age; their
+# value is owned by the C3 standing valuation (src.execution.staleness_cancel).
 PRE_SUBMIT_MAX_QUOTE_AGE_MS: float = 1000.0
 # Price-channel held/candidate quote refresh writes execution_feasibility_evidence
 # every scheduler tick, while executable_market_snapshots only moves on substrate
@@ -168,24 +162,10 @@ PRE_SUBMIT_MAX_QUOTE_AGE_MS: float = 1000.0
 # but only under a short TTL so a quiet or failed sidecar cannot fabricate fresh
 # price from an old row.
 FEASIBILITY_QUOTE_FRESHNESS_SECONDS: float = 90.0
-# §4.5 moved-book pull: a resting maker quote whose limit is no longer within this many ticks of the
-# current best bid is on a stale book that has walked away — pull and re-quote at the fresh price.
-# One tick of tolerance: a quote exactly at best is fine; a quote a full tick or more off-best is
-# unlikely to fill and bleeds queue-position.
-REST_BOOK_DRIFT_TICKS: float = 1.0
-# Confirmed-value maker rests should not sit inert until the long escalation
-# deadline when the live book still supports crossing after fees. A 5-minute
-# minimum keeps a real maker fill window (multiple screen/venue-heartbeat ticks)
-# while allowing the full cert path to re-price before the 20-minute hard
-# rest-then-cross escalation deadline.
+# The "a real maker window happened" floor: a terminal unfilled ENTRY rest that
+# rested at least this long arms rest-then-cross escalation for its token
+# (event_reactor_adapter._family_rest_state). It cancels nothing.
 REST_VALUE_REFRESH_MIN_AGE_SECONDS: float = 5.0 * 60.0
-# Family optimum shifts use the same capital-efficiency shape as q-kernel's
-# ROI frontier, but only with screen-time inputs. Keep ultra-cheap dust from
-# pulling a live family slot; the full submit gate still owns strategy-specific
-# floors and expected-profit checks.
-REST_SHIFT_MIN_EXECUTABLE_COST: float = 0.02
-REST_SHIFT_MIN_PAYOFF_Q_LCB: float = 0.02
-REST_SHIFT_MIN_SCORE_IMPROVEMENT_RATIO: float = 0.10
 REDECISION_EVENT_TYPE: str = "EDLI_REDECISION_PENDING"
 _BELIEF_PREFIX: str = "edli_belief:"
 _EPS: float = 1e-9
@@ -301,30 +281,16 @@ class RecentNoValueEventRefutation:
 
 @dataclass(frozen=True)
 class RepriceDecision:
-    """§4.5 (Dimension 3) cancel/re-place decision for a RESTING order. ``action`` is
-    always ``CANCEL_REPLACE`` (the exit-side ``CANCEL_EXIT`` action was removed in W3
-    (#133) along with ``screen_exit``/``screen_exit_cancel`` — no live code constructs
-    it); ``reason`` is the evidence class. Submit-safe: the reactor routes this back
-    through the existing cert path; this module never submits."""
+    """Cancel decision for a RESTING order whose sealed decision current strategy
+    policy no longer admits. ``action`` is always ``CANCEL_REPLACE``; ``reason`` is
+    the policy block. Value-based keep/resize/cancel is the C3 standing valuation
+    (src.execution.staleness_cancel). This module never submits."""
     family_id: str
     bin_label: str
     side: str
     action: str
     reason: str
-    detail: float = 0.0  # |Δbelief| for BELIEF_WORSENING; bid-limit drift for BOOK_MOVED.
-    replacement_condition_id: str = ""
-    replacement_bin_label: str = ""
-    replacement_side: str = ""
-
-
-@dataclass(frozen=True)
-class _FamilyRestCandidate:
-    condition_id: str
-    bin_label: str
-    side: str
-    score: float
-    edge: float
-    quote: PriceQuote
+    detail: float = 0.0
 
 
 def _no_value_refutation_event_types_compatible(
@@ -1646,102 +1612,6 @@ def recent_no_value_event_refutation(
     ).get(event.event_id)
 
 
-def screen_reprice(
-    conn: sqlite3.Connection,
-    *,
-    family_id: str,
-    bin_label: str,
-    side: str,
-    resting_posterior: float,
-    resting_snapshot_id: str,
-    belief_reprice_delta: float = BELIEF_REPRICE_DELTA,
-) -> RepriceDecision | None:
-    """§4.5 (Dimension 3) — the symmetric belief-WORSENING re-price trigger.
-
-    The existing ``enqueue_live_redecisions`` IMPROVE_DELTA path re-fires only on edge IMPROVEMENT.
-    This is its mirror: a resting favorable order whose BELIEF has DECAYED past ``belief_reprice_delta``
-    must be PULLED (cancel + re-place at the new reservation), because a stale-favorable resting quote
-    bleeds adverse selection.
-
-    ANTI-TWITCH (the invariant): the trigger is keyed on EVIDENCE, not price. A re-price fires only
-    when the LATEST cached belief comes from a DIFFERENT snapshot than the one the resting order was
-    priced on (``resting_snapshot_id``) — i.e. a new FSR / day0 / obs landed. If the latest belief is
-    still the resting order's own snapshot (no new evidence — a bare price wiggle), this returns None
-    (HOLD). A favorable belief move also returns None (improvement is the IMPROVE_DELTA path's job, not
-    a cancel). So a bare price move can NEVER reach a CANCEL here.
-    """
-    belief = latest_cached_belief(conn, family_id=family_id)
-    if belief is None:
-        return None
-    # Evidence gate: only a NEW snapshot (new forecast/day0/obs) is evidence. Same snapshot = the
-    # resting order's belief is unchanged → any price move is a bare wiggle → HOLD (anti-twitch).
-    if belief.snapshot_id == resting_snapshot_id:
-        return None
-    try:
-        idx = belief.bin_labels.index(bin_label)
-    except ValueError:
-        return None
-    if idx >= len(belief.p_posterior_vec):
-        return None
-    yes_post = float(belief.p_posterior_vec[idx])
-    if side not in {"buy_yes", "buy_no"}:
-        return None
-    current = yes_post if side == "buy_yes" else one_minus(yes_post)
-    delta = float(resting_posterior) - current  # >0 means belief WORSENED against the held side
-    if delta >= belief_reprice_delta - _EPS:
-        return RepriceDecision(
-            family_id=family_id, bin_label=bin_label, side=side,
-            action="CANCEL_REPLACE", reason="BELIEF_WORSENING", detail=delta,
-        )
-    return None
-
-
-def _current_rest_mean_edge(
-    rest: OpenRest,
-    *,
-    belief: CachedBelief | None,
-    tick_size: object = None,
-) -> float | None:
-    """Current posterior-mean edge if this resting ENTRY filled at its limit now."""
-
-    if belief is None:
-        return None
-    try:
-        idx = belief.bin_labels.index(rest.bin_label)
-        yes_post = float(belief.p_posterior_vec[idx])
-    except (ValueError, IndexError, TypeError):
-        return None
-    if not math.isfinite(yes_post) or not (0.0 <= yes_post <= 1.0):
-        return None
-    if rest.side == "buy_yes":
-        current_q = yes_post
-    elif rest.side == "buy_no":
-        current_q = one_minus(yes_post)
-    else:
-        return None
-    try:
-        limit_price = float(rest.limit_price)
-    except (TypeError, ValueError):
-        return None
-    edge = current_q - _entry_screen_c95_cost(
-        limit_price,
-        tick_size=tick_size,
-    )
-    return edge if math.isfinite(edge) else None
-
-
-def _held_side_q_lcb(belief: CachedBelief, *, bin_label: str, side: str) -> float | None:
-    try:
-        idx = belief.bin_labels.index(bin_label)
-    except ValueError:
-        return None
-    if side == "buy_yes":
-        return _vec_float_at(belief.q_lcb_yes_vec, idx)
-    if side == "buy_no":
-        return _vec_float_at(belief.q_lcb_no_vec, idx)
-    return None
-
-
 _OPPOSITE_SIDE: dict[str, str] = {"buy_yes": "buy_no", "buy_no": "buy_yes"}
 
 
@@ -1837,58 +1707,7 @@ def read_freshest_executable_prices(
     return out
 
 
-def read_freshest_resting_best_bids(
-    trade_conn: sqlite3.Connection,
-    *,
-    condition_ids: set[str],
-) -> dict[tuple[str, str], PriceQuote]:
-    """Build a ``(condition_id, direction) -> best bid`` map for maker-rest checks.
 
-    Entry edge screening consumes executable ask cost. Resting maker orders need
-    same-side best bid; using ask cost here turns ordinary spread into false
-    ``BOOK_MOVED`` churn. Snapshot rows are native to the selected outcome token,
-    so a NO row's ``orderbook_top_bid`` is already the NO best bid.
-    """
-    if not condition_ids:
-        return {}
-    out: dict[tuple[str, str], PriceQuote] = {}
-    try:
-        cols = {row[1] for row in trade_conn.execute(
-            "PRAGMA table_info(executable_market_snapshots)").fetchall()}
-    except sqlite3.Error:
-        cols = set()
-    token_sides: dict[tuple[str, str], str] = {}
-    if {
-        "condition_id",
-        "orderbook_top_bid",
-        "orderbook_top_ask",
-        "freshness_deadline",
-        "captured_at",
-        "selected_outcome_token_id",
-        "yes_token_id",
-        "no_token_id",
-    }.issubset(cols):
-        rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
-        token_sides = _condition_side_tokens(rows)
-        for cid, side_books in _side_books_by_condition(rows).items():
-            for side, book in side_books.items():
-                if 0.0 < book["bid"] < 1.0:
-                    _merge_price_quote(
-                        out,
-                        (cid, side),
-                        PriceQuote(
-                            price=book["bid"],
-                            freshness_deadline=str(book["freshness_deadline"]),
-                            tick_size=float(book.get("tick_size", TICK_SIZE)),
-                        ),
-                    )
-    for key, quote in _freshest_feasibility_quotes_by_condition(
-        trade_conn,
-        token_sides=token_sides,
-        quote_column="bid",
-    ).items():
-        _merge_price_quote(out, key, quote)
-    return out
 
 
 def _merge_price_quote(
@@ -2598,428 +2417,3 @@ class OpenRest:
     city: str = ""
     target_date: str = ""
     metric: str = ""
-
-
-def _rest_has_sub_min_partial_fill(rest: OpenRest) -> bool:
-    try:
-        matched = float(rest.matched_size) if rest.matched_size is not None else 0.0
-        min_order_size = (
-            float(rest.min_order_size) if rest.min_order_size is not None else 0.0
-        )
-    except (TypeError, ValueError):
-        return False
-    return (
-        math.isfinite(matched)
-        and math.isfinite(min_order_size)
-        and matched > _EPS
-        and min_order_size > _EPS
-        and matched < min_order_size - _EPS
-    )
-
-
-def _fresh_quote_or_none(quote: PriceQuote | None, screen_time: datetime) -> PriceQuote | None:
-    if quote is None:
-        return None
-    try:
-        deadline = _parse(quote.freshness_deadline)
-        if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
-        compare_time = screen_time
-        if compare_time.tzinfo is None:
-            compare_time = compare_time.replace(tzinfo=timezone.utc)
-        if deadline.astimezone(timezone.utc) <= compare_time.astimezone(timezone.utc):
-            return None
-    except (TypeError, ValueError):
-        return None
-    return quote
-
-
-def _belief_side_probability(
-    belief: CachedBelief,
-    *,
-    idx: int,
-    side: str,
-) -> tuple[float, float] | None:
-    try:
-        yes_post = float(belief.p_posterior_vec[idx])
-    except (IndexError, TypeError, ValueError):
-        return None
-    if not math.isfinite(yes_post) or not (0.0 <= yes_post <= 1.0):
-        return None
-    if side == "buy_yes":
-        q_lcb = _vec_float_at(belief.q_lcb_yes_vec, idx)
-        posterior = yes_post
-    elif side == "buy_no":
-        q_lcb = _vec_float_at(belief.q_lcb_no_vec, idx)
-        posterior = one_minus(yes_post)
-    else:
-        return None
-    if q_lcb is None:
-        return None
-    return posterior, q_lcb
-
-
-def _family_rest_candidate_score(
-    belief: CachedBelief,
-    *,
-    idx: int,
-    side: str,
-    price: float,
-    tick_size: object = None,
-) -> float | None:
-    probs = _belief_side_probability(belief, idx=idx, side=side)
-    if probs is None:
-        return None
-    posterior, q_lcb = probs
-    cost = _entry_screen_c95_cost(float(price), tick_size=tick_size)
-    edge = min(float(q_lcb) - cost, float(posterior) - cost)
-    if not math.isfinite(edge):
-        return None
-    if edge <= 0.0:
-        return edge
-    if cost < REST_SHIFT_MIN_EXECUTABLE_COST - _EPS:
-        return None
-    if float(q_lcb) < REST_SHIFT_MIN_PAYOFF_Q_LCB - _EPS:
-        return None
-    edge_density = edge / cost
-    kelly_fraction_lcb = edge / max(1.0 - cost, _EPS)
-    score = edge_density * kelly_fraction_lcb
-    if not math.isfinite(score):
-        return None
-    return score
-
-
-def _family_rest_candidate_edge(
-    belief: CachedBelief,
-    *,
-    idx: int,
-    side: str,
-    price: float,
-    tick_size: object = None,
-) -> float | None:
-    probs = _belief_side_probability(belief, idx=idx, side=side)
-    if probs is None:
-        return None
-    posterior, q_lcb = probs
-    edge = _entry_screen_robust_trade_score(
-        q_posterior=posterior,
-        q_lcb_5pct=q_lcb,
-        price=float(price),
-        tick_size=tick_size,
-    )
-    if not math.isfinite(edge):
-        return None
-    return edge
-
-
-def _family_optimum_shift_pull(
-    rest: OpenRest,
-    *,
-    belief: CachedBelief | None,
-    price_by_cid: dict[tuple[str, str], PriceQuote],
-    screen_time: datetime,
-    value_refresh_min_age_seconds: float,
-) -> RepriceDecision | None:
-    """Pull a live maker rest only when a different family sibling is now superior.
-
-    This is the order-management bridge between "one active live order per
-    weather family" and "keep chasing the best executable window until fill".
-    Duplicate suppression still owns final no-double-submit safety. This
-    function only proves that the current rest is no longer the best use of the
-    family's live slot, then asks the existing cancel + redecision path to
-    re-run the full reactor.
-    """
-
-    if belief is None or rest.side not in {"buy_yes", "buy_no"}:
-        return None
-    if rest.quote_age_ms < float(value_refresh_min_age_seconds) * 1000.0:
-        return None
-    labels = [str(label or "") for label in (belief.bin_labels or [])]
-    condition_ids = [str(c or "").strip() for c in (belief.condition_ids or [])]
-    try:
-        rest_idx = labels.index(str(rest.bin_label or ""))
-    except ValueError:
-        return None
-    if rest_idx >= len(condition_ids):
-        return None
-
-    rest_quote = _fresh_quote_or_none(
-        price_by_cid.get((str(rest.condition_id or "").strip(), rest.side)),
-        screen_time,
-    )
-    rest_tick = rest_quote.tick_size if rest_quote is not None else TICK_SIZE
-    current_score = _family_rest_candidate_score(
-        belief,
-        idx=rest_idx,
-        side=rest.side,
-        price=float(rest.limit_price),
-        tick_size=rest_tick,
-    )
-    if current_score is None:
-        return None
-
-    best: _FamilyRestCandidate | None = None
-    for idx, raw_condition_id in enumerate(condition_ids):
-        condition_id = str(raw_condition_id or "").strip()
-        if not condition_id:
-            continue
-        label = labels[idx] if idx < len(labels) else ""
-        for side in ("buy_yes", "buy_no"):
-            if condition_id == str(rest.condition_id or "").strip() and side == rest.side:
-                continue
-            quote = _fresh_quote_or_none(price_by_cid.get((condition_id, side)), screen_time)
-            if quote is None:
-                continue
-            score = _family_rest_candidate_score(
-                belief,
-                idx=idx,
-                side=side,
-                price=float(quote.price),
-                tick_size=quote.tick_size,
-            )
-            if score is None:
-                continue
-            edge = _family_rest_candidate_edge(
-                belief,
-                idx=idx,
-                side=side,
-                price=float(quote.price),
-                tick_size=quote.tick_size,
-            )
-            if edge is None:
-                continue
-            floor = _improve_delta_for_tick(quote.tick_size)
-            if edge < floor - _EPS:
-                continue
-            if best is None or score > best.score:
-                best = _FamilyRestCandidate(
-                    condition_id=condition_id,
-                    bin_label=label,
-                    side=side,
-                    score=score,
-                    edge=edge,
-                    quote=quote,
-                )
-
-    if best is None:
-        return None
-    score_delta = best.score - current_score
-    # ``best.edge`` has already cleared the price-unit round-trip floor above.
-    # ``score`` is ROI/growth-density, so compare it to current_score in its own
-    # units instead of comparing a dimensionless score delta to a price tick.
-    required_score_delta = max(abs(current_score) * REST_SHIFT_MIN_SCORE_IMPROVEMENT_RATIO, _EPS)
-    if score_delta < required_score_delta - _EPS:
-        return None
-    return RepriceDecision(
-        family_id=rest.family_id,
-        bin_label=rest.bin_label,
-        side=rest.side,
-        action="CANCEL_REPLACE",
-        reason="FAMILY_OPTIMUM_SHIFT",
-        detail=score_delta,
-        replacement_condition_id=best.condition_id,
-        replacement_bin_label=best.bin_label,
-        replacement_side=best.side,
-    )
-
-
-def screen_resting_orders(
-    world_conn: sqlite3.Connection,
-    trade_conn: sqlite3.Connection,
-    *,
-    open_rests: list[OpenRest],
-    decision_time: str | None = None,
-    value_refresh_min_age_seconds: float = REST_VALUE_REFRESH_MIN_AGE_SECONDS,
-) -> list[tuple[OpenRest, RepriceDecision]]:
-    """§4.5 resting-order management: for each OPEN maker rest, fire a PULL (cancel+re-decide) only
-    when its belief decayed past BELIEF_REPRICE_DELTA on NEW evidence (screen_reprice), or the live
-    book has walked away from our limit by at least REST_BOOK_DRIFT_TICKS. Order age alone is not
-    trading value and not dead-book proof for an already-resting GTC order; the maker-rest deadline
-    owner is src.state.order_state_predicates.rest_deadline_exceeded, wired by
-    src.execution.staleness_cancel (W4.2; retired src.execution.maker_rest_escalation was the prior
-    owner). Pure read; returns decisions only — the scheduler job enqueues the redecision and
-    performs cancellation through the existing cancel path.
-
-    Entry cheap-screen and submit-layer duplicate-suppression receipts are not
-    cancellation authority. They can select families for a full reactor pass or
-    prevent duplicate submission, but a live rest may only be pulled by
-    order-management evidence produced for that rest.
-    """
-    screen_time = _parse(decision_time) if decision_time is not None else datetime.now().astimezone()
-    beliefs_by_family: dict[str, CachedBelief] = {}
-    condition_ids = {r.condition_id for r in open_rests if r.condition_id}
-    for rest in open_rests:
-        family_id = str(rest.family_id or "")
-        if not family_id or family_id in beliefs_by_family:
-            continue
-        belief = latest_cached_belief(world_conn, family_id=family_id)
-        if belief is None:
-            continue
-        beliefs_by_family[family_id] = belief
-        condition_ids.update(
-            str(c or "").strip()
-            for c in (belief.condition_ids or [])
-            if str(c or "").strip()
-        )
-    bid_by_cid = read_freshest_resting_best_bids(trade_conn, condition_ids=condition_ids)
-    ask_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=condition_ids)
-    out: list[tuple[OpenRest, RepriceDecision]] = []
-    for rest in open_rests:
-        if _rest_has_sub_min_partial_fill(rest):
-            # A sub-min partial fill is real exposure but not independently sellable.
-            # Pulling the rest can strand dust that the exit path cannot sell because
-            # the remaining held shares are below the venue min_order_size.
-            continue
-        belief = beliefs_by_family.get(str(rest.family_id or ""))
-        # 0) Certificate-expiry pull. The belief backing this rest is past its validity boundary
-        # (a newer authoritative forecast issue SHOULD now exist), so its priced favorable quote is
-        # no longer a valid basis — PULL and re-decide through the same cancel/cert path. No age
-        # floor: τ_next is a forecast-issue boundary crossed exactly once, not microstructure noise,
-        # so there is no thrash to damp. Fail-safe, not cancel-forever: the entry screen's
-        # CERT_EXPIRED gate then withholds re-entry until a fresh forecast issue lands a new belief,
-        # so this cannot loop. valid_until=None (calendar cannot vouch) never pulls.
-        if belief is not None and _belief_certificate_expired(belief, screen_time):
-            out.append((
-                rest,
-                RepriceDecision(
-                    family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,
-                    action="CANCEL_REPLACE", reason="CERT_EXPIRY_PULL",
-                ),
-            ))
-            continue
-        # 1) Belief-decay pull (evidence-gated, anti-twitch by snapshot identity).
-        decision = screen_reprice(
-            world_conn,
-            family_id=rest.family_id,
-            bin_label=rest.bin_label,
-            side=rest.side,
-            resting_posterior=rest.resting_posterior,
-            resting_snapshot_id=rest.resting_snapshot_id,
-        )
-        if decision is None:
-            # A resting ENTRY is still an unexecuted capital decision.  It must
-            # remain positive-EV under the latest causal probability, not merely
-            # survive until a maker-age or book-drift threshold.  This check is
-            # deliberately independent of the historical belief-delta identity:
-            # older rows bound the CLOB executable snapshot to
-            # ``resting_snapshot_id`` and could therefore compare latest q to
-            # itself, making a probability reversal invisible.  The current
-            # fill economics are sufficient cancellation authority.
-            current_quote = _fresh_quote_or_none(
-                ask_by_cid.get((rest.condition_id, rest.side)),
-                screen_time,
-            ) or _fresh_quote_or_none(
-                bid_by_cid.get((rest.condition_id, rest.side)),
-                screen_time,
-            )
-            current_edge = _current_rest_mean_edge(
-                rest,
-                belief=belief,
-                tick_size=current_quote.tick_size if current_quote is not None else TICK_SIZE,
-            )
-            if current_edge is not None and current_edge <= _EPS:
-                decision = RepriceDecision(
-                    family_id=rest.family_id,
-                    bin_label=rest.bin_label,
-                    side=rest.side,
-                    action="CANCEL_REPLACE",
-                    reason="CURRENT_MEAN_EDGE_NON_POSITIVE",
-                    detail=current_edge,
-                )
-        if decision is None:
-            # 2) Moved-book pull: our limit is at least one full tick behind the live best bid for our side.
-            bid = bid_by_cid.get((rest.condition_id, rest.side))
-            if bid is not None:
-                try:
-                    if _parse(bid.freshness_deadline) <= screen_time:
-                        bid = None
-                except (TypeError, ValueError):
-                    bid = None
-            if bid is not None:
-                drift = float(bid.price) - float(rest.limit_price)
-                # Gate the BOOK_MOVED microstructure pull behind the same 300s
-                # maker-window floor the value-refresh pull uses (and the
-                # escalation-arming floor in event_reactor_adapter). Pre-fix this
-                # pull had NO age guard, so a rest whose bid moved a tick was
-                # cancelled sub-floor, re-decided as a fresh non-escalated
-                # REST_DEFAULT, and pulled again — an infinite rest->pull->re-rest
-                # loop with 0 crosses / 0 +EV-band fills. Holding within the
-                # window lets the rest survive to escalation-eligibility so the
-                # next certified decision crosses TAKER_ESCALATED_AFTER_REST (still
-                # +EV-gated). Belief-decay (screen_reprice) stays ungated above, so
-                # fair-value protection on NEW evidence is unchanged.
-                # (2026-06-23 entry fill-lane diagnosis.)
-                if (
-                    drift >= REST_BOOK_DRIFT_TICKS * _quote_tick_size(bid.tick_size) - _EPS
-                    and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0
-                ):
-                    decision = RepriceDecision(
-                        family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,
-                        action="CANCEL_REPLACE", reason="BOOK_MOVED", detail=drift,
-                    )
-        if decision is None:
-            # 3) Confirmed-value refresh. This is not an age-only cancel: an aged maker rest is
-            # pulled only when the latest conservative held-side q_lcb still clears the current
-            # executable ask, fee, c95 tick, and a material-improvement floor. The cancel then
-            # routes through the existing EDLI cert path; _family_rest_state arms the
-            # post-real-maker-window escalation lane, and executor duplicate guards still own
-            # final submit safety.
-            ask = ask_by_cid.get((rest.condition_id, rest.side))
-            if ask is not None:
-                try:
-                    if _parse(ask.freshness_deadline) <= screen_time:
-                        ask = None
-                except (TypeError, ValueError):
-                    ask = None
-            if ask is not None and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0:
-                held_q_lcb = (
-                    _held_side_q_lcb(belief, bin_label=rest.bin_label, side=rest.side)
-                    if belief is not None
-                    else None
-                )
-                if held_q_lcb is not None:
-                    try:
-                        idx = belief.bin_labels.index(rest.bin_label) if belief is not None else -1
-                        yes_post = float(belief.p_posterior_vec[idx]) if idx >= 0 else float("nan")
-                        posterior_q = yes_post if rest.side == "buy_yes" else one_minus(yes_post)
-                    except (TypeError, ValueError, IndexError):
-                        posterior_q = float("nan")
-                    if math.isfinite(posterior_q):
-                        score = _entry_screen_robust_trade_score(
-                            q_posterior=posterior_q,
-                            q_lcb_5pct=float(held_q_lcb),
-                            price=float(ask.price),
-                            tick_size=ask.tick_size,
-                        )
-                        material_price_change = abs(float(ask.price) - float(rest.limit_price))
-                        material_refresh_floor = _improve_delta_for_tick(ask.tick_size)
-                        executable_tick = _quote_tick_size(ask.tick_size)
-                        if (
-                            material_price_change >= executable_tick - _EPS
-                            and score >= material_refresh_floor - _EPS
-                        ):
-                            decision = RepriceDecision(
-                                family_id=rest.family_id,
-                                bin_label=rest.bin_label,
-                                side=rest.side,
-                                action="CANCEL_REPLACE",
-                                reason="CONFIRMED_VALUE_REFRESH",
-                                detail=score,
-                            )
-        if decision is None:
-            # 4) Family optimum shift. A family-level duplicate mutex should not
-            # make a stale open rest invisible when a different sibling/direction
-            # is now the materially better executable window. Pull the old rest
-            # only after the maker window and only when the replacement leg has
-            # a positive robust edge that beats the current rest by round-trip
-            # friction; the full reactor still owns the replacement submit.
-            decision = _family_optimum_shift_pull(
-                rest,
-                belief=belief,
-                price_by_cid=ask_by_cid,
-                screen_time=screen_time,
-                value_refresh_min_age_seconds=value_refresh_min_age_seconds,
-            )
-        if decision is not None:
-            out.append((rest, decision))
-    return out

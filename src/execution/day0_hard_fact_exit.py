@@ -1806,8 +1806,8 @@ def evaluate_hard_fact_exit(
 # FIX 2 — resting-order cancel on bin death / family anomaly pause.
 # Minimal correct cut (adversarial review finding 4): day0 families' resting
 # ENTRY orders are cancelled when their bin is hard-fact dead for the order's
-# side, or when the family is oracle-anomaly paused. The general
-# screen_reprice/stale-quote cancel wiring remains future work.
+# side, or when the family is oracle-anomaly paused. Every other ENTRY rest
+# disposition is the C3 standing valuation (src.execution.staleness_cancel).
 # ---------------------------------------------------------------------------
 
 

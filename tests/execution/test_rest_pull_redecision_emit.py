@@ -259,8 +259,8 @@ def test_redecision_screen_manages_open_rests_outside_entry_fair_batch():
 
     source = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
 
-    assert source.count("management_beliefs = _all_latest_beliefs(") >= 2
-    assert source.count("beliefs=management_beliefs") >= 2
+    assert source.count("management_beliefs = _all_latest_beliefs(") == 1
+    assert source.count("beliefs=management_beliefs") == 1
     assert "_edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)" not in source
     assert "forecast_only_admissible=True" in source
     assert "_edli_open_rest_condition_scope(\n                open_rests,\n                management_beliefs," in source

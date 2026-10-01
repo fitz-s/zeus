@@ -8830,27 +8830,17 @@ def _get_c3_staleness_rate_budget():
 
 @_scheduler_job("c3_staleness_cancel")
 def _c3_staleness_cancel_cycle() -> None:
-    """W4.2 C3 staleness cancel path (SCH-W1.2-ORDER-STATE wiring).
+    """C3 standing ENTRY valuation (SCH-W1.2-ORDER-STATE wiring).
 
-    TTL/q-staleness successor to the retired ``maker_rest_escalation``. Two
-    independent clocks, composed as two passes inside
-    ``run_c3_staleness_cancel_cycle`` (not gated on each other):
-
-    - TTL (``rest_deadline_exceeded``) is the GLOBAL, UNCONDITIONAL GTC deadline
-      owner — it scans EVERY open ENTRY rest and runs on EVERY scheduled tick,
-      regardless of whether any ``SOURCE_RUN_ARRIVED`` event is pending. This is
-      the exact behavior the retired maker_rest_escalation job had; gating it
-      behind an event claim would strand expired rests during quiet forecast
-      periods (the orphaned-GTC bug this composition must not reintroduce).
-    - q-version/HWM staleness (``is_stale_pending_cancel``) scans every open
-      forecast-authority rest on every tick. ``SOURCE_RUN_ARRIVED`` events are
-      retained as wake/provenance hints, but cannot be the safety scope: raw HWM
-      may supersede an order's q before an event is emitted or claimed.
-
-    Cancels go out through the W2.1 batch cancel gateway (cutover_guard-gated;
-    W2.3 rate budget consulted at CANCEL priority), then a reconciled
+    Every scheduled tick revalues EVERY open ENTRY rest on current probability,
+    wealth and holdings (``run_c3_staleness_cancel_cycle``): KEEP journals the
+    current authority and takes no venue action; RESIZE and CANCEL go out
+    through the W2.1 batch cancel gateway (cutover_guard-gated; W2.3 rate
+    budget at CANCEL priority). Age and posterior identity never cancel by
+    themselves. ``SOURCE_RUN_ARRIVED`` events are claimed as wake/provenance
+    hints only; the valuation never depends on them. A reconciled
     ``EDLI_REDECISION_PENDING`` is emitted for every family whose cancel is
-    DURABLY confirmed.
+    DURABLY confirmed (a resize's fresh redecision).
     """
     edli_cfg = _settings_section("edli", {})
     if get_mode() != "live":
@@ -8891,7 +8881,6 @@ def _c3_staleness_cancel_cycle() -> None:
         )
 
     claimed_ids: list[str] = []
-    affected_cities: set[str] = set()
     try:
         world = get_world_connection()
         try:
@@ -8900,53 +8889,48 @@ def _c3_staleness_cancel_cycle() -> None:
                 event_type="SOURCE_RUN_ARRIVED", decision_time=now.isoformat(), limit=25
             )
             for event in events:
-                if not store.claim(event.event_id):
-                    continue
-                claimed_ids.append(event.event_id)
-                try:
-                    payload = json.loads(event.payload_json or "{}")
-                except Exception:  # noqa: BLE001
-                    payload = {}
-                affected_cities.update(str(c) for c in payload.get("affected_cities") or [])
+                if store.claim(event.event_id):
+                    claimed_ids.append(event.event_id)
             world.commit()
         finally:
             world.close()
-    except Exception as _event_lane_exc:  # noqa: BLE001 — FAIL-SOFT: the retired
-        # maker_rest_escalation TTL owner never depended on the event lane at
-        # all; a fault here (connection, schema, EventStore) must degrade to
-        # "no source event claimed this tick," never take down the TTL pass
-        # below (that would be an availability regression versus the deleted
-        # job this one replaces).
+    except Exception as _event_lane_exc:  # noqa: BLE001 — FAIL-SOFT: the
+        # valuation never depends on the event lane; a fault here (connection,
+        # schema, EventStore) degrades to "no source event claimed this tick".
         logger.warning(
             "c3_staleness_cancel: SOURCE_RUN_ARRIVED claim lane failed "
-            "(degrading to TTL-only this tick): %r",
+            "(valuation still runs this tick): %r",
             _event_lane_exc,
         )
         claimed_ids = []
-        affected_cities = set()
 
-    # UNCONDITIONAL: the TTL pass inside run_c3_staleness_cancel_cycle must run
-    # every tick regardless of claimed_ids. Zero claimed_ids still exercises
-    # both TTL and q-version/HWM checks over every open rest.
+    # UNCONDITIONAL: every open rest is revalued every tick regardless of
+    # claimed_ids.
     from src.data.polymarket_client import PolymarketClient
     from src.execution.staleness_cancel import run_c3_staleness_cancel_cycle
-    from src.state.db import get_forecasts_connection_read_only, get_trade_connection, get_trade_connection_read_only
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection,
+        get_trade_connection_read_only,
+        get_world_connection_read_only,
+    )
 
     trade_ro = get_trade_connection_read_only()
     trade_rw = get_trade_connection(write_class="live")
     forecasts_ro = get_forecasts_connection_read_only()
+    world_ro = get_world_connection_read_only()
     try:
         stats = run_c3_staleness_cancel_cycle(
             trade_ro,
             trade_rw,
             forecasts_ro,
             PolymarketClient(),
-            affected_cities=frozenset(affected_cities) if affected_cities else None,
+            world_conn_ro=world_ro,
             now=now,
             rate_budget=_get_c3_staleness_rate_budget(),
         )
     finally:
-        for c in (trade_ro, trade_rw, forecasts_ro):
+        for c in (trade_ro, trade_rw, forecasts_ro, world_ro):
             try:
                 c.close()
             except Exception:  # noqa: BLE001
@@ -8963,9 +8947,12 @@ def _c3_staleness_cancel_cycle() -> None:
             world2.close()
 
     logger.info(
-        "c3_staleness_cancel: events=%d scanned=%d cancel_set=%d confirmed_families=%d",
+        "c3_staleness_cancel: events=%d scanned=%d kept=%d resized=%d cancel_set=%d "
+        "confirmed_families=%d",
         len(claimed_ids),
         stats["scanned"],
+        stats["kept"],
+        stats["resized"],
         stats["cancel_set_size"],
         len(stats["confirmed_families"]),
     )
@@ -11038,15 +11025,11 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        # W4.2 C3 staleness cancel path (SCH-W1.2-ORDER-STATE wiring): the TTL/
-        # q-staleness successor to the retired maker_rest_escalation. Cancels GTC
-        # maker entry rests whose q_version has gone stale (SOURCE_RUN_ARRIVED) OR
-        # that have aged past the deadline (rest_deadline_exceeded — the same
-        # unconditional per-order backstop maker_rest_escalation used to own,
-        # 20min). 5-min cadence is well inside the deadline's 60-min derivation
-        # slack (taker_immediate_event_end_floor relation in the time-semantics
-        # registry). Also carries the recurring invalid-entry-authority cancel
-        # lane forward unchanged.
+        # C3 standing ENTRY valuation (SCH-W1.2-ORDER-STATE wiring): every
+        # 5 minutes each open ENTRY rest is revalued at its own limit with the
+        # selector's fractional-Kelly sizer and kept, resized (persisted cancel
+        # then redecision) or cancelled. No age deadline. Also carries the
+        # recurring invalid-entry-authority cancel lane forward unchanged.
         scheduler.add_job(
             _c3_staleness_cancel_cycle,
             "interval",

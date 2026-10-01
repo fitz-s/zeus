@@ -2317,7 +2317,7 @@ files:
   src/events/continuous_redecision.py:
     zone: K2_runtime
     authority_role: continuous_redecision_quote_overlay
-    why: Re-emits entry and resting-order decisions against current belief and executable quote evidence; the quote overlay reads only execution_feasibility_latest, so missing current rows remain absent authority instead of falling back to stale append history.
+    why: Re-emits entry decisions against current belief and executable quote evidence; the quote overlay reads only execution_feasibility_latest, so missing current rows remain absent authority instead of falling back to stale append history. Resting ENTRY value is not judged here (C3 standing valuation in src/execution/staleness_cancel.py owns it).
     downstream:
     - src/main.py
   src/events/candidate_evaluation.py:
@@ -3079,13 +3079,13 @@ files:
   src/state/order_state_predicates.py:
     zone: K2_runtime
     authority_role: derived_order_state_predicates
-    why: SCH-W1.2-ORDER-STATE (Option B, derived predicate — not stored state). Pure functions computing C3 q-staleness (is_stale_pending_cancel), submit-flight delay (is_delayed), and max-rest-age (rest_deadline_exceeded) from existing truth (venue_commands.q_version, CommandState dwell, rest age) instead of storing a recomputable classification. Closes the NULL-q rest-forever leak (critic ruling 2) — rest_deadline_exceeded applies to ALL open rests regardless of q_version. First wired to the cancel path by W4.2 (src/execution/staleness_cancel.py), which licensed the same-packet deletion of maker_rest_escalation.py.
+    why: SCH-W1.2-ORDER-STATE (Option B, derived predicate — not stored state). Pure functions for submit-flight delay (is_delayed) and the one standing ENTRY disposition (entry_rest_disposition — KEEP / RESIZE at one legal lot below the open remainder / CANCEL below one lot or at non-positive value). Age and posterior identity are not inputs (standing ENTRY keep-by-value, 2026-10-01; the retired is_stale_pending_cancel / rest_deadline_exceeded / bootstrap_rest_deadline_minutes cancelled on them).
     downstream:
     - src/execution/staleness_cancel.py
   src/execution/staleness_cancel.py:
     zone: K2_runtime
-    authority_role: c3_staleness_cancel_path
-    why: W4.2 (docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md §"C3 mark orders stale"). Every recurring tick classifies every open ENTRY rest via order_state_predicates (is_stale_pending_cancel + rest_deadline_exceeded) against current posterior/HWM authority; SOURCE_RUN_ARRIVED is a wake/provenance hint, never the sole safety scope. This prevents a missed event from leaving a stale-q maker remainder fillable after newer raw input blocks its posterior. The path builds the cancel-set and cancels it through the W2.1 batch cancel gateway (cutover_guard-gated; W2.3 rate budget at CANCEL priority). NO-WRITE staleness (Option B) — nothing here stores a classification. TTL/GTC-deadline successor to the deleted maker_rest_escalation.py; rest_deadline_exceeded is now the sole GTC TTL owner, behavior-continuous via bootstrap_rest_deadline_minutes().
+    authority_role: c3_standing_entry_valuation
+    why: The sole owner of open ENTRY rest value (standing ENTRY keep-by-value, 2026-10-01). Every recurring tick revalues every open ENTRY rest at its own limit with the selector's own BUY sizer (solver._score_global_single_order_buy_expected) on current ENTRY probability (_prepare_current_global_probability_family, HWM-enforced, then the same market-anchored correction), current wealth with the order's own unfilled reservation credited back, bound holdings, the runtime Kelly multiplier and the same per-token capital limit. order_state_predicates.entry_rest_disposition turns R* into KEEP (append-only decision_log authority row, no venue action, submission q_version/certificate untouched), RESIZE (no venue amend; persisted batch cancel, confirmed terminal reconciliation, then the reconciled redecision emit) or CANCEL; blocked or missing authority cancels protectively. All reads finish before the TRADE write (INV-37); CANCEL_REQUESTED is journaled before the W2.1 batch cancel gateway SDK call. Day0 dead-bin/anomaly is a separate merged lane. No age deadline; a posterior identity change only triggers revaluation.
     downstream:
     - src/main.py  # _c3_staleness_cancel_cycle scheduler job
   src/execution/venue_cancel_journal.py:

@@ -361,7 +361,6 @@ def _install_rest_priority_cycle_fakes(
     """Stop at scoped-freshness admission after exercising the two read phases."""
 
     import src.state.db as db
-    from src.events.continuous_redecision import RepriceDecision
 
     class ReachedRestFreshness(RuntimeError):
         pass
@@ -377,20 +376,10 @@ def _install_rest_priority_cycle_fakes(
         "command-1", "order-1", "family-000", "31C", "buy_yes",
         "City-000", "2026-09-21", "high", "condition-1",
     )
-    pull = (
-        rest,
-        RepriceDecision(
-            family_id=rest.family_id,
-            bin_label=rest.bin_label,
-            side=rest.side,
-            action="CANCEL_REPLACE",
-            reason="BOOK_MOVED",
-        ),
-    )
     beliefs = _screen_priority_beliefs()
     entry_family = ("City-000", "2026-09-21", "high")
     seen: dict[str, object] = {
-        "rest_screens": 0,
+        "rest_reads": 0,
         "fresh_scopes": [],
         "cancellations": [],
         "emitted": [],
@@ -407,7 +396,11 @@ def _install_rest_priority_cycle_fakes(
     monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: sqlite3.connect(":memory:"))
     monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: sqlite3.connect(":memory:"))
     monkeypatch.setattr(db, "get_world_connection", lambda: sqlite3.connect(":memory:"))
-    monkeypatch.setattr(reactor, "_edli_open_maker_rests_for_screen", lambda *_a, **_kw: [rest])
+    def _open_rests(*_a, **_kw):
+        seen["rest_reads"] = int(seen["rest_reads"]) + 1
+        return [rest]
+
+    monkeypatch.setattr(reactor, "_edli_open_maker_rests_for_screen", _open_rests)
     monkeypatch.setattr(reactor, "_edli_policy_blocked_open_rest_commands", lambda *_a, **_kw: {})
     monkeypatch.setattr(
         reactor,
@@ -442,7 +435,6 @@ def _install_rest_priority_cycle_fakes(
         )
         monkeypatch.setattr(reactor, "_edli_plan_unadmitted_redecision_expiry", lambda *_a, **_kw: None)
         monkeypatch.setattr(reactor, "_edli_apply_unadmitted_redecision_expiry", lambda *_a, **_kw: 0)
-        monkeypatch.setattr(reactor, "_edli_supersede_pending_redecisions_for_rest_pull_families", lambda *_a, **_kw: 0)
         monkeypatch.setattr(reactor, "_begin_world_write_without_convoy", lambda *_a, **_kw: True)
         monkeypatch.setattr(
             reactor,
@@ -515,12 +507,6 @@ def _install_rest_priority_cycle_fakes(
         lambda *_a, **_kw: {entry_family} if emit_completed_entry else set(),
     )
     monkeypatch.setattr(continuous_redecision, "entry_substrate_refresh_scope", lambda *_a, **_kw: {})
-
-    def _screen_resting(*_args, **_kwargs):
-        seen["rest_screens"] = int(seen["rest_screens"]) + 1
-        return [pull]
-
-    monkeypatch.setattr(continuous_redecision, "screen_resting_orders", _screen_resting)
     return ReachedRestFreshness, seen
 
 
@@ -552,7 +538,7 @@ def test_rest_freshness_survives_locally_timed_out_entry_screen(monkeypatch: pyt
     with pytest.raises(marker):
         reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
 
-    assert seen["rest_screens"] == 1
+    assert seen["rest_reads"] == 1
     assert seen["fresh_scopes"] == [{("City-000", "2026-09-21", "high"): {"condition-1"}}]
     assert 0 < reactor._edli_redecision_screen_belief_cursor < reactor._EDLI_REDECISION_FAIR_BATCH
 
@@ -573,12 +559,12 @@ def test_persistent_rest_still_allows_completed_entry_fair_batch(monkeypatch: py
         reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
 
     assert entry_calls == [8, 8, 8, 8, 8, 8, 8, 4]
-    assert seen["rest_screens"] == 1
+    assert seen["rest_reads"] == 1
     assert reactor._edli_redecision_screen_belief_cursor == reactor._EDLI_REDECISION_FAIR_BATCH
 
 
-def test_entry_timeout_keeps_rest_cancel_journal_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A locally deferred entry chunk still emits the rest flow before its existing journal call."""
+def test_entry_timeout_never_queues_a_rest_value_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A locally deferred entry chunk completes the cycle; an open rest's value is C3's."""
 
     from src.events import continuous_redecision
 
@@ -608,9 +594,7 @@ def test_entry_timeout_keeps_rest_cancel_journal_path(monkeypatch: pytest.Monkey
 
     reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
 
-    assert len(seen["cancellations"]) == 1
-    assert len(seen["cancellations"][0]) == 1
-    assert seen["cancellations"][0][0][1].reason == "BOOK_MOVED"
+    assert seen["cancellations"] == []
     assert 0 < reactor._edli_redecision_screen_belief_cursor < reactor._EDLI_REDECISION_FAIR_BATCH
 
 
@@ -687,10 +671,8 @@ def test_repeated_rest_phase_timeouts_continue_fair_cursor(monkeypatch: pytest.M
     assert reactor._edli_redecision_screen_belief_cursor == 32
 
 
-def test_stale_open_rest_refreshes_then_rescreens_and_queues_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An open rest without an initial pull still owns its exact refresh frontier."""
-
-    from src.events import continuous_redecision
+def test_stale_open_rest_owns_refresh_frontier_without_value_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An open rest still owns its exact refresh frontier; the screen never value-cancels it."""
 
     _marker, seen = _install_rest_priority_cycle_fakes(
         monkeypatch,
@@ -699,7 +681,6 @@ def test_stale_open_rest_refreshes_then_rescreens_and_queues_cancel(monkeypatch:
     )
     refreshed = False
     refresh_requests: list[tuple[set, list[str]]] = []
-    screen_calls = 0
 
     def _fresh_scope(scope, **_kwargs):
         return set(scope) if refreshed else set()
@@ -710,77 +691,13 @@ def test_stale_open_rest_refreshes_then_rescreens_and_queues_cancel(monkeypatch:
         refreshed = True
         return {"status": "requested"}
 
-    def _stale_then_moved(*_args, **_kwargs):
-        nonlocal screen_calls
-        screen_calls += 1
-        if screen_calls == 1:
-            return []
-        return [
-            (
-                SimpleNamespace(
-                    command_id="command-1",
-                    venue_order_id="order-1",
-                    family_id="family-000",
-                    bin_label="31C",
-                    side="buy_yes",
-                    city="City-000",
-                    target_date="2026-09-21",
-                    metric="high",
-                    condition_id="condition-1",
-                ),
-                continuous_redecision.RepriceDecision(
-                    family_id="family-000",
-                    bin_label="31C",
-                    side="buy_yes",
-                    action="CANCEL_REPLACE",
-                    reason="BOOK_MOVED",
-                ),
-            )
-        ]
-
     monkeypatch.setattr(reactor, "_edli_families_with_fresh_scoped_executable_substrate", _fresh_scope)
     monkeypatch.setattr(reactor, "_edli_refresh_continuous_money_path_families", _refresh)
-    monkeypatch.setattr(continuous_redecision, "screen_resting_orders", _stale_then_moved)
 
     reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
     assert refresh_requests == [
         ({("City-000", "2026-09-21", "high")}, ["condition-1"])
     ]
-    assert seen["cancellations"] == []
-    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
-
-    assert screen_calls == 3
-    assert len(seen["cancellations"]) == 1
-    assert seen["cancellations"][0][0][0].command_id == "command-1"
-
-
-def test_refreshed_rest_without_a_screen_pull_does_not_queue_cancel(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A refresh request is not cancel authority when the second screen has no pull."""
-
-    from src.events import continuous_redecision
-
-    _marker, seen = _install_rest_priority_cycle_fakes(
-        monkeypatch,
-        entry_screen=lambda *_args, **_kwargs: [],
-        complete_rest_flow=True,
-    )
-    refreshed = False
-
-    def _fresh_scope(scope, **_kwargs):
-        return set(scope) if refreshed else set()
-
-    def _refresh(*_args, **_kwargs):
-        nonlocal refreshed
-        refreshed = True
-        return {"status": "requested"}
-
-    monkeypatch.setattr(reactor, "_edli_families_with_fresh_scoped_executable_substrate", _fresh_scope)
-    monkeypatch.setattr(reactor, "_edli_refresh_continuous_money_path_families", _refresh)
-    monkeypatch.setattr(continuous_redecision, "screen_resting_orders", lambda *_args, **_kwargs: [])
-
-    reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
     reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
 
     assert seen["cancellations"] == []
@@ -832,12 +749,6 @@ def test_deferred_entry_drops_changed_belief_identity_before_emit(
         complete_rest_flow=True,
         emit_completed_entry=True,
     )
-    monkeypatch.setattr(
-        continuous_redecision,
-        "screen_resting_orders",
-        lambda *_args, **_kwargs: [],
-    )
-
     def _beliefs_after_refresh(*_args, **_kwargs):
         nonlocal reads
         reads += 1
@@ -848,7 +759,8 @@ def test_deferred_entry_drops_changed_belief_identity_before_emit(
 
     reactor.run_edli_continuous_redecision_screen_cycle(screen_lock=threading.Lock())
 
-    assert reads == 3
+    # Initial scan + post-refresh rescan; rest value is not read here (C3 owns it).
+    assert reads == 2
     assert seen["emitted"] == []
 
 
@@ -1796,242 +1708,6 @@ def test_fresh_screen_preserves_processing_until_full_claim_lease_expires():
     assert tuple(row) == (
         "expired",
         "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed",
-    )
-
-
-def test_recent_rest_pull_redecision_survives_generic_no_edge_expiry():
-    """Cancel/reprice continuity must survive after the rest leaves the open-rest set."""
-
-    world = sqlite3.connect(":memory:")
-    world.row_factory = sqlite3.Row
-    init_schema(world)
-    _install_active_redecision_projection(world)
-    store = EventStore(world, consumer_name="edli_reactor_v1")
-    payload = dataclasses.asdict(
-        _ready_payload(
-            city="Paris",
-            target_date="2026-06-19",
-            metric="low",
-            source_run_id="run-rest-pull",
-            snapshot_id="snap-rest-pull",
-        )
-    )
-    payload["redecision_origin"] = "rest_pull"
-    rest_pull = make_opportunity_event(
-        event_type="EDLI_REDECISION_PENDING",
-        entity_key="Paris|2026-06-19|low|run-rest-pull",
-        source="cycle-rest-pull",
-        observed_at="2026-06-17T15:45:00+00:00",
-        available_at="2026-06-17T15:45:00+00:00",
-        received_at="2026-06-17T15:45:00+00:00",
-        causal_snapshot_id="snap-rest-pull",
-        payload=payload,
-        priority=50,
-        created_at="2026-06-17T15:45:00+00:00",
-    )
-    store.insert_or_ignore(rest_pull)
-
-    expired = reactor._edli_expire_unadmitted_redecision_pending(
-        world,
-        set(),
-        decision_time="2026-06-17T16:00:00+00:00",
-    )
-
-    row = world.execute(
-        """
-        SELECT p.processing_status, p.last_error
-          FROM opportunity_events e
-          JOIN opportunity_event_processing p ON p.event_id = e.event_id
-         WHERE e.entity_key = ?
-        """,
-        (rest_pull.entity_key,),
-    ).fetchone()
-    assert expired == 0
-    assert tuple(row) == ("pending", None)
-
-
-def test_rest_pull_supersedes_generic_pending_redecision_blocker():
-    """A live rest-pull must not be suppressed by an older generic pending row."""
-
-    world = sqlite3.connect(":memory:")
-    world.row_factory = sqlite3.Row
-    init_schema(world)
-    store = EventStore(world, consumer_name="edli_reactor_v1")
-    generic_payload = dataclasses.asdict(
-        _ready_payload(
-            city="Ankara",
-            target_date="2026-06-29",
-            metric="high",
-            source_run_id="run-generic",
-            snapshot_id="snap-generic",
-        )
-    )
-    generic_payload["redecision_origin"] = "market_price"
-    generic = make_opportunity_event(
-        event_type="EDLI_REDECISION_PENDING",
-        entity_key="Ankara|2026-06-29|high|run-generic",
-        source="market-channel",
-        observed_at="2026-06-28T04:20:00+00:00",
-        available_at="2026-06-28T04:20:00+00:00",
-        received_at="2026-06-28T04:20:00+00:00",
-        causal_snapshot_id="snap-generic",
-        payload=generic_payload,
-        priority=50,
-        created_at="2026-06-28T04:20:00+00:00",
-    )
-    rest_payload = dict(generic_payload)
-    rest_payload["source_run_id"] = "run-rest"
-    rest_payload["snapshot_id"] = "snap-rest"
-    rest_payload["redecision_origin"] = "rest_pull"
-    rest_pull = make_opportunity_event(
-        event_type="EDLI_REDECISION_PENDING",
-        entity_key="Ankara|2026-06-29|high|run-rest",
-        source="rest-pull",
-        observed_at="2026-06-28T04:21:00+00:00",
-        available_at="2026-06-28T04:21:00+00:00",
-        received_at="2026-06-28T04:21:00+00:00",
-        causal_snapshot_id="snap-rest",
-        payload=rest_payload,
-        priority=50,
-        created_at="2026-06-28T04:21:00+00:00",
-    )
-    store.insert_or_ignore(generic)
-    store.insert_or_ignore(rest_pull)
-
-    expired = reactor._edli_supersede_pending_redecisions_for_rest_pull_families(
-        world,
-        {("Ankara", "2026-06-29", "high")},
-        decision_time="2026-06-28T04:22:00+00:00",
-    )
-
-    rows = dict(
-        world.execute(
-            """
-            SELECT e.entity_key, p.processing_status || ':' || COALESCE(p.last_error, '')
-              FROM opportunity_events e
-              JOIN opportunity_event_processing p ON p.event_id = e.event_id
-             WHERE p.consumer_name = ?
-            """,
-            (store.consumer_name,),
-        ).fetchall()
-    )
-    assert expired == 1
-    assert rows[generic.entity_key] == (
-        "expired:REDECISION_SUPERSEDED_BY_REST_PULL:open_rest_requires_cancel_reprice"
-    )
-    assert rows[rest_pull.entity_key] == "pending:"
-
-
-def test_rest_pull_supersede_leaves_processing_redecision_alone():
-    """The rest-pull blocker cleanup must not terminalize an in-flight reactor claim."""
-
-    world = sqlite3.connect(":memory:")
-    world.row_factory = sqlite3.Row
-    init_schema(world)
-    store = EventStore(world, consumer_name="edli_reactor_v1")
-    payload = dataclasses.asdict(
-        _ready_payload(
-            city="Ankara",
-            target_date="2026-06-29",
-            metric="high",
-            source_run_id="run-processing",
-            snapshot_id="snap-processing",
-        )
-    )
-    payload["redecision_origin"] = "market_price"
-    event = make_opportunity_event(
-        event_type="EDLI_REDECISION_PENDING",
-        entity_key="Ankara|2026-06-29|high|run-processing",
-        source="market-channel",
-        observed_at="2026-06-28T04:20:00+00:00",
-        available_at="2026-06-28T04:20:00+00:00",
-        received_at="2026-06-28T04:20:00+00:00",
-        causal_snapshot_id="snap-processing",
-        payload=payload,
-        priority=50,
-        created_at="2026-06-28T04:20:00+00:00",
-    )
-    store.insert_or_ignore(event)
-    world.execute(
-        """
-        UPDATE opportunity_event_processing
-           SET processing_status = 'processing',
-               claimed_at = '2026-06-28T04:21:00+00:00',
-               updated_at = '2026-06-28T04:21:00+00:00'
-         WHERE event_id = ?
-        """,
-        (event.event_id,),
-    )
-
-    expired = reactor._edli_supersede_pending_redecisions_for_rest_pull_families(
-        world,
-        {("Ankara", "2026-06-29", "high")},
-        decision_time="2026-06-28T04:22:00+00:00",
-    )
-
-    row = world.execute(
-        """
-        SELECT processing_status, last_error
-          FROM opportunity_event_processing
-         WHERE event_id = ?
-        """,
-        (event.event_id,),
-    ).fetchone()
-    assert expired == 0
-    assert tuple(row) == ("processing", None)
-
-
-def test_old_rest_pull_redecision_still_expires_without_current_edge():
-    """The rest-pull grace is a continuity window, not an infinite pending queue."""
-
-    world = sqlite3.connect(":memory:")
-    world.row_factory = sqlite3.Row
-    init_schema(world)
-    _install_active_redecision_projection(world)
-    store = EventStore(world, consumer_name="edli_reactor_v1")
-    payload = dataclasses.asdict(
-        _ready_payload(
-            city="Paris",
-            target_date="2026-06-19",
-            metric="low",
-            source_run_id="run-old-rest-pull",
-            snapshot_id="snap-old-rest-pull",
-        )
-    )
-    payload["redecision_origin"] = "rest_pull"
-    old_rest_pull = make_opportunity_event(
-        event_type="EDLI_REDECISION_PENDING",
-        entity_key="Paris|2026-06-19|low|run-old-rest-pull",
-        source="cycle-old-rest-pull",
-        observed_at="2026-06-17T15:00:00+00:00",
-        available_at="2026-06-17T15:00:00+00:00",
-        received_at="2026-06-17T15:00:00+00:00",
-        causal_snapshot_id="snap-old-rest-pull",
-        payload=payload,
-        priority=50,
-        created_at="2026-06-17T15:00:00+00:00",
-    )
-    store.insert_or_ignore(old_rest_pull)
-
-    expired = reactor._edli_expire_unadmitted_redecision_pending(
-        world,
-        set(),
-        decision_time="2026-06-17T16:00:00+00:00",
-    )
-
-    row = world.execute(
-        """
-        SELECT p.processing_status, p.last_error
-          FROM opportunity_events e
-          JOIN opportunity_event_processing p ON p.event_id = e.event_id
-         WHERE e.entity_key = ?
-        """,
-        (old_rest_pull.entity_key,),
-    ).fetchone()
-    assert expired == 1
-    assert tuple(row) == (
-        "expired",
-        "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value",
     )
 
 
@@ -3017,7 +2693,7 @@ def test_redecision_screen_separates_entry_from_held_reemit():
     assert "raw_entry_family_keys = screened_family_keys" in screen_src
     assert "family_keys = _edli_entry_redecision_family_keys" in screen_src
     assert "held_reemit_families = _edli_reemittable_held_position_family_keys" in screen_src
-    assert "all_families = set(family_keys) | rest_pull_families | held_reemit_families" in screen_src
+    assert "all_families = set(family_keys) | held_reemit_families" in screen_src
     assert "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d" in screen_src
     assert "suppressed_existing_pending=%d" in screen_src
     assert "no_current_edge_or_rest_reprice_value" in inspect.getsource(
@@ -3026,86 +2702,11 @@ def test_redecision_screen_separates_entry_from_held_reemit():
 
 
 def test_redecision_screen_keeps_day0_capital_obligations_in_reemit_scope():
-    """Day0 phase filtering cannot erase rest-pull escalation or held redecision."""
+    """Day0 phase filtering cannot erase held redecision."""
 
     screen_src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
 
-    assert (
-        "phase_filter_exempt_families=(\n"
-        "                        set(rest_pull_families) | set(held_reemit_families)\n"
-        "                    )"
-    ) in screen_src
-
-
-def test_rest_pull_condition_scope_uses_rest_family_identity_without_belief():
-    """Open maker-rest pulls must not disappear when the entry belief subset is empty."""
-
-    from src.events.continuous_redecision import OpenRest, RepriceDecision
-
-    rest = OpenRest(
-        command_id="cmd-rest",
-        venue_order_id="order-rest",
-        family_id="family-rest",
-        bin_label="20C",
-        side="buy_yes",
-        condition_id="cond-rest",
-        resting_posterior=0.7,
-        resting_snapshot_id="snap-rest",
-        limit_price=0.4,
-        quote_age_ms=301_000,
-        city="Paris",
-        target_date="2026-06-20",
-        metric="low",
-    )
-    decision = RepriceDecision(
-        family_id="family-rest",
-        bin_label="20C",
-        side="buy_yes",
-        action="CANCEL_REPLACE",
-        reason="BOOK_MOVED",
-        detail=0.02,
-    )
-
-    assert reactor._edli_rest_pull_condition_scope([(rest, decision)], []) == {
-        ("Paris", "2026-06-20", "low"): {"cond-rest"}
-    }
-
-
-def test_rest_pull_condition_scope_includes_family_optimum_replacement_condition():
-    """Replacement pulls must refresh the sibling condition before redecision emits."""
-
-    from src.events.continuous_redecision import OpenRest, RepriceDecision
-
-    rest = OpenRest(
-        command_id="cmd-rest",
-        venue_order_id="order-rest",
-        family_id="family-rest",
-        bin_label="29C",
-        side="buy_no",
-        condition_id="cond-old",
-        resting_posterior=0.7,
-        resting_snapshot_id="snap-rest",
-        limit_price=0.6,
-        quote_age_ms=301_000,
-        city="Shanghai",
-        target_date="2026-06-20",
-        metric="high",
-    )
-    decision = RepriceDecision(
-        family_id="family-rest",
-        bin_label="29C",
-        side="buy_no",
-        action="CANCEL_REPLACE",
-        reason="FAMILY_OPTIMUM_SHIFT",
-        detail=0.12,
-        replacement_condition_id="cond-new",
-        replacement_bin_label="30C",
-        replacement_side="buy_yes",
-    )
-
-    assert reactor._edli_rest_pull_condition_scope([(rest, decision)], []) == {
-        ("Shanghai", "2026-06-20", "high"): {"cond-old", "cond-new"}
-    }
+    assert "phase_filter_exempt_families=set(held_reemit_families)" in screen_src
 
 
 def test_entry_redecision_excludes_current_held_families(monkeypatch):
@@ -3907,7 +3508,7 @@ def test_redecision_screen_write_locks_are_bounded_and_emit_uses_prefetched_pend
     assert "_edli_acquire_mutex(prune_mutex" in src
     assert "_edli_acquire_mutex(emit_mutex" in src
     emit_block = src[src.rindex("world = get_world_connection()") : src.index(
-        "# 3) CANCEL the pulled rests"
+        "events_emitted=%d expired_unadmitted=%d expired_stale_pending=%d"
     )]
     assert "_edli_pending_entity_keys(world" not in emit_block
     assert "if event.entity_key in pending:" in emit_block
@@ -3932,7 +3533,7 @@ def test_redecision_screen_opens_connection_before_mutex_and_begins_after():
     ]
     emit = src[
         src.rindex("emit_mutex = _world_write_mutex()") :
-        src.index("# 3) CANCEL the pulled rests")
+        src.index("events_emitted=%d expired_unadmitted=%d expired_stale_pending=%d")
     ]
 
     for block, acquire, writer, close, release in (

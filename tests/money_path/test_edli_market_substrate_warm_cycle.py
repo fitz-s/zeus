@@ -814,7 +814,6 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "async_confirmation_requested" in screen_src
     assert "confirmed_entry_scope = set(family_keys)" in screen_src
     assert "family_keys &= confirmed_entry_scope" in screen_src
-    assert "rest_pull_families &= confirmed_rest_scope" in screen_src
     assert "open_rest_condition_scope = _edli_open_rest_condition_scope(" in screen_src
     assert "                management_beliefs,\n            )" in screen_src
     assert "_missing_scope(open_rest_condition_scope)" in screen_src
@@ -1967,15 +1966,16 @@ def test_confirm_priority_condition_ids_are_bounded_money_path_frontier(monkeypa
     family_b = ("Shanghai", "2026-06-20", "high")
 
     condition_ids = reactor._edli_confirm_priority_condition_ids(
-        rest_condition_scope={family_b: {"rest-2", "rest-1"}},
-        held_condition_scope={family_a: {"held-1"}},
+        held_condition_scope={family_a: {"held-1"}, family_b: {"held-2"}},
         entry_condition_scope={family_a: {"entry-1"}},
         entry_refresh_condition_scope={family_a: {"refresh-1", "refresh-2"}},
-        open_rest_condition_scope={family_a: {"open-rest-1"}},
+        open_rest_condition_scope={family_b: {"open-rest-2", "open-rest-1"}},
         full_family_refresh_families={family_a},
     )
 
-    assert condition_ids == ["rest-1", "rest-2"]
+    # family_a is a full-family refresh: none of its conditions are listed.
+    # family_b: held first, then its open rests, bounded by the limit.
+    assert condition_ids == ["held-2", "open-rest-1", "open-rest-2"]
 
 
 def test_redecision_priority_defaults_service_live_money_frontier(monkeypatch):

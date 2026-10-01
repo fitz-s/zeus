@@ -166,11 +166,10 @@ def _seed_prior_rest(trade, forecasts, *, city, target_date, at):
     trade.commit();forecasts.commit()
 
 
-def _cancel_prior_rest(trade, forecasts, *, bundle, at):
-    """Real C3 classification/batch cancellation; denied budget cannot authorize replacement."""
-    from src.execution.staleness_cancel import run_c3_staleness_cancel_cycle, read_current_family_q_versions
+def _cancel_prior_rest(trade, forecasts, world, *, bundle, at):
+    """Real C3 valuation/batch cancellation; denied budget cannot authorize replacement."""
+    from src.execution.staleness_cancel import run_c3_staleness_cancel_cycle
     family=(bundle.city,bundle.target_date,bundle.temperature_metric)
-    assert read_current_family_q_versions(forecasts,(family,),now=at)[family]==bundle.posterior_identity_hash
     class Venue:
         def __init__(self): self.calls=[]
         def cancel_orders_batch(self, ids):
@@ -183,17 +182,23 @@ def _cancel_prior_rest(trade, forecasts, *, bundle, at):
         def try_acquire(self,_request_class):
             return SimpleNamespace(granted=self.allowed,decision=SimpleNamespace(value='DENIED'))
     venue=Venue();budget=Budget();started=time.monotonic_ns()
-    denied=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,now=at,rate_budget=budget)
+    denied=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,world_conn_ro=world,now=at,rate_budget=budget)
     assert denied['cancel_set_size']==1,denied
+    # This harness has no complete current global scope for the prior rest's
+    # family, so C3 cancels it protectively (unavailable authority), never on
+    # q_version inequality: a posterior identity change alone is not a cancel.
+    [prior]=denied['valuations']
+    assert prior.action=='CANCEL' and prior.evidence['authority_valid'] is False,prior
+    assert prior.reason.startswith('ENTRY_REST_CURRENT_SCOPE_UNAVAILABLE'),prior
     assert not denied['confirmed_families'] and not venue.calls
     assert trade.execute('SELECT COUNT(*) FROM venue_commands').fetchone()[0]==1
     budget.allowed=True
-    confirmed=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,now=at,rate_budget=budget)
+    confirmed=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,world_conn_ro=world,now=at,rate_budget=budget)
     assert confirmed['confirmed_families']=={family},confirmed
     assert trade.execute("SELECT state FROM venue_commands WHERE command_id='prior-rest'").fetchone()[0]=='CANCELLED'
     trade.commit()
     assert venue.calls==[['prior-venue']]
-    replay=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,now=at,rate_budget=budget)
+    replay=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,world_conn_ro=world,now=at,rate_budget=budget)
     assert replay['cancel_set_size']==0 and len(venue.calls)==1
     return (time.monotonic_ns()-started)/1e6
 
@@ -512,7 +517,7 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     assert abs(sum(read.bundle.q.values())-1)<1e-9
     q_served_monotonic=time.monotonic_ns()
 
-    cancel_ms=(_cancel_prior_rest(trade,conn,bundle=read.bundle,at=now)
+    cancel_ms=(_cancel_prior_rest(trade,conn,world,bundle=read.bundle,at=now)
                if reaction_path=='replace' else None)
     auction,auction_ms=_auction_from_served_observation(read.bundle,at=now,trade=trade)
     print('MEASURED_GLOBAL_AUCTION',json.dumps({'auction_ms':auction_ms,

@@ -1,10 +1,10 @@
 # Created: 2026-07-24
-# Lifecycle: created=2026-07-24; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-07-24; last_reviewed=2026-10-01; last_reused=2026-07-24
 # Authority basis: docs/operations/current/plans/ultimate_alpha_2026-07-23/FINAL_SPEC.md
 #   (§certificate validity — valid_until min-formula, τ_next issue boundary, fail-closed on
 #   missing next-issue metadata) + COLLISION.md commit group D. Pins the certificate-validity
 #   contract for the continuous-redecision decision basis: τ_next composition, valid_until
-#   min-formula, expired-basis fail-closed, release-boundary resting pull, and the
+#   min-formula, expired-basis fail-closed, and the
 #   missing-τ_next new-entry fail-closed (exit/monitor never blocked).
 """Certificate validity across forecast issues (commit group D).
 
@@ -223,63 +223,6 @@ def test_construction_valid_until_none_for_unknown_metric() -> None:
     assert belief.next_authoritative_issue_at is None
 
 
-# ── CERT_EXPIRY_PULL: a resting maker order is pulled once its belief certificate expires ─────────
-
-
-def _rest(*, family_id: str, snapshot_id: str = "snap1"):
-    import src.events.continuous_redecision as cr
-
-    return cr.OpenRest(
-        command_id="cmd1",
-        venue_order_id="vo1",
-        family_id=family_id,
-        bin_label="b1",
-        side="buy_yes",
-        condition_id="0xc1",
-        resting_posterior=0.62,
-        resting_snapshot_id=snapshot_id,
-        limit_price=0.30,
-        quote_age_ms=0.0,
-    )
-
-
-def test_cert_expiry_pull_fires_on_expired_rest() -> None:
-    import sqlite3
-
-    import src.events.continuous_redecision as cr
-
-    family_id = "hyp|live|NYC|2026-07-24|high|d"
-    world = _world_with_belief(
-        family_id=family_id, metric="high", recorded_at="2026-07-24T00:00:00+00:00"
-    )
-    trade = sqlite3.connect(":memory:")  # no book rows needed; cert pull fires before any quote read
-    # valid_until = 10:45; screen at 11:00 → past the certificate boundary → CERT_EXPIRY_PULL.
-    pulls = cr.screen_resting_orders(
-        world,
-        trade,
-        open_rests=[_rest(family_id=family_id)],
-        decision_time="2026-07-24T11:00:00+00:00",
-    )
-    assert len(pulls) == 1
-    _rest_out, decision = pulls[0]
-    assert decision.reason == "CERT_EXPIRY_PULL"
-    assert decision.action == "CANCEL_REPLACE"
-
-
-def test_no_cert_expiry_pull_when_valid_until_none() -> None:
-    import sqlite3
-
-    import src.events.continuous_redecision as cr
-
-    family_id = "hyp|live|NYC|2026-07-24|na|d"
-    world = _world_with_belief(
-        family_id=family_id, metric="", recorded_at="2026-07-24T00:00:00+00:00"
-    )
-    trade = sqlite3.connect(":memory:")
-    pulls = cr.screen_resting_orders(
-        world,
-        trade,
-        open_rests=[_rest(family_id=family_id)],
-        decision_time="2026-07-24T11:00:00+00:00",
-    )
-    assert pulls == []
+# A resting ENTRY order is not pulled on its cached belief's certificate expiry: the
+# C3 standing valuation (tests/execution/test_standing_entry_value.py) revalues it on
+# current probability every tick and cancels protectively when that authority is blocked.

@@ -1,10 +1,11 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-27
+# Last reused/audited: 2026-10-01
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md
-#   (SCH-W1.2-ORDER-STATE) + docs/operations/current/plans/order_engine_rebuild_execution_plan_2026-07-02.md
-#   W4 row (C3 staleness path, same packet: DELETE maker_rest_escalation).
-"""W4.2 C3 staleness cancel path: classification, family resolution, and the
-scan -> classify -> cancel -> confirm -> reconciled re-solve orchestration."""
+#   (SCH-W1.2-ORDER-STATE) C3 path; standing ENTRY keep-by-value law (operator, 2026-09-30):
+#   an open ENTRY rest is kept, resized or cancelled on current fractional-Kelly value,
+#   never on age or posterior identity.
+"""C3 standing ENTRY valuation: readers, family resolution, persistence, cancel,
+and the reconciled-redecision gate."""
 
 from __future__ import annotations
 
@@ -18,20 +19,25 @@ import pytest
 
 import src.execution.staleness_cancel as staleness_cancel_module
 from src.execution.staleness_cancel import (
+    StandingEntryValuation,
     _merge_cancel_proposals,
-    classify_cancel_set,
     find_open_entry_rests,
-    maker_rest_escalation_armed_token_ids,
-    read_current_family_q_versions,
+    persist_standing_entry_values,
     resolve_order_families,
     run_c3_staleness_cancel_cycle,
 )
-from src.state.order_state_predicates import bootstrap_rest_deadline_minutes
 
 UTC = timezone.utc
 NOW = datetime(2026, 7, 3, 22, 0, 0, tzinfo=UTC)
-DEADLINE_MIN = bootstrap_rest_deadline_minutes()
 FAMILY = ("Miami", "2026-07-04", "high")
+
+
+@pytest.fixture(autouse=True)
+def _dry_run_entry_fixture_mode(monkeypatch):
+    """Fixtures seed already-acknowledged rests; live ENTRY admission is not under test."""
+    monkeypatch.delenv("ZEUS_ENTRY_Q_VERSION_STRICT", raising=False)
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
+    monkeypatch.setenv("ZEUS_MODE", "dry_run")
 
 
 def _entry(command_id: str, *, q_version, age_minutes: float, family=FAMILY) -> dict:
@@ -49,127 +55,16 @@ def _entry(command_id: str, *, q_version, age_minutes: float, family=FAMILY) -> 
     }
 
 
-# ---------------------------------------------------------------------------
-# classify_cancel_set: pure predicate wiring
-# ---------------------------------------------------------------------------
-
-
-class TestNoOrphanedGtcHandoverProof:
-    """rest_deadline_exceeded is the sole GTC TTL owner: every open rest older
-    than the deadline lands in the cancel-set REGARDLESS of q_version — the
-    same unconditional per-order backstop maker_rest_escalation used to own.
-    """
-
-    @pytest.mark.parametrize(
-        "q_version,current_q,label",
-        [
-            (None, None, "null_stamp_blind_family"),
-            (None, "q-fresh", "null_stamp_known_family"),
-            ("q-fresh", "q-fresh", "matching_q_not_stale"),
-            ("q-old", "q-fresh", "stale_q"),
-            ("q-old", None, "blind_family_indeterminate"),
-        ],
+def _keep(command_id: str, venue_order_id: str, token_id: str) -> StandingEntryValuation:
+    return StandingEntryValuation(
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+        token_id=token_id,
+        family=FAMILY,
+        action="KEEP",
+        reason="CURRENT_ENTRY_REST_VALUE_POSITIVE",
+        evidence={"authority_valid": True, "probability_witness_identity": "w"},
     )
-    def test_aged_past_deadline_always_cancelled(self, q_version, current_q, label):
-        entry = _entry("c1", q_version=q_version, age_minutes=DEADLINE_MIN + 5)
-        families_by_command = {"c1": FAMILY}
-        q_by_family = {FAMILY: current_q}
-
-        cancel_set = classify_cancel_set(
-            [entry], families_by_command, q_by_family, now=NOW, deadline_minutes=DEADLINE_MIN
-        )
-
-        assert len(cancel_set) == 1, label
-        assert "REST_DEADLINE_EXCEEDED" in cancel_set[0]["cancel_reason"]
-
-
-class TestIndeterminateNoCancel:
-    """INDETERMINATE (NULL stamp, or family with no servable q) never
-    contributes a q-staleness cancel. A FRESH order (well under the TTL
-    deadline) in that state must not be cancelled at all — the fail-closed
-    "do not churn cancels on a blind family" law.
-    """
-
-    def test_null_stamp_fresh_order_not_cancelled(self):
-        entry = _entry("c1", q_version=None, age_minutes=5.0)
-        cancel_set = classify_cancel_set(
-            [entry], {"c1": FAMILY}, {FAMILY: "q-fresh"}, now=NOW, deadline_minutes=DEADLINE_MIN
-        )
-        assert cancel_set == []
-
-    def test_blocked_family_fresh_order_not_cancelled(self):
-        entry = _entry("c1", q_version="q-old", age_minutes=5.0)
-        cancel_set = classify_cancel_set(
-            [entry], {"c1": FAMILY}, {FAMILY: None}, now=NOW, deadline_minutes=DEADLINE_MIN
-        )
-        assert cancel_set == []
-
-    def test_unresolved_family_fresh_order_not_cancelled(self):
-        entry = _entry("c1", q_version="q-old", age_minutes=5.0)
-        cancel_set = classify_cancel_set(
-            [entry], {"c1": None}, {}, now=NOW, deadline_minutes=DEADLINE_MIN
-        )
-        assert cancel_set == []
-
-
-class TestQVersionStaleCancel:
-    def test_stale_fresh_order_is_cancelled_for_staleness_only(self):
-        entry = _entry("c1", q_version="q-old", age_minutes=5.0)
-        cancel_set = classify_cancel_set(
-            [entry], {"c1": FAMILY}, {FAMILY: "q-new"}, now=NOW, deadline_minutes=DEADLINE_MIN
-        )
-        assert len(cancel_set) == 1
-        assert cancel_set[0]["cancel_reason"] == "Q_VERSION_STALE"
-
-    def test_matching_q_fresh_order_untouched(self):
-        entry = _entry("c1", q_version="q-same", age_minutes=5.0)
-        cancel_set = classify_cancel_set(
-            [entry], {"c1": FAMILY}, {FAMILY: "q-same"}, now=NOW, deadline_minutes=DEADLINE_MIN
-        )
-        assert cancel_set == []
-
-    @pytest.mark.parametrize(
-        "age_minutes,current_q",
-        [
-            (5.0, "q-new"),
-            (DEADLINE_MIN + 5, "q-old"),
-        ],
-    )
-    def test_sub_min_partial_remainder_is_cancelled_and_redecided(
-        self, age_minutes, current_q
-    ):
-        entry = _entry("c1", q_version="q-old", age_minutes=age_minutes)
-        entry["matched_size"] = "1"
-        entry["min_order_size"] = "5"
-
-        cancel_set = classify_cancel_set(
-            [entry], {"c1": FAMILY}, {FAMILY: current_q}, now=NOW, deadline_minutes=DEADLINE_MIN
-        )
-
-        assert len(cancel_set) == 1
-        expected_reason = (
-            "Q_VERSION_STALE"
-            if current_q == "q-new"
-            else "REST_DEADLINE_EXCEEDED"
-        )
-        assert cancel_set[0]["cancel_reason"] == expected_reason
-
-    def test_partial_fill_at_or_above_minimum_still_cancels_when_stale(self):
-        entry = _entry("c1", q_version="q-old", age_minutes=5.0)
-        entry["matched_size"] = "5"
-        entry["min_order_size"] = "5"
-
-        cancel_set = classify_cancel_set(
-            [entry], {"c1": FAMILY}, {FAMILY: "q-new"}, now=NOW, deadline_minutes=DEADLINE_MIN
-        )
-
-        assert len(cancel_set) == 1
-        assert cancel_set[0]["cancel_reason"] == "Q_VERSION_STALE"
-
-
-# ---------------------------------------------------------------------------
-# find_open_entry_rests / resolve_order_families / read_current_family_q_versions
-# ---------------------------------------------------------------------------
 
 
 def _trade_db() -> sqlite3.Connection:
@@ -212,10 +107,9 @@ def _seed_open_entry(
 ) -> None:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
-    from src.execution.command_bus import IntentKind
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.snapshot_repo import insert_snapshot
-    from src.state.venue_command_repo import insert_command, insert_submission_envelope
+    from src.state.venue_command_repo import insert_submission_envelope
 
     init_collateral_schema(conn)
     snapshot_id = f"snap-{command_id}"
@@ -274,22 +168,24 @@ def _seed_open_entry(
         ),
         envelope_id=envelope_id,
     )
-    insert_command(
-        conn, command_id=command_id, snapshot_id=snapshot_id, envelope_id=envelope_id, position_id=f"pos-{command_id}",
-        decision_id=f"decision-{command_id}", idempotency_key=command_id.ljust(32, "0")[:32],
-        intent_kind=IntentKind.ENTRY.value, market_id=f"cond-{token_id}", token_id=token_id, side="BUY",
-        size=10.0, price=0.50, created_at=created_at.isoformat(), snapshot_checked_at=created_at.isoformat(),
-        q_version=q_version,
-    )
     now = created_at.isoformat()
-    # Advance straight to ACKED+venue_order_id by direct UPDATE rather than
-    # append_event(SUBMIT_REQUESTED/SUBMIT_ACKED): ENTRY SUBMIT_REQUESTED
-    # validates a full execution_capability payload this fixture has no need
-    # to construct — find_open_entry_rests/cancel_commands_batch only read the
-    # CURRENT venue_commands.state/venue_order_id, not the event history.
+    # An already-acknowledged rest is an input fixture: insert the ACKED row
+    # directly. Live ENTRY admission (certificate closure, SUBMIT_REQUESTED
+    # capability payload) is not under test; C3 reads only the current
+    # venue_commands row, its order facts and its submission snapshot.
     conn.execute(
-        "UPDATE venue_commands SET state = 'ACKED', venue_order_id = ?, updated_at = ? WHERE command_id = ?",
-        (venue_order_id, now, command_id),
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, created_at, updated_at, q_version
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', ?, ?, 'BUY', 10.0, 0.50, ?, 'ACKED', ?, ?, ?)
+        """,
+        (
+            command_id, snapshot_id, envelope_id, f"pos-{command_id}", f"decision-{command_id}",
+            command_id.ljust(32, "0")[:32], f"cond-{token_id}", token_id, venue_order_id,
+            now, now, q_version,
+        ),
     )
     conn.execute(
         "INSERT INTO venue_order_facts (venue_order_id, command_id, state, remaining_size, matched_size, "
@@ -347,209 +243,12 @@ def _seed_submit_requested_forecast_q_payload(
     conn.commit()
 
 
-def test_maker_rest_escalation_arms_only_terminal_tokens_after_real_window(
-    monkeypatch,
-):
-    monkeypatch.delenv("ZEUS_ENTRY_Q_VERSION_STRICT", raising=False)
-    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
-    monkeypatch.setenv("ZEUS_MODE", "dry_run")
-    conn = sqlite3.connect(":memory:")
-    conn.executescript(
-        """
-        CREATE TABLE venue_commands (
-            command_id TEXT PRIMARY KEY,
-            venue_order_id TEXT,
-            token_id TEXT,
-            side TEXT,
-            intent_kind TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE venue_order_facts (
-            venue_order_id TEXT,
-            state TEXT,
-            observed_at TEXT,
-            local_sequence INTEGER
-        );
-        """
-    )
-    for command_id, age_minutes, fact_state in (
-        ("armed", 10, "CANCEL_CONFIRMED"),
-        ("early", 2, "CANCEL_CONFIRMED"),
-        ("live", 10, "LIVE"),
-    ):
-        conn.execute(
-            "INSERT INTO venue_commands VALUES (?, ?, ?, 'BUY', 'ENTRY', ?)",
-            (
-                command_id,
-                f"v-{command_id}",
-                f"tok-{command_id}",
-                (NOW - timedelta(minutes=age_minutes)).isoformat(),
-            ),
-        )
-        conn.execute(
-            "INSERT INTO venue_order_facts VALUES (?, ?, ?, 1)",
-            (f"v-{command_id}", fact_state, NOW.isoformat()),
-        )
-
-    armed = maker_rest_escalation_armed_token_ids(
-        conn,
-        token_ids=("tok-armed", "tok-early", "tok-live"),
-        decision_time=NOW,
-    )
-
-    assert armed == frozenset({"tok-armed"})
-
 
 def _seed_market_event(conn, *, token_id: str, city: str, target_date: str, metric: str) -> None:
     conn.execute(
         "INSERT INTO market_events (market_slug, city, target_date, temperature_metric, condition_id, token_id) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (f"slug-{token_id}", city, target_date, metric, f"cond-{token_id}", token_id),
-    )
-    conn.commit()
-
-
-def _seed_posterior(
-    conn,
-    *,
-    family,
-    posterior_identity_hash: str,
-    source_cycle_time: str,
-    provenance_json: str | None = None,
-    snapshot_id: int = 1,
-    snapshot_dataset: str | None = None,
-) -> None:
-    from src.data.replacement_forecast_source_run_identity import (
-        expected_replacement_dependency_identity_by_role,
-    )
-    from src.data.replacement_forecast_readiness import (
-        HIGH_DATA_VERSION, LOW_DATA_VERSION, SOURCE_ID,
-    )
-
-    city, target_date, metric = family
-    if provenance_json is None:
-        # A materialized posterior binds its own current-evidence shape to the
-        # snapshot it consumed; the identity reader replays that binding.
-        provenance_json = json.dumps(
-            {"bayes_precision_fusion": {"current_evidence_shape": {"snapshot_id": snapshot_id}}}
-        )
-    expected_dataset = expected_replacement_dependency_identity_by_role(metric)[
-        "baseline_b0"
-    ].data_version
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO ensemble_snapshots (
-            snapshot_id, city, target_date, temperature_metric, physical_quantity,
-            observation_field, available_at, fetch_time, lead_hours, members_json,
-            model_version, dataset_id, source_id, authority, causality_status,
-            boundary_ambiguous, source_run_id, forecast_window_attribution_status,
-            contributes_to_target_extrema
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, '[]', 'fixture', ?,
-                  'ecmwf_open_data', 'VERIFIED', 'OK', 0, ?, 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1)
-        """,
-        (
-            snapshot_id,
-            city,
-            target_date,
-            metric,
-            "mx2t3_local_calendar_day_max" if metric == "high" else "mn2t3_local_calendar_day_min",
-            "high_temp" if metric == "high" else "low_temp",
-            source_cycle_time,
-            source_cycle_time,
-            snapshot_dataset or expected_dataset or "fixture-current-dataset",
-            f"run-{snapshot_id}",
-        ),
-    )
-    conn.execute(
-        """INSERT OR IGNORE INTO source_run (
-            source_run_id, source_id, track, release_calendar_key, ingest_mode,
-            origin_mode, source_cycle_time, imported_at, completeness_status, status
-        ) VALUES (?, 'ecmwf_open_data', 'ensemble', 'fixture', 'SCHEDULED_LIVE',
-                  'SCHEDULED_LIVE', ?, ?, 'COMPLETE', 'SUCCESS')""",
-        (f"run-{snapshot_id}", source_cycle_time, source_cycle_time),
-    )
-    conn.execute(
-        """INSERT OR IGNORE INTO source_run_coverage (
-            coverage_id, source_run_id, source_id, source_transport,
-            release_calendar_key, track, city_id, city, city_timezone,
-            target_local_date, temperature_metric, physical_quantity,
-            observation_field, data_version, expected_members, observed_members,
-            expected_steps_json, observed_steps_json, snapshot_ids_json,
-            target_window_start_utc, target_window_end_utc, completeness_status,
-            readiness_status, computed_at, expires_at, recorded_at
-        ) VALUES (?, ?, 'ecmwf_open_data', 'fixture', 'fixture', 'ensemble',
-                  'fixture-city', ?, 'UTC', ?, ?, ?, ?, ?, 1, 1, '[1]', '[1]', ?,
-                  ?, ?, 'COMPLETE', 'LIVE_ELIGIBLE', ?, ?, ?)""",
-        (f"coverage-{snapshot_id}", f"run-{snapshot_id}", city, target_date,
-         metric, "mx2t3_local_calendar_day_max" if metric == "high" else "mn2t3_local_calendar_day_min",
-         "high_temp" if metric == "high" else "low_temp",
-         snapshot_dataset or expected_dataset or "fixture-current-dataset",
-         json.dumps([snapshot_id]), source_cycle_time, "2099-01-01T00:00:00+00:00",
-         source_cycle_time, "2099-01-01T00:00:00+00:00", source_cycle_time),
-    )
-    conn.execute(
-        """
-        INSERT INTO forecast_posteriors (
-            source_id, product_id, data_version, city, target_date, temperature_metric,
-            source_cycle_time, source_available_at, computed_at, q_json, posterior_method,
-            posterior_identity_hash, provenance_json, dependency_source_run_ids_json
-        ) VALUES (?, 'openmeteo_ecmwf_ifs9_bayes_fusion_v1', ?, ?, ?, ?, ?, ?, ?, '{}', 'bayes', ?, ?, ?)
-        """,
-        (SOURCE_ID, HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
-         city, target_date, metric, source_cycle_time, source_cycle_time, source_cycle_time,
-         posterior_identity_hash, provenance_json, json.dumps({"current_ensemble_snapshot": snapshot_id})),
-    )
-    conn.commit()
-
-
-def _certify_latest_posterior(conn, family, *, computed_at: str = "2026-07-03T21:00:00+00:00") -> None:
-    from src.data.replacement_forecast_readiness import (
-        HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID, STRATEGY_KEY,
-    )
-
-    city, target_date, metric = family
-    row = conn.execute(
-        "SELECT posterior_id, source_available_at FROM forecast_posteriors ORDER BY posterior_id DESC LIMIT 1"
-    ).fetchone()
-    conn.execute(
-        """INSERT OR REPLACE INTO readiness_state (
-            readiness_id, scope_key, scope_type, city, target_local_date,
-            temperature_metric, source_id, data_version, strategy_key,
-            status, computed_at, expires_at, dependency_json
-        ) VALUES ('test-ready', 'test-scope', 'strategy', ?, ?, ?, ?, ?, ?, 'READY', ?, ?, ?)""",
-        (city, target_date, metric, SOURCE_ID,
-         HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
-         STRATEGY_KEY, computed_at, "2026-07-05T00:00:00+00:00",
-         json.dumps({"dependencies": [{
-             "role": "soft_anchor_posterior", "source_id": SOURCE_ID,
-             "product_id": PRODUCT_ID,
-             "data_version": HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION,
-             "status": "READY", "posterior_id": row[0],
-             "source_available_at": row[1],
-         }]})),
-    )
-    conn.commit()
-
-
-def _seed_raw_model_forecast(
-    conn,
-    *,
-    family,
-    model: str,
-    source_cycle_time: str,
-    source_available_at: str,
-    captured_at: str,
-) -> None:
-    city, target_date, metric = family
-    conn.execute(
-        """
-        INSERT INTO raw_model_forecasts (
-            model, city, target_date, metric, source_cycle_time,
-            source_available_at, captured_at, lead_days, forecast_value_c,
-            endpoint, coverage_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 30.0, 'single_runs', 'COVERED')
-        """,
-        (model, city, target_date, metric, source_cycle_time, source_available_at, captured_at),
     )
     conn.commit()
 
@@ -833,9 +532,8 @@ class TestPendingCancelReader:
 
         assert find_open_entry_rests(conn, include_pending_cancels=True) == []
 
-
 class TestResolveOrderFamilies:
-    def test_token_resolves_through_condition_to_family(self):
+    def test_order_resolves_through_its_own_submission_snapshot(self):
         trade_conn = _trade_db()
         forecasts_conn = _forecasts_db()
         _seed_open_entry(trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q-old")
@@ -846,7 +544,7 @@ class TestResolveOrderFamilies:
 
         assert families["c1"] == FAMILY
 
-    def test_unresolvable_token_maps_to_none(self):
+    def test_unresolvable_condition_maps_to_none(self):
         trade_conn = _trade_db()
         forecasts_conn = _forecasts_db()
         _seed_open_entry(trade_conn, command_id="c1", token_id="tok-orphan", venue_order_id="v1", q_version="q-old")
@@ -856,223 +554,342 @@ class TestResolveOrderFamilies:
 
         assert families["c1"] is None
 
-
-class TestReadCurrentFamilyQVersions:
-    def test_certified_low_window_v2_supersedes_retained_uncertified_18z(self):
-        from src.contracts.ensemble_snapshot_provenance import (
-            ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
+    def test_high_low_alias_on_one_condition_is_ambiguous_not_guessed(self):
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        _seed_open_entry(trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q-old")
+        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric="high")
+        forecasts_conn.execute(
+            "INSERT INTO market_events (market_slug, city, target_date, temperature_metric, condition_id, token_id) "
+            "VALUES ('slug-low', ?, ?, 'low', 'cond-tok1', 'tok1-low')",
+            (FAMILY[0], FAMILY[1]),
         )
+        forecasts_conn.commit()
 
-        conn = _forecasts_db()
-        family = ("Miami", "2026-07-04", "low")
-        _seed_posterior(
-            conn, family=family, posterior_identity_hash="q-old-18z",
-            source_cycle_time="2026-07-03T18:00:00+00:00", snapshot_id=1,
-            snapshot_dataset=ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED,
+        families = resolve_order_families(find_open_entry_rests(trade_conn), trade_conn, forecasts_conn)
+
+        assert families["c1"] is None
+
+    def test_token_not_in_its_own_snapshot_is_none(self):
+        trade_conn = _trade_db()
+        forecasts_conn = _forecasts_db()
+        _seed_open_entry(trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q-old")
+        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
+        entries = find_open_entry_rests(trade_conn)
+        entries[0]["token_id"] = "tok-other"
+
+        assert resolve_order_families(entries, trade_conn, forecasts_conn)["c1"] is None
+
+
+# ---------------------------------------------------------------------------
+# Persistence: KEEP authority is durable, append-only, and never rewrites the
+# submission; CANCEL/RESIZE go through the batch journal before the venue call.
+# ---------------------------------------------------------------------------
+
+
+class _FakeGatewayClient:
+    """The batch gateway shape ``cancel_commands_batch`` calls."""
+
+    def __init__(self, cancel_responses):
+        self._responses = list(cancel_responses)
+        self.cancel_calls: list[list[str]] = []
+
+    def cancel_orders_batch(self, order_ids):
+        self.cancel_calls.append(list(order_ids))
+        return self._responses.pop(0)
+
+
+def conn_state(conn: sqlite3.Connection, command_id: str) -> str:
+    return conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
+    ).fetchone()[0]
+
+
+def _standing_rows(conn) -> list[dict]:
+    return [
+        json.loads(row[0])
+        for row in conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE mode = 'standing_entry_revaluation' ORDER BY id"
         )
-        _seed_posterior(
-            conn, family=family, posterior_identity_hash="q-certified-12z",
-            source_cycle_time="2026-07-03T12:00:00+00:00", snapshot_id=2,
-        )
-        _certify_latest_posterior(conn, family)
-
-        current = read_current_family_q_versions(conn, [family], now=NOW)
-
-        # The certified 12Z identity is selected over the retained 18Z row. Its
-        # consumed inputs are unnamed (no current_value_serving), so consumed
-        # authority is unknown and the rest is cancelled protectively.
-        assert current[family] == (
-            "__Q_AUTHORITY_BLOCKED__:q-certified-12z:"
-            "basis=current_value_serving_provenance_unverifiable"
-        )
-        assert [row["command_id"] for row in classify_cancel_set(
-            [_entry("rest", q_version="q-certified-12z", age_minutes=5)],
-            {"rest": family}, current, now=NOW, deadline_minutes=DEADLINE_MIN,
-        )] == ["rest"]
-
-    def test_missing_or_invalid_certificate_never_uses_uncertified_row(self):
-        conn = _forecasts_db()
-        _seed_posterior(
-            conn, family=FAMILY, posterior_identity_hash="q-uncertified",
-            source_cycle_time="2026-07-03T12:00:00+00:00",
-        )
-        unknown = read_current_family_q_versions(conn, [FAMILY], now=NOW)
-        assert unknown[FAMILY] is None
-        assert classify_cancel_set(
-            [_entry("rest", q_version="q-uncertified", age_minutes=5)],
-            {"rest": FAMILY}, unknown, now=NOW, deadline_minutes=DEADLINE_MIN,
-        ) == []
-
-        _certify_latest_posterior(conn, FAMILY)
-        conn.execute(
-            "UPDATE readiness_state SET dependency_json = ?",
-            (json.dumps({"dependencies": [{"role": "soft_anchor_posterior", "posterior_id": 999}]}),),
-        )
-        conn.commit()
-        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] is None
-
-        conn.execute("UPDATE readiness_state SET status = 'BLOCKED'")
-        conn.commit()
-        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] is None
-
-        conn.execute("DROP TABLE readiness_state")
-        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] is None
-
-    def test_certified_current_snapshot_without_coverage_is_blocked(self):
-        conn = _forecasts_db()
-        _seed_posterior(
-            conn, family=FAMILY, posterior_identity_hash="q-covered",
-            source_cycle_time="2026-07-03T12:00:00+00:00",
-        )
-        _certify_latest_posterior(conn, FAMILY)
-        conn.execute(
-            "UPDATE source_run_coverage SET readiness_status = 'BLOCKED' WHERE source_run_id = 'run-1'"
-        )
-        conn.commit()
-
-        result = read_current_family_q_versions(conn, [FAMILY], now=NOW)
-
-        assert result[FAMILY] == (
-            "__Q_AUTHORITY_BLOCKED__:q-covered:REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
-        )
+    ]
 
 
-    def test_bound_shape_without_named_consumed_inputs_is_not_servable(self):
-        # The shape binding passes; serving still needs the exact consumed
-        # inputs to re-verify, and a posterior that names none cannot.
-        conn = _forecasts_db()
-        _seed_posterior(
-            conn, family=FAMILY, posterior_identity_hash="q-shaped",
-            source_cycle_time="2026-07-03T12:00:00+00:00",
-        )
-        _certify_latest_posterior(conn, FAMILY)
-
-        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] == (
-            "__Q_AUTHORITY_BLOCKED__:q-shaped:basis=current_value_serving_provenance_unverifiable"
-        )
-
-    @pytest.mark.parametrize(
-        "provenance_json, reason",
-        [
-            ("{}", "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"),
-            (
-                json.dumps({"bayes_precision_fusion": {"current_evidence_shape": {"snapshot_id": 2}}}),
-                "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH",
-            ),
-            ("[]", "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_FAULT"),
-        ],
-        ids=["shape_absent", "shape_names_other_snapshot", "provenance_not_an_object"],
+def _valuation(action: str, *, reason: str = "R", witness: str = "w-new") -> StandingEntryValuation:
+    return StandingEntryValuation(
+        command_id="c1",
+        venue_order_id="v1",
+        token_id="tok1",
+        family=FAMILY,
+        action=action,
+        reason=reason,
+        evidence={
+            "authority_valid": True,
+            "probability_witness_identity": witness,
+            "acting_q": 0.75,
+            "target_remaining": "10",
+            "open_remaining": "10",
+            "limit_price": "0.5",
+        },
     )
-    def test_posterior_without_a_bound_current_evidence_shape_stays_blocked(
-        self, provenance_json, reason
-    ):
-        conn = _forecasts_db()
-        _seed_posterior(
-            conn, family=FAMILY, posterior_identity_hash="q-unshaped",
-            source_cycle_time="2026-07-03T12:00:00+00:00",
-            provenance_json=provenance_json,
-        )
-        _certify_latest_posterior(conn, FAMILY)
 
-        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] == (
-            f"__Q_AUTHORITY_BLOCKED__:q-unshaped:{reason}"
-        )
 
-    def test_freshest_posterior_wins(self):
-        conn = _forecasts_db()
-        _seed_posterior(conn, family=FAMILY, posterior_identity_hash="q-old", source_cycle_time="2026-07-03T00:00:00+00:00")
-        _seed_posterior(conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time="2026-07-03T12:00:00+00:00")
-        _certify_latest_posterior(conn, FAMILY)
+class TestStandingEntryPersistence:
+    def test_keep_journals_new_authority_without_touching_the_order(self):
+        conn = _trade_db()
+        _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q-submitted")
+        before = conn.execute(
+            "SELECT state, venue_order_id, q_version, last_event_id, envelope_id FROM venue_commands"
+        ).fetchone()
+        events_before = conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0]
 
-        result = read_current_family_q_versions(conn, [FAMILY], now=NOW)
+        kept = persist_standing_entry_values(conn, [_valuation("KEEP")], now=NOW)
 
-        # The certified freshest identity is the one judged (and blocked here,
-        # since its consumed inputs are unnamed); the older row is never served.
-        assert result[FAMILY] == (
-            "__Q_AUTHORITY_BLOCKED__:q-new:basis=current_value_serving_provenance_unverifiable"
-        )
+        assert [v.command_id for v in kept] == ["c1"]
+        after = conn.execute(
+            "SELECT state, venue_order_id, q_version, last_event_id, envelope_id FROM venue_commands"
+        ).fetchone()
+        assert tuple(after) == tuple(before)  # submission certificate and q_version untouched
+        assert conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0] == events_before
+        rows = _standing_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["action"] == "KEEP"
+        assert rows[0]["venue_order_id"] == "v1"
+        assert rows[0]["evidence"]["probability_witness_identity"] == "w-new"
+        assert not conn.in_transaction
 
-    def test_family_with_no_posterior_is_none(self):
-        conn = _forecasts_db()
-        result = read_current_family_q_versions(conn, [FAMILY])
-        assert result[FAMILY] is None
+    def test_unchanged_keep_authority_is_not_rejournaled(self):
+        conn = _trade_db()
+        _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
 
-    def test_newer_raw_cycle_is_never_the_blocking_reason(self):
-        # A newer raw cycle is successor debt, not revocation; this posterior
-        # blocks only because its consumed inputs are unnamed.
-        conn = _forecasts_db()
-        _seed_posterior(
-            conn,
-            family=FAMILY,
-            posterior_identity_hash="q-old",
-            source_cycle_time="2026-07-03T00:00:00+00:00",
-        )
-        _certify_latest_posterior(conn, FAMILY, computed_at="2026-07-03T07:00:00+00:00")
-        for model in ("ecmwf_ifs", "icon_global"):
-            _seed_raw_model_forecast(
-                conn,
-                family=FAMILY,
-                model=model,
-                source_cycle_time="2026-07-03T06:00:00+00:00",
-                source_available_at="2026-07-03T07:00:00+00:00",
-                captured_at="2026-07-03T07:10:00+00:00",
-            )
+        # Journal rows live under decision_log retention: use the real clock.
+        at = datetime.now(UTC)
+        persist_standing_entry_values(conn, [_valuation("KEEP")], now=at)
+        persist_standing_entry_values(conn, [_valuation("KEEP")], now=at + timedelta(minutes=5))
+        persist_standing_entry_values(conn, [_valuation("KEEP", witness="w-newer")], now=at + timedelta(minutes=10))
 
-        result = read_current_family_q_versions(
-            conn,
-            [FAMILY],
-            now=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
-        )
+        assert [r["evidence"]["probability_witness_identity"] for r in _standing_rows(conn)] == [
+            "w-new",
+            "w-newer",
+        ]
 
-        assert result[FAMILY] == (
-            "__Q_AUTHORITY_BLOCKED__:q-old:basis=current_value_serving_provenance_unverifiable"
-        )
+    def test_valuation_for_a_replaced_or_closed_order_is_dropped(self):
+        conn = _trade_db()
+        _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
+        stale = replace_valuation(_valuation("CANCEL"), venue_order_id="v-old")
 
-    def test_old_intrinsic_ensemble_carrier_returns_blocked_q_sentinel(self):
-        conn = _forecasts_db()
-        _seed_posterior(
-            conn,
-            family=FAMILY,
-            posterior_identity_hash="q-old",
-            source_cycle_time="2026-07-03T00:00:00+00:00",
-        )
-        _certify_latest_posterior(conn, FAMILY)
+        assert persist_standing_entry_values(conn, [stale], now=NOW) == []
+        assert _standing_rows(conn) == []
+
+        conn.execute("UPDATE venue_commands SET state = 'CANCELLED'")
+        conn.commit()
+        assert persist_standing_entry_values(conn, [_valuation("KEEP")], now=NOW) == []
+
+    def test_a_failed_journal_write_leaves_the_order_and_reservation_intact(self):
+        conn = _trade_db()
+        _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
         conn.execute(
-            "UPDATE ensemble_snapshots SET dataset_id = ? WHERE snapshot_id = 1",
-            ("ecmwf_opendata_mx2t3_local_calendar_day_max",),
+            "CREATE TRIGGER fail_standing BEFORE INSERT ON decision_log "
+            "BEGIN SELECT RAISE(ABORT, 'fault'); END"
         )
         conn.commit()
 
-        result = read_current_family_q_versions(conn, [FAMILY], now=NOW)
+        with pytest.raises(sqlite3.DatabaseError):
+            persist_standing_entry_values(conn, [_valuation("KEEP")], now=NOW)
 
-        assert result[FAMILY].startswith("__Q_AUTHORITY_BLOCKED__:q-old:")
-        assert "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH" in result[FAMILY]
+        assert conn_state(conn, "c1") == "ACKED"
+        assert not conn.in_transaction
 
-    def test_malformed_intrinsic_dependency_returns_blocked_q_sentinel(self):
-        conn = _forecasts_db()
-        _seed_posterior(
-            conn,
-            family=FAMILY,
-            posterior_identity_hash="q-old",
-            source_cycle_time="2026-07-03T00:00:00+00:00",
+
+def replace_valuation(valuation: StandingEntryValuation, **changes) -> StandingEntryValuation:
+    from dataclasses import replace
+
+    return replace(valuation, **changes)
+
+
+class TestRunC3StandingValuation:
+    """Orchestration: KEEP takes no venue action; CANCEL and RESIZE are
+    journaled CANCEL_REQUESTED before the single batch SDK call."""
+
+    def _run(self, monkeypatch, valuations, *, responses, rate_budget=None):
+        trade_conn = _trade_db()
+        _seed_open_entry(trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
+        monkeypatch.setattr(staleness_cancel_module, "resolve_order_families", lambda *_a: {"c1": FAMILY})
+        monkeypatch.setattr(
+            staleness_cancel_module, "_capture_standing_entry_values", lambda *_a, **_k: valuations
         )
-        _certify_latest_posterior(conn, FAMILY)
-        conn.execute(
-            "UPDATE forecast_posteriors SET dependency_source_run_ids_json = ?",
-            ("{malformed",),
+        import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
+
+        monkeypatch.setattr(
+            day0_hard_fact_exit, "classify_day0_dead_bin_entry_cancels", lambda *_a, **_k: []
         )
-        conn.commit()
+        observed_before_sdk: list[tuple[str, dict]] = []
 
-        result = read_current_family_q_versions(conn, [FAMILY], now=NOW)
+        class _Client(_FakeGatewayClient):
+            def cancel_orders_batch(self, order_ids):
+                state = conn_state(trade_conn, "c1")
+                payload = json.loads(
+                    trade_conn.execute(
+                        "SELECT payload_json FROM venue_command_events "
+                        "WHERE command_id='c1' AND event_type='CANCEL_REQUESTED'"
+                    ).fetchone()[0]
+                )
+                observed_before_sdk.append((state, payload))
+                return super().cancel_orders_batch(order_ids)
 
-        assert result[FAMILY] == (
-            "__Q_AUTHORITY_BLOCKED__:q-old:current_ensemble_dependency_unparseable"
+        client = _Client(cancel_responses=responses)
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, object(), client,
+            world_conn_ro=object(), now=NOW, rate_budget=rate_budget,
+        )
+        return trade_conn, client, result, observed_before_sdk
+
+    def test_keep_takes_no_venue_action(self, monkeypatch):
+        trade_conn, client, result, _ = self._run(
+            monkeypatch, [_valuation("KEEP")], responses=[]
         )
 
+        assert client.cancel_calls == []
+        assert result["kept"] == 1
+        assert result["cancel_set_size"] == 0
+        assert result["confirmed_families"] == set()
+        assert conn_state(trade_conn, "c1") == "ACKED"
+        assert [r["action"] for r in _standing_rows(trade_conn)] == ["KEEP"]
 
-# ---------------------------------------------------------------------------
-# run_c3_staleness_cancel_cycle: end-to-end orchestration
-# ---------------------------------------------------------------------------
+    @pytest.mark.parametrize("action", ["CANCEL", "RESIZE"])
+    def test_cancel_and_resize_journal_before_sdk_then_confirm_family(self, monkeypatch, action):
+        trade_conn, client, result, observed = self._run(
+            monkeypatch,
+            [_valuation(action, reason="CURRENT_FRACTIONAL_TARGET_REDUCED")],
+            responses=[[{"canceled": True, "orderID": "v1"}]],
+        )
+
+        assert client.cancel_calls == [["v1"]]
+        assert observed == [("CANCEL_PENDING", {"venue_order_id": "v1", "batch": True})]
+        assert [r["action"] for r in _standing_rows(trade_conn)] == [action]
+        assert conn_state(trade_conn, "c1") == "CANCELLED"
+        # A resize's fresh redecision is gated on the durable CANCELLED read.
+        assert result["confirmed_families"] == {FAMILY}
+
+    def test_budget_denial_defers_never_drops_the_intent(self, monkeypatch):
+        class _DenyingBudget:
+            def try_acquire(self, request_class):
+                from src.venue.rate_budget import BudgetDecision, BudgetResult
+
+                return BudgetResult(BudgetDecision.DENIED, request_class, wait_seconds=15.0)
+
+        trade_conn, client, result, _ = self._run(
+            monkeypatch,
+            [_valuation("CANCEL")],
+            responses=[],
+            rate_budget=_DenyingBudget(),
+        )
+
+        assert client.cancel_calls == []
+        assert result["cancel_set_size"] == 1
+        assert result["confirmed_families"] == set()
+        assert conn_state(trade_conn, "c1") == "ACKED"
+        assert result["outcomes"][0].status == "not_attempted"
+
+    def test_mixed_outcomes_in_same_family_suppress_the_whole_family(self, monkeypatch):
+        trade_conn = _trade_db()
+        _seed_open_entry(trade_conn, command_id="c-good", token_id="tok-good", venue_order_id="v-good", q_version="q")
+        _seed_open_entry(trade_conn, command_id="c-bad", token_id="tok-bad", venue_order_id="v-bad", q_version="q")
+        monkeypatch.setattr(
+            staleness_cancel_module,
+            "resolve_order_families",
+            lambda *_a: {"c-good": FAMILY, "c-bad": FAMILY},
+        )
+        monkeypatch.setattr(
+            staleness_cancel_module,
+            "_capture_standing_entry_values",
+            lambda *_a, **_k: [
+                replace_valuation(_valuation("CANCEL"), command_id=cid, venue_order_id=vid, token_id=tok)
+                for cid, vid, tok in (("c-good", "v-good", "tok-good"), ("c-bad", "v-bad", "tok-bad"))
+            ],
+        )
+        import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
+
+        monkeypatch.setattr(day0_hard_fact_exit, "classify_day0_dead_bin_entry_cancels", lambda *_a, **_k: [])
+        client = _FakeGatewayClient(
+            cancel_responses=[[
+                {"canceled": True, "orderID": "v-good"},
+                {"orderID": "v-bad", "status": "NOT_CANCELED", "errorMessage": "still live"},
+            ]]
+        )
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, object(), client, world_conn_ro=object(), now=NOW
+        )
+
+        assert conn_state(trade_conn, "c-good") == "CANCELLED"
+        assert conn_state(trade_conn, "c-bad") != "CANCELLED"
+        assert result["confirmed_families"] == set()
+
+
+class TestMainC3StandingValuationGlue:
+    """The scheduler job revalues every open rest whether or not any
+    SOURCE_RUN_ARRIVED event is claimed, and a claim-lane fault never
+    suppresses the valuation."""
+
+    @pytest.mark.parametrize("event_lane", ["empty", "raising"])
+    def test_valuation_runs_without_and_despite_the_event_lane(self, monkeypatch, event_lane):
+        import src.data.polymarket_client as polymarket_client_module
+        import src.events.event_store as event_store_module
+        import src.execution.command_recovery as command_recovery_module
+        import src.main as main_module
+        import src.state.db as state_db
+
+        class _EventStore:
+            def __init__(self, conn, *, consumer_name):
+                pass
+
+            def fetch_pending_by_event_type(self, *, event_type, decision_time, limit):
+                if event_lane == "raising":
+                    raise sqlite3.OperationalError("simulated world DB fault")
+                return []
+
+            def claim(self, event_id):
+                raise AssertionError("nothing to claim")
+
+        class _World:
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        calls: list[dict] = []
+
+        def _run(trade_ro, trade_rw, forecasts_ro, client, **kwargs):
+            calls.append(kwargs)
+            return {
+                "scanned": 1, "kept": 1, "resized": 0, "cancel_set_size": 0,
+                "confirmed_families": set(), "valuations": [], "outcomes": [],
+                "day0_cancel_set_size": 0,
+            }
+
+        class _Conn:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {})
+        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+        monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+        monkeypatch.setattr(command_recovery_module, "find_invalid_pending_entry_authority_cancels", lambda conn: [])
+        monkeypatch.setattr(polymarket_client_module, "PolymarketClient", lambda: object())
+        monkeypatch.setattr(event_store_module, "EventStore", _EventStore)
+        monkeypatch.setattr(staleness_cancel_module, "run_c3_staleness_cancel_cycle", _run)
+        monkeypatch.setattr(state_db, "get_world_connection", lambda: _World())
+        monkeypatch.setattr(state_db, "get_world_connection_read_only", lambda: _Conn())
+        monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _Conn())
+        monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class=None: _Conn())
+        monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _Conn())
+
+        main_module._c3_staleness_cancel_cycle()
+
+        assert len(calls) == 1
+        assert "affected_cities" not in calls[0]
+        assert isinstance(calls[0]["world_conn_ro"], _Conn)
 
 
 class _FakeGatewayClient:
@@ -1092,7 +909,7 @@ class _FakeGatewayClient:
         return self._responses.pop(0)
 
 
-def test_pending_cancel_is_retried_without_q_ttl_or_day0_classification(monkeypatch):
+def test_pending_cancel_is_retried_without_valuation_or_day0_classification(monkeypatch):
     from src.execution import batch_order_submission
     from src.execution import day0_hard_fact_exit
     from src.state import venue_command_repo
@@ -1118,8 +935,8 @@ def test_pending_cancel_is_retried_without_q_ttl_or_day0_classification(monkeypa
     )
     monkeypatch.setattr(
         staleness_cancel_module,
-        "read_current_family_q_versions",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pending retry read q")),
+        "_capture_standing_entry_values",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pending retry valued")),
     )
     day0_calls = []
     monkeypatch.setattr(
@@ -1136,7 +953,9 @@ def test_pending_cancel_is_retried_without_q_ttl_or_day0_classification(monkeypa
     monkeypatch.setattr(batch_order_submission, "cancel_commands_batch", _cancel_batch)
     monkeypatch.setattr(venue_command_repo, "get_command", lambda *_args: {"state": "CANCELLED"})
 
-    result = run_c3_staleness_cancel_cycle(object(), object(), object(), object(), now=NOW)
+    result = run_c3_staleness_cancel_cycle(
+        object(), object(), object(), object(), world_conn_ro=object(), now=NOW
+    )
 
     assert submitted == [["c-pending"]]
     assert result["cancel_set_size"] == 1
@@ -1161,8 +980,8 @@ def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch, 
     )
     monkeypatch.setattr(
         staleness_cancel,
-        "read_current_family_q_versions",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pending retry read q")),
+        "_capture_standing_entry_values",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pending retry valued")),
     )
     client = _FakeGatewayClient(
         cancel_responses=[[{"canceled": True, "orderID": "v-pending"}]]
@@ -1181,7 +1000,8 @@ def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch, 
 
     budget = _RateBudget()
     first = run_c3_staleness_cancel_cycle(
-        trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=budget
+        trade_conn, trade_conn, forecasts_conn, client,
+        world_conn_ro=object(), now=NOW, rate_budget=budget,
     )
     assert first["outcomes"][0].status == "not_attempted"
     assert "command_id=c-pending status=not_attempted reason=rate_budget_DENIED" in caplog.text
@@ -1193,7 +1013,8 @@ def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch, 
     ).fetchone()[0] == 1
 
     second = run_c3_staleness_cancel_cycle(
-        trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=budget
+        trade_conn, trade_conn, forecasts_conn, client,
+        world_conn_ro=object(), now=NOW, rate_budget=budget,
     )
     assert second["outcomes"][0].status == "acked"
     assert client.cancel_calls == [["v-pending"]]
@@ -1208,542 +1029,12 @@ def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch, 
     ).fetchone()[0] == 1
 
     third = run_c3_staleness_cancel_cycle(
-        trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=budget
+        trade_conn, trade_conn, forecasts_conn, client,
+        world_conn_ro=object(), now=NOW, rate_budget=budget,
     )
     assert third["cancel_set_size"] == 0
     assert client.cancel_calls == [["v-pending"]]
 
-
-class TestRunC3StalenessCancelCycle:
-    def test_stale_order_is_cancelled_and_family_confirmed(self):
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        _seed_open_entry(
-            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
-            q_version="q-old", created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
-        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
-
-        # q-version staleness is recurring and independent of source-event
-        # delivery; this test covers the classify+confirm path.
-        result = run_c3_staleness_cancel_cycle(
-            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
-            affected_cities=frozenset({FAMILY[0]}),
-        )
-
-        assert result["cancel_set_size"] == 1
-        assert result["confirmed_families"] == {FAMILY}
-        assert conn_state(trade_conn, "c1") == "CANCELLED"
-
-    def test_hwm_blocked_family_cancels_without_source_event(self):
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        q_version = "a" * 64
-        _seed_open_entry(
-            trade_conn,
-            command_id="c1",
-            token_id="tok1",
-            venue_order_id="v1",
-            q_version=None,
-            created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_submit_requested_forecast_q_payload(
-            trade_conn,
-            command_id="c1",
-            q_version=q_version,
-        )
-        _seed_market_event(
-            forecasts_conn,
-            token_id="tok1",
-            city=FAMILY[0],
-            target_date=FAMILY[1],
-            metric=FAMILY[2],
-        )
-        _seed_posterior(
-            forecasts_conn,
-            family=FAMILY,
-            posterior_identity_hash=q_version,
-            source_cycle_time="2026-07-03T00:00:00+00:00",
-        )
-        for model in ("ecmwf_ifs", "icon_global"):
-            _seed_raw_model_forecast(
-                forecasts_conn,
-                family=FAMILY,
-                model=model,
-                source_cycle_time="2026-07-03T06:00:00+00:00",
-                source_available_at="2026-07-03T07:00:00+00:00",
-                captured_at="2026-07-03T07:10:00+00:00",
-            )
-        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
-
-        result = run_c3_staleness_cancel_cycle(
-            trade_conn,
-            trade_conn,
-            forecasts_conn,
-            client,
-            now=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
-            affected_cities=None,
-        )
-
-        assert result["cancel_set_size"] == 1
-        assert client.cancel_calls == [["v1"]]
-        assert conn_state(trade_conn, "c1") == "CANCELLED"
-
-    def test_hwm_blocked_sub_min_partial_fill_is_not_cancelled(self):
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        q_version = "a" * 64
-        _seed_open_entry(
-            trade_conn,
-            command_id="c1",
-            token_id="tok1",
-            venue_order_id="v1",
-            q_version=None,
-            created_at=NOW - timedelta(minutes=5),
-            matched_size="1",
-            remaining_size="9",
-            min_order_size=Decimal("5"),
-        )
-        _seed_submit_requested_forecast_q_payload(
-            trade_conn,
-            command_id="c1",
-            q_version=q_version,
-        )
-        _seed_market_event(
-            forecasts_conn,
-            token_id="tok1",
-            city=FAMILY[0],
-            target_date=FAMILY[1],
-            metric=FAMILY[2],
-        )
-        _seed_posterior(
-            forecasts_conn,
-            family=FAMILY,
-            posterior_identity_hash=q_version,
-            source_cycle_time="2026-07-03T00:00:00+00:00",
-        )
-        for model in ("ecmwf_ifs", "icon_global"):
-            _seed_raw_model_forecast(
-                forecasts_conn,
-                family=FAMILY,
-                model=model,
-                source_cycle_time="2026-07-03T06:00:00+00:00",
-                source_available_at="2026-07-03T07:00:00+00:00",
-                captured_at="2026-07-03T07:10:00+00:00",
-            )
-        client = _FakeGatewayClient(cancel_responses=[])
-
-        entries = find_open_entry_rests(trade_conn)
-        assert entries[0]["matched_size"] == "1"
-        assert entries[0]["min_order_size"] == "5"
-
-        result = run_c3_staleness_cancel_cycle(
-            trade_conn,
-            trade_conn,
-            forecasts_conn,
-            client,
-            now=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
-            affected_cities=frozenset({FAMILY[0]}),
-        )
-
-        assert result["cancel_set_size"] == 0
-        assert client.cancel_calls == []
-        assert conn_state(trade_conn, "c1") == "ACKED"
-
-    def test_fresh_matching_q_order_is_never_touched(self):
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        _seed_open_entry(
-            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
-            q_version="q-same", created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-same", source_cycle_time=NOW.isoformat())
-        client = _FakeGatewayClient(cancel_responses=[])
-
-        result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
-
-        assert result["cancel_set_size"] == 0
-        assert result["confirmed_families"] == set()
-        assert client.cancel_calls == []
-        assert conn_state(trade_conn, "c1") == "ACKED"
-
-    def test_day0_observation_q_is_not_compared_to_forecast_family_q(self):
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        day0_q = "d" * 64
-        _seed_open_entry(
-            trade_conn,
-            command_id="c1",
-            token_id="tok1",
-            venue_order_id="v1",
-            q_version=day0_q,
-            created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_submit_requested_forecast_q_payload(
-            trade_conn,
-            command_id="c1",
-            q_version=day0_q,
-            source_id="day0_live_observation:London:2026-07-08:high:station",
-            authority_tier="OBSERVATION",
-            forecast_source_role="day0_live_observation",
-        )
-        _seed_market_event(
-            forecasts_conn,
-            token_id="tok1",
-            city=FAMILY[0],
-            target_date=FAMILY[1],
-            metric=FAMILY[2],
-        )
-        _seed_posterior(
-            forecasts_conn,
-            family=FAMILY,
-            posterior_identity_hash="forecast-q-different",
-            source_cycle_time=NOW.isoformat(),
-        )
-        client = _FakeGatewayClient(cancel_responses=[])
-
-        result = run_c3_staleness_cancel_cycle(
-            trade_conn,
-            trade_conn,
-            forecasts_conn,
-            client,
-            now=NOW,
-            affected_cities=frozenset({FAMILY[0]}),
-        )
-
-        assert result["cancel_set_size"] == 0
-        assert client.cancel_calls == []
-        assert conn_state(trade_conn, "c1") == "ACKED"
-
-    def test_budget_denial_defers_never_drops_the_intent(self):
-        """A rate-budget denial must leave the command open and un-journaled —
-        never silently dropped. The next tick's fresh scan sees the SAME still-
-        open, still-stale order and can retry it; there is no cancel-set removal
-        or dead-letter for a deferred command."""
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        _seed_open_entry(
-            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
-            q_version="q-old", created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
-        client = _FakeGatewayClient(cancel_responses=[])  # never reached: budget denies first
-
-        class _DenyingBudget:
-            def try_acquire(self, request_class):
-                from src.venue.rate_budget import BudgetDecision, BudgetResult
-
-                return BudgetResult(BudgetDecision.DENIED, request_class, wait_seconds=15.0)
-
-        result = run_c3_staleness_cancel_cycle(
-            trade_conn, trade_conn, forecasts_conn, client, now=NOW, rate_budget=_DenyingBudget(),
-            affected_cities=frozenset({FAMILY[0]}),
-        )
-
-        assert result["cancel_set_size"] == 1  # classified as cancel-worthy...
-        assert result["confirmed_families"] == set()  # ...but NOT confirmed cancelled
-        assert client.cancel_calls == []  # the SDK was never even called
-        # the command is untouched — still ACKED/open, not CANCEL_PENDING/journaled,
-        # so a fresh classification next tick reclassifies and retries it cleanly.
-        assert conn_state(trade_conn, "c1") == "ACKED"
-        outcome = result["outcomes"][0]
-        assert outcome.status == "not_attempted"
-        assert "rate_budget" in (outcome.error_message or "")
-
-    def test_indeterminate_blind_family_fresh_order_not_cancelled_end_to_end(self):
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        _seed_open_entry(
-            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
-            q_version="q-old", created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        # No posterior seeded: family has no servable q -> BLOCKED/INDETERMINATE.
-        client = _FakeGatewayClient(cancel_responses=[])
-
-        result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
-
-        assert result["cancel_set_size"] == 0
-        assert client.cancel_calls == []
-        assert conn_state(trade_conn, "c1") == "ACKED"
-
-    def test_affected_cities_hint_does_not_scope_stale_q_safety(self):
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        other_family = ("Toronto", "2026-07-04", "high")
-        _seed_open_entry(
-            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
-            q_version="q-old", created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_open_entry(
-            trade_conn, command_id="c2", token_id="tok2", venue_order_id="v2",
-            q_version="q-old", created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        _seed_market_event(forecasts_conn, token_id="tok2", city=other_family[0], target_date=other_family[1], metric=other_family[2])
-        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new-1", source_cycle_time=NOW.isoformat())
-        _seed_posterior(forecasts_conn, family=other_family, posterior_identity_hash="q-new-2", source_cycle_time=NOW.isoformat())
-        client = _FakeGatewayClient(cancel_responses=[[
-            {"canceled": True, "orderID": "v1"},
-            {"canceled": True, "orderID": "v2"},
-        ]])
-
-        result = run_c3_staleness_cancel_cycle(
-            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
-            affected_cities=frozenset({FAMILY[0]}),
-        )
-
-        # The event names only Miami, but both stale q versions are cancelled.
-        # Event delivery is a wake hint, not stale-q fill authority.
-        assert result["scanned"] == 2
-        assert result["confirmed_families"] == {FAMILY, other_family}
-        assert conn_state(trade_conn, "c1") == "CANCELLED"
-        assert conn_state(trade_conn, "c2") == "CANCELLED"
-
-
-class TestFamilyLevelRedecisionGating:
-    """Consult review round 2 BLOCKER: confirmed_families must be FAMILY-level
-    conservative, not per-command. A family with one durably-cancelled command
-    and one command stuck ambiguous (REVIEW_REQUIRED / not_canceled / unknown)
-    in the SAME cycle must be excluded ENTIRELY -- that family still carries a
-    recovery-owned ambiguous venue exposure; emitting a redecision for it
-    anyway risks a duplicate/overlapping submit against that exposure."""
-
-    def test_mixed_outcomes_in_same_family_suppress_the_whole_family(self):
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        _seed_open_entry(
-            trade_conn, command_id="c-good", token_id="tok-good", venue_order_id="v-good",
-            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
-        )
-        _seed_open_entry(
-            trade_conn, command_id="c-bad", token_id="tok-bad", venue_order_id="v-bad",
-            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
-        )
-        # BOTH commands resolve to the SAME family.
-        _seed_market_event(forecasts_conn, token_id="tok-good", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        _seed_market_event(forecasts_conn, token_id="tok-bad", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        # ONE batch call, per-order mixed outcome: c-good acks cleanly; c-bad
-        # comes back NOT_CANCELED (ambiguous -- venue truth still open).
-        client = _FakeGatewayClient(
-            cancel_responses=[[
-                {"canceled": True, "orderID": "v-good"},
-                {"orderID": "v-bad", "status": "NOT_CANCELED", "errorMessage": "still live"},
-            ]]
-        )
-
-        result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
-
-        assert result["cancel_set_size"] == 2
-        assert conn_state(trade_conn, "c-good") == "CANCELLED"
-        assert conn_state(trade_conn, "c-bad") != "CANCELLED"
-        # The family is excluded ENTIRELY, not partially confirmed, because
-        # c-bad's ambiguous outcome makes the family's venue exposure unclear.
-        assert result["confirmed_families"] == set()
-
-    def test_ambiguous_family_does_not_block_an_unrelated_confirmed_family(self):
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        other_family = ("Toronto", "2026-07-04", "high")
-        _seed_open_entry(
-            trade_conn, command_id="c-good", token_id="tok-good", venue_order_id="v-good",
-            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
-        )
-        _seed_open_entry(
-            trade_conn, command_id="c-bad", token_id="tok-bad", venue_order_id="v-bad",
-            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
-        )
-        _seed_open_entry(
-            trade_conn, command_id="c-clean", token_id="tok-clean", venue_order_id="v-clean",
-            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
-        )
-        _seed_market_event(forecasts_conn, token_id="tok-good", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        _seed_market_event(forecasts_conn, token_id="tok-bad", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        _seed_market_event(
-            forecasts_conn, token_id="tok-clean", city=other_family[0], target_date=other_family[1], metric=other_family[2]
-        )
-        client = _FakeGatewayClient(
-            cancel_responses=[[
-                {"canceled": True, "orderID": "v-good"},
-                {"orderID": "v-bad", "status": "NOT_CANCELED", "errorMessage": "still live"},
-                {"canceled": True, "orderID": "v-clean"},
-            ]]
-        )
-
-        result = run_c3_staleness_cancel_cycle(trade_conn, trade_conn, forecasts_conn, client, now=NOW)
-
-        assert result["confirmed_families"] == {other_family}  # FAMILY (ambiguous) excluded, other_family confirmed
-
-
-class TestRecurringCancelClockIndependence:
-    """TTL and q/HWM staleness are global recurring safety passes.
-
-    A missing ``SOURCE_RUN_ARRIVED`` event cannot strand an expired rest or
-    license a forecast rest whose frozen q is no longer current.
-    """
-
-    def test_source_event_hint_does_not_scope_q_hwm_scan(self, monkeypatch):
-        """Every open family reaches the q/HWM reader on a no-event tick."""
-        entries = [
-            _entry("c1", q_version="q-miami", age_minutes=1.0),
-            _entry("c2", q_version="q-toronto", age_minutes=1.0),
-        ]
-        other_family = ("Toronto", "2026-07-04", "high")
-        families = {"c1": FAMILY, "c2": other_family}
-        read_families = []
-        classified_q_maps = []
-
-        monkeypatch.setattr(
-            staleness_cancel_module,
-            "find_open_entry_rests",
-            lambda _conn, **_kwargs: entries,
-        )
-        monkeypatch.setattr(
-            staleness_cancel_module,
-            "resolve_order_families",
-            lambda _entries, _trade, _forecasts: families,
-        )
-
-        def _read(_conn, requested, *, now):
-            requested_set = set(requested)
-            read_families.append(requested_set)
-            return {family: f"q-{family[0].lower()}" for family in requested_set}
-
-        def _classify(_entries, _families, q_by_family, *, now, deadline_minutes):
-            classified_q_maps.append(dict(q_by_family))
-            return []
-
-        monkeypatch.setattr(staleness_cancel_module, "read_current_family_q_versions", _read)
-        monkeypatch.setattr(staleness_cancel_module, "classify_cancel_set", _classify)
-
-        import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
-
-        monkeypatch.setattr(
-            day0_hard_fact_exit,
-            "classify_day0_dead_bin_entry_cancels",
-            lambda *_args, **_kwargs: [],
-        )
-
-        result = staleness_cancel_module.run_c3_staleness_cancel_cycle(
-            object(),
-            object(),
-            object(),
-            object(),
-            now=NOW,
-            affected_cities=None,
-        )
-
-        assert result["scanned"] == 2
-        assert result["cancel_set_size"] == 0
-        assert read_families == [{FAMILY, other_family}]
-        assert classified_q_maps[0] == {}  # TTL-only pass.
-        assert set(classified_q_maps[1]) == {FAMILY, other_family}
-
-    def test_no_source_event_still_cancels_expired_rest(self):
-        """affected_cities=None (no SOURCE_RUN_ARRIVED claimed this tick) must
-        NOT suppress the TTL pass -- an expired rest is still cancelled."""
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        _seed_open_entry(
-            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
-            q_version=None, created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
-        )
-        # No market_events/posterior seeded at all -- family is unresolvable,
-        # proving TTL fires without ANY q-version machinery available.
-        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
-
-        result = run_c3_staleness_cancel_cycle(
-            trade_conn, trade_conn, forecasts_conn, client, now=NOW, affected_cities=None,
-        )
-
-        assert result["cancel_set_size"] == 1
-        assert client.cancel_calls == [["v1"]]
-        assert conn_state(trade_conn, "c1") == "CANCELLED"
-
-    def test_source_event_city_does_not_starve_other_city_ttl(self):
-        """A SOURCE_RUN_ARRIVED for city A must not prevent an expired rest in
-        city B (untouched by the event) from being cancelled by TTL."""
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        city_b = ("Toronto", "2026-07-04", "high")
-        _seed_open_entry(
-            trade_conn, command_id="c-fresh-a", token_id="tok-a", venue_order_id="v-a",
-            q_version="q-old", created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_open_entry(
-            trade_conn, command_id="c-expired-b", token_id="tok-b", venue_order_id="v-b",
-            q_version="q-b", created_at=NOW - timedelta(minutes=DEADLINE_MIN + 5),
-        )
-        _seed_market_event(forecasts_conn, token_id="tok-a", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        _seed_market_event(forecasts_conn, token_id="tok-b", city=city_b[0], target_date=city_b[1], metric=city_b[2])
-        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
-        # city_b's rest is well past TTL and NOT stale on q (no posterior is even
-        # seeded for city_b -- TTL alone must carry it). Both commands land in
-        # ONE merged cancel-set, so ONE batch call carries both order IDs.
-        client = _FakeGatewayClient(
-            cancel_responses=[[{"canceled": True, "orderID": "v-a"}, {"canceled": True, "orderID": "v-b"}]]
-        )
-
-        result = run_c3_staleness_cancel_cycle(
-            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
-            affected_cities=frozenset({FAMILY[0]}),  # event only names city A
-        )
-
-        assert result["scanned"] == 2
-        cancelled_order_ids = {oid for chunk in client.cancel_calls for oid in chunk}
-        assert cancelled_order_ids == {"v-a", "v-b"}
-        assert conn_state(trade_conn, "c-fresh-a") == "CANCELLED"  # q-stale, scoped pass
-        assert conn_state(trade_conn, "c-expired-b") == "CANCELLED"  # TTL, unscoped pass -- not starved
-
-    def test_duplicate_source_event_replay_is_idempotent_no_double_cancel(self):
-        """A replayed/duplicate SOURCE_RUN_ARRIVED driving a second
-        run_c3_staleness_cancel_cycle call over the SAME already-cancelled
-        order must not produce a duplicate venue side effect -- the second
-        pass sees the command already CANCELLED and cancel_commands_batch
-        skips it as not_requestable (no second SDK call, no second journal
-        entry, no double cancel)."""
-        trade_conn = _trade_db()
-        forecasts_conn = _forecasts_db()
-        _seed_open_entry(
-            trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1",
-            q_version="q-old", created_at=NOW - timedelta(minutes=5),
-        )
-        _seed_market_event(forecasts_conn, token_id="tok1", city=FAMILY[0], target_date=FAMILY[1], metric=FAMILY[2])
-        _seed_posterior(forecasts_conn, family=FAMILY, posterior_identity_hash="q-new", source_cycle_time=NOW.isoformat())
-        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}], [None]])
-
-        first = run_c3_staleness_cancel_cycle(
-            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
-            affected_cities=frozenset({FAMILY[0]}),
-        )
-        assert first["confirmed_families"] == {FAMILY}
-        assert conn_state(trade_conn, "c1") == "CANCELLED"
-
-        cancel_events_after_first = trade_conn.execute(
-            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'c1' AND event_type = 'CANCEL_ACKED'"
-        ).fetchone()[0]
-        assert cancel_events_after_first == 1
-
-        # REPLAY: the same command is still returned by find_open_entry_rests'
-        # underlying state? No -- it is CANCELLED now, so a second identical
-        # tick's TTL/q-stale classification would not even re-select it (the
-        # scan only returns state IN ('ACKED','POST_ACKED','PARTIAL')). This
-        # proves the idempotency at the SOURCE: a duplicate SOURCE_RUN_ARRIVED
-        # driving a second cycle finds nothing left to cancel for c1.
-        second = run_c3_staleness_cancel_cycle(
-            trade_conn, trade_conn, forecasts_conn, client, now=NOW,
-            affected_cities=frozenset({FAMILY[0]}),
-        )
-        assert second["cancel_set_size"] == 0
-        assert client.cancel_calls == [["v1"]]  # the SDK was never called a second time
-        cancel_events_after_second = trade_conn.execute(
-            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'c1' AND event_type = 'CANCEL_ACKED'"
-        ).fetchone()[0]
-        assert cancel_events_after_second == 1  # no duplicate journal entry
 
 
 def conn_state(conn: sqlite3.Connection, command_id: str) -> str:
@@ -2028,6 +1319,12 @@ def test_c3_day0_cancel_uses_batch_journal_and_confirms_family(monkeypatch):
         "resolve_order_families",
         lambda *_args: {"c-day0": FAMILY},
     )
+    # The Day0 lane is under test; the value lane keeps this rest.
+    monkeypatch.setattr(
+        staleness_cancel,
+        "_capture_standing_entry_values",
+        lambda *_args, **_kwargs: [_keep("c-day0", "v-day0", "tok-day0")],
+    )
     monkeypatch.setattr(
         day0_hard_fact_exit,
         "classify_day0_dead_bin_entry_cancels",
@@ -2050,6 +1347,7 @@ def test_c3_day0_cancel_uses_batch_journal_and_confirms_family(monkeypatch):
         trade_conn,
         forecasts_conn,
         client,
+        world_conn_ro=object(),
         now=NOW,
     )
 
@@ -2066,22 +1364,12 @@ def test_c3_merge_preserves_every_lane_reason_and_family() -> None:
     merged = _merge_cancel_proposals(
         (
             (
-                "ttl",
+                "value",
                 [
                     {
                         "command_id": "c1",
-                        "cancel_reason": "REST_DEADLINE_EXCEEDED",
-                        "cancel_detail": {"ttl": True},
-                    }
-                ],
-            ),
-            (
-                "q_version",
-                [
-                    {
-                        "command_id": "c1",
-                        "cancel_reason": "Q_VERSION_STALE",
-                        "cancel_detail": {"stale": True},
+                        "cancel_reason": "CURRENT_MEAN_VALUE_NON_POSITIVE",
+                        "cancel_detail": {"value": True},
                     }
                 ],
             ),
@@ -2101,44 +1389,39 @@ def test_c3_merge_preserves_every_lane_reason_and_family() -> None:
     )
 
     assert len(merged) == 1
-    assert merged[0]["cancel_reason"] == (
-        "HARD_FACT_BIN_DEAD+Q_VERSION_STALE+REST_DEADLINE_EXCEEDED"
-    )
+    assert merged[0]["cancel_reason"] == "CURRENT_MEAN_VALUE_NON_POSITIVE+HARD_FACT_BIN_DEAD"
     assert merged[0]["cancel_detail_by_lane"] == {
-        "ttl": {"ttl": True},
-        "q_version": {"stale": True},
+        "value": {"value": True},
         "day0": {"dead": True},
     }
     assert families["c1"] == FAMILY
 
 
-def test_day0_classification_failure_does_not_suppress_ttl(monkeypatch) -> None:
+def test_day0_classification_failure_does_not_suppress_valuation(monkeypatch) -> None:
     from src import config
     from src.execution import batch_order_submission
     from src.execution import day0_hard_fact_exit
     from src.execution import staleness_cancel
-    from src.state import venue_command_repo
 
-    entry = _entry(
-        "c1",
-        q_version="q-current",
-        age_minutes=DEADLINE_MIN + 1,
-    )
-    monkeypatch.setattr(
-        staleness_cancel,
-        "find_open_entry_rests",
-        lambda _conn, **_kwargs: [entry],
-    )
-    monkeypatch.setattr(
-        staleness_cancel,
-        "resolve_order_families",
-        lambda *_args: {"c1": FAMILY},
-    )
+    trade_conn = _trade_db()
+    _seed_open_entry(trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q-current")
+    monkeypatch.setattr(staleness_cancel, "resolve_order_families", lambda *_args: {"c1": FAMILY})
     monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {})
     monkeypatch.setattr(
         day0_hard_fact_exit,
         "classify_day0_dead_bin_entry_cancels",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("day0 unavailable")),
+    )
+    monkeypatch.setattr(
+        staleness_cancel,
+        "_capture_standing_entry_values",
+        lambda *_args, **_kwargs: [
+            staleness_cancel.StandingEntryValuation(
+                command_id="c1", venue_order_id="v1", token_id="tok1", family=FAMILY,
+                action="CANCEL", reason="CURRENT_MEAN_VALUE_NON_POSITIVE",
+                evidence={"authority_valid": True},
+            )
+        ],
     )
     submitted: list[list[str]] = []
 
@@ -2147,237 +1430,11 @@ def test_day0_classification_failure_does_not_suppress_ttl(monkeypatch) -> None:
         return [SimpleNamespace(command_id="c1", status="acked")]
 
     monkeypatch.setattr(batch_order_submission, "cancel_commands_batch", _cancel_batch)
-    monkeypatch.setattr(
-        venue_command_repo,
-        "get_command",
-        lambda _conn, _command_id: {"state": "CANCELLED"},
-    )
 
     result = run_c3_staleness_cancel_cycle(
-        object(),
-        object(),
-        object(),
-        object(),
-        now=NOW,
+        trade_conn, trade_conn, object(), object(), world_conn_ro=object(), now=NOW
     )
 
     assert submitted == [["c1"]]
     assert result["cancel_set_size"] == 1
     assert result["day0_cancel_set_size"] == 0
-    assert result["confirmed_families"] == {FAMILY}
-
-
-# ---------------------------------------------------------------------------
-# main._c3_staleness_cancel_cycle: the GLUE layer itself, not just the
-# extracted run_c3_staleness_cancel_cycle function.
-#
-# The E1 BLOCKER (early return on empty claimed_ids, filtering TTL by
-# affected_cities) lived entirely in this glue, not in the pure function above
-# -- every prior test in this file called run_c3_staleness_cancel_cycle
-# directly and would stay green even if the glue silently regressed. This
-# closes that gap: it drives the real @_scheduler_job-decorated main.py
-# function end-to-end (monkeypatched dependencies only, no behavior change),
-# with the exact scenario the BLOCKER broke -- zero claimed SOURCE_RUN_ARRIVED
-# events -- and asserts the TTL-expired rest is still cancelled.
-# ---------------------------------------------------------------------------
-
-
-class TestMainC3StalenessCancelCycleGlue:
-    def test_zero_claimed_events_still_cancels_expired_rest_through_the_real_scheduler_job(
-        self, monkeypatch, tmp_path
-    ):
-        import src.data.polymarket_client as polymarket_client_module
-        import src.events.event_store as event_store_module
-        import src.execution.command_recovery as command_recovery_module
-        import src.main as main_module
-        import src.state.db as state_db
-        from src.state.db import init_schema, init_schema_trade_only
-        from src.state.schema.v2_schema import apply_canonical_schema
-
-        trade_db_path = tmp_path / "trade.db"
-        forecasts_db_path = tmp_path / "forecasts.db"
-
-        seed_trade = sqlite3.connect(str(trade_db_path))
-        seed_trade.row_factory = sqlite3.Row
-        init_schema(seed_trade)
-        init_schema_trade_only(seed_trade)
-        _seed_open_entry(
-            seed_trade, command_id="c1", token_id="tok1", venue_order_id="v1",
-            q_version=None,
-            created_at=datetime.now(UTC) - timedelta(minutes=DEADLINE_MIN + 5),
-        )
-        seed_trade.commit()
-        seed_trade.close()
-
-        seed_forecasts = sqlite3.connect(str(forecasts_db_path))
-        seed_forecasts.row_factory = sqlite3.Row
-        apply_canonical_schema(seed_forecasts)
-        seed_forecasts.commit()
-        seed_forecasts.close()
-
-        def _open_trade():
-            conn = sqlite3.connect(str(trade_db_path))
-            conn.row_factory = sqlite3.Row
-            return conn
-
-        def _open_forecasts():
-            conn = sqlite3.connect(str(forecasts_db_path))
-            conn.row_factory = sqlite3.Row
-            return conn
-
-        class _FakeEventStore:
-            """Zero claimed events -- the exact scenario the BLOCKER broke."""
-
-            def __init__(self, conn, *, consumer_name):
-                pass
-
-            def fetch_pending_by_event_type(self, *, event_type, decision_time, limit):
-                return []
-
-            def claim(self, event_id):
-                return True
-
-            def mark_processed(self, event_id):
-                pass
-
-        class _FakeWorldConn:
-            def commit(self):
-                pass
-
-            def close(self):
-                pass
-
-        cancel_calls: list[list[str]] = []
-
-        class _FakeGatewayClient:
-            def cancel_orders_batch(self, order_ids):
-                cancel_calls.append(list(order_ids))
-                return [{"canceled": True, "orderID": oid} for oid in order_ids]
-
-        monkeypatch.setattr(
-            main_module, "_settings_section",
-            lambda name, default=None: {"enabled": True, "event_writer_enabled": False},
-        )
-        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
-        monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
-        # Invalid-entry-authority lane is orthogonal to this glue proof -- stub
-        # it to a no-op so this test stays focused on the TTL/event-clock seam.
-        monkeypatch.setattr(
-            command_recovery_module, "find_invalid_pending_entry_authority_cancels", lambda conn: []
-        )
-        monkeypatch.setattr(polymarket_client_module, "PolymarketClient", _FakeGatewayClient)
-        monkeypatch.setattr(event_store_module, "EventStore", _FakeEventStore)
-        monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeWorldConn())
-        monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _open_trade())
-        monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class=None: _open_trade())
-        monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _open_forecasts())
-
-        main_module._c3_staleness_cancel_cycle()
-
-        assert cancel_calls == [["v1"]]
-        check_conn = _open_trade()
-        try:
-            assert conn_state(check_conn, "c1") == "CANCELLED"
-        finally:
-            check_conn.close()
-
-    def test_event_store_failure_still_runs_ttl_pass(self, monkeypatch, tmp_path):
-        """HIGH (consult round 2): the retired maker_rest_escalation TTL owner
-        never depended on the event lane at all -- a fault in the
-        SOURCE_RUN_ARRIVED claim lane (EventStore raising) must degrade to
-        "no source event this tick," never take down the unconditional TTL
-        pass. Without the fail-soft wrap, an EventStore exception propagates
-        out of _c3_staleness_cancel_cycle (caught only by @_scheduler_job,
-        which marks the WHOLE tick failed and skips the TTL scan too) -- an
-        availability regression versus the deleted job."""
-        import src.data.polymarket_client as polymarket_client_module
-        import src.events.event_store as event_store_module
-        import src.execution.command_recovery as command_recovery_module
-        import src.main as main_module
-        import src.state.db as state_db
-        from src.state.db import init_schema, init_schema_trade_only
-        from src.state.schema.v2_schema import apply_canonical_schema
-
-        trade_db_path = tmp_path / "trade.db"
-        forecasts_db_path = tmp_path / "forecasts.db"
-
-        seed_trade = sqlite3.connect(str(trade_db_path))
-        seed_trade.row_factory = sqlite3.Row
-        init_schema(seed_trade)
-        init_schema_trade_only(seed_trade)
-        _seed_open_entry(
-            seed_trade, command_id="c1", token_id="tok1", venue_order_id="v1",
-            q_version=None,
-            created_at=datetime.now(UTC) - timedelta(minutes=DEADLINE_MIN + 5),
-        )
-        seed_trade.commit()
-        seed_trade.close()
-
-        seed_forecasts = sqlite3.connect(str(forecasts_db_path))
-        seed_forecasts.row_factory = sqlite3.Row
-        apply_canonical_schema(seed_forecasts)
-        seed_forecasts.commit()
-        seed_forecasts.close()
-
-        def _open_trade():
-            conn = sqlite3.connect(str(trade_db_path))
-            conn.row_factory = sqlite3.Row
-            return conn
-
-        def _open_forecasts():
-            conn = sqlite3.connect(str(forecasts_db_path))
-            conn.row_factory = sqlite3.Row
-            return conn
-
-        class _RaisingEventStore:
-            def __init__(self, conn, *, consumer_name):
-                pass
-
-            def fetch_pending_by_event_type(self, *, event_type, decision_time, limit):
-                raise sqlite3.OperationalError("simulated world DB fault")
-
-            def claim(self, event_id):
-                raise AssertionError("must not be reached: fetch already raised")
-
-            def mark_processed(self, event_id):
-                raise AssertionError("must not be reached: nothing was claimed")
-
-        class _FakeWorldConn:
-            def commit(self):
-                raise AssertionError("must not be reached: fetch raised before commit")
-
-            def close(self):
-                pass
-
-        cancel_calls: list[list[str]] = []
-
-        class _FakeGatewayClient:
-            def cancel_orders_batch(self, order_ids):
-                cancel_calls.append(list(order_ids))
-                return [{"canceled": True, "orderID": oid} for oid in order_ids]
-
-        monkeypatch.setattr(
-            main_module, "_settings_section",
-            lambda name, default=None: {"enabled": True, "event_writer_enabled": False},
-        )
-        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
-        monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
-        monkeypatch.setattr(
-            command_recovery_module, "find_invalid_pending_entry_authority_cancels", lambda conn: []
-        )
-        monkeypatch.setattr(polymarket_client_module, "PolymarketClient", _FakeGatewayClient)
-        monkeypatch.setattr(event_store_module, "EventStore", _RaisingEventStore)
-        monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeWorldConn())
-        monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _open_trade())
-        monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class=None: _open_trade())
-        monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _open_forecasts())
-
-        # Must not raise: the fault is caught and degraded, the TTL pass runs regardless.
-        main_module._c3_staleness_cancel_cycle()
-
-        assert cancel_calls == [["v1"]]
-        check_conn = _open_trade()
-        try:
-            assert conn_state(check_conn, "c1") == "CANCELLED"
-        finally:
-            check_conn.close()
