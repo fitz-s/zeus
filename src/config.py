@@ -24,6 +24,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -1184,6 +1185,22 @@ def runtime_station_geometry_for_city(
     returns source-capture metadata, not published-posterior authority.
     """
     path = registry_path or CONFIG_DIR / "station_precise_coords.json"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        raw = None
+    proof, entry = _station_reference_identity(city, raw)
+    if entry is not None:
+        proof.update(_station_ground_for_entry(entry, str(proof["station_id"]), effective_at=effective_at))
+    return proof
+
+
+def _station_reference_identity(city: City, raw: bytes | None) -> tuple[dict[str, object], dict | None]:
+    """Station reference identity from exact registry bytes, without ground.
+
+    Returns the proof and, only when the reference is valid, the registry entry
+    whose ground claim the caller may verify.
+    """
     source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
     expected_id = (
         "HKO_HQ" if source_type == "hko"
@@ -1200,31 +1217,33 @@ def runtime_station_geometry_for_city(
         "validity_reason": "STATION_SOURCE_IDENTITY_UNAVAILABLE",
     }
     if not expected_id:
-        return proof
+        return proof, None
     try:
-        rows, registry_sha = _station_registry(path.read_bytes())
+        if raw is None:
+            raise OSError("station registry unreadable")
+        rows, registry_sha = _station_registry(raw)
         entry = copy.deepcopy(rows[city.name])
         proof["registry_sha256"] = registry_sha
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         proof["validity_reason"] = "STATION_REGISTRY_ROW_UNAVAILABLE"
-        return proof
+        return proof, None
     if not isinstance(entry, dict) or str(entry.get("station") or "").strip().upper() != expected_id:
         proof["validity_reason"] = "STATION_REGISTRY_ID_MISMATCH"
-        return proof
+        return proof, None
     try:
         lat, lon = float(entry["lat"]), float(entry["lon"])
     except (KeyError, TypeError, ValueError):
         proof["validity_reason"] = "STATION_REGISTRY_GEOMETRY_INVALID"
-        return proof
+        return proof, None
     if not (math.isfinite(lat) and math.isfinite(lon)) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
         proof["validity_reason"] = "STATION_REGISTRY_GEOMETRY_INVALID"
-        return proof
+        return proof, None
     p1, p2 = math.radians(lat), math.radians(float(city.lat))
     d_lon = math.radians((lon - float(city.lon) + 180) % 360 - 180)
     a = math.sin((p1 - p2) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(d_lon / 2) ** 2
     if 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a))) > 5.0:
         proof["validity_reason"] = "STATION_REGISTRY_REQUEST_COORDINATE_MISMATCH"
-        return proof
+        return proof, None
     try:
         elevation = float(entry["elevation_m"])
         if not math.isfinite(elevation):
@@ -1239,23 +1258,46 @@ def runtime_station_geometry_for_city(
         station_surface="UNKNOWN", source=str(entry.get("source") or ""),
         validity_reason=None,
     )
-    proof.update(_station_ground_for_entry(entry, expected_id, effective_at=effective_at))
-    return proof
+    return proof, entry
 
 
 def runtime_coordinate_manifest_json() -> str:
     """Freeze one station-coordinate, calendar and unit snapshot for source identity."""
+    try:
+        raw = (CONFIG_DIR / "station_precise_coords.json").read_bytes()
+    except OSError:
+        raw = None
+    cities = tuple(
+        (name, tuple(getattr(city, field, None) for field in _MANIFEST_CITY_FIELDS))
+        for name, city in sorted(runtime_cities_by_name().items())
+    )
+    return _coordinate_manifest_json(cities, raw)
+
+
+# Every city attribute the manifest (and its station reference identity) reads.
+_MANIFEST_CITY_FIELDS = ("lat", "lon", "timezone", "settlement_unit", "settlement_source_type", "wu_station")
+
+
+@functools.cache
+def _coordinate_manifest_json(cities: tuple[tuple[str, tuple[object, ...]], ...], raw: bytes | None) -> str:
+    """Pure in its key: the city field values it reads and exact registry bytes.
+
+    Station ground is not a manifest input, so its replay stays out. Rebuilt
+    per bundle read it cost ~10 ms x 6 per family (19% of a cold prepare).
+    Bounded by distinct city/registry versions a process observes.
+    """
     rows = []
     station_identity_keys = (
         "station_id", "lat", "lon", "validity_reason",
     )
-    for name, city in sorted(runtime_cities_by_name().items()):
+    for name, values in cities:
+        city = SimpleNamespace(name=name, **dict(zip(_MANIFEST_CITY_FIELDS, values)))
         lat, lon = float(city.lat), float(city.lon)
         if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
             raise ValueError(f"invalid extraction coordinates: {name}")
         if city.settlement_unit not in {"C", "F"} or not city.timezone:
             raise ValueError(f"invalid extraction calendar/unit: {name}")
-        station = runtime_station_geometry_for_city(city)
+        station, _ = _station_reference_identity(city, raw)
         rows.append({
             "city": name, "lat": lat, "lon": lon,
             "timezone": city.timezone, "unit": city.settlement_unit,

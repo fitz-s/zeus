@@ -585,7 +585,8 @@ def test_coordinate_manifest_identity_excludes_station_audit_only_edits(monkeypa
         expected_replacement_dependency_identity_by_role,
     )
 
-    original = config.runtime_station_geometry_for_city
+    original = config._station_reference_identity
+    config._coordinate_manifest_json.cache_clear()
     baseline = config.runtime_coordinate_manifest_json()
     hong_kong = next(row for row in json.loads(baseline)["cities"] if row["city"] == "Hong Kong")
     assert set(hong_kong["station_geometry"]) == {
@@ -597,36 +598,41 @@ def test_coordinate_manifest_identity_excludes_station_audit_only_edits(monkeypa
     }
 
     with monkeypatch.context() as patcher:
-        def changed_audit(city):
+        def changed_audit(city, raw):
             # Editing one unrelated row changes the audit hash of the whole
             # registry, including every other station's helper result.
-            station = {**original(city), "registry_sha256": "f" * 64}
+            station, entry = original(city, raw)
+            station = {**station, "registry_sha256": "f" * 64}
             if city.name == "Manila":
-                return {**station, "source": "reworded audit citation"}
-            return station
-        patcher.setattr(config, "runtime_station_geometry_for_city", changed_audit)
+                return {**station, "source": "reworded audit citation"}, entry
+            return station, entry
+        patcher.setattr(config, "_station_reference_identity", changed_audit)
+        config._coordinate_manifest_json.cache_clear()
         assert config.runtime_coordinate_manifest_json() == baseline
         for metric in ("high", "low"):
             assert expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version == expected[metric]
 
     for physical in ("lat",):
         with monkeypatch.context() as patcher:
-            def changed_physics(city, *, field=physical):
-                station = original(city)
+            def changed_physics(city, raw, *, field=physical):
+                station, entry = original(city, raw)
                 if city.name == "Hong Kong":
-                    return {**station, field: float(station[field]) + .001}
-                return station
-            patcher.setattr(config, "runtime_station_geometry_for_city", changed_physics)
+                    return {**station, field: float(station[field]) + .001}, entry
+                return station, entry
+            patcher.setattr(config, "_station_reference_identity", changed_physics)
+            config._coordinate_manifest_json.cache_clear()
             assert config.runtime_coordinate_manifest_json() != baseline
             for metric in ("high", "low"):
                 assert expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version != expected[metric]
 
     with monkeypatch.context() as patcher:
-        patcher.setattr(config, "runtime_station_geometry_for_city", lambda city: {
-            **original(city), "elevation_m": 999.0,
+        patcher.setattr(config, "_station_reference_identity", lambda city, raw: ({
+            **original(city, raw)[0], "elevation_m": 999.0,
             "ground_audit": {"body_sha256": "f" * 64},
-        })
+        }, None))
+        config._coordinate_manifest_json.cache_clear()
         assert config.runtime_coordinate_manifest_json() == baseline
+    config._coordinate_manifest_json.cache_clear()
 
 
 def test_coordinate_manifest_replays_each_ground_claim_once(monkeypatch) -> None:
@@ -646,18 +652,53 @@ def test_coordinate_manifest_replays_each_ground_claim_once(monkeypatch) -> None
 
     config._registry_claim_ground_facts.cache_clear()
     monkeypatch.setattr(config, "station_ground_facts_from_bytes", counted)
-    first = config.runtime_coordinate_manifest_json()
+    city = config.runtime_cities_by_name()["Hong Kong"]
+    station = config.runtime_station_geometry_for_city(city)
     replays = len(calls)
     assert replays > 0
     for _ in range(3):
-        assert config.runtime_coordinate_manifest_json() == first
+        assert config.runtime_station_geometry_for_city(city)["ground_status"] == "VERIFIED"
     assert len(calls) == replays
-
-    city = config.runtime_cities_by_name()["Hong Kong"]
-    station = config.runtime_station_geometry_for_city(city)
     assert station["ground_status"] == "VERIFIED"
     station["ground_facts"]["elevation_m"] = -1.0
     assert config.runtime_station_geometry_for_city(city)["ground_facts"]["elevation_m"] != -1.0
+
+
+def test_coordinate_manifest_builds_once_per_exact_input_and_never_replays_ground(monkeypatch, tmp_path) -> None:
+    """Every bundle read hashes the manifest; rebuilding it per read cost ~10 ms
+    x 6 per family (19% of a cold prepare, 2026-10-01). Ground is not a
+    manifest input, so the manifest must neither replay it nor depend on it."""
+    import src.config as config
+
+    ground_calls: list[str] = []
+    real_ground = config._station_ground_for_entry
+    monkeypatch.setattr(config, "_station_ground_for_entry", lambda entry, sid, **kw: (
+        ground_calls.append(sid) or real_ground(entry, sid, **kw)))
+    builds: list[int] = []
+    real_identity = config._station_reference_identity
+    monkeypatch.setattr(config, "_station_reference_identity", lambda city, raw: (
+        builds.append(1) or real_identity(city, raw)))
+
+    config._coordinate_manifest_json.cache_clear()
+    first = config.runtime_coordinate_manifest_json()
+    built = len(builds)
+    assert built == len(config.runtime_cities_by_name())
+    for _ in range(5):
+        assert config.runtime_coordinate_manifest_json() == first
+    assert len(builds) == built
+    assert ground_calls == []
+
+    # A changed registry byte is a new key: rebuilt, not served stale.
+    real_path = config.CONFIG_DIR / "station_precise_coords.json"
+    rows = json.loads(real_path.read_text())
+    rows["Hong Kong"]["lat"] = float(rows["Hong Kong"]["lat"]) + 0.001
+    edited = json.dumps(rows).encode()
+    real_read = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: edited if self == real_path else real_read(self))
+    changed = config.runtime_coordinate_manifest_json()
+    assert len(builds) == 2 * built
+    assert changed != first
+    config._coordinate_manifest_json.cache_clear()
 
 
 def test_station_geometry_wrong_station_degrades_only_that_city(tmp_path) -> None:
