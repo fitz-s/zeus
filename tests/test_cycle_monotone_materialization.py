@@ -1742,15 +1742,22 @@ def test_held_family_whose_local_day_ended_is_never_readmitted(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize(
-    ("error_type", "retained"),
-    (("ValueError", False), ("OperationalError", True), (None, True)),
+    ("error_type", "category", "retained"),
+    (
+        ("ValueError", "INPUT_VERDICT", False),
+        ("ValueError", None, True),  # an older worker's bare ValueError is UNCLASSIFIED
+        ("OperationalError", "ENVIRONMENT_RETRY", True),
+        ("RuntimeError", "BOGUS", True),
+        (None, None, True),
+    ),
 )
 def test_held_materialization_error_is_fenced_or_owned_never_respawned(
-    tmp_path, monkeypatch, error_type, retained,
+    tmp_path, monkeypatch, error_type, category, retained,
 ) -> None:
     """S3: a worker ERROR never makes held re-heal publish fresh producer work per tick.
-    An input-verdict error (ValueError) is fenced on the attempt identity; a transient or
-    unknown error keeps its one request as the family's owner, retried by the queue."""
+    Only an emitted INPUT_VERDICT is fenced on the attempt identity; an environment or
+    unclassified error (absent/unknown category included, whatever its exception type)
+    keeps its one request as the family's owner, retried by the queue."""
     import subprocess
 
     import src.data.replacement_forecast_live_materialization_queue as queue
@@ -1775,7 +1782,10 @@ def test_held_materialization_error_is_fenced_or_owned_never_respawned(
     monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
     monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
     monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
-    body = "" if error_type is None else json.dumps({"status": "ERROR", "error_type": error_type})
+    body = "" if error_type is None else json.dumps({
+        "status": "ERROR", "error_type": error_type,
+        **({} if category is None else {"failure_category": category}),
+    })
     report = queue._process_claimed_materialization_batch(
         request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
         forecast_db=db, limit=1,
