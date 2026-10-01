@@ -6168,7 +6168,7 @@ def _edli_day0_hourly_refresh_due_families(
     """
     from src.config import runtime_cities_by_name
     from src.data.day0_hourly_vectors import (
-        DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
+        DAY0_ROLLING_CAPTURE_MAX_AGE_HOURS,
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
         DAY0_HOURLY_REFRESH_HEADROOM_HOURS,
         day0_hourly_models_for_city,
@@ -6339,7 +6339,7 @@ def _edli_day0_hourly_refresh_due_families(
                     # already-dark families that the 3-city microbatch can
                     # only repair after the authority cliff.
                     max_age_hours=(
-                        DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS
+                        DAY0_ROLLING_CAPTURE_MAX_AGE_HOURS
                         - DAY0_HOURLY_REFRESH_HEADROOM_HOURS
                     ),
                     expected_models=expected_models,

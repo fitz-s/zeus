@@ -37148,12 +37148,12 @@ def _assert_day0_post_local_vector_witness(
     ):
         raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_FUTURE")
     try:
-        from src.data.day0_hourly_vectors import DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS
+        from src.data.day0_hourly_vectors import DAY0_ROLLING_CAPTURE_MAX_AGE_HOURS
 
         freshness_as_of = min(decision_utc, target_end_utc)
         if (
             freshness_as_of - source_available
-        ).total_seconds() > float(DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS) * 3600.0:
+        ).total_seconds() > float(DAY0_ROLLING_CAPTURE_MAX_AGE_HOURS) * 3600.0:
             raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_STALE")
     except ImportError:
         raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_INVALID") from None
@@ -49786,11 +49786,11 @@ def _day0_direct_entry_source_clock_carrier(
     """
 
     from src.data.day0_hourly_vectors import (
-        DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
         DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,
         DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL,
         OPENMETEO_ENSEMBLE_URL,
+        day0_ensemble_run_refusal,
         day0_source_clock_ensemble_member_models,
         read_freshest_day0_hourly_vectors,
     )
@@ -49901,8 +49901,9 @@ def _day0_direct_entry_source_clock_carrier(
         or provider_modified > fetch_finished
         or fetch_finished > decision_utc
         or captured_at > decision_utc
-        or decision_utc - fetch_finished
-        > timedelta(hours=float(DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS))
+        # One immutable ENS run: current by run identity, not capture age.
+        or day0_ensemble_run_refusal(provider_cycle, decision_time=decision_utc)
+        is not None
     ):
         return None
     current_c = (

@@ -133,7 +133,11 @@ DEFAULT_REFRESH_INTERVAL_S = 3600.0
 DEFAULT_FETCH_TIMEOUT_S = 4.0
 DEFAULT_REFRESH_BUDGET_S = 6.0
 DEFAULT_REFRESH_MAX_CITIES = 3
-DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS = 3.0
+# Capture-age bound for ROLLING rows only: deterministic standard-endpoint
+# vectors serve a blended "now" whose currency is when they were captured.
+# ENS member rows are one immutable provider run; their currency is run
+# identity (``day0_ensemble_run_refusal``), never capture age.
+DAY0_ROLLING_CAPTURE_MAX_AGE_HOURS = 3.0
 DAY0_HOURLY_REFRESH_HEADROOM_HOURS = 1.0
 DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES = 60.0
 DAY0_HOURLY_FORECAST_HOURS = 72
@@ -275,6 +279,11 @@ class Day0HourlyVector:
     # separate fetch-start/fetch-complete possession clocks and source-run
     # identity; rows without it cannot sponsor held probability authority.
     source_run_meta_json: str | None = None
+
+    @property
+    def immutable_run_member(self) -> bool:
+        """True for an ENS member row: one immutable run, current by run identity."""
+        return str(self.model or "").startswith(DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX)
 
 
 @dataclass(frozen=True)
@@ -3522,11 +3531,60 @@ def _day0_source_clock_ensemble_metadata_is_current(
     )
 
 
+def day0_ensemble_run_refusal(
+    run: datetime, *, decision_time: datetime
+) -> str | None:
+    """Run-identity currency of one immutable ENS run; None when current.
+
+    A capture of run R carries the same members however long ago it was
+    fetched, so capture age measures nothing. R is stale only when (a) the
+    provider's latest-available run (the monotone ensemble HWM pin) names a
+    newer run that was publicly usable and recorded by ``decision_time``, or
+    (b) R's own cycle is outside the source-cycle age law
+    (``replacement_source_cycle_max_age_hours``: decision minus CYCLE time,
+    30h default) -- the backstop when a dead metadata probe stops the pin
+    from advancing.
+    """
+    from src.data.replacement_forecast_cycle_policy import cycle_age_outside_bound
+
+    cutoff = decision_time.astimezone(UTC)
+    if cycle_age_outside_bound(cutoff, run):
+        return "DAY0_CONDITIONAL_HIGH_ENSEMBLE_RUN_EXPIRED"
+    try:
+        pin = json.loads(_day0_provider_run_hwm_pin_path().read_text(encoding="utf-8"))
+        entry = pin["entries"][DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL]
+        pinned_run = _day0_parse_aware_clock(
+            entry["run_initialisation_time"], field_name="ensemble_pin_run"
+        )
+        pinned_available = _day0_parse_aware_clock(
+            entry["run_availability_time"], field_name="ensemble_pin_available"
+        )
+        pinned_recorded = _day0_parse_aware_clock(
+            entry["recorded_at"], field_name="ensemble_pin_recorded"
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None  # No causal pin: the cycle-age law alone governs.
+    from src.strategy.live_inference.source_clock_vnext import (
+        SOURCE_AVAILABILITY_CONSISTENCY_WAIT_MINUTES,
+    )
+
+    if (
+        pinned_run <= pinned_available
+        and pinned_recorded <= cutoff
+        and pinned_available + timedelta(
+            minutes=SOURCE_AVAILABILITY_CONSISTENCY_WAIT_MINUTES
+        ) <= cutoff
+        and run.astimezone(UTC) < pinned_run
+    ):
+        return "DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED"
+    return None
+
+
 def select_ready_day0_hourly_vectors(
     vectors: Iterable[Day0HourlyVector],
     *,
     target_date: str,
-    max_age_hours: float = DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
+    max_age_hours: float = DAY0_ROLLING_CAPTURE_MAX_AGE_HOURS,
     now: Optional[datetime] = None,
     expected_models: Optional[Iterable[str]] = None,
     require_expected: bool = False,
@@ -3537,7 +3595,10 @@ def select_ready_day0_hourly_vectors(
     """Pure strict-bundle predicate shared by producer and live readers.
 
     It is intentionally the one place that decides freshness, expected-model
-    completeness, capture skew, and remaining-window coverage.  The producer
+    completeness, capture skew, and remaining-window coverage. Freshness splits
+    by row kind: a rolling row must be captured within ``max_age_hours``; an
+    immutable ENS member row must name a current run
+    (``day0_ensemble_run_refusal``), whatever its capture age.  The producer
     probes persisted readiness through ``read_freshest_day0_hourly_vectors``;
     health and money-path readers do the same, so a city cannot be prioritized
     by a weaker interpretation than the authority consumer accepts.
@@ -3550,6 +3611,7 @@ def select_ready_day0_hourly_vectors(
             expected.append(normalized)
     expected_set = set(expected)
 
+    run_refusals: dict[datetime, str | None] = {}
     parsed: list[tuple[datetime, Day0HourlyVector]] = []
     for vector in vectors:
         model = str(vector.model or "").strip()
@@ -3567,7 +3629,23 @@ def select_ready_day0_hourly_vectors(
             age_hours = (moment - captured).total_seconds() / 3600.0
         except (TypeError, ValueError):
             continue
-        if age_hours > float(max_age_hours) or age_hours < 0.0:
+        if age_hours < 0.0:
+            continue
+        if vector.immutable_run_member:
+            try:
+                run = _day0_parse_aware_clock(
+                    json.loads(str(vector.source_run_meta_json or ""))[
+                        "provider_source_cycle_time_utc"
+                    ],
+                    field_name="provider_source_cycle_time_utc",
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if run not in run_refusals:
+                run_refusals[run] = day0_ensemble_run_refusal(run, decision_time=moment)
+            if run_refusals[run] is not None:
+                continue
+        elif age_hours > float(max_age_hours):
             continue
         if require_complete_remaining_window:
             try:
@@ -3656,7 +3734,7 @@ def read_freshest_day0_hourly_vectors(
     *,
     city: str,
     target_date: str,
-    max_age_hours: float = DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
+    max_age_hours: float = DAY0_ROLLING_CAPTURE_MAX_AGE_HOURS,
     now: Optional[datetime] = None,
     conn: Optional[sqlite3.Connection] = None,
     expected_models: Optional[Iterable[str]] = None,
@@ -3668,9 +3746,10 @@ def read_freshest_day0_hourly_vectors(
 ) -> list[Day0HourlyVector]:
     """Freshest persisted vector per model for (city, target_date).
 
-    Vectors older than max_age_hours are EXCLUDED (a stale high-res run must
-    not masquerade as the current remaining-day distribution — fail-closed to
-    the legacy full-day path instead).
+    Rolling vectors captured more than max_age_hours ago are EXCLUDED (a stale
+    high-res "now" must not masquerade as the current remaining-day
+    distribution). Immutable ENS member rows are instead admitted by run
+    currency; the SQL prefilter bounds them by the source-cycle age law.
 
     ``expected_models`` lets live consumers define the complete bundle they are
     willing to treat as same-day authority. With ``require_expected=True``, any
@@ -3691,6 +3770,11 @@ def read_freshest_day0_hourly_vectors(
         conn = get_forecasts_connection_read_only()
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     oldest_capture = moment - timedelta(hours=float(max_age_hours))
+    from src.data.replacement_forecast_cycle_policy import (
+        replacement_source_cycle_max_age_hours,
+    )
+
+    oldest_run = moment - timedelta(hours=replacement_source_cycle_max_age_hours())
     try:
         try:
             rows = conn.execute(
@@ -3699,15 +3783,27 @@ def read_freshest_day0_hourly_vectors(
                        times_json, temps_c_json, source_run_meta_json
                 FROM day0_hourly_vectors
                 WHERE city = ? AND target_date = ?
-                  AND julianday(captured_at)
-                      BETWEEN julianday(?) AND julianday(?)
+                  AND julianday(captured_at) <= julianday(?)
+                  AND (
+                      julianday(captured_at) >= julianday(?)
+                      OR (
+                          substr(model, 1, ?) = ?
+                          AND julianday(json_extract(
+                              source_run_meta_json,
+                              '$.provider_source_cycle_time_utc'
+                          )) >= julianday(?)
+                      )
+                  )
                 ORDER BY captured_at DESC
                 """,
                 (
                     str(city),
                     str(target_date),
-                    oldest_capture.isoformat(),
                     moment.isoformat(),
+                    oldest_capture.isoformat(),
+                    len(DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX),
+                    DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX,
+                    oldest_run.isoformat(),
                 ),
             ).fetchall()
         except sqlite3.Error:
@@ -4607,36 +4703,10 @@ def day0_conditional_high_run_proof(
     if len({(request_hash, provider_run_id) for _run, request_hash, provider_run_id in ens_meta}) != 1:
         raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_CAPTURE_MISMATCH")
     # The deterministic IFS and Ensemble API have independent release clocks.
-    # A known newer ENS run supersedes an older member bundle only after its
-    # own metadata was observed and became publicly usable by this decision.
-    try:
-        pin = json.loads(_day0_provider_run_hwm_pin_path().read_text(encoding="utf-8"))
-        entry = pin["entries"][DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL]
-        pinned_run = _day0_parse_aware_clock(
-            entry["run_initialisation_time"], field_name="ensemble_pin_run"
-        )
-        pinned_available = _day0_parse_aware_clock(
-            entry["run_availability_time"], field_name="ensemble_pin_available"
-        )
-        pinned_recorded = _day0_parse_aware_clock(
-            entry["recorded_at"], field_name="ensemble_pin_recorded"
-        )
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        pass  # No causal pin: the bracketed vector clocks and 3h freshness govern.
-    else:
-        from src.strategy.live_inference.source_clock_vnext import (
-            SOURCE_AVAILABILITY_CONSISTENCY_WAIT_MINUTES,
-        )
-
-        if (
-            pinned_run <= pinned_available
-            and pinned_recorded <= cutoff
-            and pinned_available + timedelta(
-                minutes=SOURCE_AVAILABILITY_CONSISTENCY_WAIT_MINUTES
-            ) <= cutoff
-            and ensemble_run < pinned_run
-        ):
-            raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED")
+    # The ENS bundle is current by its own run identity, never capture age.
+    refusal = day0_ensemble_run_refusal(ensemble_run, decision_time=cutoff)
+    if refusal is not None:
+        raise ValueError(refusal)
     return provider_meta, ensemble_run
 
 

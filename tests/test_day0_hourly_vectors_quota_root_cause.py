@@ -1,5 +1,5 @@
 # Created: 2026-09-05
-# Last reused or audited: 2026-09-30
+# Last reused or audited: 2026-10-01
 # Lifecycle: created=2026-09-05; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: current HIGH conditional-variance acquisition plan; shared quota contract.
 # Purpose: Regression tests for the round-3 quota root-cause fixes in
@@ -504,12 +504,9 @@ def test_new_usable_ensemble_run_drains_success_ttl_without_refetching_determini
             decision_time=moment["now"], remaining_window_starts={target: moment["now"]},
         )
         if barrier in {"none", "old_missing_member", "old_overage", "old_incomplete_window"}:
-            reason = (
-                "DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE"
-                if barrier != "none"
-                else "DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED"
-            )
-            with pytest.raises(ValueError, match=reason):
+            # The selector refuses a superseded run's rows (run currency), so
+            # the old bundle reads as absent, whatever its capture age.
+            with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE"):
                 day0.day0_conditional_high_shape(
                     conn=conn, city=city, target_date=target,
                     decision_time=moment["now"], current_state=state,
@@ -2189,8 +2186,9 @@ def test_ambiguous_low_missing_ens_is_priority_debt_until_strict_current_bundle(
 
         carriers = {
             "missing": [],
-            "old_target": _parsed_ensemble_vectors(city, run - timedelta(days=1),
-                available - timedelta(days=1), decision - timedelta(days=1)),
+            # A run past the source-cycle age law (30h) is expired, not merely old.
+            "old_target": _parsed_ensemble_vectors(city, run - timedelta(hours=29),
+                available - timedelta(hours=29), decision - timedelta(days=1)),
             "wrong_metadata_run": [wrong_metadata(row) for row in valid],
             "partial": valid[:-1],
         }
@@ -2379,3 +2377,100 @@ def test_ensemble_metadata_response_cannot_relabel_deterministic_model(
     assert pins == []
     assert parsed == []
     assert fetched == ([True] if wrong_phase == "after" else [])
+
+
+def _ens_currency_case(tmp_path, monkeypatch, *, pin_run=None, pin_available=None):
+    city = SimpleNamespace(name="ENS Currency City", timezone="UTC", lat=0.0, lon=0.0)
+    now = datetime(2026, 10, 1, 13, 30, tzinfo=UTC)
+    run = datetime(2026, 9, 30, 18, tzinfo=UTC)
+    available = datetime(2026, 10, 1, 6, 26, tzinfo=UTC)
+    captured = now - timedelta(hours=4)
+    pin = tmp_path / "pin.json"
+    if pin_run is not None:
+        pin.write_text(_json.dumps({"schema_version": 1, "entries": {
+            day0.DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL: {
+                "run_initialisation_time": pin_run.isoformat(),
+                "run_availability_time": (pin_available or available).isoformat(),
+                "recorded_at": (now - timedelta(minutes=30)).isoformat(),
+            }}}))
+    monkeypatch.setattr(day0, "_day0_provider_run_hwm_pin_path", lambda: pin)
+    rows = [
+        _strict_ensemble_member_vector(
+            city, member, run, available, captured,
+            captured, captured + timedelta(minutes=1),
+        )
+        for member in day0.day0_source_clock_ensemble_member_models()
+    ]
+    strict = dict(
+        target_date=now.date().isoformat(), now=now,
+        expected_models=day0.day0_source_clock_ensemble_member_models(),
+        require_expected=True,
+        max_bundle_skew_minutes=day0.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=now - timedelta(minutes=10),
+        require_complete_remaining_window=True,
+    )
+    return city, now, run, rows, strict
+
+
+def test_four_hour_old_capture_of_the_latest_ens_run_is_admitted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """Members of one run are immutable: capture age is not staleness."""
+    city, now, run, rows, strict = _ens_currency_case(
+        tmp_path, monkeypatch, pin_run=datetime(2026, 9, 30, 18, tzinfo=UTC),
+    )
+    assert len(select_ready_day0_hourly_vectors(rows, **strict)) == 51
+    assert day0.day0_ensemble_run_refusal(run, decision_time=now) is None
+    # The persisted reader's SQL prefilter must not pre-drop them by capture.
+    conn = sqlite3.connect(":memory:")
+    assert day0.persist_day0_hourly_vectors(
+        rows, target_date=strict["target_date"], conn=conn,
+        request_hash="sha256:ens", endpoint=day0.OPENMETEO_ENSEMBLE_URL, now=now,
+    ) == 51
+    assert len(day0.read_freshest_day0_hourly_vectors(
+        city=city.name, conn=conn, **strict,
+    )) == 51
+    # A rolling deterministic row of the same capture age stays refused.
+    meta = _json.loads(rows[0].source_run_meta_json)
+    meta["model"] = "ecmwf_ifs"
+    rolling = replace(rows[0], model="ecmwf_ifs", source_run_meta_json=_json.dumps(meta))
+    assert select_ready_day0_hourly_vectors(
+        [rolling], **{**strict, "expected_models": ["ecmwf_ifs"]},
+    ) == []
+
+
+def test_superseded_ens_run_is_refused_once_the_newer_run_is_usable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    newer = datetime(2026, 10, 1, 0, tzinfo=UTC)
+    _city, now, run, rows, strict = _ens_currency_case(
+        tmp_path, monkeypatch, pin_run=newer,
+        pin_available=datetime(2026, 10, 1, 13, 25, tzinfo=UTC),
+    )
+    # Pinned but inside the public-usability wait: the old run is still current.
+    assert len(select_ready_day0_hourly_vectors(rows, **strict)) == 51
+    _city, now, run, rows, strict = _ens_currency_case(
+        tmp_path, monkeypatch, pin_run=newer,
+        pin_available=datetime(2026, 10, 1, 12, 0, tzinfo=UTC),
+    )
+    assert select_ready_day0_hourly_vectors(rows, **strict) == []
+    assert (
+        day0.day0_ensemble_run_refusal(run, decision_time=now)
+        == "DAY0_CONDITIONAL_HIGH_ENSEMBLE_SUPERSEDED"
+    )
+
+
+def test_ens_run_currency_keeps_the_coverage_and_cycle_age_laws(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    _city, now, run, rows, strict = _ens_currency_case(
+        tmp_path, monkeypatch, pin_run=datetime(2026, 9, 30, 18, tzinfo=UTC),
+    )
+    truncated = [
+        replace(row, times=row.times[:20], temps_c=row.temps_c[:20]) for row in rows
+    ]
+    assert select_ready_day0_hourly_vectors(truncated, **strict) == []
+    # Dead probe (pin never advances): the 30h source-cycle age law expires the run.
+    assert day0.day0_ensemble_run_refusal(
+        run, decision_time=now + timedelta(hours=26),
+    ) == "DAY0_CONDITIONAL_HIGH_ENSEMBLE_RUN_EXPIRED"

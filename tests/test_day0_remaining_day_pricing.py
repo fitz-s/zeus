@@ -8604,6 +8604,10 @@ def test_source_clock_reader_rejects_legacy_deterministic_metadata_domain():
                 {
                     "model": member,
                     "provider": "openmeteo",
+                    # ENS rows are admitted by run identity, not capture age.
+                    "provider_source_cycle_time_utc": (
+                        now - timedelta(hours=9)
+                    ).isoformat(),
                     "request_params_json": json.dumps(
                         {"metadata_model": metadata_model}
                     ),
@@ -14029,7 +14033,7 @@ class TestRequestHashProvenance:
             {("Paris", "2026-06-10", "high"), ("Paris", "2026-06-10", "low")}
         )
         assert observed_max_ages == [2.0, 2.0]
-        assert vectors_module.DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS == 3.0
+        assert vectors_module.DAY0_ROLLING_CAPTURE_MAX_AGE_HOURS == 3.0
         assert vectors_module.DAY0_HOURLY_REFRESH_HEADROOM_HOURS == 1.0
 
     @pytest.mark.parametrize("failure", ["read", "close"])
