@@ -646,6 +646,42 @@ def _no_trade(reason: str) -> PreparedGlobalAuctionResult:
     )
 
 
+def single_position_capital_limit(
+    allocator_limit: Decimal,
+    *,
+    token_id: str,
+    wealth_witness: PortfolioWealthWitness,
+) -> Decimal:
+    """Bound one BUY token's capital by the configured single-position fraction.
+
+    The W3 selector owns the final executable BUY size, so the configured
+    single-position fraction constrains this same capital envelope. Zeus-owned
+    utility equity, never shared-wallet cash, is the fraction basis. Zero
+    retains the documented disabled posture.
+    """
+    from src.config import sizing_defaults
+
+    single_position_pct = Decimal(str(sizing_defaults()["max_single_position_pct"]))
+    if (
+        not single_position_pct.is_finite()
+        or single_position_pct < 0
+        or single_position_pct > 1
+    ):
+        raise ValueError("GLOBAL_SINGLE_POSITION_FRACTION_INVALID")
+    if single_position_pct == 0:
+        return Decimal(allocator_limit)
+    committed_usd = Decimal(
+        dict(wealth_witness.native_commitments_micro).get(token_id, 0)
+    ) / Decimal("1000000")
+    remaining_position_budget = max(
+        Decimal("0"),
+        single_position_pct
+        * wealth_witness.strategy_capital_allocation.allocated_equity_usd
+        - committed_usd,
+    )
+    return min(Decimal(allocator_limit), remaining_position_budget)
+
+
 def _candidate_portfolio_endowment(
     candidate: GlobalSingleOrderAnyCandidate,
     *,
@@ -1526,42 +1562,11 @@ def select_prepared_global_auction(
                     owner_event_id,
                 )
             )
-
-        # The W3 selector owns the final executable BUY size, so the configured
-        # single-position fraction must constrain this same capital envelope.
-        # Leaving it only in the retired local sizing path let the global solver
-        # spend well above max_single_position_pct while every upstream receipt
-        # still advertised that setting. Use Zeus-owned utility equity, never
-        # shared-wallet cash, as the fraction basis. Zero retains the documented
-        # disabled posture.
-        from src.config import sizing_defaults
-
-        single_position_pct = Decimal(
-            str(sizing_defaults()["max_single_position_pct"])
+        return single_position_capital_limit(
+            allocator_limit,
+            token_id=candidate.token_id,
+            wealth_witness=wealth_witness,
         )
-        if (
-            not single_position_pct.is_finite()
-            or single_position_pct < 0
-            or single_position_pct > 1
-        ):
-            raise ValueError("GLOBAL_SINGLE_POSITION_FRACTION_INVALID")
-        if single_position_pct > 0:
-            capital_allocation = wealth_witness.strategy_capital_allocation
-            committed_micro = dict(
-                wealth_witness.native_commitments_micro
-            ).get(candidate.token_id, 0)
-            committed_usd = Decimal(committed_micro) / Decimal("1000000")
-            remaining_position_budget = max(
-                Decimal("0"),
-                single_position_pct
-                * capital_allocation.allocated_equity_usd
-                - committed_usd,
-            )
-            allocator_limit = min(
-                allocator_limit,
-                remaining_position_budget,
-            )
-        return allocator_limit
 
     def _candidate_policy_rejection(
         candidate: GlobalSingleOrderAnyCandidate,

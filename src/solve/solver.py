@@ -7742,6 +7742,90 @@ def finite_sample_false_edge_rate(
     return float((false_edges + 1) / (len(samples) + 1))
 
 
+def resolve_candidate_payoff_q_correction(
+    candidate: GlobalSingleOrderAnyCandidate,
+    *,
+    raw_q: float,
+    witness: FamilyPayoffWitness,
+    resolver: Callable[
+        [GlobalSingleOrderCandidate, float, float, datetime],
+        PayoffQCorrection | SourceIdentityBaseline | None,
+    ]
+    | None,
+    decision_at_utc: datetime,
+) -> PayoffQCorrection | SourceIdentityBaseline | None:
+    """Market-anchored correction for one BUY or SELL leg, or raw q.
+
+    Canonical SELL resolves its inherited ENTRY price feature inside the
+    binding resolver and independently verifies it on return. A proved
+    0/1 Day0 payoff never enters calibration. Optional legacy resolvers may return None; the
+    canonical resolver returns a sealed source-identity policy only for
+    verified insufficient residual support; invalid evidence still raises.
+    """
+
+    if (
+        resolver is None
+        or not isinstance(
+            candidate,
+            (GlobalSingleOrderCandidate, GlobalSingleOrderSellCandidate),
+        )
+        or family_exact_yes_payoff(witness, bin_id=candidate.bin_id) is not None
+        or getattr(candidate, "settlement_locked_exact_payoff", False)
+    ):
+        return None
+    # p0 is the decision-time gross unit fill price of THIS token: the
+    # market's probability anchor for the claim. Fees stay on the economic
+    # cost curve and are excluded from the calibrator's logit residual.
+    curve = (
+        candidate.economic_sell_curve
+        if isinstance(candidate, GlobalSingleOrderSellCandidate)
+        else candidate.economic_cost_curve
+    )
+    if not curve.levels:
+        return None
+    p0 = float(curve.levels[0].price)
+    if not math.isfinite(p0) or not 0.0 < p0 < 1.0:
+        return None
+    action = "SELL" if isinstance(candidate, GlobalSingleOrderSellCandidate) else "BUY"
+    try:
+        correction = resolver(candidate, float(raw_q), p0, decision_at_utc)
+    except PayoffQCorrectionUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a failed correction cannot authorize raw q
+        raise PayoffQCorrectionUnavailable(
+            f"{action} correction resolver failed: {exc}"
+        ) from exc
+    if correction is None:
+        return None
+    if not isinstance(correction, (PayoffQCorrection, SourceIdentityBaseline)):
+        raise PayoffQCorrectionUnavailable(
+            f"{action} correction result has invalid type"
+        )
+    if not correction.matches(
+        family_key=candidate.family_key,
+        bin_id=candidate.bin_id,
+        side=candidate.side,
+        token_id=candidate.token_id,
+    ) or not math.isclose(
+        correction.raw_q, float(raw_q), rel_tol=0.0, abs_tol=1e-12
+    ):
+        # A record sealed against a different leg or a superseded raw q
+        # cannot describe this sizing; acting on it would break the
+        # certificate's raw-q supersession check.
+        raise PayoffQCorrectionUnavailable(
+            f"{action} correction identity or raw q mismatch"
+        )
+    if isinstance(correction, SourceIdentityBaseline) and not correction.matches_witness(witness):
+        raise PayoffQCorrectionUnavailable(f"{action} source identity superseded")
+    if isinstance(candidate, GlobalSingleOrderSellCandidate) and correction.fit_scope is not None:
+        p0 = candidate.entry_calibration_price_anchor(correction.fit_scope)
+    if not math.isclose(
+        correction.p0, p0, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise PayoffQCorrectionUnavailable(f"{action} correction p0 mismatch")
+    return correction
+
+
 def select_global_single_order(
     candidates: Sequence[GlobalSingleOrderAnyCandidate],
     *,
@@ -8005,78 +8089,13 @@ def select_global_single_order(
         raw_q: float,
         witness: FamilyPayoffWitness,
     ) -> PayoffQCorrection | SourceIdentityBaseline | None:
-        """Market-anchored correction for one BUY or SELL leg, or raw q.
-
-        Canonical SELL resolves its inherited ENTRY price feature inside the
-        binding resolver and independently verifies it on return. A proved
-        0/1 Day0 payoff never enters calibration. Optional legacy resolvers may return None; the
-        canonical resolver returns a sealed source-identity policy only for
-        verified insufficient residual support; invalid evidence still raises.
-        """
-
-        if (
-            payoff_q_correction_resolver is None
-            or not isinstance(
-                candidate,
-                (GlobalSingleOrderCandidate, GlobalSingleOrderSellCandidate),
-            )
-            or family_exact_yes_payoff(witness, bin_id=candidate.bin_id) is not None
-            or getattr(candidate, "settlement_locked_exact_payoff", False)
-        ):
-            return None
-        # p0 is the decision-time gross unit fill price of THIS token: the
-        # market's probability anchor for the claim. Fees stay on the economic
-        # cost curve and are excluded from the calibrator's logit residual.
-        curve = (
-            candidate.economic_sell_curve
-            if isinstance(candidate, GlobalSingleOrderSellCandidate)
-            else candidate.economic_cost_curve
+        return resolve_candidate_payoff_q_correction(
+            candidate,
+            raw_q=raw_q,
+            witness=witness,
+            resolver=payoff_q_correction_resolver,
+            decision_at_utc=decision_at_utc,
         )
-        if not curve.levels:
-            return None
-        p0 = float(curve.levels[0].price)
-        if not math.isfinite(p0) or not 0.0 < p0 < 1.0:
-            return None
-        action = "SELL" if isinstance(candidate, GlobalSingleOrderSellCandidate) else "BUY"
-        try:
-            correction = payoff_q_correction_resolver(
-                candidate, float(raw_q), p0, decision_at_utc
-            )
-        except PayoffQCorrectionUnavailable:
-            raise
-        except Exception as exc:  # noqa: BLE001 - a failed correction cannot authorize raw q
-            raise PayoffQCorrectionUnavailable(
-                f"{action} correction resolver failed: {exc}"
-            ) from exc
-        if correction is None:
-            return None
-        if not isinstance(correction, (PayoffQCorrection, SourceIdentityBaseline)):
-            raise PayoffQCorrectionUnavailable(
-                f"{action} correction result has invalid type"
-            )
-        if not correction.matches(
-            family_key=candidate.family_key,
-            bin_id=candidate.bin_id,
-            side=candidate.side,
-            token_id=candidate.token_id,
-        ) or not math.isclose(
-            correction.raw_q, float(raw_q), rel_tol=0.0, abs_tol=1e-12
-        ):
-            # A record sealed against a different leg or a superseded raw q
-            # cannot describe this sizing; acting on it would break the
-            # certificate's raw-q supersession check.
-            raise PayoffQCorrectionUnavailable(
-                f"{action} correction identity or raw q mismatch"
-            )
-        if isinstance(correction, SourceIdentityBaseline) and not correction.matches_witness(witness):
-            raise PayoffQCorrectionUnavailable(f"{action} source identity superseded")
-        if isinstance(candidate, GlobalSingleOrderSellCandidate) and correction.fit_scope is not None:
-            p0 = candidate.entry_calibration_price_anchor(correction.fit_scope)
-        if not math.isclose(
-            correction.p0, p0, rel_tol=0.0, abs_tol=1e-12
-        ):
-            raise PayoffQCorrectionUnavailable(f"{action} correction p0 mismatch")
-        return correction
 
     def bind_capital_horizon(
         score: GlobalSingleOrderDecision,
