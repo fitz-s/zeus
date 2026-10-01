@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-21; last_reviewed=2026-09-29; last_reused=2026-09-29
+# Lifecycle: created=2026-05-21; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Purpose: Relationship antibody for monotonic venue order truth reduction.
 # Reuse: Run when changing venue order fact precedence, command recovery,
 #        exchange reconciliation, or terminal/no-fill projection semantics.
@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
+import pytest
 
 from src.contracts.canonical_lifecycle import OrderProofClass
 from src.execution.order_truth_reducer import (
@@ -236,3 +238,76 @@ def test_append_order_fact_uses_reducer_to_preserve_terminal_no_fill(tmp_path) -
     assert live_fact_id == terminal_fact_id
     count = conn.execute("SELECT COUNT(*) FROM venue_order_facts").fetchone()[0]
     assert count == 1
+
+
+def _fact_writer_conn(tmp_path, side):
+    conn = get_connection(tmp_path / f"order-facts-{side}.db")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, created_at, updated_at
+        ) VALUES ('cmd-1', 'snap-1', 'env-1', 'pos-1', 'dec-1', 'idem-1', ?,
+                  'm-1', 'tok-1', ?, 5, 0.20, 'order-1', 'ACKED',
+                  '2026-10-01T00:00:00+00:00', '2026-10-01T00:00:00+00:00')
+        """,
+        ("entry" if side == "BUY" else "exit", side),
+    )
+    conn.commit()
+    return conn
+
+
+def _write_fact(conn, state, remaining, matched, tag):
+    return append_order_fact(
+        conn, venue_order_id="order-1", command_id="cmd-1", state=state,
+        remaining_size=remaining, matched_size=matched, source="REST",
+        observed_at="2026-10-01T00:00:00+00:00", raw_payload_hash=tag * 64,
+    )
+
+
+def _stored_truth(conn):
+    facts = [dict(row) for row in conn.execute(
+        "SELECT state, remaining_size, matched_size FROM venue_order_facts "
+        "ORDER BY local_sequence")]
+    return facts, VenueOrderTruthReducer.reduce(order_facts=facts, command_size="5")
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+@pytest.mark.parametrize("fill_state,remaining,matched", [
+    ("PARTIALLY_MATCHED", "3", "2"),
+    ("PARTIALLY_MATCHED", "0", "5"),
+])
+@pytest.mark.parametrize("terminal_first", [True, False])
+def test_writer_persists_positive_fill_on_either_side_of_terminal_fact(
+    tmp_path, side, fill_state, remaining, matched, terminal_first,
+) -> None:
+    conn = _fact_writer_conn(tmp_path, side)
+    try:
+        writes = [("EXPIRED", "0", "0", "a"), (fill_state, remaining, matched, "b")]
+        for write in (writes if terminal_first else writes[::-1]):
+            _write_fact(conn, *write)
+        # Repeated delivery of the same fill evidence is economically empty.
+        _write_fact(conn, fill_state, remaining, matched, "b")
+        facts, truth = _stored_truth(conn)
+        assert len(facts) == 2
+        assert max(Decimal(f["matched_size"]) for f in facts) == Decimal(matched)
+        assert truth.matched_size == Decimal(matched)
+        assert truth.remaining_size == Decimal("0")
+    finally:
+        conn.close()
+
+
+def test_writer_suppresses_stale_fill_not_above_stored_evidence(tmp_path) -> None:
+    conn = _fact_writer_conn(tmp_path, "BUY")
+    try:
+        _write_fact(conn, "PARTIALLY_MATCHED", "2", "3", "a")
+        terminal_id = _write_fact(conn, "EXPIRED", "0", "3", "b")
+        assert _write_fact(conn, "PARTIALLY_MATCHED", "3", "2", "c") == terminal_id
+        assert _write_fact(conn, "LIVE", "5", "0", "d") == terminal_id
+        facts, truth = _stored_truth(conn)
+        assert len(facts) == 2
+        assert (truth.matched_size, truth.remaining_size) == (Decimal("3"), Decimal("0"))
+    finally:
+        conn.close()

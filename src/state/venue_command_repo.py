@@ -408,6 +408,38 @@ def _prior_terminal_no_resting_order_fact(
     return row
 
 
+def _order_fact_raises_matched(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+    command_id: str,
+    matched_size: str | None,
+) -> bool:
+    """True iff this fact carries fill evidence no stored fact already holds.
+
+    Raw-fact admission is independent of the projected terminality: a fill
+    discovered after a terminal fact is appended (the reducer still keeps the
+    closed remainder at zero). A fact matching no more than is already stored
+    is economically empty, so stale and repeated deliveries stay suppressed.
+    """
+
+    incoming = _decimal_or_none(matched_size)
+    if incoming is None or incoming <= 0:
+        return False
+    rows = conn.execute(
+        """
+        SELECT matched_size
+          FROM venue_order_facts
+         WHERE venue_order_id = ?
+           AND command_id = ?
+           AND matched_size IS NOT NULL
+        """,
+        (venue_order_id, command_id),
+    ).fetchall()
+    stored = (_decimal_or_none(row[0]) for row in rows)
+    return all(value is None or incoming > value for value in stored)
+
+
 def _terminal_partial_correction_proven(
     conn: sqlite3.Connection,
     *,
@@ -6996,7 +7028,16 @@ def append_order_fact(
                 matched_size=matched_size,
                 raw_payload_json=raw_payload_json,
             )
-            if prior_terminal is not None and not terminal_partial_correction:
+            if (
+                prior_terminal is not None
+                and not terminal_partial_correction
+                and not _order_fact_raises_matched(
+                    conn,
+                    venue_order_id=venue_order_id,
+                    command_id=command_id,
+                    matched_size=matched_size,
+                )
+            ):
                 from src.execution.order_truth_reducer import (
                     TERMINAL_FILLED,
                     TERMINAL_PARTIAL,
