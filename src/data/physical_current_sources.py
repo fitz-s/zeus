@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-01 (finite bound speed proof; per-route isolation)
+# Last reused/audited: 2026-10-01 (rivals = structurally valid current paths only)
 """Station-bound current observations and their settlement roles.
 
 Adapters own fixed endpoints. Configuration cannot inject URLs, SQL, or code.
@@ -102,7 +102,7 @@ def fast_admission_defect(row: dict[str, Any], rivals: frozenset[str] = frozense
     the lead instant carries a value pair equal under the city's settlement
     rounding; and at that instant the candidate's latest possible receipt
     precedes the earliest possible receipt of every current path (``rivals``
-    are other registry providers at the same station).
+    are the other structurally valid registry routes at the same station).
     """
     from src.config import cities_by_name
     from src.contracts.settlement_semantics import SettlementSemantics
@@ -197,26 +197,43 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
     data = json.loads(Path(path).read_text())
     if data.get("schema_version") != 1 or data.get("role") != "station_temperature_observations":
         raise ValueError("PHYSICAL_CURRENT_REGISTRY_ROLE")
-    sources = []
-    seen = set()
-    by_station: dict[str, set[str]] = {}
-    for row in data["sources"]:
-        by_station.setdefault(row["station_id"], set()).add(row["provider"])
-    for row in data["sources"]:
-        role = _role(row)
+    # Pass 1, structure: every row becomes its adapter source or a defect.
+    # Only structurally valid rows are current paths; a proposed row naming no
+    # real adapter cannot become a rival that a valid route must beat.
+    # Incumbents first: an optional row can never claim an incumbent's key.
+    rows = [(row, _role(row)) for row in data["sources"]]
+    seen: set = set()
+    built: dict[int, PhysicalCurrentSource | str] = {}
+    for i in sorted(range(len(rows)), key=lambda i: rows[i][1] is SourceRole.FAST_ADMISSION):
+        row, role = rows[i]
         if role is not SourceRole.FAST_ADMISSION:
-            sources.append(_source(row, role, seen))
+            built[i] = _source(row, role, seen)
             continue
-        # SCOPE: this one optional route. DRAIN/RESET: a config with bound,
-        # well-formed evidence on restart. Incumbent channels keep serving;
-        # a malformed optional row never takes the rest of the registry down.
         try:
-            defect = fast_admission_defect(row, frozenset(by_station[row["station_id"]] - {row["provider"]}))
-            if defect is None:
-                sources.append(_source(row, role, seen))
+            built[i] = _source(row, role, seen)
         except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
-            defect = f"MALFORMED:{type(exc).__name__}"
-        if defect is not None:
+            built[i] = f"MALFORMED:{type(exc).__name__}"
+    paths: dict[str, set[str]] = {}
+    for source in built.values():
+        if isinstance(source, PhysicalCurrentSource):
+            paths.setdefault(source.station_id, set()).add(source.provider)
+    # Pass 2, speed: a fast admission must beat every current path at its station.
+    sources = []
+    for i, (row, _) in enumerate(rows):
+        source = built[i]
+        defect = source if isinstance(source, str) else None
+        if defect is None and source.role is SourceRole.FAST_ADMISSION:
+            # SCOPE: this one optional route. DRAIN/RESET: a config with bound,
+            # well-formed evidence on restart. Incumbent channels keep serving;
+            # a malformed optional row never takes the rest of the registry down.
+            try:
+                defect = fast_admission_defect(
+                    row, frozenset(paths[source.station_id] - {source.provider}))
+            except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
+                defect = f"MALFORMED:{type(exc).__name__}"
+        if defect is None:
+            sources.append(source)
+        else:
             logger.error("PHYSICAL_CURRENT_FAST_ADMISSION_OMITTED provider=%s station=%s reason=%s",
                          row.get("provider"), row.get("station_id"), defect)
     budget = data["providers"]["fmi_wfs"]

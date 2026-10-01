@@ -708,6 +708,34 @@ def test_invalid_fast_admission_is_omitted_and_incumbents_keep_serving(tmp_path,
     assert "PHYSICAL_CURRENT_FAST_ADMISSION_OMITTED" in caplog.text and reason in caplog.text
 
 
+def test_only_structurally_valid_routes_are_rivals(tmp_path, caplog):
+    """An invalid proposed row is no current path; a valid same-station one is."""
+    import copy
+    data, row = _ltac_registry_row()
+    unknown = {**copy.deepcopy(row), "provider": "unknown_adapter",
+               "source_channel": "unknown_temperature"}
+    data["sources"].append(unknown)
+    path = tmp_path / "proposed.json"
+    path.write_text(json.dumps(data))
+    with caplog.at_level("ERROR"):
+        routes = load_physical_current_sources(path)[0]
+    assert ("mgm_metar", "LTAC") in {(r.provider, r.station_id) for r in routes}
+    assert "unknown_adapter" not in {r.provider for r in routes}
+    assert "LEAD_NOT_FASTER" not in caplog.text
+
+    data, row = _ltac_registry_row()
+    data["sources"].append({**copy.deepcopy(row), "provider": "jma_amedas",
+                            "source_channel": "jma_amedas_temperature",
+                            "role": "physical_only", "identity": {"provider_station": "44166"}})
+    path = tmp_path / "incumbent.json"
+    path.write_text(json.dumps(data))
+    with caplog.at_level("ERROR"):
+        routes = load_physical_current_sources(path)[0]
+    assert ("mgm_metar", "LTAC") not in {(r.provider, r.station_id) for r in routes}
+    assert ("jma_amedas", "LTAC") in {(r.provider, r.station_id) for r in routes}
+    assert "LEAD_NOT_FASTER:jma_amedas" in caplog.text
+
+
 def test_canonical_role_cannot_be_claimed_by_a_transport(tmp_path):
     data, row = _ltac_registry_row()
     row["role"] = "canonical_resolver"
