@@ -2,8 +2,8 @@
 # Last reused/audited: 2026-10-01
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md
 #   (SCH-W1.2-ORDER-STATE) C3 path; standing ENTRY keep-by-value law (operator, 2026-09-30):
-#   an open ENTRY rest is kept, resized or cancelled on current fractional-Kelly value,
-#   never on age or posterior identity.
+#   an open ENTRY rest is kept or cancelled on current fractional-Kelly value, never on
+#   age or posterior identity.
 """C3 standing ENTRY valuation: readers, family resolution, persistence, cancel,
 and the reconciled-redecision gate."""
 
@@ -23,6 +23,7 @@ from src.execution.staleness_cancel import (
     _merge_cancel_proposals,
     find_open_entry_rests,
     persist_standing_entry_values,
+    read_journaled_identities,
     resolve_order_families,
     run_c3_staleness_cancel_cycle,
 )
@@ -582,8 +583,9 @@ class TestResolveOrderFamilies:
 
 
 # ---------------------------------------------------------------------------
-# Persistence: KEEP authority is durable, append-only, and never rewrites the
-# submission; CANCEL/RESIZE go through the batch journal before the venue call.
+# Persistence: KEEP authority is durable, append-only, keyed by time-independent
+# economics, and never rewrites the submission; CANCEL goes through the batch
+# journal (with its reason) before the venue call; a journal fault never blocks it.
 # ---------------------------------------------------------------------------
 
 
@@ -614,7 +616,14 @@ def _standing_rows(conn) -> list[dict]:
     ]
 
 
-def _valuation(action: str, *, reason: str = "R", witness: str = "w-new") -> StandingEntryValuation:
+def _valuation(
+    action: str,
+    *,
+    reason: str = "R",
+    witness: str = "w-new",
+    posterior: str = "posterior-a",
+    acting_q: float = 0.75,
+) -> StandingEntryValuation:
     return StandingEntryValuation(
         command_id="c1",
         venue_order_id="v1",
@@ -625,11 +634,20 @@ def _valuation(action: str, *, reason: str = "R", witness: str = "w-new") -> Sta
         evidence={
             "authority_valid": True,
             "probability_witness_identity": witness,
-            "acting_q": 0.75,
+            "wealth_witness_identity": f"wealth-{witness}",
+            "q_version": f"q-{posterior}",
+            "posterior_identity_hash": posterior,
+            "acting_q": acting_q,
             "target_remaining": "10",
             "open_remaining": "10",
             "limit_price": "0.5",
         },
+    )
+
+
+def _persist(conn, valuations, *, now):
+    return persist_standing_entry_values(
+        conn, valuations, now=now, journaled=read_journaled_identities(conn, now=now)
     )
 
 
@@ -642,9 +660,9 @@ class TestStandingEntryPersistence:
         ).fetchone()
         events_before = conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0]
 
-        kept = persist_standing_entry_values(conn, [_valuation("KEEP")], now=NOW)
+        written = _persist(conn, [_valuation("KEEP")], now=datetime.now(UTC))
 
-        assert [v.command_id for v in kept] == ["c1"]
+        assert written == 1
         after = conn.execute(
             "SELECT state, venue_order_id, q_version, last_event_id, envelope_id FROM venue_commands"
         ).fetchone()
@@ -657,32 +675,57 @@ class TestStandingEntryPersistence:
         assert rows[0]["evidence"]["probability_witness_identity"] == "w-new"
         assert not conn.in_transaction
 
-    def test_unchanged_keep_authority_is_not_rejournaled(self):
+    def test_advancing_clock_with_unchanged_economics_journals_exactly_one_row(self):
+        # Witness identities hash their capture time, so they differ every
+        # tick in production. The same economics must still journal once.
         conn = _trade_db()
         _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
-
-        # Journal rows live under decision_log retention: use the real clock.
         at = datetime.now(UTC)
-        persist_standing_entry_values(conn, [_valuation("KEEP")], now=at)
-        persist_standing_entry_values(conn, [_valuation("KEEP")], now=at + timedelta(minutes=5))
-        persist_standing_entry_values(conn, [_valuation("KEEP", witness="w-newer")], now=at + timedelta(minutes=10))
 
-        assert [r["evidence"]["probability_witness_identity"] for r in _standing_rows(conn)] == [
-            "w-new",
-            "w-newer",
-        ]
+        _persist(conn, [_valuation("KEEP", witness="w-tick-1")], now=at)
+        _persist(conn, [_valuation("KEEP", witness="w-tick-2")], now=at + timedelta(minutes=5))
 
-    def test_valuation_for_a_replaced_or_closed_order_is_dropped(self):
+        assert len(_standing_rows(conn)) == 1
+
+    def test_changed_economics_or_posterior_journals_again(self):
         conn = _trade_db()
         _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
-        stale = replace_valuation(_valuation("CANCEL"), venue_order_id="v-old")
+        at = datetime.now(UTC)
 
-        assert persist_standing_entry_values(conn, [stale], now=NOW) == []
-        assert _standing_rows(conn) == []
+        _persist(conn, [_valuation("KEEP")], now=at)
+        _persist(conn, [_valuation("KEEP", posterior="posterior-b")], now=at + timedelta(minutes=5))
+        _persist(conn, [_valuation("KEEP", posterior="posterior-b", acting_q=0.7)], now=at + timedelta(minutes=10))
 
-        conn.execute("UPDATE venue_commands SET state = 'CANCELLED'")
-        conn.commit()
-        assert persist_standing_entry_values(conn, [_valuation("KEEP")], now=NOW) == []
+        assert [
+            (r["evidence"]["posterior_identity_hash"], r["evidence"]["acting_q"]) for r in _standing_rows(conn)
+        ] == [("posterior-a", 0.75), ("posterior-b", 0.75), ("posterior-b", 0.7)]
+
+    def test_the_journal_read_is_outside_the_write_lease(self, monkeypatch):
+        # Inside the lease the only statements are the INSERTs and the bounded
+        # retention walk: no journal row is read under the lock.
+        conn = _trade_db()
+        _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
+        at = datetime.now(UTC)
+        journaled = read_journaled_identities(conn, now=at)
+        statements: list[str] = []
+        conn.set_trace_callback(lambda sql: statements.append(sql) if conn.in_transaction else None)
+        try:
+            persist_standing_entry_values(conn, [_valuation("KEEP")], now=at, journaled=journaled)
+        finally:
+            conn.set_trace_callback(None)
+
+        under_lease = [sql for sql in statements if "decision_log" in sql and "SELECT" in sql.upper()]
+        assert not any("json_extract" in sql for sql in under_lease)
+
+    def test_journal_window_read_seeks_the_window_not_the_whole_mode(self):
+        conn = _trade_db()
+        _seed_open_entry(conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
+        at = datetime.now(UTC)
+        _persist(conn, [_valuation("KEEP")], now=at - timedelta(hours=30))
+        # Outside the re-journal window the unchanged KEEP journals again.
+        assert read_journaled_identities(conn, now=at) == {}
+        _persist(conn, [_valuation("KEEP")], now=at)
+        assert len(_standing_rows(conn)) == 2
 
     def test_a_failed_journal_write_leaves_the_order_and_reservation_intact(self):
         conn = _trade_db()
@@ -694,7 +737,7 @@ class TestStandingEntryPersistence:
         conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError):
-            persist_standing_entry_values(conn, [_valuation("KEEP")], now=NOW)
+            _persist(conn, [_valuation("KEEP")], now=NOW)
 
         assert conn_state(conn, "c1") == "ACKED"
         assert not conn.in_transaction
@@ -707,16 +750,23 @@ def replace_valuation(valuation: StandingEntryValuation, **changes) -> StandingE
 
 
 class TestRunC3StandingValuation:
-    """Orchestration: KEEP takes no venue action; CANCEL and RESIZE are
-    journaled CANCEL_REQUESTED before the single batch SDK call."""
+    """Orchestration: KEEP takes no venue action; CANCEL is journaled
+    CANCEL_REQUESTED (with its reason) before the single batch SDK call."""
 
-    def _run(self, monkeypatch, valuations, *, responses, rate_budget=None):
+    def _run(self, monkeypatch, valuations, *, responses, rate_budget=None, journal_fault=False):
         trade_conn = _trade_db()
         _seed_open_entry(trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
         monkeypatch.setattr(staleness_cancel_module, "resolve_order_families", lambda *_a: {"c1": FAMILY})
         monkeypatch.setattr(
             staleness_cancel_module, "_capture_standing_entry_values", lambda *_a, **_k: valuations
         )
+        if journal_fault:
+            from src.state.write_coordinator import WriteLeaseTimeout
+
+            def _timeout(*_a, **_k):
+                raise WriteLeaseTimeout("standing_entry_value lease timed out")
+
+            monkeypatch.setattr(staleness_cancel_module, "persist_standing_entry_values", _timeout)
         import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
 
         monkeypatch.setattr(
@@ -753,22 +803,65 @@ class TestRunC3StandingValuation:
         assert result["cancel_set_size"] == 0
         assert result["confirmed_families"] == set()
         assert conn_state(trade_conn, "c1") == "ACKED"
-        assert [r["action"] for r in _standing_rows(trade_conn)] == ["KEEP"]
 
-    @pytest.mark.parametrize("action", ["CANCEL", "RESIZE"])
-    def test_cancel_and_resize_journal_before_sdk_then_confirm_family(self, monkeypatch, action):
+    def test_cancel_journals_its_reason_before_sdk_then_confirms_family(self, monkeypatch):
         trade_conn, client, result, observed = self._run(
             monkeypatch,
-            [_valuation(action, reason="CURRENT_FRACTIONAL_TARGET_REDUCED")],
+            [_valuation("CANCEL", reason="CURRENT_FRACTIONAL_TARGET_REDUCED")],
             responses=[[{"canceled": True, "orderID": "v1"}]],
         )
 
         assert client.cancel_calls == [["v1"]]
-        assert observed == [("CANCEL_PENDING", {"venue_order_id": "v1", "batch": True})]
-        assert [r["action"] for r in _standing_rows(trade_conn)] == [action]
+        assert observed == [(
+            "CANCEL_PENDING",
+            {"venue_order_id": "v1", "batch": True, "cancel_reason": "CURRENT_FRACTIONAL_TARGET_REDUCED"},
+        )]
         assert conn_state(trade_conn, "c1") == "CANCELLED"
-        # A resize's fresh redecision is gated on the durable CANCELLED read.
+        # The family's fresh redecision is gated on the durable CANCELLED read.
         assert result["confirmed_families"] == {FAMILY}
+
+    def test_a_raising_journal_still_sends_the_protective_cancel(self, monkeypatch):
+        protective = StandingEntryValuation(
+            command_id="c1",
+            venue_order_id="v1",
+            token_id="tok1",
+            family=FAMILY,
+            action="CANCEL",
+            reason="ENTRY_REST_PROBABILITY_BLOCKED:ValueError:HWM",
+            evidence={"authority_valid": False},
+        )
+        trade_conn, client, result, observed = self._run(
+            monkeypatch,
+            [protective],
+            responses=[[{"canceled": True, "orderID": "v1"}]],
+            journal_fault=True,
+        )
+
+        assert client.cancel_calls == [["v1"]]
+        assert observed[0][0] == "CANCEL_PENDING"
+        assert conn_state(trade_conn, "c1") == "CANCELLED"
+        assert result["journaled"] == 0
+
+    def test_a_raising_capture_cancels_every_active_rest_protectively(self, monkeypatch):
+        trade_conn = _trade_db()
+        _seed_open_entry(trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
+        monkeypatch.setattr(staleness_cancel_module, "resolve_order_families", lambda *_a: {"c1": FAMILY})
+
+        def _boom(*_a, **_k):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(staleness_cancel_module, "_capture_standing_entry_values", _boom)
+        import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
+
+        monkeypatch.setattr(day0_hard_fact_exit, "classify_day0_dead_bin_entry_cancels", lambda *_a, **_k: [])
+        client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, object(), client, world_conn_ro=object(), now=NOW
+        )
+
+        assert client.cancel_calls == [["v1"]]
+        assert result["valuations"][0].reason == "ENTRY_REST_VALUATION_FAILED:OperationalError"
 
     def test_budget_denial_defers_never_drops_the_intent(self, monkeypatch):
         class _DenyingBudget:
@@ -789,6 +882,36 @@ class TestRunC3StandingValuation:
         assert result["confirmed_families"] == set()
         assert conn_state(trade_conn, "c1") == "ACKED"
         assert result["outcomes"][0].status == "not_attempted"
+
+    def test_family_scoped_pass_values_only_those_families(self, monkeypatch):
+        trade_conn = _trade_db()
+        _seed_open_entry(trade_conn, command_id="c-in", token_id="tok-in", venue_order_id="v-in", q_version="q")
+        _seed_open_entry(trade_conn, command_id="c-out", token_id="tok-out", venue_order_id="v-out", q_version="q")
+        other = ("Paris", "2026-07-04", "low")
+        monkeypatch.setattr(
+            staleness_cancel_module, "resolve_order_families", lambda *_a: {"c-in": FAMILY, "c-out": other}
+        )
+        valued: list[list[str]] = []
+
+        def _capture(_trade, _forecasts, _world, active, **_k):
+            valued.append([str(e["command_id"]) for e in active])
+            return []
+
+        monkeypatch.setattr(staleness_cancel_module, "_capture_standing_entry_values", _capture)
+        import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
+
+        def _no_day0(*_a, **_k):
+            raise AssertionError("a wake pass leaves the Day0 lane to the full tick")
+
+        monkeypatch.setattr(day0_hard_fact_exit, "classify_day0_dead_bin_entry_cancels", _no_day0)
+
+        result = run_c3_staleness_cancel_cycle(
+            trade_conn, trade_conn, object(), _FakeGatewayClient([]),
+            world_conn_ro=object(), now=NOW, families={("miami", "2026-07-04", "HIGH")},
+        )
+
+        assert valued == [["c-in"]]
+        assert result["scanned"] == 1
 
     def test_mixed_outcomes_in_same_family_suppress_the_whole_family(self, monkeypatch):
         trade_conn = _trade_db()
@@ -863,7 +986,7 @@ class TestMainC3StandingValuationGlue:
         def _run(trade_ro, trade_rw, forecasts_ro, client, **kwargs):
             calls.append(kwargs)
             return {
-                "scanned": 1, "kept": 1, "resized": 0, "cancel_set_size": 0,
+                "scanned": 1, "kept": 1, "journaled": 0, "cancel_set_size": 0,
                 "confirmed_families": set(), "valuations": [], "outcomes": [],
                 "day0_cancel_set_size": 0,
             }
@@ -889,24 +1012,87 @@ class TestMainC3StandingValuationGlue:
 
         assert len(calls) == 1
         assert "affected_cities" not in calls[0]
+        assert calls[0]["families"] is None
         assert isinstance(calls[0]["world_conn_ro"], _Conn)
 
+    def test_belief_and_day0_wakes_run_the_same_valuation_on_their_families(self, monkeypatch):
+        import src.main as main_module
 
-class _FakeGatewayClient:
-    """Mirrors tests/execution/test_batch_order_submission.py's FakeGatewayClient
-    shape (the real cancel_commands_batch's expected interface): NOT the
-    PolymarketClient wrapper, so no cutover_guard call here — unit scope is the
-    staleness_cancel orchestration, not the venue gate (already covered by
-    tests/execution/test_batch_order_submission.py and polymarket_client tests).
-    """
+        runs: list[frozenset] = []
+        monkeypatch.setattr(
+            main_module,
+            "_run_standing_entry_valuation",
+            lambda *, now, families: runs.append(families) or {
+                "scanned": 0, "kept": 0, "cancel_set_size": 0, "confirmed_families": set(),
+            },
+        )
+        family = ("Miami", "2026-07-04", "high")
+        day0_family = ("Paris", "2026-07-04", "low")
+        monkeypatch.setattr(
+            main_module, "_day0_wake_target_families", lambda event_ids: frozenset({day0_family})
+        )
+        wakes = (
+            SimpleNamespace(reason="forecast_posterior_advanced", forecast_families=(family,), event_ids=()),
+            SimpleNamespace(reason="day0_extreme_event_committed", forecast_families=(), event_ids=("e1",)),
+        )
+        main_module._standing_entry_valuation_lock.acquire()
+        main_module._standing_entry_wake_valuation(wakes)
 
-    def __init__(self, cancel_responses):
-        self._responses = list(cancel_responses)
-        self.cancel_calls: list[list[str]] = []
+        assert runs == [frozenset({family, day0_family})]
+        assert not main_module._standing_entry_valuation_lock.locked()
 
-    def cancel_orders_batch(self, order_ids):
-        self.cancel_calls.append(list(order_ids))
-        return self._responses.pop(0)
+    def test_new_queued_wakes_start_one_pass_without_being_consumed(self, monkeypatch):
+        import src.main as main_module
+        import src.runtime.reactor_wake as reactor_wake
+
+        family = ("Miami", "2026-07-04", "high")
+        wake = SimpleNamespace(
+            wake_id="w1", reason="forecast_posterior_advanced", forecast_families=(family,), event_ids=()
+        )
+        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+        monkeypatch.setattr(
+            reactor_wake,
+            "reactor_wakes_for_reason",
+            lambda reason, **_k: (wake,) if reason == "forecast_posterior_advanced" else (),
+        )
+        started: list[tuple] = []
+
+        class _Thread:
+            def __init__(self, *, target, args, name, daemon):
+                started.append(args[0])
+
+            def start(self):
+                main_module._standing_entry_valuation_lock.release()
+
+        monkeypatch.setattr(main_module.threading, "Thread", _Thread)
+        monkeypatch.setattr(main_module, "_standing_entry_valued_wake_ids", set())
+
+        main_module._value_standing_entries_for_new_wakes()
+        main_module._value_standing_entries_for_new_wakes()
+
+        assert [tuple(w.wake_id for w in batch) for batch in started] == [("w1",)]
+
+    def test_a_held_valuation_lock_defers_the_wake_to_the_next_poll(self, monkeypatch):
+        import src.main as main_module
+        import src.runtime.reactor_wake as reactor_wake
+
+        wake = SimpleNamespace(
+            wake_id="w2", reason="forecast_posterior_advanced",
+            forecast_families=(("Miami", "2026-07-04", "high"),), event_ids=(),
+        )
+        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+        monkeypatch.setattr(
+            reactor_wake, "reactor_wakes_for_reason",
+            lambda reason, **_k: (wake,) if reason == "forecast_posterior_advanced" else (),
+        )
+        monkeypatch.setattr(main_module, "_standing_entry_valued_wake_ids", set())
+        main_module._standing_entry_valuation_lock.acquire()
+        try:
+            main_module._value_standing_entries_for_new_wakes()
+        finally:
+            main_module._standing_entry_valuation_lock.release()
+
+        assert main_module._standing_entry_valued_wake_ids == set()
 
 
 def test_pending_cancel_is_retried_without_valuation_or_day0_classification(monkeypatch):
@@ -1035,12 +1221,6 @@ def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch, 
     assert third["cancel_set_size"] == 0
     assert client.cancel_calls == [["v-pending"]]
 
-
-
-def conn_state(conn: sqlite3.Connection, command_id: str) -> str:
-    return conn.execute(
-        "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
-    ).fetchone()[0]
 
 
 def test_day0_classifier_selects_only_dead_local_day_entry(monkeypatch):

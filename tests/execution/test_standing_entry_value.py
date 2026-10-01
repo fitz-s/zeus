@@ -5,13 +5,12 @@
 #   mean-q sizer at the rest's limit); a posterior identity change only triggers
 #   revaluation; ENTRY rests have no age deadline.
 """Standing ENTRY valuation: R* is the selector's own BUY sizer at the rest's limit,
-and the C3 cycle keeps, resizes or cancels from it."""
+and the C3 cycle keeps or cancels from it."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from types import SimpleNamespace
@@ -76,20 +75,55 @@ def _witness(*, q: float, posterior: str = "posterior-a", side: str = "YES") -> 
     )
 
 
-def _wealth(*, cash: str = "100", reservation: str = "5", committed: str = "5") -> S.PortfolioWealthWitness:
-    """$100 spendable, the rest's own $5 reservation counted as committed capital."""
-    committed_d = D(committed)
+RESOLUTION_AT = NOW + timedelta(hours=36)
+
+
+def _obligation_row(*, command_id="cmd", shares="10", cost="5", status="OPEN", position_id="pos-cmd"):
+    """One ``entry_obligation_rows`` row: (command_id, status, token, shares, cost,
+    unbounded, created_at, position_id, command token, side, size, price,
+    intent_kind, state, fill_confirmed_at, fixed_cash_fak)."""
+    return (
+        command_id, status, TOKEN, shares, cost, 0, NOW.isoformat(),
+        position_id, TOKEN, "BUY", shares, str(D(cost) / D(shares)), "ENTRY", "ACKED", None, 0,
+    )
+
+
+def _wealth(
+    *,
+    cash: str = "100",
+    reservation: str = "5",
+    rows=None,
+    positions=(),
+    native: dict | None = None,
+    extra_commitment_micro: int = 0,
+) -> S.PortfolioWealthWitness:
+    """The witness ``current_portfolio_wealth_witness`` builds over ``rows``:
+    $``cash`` spendable, the rest's $``reservation`` held back, its obligation
+    pending and costed, and any held native shares committed."""
+    from src.engine.global_auction_universe import pending_entry_endowments_from_rows
+
+    rows = [_obligation_row()] if rows is None else rows
+    native = dict(native or {})
+    pending, _ids, cost, _oids = pending_entry_endowments_from_rows(
+        rows, positions=tuple(positions), native_holdings_micro=native
+    )
+    commitments = dict(cost and {TOKEN: sum(cost.values())} or {})
+    if extra_commitment_micro:
+        commitments[TOKEN] = commitments.get(TOKEN, 0) + extra_commitment_micro
+    committed = sum((D(v) / D(1_000_000) for v in commitments.values()), D("0"))
     allocation = StrategyCapitalAllocationWitness.build(
-        capital_basis_usd=D(cash) + committed_d,
-        committed_capital_usd=committed_d,
+        capital_basis_usd=D(cash) + committed,
+        committed_capital_usd=committed,
         venue_spendable_cash_usd=D(cash),
         allocation={"mode": "wallet_total"},
     )
+    held = sum((D(v) for v in native.values()), D("0")) / D(1_000_000)
+    pend = sum((D(r[2]) for r in pending), D("0")) / D(1_000_000)
     fields = dict(
         ledger_snapshot_id="ledger-current",
         position_set_hash="positions",
         wealth_floor_usd=D(cash),
-        wealth_ceiling_usd=D(cash) + D("10"),
+        wealth_ceiling_usd=D(cash) + held + pend,
         spendable_cash_usd=D(cash),
         reservations_usd=D(reservation),
         collateral_authority="CHAIN",
@@ -102,8 +136,31 @@ def _wealth(*, cash: str = "100", reservation: str = "5", committed: str = "5") 
         witness_identity=S.portfolio_wealth_identity(
             **fields, strategy_capital_allocation_identity=allocation.witness_identity,
         ),
-        pending_entry_endowments_micro=(("cmd", TOKEN, 10_000_000),),
-        native_commitments_micro=((TOKEN, int(committed_d * 1_000_000)),) if committed_d else (),
+        native_holdings_micro=tuple(sorted(native.items())),
+        pending_entry_endowments_micro=tuple(sorted(pending)),
+        native_commitments_micro=tuple(sorted((t, a) for t, a in commitments.items() if a)),
+    )
+
+
+def _own(*, size="10", filled="0", price="0.50", at_risk_micro=5_000_000, position=None):
+    return C.OwnCommandCapital(
+        command_id="cmd",
+        token_id=TOKEN,
+        size=D(size),
+        price=D(price),
+        filled_shares=D(filled),
+        at_risk_micro=at_risk_micro,
+        position=position,
+    )
+
+
+def _own_view(wealth=None, own=None, *, rows=None, positions=(), native=None):
+    return C._own_reservation_wealth(
+        wealth if wealth is not None else _wealth(rows=rows, positions=positions, native=native),
+        own if own is not None else _own(),
+        obligation_rows=[_obligation_row()] if rows is None else rows,
+        positions=tuple(positions),
+        native_holdings_micro=dict(native or {}),
     )
 
 
@@ -141,7 +198,7 @@ def _rest(*, size: str = "10", matched: str = "0", price: str = "0.50") -> dict:
     }
 
 
-def _holdings(witness, wealth):
+def _holdings(witness, wealth, *, positions=()):
     from src.engine.global_batch_runtime import _bind_selection_holdings
     from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
 
@@ -149,31 +206,41 @@ def _holdings(witness, wealth):
         decision_id="d", probability_witness=witness, candidate_seeds=()
     )
     return _bind_selection_holdings(
-        {"e": prepared}, portfolio_state=SimpleNamespace(positions=()), wealth_witness=wealth
+        {"e": prepared}, portfolio_state=SimpleNamespace(positions=tuple(positions)),
+        wealth_witness=wealth,
     )["e"].holdings_snapshot
 
 
+def _prepared(witness, **fields):
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+
+    return PreparedGlobalFamily(decision_id="d", probability_witness=witness, candidate_seeds=(), **fields)
+
+
 def _value(*, q=0.75, posterior="posterior-a", cash="100", multiplier="0.125",
-           capital_limit="100", size="10", matched="0", price="0.50"):
+           capital_limit="100", size="10", matched="0", price="0.50", prepared_fields=None,
+           resolution_at=RESOLUTION_AT):
     witness = _witness(q=q, posterior=posterior)
+    rows = [_obligation_row(shares=size, cost=str(D(size) * D(price)))]
     own = C._own_reservation_wealth(
-        _wealth(cash=cash),
-        command_id="cmd",
-        token_id=TOKEN,
-        reservation_micro=5_000_000,
-        filled_shares=D(matched),
-        remaining_cost_usd=(D(size) - D(matched)) * D(price),
+        _wealth(cash=cash, reservation=str(D(size) * D(price)), rows=rows),
+        _own(size=size, filled=matched, price=price,
+             at_risk_micro=int(D(size) * D(price) * 1_000_000)),
+        obligation_rows=rows,
+        positions=(),
+        native_holdings_micro={},
     )
     return C.value_standing_entry(
         _rest(size=size, matched=matched, price=price),
         family=FAMILY,
         snapshot=_snapshot(),
-        probability_witness=witness,
+        prepared=_prepared(witness, **(prepared_fields or {})),
         wealth=own,
         holdings_snapshot=_holdings(witness, own),
         fractional_kelly_multiplier=D(multiplier),
         capital_limit_usd=D(capital_limit),
         payoff_q_correction_resolver=None,
+        resolution_at=resolution_at,
         now=NOW,
     )
 
@@ -183,10 +250,7 @@ class TestRStarIsTheSelectorsOwnSizer:
         value = _value()
 
         witness = _witness(q=0.75)
-        own = C._own_reservation_wealth(
-            _wealth(), command_id="cmd", token_id=TOKEN, reservation_micro=5_000_000,
-            filled_shares=D("0"), remaining_cost_usd=D("5"),
-        )
+        own = _own_view()
         candidate = C._rest_candidate(
             _rest(), snapshot=_snapshot(), binding=witness.bindings[0], side="YES",
             probability_witness=witness, capacity=S.maker_buy_capacity(own.spendable_cash_usd, D("0.50")),
@@ -231,11 +295,8 @@ class TestRStarIsTheSelectorsOwnSizer:
         assert kwargs["payoff_probability_mean"] == pytest.approx(0.75)
 
     def test_own_reservation_is_available_to_its_own_remainder(self):
-        base = _wealth(cash="100", reservation="5", committed="5")
-        own = C._own_reservation_wealth(
-            base, command_id="cmd", token_id=TOKEN, reservation_micro=5_000_000,
-            filled_shares=D("0"), remaining_cost_usd=D("5"),
-        )
+        base = _wealth(cash="100", reservation="5")
+        own = _own_view(base)
 
         assert own.spendable_cash_usd == D("105")
         assert own.reservations_usd == D("0")
@@ -243,18 +304,57 @@ class TestRStarIsTheSelectorsOwnSizer:
         assert own.pending_entry_endowments_micro == ()
         assert own.economic_identity != base.economic_identity
 
-    def test_filled_part_stays_holding_and_its_cash_is_not_released(self):
-        base = _wealth(cash="100", reservation="5", committed="5")
-        own = C._own_reservation_wealth(
-            base, command_id="cmd", token_id=TOKEN, reservation_micro=5_000_000,
-            filled_shares=D("4"), remaining_cost_usd=D("3"),  # 6 open at 0.50
-        )
+    def test_unprojected_fill_stays_holding_and_its_cash_is_not_released(self):
+        # 4 of 10 filled, no runtime projection carries the fill yet: the
+        # filled 4 stay owned exposure; only the unfilled 6's cash returns.
+        base = _wealth(cash="100", reservation="5")
+        own = _own_view(base, _own(filled="4"))
 
         assert own.spendable_cash_usd == D("103")
         assert own.pending_entry_endowments_micro == (("cmd", TOKEN, 4_000_000),)
-        value = _value(size="10", matched="4")
-        assert value.evidence["open_remaining"] == "6"
-        assert D(value.evidence["current_token_shares"]) == D("4")
+        assert own.native_commitments_micro == ((TOKEN, 2_000_000),)
+
+    def test_partial_fill_on_native_holdings_is_counted_once(self):
+        # The collateral snapshot already holds the 4 filled shares and the
+        # runtime position carries them. The witness counts them there and
+        # through the OPEN obligation's projection gap; the counterfactual
+        # must add nothing on top: R* sees exactly the 4 held shares.
+        native = {TOKEN: 4_000_000}
+        position = SimpleNamespace(
+            position_id="pos-cmd", trade_id="pos-cmd", direction="buy_yes", token_id=TOKEN,
+            no_token_id="no-rest", condition_id=CONDITION, shares=4.0,
+        )
+        rows = [_obligation_row()]
+        # While the order is open its full $5 reservation stays held; the
+        # terminal conversion law spends $2 on the fill and releases $3.
+        base = _wealth(cash="100", reservation="5", rows=rows, positions=(position,),
+                       native=native, extra_commitment_micro=2_000_000)
+        own = _own_view(base, _own(filled="4", position=position),
+                        rows=rows, positions=(position,), native=native)
+
+        assert own.pending_entry_endowments_micro == ()
+        assert own.native_holdings_micro == ((TOKEN, 4_000_000),)
+        # Held shares' cost stays committed; only the open obligation's cost leaves.
+        assert own.native_commitments_micro == ((TOKEN, 2_000_000),)
+        assert own.spendable_cash_usd == D("103")
+        witness = _witness(q=0.75)
+        bound = _holdings(witness, own, positions=(position,))
+        candidate = C._rest_candidate(
+            _rest(matched="4"), snapshot=_snapshot(), binding=witness.bindings[0], side="YES",
+            probability_witness=witness, capacity=D("100"), ledger_snapshot_id=own.ledger_snapshot_id,
+            now=NOW,
+        )
+        from src.engine.global_single_order_auction import _candidate_portfolio_endowment
+
+        endowment = _candidate_portfolio_endowment(
+            candidate, probability_witness=witness, holdings_snapshot=bound, wealth_witness=own,
+        )
+        assert endowment.current_token_shares == D("4")
+
+    def test_rows_that_disagree_with_the_witness_refuse_the_view(self):
+        base = _wealth(cash="100", reservation="5")
+        with pytest.raises(ValueError, match="ENTRY_REST_OBLIGATION_ROWS_NOT_THE_WITNESS"):
+            _own_view(base, rows=[_obligation_row(shares="12", cost="6")])
 
 
 class TestDisposition:
@@ -262,14 +362,39 @@ class TestDisposition:
         value = _value(q=0.75)
         assert value.action == "KEEP"
         assert value.evidence["authority_valid"] is True
+        assert value.evidence["expected_growth"]["capital_lock_hours"] == pytest.approx(36.0)
 
-    def test_target_more_than_a_lot_below_remainder_resizes(self):
-        # A large rest whose current fractional target is >= one lot smaller.
+    def test_target_more_than_a_lot_below_remainder_cancels(self):
+        # No amend and no same-order re-post: a lot-sized reduction cancels and
+        # the family's confirmed-cancel redecision sizes a fresh order.
         value = _value(q=0.75, size="60")
         target = D(value.evidence["target_remaining"])
         assert D("60") - target >= D("5")
-        assert value.action == "RESIZE"
+        assert value.action == "CANCEL"
         assert value.reason == "CURRENT_FRACTIONAL_TARGET_REDUCED"
+
+    def test_day0_saturated_certainty_is_refuted_like_the_selector(self):
+        value = _value(
+            q=1.0,
+            prepared_fields={},
+        )
+        witness = _witness(q=1.0)
+        refuted = _value(
+            q=1.0,
+            prepared_fields={
+                "day0_saturated_statistical_sides": (("bin-rest", "YES"),),
+                "day0_saturation_witness_identity": witness.witness_identity,
+            },
+        )
+        assert value.reason != refuted.reason
+        assert refuted.action == "CANCEL"
+        assert refuted.reason == "ENTRY_REST_BUY_REFUTED:DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED"
+
+    def test_missing_capital_horizon_cancels_protectively(self):
+        value = _value(q=0.75, resolution_at=None)
+        assert value.action == "CANCEL"
+        assert value.evidence["authority_valid"] is False
+        assert value.reason == "ENTRY_REST_CAPITAL_HORIZON_INVALID:CAPITAL_HORIZON_AUTHORITY_MISSING"
 
     @pytest.mark.parametrize("q", [0.50, 0.30])
     def test_non_positive_value_at_the_limit_cancels(self, q):
@@ -280,8 +405,8 @@ class TestDisposition:
     def test_own_reservation_alone_keeps_funding_its_rest(self):
         # No free cash: the order's own reservation still funds its remainder.
         value = _value(cash="0")
-        assert value.action in {"KEEP", "RESIZE"}
-        assert D(value.evidence["target_remaining"]) >= D("5")
+        assert value.reason != "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT:MAKER_CASH_CAPACITY_BELOW_LOT"
+        assert D(value.evidence["proposal_capacity_shares"]) >= D("5")
 
     def test_target_below_one_lot_cancels(self):
         # q=0.51 at 0.50: even full Kelly is below one 5-share lot.
@@ -298,7 +423,8 @@ class TestDisposition:
         assert D(value.evidence["fractional_kelly_target_shares"]) < D("5")
         assert D(value.evidence["full_kelly_target_shares"]) >= D("5")
         assert value.evidence["target_remaining"] == "5"
-        assert value.action == "RESIZE"
+        assert value.action == "CANCEL"
+        assert value.reason == "CURRENT_FRACTIONAL_TARGET_REDUCED"
 
     def test_posterior_identity_alone_never_changes_the_disposition(self):
         before = _value(q=0.75, posterior="posterior-a")
@@ -370,7 +496,9 @@ class TestStandingEntryTrace:
         )
         monkeypatch.setattr(
             universe, "scan_current_global_auction_scope",
-            lambda **_k: SimpleNamespace(events=(event,)),
+            lambda **_k: SimpleNamespace(
+                events=(event,), resolution_at_by_family={FAMILY_KEY: RESOLUTION_AT}
+            ),
         )
         witness = _witness(q=q, posterior=posterior)
         monkeypatch.setattr(
@@ -392,9 +520,11 @@ class TestStandingEntryTrace:
             portfolio_module, "load_runtime_open_portfolio",
             lambda _c: SimpleNamespace(positions=(), chain_only_facts=()),
         )
+        rows = [_obligation_row()]
         monkeypatch.setattr(
-            universe, "current_portfolio_wealth_witness", lambda *_a, **_k: _wealth()
+            universe, "current_portfolio_wealth_witness", lambda *_a, **_k: _wealth(rows=rows)
         )
+        monkeypatch.setattr(universe, "entry_obligation_rows", lambda _conn: rows)
         monkeypatch.setattr(
             governor, "snapshot_global_auction_capital_authority",
             lambda: SimpleNamespace(capacity_usd=lambda **_k: D("1000")),
@@ -441,8 +571,13 @@ class TestStandingEntryTrace:
         conn, venue, result = self._cycle(monkeypatch, q=0.45, posterior="posterior-NEW")
 
         assert [v.action for v in result["valuations"]] == ["CANCEL"]
-        # CANCEL_REQUESTED was journaled before the venue call.
+        # CANCEL_REQUESTED was journaled, with its reason, before the venue call.
         assert venue.calls == [(["venue-1"], "CANCEL_PENDING")]
+        payload = json.loads(conn.execute(
+            "SELECT payload_json FROM venue_command_events "
+            "WHERE command_id='cmd' AND event_type='CANCEL_REQUESTED'"
+        ).fetchone()[0])
+        assert payload["cancel_reason"] == result["valuations"][0].reason
         assert conn.execute(
             "SELECT state FROM venue_commands WHERE command_id='cmd'"
         ).fetchone()[0] == "CANCELLED"
@@ -465,7 +600,8 @@ def test_blocked_probability_authority_cancels_through_the_persisted_path(monkey
         payload_json=json.dumps({"city": FAMILY[0], "target_date": FAMILY[1], "metric": FAMILY[2]}),
     )
     monkeypatch.setattr(
-        universe, "scan_current_global_auction_scope", lambda **_k: SimpleNamespace(events=(event,))
+        universe, "scan_current_global_auction_scope",
+        lambda **_k: SimpleNamespace(events=(event,), resolution_at_by_family={}),
     )
 
     def blocked(*_a, **_k):
@@ -490,3 +626,36 @@ def test_blocked_probability_authority_cancels_through_the_persisted_path(monkey
     assert valuation.evidence["authority_valid"] is False
     assert valuation.reason.startswith("ENTRY_REST_PROBABILITY_BLOCKED")
     assert calls == [["venue-1"]]
+
+
+def test_an_unreadable_order_cancels_that_order_and_values_the_rest(monkeypatch):
+    from src.engine import global_auction_universe as universe
+    from src.state import venue_command_repo
+
+    real = venue_command_repo.get_command
+
+    def flaky(conn, command_id):
+        if command_id == "cmd-bad":
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(conn, command_id)
+
+    monkeypatch.setattr(venue_command_repo, "get_command", flaky)
+    monkeypatch.setattr(
+        universe, "scan_current_global_auction_scope",
+        lambda **_k: (_ for _ in ()).throw(ValueError("no scope in this test")),
+    )
+    conn = _trade_db()
+    _seed_early_rest(conn)
+    entries = [
+        {"command_id": "cmd-bad", "venue_order_id": "venue-bad", "token_id": "tok-bad"},
+        {"command_id": "cmd", "venue_order_id": "venue-1", "token_id": TOKEN},
+    ]
+
+    values = C._capture_standing_entry_values(
+        conn, sqlite3.connect(":memory:"), sqlite3.connect(":memory:"), entries,
+        families={"cmd-bad": FAMILY, "cmd": FAMILY}, now=NOW,
+    )
+
+    assert [(v.command_id, v.action) for v in values] == [("cmd-bad", "CANCEL"), ("cmd", "CANCEL")]
+    assert values[0].reason == "ENTRY_REST_COMMAND_UNREADABLE:OperationalError"
+    assert values[1].reason.startswith("ENTRY_REST_CURRENT_SCOPE_UNAVAILABLE")

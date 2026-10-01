@@ -68,13 +68,15 @@ def entry_rest_disposition(
     minimum_order_size: Decimal,
     conditional_gain: float,
 ) -> tuple[str, str]:
-    """Dispose one open ENTRY rest from its current valuation.
+    """Dispose one open ENTRY rest from its current valuation: KEEP or CANCEL.
 
     ``target_remaining`` is the selector's fractional-Kelly remaining quantity
     R* at the rest's own limit; ``conditional_gain`` is the expected log-wealth
     gain of the quantity that would keep working. The venue has no amend, so a
-    RESIZE is cancel, confirmed terminal reconciliation, then a fresh decision.
-    A reduction smaller than one legal lot keeps the incumbent unchanged.
+    target at least one legal lot below the open remainder cancels; the
+    family's confirmed-cancel redecision then sizes a fresh order from scratch
+    under every ordinary entry law (there is no same-order re-post). A
+    reduction smaller than one legal lot keeps the incumbent unchanged.
     """
     values = (open_remaining, target_remaining, minimum_order_size)
     if (
@@ -90,5 +92,5 @@ def entry_rest_disposition(
     if conditional_gain <= 0:
         return "CANCEL", "CURRENT_MEAN_VALUE_NON_POSITIVE"
     if open_remaining - target_remaining >= minimum_order_size:
-        return "RESIZE", "CURRENT_FRACTIONAL_TARGET_REDUCED"
+        return "CANCEL", "CURRENT_FRACTIONAL_TARGET_REDUCED"
     return "KEEP", "CURRENT_ENTRY_REST_VALUE_POSITIVE"

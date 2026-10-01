@@ -55,7 +55,7 @@ class TestIsDelayed:
 
 
 # ---------------------------------------------------------------------------
-# entry_rest_disposition — the one keep/resize/cancel rule for an open ENTRY rest
+# entry_rest_disposition — the one keep/cancel rule for an open ENTRY rest
 # ---------------------------------------------------------------------------
 
 def _dispose(remaining, target, gain=0.01, minimum="5"):
@@ -74,14 +74,28 @@ class TestEntryRestDisposition:
             ("10", "10", "KEEP"),       # at target
             ("10", "12", "KEEP"),       # target above remainder: keep working
             ("10", "5.01", "KEEP"),     # reduction 4.99 < one lot
-            ("10", "5", "RESIZE"),      # reduction exactly one lot
-            ("10.01", "5", "RESIZE"),   # reduction above one lot
+            ("10", "5", "CANCEL"),      # reduction exactly one lot: no amend, cancel
+            ("10.01", "5", "CANCEL"),   # reduction above one lot
             ("10", "4.99", "CANCEL"),   # target below one legal lot
             ("10", "0", "CANCEL"),
         ],
     )
     def test_lot_boundaries(self, remaining, target, expected):
         assert _dispose(remaining, target)[0] == expected
+
+    def test_reduction_of_one_lot_cancels_under_its_own_reason(self):
+        # No same-order re-post exists: the confirmed cancel hands the family
+        # to a fresh redecision that sizes from scratch.
+        assert _dispose("10", "5") == ("CANCEL", "CURRENT_FRACTIONAL_TARGET_REDUCED")
+
+    def test_there_is_no_resize_action(self):
+        actions = {
+            _dispose(r, t, gain=g)[0]
+            for r in ("5", "10", "60")
+            for t in ("0", "4.99", "5", "10", "55", "60")
+            for g in (-1.0, 0.0, 0.01)
+        }
+        assert actions == {"KEEP", "CANCEL"}
 
     @pytest.mark.parametrize("gain", [0.0, -1e-9])
     def test_non_positive_conditional_value_cancels(self, gain):

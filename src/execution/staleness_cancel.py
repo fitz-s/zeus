@@ -413,51 +413,142 @@ def _protective(entry: Mapping[str, Any], family: FamilyKey | None, reason: str)
     )
 
 
+@dataclass(frozen=True)
+class OwnCommandCapital:
+    """One open ENTRY command's own capital, read with the wealth witness.
+
+    ``at_risk_micro``: this command's cash the witness holds back (its open
+    reservation and unsettled outgoing deduction). ``position`` is the
+    runtime projection the command's fills land on, if any.
+    """
+
+    command_id: str
+    token_id: str
+    size: Decimal
+    price: Decimal
+    filled_shares: Decimal
+    at_risk_micro: int
+    position: Any | None
+
+
+def _own_command_capital(
+    trade_conn: sqlite3.Connection,
+    rest: Mapping[str, Any],
+    *,
+    positions: tuple[Any, ...],
+) -> OwnCommandCapital:
+    from src.state.collateral_ledger import _proven_filled_size
+
+    command_id = str(rest["command_id"])
+    at_risk = trade_conn.execute(
+        "SELECT COALESCE((SELECT SUM(amount) FROM collateral_reservations "
+        "WHERE command_id = ? AND reservation_type = 'PUSD_BUY' AND released_at IS NULL), 0) "
+        "+ COALESCE((SELECT SUM(amount_micro) FROM collateral_unsettled_proceeds "
+        "WHERE command_id = ? AND direction = 'OUTGOING_DEDUCTION' AND settled_at IS NULL), 0)",
+        (command_id, command_id),
+    ).fetchone()[0]
+    filled = max(
+        Decimal(str(rest.get("matched_size") or "0")),
+        _proven_filled_size(trade_conn, command_id),
+    )
+    position_id = str(rest.get("position_id") or "")
+    position = next(
+        (
+            p
+            for p in positions
+            if position_id
+            and position_id
+            in {str(getattr(p, "position_id", "") or ""), str(getattr(p, "trade_id", "") or "")}
+        ),
+        None,
+    )
+    return OwnCommandCapital(
+        command_id=command_id,
+        token_id=str(rest["token_id"]),
+        size=Decimal(str(rest["size"])),
+        price=Decimal(str(rest["price"])),
+        filled_shares=filled,
+        at_risk_micro=int(at_risk or 0),
+        position=position,
+    )
+
+
 def _own_reservation_wealth(
     wealth: Any,
+    own: OwnCommandCapital,
     *,
-    command_id: str,
-    token_id: str,
-    reservation_micro: int,
-    filled_shares: Decimal,
-    remaining_cost_usd: Decimal,
+    obligation_rows: list[tuple],
+    positions: tuple[Any, ...],
+    native_holdings_micro: Mapping[str, int],
 ):
-    """Current wealth as seen by this order's own redecision.
+    """Current wealth as this order's own redecision sees it.
 
-    The selector's holdings minus this order's own unfilled remainder: the
-    remainder's reserved cash (at most its limit cost; a filled part's cash is
-    already spent) returns to spendable cash and leaves BUY capital
-    commitments, and the order's pending obligation (full size) is replaced by
-    its filled part only. Other commands' reservations and obligations stay
-    exactly as the selector sees them. A valuation input only — it never
+    The counterfactual is the order's unfilled remainder never placed: its
+    cash returns to spendable exactly as a terminal cancel would release it
+    (``filled_reservation_amount``, the conversion law of
+    ``convert_reservation_on_fill``), and its entry obligation resolves. The
+    obligation endowment is then recomputed by the same
+    ``pending_entry_endowments_from_rows`` the wealth witness used, so the
+    filled part is counted once: through the position projection the fill
+    already moved, or, only when no projection carries it yet, as a pending
+    endowment. Every other command's reservations and obligations stay
+    exactly as the selector sees them. A valuation input only; it never
     writes a reservation or an order row.
     """
     from src.contracts.strategy_capital_allocation import StrategyCapitalAllocationWitness
+    from src.engine.global_auction_universe import pending_entry_endowments_from_rows
     from src.solve.solver import PortfolioWealthWitness, portfolio_wealth_identity
+    from src.state.collateral_ledger import filled_reservation_amount
 
-    if reservation_micro < 0 or remaining_cost_usd < 0:
-        raise ValueError("ENTRY_REST_OWN_RESERVATION_INVALID")
-    credit_micro = min(
-        int(reservation_micro),
-        int((remaining_cost_usd * _MICRO).to_integral_value(rounding=ROUND_FLOOR)),
+    if own.size <= 0 or own.filled_shares < 0 or own.at_risk_micro < 0:
+        raise ValueError("ENTRY_REST_OWN_CAPITAL_INVALID")
+    base_pending, _identities, base_cost, _ids = pending_entry_endowments_from_rows(
+        obligation_rows, positions=positions, native_holdings_micro=native_holdings_micro
     )
-    if credit_micro > int(wealth.reservations_usd * _MICRO):
-        raise ValueError("ENTRY_REST_OWN_RESERVATION_NOT_IN_WEALTH")
-    credit = Decimal(credit_micro) / _MICRO
+    uncertain = tuple(
+        row for row in wealth.pending_entry_endowments_micro if row[0].startswith("position_claim:")
+    )
+    if tuple(sorted((*base_pending, *uncertain))) != tuple(wealth.pending_entry_endowments_micro):
+        # The rows must reproduce the witness exactly: otherwise this view would
+        # be built on a different ledger than the one the selector sizes on.
+        raise ValueError("ENTRY_REST_OBLIGATION_ROWS_NOT_THE_WITNESS")
+    cf_pending, _identities, cf_cost, _ids = pending_entry_endowments_from_rows(
+        obligation_rows,
+        positions=positions,
+        native_holdings_micro=native_holdings_micro,
+        resolved_command_ids=frozenset({own.command_id}),
+    )
+    own_position_micro = (
+        int((Decimal(str(getattr(own.position, "shares", 0) or 0)) * _MICRO).to_integral_value())
+        if own.position is not None
+        else 0
+    )
+    filled_micro = int((own.filled_shares * _MICRO).to_integral_value(rounding=ROUND_FLOOR))
+    # A fill no runtime projection carries yet is still owned exposure.
+    unprojected = max(0, filled_micro - own_position_micro)
+    pending = list(cf_pending)
+    if unprojected:
+        pending.append((own.command_id, own.token_id, unprojected))
+    pending_tuple = tuple(sorted((*pending, *uncertain)))
+
+    spent_micro = filled_reservation_amount(
+        own.at_risk_micro, order_size=own.size, filled=own.filled_shares
+    )
+    credit = Decimal(own.at_risk_micro - spent_micro) / _MICRO
     commitments = dict(wealth.native_commitments_micro)
-    if credit_micro > commitments.get(token_id, 0):
+    base_own_cost = int(base_cost.get(own.command_id, 0))
+    cf_own_cost = int(cf_cost.get(own.command_id, 0))
+    if unprojected:
+        cf_own_cost = int(
+            (Decimal(unprojected) / _MICRO * own.price * _MICRO).to_integral_value()
+        )
+    removed_cost = base_own_cost - cf_own_cost
+    if removed_cost < 0 or removed_cost > commitments.get(own.token_id, 0):
         raise ValueError("ENTRY_REST_OWN_COMMITMENT_NOT_IN_WEALTH")
-    commitments[token_id] = commitments.get(token_id, 0) - credit_micro
-    own = tuple(row for row in wealth.pending_entry_endowments_micro if row[0] == command_id)
-    if len(own) > 1:
-        raise ValueError("ENTRY_REST_OWN_OBLIGATION_AMBIGUOUS")
-    filled_micro = int((filled_shares * _MICRO).to_integral_value(rounding=ROUND_FLOOR))
-    pending = tuple(row for row in wealth.pending_entry_endowments_micro if row[0] != command_id)
-    if own and filled_micro > 0:
-        pending += ((command_id, token_id, min(filled_micro, int(own[0][2]))),)
-    removed = sum(int(row[2]) for row in own) - sum(
-        int(row[2]) for row in pending if row[0] == command_id
-    )
+    commitments[own.token_id] = commitments.get(own.token_id, 0) - removed_cost
+    if credit > wealth.reservations_usd:
+        raise ValueError("ENTRY_REST_OWN_RESERVATION_NOT_IN_WEALTH")
+
     allocation = wealth.strategy_capital_allocation
     config: dict[str, object] = {"mode": allocation.mode}
     if allocation.configured_value is not None:
@@ -465,17 +556,20 @@ def _own_reservation_wealth(
     if allocation.configured_buy_commitment_limit_usd is not None:
         config["buy_commitment_limit_usd"] = allocation.configured_buy_commitment_limit_usd
     floor = wealth.wealth_floor_usd + credit
-    committed = allocation.committed_capital_usd - credit
     spendable = wealth.spendable_cash_usd + credit
+    committed = sum((Decimal(v) / _MICRO for v in commitments.values()), Decimal("0"))
     updated_allocation = StrategyCapitalAllocationWitness.build(
         capital_basis_usd=floor + committed,
         committed_capital_usd=committed,
         venue_spendable_cash_usd=spendable,
         allocation=config,
     )
+    pending_delta = sum(int(r[2]) for r in pending_tuple) - sum(
+        int(r[2]) for r in wealth.pending_entry_endowments_micro
+    )
     position_set_hash = hashlib.sha256(
         json.dumps(
-            [wealth.position_set_hash, command_id, str(credit), sorted(pending)],
+            [wealth.position_set_hash, own.command_id, str(credit), [list(r) for r in pending_tuple]],
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
@@ -483,7 +577,7 @@ def _own_reservation_wealth(
         ledger_snapshot_id=wealth.ledger_snapshot_id,
         position_set_hash=position_set_hash,
         wealth_floor_usd=floor,
-        wealth_ceiling_usd=wealth.wealth_ceiling_usd + credit - Decimal(removed) / _MICRO,
+        wealth_ceiling_usd=wealth.wealth_ceiling_usd + credit + Decimal(pending_delta) / _MICRO,
         spendable_cash_usd=spendable,
         reservations_usd=wealth.reservations_usd - credit,
         collateral_authority=wealth.collateral_authority,
@@ -498,7 +592,7 @@ def _own_reservation_wealth(
             strategy_capital_allocation_identity=updated_allocation.witness_identity,
         ),
         native_holdings_micro=wealth.native_holdings_micro,
-        pending_entry_endowments_micro=pending,
+        pending_entry_endowments_micro=pending_tuple,
         native_commitments_micro=tuple(
             sorted((token, amount) for token, amount in commitments.items() if amount)
         ),
@@ -521,20 +615,33 @@ def _rest_candidate(
     The economic curve is one level: the rest's own limit, the selector's own
     proposal capacity (``maker_buy_capacity`` of current cash), zero maker fee,
     its submission snapshot's tick and lot. The open remainder does not bound
-    R*: it is compared with R* afterwards. The executable ask
-    ladder is that snapshot's; it only satisfies the candidate's non-crossing
-    shape and is never read by the BUY sizer. The fill-model period is a
-    candidate-shape field the BUY sizer does not read either; it is not an
-    order deadline. Fill probability is not an input: R* is conditional on fill.
+    R*: it is compared with R* afterwards. The executable ask ladder is that
+    snapshot's; it only satisfies the candidate's non-crossing shape and is
+    never read by the BUY sizer.
+
+    R* is conditional on fill, so the maker witness is the certain-fill one
+    (one outcome: probability 1, full fill at the limit). The common
+    expected-growth law (``bind_score_capital_horizon``) then values the
+    order over its capital horizon exactly as the selector values a filled
+    maker proposal; the fill-model period is a candidate-shape field that a
+    full-fill outcome never weights, not an order deadline.
     """
     from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
     from src.engine.event_reactor_adapter import _native_side_cost_curve_from_snapshot_row
-    from src.solve.solver import GlobalSingleOrderCandidate, executable_curve_identity
+    from src.solve.solver import (
+        CurrentMakerFillWitness,
+        GlobalSingleOrderCandidate,
+        MakerFillOutcome,
+        current_maker_fill_witness_identity,
+        executable_curve_identity,
+        maker_fill_candidate_binding_identity,
+    )
     from src.strategy.live_inference.mode_consistent_ev import (
         MAKER_REST_ESCALATION_DEADLINE_MINUTES,
     )
 
     price = Decimal(str(entry["price"]))
+    command_id = str(entry["command_id"])
     asks = _native_side_cost_curve_from_snapshot_row(
         dict(snapshot), side=side, token_id=str(entry["token_id"])
     )
@@ -549,8 +656,47 @@ def _rest_candidate(
         min_order_size=asks.min_order_size,
         quote_ttl=asks.quote_ttl,
     )
+    deadline = float(MAKER_REST_ESCALATION_DEADLINE_MINUTES)
+    asset_epoch_identity = f"standing_entry:{command_id}:{asks.snapshot_id}"
+    witness_fields = dict(
+        candidate_binding_identity=maker_fill_candidate_binding_identity(
+            action="BUY",
+            family_key=probability_witness.family_key,
+            bin_id=binding.bin_id,
+            condition_id=binding.condition_id,
+            side=side,
+            token_id=str(entry["token_id"]),
+            ledger_snapshot_id=ledger_snapshot_id,
+            position_id=None,
+            held_shares=None,
+            asset_epoch_identity=asset_epoch_identity,
+            proposal_identity=executable_curve_identity(proposal),
+        ),
+        asset_epoch_identity=asset_epoch_identity,
+        book_snapshot_id=proposal.snapshot_id,
+        book_hash=proposal.book_hash,
+        limit_price=price,
+        rest_deadline_minutes=deadline,
+        source_identity="standing_entry_conditional_on_fill",
+        model_identity="certain_full_fill",
+        sample_identity=command_id,
+        training_cutoff_at_utc=now,
+        issued_at_utc=now,
+        valid_until_at_utc=now,
+        outcomes=(
+            MakerFillOutcome(
+                probability=Decimal("1"),
+                fill_fraction=Decimal("1"),
+                proceeds_per_share_usd=-price,
+            ),
+        ),
+    )
+    witness = CurrentMakerFillWitness(
+        witness_identity=current_maker_fill_witness_identity(**witness_fields),
+        **witness_fields,
+    )
     return GlobalSingleOrderCandidate(
-        candidate_id="standing_entry:" + str(entry["command_id"]),
+        candidate_id="standing_entry:" + command_id,
         family_key=probability_witness.family_key,
         bin_id=binding.bin_id,
         condition_id=binding.condition_id,
@@ -566,9 +712,17 @@ def _rest_candidate(
         neg_risk=bool(snapshot.get("neg_risk")),
         execution_mode="MAKER_REST",
         proposal_cost_curve=proposal,
-        rest_deadline_minutes=float(MAKER_REST_ESCALATION_DEADLINE_MINUTES),
-        fill_probability_source="standing_entry_conditional_on_fill",
+        rest_deadline_minutes=deadline,
+        fill_probability_source=witness.witness_identity,
+        maker_fill_witness=witness,
+        asset_epoch_identity=asset_epoch_identity,
     )
+
+
+# The selector's own common-axis failures: the proposal is worth nothing on
+# the common expected-growth axis. Every other binding failure is lost
+# authority (protective).
+_OWN_LAW_HORIZON_PREFIXES = ("NON_POSITIVE_EXPECTED_GROWTH", "COMMON_SCORE_BINDING_INVALID:")
 
 
 def value_standing_entry(
@@ -576,31 +730,42 @@ def value_standing_entry(
     *,
     family: FamilyKey,
     snapshot: Mapping[str, Any],
-    probability_witness: Any,
+    prepared: Any,
     wealth: Any,
     holdings_snapshot: Any,
     fractional_kelly_multiplier: Decimal,
     capital_limit_usd: Decimal,
     payoff_q_correction_resolver: Any,
+    resolution_at: datetime | None,
     now: datetime,
 ) -> StandingEntryValuation:
-    """Disposition of one open ENTRY rest from the selector's own BUY sizer.
+    """Disposition of one open ENTRY rest from the selector's own BUY laws.
 
-    R* is ``_score_global_single_order_buy_expected`` at the rest's own limit:
-    the same posterior-mean q (after the same market-anchored correction), the
-    same Kelly multiplier, wealth floor/ceiling, held shares and capital limit
-    the selector would use. Holdings include this order's filled part; its own
-    unfilled reservation is credited back (``wealth`` is already that view).
+    In selector order: the market-anchored correction
+    (``resolve_candidate_payoff_q_correction``), the post-calibration BUY
+    refutation (``buy_probability_rejection``), the posterior-mean BUY sizer
+    (``_score_global_single_order_buy_expected``) at the rest's own limit with
+    the same multiplier, wealth floor/ceiling, held shares and capital limit,
+    and the common expected-growth binding (``bind_score_capital_horizon``).
+    Holdings include this order's filled part once; its own unfilled
+    reservation is credited back (``wealth`` is already that view).
     """
-    from src.engine.global_single_order_auction import _candidate_portfolio_endowment
+    from src.engine.global_batch_runtime import _prepared_candidate_payoff_q_lcb_caps
+    from src.engine.global_single_order_auction import (
+        _candidate_portfolio_endowment,
+        buy_probability_rejection,
+        day0_saturated_sides_by_family,
+    )
     from src.solve.solver import (
         _score_global_single_order_buy_expected,
+        bind_score_capital_horizon,
         family_payoff_point_q,
         family_payoff_q_samples,
         maker_buy_capacity,
         resolve_candidate_payoff_q_correction,
     )
 
+    probability_witness = prepared.probability_witness
     command_id = str(entry["command_id"])
     token_id = str(entry["token_id"])
     binding = next(
@@ -621,6 +786,32 @@ def value_standing_entry(
     minimum = Decimal(str(snapshot["min_order_size"]))
     if remaining <= 0:
         return _protective(entry, family, "ENTRY_REST_REMAINDER_NOT_POSITIVE")
+    base_evidence: dict[str, Any] = {
+        "authority_valid": True,
+        "probability_witness_identity": probability_witness.witness_identity,
+        "q_version": probability_witness.q_version,
+        "posterior_identity_hash": probability_witness.posterior_identity_hash,
+        "authority_certificate_hash": probability_witness.authority_certificate_hash,
+        "submission_q_version": entry.get("q_version"),
+        "wealth_witness_identity": wealth.witness_identity,
+        "ledger_snapshot_id": wealth.ledger_snapshot_id,
+        "limit_price": str(price),
+        "filled_shares": str(filled),
+        "open_remaining": str(remaining),
+        "minimum_order_size": str(minimum),
+    }
+
+    def valued(action: str, reason: str, evidence: Mapping[str, Any]) -> StandingEntryValuation:
+        return StandingEntryValuation(
+            command_id=command_id,
+            venue_order_id=str(entry["venue_order_id"]),
+            token_id=token_id,
+            family=family,
+            action=action,
+            reason=reason,
+            evidence={**base_evidence, **evidence},
+        )
+
     capacity = maker_buy_capacity(wealth.spendable_cash_usd, price)
     if capacity < minimum:
         # The selector offers no maker proposal below one lot of current cash:
@@ -631,22 +822,10 @@ def value_standing_entry(
             minimum_order_size=minimum,
             conditional_gain=0.0,
         )
-        return StandingEntryValuation(
-            command_id=command_id,
-            venue_order_id=str(entry["venue_order_id"]),
-            token_id=token_id,
-            family=family,
-            action=action,
-            reason=f"{reason}:MAKER_CASH_CAPACITY_BELOW_LOT",
-            evidence={
-                "authority_valid": True,
-                "probability_witness_identity": probability_witness.witness_identity,
-                "limit_price": str(price),
-                "open_remaining": str(remaining),
-                "minimum_order_size": str(minimum),
-                "spendable_cash_usd": str(wealth.spendable_cash_usd),
-                "target_remaining": "0",
-            },
+        return valued(
+            action,
+            f"{reason}:MAKER_CASH_CAPACITY_BELOW_LOT",
+            {"spendable_cash_usd": str(wealth.spendable_cash_usd), "target_remaining": "0"},
         )
     candidate = _rest_candidate(
         entry,
@@ -673,6 +852,33 @@ def value_standing_entry(
     except Exception as exc:  # noqa: BLE001 - a failed correction never authorizes raw q
         return _protective(entry, family, f"ENTRY_REST_CALIBRATED_Q_UNAVAILABLE:{exc}")
     q = correction.corrected_q if correction is not None else raw_q
+    q_evidence = {
+        "bin_id": binding.bin_id,
+        "condition_id": binding.condition_id,
+        "side": side,
+        "raw_q": raw_q,
+        "acting_q": q,
+        "payoff_q_correction": (
+            None
+            if correction is None
+            else {
+                "type": type(correction).__name__,
+                "p0": correction.p0,
+                "param_hash": getattr(correction, "param_hash", None),
+            }
+        ),
+    }
+    refutation = buy_probability_rejection(
+        candidate,
+        q,
+        saturated_sides=day0_saturated_sides_by_family(
+            {probability_witness.family_key: prepared},
+            {probability_witness.family_key: probability_witness},
+        ),
+        payoff_q_lcb_by_candidate=_prepared_candidate_payoff_q_lcb_caps({command_id: prepared}),
+    )
+    if refutation is not None:
+        return valued("CANCEL", f"ENTRY_REST_BUY_REFUTED:{refutation}", {**q_evidence, "target_remaining": "0"})
     endowment = _candidate_portfolio_endowment(
         candidate,
         probability_witness=probability_witness,
@@ -692,65 +898,55 @@ def value_standing_entry(
         current_token_shares=endowment.current_token_shares,
     )
     target = score.shares if score.candidate is not None else Decimal("0")
-    gain = (
-        float(score.expected_terminal_wealth.expected_delta_log_wealth)
-        if score.candidate is not None and score.expected_terminal_wealth is not None
-        else 0.0
-    )
+    gain = 0.0
+    growth = None
+    horizon_reason = None
+    if score.candidate is not None:
+        bound, horizon_reason = bind_score_capital_horizon(
+            score,
+            resolution_at=resolution_at,
+            probability_witness=probability_witness,
+            decision_at_utc=now,
+            action_mode="CONTINGENT_MAKER_REST_BUY",
+        )
+        if bound is not None:
+            growth = bound.expected_growth
+            gain = float(growth.expected_delta_log_wealth)
+        elif not str(horizon_reason or "").startswith(_OWN_LAW_HORIZON_PREFIXES):
+            return _protective(entry, family, f"ENTRY_REST_CAPITAL_HORIZON_INVALID:{horizon_reason}")
     action, reason = entry_rest_disposition(
         open_remaining=remaining,
         target_remaining=target,
         minimum_order_size=minimum,
         conditional_gain=gain,
     )
-    if action == "CANCEL" and score.no_trade_reason:
-        reason = f"{reason}:{score.no_trade_reason}"
-    evidence = {
-        "authority_valid": True,
-        "probability_witness_identity": probability_witness.witness_identity,
-        "q_version": probability_witness.q_version,
-        "posterior_identity_hash": probability_witness.posterior_identity_hash,
-        "authority_certificate_hash": probability_witness.authority_certificate_hash,
-        "submission_q_version": entry.get("q_version"),
-        "wealth_witness_identity": wealth.witness_identity,
-        "ledger_snapshot_id": wealth.ledger_snapshot_id,
-        "bin_id": binding.bin_id,
-        "condition_id": binding.condition_id,
-        "side": side,
-        "raw_q": raw_q,
-        "acting_q": q,
-        "payoff_q_correction": (
-            None
-            if correction is None
+    if action == "CANCEL" and (horizon_reason or score.no_trade_reason):
+        reason = f"{reason}:{horizon_reason or score.no_trade_reason}"
+    return valued(
+        action,
+        reason,
+        {
+            **q_evidence,
+            "proposal_capacity_shares": str(capacity),
+            "current_token_shares": str(endowment.current_token_shares),
+            "full_kelly_target_shares": str(score.full_kelly_target_shares),
+            "fractional_kelly_target_shares": str(score.fractional_kelly_target_shares),
+            "target_remaining": str(target),
+            "sizing_no_trade_reason": score.no_trade_reason,
+            "capital_horizon_reason": horizon_reason,
+            "resolution_at_utc": None if resolution_at is None else resolution_at.isoformat(),
+            "conditional_gain": gain,
+            "expected_growth": None
+            if growth is None
             else {
-                "type": type(correction).__name__,
-                "p0": correction.p0,
-                "param_hash": getattr(correction, "param_hash", None),
-            }
-        ),
-        "limit_price": str(price),
-        "proposal_capacity_shares": str(capacity),
-        "filled_shares": str(filled),
-        "open_remaining": str(remaining),
-        "minimum_order_size": str(minimum),
-        "current_token_shares": str(endowment.current_token_shares),
-        "full_kelly_target_shares": str(score.full_kelly_target_shares),
-        "fractional_kelly_target_shares": str(score.fractional_kelly_target_shares),
-        "target_remaining": str(target),
-        "sizing_no_trade_reason": score.no_trade_reason,
-        "conditional_gain": gain,
-        "fractional_kelly_multiplier": str(fractional_kelly_multiplier),
-        "capital_limit_usd": str(capital_limit_usd),
-        "resize_semantics": "PERSISTED_CANCEL_THEN_TERMINAL_RECONCILIATION_THEN_REDECISION",
-    }
-    return StandingEntryValuation(
-        command_id=command_id,
-        venue_order_id=str(entry["venue_order_id"]),
-        token_id=token_id,
-        family=family,
-        action=action,
-        reason=reason,
-        evidence=evidence,
+                "expected_delta_log_wealth": growth.expected_delta_log_wealth,
+                "expected_ev_usd": growth.expected_ev_usd,
+                "capital_lock_hours": growth.capital_lock_hours,
+                "expected_capital_efficiency": growth.expected_capital_efficiency,
+            },
+            "fractional_kelly_multiplier": str(fractional_kelly_multiplier),
+            "capital_limit_usd": str(capital_limit_usd),
+        },
     )
 
 
@@ -765,64 +961,103 @@ def _snapshot_row(trade_conn: sqlite3.Connection, snapshot_id: str) -> dict[str,
     return dict(zip((c[0] for c in cursor.description or ()), row, strict=True))
 
 
+def _entry_calibration_scope_resolver(
+    metric_by_family_key: Mapping[str, str], forecasts_conn: sqlite3.Connection
+):
+    """The selector's ENTRY calibration fit scope (its owner metric per family)."""
+    from src.engine.event_reactor_adapter import (
+        _global_entry_calibration_fit_scope,
+        _prepared_global_probability_semantics_revision,
+    )
+
+    def resolve(candidate: Any, prepared: Any) -> Any:
+        return _global_entry_calibration_fit_scope(
+            candidate,
+            metric=metric_by_family_key.get(str(getattr(candidate, "family_key", ""))),
+            raw_probability_revision=_prepared_global_probability_semantics_revision(
+                prepared, forecasts_conn
+            ),
+        )
+
+    return resolve
+
+
 def _capture_standing_entry_values(
     trade_conn: sqlite3.Connection,
     forecasts_conn: sqlite3.Connection,
     world_conn: sqlite3.Connection,
     entries: list[dict[str, Any]],
     *,
+    families: Mapping[str, FamilyKey | None],
     now: datetime,
 ) -> list[StandingEntryValuation]:
     """Read every input before any write: current scope, q, wealth, holdings.
 
-    Reuses the selector's own readers and adapter: the current global scope,
-    ``_prepare_current_global_probability_family`` (the ENTRY q authority with
-    HWM enforcement), ``current_portfolio_wealth_witness``,
-    ``_bind_selection_holdings``, the runtime Kelly multiplier, the
-    market-anchored correction and the allocator's per-market capacity.
+    Reuses the selector's own readers and adapter: the current global scope
+    (and its per-family resolution time), ``_prepare_current_global_probability_family``
+    (the ENTRY q authority with HWM enforcement), ``current_portfolio_wealth_witness``,
+    ``_bind_selection_holdings``, the runtime Kelly multiplier, one
+    market-anchored correction resolver over every valued family (with
+    ``_target_context_by_family`` on the selector's own payload reader) and
+    the allocator's per-market capacity. Every trade read shares one read
+    transaction, so the wealth witness, the obligation rows it was built from
+    and each order's own capital are one ledger snapshot. A failed read for
+    one order cancels that order protectively; it never aborts the others.
     """
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
     from src.engine import event_reactor_adapter as adapter
     from src.engine import global_auction_universe as universe
     from src.engine import global_batch_runtime as runtime
     from src.engine.global_single_order_auction import single_position_capital_limit
-    from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS, _proven_filled_size
+    from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
     from src.state.portfolio import load_runtime_open_portfolio
     from src.state.venue_command_repo import get_command
 
-    families = resolve_order_families(entries, trade_conn, forecasts_conn)
-    rests: list[dict[str, Any]] = []
+    order = [str(entry["command_id"]) for entry in entries]
     values: dict[str, StandingEntryValuation] = {}
-    for entry in entries:
-        command_id = str(entry["command_id"])
-        command = get_command(trade_conn, command_id)
-        if command is None:
-            continue
-        rest = {**command, **entry}
-        rest["matched_size"] = str(
-            max(
-                Decimal(str(entry.get("matched_size") or "0")),
-                _proven_filled_size(trade_conn, command_id),
-            )
-        )
-        rests.append(rest)
-        if families.get(command_id) is None:
-            values[command_id] = _protective(rest, None, "ENTRY_REST_FAMILY_UNRESOLVED")
-    live_families = {f for f in families.values() if f}
-    prepared_by_family: dict[FamilyKey, tuple[str, Any, Any]] = {}
-    blocked: dict[FamilyKey, str] = {}
-    if live_families:
-        try:
-            scope = universe.scan_current_global_auction_scope(
-                world_conn=world_conn,
-                forecasts_conn=forecasts_conn,
-                decision_at_utc=now,
-                restrict_to_families=tuple(sorted(live_families)),
-            )
-        except Exception as exc:  # noqa: BLE001 - no current scope is no authority
-            blocked = {f: f"ENTRY_REST_CURRENT_SCOPE_UNAVAILABLE:{type(exc).__name__}" for f in live_families}
-        else:
-            for event in scope.events:
+    rests: list[dict[str, Any]] = []
+    owns_txn = not trade_conn.in_transaction
+    if owns_txn:
+        trade_conn.execute("BEGIN")
+    try:
+        for entry in entries:
+            command_id = str(entry["command_id"])
+            try:
+                command = get_command(trade_conn, command_id)
+            except Exception as exc:  # noqa: BLE001 - an unreadable order cancels protectively
+                values[command_id] = _protective(
+                    entry, families.get(command_id), f"ENTRY_REST_COMMAND_UNREADABLE:{type(exc).__name__}"
+                )
+                continue
+            if command is None:
+                order.remove(command_id)
+                continue
+            rest = {**command, **entry}
+            rests.append(rest)
+            if families.get(command_id) is None:
+                values[command_id] = _protective(rest, None, "ENTRY_REST_FAMILY_UNRESOLVED")
+        live_families = {
+            families[str(r["command_id"])] for r in rests if str(r["command_id"]) not in values
+        }
+        prepared_by_family: dict[FamilyKey, tuple[Any, Any]] = {}
+        blocked: dict[FamilyKey, str] = {}
+        resolution_at_by_key: Mapping[str, datetime] = {}
+        if live_families:
+            try:
+                scope = universe.scan_current_global_auction_scope(
+                    world_conn=world_conn,
+                    forecasts_conn=forecasts_conn,
+                    decision_at_utc=now,
+                    restrict_to_families=tuple(sorted(live_families)),
+                )
+                resolution_at_by_key = dict(getattr(scope, "resolution_at_by_family", {}) or {})
+                scope_events = tuple(scope.events)
+            except Exception as exc:  # noqa: BLE001 - no current scope is no authority
+                blocked = {
+                    f: f"ENTRY_REST_CURRENT_SCOPE_UNAVAILABLE:{type(exc).__name__}" for f in live_families
+                }
+                scope_events = ()
+            for event in scope_events:
                 family = universe._event_family(event)
                 if family not in live_families:
                     continue
@@ -844,149 +1079,140 @@ def _capture_standing_entry_values(
                 if prepared is None:
                     blocked[family] = "ENTRY_REST_PROBABILITY_UNAVAILABLE"
                     continue
-                prepared_by_family[family] = (event, prepared, payload_family_context(event))
-    active = [r for r in rests if str(r["command_id"]) not in values]
-    for rest in active:
-        family = families[str(rest["command_id"])]
-        if family not in prepared_by_family:
-            values[str(rest["command_id"])] = _protective(
-                rest, family, blocked.get(family, "ENTRY_REST_PROBABILITY_UNAVAILABLE")
-            )
-    active = [r for r in active if str(r["command_id"]) not in values]
-    if not active:
-        return [values[str(r["command_id"])] for r in rests if str(r["command_id"]) in values]
-    try:
-        portfolio = load_runtime_open_portfolio(trade_conn)
-        wealth = universe.current_portfolio_wealth_witness(
-            trade_conn,
-            decision_at_utc=now,
-            max_age=timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)),
-            portfolio_state=portfolio,
-        )
-        multiplier = Decimal(str(adapter._runtime_kelly_multiplier()))
-        from src.risk_allocator import snapshot_global_auction_capital_authority
-
-        capital_authority = snapshot_global_auction_capital_authority()
-    except Exception as exc:  # noqa: BLE001 - no current wealth is no new exposure
-        for rest in active:
-            values[str(rest["command_id"])] = _protective(
-                rest,
-                families[str(rest["command_id"])],
-                f"ENTRY_REST_PORTFOLIO_AUTHORITY_INVALID:{type(exc).__name__}",
-            )
-        return [values[str(r["command_id"])] for r in rests]
-    target_context = {
-        prepared.probability_witness.family_key: context
-        for _event, prepared, context in prepared_by_family.values()
-        if context is not None
-    }
-    for rest in active:
-        command_id = str(rest["command_id"])
-        family = families[command_id]
-        event, prepared, _context = prepared_by_family[family]
+                prepared_by_family[family] = (event, prepared)
+        for rest in rests:
+            command_id = str(rest["command_id"])
+            family = families.get(command_id)
+            if command_id not in values and family not in prepared_by_family:
+                values[command_id] = _protective(
+                    rest, family, blocked.get(family, "ENTRY_REST_PROBABILITY_UNAVAILABLE")
+                )
+        active = [r for r in rests if str(r["command_id"]) not in values]
+        if not active:
+            return [values[c] for c in order]
         try:
-            snapshot = _snapshot_row(trade_conn, str(rest.get("snapshot_id") or ""))
-            if snapshot is None:
-                raise ValueError("ENTRY_REST_SUBMISSION_SNAPSHOT_MISSING")
-            reservation = trade_conn.execute(
-                "SELECT amount FROM collateral_reservations "
-                "WHERE command_id = ? AND reservation_type = 'PUSD_BUY' AND released_at IS NULL",
-                (command_id,),
-            ).fetchone()
-            filled = Decimal(str(rest["matched_size"]))
-            own_wealth = _own_reservation_wealth(
-                wealth,
-                command_id=command_id,
-                token_id=str(rest["token_id"]),
-                reservation_micro=int(reservation[0]) if reservation is not None else 0,
-                filled_shares=filled,
-                remaining_cost_usd=max(Decimal("0"), Decimal(str(rest["size"])) - filled)
-                * Decimal(str(rest["price"])),
-            )
-            bound = runtime._bind_selection_holdings(
-                {event.event_id: prepared},
+            portfolio = load_runtime_open_portfolio(trade_conn)
+            positions = tuple(getattr(portfolio, "positions", ()) or ())
+            wealth = universe.current_portfolio_wealth_witness(
+                trade_conn,
+                decision_at_utc=now,
+                max_age=timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)),
                 portfolio_state=portfolio,
-                wealth_witness=own_wealth,
-            )[event.event_id]
+            )
+            obligation_rows = universe.entry_obligation_rows(trade_conn)
+            bounded_claims = dict(wealth.native_holdings_micro)
+            for obligation_id, token, amount in wealth.pending_entry_endowments_micro:
+                if obligation_id.startswith("position_claim:"):
+                    bounded_claims[token] = bounded_claims.get(token, 0) + int(amount)
+            multiplier = Decimal(str(adapter._runtime_kelly_multiplier()))
+            from src.risk_allocator import snapshot_global_auction_capital_authority
+
+            capital_authority = snapshot_global_auction_capital_authority()
+            prepared_by_key = {
+                prepared.probability_witness.family_key: prepared
+                for _event, prepared in prepared_by_family.values()
+            }
             correction = runtime._market_anchored_correction_resolver(
                 world_conn,
                 trade_conn=trade_conn,
                 forecast_conn=forecasts_conn,
-                target_context_by_family=target_context,
-                prepared_by_family={prepared.probability_witness.family_key: prepared},
-                calibration_scope_resolver=_entry_calibration_scope_resolver(family, forecasts_conn),
-            )
-            allocator_limit = capital_authority.capacity_usd(
-                market_id=str(snapshot.get("gamma_market_id") or ""),
-                event_id=str(snapshot.get("event_id") or ""),
-                correlation_key=prepared.probability_witness.family_key,
-            )
-            capital_limit = min(
-                own_wealth.strategy_capital_allocation.remaining_buy_capacity_usd,
-                single_position_capital_limit(
-                    allocator_limit,
-                    token_id=str(rest["token_id"]),
-                    wealth_witness=own_wealth,
+                target_context_by_family=runtime._target_context_by_family(
+                    {
+                        prepared.probability_witness.family_key: event
+                        for event, prepared in prepared_by_family.values()
+                    },
+                    payload_reader=adapter._payload,
+                ),
+                prepared_by_family=prepared_by_key,
+                calibration_scope_resolver=_entry_calibration_scope_resolver(
+                    {
+                        prepared.probability_witness.family_key: family[2]
+                        for family, (_event, prepared) in prepared_by_family.items()
+                    },
+                    forecasts_conn,
                 ),
             )
-            values[command_id] = value_standing_entry(
-                rest,
-                family=family,
-                snapshot=snapshot,
-                probability_witness=prepared.probability_witness,
-                wealth=own_wealth,
-                holdings_snapshot=bound.holdings_snapshot,
-                fractional_kelly_multiplier=multiplier,
-                capital_limit_usd=capital_limit,
-                payoff_q_correction_resolver=correction,
-                now=now,
-            )
-        except Exception as exc:  # noqa: BLE001 - an unprovable valuation cancels protectively
-            values[command_id] = _protective(
-                rest,
-                family,
-                f"ENTRY_REST_VALUE_AUTHORITY_INVALID:{type(exc).__name__}:{exc}",
-            )
-    return [values[str(r["command_id"])] for r in rests]
-
-
-def payload_family_context(event: Any) -> tuple[str, Any] | None:
-    """(city, target date) from the event payload, as the selector reads it."""
-    from datetime import date
-
-    try:
-        payload = json.loads(str(event.payload_json or "{}"))
-        city = str(payload.get("city") or "")
-        target_date = date.fromisoformat(str(payload.get("target_date") or "")[:10])
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    return (city, target_date) if city else None
-
-
-def _entry_calibration_scope_resolver(family: FamilyKey, forecasts_conn: sqlite3.Connection):
-    """The selector's ENTRY calibration fit scope for this family's metric."""
-    from src.engine.event_reactor_adapter import (
-        _global_entry_calibration_fit_scope,
-        _prepared_global_probability_semantics_revision,
-    )
-
-    def resolve(candidate: Any, prepared: Any) -> Any:
-        return _global_entry_calibration_fit_scope(
-            candidate,
-            metric=family[2],
-            raw_probability_revision=_prepared_global_probability_semantics_revision(
-                prepared, forecasts_conn
-            ),
-        )
-
-    return resolve
+        except Exception as exc:  # noqa: BLE001 - no current wealth is no new exposure
+            for rest in active:
+                command_id = str(rest["command_id"])
+                values[command_id] = _protective(
+                    rest,
+                    families.get(command_id),
+                    f"ENTRY_REST_PORTFOLIO_AUTHORITY_INVALID:{type(exc).__name__}",
+                )
+            return [values[c] for c in order]
+        for rest in active:
+            command_id = str(rest["command_id"])
+            family = families[command_id]
+            event, prepared = prepared_by_family[family]
+            try:
+                snapshot = _snapshot_row(trade_conn, str(rest.get("snapshot_id") or ""))
+                if snapshot is None:
+                    raise ValueError("ENTRY_REST_SUBMISSION_SNAPSHOT_MISSING")
+                own = _own_command_capital(trade_conn, rest, positions=positions)
+                rest["matched_size"] = str(own.filled_shares)
+                own_wealth = _own_reservation_wealth(
+                    wealth,
+                    own,
+                    obligation_rows=obligation_rows,
+                    positions=positions,
+                    native_holdings_micro=bounded_claims,
+                )
+                bound = runtime._bind_selection_holdings(
+                    {event.event_id: prepared},
+                    portfolio_state=portfolio,
+                    wealth_witness=own_wealth,
+                )[event.event_id]
+                allocator_limit = capital_authority.capacity_usd(
+                    market_id=str(snapshot.get("gamma_market_id") or ""),
+                    event_id=str(snapshot.get("event_id") or ""),
+                    correlation_key=prepared.probability_witness.family_key,
+                )
+                capital_limit = min(
+                    own_wealth.strategy_capital_allocation.remaining_buy_capacity_usd,
+                    single_position_capital_limit(
+                        allocator_limit,
+                        token_id=str(rest["token_id"]),
+                        wealth_witness=own_wealth,
+                    ),
+                )
+                values[command_id] = value_standing_entry(
+                    rest,
+                    family=family,
+                    snapshot=snapshot,
+                    prepared=prepared,
+                    wealth=own_wealth,
+                    holdings_snapshot=bound.holdings_snapshot,
+                    fractional_kelly_multiplier=multiplier,
+                    capital_limit_usd=capital_limit,
+                    payoff_q_correction_resolver=correction,
+                    resolution_at=resolution_at_by_key.get(prepared.probability_witness.family_key),
+                    now=now,
+                )
+            except Exception as exc:  # noqa: BLE001 - an unprovable valuation cancels protectively
+                values[command_id] = _protective(
+                    rest,
+                    family,
+                    f"ENTRY_REST_VALUE_AUTHORITY_INVALID:{type(exc).__name__}:{exc}",
+                )
+        return [values[c] for c in order]
+    finally:
+        if owns_txn and trade_conn.in_transaction:
+            trade_conn.rollback()
 
 
 def _authority_identity(valuation: StandingEntryValuation) -> str:
+    """The valuation's economic authority, independent of the clock.
+
+    Witness identities hash their capture time, so they change every tick;
+    only the posterior's own identity and the economics it produced belong
+    here. An unchanged KEEP then journals nothing.
+    """
     stable = {
         key: valuation.evidence.get(key)
         for key in (
-            "probability_witness_identity",
+            "q_version",
+            "posterior_identity_hash",
             "acting_q",
             "target_remaining",
             "open_remaining",
@@ -1004,78 +1230,96 @@ def _authority_identity(valuation: StandingEntryValuation) -> str:
     ).hexdigest()
 
 
+# An unchanged KEEP is re-journaled at most once per window, so the journal
+# read stays a bounded tail of the newest rows of this mode.
+STANDING_ENTRY_REJOURNAL_WINDOW = timedelta(hours=24)
+
+
+def read_journaled_identities(conn: sqlite3.Connection, *, now: datetime) -> dict[str, str]:
+    """Latest journaled authority per command within the re-journal window.
+
+    Read phase only (never inside the write lease): one ``timestamp`` index
+    seek for the window start, then the ``(mode, rowid)`` index range of this
+    mode from there. An unreadable journal reads as empty: every KEEP then
+    journals once, which is safe.
+    """
+    try:
+        start = conn.execute(
+            "SELECT id FROM decision_log WHERE timestamp >= ? ORDER BY timestamp LIMIT 1",
+            ((now - STANDING_ENTRY_REJOURNAL_WINDOW).isoformat(),),
+        ).fetchone()
+        if start is None:
+            return {}
+        rows = conn.execute(
+            "SELECT json_extract(artifact_json, '$.command_id'), "
+            "json_extract(artifact_json, '$.authority_identity') "
+            "FROM decision_log WHERE mode = ? AND id >= ? ORDER BY id",
+            (STANDING_ENTRY_DECISION_MODE, start[0]),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(command_id): str(identity) for command_id, identity in rows if command_id}
+
+
 def persist_standing_entry_values(
     conn: sqlite3.Connection,
     valuations: Iterable[StandingEntryValuation],
     *,
     now: datetime,
-) -> list[StandingEntryValuation]:
-    """Journal each disposition's authority before any venue action.
+    journaled: Mapping[str, str],
+) -> int:
+    """Journal each changed disposition's authority; return the rows written.
 
     One append-only ``decision_log`` row per changed authority, bound to the
     exact command and venue order id. The submission certificate,
     ``venue_commands.q_version`` and every reservation stay untouched. A KEEP
-    whose authority equals the command's latest journaled authority writes
-    nothing (read from the journal itself, so a restart does not re-journal).
-    Returns the valuations whose command is still the same open order.
+    whose authority equals ``journaled`` (read before the lease) writes
+    nothing. The write lease holds only the inserts and the bounded
+    retention walk; it reads no journal rows.
     """
     from src.execution.batch_order_submission import _cancel_journal_transaction
     from src.state.decision_chain import _inline_expire_decision_log
-    from src.state.venue_command_repo import get_command
 
-    current: list[StandingEntryValuation] = []
+    artifacts = []
+    for valuation in valuations:
+        identity = _authority_identity(valuation)
+        if valuation.action == "KEEP" and journaled.get(valuation.command_id) == identity:
+            continue
+        artifacts.append(
+            json.dumps(
+                {
+                    "command_id": valuation.command_id,
+                    "venue_order_id": valuation.venue_order_id,
+                    "token_id": valuation.token_id,
+                    "family": list(valuation.family) if valuation.family else None,
+                    "action": valuation.action,
+                    "reason": valuation.reason,
+                    "authority_identity": identity,
+                    "evidence": dict(valuation.evidence),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        )
+    if not artifacts:
+        return 0
+    stamp = now.isoformat()
     with _cancel_journal_transaction(conn, owner="standing_entry_value"):
         last_id = None
-        for valuation in valuations:
-            command = get_command(conn, valuation.command_id)
-            if (
-                command is None
-                or str(command.get("venue_order_id") or "") != valuation.venue_order_id
-                or str(command.get("token_id") or "") != valuation.token_id
-                or str(command.get("state") or "") not in {"ACKED", "POST_ACKED", "PARTIAL"}
-            ):
-                continue
-            current.append(valuation)
-            identity = _authority_identity(valuation)
-            if valuation.action == "KEEP" and _latest_journaled_identity(
-                conn, valuation.command_id
-            ) == identity:
-                continue
-            artifact = {
-                "command_id": valuation.command_id,
-                "venue_order_id": valuation.venue_order_id,
-                "token_id": valuation.token_id,
-                "family": list(valuation.family) if valuation.family else None,
-                "action": valuation.action,
-                "reason": valuation.reason,
-                "authority_identity": identity,
-                "evidence": dict(valuation.evidence),
-            }
-            cursor = conn.execute(
+        for artifact in artifacts:
+            last_id = conn.execute(
                 "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (
-                    STANDING_ENTRY_DECISION_MODE,
-                    now.isoformat(),
-                    now.isoformat(),
-                    json.dumps(artifact, sort_keys=True, separators=(",", ":"), default=str),
-                    now.isoformat(),
-                ),
-            )
-            last_id = cursor.lastrowid
-        if last_id is not None:
-            _inline_expire_decision_log(conn, STANDING_ENTRY_DECISION_MODE, exclude_id=last_id)
-    return current
+                (STANDING_ENTRY_DECISION_MODE, stamp, stamp, artifact, stamp),
+            ).lastrowid
+        _inline_expire_decision_log(conn, STANDING_ENTRY_DECISION_MODE, exclude_id=last_id)
+    return len(artifacts)
 
 
-def _latest_journaled_identity(conn: sqlite3.Connection, command_id: str) -> str | None:
-    row = conn.execute(
-        "SELECT json_extract(artifact_json, '$.authority_identity') FROM decision_log "
-        "WHERE mode = ? AND json_extract(artifact_json, '$.command_id') = ? "
-        "ORDER BY id DESC LIMIT 1",
-        (STANDING_ENTRY_DECISION_MODE, command_id),
-    ).fetchone()
-    return None if row is None else row[0]
+def _family_scope_key(family: Iterable[object]) -> tuple[str, str, str]:
+    city, target_date, metric = (str(value or "").strip() for value in family)
+    return city.casefold(), target_date[:10], metric.lower()
 
 
 def run_c3_staleness_cancel_cycle(
@@ -1087,31 +1331,45 @@ def run_c3_staleness_cancel_cycle(
     world_conn_ro: sqlite3.Connection,
     now: datetime | None = None,
     rate_budget: Any = None,
+    families: Iterable[Iterable[object]] | None = None,
 ) -> dict[str, Any]:
-    """Value every open ENTRY rest and cancel only what current value rejects.
+    """Value open ENTRY rests and cancel only what current value rejects.
+
+    ``families`` restricts the pass to the open rests of those families (a
+    belief or Day0 wake for them); ``None`` is the full tick, which also
+    retries pending cancels and runs the Day0 dead-bin lane.
 
     Read phase (no writes, INV-37): open rests, current probability, wealth,
-    holdings, Day0 dead-bin classification. Write phase: journal every
-    valuation's authority, then one ``cancel_commands_batch`` over CANCEL,
-    RESIZE, Day0 and pending-retry commands. KEEP takes no venue action.
-
-    ``cancel_commands_batch`` persists CANCEL_REQUESTED before its SDK call and
-    defers (never drops) on a rate-budget denial; the next tick revalues the
-    still-open order. Returns ``confirmed_families``: families whose every
-    cancelled command re-reads as CANCELLED, the gate for fresh redecision.
+    holdings, the journal's latest identities, Day0 classification. Write
+    phase: journal changed authority (best effort), then one
+    ``cancel_commands_batch`` over every CANCEL, Day0 and pending-retry
+    command. A journal failure never blocks a cancel: the batch journals
+    CANCEL_REQUESTED, with its ``cancel_reason``, before its SDK call. KEEP
+    takes no venue action. A rate-budget denial defers (never drops); the
+    next tick revalues the still-open order. ``confirmed_families`` are the
+    families whose every cancelled command re-reads as CANCELLED.
     """
     from src.execution.batch_order_submission import cancel_commands_batch
     from src.execution.day0_hard_fact_exit import classify_day0_dead_bin_entry_cancels
     from src.state.venue_command_repo import get_command
 
     at = now or datetime.now(UTC)
-    entries = find_open_entry_rests(trade_conn_ro, include_pending_cancels=True)
+    full_tick = families is None
+    entries = find_open_entry_rests(trade_conn_ro, include_pending_cancels=full_tick)
+    families_by_command = resolve_order_families(entries, trade_conn_ro, forecasts_conn_ro)
+    if not full_tick:
+        wanted = {_family_scope_key(family) for family in families or ()}
+        entries = [
+            e
+            for e in entries
+            if (family := families_by_command.get(str(e["command_id"]))) is not None
+            and _family_scope_key(family) in wanted
+        ]
     pending = [e for e in entries if e.get("pending_cancel")]
     active = [e for e in entries if not e.get("pending_cancel")]
-    families_by_command = resolve_order_families(entries, trade_conn_ro, forecasts_conn_ro)
 
     day0_cancel_set: list[dict[str, Any]] = []
-    if active:
+    if active and full_tick:
         try:
             from src.config import runtime_cities_by_name
 
@@ -1125,14 +1383,38 @@ def run_c3_staleness_cancel_cycle(
         except Exception as exc:  # noqa: BLE001 - one lane cannot suppress valuation
             logger.warning("C3 Day0 cancel classification failed: %s", exc)
     valuations: list[StandingEntryValuation] = []
+    journaled_rows = 0
     if active:
-        valuations = persist_standing_entry_values(
-            trade_conn_rw,
-            _capture_standing_entry_values(
-                trade_conn_ro, forecasts_conn_ro, world_conn_ro, active, now=at
-            ),
-            now=at,
-        )
+        try:
+            valuations = _capture_standing_entry_values(
+                trade_conn_ro,
+                forecasts_conn_ro,
+                world_conn_ro,
+                active,
+                families=families_by_command,
+                now=at,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unvalued rest never keeps filling
+            logger.warning("C3 standing valuation failed; cancelling protectively: %s", exc)
+            valuations = [
+                _protective(
+                    e,
+                    families_by_command.get(str(e["command_id"])),
+                    f"ENTRY_REST_VALUATION_FAILED:{type(exc).__name__}",
+                )
+                for e in active
+            ]
+        journaled = read_journaled_identities(trade_conn_ro, now=at)
+        try:
+            journaled_rows = persist_standing_entry_values(
+                trade_conn_rw, valuations, now=at, journaled=journaled
+            )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never blocks a cancel
+            logger.warning(
+                "C3 standing valuation journal failed (cancels still go): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
     value_cancel_set = [
         {
@@ -1144,7 +1426,7 @@ def run_c3_staleness_cancel_cycle(
             "cancel_detail": {"action": v.action, **dict(v.evidence)},
         }
         for v in valuations
-        if v.action in {"CANCEL", "RESIZE"}
+        if v.action == "CANCEL"
     ]
     pending_cancel_set = [
         {
@@ -1168,7 +1450,7 @@ def run_c3_staleness_cancel_cycle(
         "scanned": len(entries),
         "valuations": valuations,
         "kept": sum(v.action == "KEEP" for v in valuations),
-        "resized": sum(v.action == "RESIZE" for v in valuations),
+        "journaled": journaled_rows,
         "cancel_set_size": len(cancel_set),
         "day0_cancel_set_size": len(day0_cancel_set),
         "outcomes": [],
@@ -1182,6 +1464,7 @@ def run_c3_staleness_cancel_cycle(
         client,
         [str(e["command_id"]) for e in cancel_set],
         rate_budget=rate_budget,
+        cancel_reasons={str(e["command_id"]): str(e.get("cancel_reason") or "") for e in cancel_set},
     )
     result["outcomes"] = outcomes
     confirmed: set[FamilyKey] = set()
@@ -1209,10 +1492,10 @@ def run_c3_staleness_cancel_cycle(
             confirmed.add(family)
     result["confirmed_families"] = confirmed - blocked
     logger.info(
-        "c3_staleness_cancel: scanned=%d kept=%d resized=%d cancel_set=%d confirmed_families=%d",
+        "c3_staleness_cancel: scanned=%d kept=%d journaled=%d cancel_set=%d confirmed_families=%d",
         result["scanned"],
         result["kept"],
-        result["resized"],
+        result["journaled"],
         result["cancel_set_size"],
         len(result["confirmed_families"]),
     )

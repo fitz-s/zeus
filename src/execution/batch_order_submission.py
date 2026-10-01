@@ -9,7 +9,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from src.venue.batch_submit import MAX_ORDERS_PER_BATCH, chunk_orders
 
@@ -82,8 +82,13 @@ def cancel_commands_batch(
     command_ids: Sequence[str],
     *,
     rate_budget: Any = None,
+    cancel_reasons: Mapping[str, str] | None = None,
 ) -> list[BatchCancelOutcome]:
     """Cancel ``command_ids`` in chunks of at most MAX_ORDERS_PER_BATCH.
+
+    ``cancel_reasons`` (command_id -> reason) is journaled as the
+    CANCEL_REQUESTED payload's ``cancel_reason``, in the same transaction that
+    persists the request, so the reason is durable before any venue call.
 
     Reuses the existing single-order cancel machinery
     (src.execution.exit_safety: parse_cancel_response,
@@ -163,12 +168,19 @@ def cancel_commands_batch(
             with _cancel_journal_transaction(conn, owner="batch_cancel_request"):
                 for idx, command_id, venue_order_id, state in eligible:
                     if state != "CANCEL_PENDING":
+                        payload: dict[str, Any] = {
+                            "venue_order_id": venue_order_id,
+                            "batch": True,
+                        }
+                        reason = (cancel_reasons or {}).get(command_id)
+                        if reason:
+                            payload["cancel_reason"] = str(reason)
                         append_event(
                             conn,
                             command_id=command_id,
                             event_type="CANCEL_REQUESTED",
                             occurred_at=now,
-                            payload={"venue_order_id": venue_order_id, "batch": True},
+                            payload=payload,
                         )
                     persisted.append((idx, command_id, venue_order_id))
         except Exception as exc:
