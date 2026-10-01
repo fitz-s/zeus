@@ -571,20 +571,6 @@ from src.calibration.emos import (
 
 _GLOBAL_AUCTION_WORK_CUT_SECONDS = 45.0
 
-# TYPE C bounded-revalidation counter (docs/operations/current/plans/
-# auction_collapse_repair_design_2026-08-24.md §1.3). A global batch
-# generation survives up to this many non-day0/non-fill supersessions
-# within the grace window below before _epoch_superseded reverts to
-# immediate-abort (today's behavior). day0_extreme_event_committed and
-# position_fill_projected are hard vetoes and never consult this budget --
-# see _global_batch_preemption_grace_reasons_excluded_from_grace below.
-GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS = int(
-    os.environ.get("ZEUS_GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS", "3")
-)
-GLOBAL_AUCTION_PREEMPTION_GRACE_WINDOW_SECONDS = float(
-    os.environ.get("ZEUS_GLOBAL_AUCTION_PREEMPTION_GRACE_WINDOW_SECONDS", "300")
-)
-
 
 UTC = timezone.utc
 
@@ -8142,7 +8128,6 @@ def event_bound_live_adapter_from_trade_conn(
     producer_wake_ids: tuple[str, ...] = (),
     producer_wake_published_at: str | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
-    selection_completion_fairness_reserved: bool = False,
     selection_completion_reserved: bool = False,
     family_scoped_held_completion: bool = False,
     selection_completion_sell_keys: frozenset[tuple[str, str]] = frozenset(),
@@ -8302,39 +8287,21 @@ def event_bound_live_adapter_from_trade_conn(
         for raw_wake_id in producer_wake_ids
         if (wake_id := str(raw_wake_id or "").strip())
     )
-    # TYPE C bounded-revalidation counter state
-    # (docs/operations/current/plans/auction_collapse_repair_design_2026-08-24.md §1.3).
-    # SCOPE: belief (posterior) invalidations of this adapter's cuts only.
-    # DRAIN: each new adapter (reactor cycle) opens with a full budget.
-    # RESET: once the count or window binds, a belief invalidation aborts.
-    _global_batch_grace_supersession_count = [0]
-    _global_batch_grace_window_started_monotonic = [_time.monotonic()]
-
-    # INV-47 — the running cut's dependency, published by the runtime.
-    # SCOPE: the families the cut values (CutScope), None before its scope
-    # scan. DRAIN: a wake outside the dependency stays queued for the next
-    # cut, which re-reads committed truth. RESET: each cut republishes None at
-    # entry; any scope change re-judges every wake published since the cut's
-    # own decision time.
+    # INV-47 — what the running cut's frozen winner rests on (runtime-published).
+    # SCOPE: the winner's family plus the holdings its wealth values; None
+    #   until selection freezes a winner.
+    # DRAIN: a wake outside it stays queued for the next cut, which re-reads
+    #   committed truth; publishing re-judges every wake since the cutoff.
+    # RESET: each cut republishes None at entry.
     _cut_scope: list[CutScope | None] = [None]
-    # Strict generic completion only: the portfolio valuation superset the
-    # runtime publishes once scope, wealth and obligations are coherent.
-    _dependency_scope_family_keys: list[frozenset[str] | None] = [None]
-
-    def _observe_dependency_scope(family_keys: frozenset[str] | None) -> None:
-        if not isinstance(family_keys, frozenset) or any(
-            not isinstance(family_key, str) or not family_key.strip()
-            for family_key in family_keys
-        ):
-            family_keys = None
-        _dependency_scope_family_keys[0] = family_keys
 
     def _observe_cut_scope(scope: CutScope | None) -> None:
         if scope is not None and (
             not isinstance(scope, CutScope)
+            or not str(scope.winner_family_key or "").strip()
             or any(
                 not isinstance(family_key, str) or not family_key.strip()
-                for family_key in scope.family_keys
+                for family_key in scope.held_family_keys
             )
         ):
             scope = None
@@ -9258,56 +9225,11 @@ def event_bound_live_adapter_from_trade_conn(
             == "DAY0_EXTREME_UPDATED"
             for event in events
         )
-        probability_delta_batch = bool(events) and all(
-            str(getattr(event, "event_type", "") or "")
-            in ({"FORECAST_SNAPSHOT_READY"} | _DAY0_LANE_EVENT_TYPES)
-            for event in events
-        )
-        price_delta_batch = bool(events) and all(
-            str(getattr(event, "event_type", "") or "")
-            == _EDLI_REDECISION_EVENT_TYPE
-            for event in events
-        )
-        if probability_delta_batch and probability_refresh_family_keys:
-            delta_scope_family_keys = probability_refresh_family_keys
-        elif price_delta_batch and book_refresh_family_keys:
-            delta_scope_family_keys = book_refresh_family_keys
-        else:
-            delta_scope_family_keys = None
         if entry_submit_suppression_reason is not None:
             logging.getLogger(__name__).debug(
                 "global batch suppressing BUY candidates before selection: reason=%s",
                 entry_submit_suppression_reason,
             )
-
-        def _consult_preemption_grace(*, reasons: tuple[str, ...]) -> bool:
-            """Return True to coalesce one belief invalidation within the
-            bounded TYPE C grace budget; False to abort. Only belief-kind
-            invalidations reach here (the predicate classifies them); hard
-            facts never do. The JIT re-fetch gates (book/probability/price)
-            still re-derive their own freshness truth at actuation.
-            """
-            elapsed = (
-                _time.monotonic() - _global_batch_grace_window_started_monotonic[0]
-            )
-            if elapsed > GLOBAL_AUCTION_PREEMPTION_GRACE_WINDOW_SECONDS:
-                return False
-            if (
-                _global_batch_grace_supersession_count[0]
-                >= GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS
-            ):
-                return False
-            _global_batch_grace_supersession_count[0] += 1
-            logging.getLogger(__name__).info(
-                "global batch preemption churn suppressed: generation=%s "
-                "count=%d/%d elapsed_s=%.3f suppressed_reasons=%s",
-                cut_cutoff,
-                _global_batch_grace_supersession_count[0],
-                GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS,
-                elapsed,
-                ",".join(sorted(set(reasons))),
-            )
-            return True
 
         # (b) The cut's own decision time is its cutoff: a wake published
         # before it is truth the cut reads, never an invalidation of it.
@@ -9315,39 +9237,17 @@ def event_bound_live_adapter_from_trade_conn(
 
         def _cut_dependency() -> CutDependency:
             scope = _cut_scope[0]
-            if scope is not None and family_scoped_held_completion:
-                # A strict generic completion depends on its whole portfolio
-                # valuation; an ambiguous (None) superset means every family.
-                valuation = _dependency_scope_family_keys[0]
-                return CutDependency(
-                    published=True,
-                    hard_family_keys=valuation,
-                    belief_family_keys=valuation,
-                )
             if scope is None:
                 return CutDependency(
                     published=False,
                     hard_family_keys=None,
                     belief_family_keys=None,
                 )
-            if (
-                scope.q_frozen
-                or day0_urgent_batch
-                or selection_completion_reserved
-                or selection_completion_fairness_reserved
-            ):
-                # q is frozen (the JIT preflight re-derives the winner's q), a
-                # Day0-driven cut outranks a forecast refresh, or a reserved
-                # full comparison defers newer posteriors to the next cut.
-                belief: frozenset[str] | None = frozenset()
-            elif delta_scope_family_keys is not None:
-                belief = delta_scope_family_keys
-            else:
-                belief = None
+            winner = frozenset({scope.winner_family_key})
             return CutDependency(
                 published=True,
-                hard_family_keys=scope.family_keys,
-                belief_family_keys=belief,
+                hard_family_keys=winner | scope.held_family_keys,
+                belief_family_keys=winner,
             )
 
         # One judgment per (urgent revision, dependency): the full queue read
@@ -9373,9 +9273,6 @@ def event_bound_live_adapter_from_trade_conn(
             _judged[0] = (revision, dependency, verdict)
             return verdict
 
-        # Epoch wakes the grace already absorbed; each is judged once.
-        _epoch_absorbed: set[str] = set()
-
         def _hard_invalidation() -> str | bool:
             """False to continue; else the label of the hard fact."""
 
@@ -9389,30 +9286,13 @@ def event_bound_live_adapter_from_trade_conn(
             return bool(hard) and wake_invalidation_label(hard)
 
         def _epoch_superseded() -> str | bool:
-            """False to continue; else the label of the fact that supersedes.
-
-            Hard facts end the cut; a belief invalidation ends it unless the
-            bounded grace absorbs it (each belief wake is judged once).
-            """
+            """False to continue; else the label of the fact that supersedes."""
 
             hard = _hard_invalidation()
             if hard:
                 return hard
-            fresh = CutInvalidation(
-                epoch=tuple(
-                    wake
-                    for wake in _judge().epoch
-                    if wake.wake_id not in _epoch_absorbed
-                )
-            )
-            if not fresh.epoch:
-                return False
-            if fresh.epoch_grace_eligible and _consult_preemption_grace(
-                reasons=tuple(str(wake.reason) for wake in fresh.epoch)
-            ):
-                _epoch_absorbed.update(wake.wake_id for wake in fresh.epoch)
-                return False
-            return wake_invalidation_label(fresh.epoch)
+            epoch = _judge().epoch
+            return bool(epoch) and wake_invalidation_label(epoch)
 
         _stable_preflight_monitor_handoff = [False]
 
@@ -9459,8 +9339,7 @@ def event_bound_live_adapter_from_trade_conn(
                 # with this exact winner. Keep probing above for a newer committed
                 # Day0 fact, which does revoke the capability before venue I/O.
                 return False
-            scope = _cut_scope[0]
-            if scope is not None and scope.winner_frozen:
+            if _cut_scope[0] is not None:
                 # (e) A cut that has selected its winner is not preempted by
                 # routine monitor fairness; only a changed fact its winner
                 # rests on (above) or its own deadline ends it.
@@ -12568,11 +12447,6 @@ def event_bound_live_adapter_from_trade_conn(
                 epoch_superseded=_epoch_superseded,
                 selection_cancelled=_day0_selection_cancelled,
                 final_actuation_cancelled=final_actuation_cancelled,
-                dependency_scope_observer=(
-                    _observe_dependency_scope
-                    if family_scoped_held_completion
-                    else None
-                ),
                 cut_scope_observer=_observe_cut_scope,
                 held_sell_reauction_requests=held_sell_reauction_requests,
                 required_held_family_keys=required_held_family_keys,

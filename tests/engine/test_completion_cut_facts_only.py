@@ -459,9 +459,8 @@ def test_a_request_marker_or_elapsed_time_never_cancels_a_generic_completion(
     queued.append(day0)
     revision[0] = (2, 2, 2)
     captured["cut_scope_observer"](
-        reactor_wake.CutScope(family_keys=frozenset({_DALLAS}))
+        reactor_wake.CutScope(winner_family_key=_DALLAS)
     )
-    captured["dependency_scope_observer"](frozenset({_DALLAS}))
     assert final() == "wake:day0_extreme_event_committed"
     assert selection() == "wake:day0_extreme_event_committed"
 
@@ -473,7 +472,7 @@ def _run_generic_completion_batch(monkeypatch, era):
 
     import src.engine.global_batch_runtime as global_batch_runtime
     from src.events.candidate_binding import weather_family_id
-    from tests.engine.test_global_batch_preemption_grace import _forecast_event
+    from tests.engine.test_day0_preemption_scope import _forecast_event
 
     trade = sqlite3.connect(":memory:")
     trade.row_factory = sqlite3.Row
@@ -515,7 +514,7 @@ def _run_generic_completion_batch(monkeypatch, era):
         required_held_family_keys=frozenset({held}),
     )
     adapter.process_global_batch(
-        (_forecast_event(city="Dallas", source_run_id="run-dallas"),),
+        (_forecast_event("Dallas"),),
         datetime(2026, 7, 10, 8, 10, tzinfo=timezone.utc),
     )
     return captured

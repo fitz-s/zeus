@@ -7880,126 +7880,6 @@ def _current_selection_portfolio_state(
     return portfolio_state_provider() if portfolio_state_provider else None
 
 
-def _dependency_scope_family_keys(
-    *,
-    decision_scope: CurrentGlobalAuctionScope,
-    full_scope: CurrentGlobalAuctionScope | None = None,
-    canonical_held_family_keys: frozenset[str],
-    selection_state: object | None,
-    wealth_witness: object | None,
-) -> frozenset[str] | None:
-    """Return the complete family superset safe for strict generic wakes.
-
-    This is an optimization witness only.  Any missing/ambiguous portfolio or
-    native-ledger identity returns ``None`` so the adapter retains its prior
-    global supersession behavior; it never becomes a trading admission gate.
-    """
-
-    try:
-        if selection_state is None or wealth_witness is None:
-            return None
-        positions = getattr(selection_state, "positions")
-        chain_only_facts = getattr(selection_state, "chain_only_facts")
-        native_holdings = getattr(wealth_witness, "native_holdings_micro")
-        pending_endowments = getattr(
-            wealth_witness,
-            "pending_entry_endowments_micro",
-        )
-        native_commitments = getattr(wealth_witness, "native_commitments_micro")
-        if not isinstance(positions, (tuple, list)) or not isinstance(
-            chain_only_facts, (tuple, list)
-        ):
-            return None
-        if chain_only_facts:
-            return None
-        if not isinstance(pending_endowments, (tuple, list)):
-            return None
-        if pending_endowments:
-            return None
-        if not isinstance(native_holdings, (tuple, list)) or not isinstance(
-            native_commitments, (tuple, list)
-        ):
-            return None
-        token_families: dict[str, set[str]] = {}
-        position_family_keys: set[str] = set()
-        position_ids: set[str] = set()
-        for position in tuple(positions or ()):
-            direction_raw = getattr(position, "direction")
-            direction = str(
-                getattr(direction_raw, "value", direction_raw) or ""
-            ).strip().lower()
-            if direction == "buy_yes":
-                token_id = str(getattr(position, "token_id") or "").strip()
-            elif direction == "buy_no":
-                token_id = str(getattr(position, "no_token_id") or "").strip()
-            else:
-                return None
-            position_id = str(
-                getattr(position, "position_id", "")
-                or getattr(position, "trade_id", "")
-                or ""
-            ).strip()
-            city = str(getattr(position, "city") or "").strip()
-            target_date = str(getattr(position, "target_date") or "").strip()
-            metric = str(getattr(position, "temperature_metric") or "").strip().lower()
-            if (
-                not token_id
-                or not position_id
-                or position_id in position_ids
-                or not city
-                or not target_date
-                or metric not in {"high", "low"}
-            ):
-                return None
-            if date.fromisoformat(target_date).isoformat() != target_date:
-                return None
-            position_ids.add(position_id)
-            family_key = weather_family_id(
-                city=city,
-                target_date=target_date,
-                metric=metric,
-            )
-            position_family_keys.add(family_key)
-            token_families.setdefault(token_id, set()).add(family_key)
-
-        scope_keys: set[str] = set()
-        for family_key, _event in decision_scope.events_by_family:
-            if not isinstance(family_key, str) or not family_key.strip():
-                return None
-            scope_keys.add(family_key.strip())
-        if full_scope is not None:
-            for family_key, _event in full_scope.events_by_family:
-                if not isinstance(family_key, str) or not family_key.strip():
-                    return None
-                scope_keys.add(family_key.strip())
-        for family_key in canonical_held_family_keys:
-            if not isinstance(family_key, str) or not family_key.strip():
-                return None
-            scope_keys.add(family_key.strip())
-        scope_keys.update(position_family_keys)
-        for raw_rows in (native_holdings, native_commitments):
-            seen_tokens: set[str] = set()
-            for row in raw_rows:
-                if not isinstance(row, (tuple, list)) or len(row) != 2:
-                    return None
-                token_id = row[0].strip() if isinstance(row[0], str) else ""
-                amount = row[1]
-                if type(amount) is not int:
-                    return None
-                if not token_id or amount <= 0:
-                    return None
-                if token_id in seen_tokens:
-                    return None
-                seen_tokens.add(token_id)
-                families = token_families.get(token_id)
-                if families is None or len(families) != 1:
-                    return None
-                scope_keys.update(families)
-        return frozenset(scope_keys) if scope_keys else frozenset()
-    except (AttributeError, TypeError, ValueError, KeyError):
-        return None
-
-
 def _no_trade_rejection_log_summary(
     decision: object,
     *,
@@ -8412,9 +8292,7 @@ def process_current_global_batch(
     epoch_superseded: Callable[[], bool] | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
     final_actuation_cancelled: Callable[[], bool] | None = None,
-    dependency_scope_observer: Callable[[frozenset[str] | None], None]
-    | None = None,
-    cut_scope_observer: Callable[[object], None] | None = None,
+    cut_scope_observer: Callable[[object | None], None] | None = None,
     held_sell_reauction_requests: tuple[object, ...] = (),
     required_held_family_keys: frozenset[str] = frozenset(),
     restrict_to_family_keys: frozenset[str] | None = None,
@@ -8428,49 +8306,15 @@ def process_current_global_batch(
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
-    def _observe_dependency_scope(
-        family_keys: frozenset[str] | None,
-    ) -> None:
-        if dependency_scope_observer is None:
-            return
-        # This handoff is the adapter's authority witness.  Let callback
-        # failures abort the cut before any selection or venue seam so a stale
-        # prior scope can never remain actionable.
-        dependency_scope_observer(family_keys)
-
-    # The families this cut values, published to the caller's single cancel
-    # predicate (src.runtime.reactor_wake.cut_invalidating_wakes).
-    cut_scope_state: dict[str, object] = {"family_keys": None, "q_frozen": False}
-
-    def _observe_cut_scope(
-        family_keys: frozenset[str] | None = None,
-        *,
-        q_frozen: bool = False,
-        winner_frozen: bool = False,
-    ) -> None:
-        if family_keys is not None:
-            cut_scope_state["family_keys"] = frozenset(family_keys)
-        if q_frozen:
-            cut_scope_state["q_frozen"] = True
-        if cut_scope_observer is None:
-            return
-        keys = cut_scope_state["family_keys"]
-        if keys is None:
-            cut_scope_observer(None)
-            return
-        from src.runtime.reactor_wake import CutScope
-
-        cut_scope_observer(
-            CutScope(
-                family_keys=keys,
-                q_frozen=bool(cut_scope_state["q_frozen"]),
-                winner_frozen=winner_frozen,
-            )
-        )
+    # What a frozen winner rests on, published to the caller's single cancel
+    # predicate (src.runtime.reactor_wake.cut_invalidating_wakes); None until
+    # selection freezes a winner.
+    def _observe_cut_scope(scope: object | None) -> None:
+        if cut_scope_observer is not None:
+            cut_scope_observer(scope)
 
     # Each recursive/reauction cut owns a fresh scope witness.  Reset before
     # any work so a prior cut can never authorize an unrelated wake.
-    _observe_dependency_scope(None)
     _observe_cut_scope(None)
 
     if decision_time.tzinfo is None:
@@ -9537,16 +9381,6 @@ def process_current_global_batch(
                 "GLOBAL_AUCTION_REQUIRED_HELD_FAMILY_SCOPE_MISSING:"
                 + ",".join(sorted(missing_required_obligation_keys))
             )
-        if dependency_scope_observer is not None:
-            _observe_dependency_scope(
-                _dependency_scope_family_keys(
-                    decision_scope=decision_scope,
-                    full_scope=full_scope,
-                    canonical_held_family_keys=held_family_keys,
-                    selection_state=selection_state,
-                    wealth_witness=selection_wealth,
-                )
-            )
         consumed_scope[:] = [
             (
                 scope_at,
@@ -9563,13 +9397,6 @@ def process_current_global_batch(
                 ),
             )
         ]
-        # A fact reaches this cut only through the families it prepares and
-        # the holdings its wealth values.
-        _observe_cut_scope(
-            frozenset(decision_scope.family_keys)
-            | held_family_keys
-            | held_obligation_family_keys
-        )
         full_scope_event_by_family = dict(decision_scope.events_by_family)
         ineligible_by_family: dict[str, str] = {
             weather_family_id(
@@ -9704,9 +9531,6 @@ def process_current_global_batch(
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if superseded("prepare_families"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
-        # Every scoped family's q is prepared; a later posterior no longer
-        # changes this cut (the JIT preflight re-derives the winner's q).
-        _observe_cut_scope(q_frozen=True)
         log_stage("prepare_families", families=len(prepared_by_event))
         if not prepared_by_event:
             if not holding_obligations and len(event_tuple) == 1 and ineligible_by_event:
@@ -10529,13 +10353,19 @@ def process_current_global_batch(
             )
             if winner_family_key:
                 # Selection is frozen. From here the cut consumes only the
-                # winner's q (rebuilt again at JIT preflight) and holdings;
-                # a Day0 fact for any other family belongs to the next cut.
+                # winner's q and its holdings; a fact for any other family
+                # belongs to the next cut, which re-reads it seconds later.
+                from src.runtime.reactor_wake import CutScope
+
                 _observe_cut_scope(
-                    frozenset({winner_family_key})
-                    | held_family_keys
-                    | {obligation.family_key for obligation in holding_obligations},
-                    winner_frozen=True,
+                    CutScope(
+                        winner_family_key=winner_family_key,
+                        held_family_keys=frozenset(held_family_keys)
+                        | {
+                            obligation.family_key
+                            for obligation in holding_obligations
+                        },
+                    )
                 )
             receipt_store_started = time.monotonic()
             if held_completion_expired():
@@ -11343,7 +11173,6 @@ def process_current_global_batch(
                         epoch_superseded=epoch_superseded,
                         selection_cancelled=selection_cancelled,
                         final_actuation_cancelled=final_actuation_cancelled,
-                        dependency_scope_observer=dependency_scope_observer,
                         cut_scope_observer=cut_scope_observer,
                         held_point_trace_scope_observer=held_point_trace_scope_observer,
                         selection_telemetry_observer=selection_telemetry_observer,

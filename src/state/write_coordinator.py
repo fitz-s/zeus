@@ -25,8 +25,7 @@ from typing import Callable, Iterable, Iterator, Mapping
 
 from src.state.db_writer_lock import WriteClass
 
-# TYPE-C-style bounded starvation grace (mirrors src/engine/event_reactor_adapter.py's
-# GLOBAL_AUCTION_PREEMPTION_GRACE_* idiom, docs/operations/current/plans/
+# TYPE-C-style bounded starvation grace (docs/operations/current/plans/
 # auction_collapse_repair_design_2026-08-24.md Sec1.3). _acquire_nonmonitor_reservations
 # refuses to even ATTEMPT a real reservation whenever _monitor_intent_locked() is
 # true at poll time -- an advisory pre-check, not the correctness gate itself

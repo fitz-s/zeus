@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused or audited: 2026-09-29
+# Last reused or audited: 2026-10-01
 # Authority basis: cut-cancel throughput task (2026-09-29): one predicate
 #   decides whether a wake invalidates a running cut; a structural antibody
 #   prevents a second copy.
@@ -106,7 +106,9 @@ def test_every_judging_module_calls_the_one_predicate():
 
 PARIS = ("Paris", "2026-07-20", "high")
 TOKYO = ("Tokyo", "2026-07-20", "high")
+LONDON = ("London", "2026-07-20", "high")
 PARIS_KEY = weather_family_id(city="Paris", target_date="2026-07-20", metric="high")
+TOKYO_KEY = weather_family_id(city="Tokyo", target_date="2026-07-20", metric="high")
 
 
 def _wake(reason, families=(), requests=()):
@@ -124,12 +126,13 @@ def _verdict(wake, dependency):
 
 
 UNPUBLISHED = CutDependency(published=False, hard_family_keys=None, belief_family_keys=None)
-SCOPED = CutDependency(
+# A frozen Paris winner: its family for belief, plus a Tokyo holding for hard facts.
+FROZEN = CutDependency(
     published=True,
-    hard_family_keys=frozenset({PARIS_KEY}),
+    hard_family_keys=frozenset({PARIS_KEY, TOKYO_KEY}),
     belief_family_keys=frozenset({PARIS_KEY}),
 )
-Q_FROZEN = CutDependency(
+NO_BELIEF = CutDependency(
     published=True, hard_family_keys=frozenset({PARIS_KEY}), belief_family_keys=frozenset()
 )
 
@@ -138,33 +141,33 @@ Q_FROZEN = CutDependency(
     ("wake", "dependency", "expected"),
     [
         # BOOK and REQUEST never invalidate.
-        (_wake("market_price_advanced"), SCOPED, None),
-        (_wake("money_path_substrate_refreshed", (PARIS,)), SCOPED, None),
-        (_wake(reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON), SCOPED, None),
+        (_wake("market_price_advanced"), FROZEN, None),
+        (_wake("money_path_substrate_refreshed", (PARIS,)), FROZEN, None),
+        (_wake(reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON), FROZEN, None),
         # CAPITAL always supersedes the epoch.
         (_wake("position_fill_projected"), UNPUBLISHED, "epoch"),
-        (_wake(reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON, (), (object(),)), SCOPED, "epoch"),
-        (_wake("an_unknown_reason"), Q_FROZEN, "epoch"),
-        # HARD: in scope cancels, out of scope waits; (a) before the scope a
-        # well-formed fact defers; a familyless or malformed fact keeps its veto.
-        (_wake("day0_extreme_event_committed", (PARIS,)), SCOPED, "hard"),
-        (_wake("day0_extreme_event_committed", (TOKYO,)), SCOPED, None),
+        (_wake(reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON, (), (object(),)), FROZEN, "epoch"),
+        (_wake("an_unknown_reason"), NO_BELIEF, "epoch"),
+        # Before the freeze a well-formed family fact defers; a familyless or
+        # malformed one keeps its veto.
         (_wake("day0_extreme_event_committed", (PARIS,)), UNPUBLISHED, None),
-        (_wake("day0_extreme_event_committed"), UNPUBLISHED, "hard"),
-        (_wake("day0_extreme_event_committed", (("Paris", "bad", "high"),)), SCOPED, "hard"),
-        # (e) after the winner froze, only its own family's hard fact.
-        (_wake("day0_extreme_event_committed", (PARIS,)), Q_FROZEN, "hard"),
-        # BELIEF: supersedes only while the cut reads that family's posterior.
-        (_wake("forecast_posterior_advanced", (PARIS,)), SCOPED, "epoch"),
-        (_wake("forecast_posterior_advanced", (TOKYO,)), SCOPED, None),
         (_wake("forecast_posterior_advanced", (PARIS,)), UNPUBLISHED, None),
-        (_wake("forecast_posterior_advanced", (PARIS,)), Q_FROZEN, None),
-        (_wake("forecast_posterior_advanced"), SCOPED, "epoch"),
-        # A current-only print reseeds its named families: belief, never CAPITAL.
-        (_wake("current_temperature_print_committed", (PARIS,)), SCOPED, "epoch"),
-        (_wake("current_temperature_print_committed", (TOKYO,)), SCOPED, None),
-        (_wake("current_temperature_print_committed", (PARIS,)), Q_FROZEN, None),
         (_wake("current_temperature_print_committed", (PARIS,)), UNPUBLISHED, None),
+        (_wake("day0_extreme_event_committed"), UNPUBLISHED, "hard"),
+        (_wake("current_temperature_print_committed"), UNPUBLISHED, "hard"),
+        (_wake("day0_extreme_event_committed", (("Paris", "bad", "high"),)), FROZEN, "hard"),
+        # HARD: the winner's or a holding's family cancels; any other waits.
+        (_wake("day0_extreme_event_committed", (PARIS,)), FROZEN, "hard"),
+        (_wake("day0_extreme_event_committed", (TOKYO,)), FROZEN, "hard"),
+        (_wake("day0_extreme_event_committed", (LONDON,)), FROZEN, None),
+        # BELIEF: only the winner's family; a holding's posterior is the next
+        # cut's input.
+        (_wake("forecast_posterior_advanced", (PARIS,)), FROZEN, "hard"),
+        (_wake("forecast_posterior_advanced", (TOKYO,)), FROZEN, None),
+        (_wake("current_temperature_print_committed", (PARIS,)), FROZEN, "hard"),
+        (_wake("current_temperature_print_committed", (LONDON,)), FROZEN, None),
+        (_wake("current_temperature_print_committed", (PARIS,)), NO_BELIEF, None),
+        (_wake("forecast_posterior_advanced"), FROZEN, "hard"),
     ],
 )
 def test_the_one_predicate_truth_table(wake, dependency, expected):
@@ -194,13 +197,6 @@ def test_every_emitted_wake_reason_has_a_declared_kind():
     assert emitted - _WAKE_REASONS == set()
 
 
-def test_grace_applies_to_belief_only():
-    belief = cut_invalidating_wakes((_wake("forecast_posterior_advanced", (PARIS,)),), SCOPED)
-    capital = cut_invalidating_wakes((_wake("position_fill_projected"),), SCOPED)
-    assert belief.epoch_grace_eligible is True
-    assert capital.epoch_grace_eligible is False
-
-
 def test_marker_is_judged_as_a_wake_and_old_facts_are_not(tmp_path):
     """(b)/(c) The cutoff is the cut's decision time; the urgent marker is the
     full wake record, judged by the same predicate as a queued wake."""
@@ -224,4 +220,4 @@ def test_marker_is_judged_as_a_wake_and_old_facts_are_not(tmp_path):
             queued.unlink()
     wakes = reactor_wake.wakes_after_cutoff(cutoff.isoformat(), exclude_wake_ids=(), path=path)
     assert [wake.wake_id for wake in wakes] == [newer.wake_id]
-    assert cut_invalidating_wakes(wakes, SCOPED).hard == wakes
+    assert cut_invalidating_wakes(wakes, FROZEN).hard == wakes

@@ -780,8 +780,6 @@ def _run_required_chicago_completion_with_failed_held_prepare(
     )
     prepared_calls: list[str] = []
     held_calls: list[str] = []
-    observed_scopes: list[frozenset[str] | None] = []
-    observed_before_prepare: list[frozenset[str] | None] = []
     monkeypatch.setattr(
         global_batch_runtime,
         "_current_held_weather_families",
@@ -844,10 +842,6 @@ def _run_required_chicago_completion_with_failed_held_prepare(
             trade_conn=conn,
             payload_reader=lambda item: json.loads(item.payload_json),
             prepare_event=lambda event, _at: (
-                observed_before_prepare.append(
-                    observed_scopes[-1] if observed_scopes else None
-                )
-                or
                 prepared_calls.append(event.event_id)
                 or EventSubmissionReceipt(
                     False,
@@ -877,7 +871,6 @@ def _run_required_chicago_completion_with_failed_held_prepare(
                 if required_keys is None
                 else frozenset(required_keys)
             ),
-            dependency_scope_observer=observed_scopes.append,
         )
     finally:
         conn.close()
@@ -889,8 +882,6 @@ def _run_required_chicago_completion_with_failed_held_prepare(
         target_key=target_key,
         prepared_calls=prepared_calls,
         held_calls=held_calls,
-        observed_scopes=observed_scopes,
-        observed_before_prepare=observed_before_prepare,
     )
 
 
@@ -906,16 +897,10 @@ def test_generic_family_completion_does_not_clear_when_other_family_prepares(
     result = run.result
     prepared_calls = run.prepared_calls
     held_calls = run.held_calls
-    observed_scopes = run.observed_scopes
-    observed_before_prepare = run.observed_before_prepare
     target, other = run.target, run.other
 
     assert set(prepared_calls) == {target.event_id, other.event_id}
     assert held_calls == [target.event_id]
-    assert observed_scopes and observed_scopes[0] is None
-    assert observed_scopes[-1] is not None
-    assert observed_before_prepare
-    assert all(scope_value is not None for scope_value in observed_before_prepare)
     assert result.economic_cut_completed is False
     assert result.winner_event_id is None
     assert all(
@@ -1073,154 +1058,6 @@ def test_generic_held_completion_wake_supersession_truth_table():
         wake("unknown_producer_fact"),
     ):
         assert _generic_completion_invalidates((superseding,))
-
-
-def test_generic_held_completion_wake_scope_ignores_only_valid_outside_families():
-    from src.events.candidate_binding import weather_family_id
-
-    outside = SimpleNamespace(
-        reason="forecast_posterior_advanced",
-        forecast_families=(("Dallas", "2026-05-25", "high"),),
-        held_sell_reauction_requests=(),
-    )
-    inside = SimpleNamespace(
-        **{**vars(outside), "forecast_families": (("Chicago", "2026-05-25", "high"),)}
-    )
-    day0_outside = SimpleNamespace(
-        **{**vars(outside), "reason": "day0_extreme_event_committed"}
-    )
-    scope = frozenset(
-        {
-            weather_family_id(
-                city="Chicago",
-                target_date="2026-05-25",
-                metric="high",
-            )
-        }
-    )
-
-    assert not _generic_completion_invalidates((outside,), valuation_family_keys=scope)
-    assert not _generic_completion_invalidates(
-        (day0_outside,), valuation_family_keys=scope
-    )
-    assert _generic_completion_invalidates((inside,), valuation_family_keys=scope)
-    for malformed in (
-        SimpleNamespace(**{**vars(outside), "forecast_families": ()}),
-        SimpleNamespace(
-            **{
-                **vars(outside),
-                "forecast_families": (("Dallas", "bad-date", "high"),),
-            }
-        ),
-        SimpleNamespace(
-            **{
-                **vars(outside),
-                "forecast_families": (("Dallas", "2026-05-25"),),
-            }
-        ),
-    ):
-        assert _generic_completion_invalidates(
-            (malformed,), valuation_family_keys=scope
-        )
-    assert _generic_completion_invalidates((outside,), valuation_family_keys=None)
-
-
-def test_global_dependency_scope_requires_complete_native_identity():
-    from src.engine.global_batch_runtime import _dependency_scope_family_keys
-    from src.events.candidate_binding import weather_family_id
-
-    target = weather_family_id(
-        city="Chicago", target_date="2026-05-25", metric="high"
-    )
-    held = weather_family_id(
-        city="Dallas", target_date="2026-05-25", metric="low"
-    )
-    position = SimpleNamespace(
-        position_id="position-1",
-        direction="buy_yes",
-        token_id="token-yes",
-        city="Dallas",
-        target_date="2026-05-25",
-        temperature_metric="low",
-    )
-    state = SimpleNamespace(positions=(position,), chain_only_facts=())
-    witness = SimpleNamespace(
-        native_holdings_micro=(("token-yes", 1),),
-        pending_entry_endowments_micro=(),
-        native_commitments_micro=(("token-yes", 2),),
-    )
-    scope = SimpleNamespace(events_by_family=((target, object()),))
-    assert _dependency_scope_family_keys(
-        decision_scope=scope,
-        full_scope=scope,
-        canonical_held_family_keys=frozenset({held}),
-        selection_state=state,
-        wealth_witness=witness,
-    ) == frozenset({target, held})
-
-    for invalid_witness in (
-        SimpleNamespace(
-            **{
-                **vars(witness),
-                "pending_entry_endowments_micro": (("entry", "token", 1),),
-            }
-        ),
-        SimpleNamespace(
-            **{
-                **vars(witness),
-                "native_holdings_micro": (("unmapped", 1),),
-            }
-        ),
-    ):
-        assert _dependency_scope_family_keys(
-            decision_scope=scope,
-            canonical_held_family_keys=frozenset({held}),
-            selection_state=state,
-            wealth_witness=invalid_witness,
-        ) is None
-    assert _dependency_scope_family_keys(
-        decision_scope=scope,
-        canonical_held_family_keys=frozenset({held}),
-        selection_state=SimpleNamespace(
-            **{**vars(state), "chain_only_facts": (object(),)}
-        ),
-        wealth_witness=witness,
-    ) is None
-
-
-def test_global_dependency_scope_observer_failure_aborts_before_prepare():
-    from src.engine import global_batch_runtime
-
-    conn, store = _store()
-    assert store is not None
-    event = _forecast_event("scope-observer-failure")
-    try:
-        with pytest.raises(RuntimeError, match="scope observer failed"):
-            global_batch_runtime.process_current_global_batch(
-                (event,),
-                decision_time=datetime(2026, 5, 24, 18, 5, tzinfo=timezone.utc),
-                world_conn=object(),
-                forecast_conn=object(),
-                trade_conn=conn,
-                payload_reader=lambda item: json.loads(item.payload_json),
-                prepare_event=lambda *_args: pytest.fail(
-                    "scope observer failure must abort before prepare"
-                ),
-                actuate_winner=lambda *_args: pytest.fail(
-                    "scope observer failure must never actuate"
-                ),
-                stamp_receipt=lambda receipt: receipt,
-                venue_submit_count=lambda: 0,
-                current_execution=lambda *_args: None,
-                current_time_provider=lambda: datetime(
-                    2026, 5, 24, 18, 5, tzinfo=timezone.utc
-                ),
-                dependency_scope_observer=lambda _scope: (
-                    (_ for _ in ()).throw(RuntimeError("scope observer failed"))
-                ),
-            )
-    finally:
-        conn.close()
 
 
 def test_generic_required_family_wake_coalesces_and_resets_only_after_terminal_cut(

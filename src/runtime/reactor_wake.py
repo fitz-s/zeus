@@ -2960,14 +2960,17 @@ def acknowledge_reactor_wakes(
 #            (wealth: _global_actuation_current_wealth_block_reason): the
 #            same, but a background refresh that need not interrupt.
 #   REQUEST  a generic completion marker asks for a cut; a running cut is one.
-#   BELIEF   a posterior for the named families: supersedes the epoch while
-#            the cut still reads belief for one of them (grace-eligible).
+#   BELIEF   a posterior or current print for the named families.
 #   CAPITAL  fill, exact held-SELL debt, or any unknown reason: supersedes the
 #            epoch (wealth and books are re-validated again at actuation).
-#   HARD     a committed Day0 fact for a family the cut values: cancels the
-#            cut at any checkpoint, through final actuation.
-# A family-scoped wake defers until the cut publishes what it values: the cut
-# reads current truth afterwards, and publishing re-judges every wake.
+#   HARD     a committed Day0 fact for the named families.
+# A BELIEF or HARD wake changes a cut only through the family its frozen
+# winner acts on: selection reads every other family's q once, and the next
+# cut (seconds later) re-reads them; only the winner's q is consumed after
+# selection. Until selection freezes a winner, such a wake defers; at the
+# freeze every wake since the cut's decision time is re-judged, and a wake
+# naming the winner's family cancels the cut at any checkpoint through final
+# actuation. A wake that names no family, or a malformed one, keeps its veto.
 # Every kind but REBOUND and REQUEST advances the urgent-marker revision on
 # publish, so a revision-keyed verdict can never go stale for any kind that
 # can invalidate a cut promptly. REBOUND is re-verified at actuation and
@@ -3024,34 +3027,28 @@ def wake_advances_revision(wake: object) -> bool:
 
 @dataclass(frozen=True)
 class CutScope:
-    """The families a running cut values, published by the runtime.
+    """What a cut's frozen winner rests on, published by the runtime.
 
-    ``q_frozen``: every scoped family's q is prepared; a later posterior can
-    no longer change this cut (the JIT preflight re-derives the winner's q).
-    ``winner_frozen``: selection froze a winner; the cut now values only that
-    winner's family and holdings.
+    ``winner_family_key``: the one family whose q the cut consumes after
+    selection. ``held_family_keys``: holdings and held obligations the cut's
+    wealth values; a hard fact for one of them still cancels the cut.
     """
 
-    family_keys: frozenset[str]
-    q_frozen: bool = False
-    winner_frozen: bool = False
+    winner_family_key: str
+    held_family_keys: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
 class CutDependency:
     """What one running cut still depends on.
 
-    ``published`` is False until the cut has read any family (before its scope
-    scan): a well-formed wake then defers, because the cut reads current truth
-    afterwards and republishes its scope. Once published, a key set names the
-    families whose fact of that kind changes the cut; None means every family.
-    ``hard_family_keys``: families it values (scope plus holdings; winner plus
-    holdings once selection froze). ``belief_family_keys``: families whose
-    posterior it still reads; empty once q is frozen (the JIT preflight
-    re-derives the winner's q) or when the cut defers belief, and then no
-    posterior invalidates it. ``rebinds_books`` is False only for work that
-    freezes a book-bound no-submit decision without a JIT rebind; a book
-    wake then invalidates it.
+    ``published`` is False until the cut's selection froze a winner: a
+    well-formed family-scoped wake then defers, and the freeze re-judges it.
+    Once published, a key set names the families whose fact of that kind
+    changes the cut; None means every family. ``belief_family_keys`` empty:
+    no posterior invalidates the cut. ``rebinds_books`` is False only for
+    work that freezes a book-bound no-submit decision without a JIT rebind;
+    a book wake then invalidates it.
     """
 
     published: bool
@@ -3090,13 +3087,7 @@ class CutInvalidation:
     """The verdict of ``cut_invalidating_wakes`` for one running cut."""
 
     hard: tuple[object, ...] = ()  # cancel at any checkpoint
-    epoch: tuple[object, ...] = ()  # supersede the epoch (belief: grace-eligible)
-
-    @property
-    def epoch_grace_eligible(self) -> bool:
-        """Grace applies to belief only: any other epoch fact aborts."""
-
-        return all(wake_kind(wake) == WAKE_KIND_BELIEF for wake in self.epoch)
+    epoch: tuple[object, ...] = ()  # supersede the epoch
 
 
 def cut_invalidating_wakes(
@@ -3124,19 +3115,18 @@ def cut_invalidating_wakes(
         if kind == WAKE_KIND_BELIEF and dependency.belief_family_keys == frozenset():
             continue  # the cut reads no posterior
         keys = _wake_family_key_set(wake)
-        bucket = hard if kind == WAKE_KIND_HARD else epoch
         if keys is None:
-            bucket.append(wake)  # a fact naming no family keeps its veto
+            hard.append(wake)  # a fact naming no family keeps its veto
             continue
         if not dependency.published:
-            continue  # read afterwards as current truth; re-judged on publish
+            continue  # re-judged when selection freezes a winner
         scope = (
             dependency.hard_family_keys
             if kind == WAKE_KIND_HARD
             else dependency.belief_family_keys
         )
         if scope is None or keys & scope:
-            bucket.append(wake)
+            hard.append(wake)
     return CutInvalidation(hard=tuple(hard), epoch=tuple(epoch))
 
 

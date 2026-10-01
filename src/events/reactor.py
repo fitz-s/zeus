@@ -10036,9 +10036,6 @@ def run_edli_event_reactor_cycle(
                     ),
                 ),
             ),
-            selection_completion_fairness_reserved=(
-                _monitor_completion_mode.fairness_reserved
-            ),
             selection_completion_reserved=(
                 _monitor_completion_mode.reduce_only
                 or family_scoped_held_completion

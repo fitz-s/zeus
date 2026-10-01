@@ -12528,7 +12528,6 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     def make_adapter(
         *,
         completion_reserved=False,
-        fairness_reserved=False,
         completion_sell_keys=frozenset(),
         completion_requests=(),
     ):
@@ -12543,7 +12542,6 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
                 "cycle-start portfolio must not back global selection wealth"
             ),
             auction_capital_authority=CapacityAuthority(),
-            selection_completion_fairness_reserved=fairness_reserved,
             selection_completion_reserved=completion_reserved,
             selection_completion_sell_keys=completion_sell_keys,
             held_sell_reauction_requests=completion_requests,
@@ -12721,7 +12719,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
                 {("position-unreserved", "token-unreserved")}
             )
         )
-    fairness_adapter = make_adapter(fairness_reserved=True)
+    fairness_adapter = make_adapter()
     fairness_adapter.process_global_batch(
         (event,),
         _dt.datetime(2026, 7, 10, 8, 13, tzinfo=_dt.timezone.utc),
@@ -12729,7 +12727,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert captured["buy_candidates_enabled"] is True
     urgent_revision["value"] = (7, 8, 9)
     urgent_reason["value"] = "forecast_posterior_advanced"
-    assert captured["epoch_superseded"]() is False
+    # A posterior naming no family keeps its veto (fail closed).
+    assert captured["epoch_superseded"]() == "wake:forecast_posterior_advanced"
     urgent_revision["value"] = (10, 11, 12)
     urgent_reason["value"] = "day0_extreme_event_committed"
     assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed"
@@ -13193,7 +13192,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
 
     urgent_revision["value"] = (10, 11, 12)
     urgent_reason["value"] = "forecast_posterior_advanced"
-    assert captured["epoch_superseded"]() is False
+    # A posterior naming no family keeps its veto (fail closed).
+    assert captured["epoch_superseded"]() == "wake:forecast_posterior_advanced"
 
     urgent_revision["value"] = (13, 14, 15)
     urgent_reason["value"] = "day0_extreme_event_committed"

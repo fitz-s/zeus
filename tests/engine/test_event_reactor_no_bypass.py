@@ -45,25 +45,8 @@ from src.engine.event_reactor_adapter import (
     _probability_vector_hash,
     _forecast_authority_payload_from_posterior,
 )
-from src.runtime.reactor_wake import CutDependency, cut_invalidating_wakes
 
 
-def _global_batch_wakes_supersede(
-    wakes, *, day0_urgent_batch, delta_scope_family_keys
-):
-    """The cut's verdict for an ordinary scoped cut, through the one predicate."""
-
-    verdict = cut_invalidating_wakes(
-        wakes,
-        CutDependency(
-            published=True,
-            hard_family_keys=delta_scope_family_keys,
-            belief_family_keys=(
-                frozenset() if day0_urgent_batch else delta_scope_family_keys
-            ),
-        ),
-    )
-    return bool(verdict.hard or verdict.epoch)
 from src.config import runtime_cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, ForecastSnapshotReadyPayload, make_day0_extreme_updated_event, make_opportunity_event
@@ -5365,98 +5348,6 @@ def test_refresher_never_called_inside_open_txn():
 
     assert observed, "refresher must have been invoked on the stale row"
     assert observed[0] is False, "no trade-DB txn may be open across the refresher's NET fetch"
-
-
-def test_global_batch_wake_supersession_is_scoped_to_invalidated_truth():
-    paris = ("Paris", "2026-07-20", "high")
-    shanghai = ("Shanghai", "2026-07-20", "high")
-    paris_key = weather_family_id(
-        city=paris[0],
-        target_date=paris[1],
-        metric=paris[2],
-    )
-
-    def wake(reason, families=()):
-        return SimpleNamespace(
-            reason=reason, forecast_families=families, held_sell_reauction_requests=()
-        )
-
-    scope = frozenset({paris_key})
-    assert not _global_batch_wakes_supersede(
-        (wake("market_price_advanced"),),
-        day0_urgent_batch=False,
-        delta_scope_family_keys=scope,
-    )
-    assert not _global_batch_wakes_supersede(
-        (wake("money_path_substrate_refreshed", (paris,)),),
-        day0_urgent_batch=False,
-        delta_scope_family_keys=scope,
-    )
-    assert not _global_batch_wakes_supersede(
-        (wake("forecast_posterior_advanced", (shanghai,)),),
-        day0_urgent_batch=False,
-        delta_scope_family_keys=scope,
-    )
-    assert _global_batch_wakes_supersede(
-        (wake("forecast_posterior_advanced", (paris,)),),
-        day0_urgent_batch=False,
-        delta_scope_family_keys=scope,
-    )
-    assert _global_batch_wakes_supersede(
-        (wake("day0_extreme_event_committed"),),
-        day0_urgent_batch=False,
-        delta_scope_family_keys=scope,
-    )
-
-
-def test_day0_batch_ignores_lower_authority_wakes_but_not_new_day0():
-    paris = ("Paris", "2026-07-20", "high")
-    paris_key = weather_family_id(
-        city=paris[0],
-        target_date=paris[1],
-        metric=paris[2],
-    )
-
-    def wake(reason, families=()):
-        return SimpleNamespace(
-            reason=reason, forecast_families=families, held_sell_reauction_requests=()
-        )
-
-    scope = frozenset({paris_key})
-    assert not _global_batch_wakes_supersede(
-        (
-            wake("forecast_posterior_advanced", (paris,)),
-            wake("market_price_advanced"),
-        ),
-        day0_urgent_batch=True,
-        delta_scope_family_keys=scope,
-    )
-    assert _global_batch_wakes_supersede(
-        (wake("day0_extreme_event_committed"),),
-        day0_urgent_batch=True,
-        delta_scope_family_keys=scope,
-    )
-
-
-@pytest.mark.parametrize(
-    "families,scope",
-    [
-        ((), frozenset({"family"})),
-        ((("Paris", "2026-07-20", "high"),), None),
-    ],
-)
-def test_forecast_wake_without_comparable_scope_supersedes(families, scope):
-    wake = SimpleNamespace(
-        reason="forecast_posterior_advanced",
-        forecast_families=families,
-        held_sell_reauction_requests=(),
-    )
-
-    assert _global_batch_wakes_supersede(
-        (wake,),
-        day0_urgent_batch=False,
-        delta_scope_family_keys=scope,
-    )
 
 
 def test_live_adapter_wires_scope_aware_wake_supersession_probe():

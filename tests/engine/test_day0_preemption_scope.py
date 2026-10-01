@@ -1,9 +1,9 @@
 # Created: 2026-09-25
-# Last reused/audited: 2026-09-25
+# Last reused/audited: 2026-10-01
 # Authority basis: root AGENTS.md INV-47 (SCOPE/DRAIN/RESET);
 #   docs/operations/current/plans/auction_collapse_repair_design_2026-08-24.md
 #   §2 gate 4 (JIT GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED re-derives q).
-"""A committed Day0 fact cancels a global cut only inside that cut's scope.
+"""A family-scoped fact cancels a global cut only through its frozen winner.
 
 The live adapter's cancellation closures are exercised the same way production
 calls them: ``process_current_global_batch`` is captured, the real
@@ -138,99 +138,128 @@ def _build_cut(monkeypatch, tmp_path, *, decision_at=_DECISION_AT, **adapter_kwa
     def publish_day0(*families, published_at=None):
         publish("day0_extreme_event_committed", *families, published_at=published_at)
 
-    def observe(family_keys, **flags):
+    def freeze(winner_key, held=frozenset()):
         captured["cut_scope_observer"](
-            None
-            if family_keys is None
-            else reactor_wake.CutScope(family_keys=frozenset(family_keys), **flags)
+            reactor_wake.CutScope(
+                winner_family_key=winner_key, held_family_keys=frozenset(held)
+            )
         )
 
+    def reset():
+        captured["cut_scope_observer"](None)
+
     return SimpleNamespace(
-        captured=captured, publish=publish, publish_day0=publish_day0, observe=observe
+        captured=captured,
+        publish=publish,
+        publish_day0=publish_day0,
+        freeze=freeze,
+        reset=reset,
     )
 
 
 _DAY0 = "wake:day0_extreme_event_committed"
+_PRINT = "wake:current_temperature_print_committed"
+_HK = ("Hong Kong", _TARGET, "high")
+_HK_KEY = weather_family_id(city=_HK[0], target_date=_HK[1], metric=_HK[2])
 
 
-def test_out_of_scope_day0_commit_does_not_cancel_the_cut(cut):
-    cut.observe({_IN_KEY})
+def _probes(cut):
+    return (
+        cut.captured["selection_cancelled"],
+        cut.captured["epoch_superseded"],
+        cut.captured["final_actuation_cancelled"],
+    )
+
+
+def test_unrelated_city_print_never_cancels_a_cut(cut):
+    """A print for another city changes no input the cut acts on."""
+
+    cut.publish("current_temperature_print_committed", _HK)
+    assert [probe() for probe in _probes(cut)] == [False, False, False]
+    cut.freeze(_IN_KEY)
+    assert [probe() for probe in _probes(cut)] == [False, False, False]
+
+
+@pytest.mark.parametrize(
+    ("reason", "label"),
+    (
+        ("current_temperature_print_committed", _PRINT),
+        ("forecast_posterior_advanced", "wake:forecast_posterior_advanced"),
+        ("day0_extreme_event_committed", _DAY0),
+    ),
+)
+def test_a_fact_for_the_frozen_winners_family_cancels_through_actuation(
+    cut, reason, label
+):
+    """The JIT replays the winner's q at the selection instant, so a newer
+    fact for its family must end the cut at every checkpoint."""
+
+    cut.freeze(_IN_KEY)
+    cut.publish(reason, _IN)
+    assert [probe() for probe in _probes(cut)] == [label, label, label]
+
+
+def test_a_family_fact_before_the_freeze_defers_then_cancels_at_the_freeze(cut):
+    """Re-judgement at the freeze reads every wake since the cut's decision
+    time in its original identity: a winner-family print published mid-prepare
+    still ends the cut, an unrelated one never does."""
+
+    cut.publish("current_temperature_print_committed", _HK)
+    cut.publish("current_temperature_print_committed", _IN)
     cut.publish_day0(_OUT)
+    assert [probe() for probe in _probes(cut)] == [False, False, False]
 
-    assert cut.captured["selection_cancelled"]() is False
-    assert cut.captured["final_actuation_cancelled"]() is False
+    cut.freeze(_IN_KEY)
+    assert [probe() for probe in _probes(cut)] == [_PRINT, _PRINT, _PRINT]
+
+
+def test_a_hard_fact_for_a_holding_cancels_but_its_belief_does_not(cut):
+    cut.freeze(_IN_KEY, held={_OUT_KEY})
+    cut.publish("current_temperature_print_committed", _OUT)
+    assert [probe() for probe in _probes(cut)] == [False, False, False]
+    cut.publish_day0(_OUT)
+    assert [probe() for probe in _probes(cut)] == [_DAY0, _DAY0, _DAY0]
+
+
+@pytest.mark.parametrize(
+    "reason", ("position_fill_projected", "an_unknown_producer_fact")
+)
+def test_capital_and_unknown_wakes_still_supersede_every_cut(cut, reason):
     assert cut.captured["epoch_superseded"]() is False
+    cut.publish(reason)
+    assert cut.captured["epoch_superseded"]() == f"wake:{reason}"
 
 
-def test_in_scope_day0_commit_cancels_the_cut(cut):
-    cut.observe({_IN_KEY})
-    cut.publish_day0(_IN)
+@pytest.mark.parametrize(
+    "reason", ("day0_extreme_event_committed", "current_temperature_print_committed")
+)
+def test_a_family_fact_naming_no_family_cancels_even_before_the_freeze(cut, reason):
+    cut.publish(reason)
+    assert cut.captured["selection_cancelled"]() == f"wake:{reason}"
 
-    assert cut.captured["selection_cancelled"]() == _DAY0
-    assert cut.captured["final_actuation_cancelled"]() == _DAY0
-    assert cut.captured["epoch_superseded"]() == _DAY0
 
+def test_a_new_cut_rejudges_from_none(cut):
+    """RESET: a recursive or re-auction cut republishes None; a fact absorbed
+    for a previous winner is re-judged against the next one."""
 
-def test_day0_commit_before_the_scope_is_known_defers_then_rejudges(cut):
-    """(a) Before its scope scan the cut has read no family: a well-formed
-    Day0 fact is read as current truth, and publishing the scope re-judges."""
-
-    cut.observe(None)
+    cut.freeze(_IN_KEY)
     cut.publish_day0(_OUT)
     assert cut.captured["selection_cancelled"]() is False
-
-    cut.observe({_IN_KEY})
+    cut.reset()
     assert cut.captured["selection_cancelled"]() is False
-    cut.observe({_IN_KEY, _OUT_KEY})
+    cut.freeze(_OUT_KEY)
     assert cut.captured["selection_cancelled"]() == _DAY0
 
 
-def test_day0_wake_without_families_cancels_even_before_the_scope(cut):
-    cut.observe(None)
-    cut.publish_day0()
-
-    assert cut.captured["selection_cancelled"]() == _DAY0
-
-
-def test_receipt_stage_keeps_selection_for_out_of_scope_day0(cut):
-    """After selection narrows scope to the winner, other families' facts wait.
-
-    The scope scan covered both families; once the winner (Dallas) is frozen,
-    a Moscow Day0 commit no longer reaches this cut's receipt or actuation.
-    """
-
-    cut.observe({_IN_KEY, _OUT_KEY})
-    cut.observe({_IN_KEY}, q_frozen=True, winner_frozen=True)
-    cut.publish_day0(_OUT)
-
-    assert cut.captured["selection_cancelled"]() is False
-    assert cut.captured["final_actuation_cancelled"]() is False
-    cut.publish_day0(_IN)
-    assert cut.captured["final_actuation_cancelled"]() == _DAY0
-
-
-def test_widened_scope_rereads_an_absorbed_day0_wake(cut):
-    """A fallthrough winner in a family whose fact was absorbed must cancel."""
-
-    cut.observe({_IN_KEY})
-    cut.publish_day0(_OUT)
-    assert cut.captured["selection_cancelled"]() is False
-
-    cut.observe({_IN_KEY, _OUT_KEY})
-
-    assert cut.captured["selection_cancelled"]() == _DAY0
-
-
-def test_winner_frozen_cut_ignores_routine_monitor_fairness(monkeypatch, tmp_path):
+def test_frozen_cut_ignores_routine_monitor_fairness(monkeypatch, tmp_path):
     """(e) Once the winner is selected, routine selection pressure no longer
     preempts the cut; a fact its winner rests on still does."""
 
     routine = ["monitor_handoff"]
     cut = _build_cut(monkeypatch, tmp_path, selection_cancelled=lambda: routine[0])
-    cut.observe({_IN_KEY})
     assert cut.captured["selection_cancelled"]() == "monitor_handoff"
 
-    cut.observe({_IN_KEY}, q_frozen=True, winner_frozen=True)
+    cut.freeze(_IN_KEY)
     assert cut.captured["selection_cancelled"]() is False
     cut.publish_day0(_IN)
     assert cut.captured["selection_cancelled"]() == _DAY0
@@ -249,7 +278,7 @@ def test_cutoff_is_the_cuts_own_decision_time(monkeypatch, tmp_path):
             decision_at - _dt.timedelta(minutes=5)
         ).isoformat(),
     )
-    cut.observe({_IN_KEY})
+    cut.freeze(_IN_KEY)
     cut.publish_day0(_IN, published_at=decision_at - _dt.timedelta(seconds=1))
     assert cut.captured["selection_cancelled"]() is False
 
@@ -257,42 +286,33 @@ def test_cutoff_is_the_cuts_own_decision_time(monkeypatch, tmp_path):
     assert cut.captured["selection_cancelled"]() == _DAY0
 
 
-def test_in_scope_posterior_supersedes_only_until_q_is_frozen(monkeypatch, tmp_path):
-    """Belief dependence ends once every scoped family's q is prepared."""
-
-    monkeypatch.setattr(era, "GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS", 0)
-    cut = _build_cut(monkeypatch, tmp_path)
-    cut.observe({_IN_KEY})
-    cut.publish("forecast_posterior_advanced", _IN)
-    assert (
-        cut.captured["epoch_superseded"]() == "wake:forecast_posterior_advanced"
-    )
-
-    frozen = _build_cut(monkeypatch, tmp_path / "frozen")
-    frozen.observe({_IN_KEY}, q_frozen=True)
-    frozen.publish("forecast_posterior_advanced", _IN)
-    assert frozen.captured["epoch_superseded"]() is False
-
-
 @pytest.mark.parametrize("family", (_IN, _OUT))
-def test_reserved_completion_cut_scopes_its_day0_supersession(
+def test_family_scoped_held_completion_follows_the_same_law(
     monkeypatch, tmp_path, family
 ):
-    """A fairness-reserved cut keeps its reservation only for in-scope Day0."""
+    """A generic held completion cut values its whole portfolio, yet acts
+    on one winner: only that winner's (or a holding's hard) fact ends it."""
 
-    reserved = _build_cut(
-        monkeypatch, tmp_path, selection_completion_fairness_reserved=True
+    monkeypatch.setattr(
+        reactor_wake, "exact_held_sell_completion_wake_ids", lambda **_kw: ()
     )
-    reserved.observe({_IN_KEY})
-    reserved.publish_day0(family)
-
-    assert reserved.captured["epoch_superseded"]() == (
-        _DAY0 if family == _IN else False
+    held = _build_cut(
+        monkeypatch,
+        tmp_path,
+        family_scoped_held_completion=True,
+        selection_completion_reserved=True,
+        required_held_family_keys=frozenset({_IN_KEY}),
+    )
+    held.publish("current_temperature_print_committed", family)
+    assert held.captured["final_actuation_cancelled"]() is False
+    held.freeze(_IN_KEY)
+    assert held.captured["final_actuation_cancelled"]() == (
+        _PRINT if family == _IN else False
     )
 
 
-def test_runtime_publishes_scan_scope_then_winner_scope(monkeypatch):
-    """The runtime narrows the Day0 scope to the winner once selection freezes."""
+def test_runtime_publishes_only_the_frozen_winner(monkeypatch):
+    """The runtime publishes no family scope until selection freezes a winner."""
 
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     events = (_forecast_event("Dallas"), _forecast_event("Moscow"))
@@ -395,13 +415,5 @@ def test_runtime_publishes_scan_scope_then_winner_scope(monkeypatch):
     )
 
     assert published[0] is None
-    assert published[1] == reactor_wake.CutScope(
-        family_keys=frozenset({_IN_KEY, _OUT_KEY})
-    )
-    assert published[2] == reactor_wake.CutScope(
-        family_keys=frozenset({_IN_KEY, _OUT_KEY}), q_frozen=True
-    )
-    assert published[3] == reactor_wake.CutScope(
-        family_keys=frozenset({_IN_KEY}), q_frozen=True, winner_frozen=True
-    )
-    assert published[4] == "receipt"
+    assert published[1] == reactor_wake.CutScope(winner_family_key=_IN_KEY)
+    assert published[2] == "receipt"

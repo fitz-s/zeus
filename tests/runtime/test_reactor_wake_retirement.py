@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused or audited: 2026-09-29
+# Last reused or audited: 2026-10-01
 # Authority basis: cut-cancel throughput task (2026-09-29): the wake backlog is
 #   bounded by the one family-reachability law (src.data.forecast_retention),
 #   and consumption, never by age.
@@ -174,6 +174,34 @@ def test_forecast_wake_consumed_by_a_later_completed_cut_is_retired(tmp_path, tr
     assert wake.wake_id not in queued
     # A substrate hint asks for a redecision screen, which a cut does not run.
     assert substrate.wake_id in queued
+
+
+def test_a_wake_after_prepare_keeps_its_debt_when_the_cut_completes(tmp_path, trade):
+    """A cut that ignored a non-winner family's newer fact cannot retire it.
+
+    The cut decided HOLD/CASH on prepare-time q; its consumed-scope watermark
+    is its scan instant, before the wake, so the wake's redecision debt stays
+    queued for the next cut. A current print is never retired by consumption.
+    """
+
+    path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
+    scan_at = NOW - _dt.timedelta(minutes=10)
+    posterior = _publish(
+        path, "forecast_posterior_advanced", (CURRENT,), at=scan_at + _dt.timedelta(seconds=5)
+    )
+    printed = _publish(
+        path, "current_temperature_print_committed", (CURRENT,), at=scan_at + _dt.timedelta(seconds=6)
+    )
+    reactor_wake.record_consumed_scope((CURRENT,), consumed_at=scan_at)
+
+    assert reactor_wake.retire_served_wakes(now=NOW, path=path, trade_db=trade) == 0
+    assert {posterior.wake_id, printed.wake_id} <= _queued_ids(path)
+
+    reactor_wake.record_consumed_scope(
+        (CURRENT,), consumed_at=scan_at + _dt.timedelta(seconds=10)
+    )
+    assert reactor_wake.retire_served_wakes(now=NOW, path=path, trade_db=trade) == 1
+    assert printed.wake_id in _queued_ids(path)
 
 
 def test_retirement_is_bounded_per_call(tmp_path, trade):

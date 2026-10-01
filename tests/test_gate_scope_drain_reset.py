@@ -1,5 +1,5 @@
 # Created: 2026-07-26
-# Last reused/audited: 2026-07-26
+# Last reused/audited: 2026-10-01
 # Lifecycle: created=2026-07-26; last_reviewed=2026-07-26; last_reused=2026-07-26
 # Purpose: INV-47 / NC-24 antibody -- every fail-closed gate site named in the
 #   INV-47 registry must carry an adjacent SCOPE/DRAIN/RESET declaration.
@@ -68,10 +68,10 @@ GATE_SITES: tuple[GateSite, ...] = (
         lines_after=0,
     ),
     GateSite(
-        name="global_batch_preemption_grace",
+        name="global_cut_winner_scope",
         relpath="src/engine/event_reactor_adapter.py",
-        anchor="_global_batch_grace_supersession_count = [0]",
-        lines_before=14,
+        anchor="_cut_scope: list[CutScope | None] = [None]",
+        lines_before=6,
         lines_after=0,
     ),
 )
@@ -135,7 +135,7 @@ def test_request_governor_circuit_declares_scope_drain_reset():
     _assert_declares_scope_drain_reset(GATE_SITES[3])
 
 
-def test_global_batch_preemption_grace_declares_scope_drain_reset():
+def test_global_cut_winner_scope_declares_scope_drain_reset():
     _assert_declares_scope_drain_reset(GATE_SITES[4])
 
 
