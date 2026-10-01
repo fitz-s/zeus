@@ -92,3 +92,7 @@ The Moscow UUWW route (`metaviatelecom_metar`, `http://display.meteocenter.ru/21
 ## Post-round disposition: Lucknow IMD route withdrawn (2026-10-01)
 
 The Lucknow VILK route (`imd_olbs_metar`) is removed from the registry before merge. Its parser scanned concatenated page text from the requested station header to the next `=`, so `METAR VILK ... NIL` followed by another station's report produced a VILK value from the foreign report (external review REQ-20261001-001836-85dd89). Value identity (2/2) cannot protect a parser that crosses report boundaries. Lucknow stays on its existing AWC/WRH path. Re-admit only after a bounded single-report parser rejects the NIL/foreign-report payload and the recorded value-identity/latency evidence still binds.
+
+## Lucknow IMD route re-admitted (2026-10-01)
+
+Re-admitted after the bounded single-report parser landed: visible text only (no script/style), reports split on METAR/SPECI boundaries before temperature extraction, NIL/unterminated/embedded-second-station reports yield no value. The review's NIL/foreign-report payload yields no VILK sample, and all 4 recorded IMD bodies in `round4_all_samples.json.gz` still reproduce their recorded (observed_at, value) under the new parser, so the 2/2 value identity and the recorded latency races still bind (`tests/test_station_temperature_adapters.py::test_imd_recorded_proof_bodies_still_reproduce_their_values`).

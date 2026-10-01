@@ -445,6 +445,7 @@ def test_wrh_rate_limit_is_deferred_without_secret_in_error(monkeypatch):
 
 @pytest.mark.parametrize("city_name,provider,value,unit", [
     ("Chicago","noaa_wrh",62.6,"F"),
+    ("Lucknow","imd_olbs_metar",24.0,"C"),
     ("Ankara","mgm_metar",12.0,"C"),
     ("Istanbul","mgm_metar",19.0,"C"),
 ])
@@ -493,11 +494,6 @@ def test_native_temperature_ingest_reseeds_after_durable_world_commit(monkeypatc
     assert state and state.value_native==value
     requested_day=now.astimezone(ZoneInfo(city.timezone)).date().isoformat()
     assert set(calls[0]['scopes'])=={(city_name,requested_day,m) for m in ('high','low')}
-
-
-def test_imd_route_withdrawn_until_single_report_parser_lands():
-    # IMD page text crossed report boundaries (NIL VILK read VIDP's 40 C).
-    assert not any(r.provider == "imd_olbs_metar" for r in load_physical_current_sources()[0])
 
 
 # ---------------------------------------------------------------------------
