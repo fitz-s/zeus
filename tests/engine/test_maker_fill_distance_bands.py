@@ -17,9 +17,9 @@ import pytest
 
 from src.contracts.probability_arithmetic import Z_ONE_SIDED_95, Z_TWO_SIDED_95, wilson_lower_bound
 from src.engine.global_batch_runtime import (
-    _MAKER_FILL_BAND_MIN_SAMPLE_SIZE,
     _CurrentMakerFillSample,
     _maker_fill_distance_band,
+    _monotone_band_bounds,
 )
 
 
@@ -62,8 +62,8 @@ def test_a_band_that_never_filled_reads_as_zero_not_as_the_pooled_rate():
     assert sample.band_fill_probability_lcb(Decimal("0.90")) == Decimal("0")
 
 
-def test_a_band_without_its_own_evidence_falls_back_to_the_pooled_bound():
-    """Absence of a band means too few rests to speak, not a rate of zero."""
+def test_a_band_with_no_rests_has_no_bound_not_the_pooled_one():
+    """A distance never rested at has no evidence: no bound, so no proposal."""
     sample = _CurrentMakerFillSample(
         action="BUY",
         fill_fractions=tuple(Decimal("1") for _ in range(40)),
@@ -75,16 +75,12 @@ def test_a_band_without_its_own_evidence_falls_back_to_the_pooled_bound():
         rest_deadline_minutes=20.0,
         fill_probability_lcb_by_band=((0, Decimal("0.1775")),),
     )
-    assert sample.band_fill_probability_lcb(Decimal("0.30")) == Decimal("0.0699")
+    assert sample.band_fill_probability_lcb(Decimal("0.30")) == Decimal("0")
 
 
 @pytest.mark.parametrize("trials", [0, -1])
 def test_no_trials_is_no_bound(trials):
     assert wilson_lower_bound(0, trials, z=Z_TWO_SIDED_95) == 0.0
-
-
-def test_min_band_sample_size_is_enforced_as_a_constant():
-    assert _MAKER_FILL_BAND_MIN_SAMPLE_SIZE >= 20
 
 
 def _sample(bands):
@@ -194,3 +190,149 @@ def test_maker_menu_far_edge_is_the_cheapest_price_with_the_same_fill_band():
         lower = price - Decimal("0.01")
         if lower >= Decimal("0.05"):
             assert _maker_fill_distance_band(ask - lower) != band
+
+
+def _live_shaped_conn(bands):
+    """A venue-command fixture whose BUY rests land in the given (distance, fills, n) bands."""
+
+    import datetime as _dt
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, envelope_id TEXT,
+          snapshot_id TEXT, intent_kind TEXT, side TEXT, size REAL, price REAL,
+          venue_order_id TEXT, state TEXT, created_at TEXT, updated_at TEXT);
+        CREATE TABLE venue_submission_envelopes (envelope_id TEXT PRIMARY KEY,
+          order_type TEXT, post_only INTEGER);
+        CREATE TABLE executable_market_snapshots (snapshot_id TEXT PRIMARY KEY,
+          orderbook_top_bid TEXT, orderbook_top_ask TEXT, min_tick_size TEXT,
+          authority_tier TEXT, wide_spread_display_substitution INTEGER);
+        CREATE TABLE venue_order_facts (fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          command_id TEXT, matched_size TEXT, observed_at TEXT);
+        INSERT INTO executable_market_snapshots VALUES ('no-bid', 'ABSENT', '0.90', '0.01', 'CLOB', 0);
+        """
+    )
+    cut = _dt.datetime(2026, 9, 30, 12, tzinfo=_dt.timezone.utc)
+    created = cut - _dt.timedelta(days=1)
+    index = 0
+    for distance, fills, n in bands:
+        price = Decimal("0.90") - Decimal(distance)
+        for k in range(n):
+            index += 1
+            cid = f"buy-{index}"
+            conn.execute("INSERT INTO venue_submission_envelopes VALUES (?, 'GTC', 1)", (f"e-{cid}",))
+            conn.execute(
+                "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (cid, f"e-{cid}", "no-bid", "ENTRY", "BUY", 10.0, float(price),
+                 f"v-{cid}", "FILLED" if k < fills else "CANCELLED",
+                 created.isoformat(), (created + _dt.timedelta(minutes=11)).isoformat()),
+            )
+            conn.execute(
+                "INSERT INTO venue_order_facts(command_id,matched_size,observed_at) VALUES (?,?,?)",
+                (cid, "10" if k < fills else "0",
+                 (created + _dt.timedelta(minutes=10)).isoformat()),
+            )
+    return conn, cut
+
+
+# Live 30-day shape (2026-09-30): band0 300 rests, band1 214, band2 219, band3 17 (2 fills).
+_LIVE_SHAPE = (("0.01", 110, 300), ("0.04", 60, 214), ("0.10", 40, 219), ("0.30", 2, 17))
+
+
+def test_a_thin_band_uses_its_own_wilson_bound_not_the_pooled_rate():
+    from src.engine.global_batch_runtime import _load_current_maker_fill_samples
+
+    conn, cut = _live_shaped_conn(_LIVE_SHAPE)
+    sample = _load_current_maker_fill_samples(conn, selection_cut_at_utc=cut)["BUY"]
+    own = Decimal(str(wilson_lower_bound(2, 17, z=Z_TWO_SIDED_95)))
+    assert sample.band_fill_probability_lcb(Decimal("0.30")) == own
+    assert own < Decimal("0.05") < sample.fill_probability_lcb
+
+
+def test_a_band_with_zero_rows_yields_no_witness_and_no_proposal():
+    import datetime as _dt
+    from types import SimpleNamespace
+
+    from src.engine import global_batch_runtime as g
+
+    conn, cut = _live_shaped_conn(_LIVE_SHAPE[:3])  # no band-3 rests at all
+    sample = g._load_current_maker_fill_samples(conn, selection_cut_at_utc=cut)["BUY"]
+    assert sample.band_fill_probability_lcb(Decimal("0.30")) == Decimal("0")
+    assert g._maker_fill_outcomes(
+        sample, limit_price=Decimal("0.60"), counterparty_price=Decimal("0.90")
+    ) == ()
+
+
+@pytest.mark.parametrize(
+    ("own", "expected"),
+    (
+        # Noise ranks band 2 above band 1: band 2 is held at band 1's bound.
+        ({0: "0.30", 1: "0.20", 2: "0.25", 3: "0.05"}, ("0.30", "0.20", "0.20", "0.05")),
+        # A band above everything nearer is held at the nearest envelope.
+        ({0: "0.10", 3: "0.40", 4: "0.0"}, ("0.10", "0.10", "0.0")),
+        # Already ordered: unchanged.
+        ({0: "0.31", 1: "0.23", 2: "0.15", 3: "0.03"}, ("0.31", "0.23", "0.15", "0.03")),
+    ),
+)
+def test_band_bounds_come_out_non_increasing_in_distance(own, expected):
+    bounds = _monotone_band_bounds({band: Decimal(v) for band, v in own.items()})
+    assert tuple(str(bound) for _band, bound in bounds) == expected
+    values = [bound for _band, bound in bounds]
+    assert values == sorted(values, reverse=True)
+    assert [band for band, _ in bounds] == sorted(own)
+
+
+def test_no_bid_book_prices_its_band_three_rest_with_band_three_evidence():
+    """The menu's farthest rest on a thin no-bid book carries its own thin evidence."""
+
+    import datetime as _dt
+    from types import SimpleNamespace
+
+    from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+    from src.engine import global_batch_runtime as g
+    from src.engine.global_auction_universe import (
+        CurrentGlobalBookAsset,
+        CurrentGlobalBookEpoch,
+        current_global_book_epoch_identity,
+    )
+
+    conn, cut = _live_shaped_conn(_LIVE_SHAPE)
+    sample = g._load_current_maker_fill_samples(conn, selection_cut_at_utc=cut)["BUY"]
+    curve = ExecutableCostCurve(
+        token_id="tok", side="YES", snapshot_id="snap", book_hash="hash",
+        levels=(BookLevel(price=Decimal("0.60"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")), min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"), quote_ttl=_dt.timedelta(seconds=30),
+    )
+    asset = CurrentGlobalBookAsset(
+        family_key="fam", bin_id="bin", condition_id="cond", gamma_market_id="g",
+        market_event_id="e", side="YES", token_id="tok", curve=curve,
+        captured_at_utc=cut, neg_risk=False, bid_levels=(),
+    )
+    states = (("fam", "bin", "cond", "YES", "tok", "EXECUTABLE", "hash", "e", "g", "False"),)
+    epoch = CurrentGlobalBookEpoch(
+        assets=(asset,), asset_states=states, captured_at_utc=cut,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(asset_states=states, captured_at_utc=cut),
+    )
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+
+    prepared = PreparedGlobalFamily(
+        decision_id="decision",
+        probability_witness=SimpleNamespace(family_key="fam"),
+        candidate_seeds=(),
+    )
+    rebound, _epoch = g._bind_current_maker_fill_witnesses(
+        {"event": prepared}, book_epoch=epoch,
+        wealth_witness=SimpleNamespace(ledger_snapshot_id="ledger", spendable_cash_usd=Decimal("12")),
+        samples={"BUY": sample}, issued_at_utc=cut,
+    )
+    by_limit = {key[5]: witness for key, witness in rebound["event"].maker_fill_witnesses.items()}
+    # Ask 0.60, no bid: band-3 far edge ceil(0.60 - 0.50) = 0.10.
+    band_three = by_limit[Decimal("0.10")]
+    own = Decimal(str(wilson_lower_bound(2, 17, z=Z_TWO_SIDED_95)))
+    assert band_three.fill_probability == pytest.approx(float(own))
+    band_two = by_limit[Decimal("0.45")]
+    assert band_three.fill_probability < band_two.fill_probability

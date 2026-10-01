@@ -514,7 +514,8 @@ _MAKER_FILL_MIN_SAMPLE_SIZE = {"BUY": 30, "SELL": 30}
 _MAKER_FILL_DKW_DELTA = Decimal("0.01")
 _MAKER_FILL_SAMPLE_SOURCE = "canonical_trade_db_actual_maker_outcomes_v1"
 _MAKER_FILL_SAMPLE_MODEL = (
-    "empirical_distance_conditioned_sole_best_bid_gtc_deadline_dkw99_v3"
+    "empirical_distance_conditioned_sole_best_bid_gtc_deadline_"
+    "own_band_monotone_wilson95_v4"
 )
 # A maker rest fills when the counterparty side comes to it, so the one variable that
 # decides the outcome is how far the quote sits from that side. Pooling every rest into a
@@ -524,17 +525,15 @@ _MAKER_FILL_SAMPLE_MODEL = (
 # sample the separation is total and monotone (n=478):
 #     ask - limit <= 0.02 -> 0.236 | <= 0.05 -> 0.223 | <= 0.15 -> 0.137
 #                  <= 0.50 -> 0.028 | >  0.50 -> 0.000  (62 rests, zero fills)
-# The band edges are those measurement buckets; each keeps its own DKW bound so a thin band
-# is penalised for being thin rather than borrowing the pooled rate.
+# The band edges are those measurement buckets. Every band states its own bound from its own
+# rests, whatever their count: a thin band is penalised for being thin, never handed the
+# pooled rate (which is what made the farthest, cheapest price look best).
 _MAKER_FILL_DISTANCE_BAND_EDGES: tuple[Decimal, ...] = (
     Decimal("0.02"),
     Decimal("0.05"),
     Decimal("0.15"),
     Decimal("0.50"),
 )
-# A band that has not seen this many rests cannot state its own rate and falls back to the
-# pooled one, which is the pre-2026-09-17 behaviour for that band alone.
-_MAKER_FILL_BAND_MIN_SAMPLE_SIZE = 20
 # Per-band bounds use Wilson rather than the pooled DKW. DKW is a distribution-free bound on a
 # whole CDF, so its radius (0.15-0.23 at these band sizes) erases the very ordering the bands
 # exist to express — it flattened three of five bands to zero while their measured rates were
@@ -563,18 +562,18 @@ class _CurrentMakerFillSample:
     sample_identity: str
     training_cutoff_at_utc: datetime
     rest_deadline_minutes: float
-    # Per-distance-band DKW lower bounds, keyed by _maker_fill_distance_band. A band absent
-    # here had too few rests to state its own rate; the pooled bound stands in for it.
+    # Per-distance-band lower bounds, keyed by _maker_fill_distance_band and non-increasing
+    # in distance (see _monotone_band_bounds). A band absent here has no rests: no bound.
     fill_probability_lcb_by_band: tuple[tuple[int, Decimal], ...] = ()
 
     def band_fill_probability_lcb(self, distance_to_ask: Decimal) -> Decimal:
-        """The bound this quote's own distance earns, or the pooled one when it has none."""
+        """The bound this quote's own distance band earns; zero when the band has no rests."""
 
         band = _maker_fill_distance_band(distance_to_ask)
         for index, bound in self.fill_probability_lcb_by_band:
             if index == band:
                 return bound
-        return self.fill_probability_lcb
+        return Decimal("0")
 
     def __post_init__(self) -> None:
         minimum = _MAKER_FILL_MIN_SAMPLE_SIZE.get(self.action)
@@ -2126,24 +2125,20 @@ def _load_current_maker_fill_samples(
             band_rows.setdefault(
                 _maker_fill_distance_band(distance), []
             ).append(fraction)
-        band_bounds: list[tuple[int, Decimal]] = []
-        for band, fractions in sorted(band_rows.items()):
-            if len(fractions) < _MAKER_FILL_BAND_MIN_SAMPLE_SIZE:
-                continue
-            band_bounds.append(
-                (
-                    band,
-                    Decimal(
-                        str(
-                            wilson_lower_bound(
-                                sum(1 for fraction in fractions if fraction > 0),
-                                len(fractions),
-                                z=Z_TWO_SIDED_95,
-                            )
+        band_bounds = _monotone_band_bounds(
+            {
+                band: Decimal(
+                    str(
+                        wilson_lower_bound(
+                            sum(1 for fraction in fractions if fraction > 0),
+                            len(fractions),
+                            z=Z_TWO_SIDED_95,
                         )
-                    ),
+                    )
                 )
-            )
+                for band, fractions in band_rows.items()
+            }
+        )
         canonical_rows = tuple(
             sorted(
                 (command_id, str(fraction), str(size), str(price), str(distance))
@@ -2153,7 +2148,7 @@ def _load_current_maker_fill_samples(
         sample_identity = hashlib.sha256(
             json.dumps(
                 {
-                    "schema": "current-maker-fill-sample-v2-sole-best-bid",
+                    "schema": "current-maker-fill-sample-v3-own-band-monotone",
                     "action": action,
                     "selection_cut_at_utc": cut.isoformat(),
                     "window_days": _MAKER_FILL_SAMPLE_WINDOW_DAYS,
@@ -2181,6 +2176,27 @@ def _load_current_maker_fill_samples(
     return samples
 
 
+def _monotone_band_bounds(own: Mapping[int, Decimal]) -> tuple[tuple[int, Decimal], ...]:
+    """Each band's own bound, made non-increasing in distance: b_k = min(own_k, b_(k-1)).
+
+    For a BUY we are the sole best bid at either price, and any sell that executes at the
+    farther price L2 < L1 also executes against L1. At fixed order flow the fill event at
+    L2 is a subset of the fill event at L1, so P(fill | L2) <= P(fill | L1). This is that
+    physical ordering, not a cap: noise that ranks a farther band above a nearer one is
+    removed rather than paid for. A band with no rests has no bound (and no proposal); a
+    gap carries the nearer band's envelope into the farther band only through min().
+    """
+
+    bounds: list[tuple[int, Decimal]] = []
+    envelope = Decimal("1")
+    for band in range(len(_MAKER_FILL_DISTANCE_BAND_EDGES) + 1):
+        if band not in own:
+            continue
+        envelope = min(own[band], envelope)
+        bounds.append((band, envelope))
+    return tuple(bounds)
+
+
 def _maker_fill_outcomes(
     sample: _CurrentMakerFillSample,
     *,
@@ -2191,8 +2207,7 @@ def _maker_fill_outcomes(
 
     ``counterparty_price`` is the price this rest must be reached from — the best ask for a
     BUY. It selects the distance band whose own rests measured this quote's fill rate. Without
-    it the pooled rate stands in, which is the behaviour every quote used to get and which
-    made the ranking a pure edge sort.
+    it (a SELL, which has one price) the pooled rate is the bound.
     """
     counts: dict[Decimal, int] = {}
     for fraction in sample.fill_fractions:
@@ -2351,7 +2366,7 @@ def _bind_current_maker_fill_witnesses(
             f"{_MAKER_FILL_SAMPLE_SOURCE}:action={action}:"
             f"window={_MAKER_FILL_SAMPLE_WINDOW_DAYS}d:n={len(sample.fill_fractions)}:"
             f"dkw99_lcb={sample.fill_probability_lcb}:"
-            f"distance_band={band_label}:band_dkw99_lcb={band_lcb}"
+            f"distance_band={band_label}:band_monotone_wilson95_lcb={band_lcb}"
         )
         witness_identity = current_maker_fill_witness_identity(
             candidate_binding_identity=binding,

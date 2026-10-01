@@ -4335,6 +4335,10 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy(seed_s
         sample_identity="sample",
         training_cutoff_at_utc=at - _dt.timedelta(minutes=1),
         rest_deadline_minutes=20.0,
+        # Each band speaks only for its own rests (bands 0-2 measured here).
+        fill_probability_lcb_by_band=(
+            (0, Decimal("0.05")), (1, Decimal("0.04")), (2, Decimal("0.03")),
+        ),
     )
 
     rebound, witnessed_epoch = (
