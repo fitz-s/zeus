@@ -74,7 +74,10 @@ _PRAGMA_SQL = re.compile(r"\s*PRAGMA\b", re.IGNORECASE)
 
 @dataclass
 class ReadRecord:
-    files: set[str] = field(default_factory=set)
+    # path -> its version when first opened inside the record. Taken at open,
+    # not when the record is frozen, so an edit landing between the read and
+    # the freeze is a different version, never the remembered one.
+    files: dict[str, object] = field(default_factory=dict)
     reads: list[list[object]] = field(default_factory=list)
     replayable: bool = True
 
@@ -94,7 +97,7 @@ class ReadRecord:
     def frozen(self) -> RecordedReads:
         return (
             tuple((c, s, p, n, x, h.digest()) for c, s, p, n, x, h in self.reads),
-            file_fingerprints(self.files),
+            tuple(sorted(self.files.items())),
         )
 
 
@@ -181,12 +184,23 @@ class _RecordedConnectionView:
 
 
 def _record_file_read(event: str, args: tuple[object, ...]) -> None:
+    # Installed once at import; the sink is this context's _RECORDS, so with
+    # no record active (every other caller, every other thread) it returns at
+    # once, and another thread's open never lands in a record.
     records = _RECORDS.get()
     if not records or not args:
         return
     if event == "sqlite3.connect/handle":
         # A connection not opened through the recording factory reads unseen.
         if type(args[0]) is not _RecordedReadOnlyConnection:
+            for record in records:
+                record.replayable = False
+    elif event in ("_thread.start_joinable_thread", "_thread.start_new_thread"):
+        # A worker thread does not inherit the record, so its reads would go
+        # unseen. The read-only opener's deadline thread is the one exception:
+        # it opens with the factory captured here and reads nothing itself.
+        thread = getattr(args[0], "__self__", None)
+        if getattr(thread, "name", None) != "zeus-read-only-deadline-open":
             for record in records:
                 record.replayable = False
     elif event in ("open", "os.scandir", "os.listdir") and isinstance(
@@ -199,12 +213,14 @@ sys.addaudithook(_record_file_read)
 
 
 def _note_file(path: str | bytes | os.PathLike) -> None:
-    """Add ``path`` to every active record; a stat-keyed cache answering
-    without opening its file names the file here."""
+    """Add ``path`` and its current version to every active record; a
+    stat-keyed cache answering without opening its file names it here."""
     resolved = os.path.abspath(os.fsdecode(path))
-    if not resolved.endswith(_CODE_SUFFIXES):
-        for record in _RECORDS.get():
-            record.files.add(resolved)
+    if resolved.endswith(_CODE_SUFFIXES):
+        return
+    for record in _RECORDS.get():
+        if resolved not in record.files:
+            record.files[resolved] = _file_identity(resolved)
 
 
 @contextmanager
@@ -310,17 +326,26 @@ def reads_hold(recorded: RecordedReads, conn: sqlite3.Connection | None = None) 
             opened_conn.close()
 
 
+def _file_identity(path: str) -> object:
+    """The file version a remembered verdict depends on, or None if absent.
+
+    versioned_file_read.file_version (dev, ino, size, mtime_ns, ctime_ns),
+    the semantics the model-surface and seed readers already use: no utime()
+    can restore ctime and an atomic replace moves the inode, so equal versions
+    mean equal bytes. lstat, plus the mode, also tells a symlink swap apart.
+    """
+    from src.data.versioned_file_read import file_version
+
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    return (info.st_mode, *file_version(info))
+
+
 def file_fingerprints(paths: Iterable[str]) -> tuple[tuple[str, object], ...]:
-    """(path, identity) per path; a symlink, change or absence alters it."""
-    out = []
-    for path in sorted(paths):
-        try:
-            stat = os.lstat(path)
-            out.append((path, (stat.st_dev, stat.st_ino, stat.st_mode, stat.st_size,
-                               stat.st_mtime_ns, stat.st_ctime_ns)))
-        except OSError:
-            out.append((path, None))
-    return tuple(out)
+    """(path, identity) per path; any change or absence alters it."""
+    return tuple((path, _file_identity(path)) for path in sorted(paths))
 
 
 def _memo_get(memo: OrderedDict, key: tuple[object, ...]) -> object | None:

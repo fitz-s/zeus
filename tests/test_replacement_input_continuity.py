@@ -523,6 +523,65 @@ def test_verdict_memo_misses_when_a_read_file_changes(_shanghai_reader_current_c
     finally:
         body.write_bytes(original)
 
+def _consumed_raw_body(normal):
+    raw_id=_consumed_raw_ids(normal)[0]
+    artifact=normal.conn.execute("SELECT artifact_id FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(raw_id,)).fetchone()[0]
+    return Path(normal.conn.execute("SELECT artifact_path FROM raw_forecast_artifacts WHERE artifact_id=?",(artifact,)).fetchone()[0])
+
+def test_memo_misses_a_same_length_body_edit_with_its_mtime_restored(_shanghai_reader_current_certificate):
+    # Reviewer F-file: inode, size and mtime unchanged, only ctime moves. A warm
+    # hit must not keep the bundle READY on bytes the hash validator rejects.
+    import os
+    normal=_shanghai_reader_current_certificate
+    context=_memo_context(normal)
+    H.clear_consumed_proof_memo();B._LIVE_GRADE_MEMO.clear()
+    assert B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+    body=_consumed_raw_body(normal)
+    original=body.read_bytes();before=body.stat()
+    try:
+        body.write_bytes(bytes([original[0]^1])+original[1:])
+        os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns))
+        after=body.stat()
+        assert (after.st_ino,after.st_size,after.st_mtime_ns)==(before.st_ino,before.st_size,before.st_mtime_ns)
+        assert H.replacement_live_input_lag_reason(normal.conn,**context) is not None
+        assert not B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
+    finally:
+        body.write_bytes(original);os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns))
+    # The untouched file hits again.
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+
+@pytest.mark.parametrize("table","raw_model_forecasts deterministic_forecast_anchors".split())
+def test_memo_misses_a_deleted_consumed_row_and_hits_after_an_unrelated_commit(_shanghai_reader_current_certificate,monkeypatch,table):
+    # Reviewer F1 (hwm_memo_repro): a warm READY bundle must not survive the
+    # deletion of its exact consumed raw row or anchor relation (production:
+    # the 180-day _prune_old DELETE); an unrelated commit still hits.
+    normal=_shanghai_reader_current_certificate
+    H.clear_consumed_proof_memo();B._LIVE_GRADE_MEMO.clear()
+    assert B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
+    proved=[]
+    real=H._exact_current_value_serving_lag
+    monkeypatch.setattr(H,"_exact_current_value_serving_lag",lambda *a,**k:proved.append(1) or real(*a,**k))
+    normal.conn.execute("CREATE TABLE unrelated_scratch(x)");normal.conn.execute("INSERT INTO unrelated_scratch VALUES (1)")
+    normal.conn.commit()
+    assert B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok and not proved
+    key=("raw_model_forecast_id",_consumed_raw_ids(normal)[0]) if table=="raw_model_forecasts" else (
+        "anchor_id",normal.row["openmeteo_anchor_id"])
+    normal.conn.execute(f"DELETE FROM {table} WHERE {key[0]}=?",(key[1],));normal.conn.commit()
+    assert not B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
+
+def test_c3_cancels_a_rest_whose_consumed_row_is_deleted_after_a_warm_read(_shanghai_reader_current_certificate):
+    # Reviewer hwm_c3_memo_repro on live C3: a warm memo must not keep the
+    # standing rest's q-version once its consumed evidence no longer exists.
+    normal=_shanghai_reader_current_certificate
+    H.clear_consumed_proof_memo();B._LIVE_GRADE_MEMO.clear()
+    assert _c3_q(normal,normal.request.computed_at)==normal.row["posterior_identity_hash"]
+    normal.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(_consumed_raw_ids(normal)[0],))
+    normal.conn.commit()
+    q=_c3_q(normal,normal.request.computed_at)
+    assert q.startswith(f"__Q_AUTHORITY_BLOCKED__:{normal.row['posterior_identity_hash']}:")
+    assert "consumed_proof_unverifiable" in q
+
 def _consumed_raw_ids(normal):
     serving=json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
     return sorted(item["raw_model_forecast_id"] for item in serving.values())
@@ -585,6 +644,31 @@ def test_recorded_read_shares_answers_only_within_one_visible_snapshot(tmp_path)
     assert H.reads_hold(frozen,reader) and H.reads_hold(frozen,reader)
     writer.execute("UPDATE t SET v='changed' WHERE k=1");writer.commit()
     assert not H.reads_hold(frozen,reader)
+
+def test_recorded_file_is_the_version_that_was_read_not_the_one_at_freeze(tmp_path):
+    # A writer landing between the verdict's read and the memo store must not
+    # be remembered as the version the verdict read.
+    body=tmp_path/"body.json";body.write_text("{}")
+    record=H.ReadRecord()
+    with H.recorded_reads(record):
+        body.read_text()
+    body.write_text('{"changed": 1}')
+    frozen=record.frozen()
+    assert not H.reads_hold(frozen)
+
+def test_recorded_read_disqualifies_a_worker_thread_but_not_the_deadline_opener(tmp_path):
+    import threading
+    from src.state.db import _connect_read_only
+    path=tmp_path/"reads.db";sqlite3.connect(path).execute("CREATE TABLE t(a)").connection.commit()
+    record=H.ReadRecord()
+    with H.recorded_reads(record):
+        conn=_connect_read_only(path,deadline_monotonic=__import__("time").monotonic()+5)
+        conn.execute("SELECT COUNT(*) FROM t").fetchone();conn.close()
+    assert record.replayable and record.reads
+    record=H.ReadRecord()
+    with H.recorded_reads(record):
+        worker=threading.Thread(target=lambda:None);worker.start();worker.join()
+    assert not record.replayable
 
 def test_recorded_read_refuses_a_statement_or_connection_it_cannot_replay(tmp_path):
     _conn,record=_recorded(tmp_path,lambda seen,path:seen.execute("CREATE TEMP TABLE scratch(x)"))
