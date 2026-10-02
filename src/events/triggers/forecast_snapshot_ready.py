@@ -42,6 +42,9 @@ REPLACEMENT_0_1_TRACK_LABEL = "replacement_0_1_openmeteo_bayes_fusion"
 # that exact row and dependency identity. The legacy ensemble path is untouched for flag-OFF.
 POSTERIOR_BACKED_DATA_VERSION = "forecast_posteriors.replacement_0_1_neutral_carrier"
 _POSTERIOR_SNAPSHOT_ID_PREFIX = "rmf-"
+# Same-cycle raw models a posterior needs unless its provenance certifies a complete
+# carrier set: the adapter's non-source-clock ``len(models) < 3`` spine floor.
+_LEGACY_SPINE_MIN_MODELS = 3
 _POSTERIOR_RAW_MODEL_REQUIRED_COLUMNS = {
     "model",
     "city",
@@ -1183,7 +1186,6 @@ class ForecastSnapshotReadyTrigger:
                 forecasts_conn,
                 rows,
                 decision_iso=_decision_iso,
-                min_members=3,
             )
             _raise_if_cancelled()
         # WAVE-1 W1-T1 applies market_phase_admits to every forecast_only family.
@@ -1635,9 +1637,15 @@ def _with_posterior_raw_member_counts(
     rows: list[dict[str, Any]],
     *,
     decision_iso: str,
-    min_members: int = 3,
 ) -> list[dict[str, Any]]:
-    """Attach raw-model carrier counts after fairness/restriction has bounded rows."""
+    """Attach raw-model carrier counts after fairness/restriction has bounded rows.
+
+    A posterior whose provenance certifies a complete carrier set (served ==
+    expected, carriers named) needs only those carriers, so a certified 2-of-2
+    posterior is admitted; the certificate lowers the legacy floor, never raises
+    it. Any other posterior keeps the legacy floor. A count of 0 (unknown or
+    unreadable) never passes.
+    """
 
     counts = _raw_model_member_counts_for_posterior_rows(
         conn,
@@ -1646,7 +1654,8 @@ def _with_posterior_raw_member_counts(
     )
     out: list[dict[str, Any]] = []
     for row, count in zip(rows, counts):
-        if count < min_members:
+        certified = len(_posterior_provenance_raw_member_ids(row))
+        if count < min(_LEGACY_SPINE_MIN_MODELS, certified or _LEGACY_SPINE_MIN_MODELS):
             continue
         enriched = dict(row)
         for key in (

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Lifecycle: created=2026-05-24; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Purpose: Prove FSR emits only complete, current, authority-bound forecast carriers.
 # Reuse: Re-audit replacement readiness binding and event clocks before trigger changes.
 # Authority basis: EDLI v1 implementation prompt §8 ForecastSnapshotReadyTrigger contract.
@@ -1037,6 +1037,165 @@ def test_complete_posterior_provenance_uses_exact_raw_ids_without_family_scan():
     ) == 0
 
 
+def _fusion_provenance(*, complete, served, expected, raw_ids) -> str:
+    return json.dumps(
+        {
+            "bayes_precision_fusion": {
+                "decorrelated_providers_complete": complete,
+                "decorrelated_providers_served": served,
+                "decorrelated_providers_expected": expected,
+                "raw_model_forecast_ids": raw_ids,
+            }
+        }
+    )
+
+
+def test_scan_admits_certified_two_of_two_posterior_and_keeps_uncertified_out():
+    """A certified carrier set sets its own floor; no certificate keeps the legacy one.
+
+    Tokyo: READY, decorrelated-complete, 2 of 2 carriers -> enters scope.
+    Busan: 2 served of 3 expected (incomplete) -> stays out.
+    Chicago: carrier ids unreadable, only 2 raw models in the cycle -> stays out.
+    """
+    from src.state.db import init_schema_forecasts
+
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+    families = (
+        ("Tokyo", _fusion_provenance(complete=True, served=2, expected=2, raw_ids=[1, 2]), (1, 2)),
+        ("Busan", _fusion_provenance(complete=False, served=2, expected=3, raw_ids=[3, 4]), (3, 4)),
+        ("Chicago", _fusion_provenance(complete=True, served=2, expected=2, raw_ids="garbage"), (5, 6)),
+    )
+    for city, provenance, raw_ids in families:
+        forecasts_conn.execute(
+            """
+            INSERT INTO forecast_posteriors (
+                source_id, product_id, data_version, city, target_date, temperature_metric,
+                source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
+                q_ucb_json, posterior_method, dependency_source_run_ids_json,
+                provenance_json, runtime_layer, training_allowed
+            ) VALUES (
+                'openmeteo_ecmwf_ifs9_bayes_fusion',
+                'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+                'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+                ?, '2026-05-24', 'high',
+                '2026-05-24T00:00:00+00:00', '2026-05-24T04:15:00+00:00',
+                '2026-05-24T04:16:00+00:00',
+                '{"bin:28":0.42}', NULL, NULL,
+                'openmeteo_ecmwf_ifs9_bayes_fusion', '[]', ?, 'live', 0
+            )
+            """,
+            (city, provenance),
+        )
+        posterior_id = forecasts_conn.execute(
+            "SELECT posterior_id FROM forecast_posteriors WHERE city = ?", (city,)
+        ).fetchone()[0]
+        _bind_replacement_readiness(
+            forecasts_conn,
+            posterior_id=int(posterior_id),
+            city=city,
+            target_date="2026-05-24",
+            metric="high",
+            computed_at="2026-05-24T04:16:00+00:00",
+        )
+        for raw_id in raw_ids:
+            forecasts_conn.execute(
+                """
+                INSERT INTO raw_model_forecasts (
+                    raw_model_forecast_id, model, city, target_date, metric,
+                    source_cycle_time, source_available_at, captured_at, lead_days,
+                    forecast_value_c, endpoint
+                ) VALUES (?, ?, ?, '2026-05-24', 'high', '2026-05-24T00:00:00+00:00',
+                          '2026-05-24T01:00:00+00:00', '2026-05-24T01:00:00+00:00',
+                          0, 20.0, 'single_runs')
+                """,
+                (raw_id, f"model-{raw_id}", city),
+            )
+        forecasts_conn.execute(
+            """
+            INSERT INTO market_events (
+                market_slug, city, target_date, temperature_metric, condition_id
+            ) VALUES (?, ?, '2026-05-24', 'high', ?)
+            """,
+            (f"{city.lower()}-high-2026-05-24", city, f"condition-{city.lower()}"),
+        )
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+    events = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:18:00+00:00",
+        source="global-auction-current-scope",
+        limit=None,
+        phase_filter_exempt_families={
+            (city, "2026-05-24", "high") for city, _provenance, _ids in families
+        },
+    )
+
+    payloads = [json.loads(event.payload_json) for event in events]
+    assert [payload["city"] for payload in payloads] == ["Tokyo"]
+    assert payloads[0]["member_count"] == 2
+    assert payloads[0]["min_members_floor"] == 2
+
+
+def test_unreadable_or_incomplete_carriers_keep_the_legacy_floor():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT, city TEXT, target_date TEXT, metric TEXT,
+            source_cycle_time TEXT, source_available_at TEXT, forecast_value_c REAL
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            ?, ?, 'Chicago', '2026-07-12', 'high',
+            '2026-07-11T00:00:00+00:00', '2026-07-11T01:00:00+00:00', 20.0
+        )
+        """,
+        [(101, "ecmwf"), (102, "gfs")],
+    )
+    base = {
+        "city": "Chicago",
+        "target_local_date": "2026-07-12",
+        "temperature_metric": "high",
+        "sr_source_cycle_time": "2026-07-11T00:00:00+00:00",
+    }
+    rows = [
+        {**base, "provenance_json": "{malformed-unreadable-provenance"},
+        {
+            **base,
+            "provenance_json": _fusion_provenance(
+                complete=False, served=2, expected=3, raw_ids=[101, 102]
+            ),
+        },
+        {**base, "carrier_raw_model_forecast_ids_json": "not-json"},
+    ]
+
+    for row in rows:
+        assert _with_posterior_raw_member_counts(
+            conn, [row], decision_iso="2026-07-11T02:00:00+00:00"
+        ) == []
+
+    certified = {
+        **base,
+        "provenance_json": _fusion_provenance(
+            complete=True, served=2, expected=2, raw_ids=[101, 102]
+        ),
+    }
+    enriched = _with_posterior_raw_member_counts(
+        conn, [certified], decision_iso="2026-07-11T02:00:00+00:00"
+    )
+    assert [row["observed_members"] for row in enriched] == [2]
 
 
 def test_coverage_is_completeness_authority_over_partial_source_run():
