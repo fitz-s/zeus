@@ -1776,6 +1776,7 @@ def enqueue_cycle_advance_reseeds(
     limit: int = 50,
     scopes: Sequence[tuple[str, str, str]] | None = None,
     manifests: Sequence[RawForecastArtifactManifest] | None = None,
+    current_target_plan: object | None = None,
     include_missing_posterior: bool = False,
     causal_baseline_source_run_id: str | None = None,
 ) -> dict[str, object]:
@@ -1873,10 +1874,13 @@ def enqueue_cycle_advance_reseeds(
         # city-local date still open across the roster (_default_min_target_date), not a
         # single UTC `now.date()` -- that UTC-only floor is exactly what dropped a western
         # city's still-open local day up to ~14h early.
-        plan = build_replacement_forecast_current_target_plan(
-            forecast_db,
-            require_raw_artifacts=False,
-            now_utc=now,
+        # A caller may pass the plan it already built at this same ``now``.
+        plan = current_target_plan if current_target_plan is not None else (
+            build_replacement_forecast_current_target_plan(
+                forecast_db,
+                require_raw_artifacts=False,
+                now_utc=now,
+            )
         )
         if plan.status == "BLOCKED":
             report["status"] = "CYCLE_ADVANCE_PLAN_BLOCKED"

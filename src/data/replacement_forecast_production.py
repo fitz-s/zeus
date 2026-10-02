@@ -4979,6 +4979,33 @@ def _prepared_reseed_manifests(
     return computed_at, manifest_snapshot["manifests"]
 
 
+def _shared_current_target_plan(
+    forecast_db: object,
+    manifest_snapshot: dict[str, object] | None,
+    computed_at: datetime | None,
+) -> object | None:
+    """The broad current-target plan, built once per shared manifest snapshot.
+
+    The two broad triggers of one batch share a snapshot and its computed_at, so
+    they read the same plan at the same cut instead of building it twice (about
+    105 s each on live 10-02). Without a snapshot each trigger builds its own.
+    """
+    if manifest_snapshot is None or computed_at is None:
+        return None
+    plan = manifest_snapshot.get("current_target_plan")
+    if plan is None:
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            build_replacement_forecast_current_target_plan,
+        )
+
+        plan = manifest_snapshot["current_target_plan"] = (
+            build_replacement_forecast_current_target_plan(
+                Path(str(forecast_db)), require_raw_artifacts=False, now_utc=computed_at,
+            )
+        )
+    return plan
+
+
 def _enqueue_fusion_upgrade_reseeds_if_needed(
     cfg: dict[str, object],
     *,
@@ -5024,6 +5051,10 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
             changed_sources=changed_sources,
             computed_at=computed_at or snapshot_at,
             manifests=manifests,
+            current_target_plan=(
+                _shared_current_target_plan(forecast_db, manifest_snapshot, snapshot_at)
+                if scopes is None and computed_at is None else None
+            ),
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
         logger.warning("fusion-upgrade trigger skipped (fail-soft): %s", exc)
@@ -5072,6 +5103,10 @@ def _enqueue_cycle_advance_reseeds_if_needed(
             scopes=scopes,
             computed_at=computed_at,
             manifests=manifests,
+            current_target_plan=(
+                _shared_current_target_plan(forecast_db, manifest_snapshot, computed_at)
+                if scopes is None else None
+            ),
             include_missing_posterior=scopes is not None,
             causal_baseline_source_run_id=causal_baseline_source_run_id,
         )

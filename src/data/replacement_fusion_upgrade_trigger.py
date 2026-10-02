@@ -1561,6 +1561,7 @@ def enqueue_fusion_upgrade_reseeds(
     scopes: Sequence[tuple[str, str, str]] | None = None,
     changed_sources: Sequence[str] | None = None,
     manifests: Sequence[RawForecastArtifactManifest] | None = None,
+    current_target_plan: object | None = None,
 ) -> dict[str, object]:
     """Enqueue scopes with a larger provider set or changed persisted input revision.
 
@@ -1626,10 +1627,13 @@ def enqueue_fusion_upgrade_reseeds(
         # No explicit min_target_date: inherit the plan's own default floor (the earliest
         # city-local date still open across the roster), not a single UTC now.date() -- that
         # UTC-only floor drops a western city's still-open local day up to ~14h early.
-        plan = build_replacement_forecast_current_target_plan(
-            forecast_db,
-            require_raw_artifacts=False,
-            now_utc=now,
+        # A caller may pass the plan it already built at this same ``now``.
+        plan = current_target_plan if current_target_plan is not None else (
+            build_replacement_forecast_current_target_plan(
+                forecast_db,
+                require_raw_artifacts=False,
+                now_utc=now,
+            )
         )
         if plan.status == "BLOCKED":
             report["status"] = "FUSION_UPGRADE_PLAN_BLOCKED"

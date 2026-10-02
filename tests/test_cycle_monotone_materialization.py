@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-09-15 (causal baseline completion witness;
+# Last reused or audited: 2026-10-02 (shared broad plan); 2026-09-15 (causal baseline completion witness;
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
 # Lifecycle: created=2026-06-12; last_reviewed=2026-10-01; last_reused=2026-10-01
@@ -791,6 +791,76 @@ def test_batch_cycle_advance_enqueues_day0_with_observed_extreme(
     assert marker is not None
     assert marker["seed_file"]
     assert marker["day0_observed_extreme_observation_time"] == "2026-07-03T22:00:00+00:00"
+
+
+def test_broad_triggers_share_one_plan_and_report_as_if_built_twice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One broad batch builds the current-target plan once for both triggers
+    (about 105 s each on live 10-02); each trigger's report is identical to the
+    report it gives with its own independently built plan."""
+    import shutil
+
+    import src.data.replacement_forecast_current_target_plan as plan_module
+    import src.data.replacement_forecast_production as production
+
+    row = SimpleNamespace(city="Amsterdam", target_date="2026-07-04",
+                          temperature_metric="high", day0_observed_extreme_required=False)
+    builds: list[object] = []
+
+    def plan_builder(*_args, **kwargs):
+        builds.append(kwargs.get("now_utc"))
+        return SimpleNamespace(status="OK", rows=(row,), reason_codes=())
+
+    monkeypatch.setattr(plan_module, "build_replacement_forecast_current_target_plan", plan_builder)
+    monkeypatch.setattr("src.data.replacement_forecast_seed_discovery._load_manifests",
+                        lambda *args, **kwargs: ())
+    target_cycle = datetime(2026, 7, 3, 12, tzinfo=UTC)
+    monkeypatch.setattr(cycle_advance, "freshest_materializable_cycle", lambda _conn: target_cycle)
+    monkeypatch.setattr(cycle_advance, "scope_needs_cycle_advance", lambda *a, **k: {
+        "needs_advance": True, "consumed_cycle": "2026-07-03T00:00:00+00:00",
+        "target_cycle": target_cycle.isoformat()})
+    monkeypatch.setattr(cycle_advance, "family_materializable_cycle",
+                        lambda *a, **k: (target_cycle, ()))
+
+    def fake_seed(*_args, **kwargs):
+        seed_file = Path(kwargs["output_path"])
+        seed_file.parent.mkdir(parents=True, exist_ok=True)
+        seed_file.write_text("{}", encoding="utf-8")
+        return seed_file
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", fake_seed)
+    template = tmp_path / "template.db"
+    conn = sqlite3.connect(template)
+    ensure_replacement_forecast_live_schema(conn)
+    conn.close()
+    computed_at = datetime(2026, 7, 4, 1, tzinfo=UTC)
+
+    def run(name: str, shared: bool) -> tuple[object, object]:
+        root = tmp_path / name / "state" / "queue"
+        root.mkdir(parents=True)
+        db = tmp_path / name / "forecast.db"
+        shutil.copy(template, db)
+        cfg = {"forecast_db": db, "seed_dir": root / "seeds", "raw_manifest_dir": tmp_path / "raw"}
+        snapshot = {"computed_at": computed_at}
+        fusion = production._enqueue_fusion_upgrade_reseeds_if_needed(
+            cfg, manifest_snapshot=snapshot if shared else dict(snapshot))
+        cycle = production._enqueue_cycle_advance_reseeds_if_needed(
+            cfg, manifest_snapshot=snapshot if shared else dict(snapshot))
+        strip = lambda report: {k: v for k, v in (report or {}).items()
+                                if k not in ("enqueued", "staging_durable_ancestor")}
+        return strip(fusion), strip(cycle)
+
+    independent = run("independent", shared=False)
+    independent_builds = list(builds)
+    builds.clear()
+    shared = run("shared", shared=True)
+
+    assert shared == independent
+    assert independent[1]["seeds_enqueued"] == 1 and independent[0]["scopes_checked"] == 1
+    assert len(independent_builds) == 2
+    assert builds == [computed_at], "one plan per batch, built at the batch's own cut"
 
 
 def test_committed_ens_wake_is_not_complete_on_placeholder_dependency(
