@@ -446,21 +446,25 @@ def test_request_skips_instrument_expansion_after_current_q_converges(
 
 
 def _blocked_evidence(db, argv) -> dict:
-    """What a real worker reports for an evidenced computation BLOCKED: typed facts
-    (here the materialization clock: the request's two source_run possession rows)
-    that the parent re-verifies on the queue's forecasts DB."""
+    """What a real worker reports for an evidenced computation BLOCKED, as the
+    materializer builds it: a supported reason (the stale anchor cycle) with the
+    request's scope and its two source_run possession rows. The fixture requests
+    declare an anchor cycle older than the cycle-age bound, so the stale-cycle
+    predicate is true for them and stays true for every later prospective clock."""
     import sqlite3 as _sqlite3
     from types import SimpleNamespace
 
-    from src.data.materialization_block_evidence import blocked_evidence
+    from src.data.materialization_block_evidence import STALE_CYCLE, blocked_evidence
 
     request = json.loads(Path(argv[argv.index("--input-json") + 1]).read_text())
     conn = _sqlite3.connect(str(db))  # the queue's forecasts DB (created if absent)
     try:
-        return blocked_evidence(conn, SimpleNamespace(
-            baseline_source_run_id=request.get("baseline_source_run_id"),
-            openmeteo_source_run_id=request.get("openmeteo_source_run_id"),
-        ), "TEST_EVIDENCED_BLOCK")
+        return blocked_evidence(conn, SimpleNamespace(**{
+            key: request.get(key) for key in (
+                "city", "target_date", "temperature_metric",
+                "baseline_source_run_id", "openmeteo_source_run_id",
+            )
+        }), STALE_CYCLE)
     finally:
         conn.close()
 
@@ -6416,6 +6420,8 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
         "baseline_source_available_at": "2026-07-16T12:00:00+00:00",
         "openmeteo_source_run_id": "openmeteo-current-targets-Helsinki-high-20260716T060000Z",
         "openmeteo_source_available_at": "2026-07-16T12:15:35+00:00",
+        # An anchor cycle past the cycle-age bound: the evidenced BLOCKED is true.
+        "openmeteo_source_cycle_time": "2026-06-01T00:00:00+00:00",
         "openmeteo_payload_json": "payload.json",
         "precision_metadata_json": "precision.json",
         "bins": [{"bin_id": "30C"}],

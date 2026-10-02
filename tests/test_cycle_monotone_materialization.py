@@ -58,21 +58,25 @@ UTC = timezone.utc
 
 
 def _blocked_evidence(db, argv) -> dict:
-    """What a real worker reports for an evidenced computation BLOCKED: typed facts
-    (here the materialization clock: the request's two source_run possession rows)
-    that the parent re-verifies on the queue's forecasts DB."""
+    """What a real worker reports for an evidenced computation BLOCKED, as the
+    materializer builds it: a supported reason (the stale anchor cycle) with the
+    request's scope and its two source_run possession rows. The fixture requests
+    declare an anchor cycle older than the cycle-age bound, so the stale-cycle
+    predicate is true for them and stays true for every later prospective clock."""
     import sqlite3 as _sqlite3
     from types import SimpleNamespace
 
-    from src.data.materialization_block_evidence import blocked_evidence
+    from src.data.materialization_block_evidence import STALE_CYCLE, blocked_evidence
 
     request = json.loads(Path(argv[argv.index("--input-json") + 1]).read_text())
     conn = _sqlite3.connect(str(db))  # the queue's forecasts DB (created if absent)
     try:
-        return blocked_evidence(conn, SimpleNamespace(
-            baseline_source_run_id=request.get("baseline_source_run_id"),
-            openmeteo_source_run_id=request.get("openmeteo_source_run_id"),
-        ), "TEST_EVIDENCED_BLOCK")
+        return blocked_evidence(conn, SimpleNamespace(**{
+            key: request.get(key) for key in (
+                "city", "target_date", "temperature_metric",
+                "baseline_source_run_id", "openmeteo_source_run_id",
+            )
+        }), STALE_CYCLE)
     finally:
         conn.close()
 
@@ -1752,6 +1756,10 @@ def _held_blocked_harness(
         "source_cycle_time": "2026-06-21T06:00:00+00:00",
         "computed_at": "2026-06-21T06:05:00+00:00",
         "baseline_source_run_id": "baseline-run", "openmeteo_source_run_id": "om-run",
+        "baseline_source_available_at": "2026-06-21T06:00:00+00:00",
+        "openmeteo_source_available_at": "2026-06-21T06:00:00+00:00",
+        # An anchor cycle past the cycle-age bound: the evidenced BLOCKED is true.
+        "openmeteo_source_cycle_time": "2026-05-01T00:00:00+00:00",
         "openmeteo_payload_json": "payload.json", "precision_metadata_json": "precision.json",
         "bins": [{"bin_id": "30C"}],
     }
@@ -3549,3 +3557,190 @@ def test_cert_regression_and_stale_cycle_evidence_reverify_their_own_rows(tmp_pa
     for broken in ({}, {"revision": "x", "items": []}, {**stale, "items": stale["items"][1:]}):
         assert not evidence_holds(conn, broken)
     conn.close()
+
+
+def _cert_payload(computed_at: str, **extra) -> dict:
+    return {
+        "city": "Shanghai", "target_date": "2026-10-02", "temperature_metric": "high",
+        "source_cycle_time": "2026-10-01T00:00:00+00:00", "computed_at": computed_at,
+        "baseline_source_run_id": "base", "openmeteo_source_run_id": "om",
+        "baseline_source_available_at": "2026-10-01T06:00:00+00:00",
+        "openmeteo_source_available_at": "2026-10-01T06:00:00+00:00",
+        **extra,
+    }
+
+
+def _cert_db(tmp_path):
+    db = tmp_path / "f.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE source_run (source_run_id TEXT PRIMARY KEY, fetch_finished_at TEXT);
+        CREATE TABLE readiness_state (scope_key TEXT PRIMARY KEY, source_run_id TEXT);
+        CREATE TABLE forecast_posteriors (posterior_id INTEGER PRIMARY KEY,
+            source_cycle_time TEXT, computed_at TEXT);
+        INSERT INTO readiness_state VALUES ('scope', 'posterior:7');
+        INSERT INTO forecast_posteriors VALUES (7, '2026-10-01T00:00:00+00:00', '2026-10-01T08:15:00+00:00');
+    """)
+    conn.commit()
+    return conn
+
+
+@pytest.mark.parametrize(("prospective_at", "blocks"), (
+    ("2026-10-01T08:14:00+00:00", True),   # still behind the incumbent
+    ("2026-10-01T08:15:00+00:00", False),  # equal key: no strict regression
+    ("2026-10-01T08:16:00+00:00", False),  # ahead of the incumbent
+))
+def test_cert_evidence_is_redecided_for_the_prospective_request(tmp_path, prospective_at, blocks) -> None:
+    """Round-8 BLOCKER: the fence holds only while the request the producer would
+    build now still regresses the certificate, at that request's effective clock."""
+    from datetime import datetime as _datetime, timezone as _tz
+    from types import SimpleNamespace
+
+    from src.data.materialization_block_evidence import (
+        CERT_REGRESSION, blocked_evidence, cert_regression_item, evidence_holds,
+    )
+
+    conn = _cert_db(tmp_path)
+    utc = lambda h, m=0: _datetime(2026, 10, 1, h, m, tzinfo=_tz.utc)  # noqa: E731
+    recorded = _cert_payload("2026-10-01T08:13:00+00:00")
+    evidence = blocked_evidence(conn, SimpleNamespace(**recorded), CERT_REGRESSION, [cert_regression_item(
+        scope_key="scope", incumbent_posterior_id=7,
+        incumbent_key=(utc(0), utc(8, 15)), incoming_key=(utc(0), utc(8, 13)),
+    )])
+    assert evidence_holds(conn, evidence)  # admission: the judged facts hold
+    assert evidence_holds(conn, evidence, _cert_payload(prospective_at)) is blocks
+    # The possession clock lifts the prospective key: a role possessed after the
+    # incumbent's computed_at ends the regression for any requested computed_at.
+    conn.execute("INSERT INTO source_run VALUES ('base', '2026-10-01T08:20:00+00:00')")
+    conn.commit()
+    assert not evidence_holds(conn, evidence, _cert_payload("2026-10-01T08:14:00+00:00"))
+    conn.close()
+
+
+def test_evidence_binds_only_its_own_scope_and_roles(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.data.materialization_block_evidence import STALE_CYCLE, blocked_evidence, evidence_holds
+
+    conn = _cert_db(tmp_path)
+    stale = _cert_payload("2026-10-01T08:14:00+00:00", openmeteo_source_cycle_time="2026-08-01T00:00:00+00:00")
+    evidence = blocked_evidence(conn, SimpleNamespace(**stale), STALE_CYCLE)
+    assert evidence_holds(conn, evidence, stale)
+    for change in ({"city": "Beijing"}, {"temperature_metric": "low"}, {"baseline_source_run_id": "other"}):
+        assert not evidence_holds(conn, evidence, {**stale, **change}), change
+    # A fresh anchor cycle at the prospective clock is no longer stale.
+    assert not evidence_holds(conn, evidence, {**stale, "openmeteo_source_cycle_time": "2026-10-01T00:00:00+00:00"})
+    conn.close()
+
+
+def test_unreadable_clock_row_is_unavailable_not_absent(tmp_path) -> None:
+    """Round-8 HIGH: a failed source_run read never equals a recorded absence;
+    a missing table is a proven absence."""
+    from types import SimpleNamespace
+
+    from src.data.materialization_block_evidence import STALE_CYCLE, blocked_evidence, evidence_holds
+
+    class Failing(sqlite3.Connection):
+        broken = False
+
+        def execute(self, sql, parameters=(), /):
+            if self.broken and sql.startswith("SELECT fetch_finished_at FROM source_run"):
+                raise sqlite3.OperationalError("disk I/O error")
+            return super().execute(sql, parameters)
+
+    conn = sqlite3.connect(tmp_path / "f.db", factory=Failing)
+    conn.execute("CREATE TABLE source_run (source_run_id TEXT PRIMARY KEY, fetch_finished_at TEXT)")
+    conn.commit()
+    stale = _cert_payload("2026-10-01T08:14:00+00:00", openmeteo_source_cycle_time="2026-08-01T00:00:00+00:00")
+    evidence = blocked_evidence(conn, SimpleNamespace(**stale), STALE_CYCLE)
+    assert evidence_holds(conn, evidence) and evidence_holds(conn, evidence, stale)
+    conn.broken = True
+    assert not evidence_holds(conn, evidence) and not evidence_holds(conn, evidence, stale)
+    conn.broken = False
+    conn.execute("DROP TABLE source_run")
+    conn.commit()
+    assert evidence_holds(conn, evidence, stale), "a missing source_run table is proven absence"
+    conn.close()
+
+
+@pytest.mark.parametrize("change", (
+    "unknown_reason", "cert_without_its_item", "empty_clock", "foreign_clock_role",
+    "low_cert", "extra_item",
+))
+def test_malformed_typed_evidence_binds_nothing(tmp_path, change) -> None:
+    """Round-8 MEDIUM: a supported reason, exactly its items, both clock roles,
+    the prospective scope; anything else is unbound."""
+    import copy
+    from types import SimpleNamespace
+
+    from src.data.materialization_block_evidence import (
+        CERT_REGRESSION, STALE_CYCLE, blocked_evidence, evidence_holds,
+    )
+
+    conn = _cert_db(tmp_path)
+    stale = _cert_payload("2026-10-01T08:14:00+00:00", openmeteo_source_cycle_time="2026-08-01T00:00:00+00:00")
+    evidence = blocked_evidence(conn, SimpleNamespace(**stale), STALE_CYCLE)
+    assert evidence_holds(conn, evidence, stale)
+    broken = copy.deepcopy(evidence)
+    payload = stale
+    if change == "unknown_reason":
+        broken["reason"] = "SOMETHING_ELSE"
+    elif change == "cert_without_its_item":
+        broken["reason"] = CERT_REGRESSION
+    elif change == "empty_clock":
+        broken["items"][0]["source_runs"] = []
+    elif change == "foreign_clock_role":
+        broken["items"][0]["source_runs"][0]["role"] = "other"
+    elif change == "low_cert":
+        broken["reason"] = CERT_REGRESSION
+        broken["items"].append({"kind": CERT_REGRESSION, "scope_key": "scope",
+                                "incumbent_source_run_id": "posterior:7", "incumbent_posterior_id": 7,
+                                "incumbent_key": [], "incoming_key": []})
+        broken["scope"]["temperature_metric"] = "low"
+        payload = {**stale, "temperature_metric": "low"}
+    else:
+        broken["items"].append(dict(broken["items"][0]))
+    assert not evidence_holds(conn, broken, payload)
+    assert not evidence_holds(conn, broken)
+    conn.close()
+
+
+def test_empty_cohort_is_redecided_at_the_prospective_cut(tmp_path, monkeypatch) -> None:
+    """Round-8 BLOCKER: the negative selection is re-run at the prospective
+    request's clock, so a provider possessed after the original cut reopens it."""
+    from datetime import datetime as _datetime, timedelta as _timedelta
+
+    gen, conn, consume, fenced, worker, responses, queue = _licensed_worker_queue(tmp_path, monkeypatch)
+    columns = [d[1] for d in conn.execute("PRAGMA table_info(raw_model_forecasts)")]
+    ukmo = [tuple(r) for r in conn.execute(
+        "SELECT * FROM raw_model_forecasts WHERE model = 'ukmo_global_deterministic_10km'")]
+
+    def put(rows):
+        conn.execute("DELETE FROM raw_model_forecasts WHERE model = 'ukmo_global_deterministic_10km'")
+        conn.executemany(
+            f"INSERT INTO raw_model_forecasts ({','.join(columns)}) VALUES ({','.join('?' * len(columns))})",
+            rows,
+        )
+        conn.commit()
+
+    root = tmp_path / "queue"
+    path = root / "requests" / "Shanghai.current.json"
+    payload = json.loads(path.read_text())
+    cut = _datetime.fromisoformat(payload["computed_at"])
+    try:
+        put([])
+        consume()
+        assert responses[-1]["blocked_evidence"]["reason"] == "NO_COHERENT_CURRENT_PROVIDER_COHORT"
+        seed = root / "seeds" / path.name
+        assert queue.failed_seed_identity_fenced(seed, conn=conn, decision_at=cut)
+        captured = columns.index("captured_at")
+        put([tuple((cut + _timedelta(minutes=1)).isoformat() if i == captured else v
+                   for i, v in enumerate(row)) for row in ukmo])
+        assert queue.failed_seed_identity_fenced(seed, conn=conn, decision_at=cut), \
+            "not yet possessed at the original cut: still fenced"
+        later = cut + _timedelta(minutes=2)
+        assert not queue.failed_seed_identity_fenced(seed, conn=conn, decision_at=later), \
+            "possessed by the prospective cut: the fence reopens"
+    finally:
+        put(ukmo)
+        next(gen, None)
