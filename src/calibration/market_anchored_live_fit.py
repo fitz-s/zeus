@@ -25,6 +25,10 @@ import sqlite3
 import base64
 import hashlib
 import json
+import logging
+import os
+import subprocess
+import sys
 import zlib
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass, fields, replace
@@ -93,6 +97,8 @@ CANONICAL_CALIBRATION_INPUT_REVISION = (
 CANONICAL_CALIBRATION_METRIC_POOLING = (
     "metric_separated_entry_execution_contract_raw_probability_revision"
 )
+
+_LOG = logging.getLogger(__name__)
 
 _FIT_TABLE_BY_ALIAS = {
     "main": "settlement_attribution",
@@ -241,8 +247,21 @@ def _freeze_corpus_value(value):
     return value
 
 
+def _frozen_corpus(corpus: CanonicalFitCorpus) -> CanonicalFitCorpus:
+    return replace(
+        corpus,
+        records=_freeze_corpus_value(corpus.records),
+        unknown=_freeze_corpus_value(corpus.unknown),
+        command_accounting=_freeze_corpus_value(corpus.command_accounting),
+    )
+
+
 class CanonicalCorpusCache:
-    """Bounded cache of immutable canonical corpora, never SQLite handles."""
+    """Bounded cache of immutable canonical corpora, never SQLite handles.
+
+    With a ``builder`` attached, decision paths only ``serve``: the builder
+    owns every load and ``install``s finished corpora by atomic swap.
+    """
 
     def __init__(self, *, max_entries: int = _CANONICAL_CACHE_MAX_ENTRIES) -> None:
         if type(max_entries) is not int or max_entries <= 0:
@@ -250,6 +269,57 @@ class CanonicalCorpusCache:
         self._lock = threading.Lock()
         self._max_entries = max_entries
         self._entries: OrderedDict[ArtifactCacheKey, tuple[CanonicalFitCorpus, datetime]] = OrderedDict()
+        # Builder-installed corpora, newest first: (corpus, cutoff, installed_at).
+        # The replaced one stays so a selection that fitted it is reproduced
+        # identically at actuation, whose decision instant precedes the swap.
+        self._built: dict[
+            ArtifactCacheKey,
+            tuple[tuple[CanonicalFitCorpus, datetime, datetime], ...],
+        ] = {}
+        self.builder: CanonicalCorpusBuilder | None = None
+
+    def serve(
+        self, key: ArtifactCacheKey, *, requested_cutoff: datetime, ttl: timedelta,
+        minimum_cutoff: datetime | None = None,
+    ) -> CanonicalFitCorpus | None:
+        """The corpus a decision at ``requested_cutoff`` saw; never loads.
+
+        That is the newest install no later than the decision instant, so a
+        replay of the same decision instant resolves to the same corpus.
+        """
+
+        with self._lock:
+            held = self._built.get(key, ())
+        for corpus, corpus_cutoff, installed_at in held:
+            if installed_at > requested_cutoff:
+                continue
+            if timedelta(0) <= requested_cutoff - corpus_cutoff < ttl and (
+                minimum_cutoff is None or corpus_cutoff >= minimum_cutoff
+            ):
+                return corpus
+            return None
+        return None
+
+    def install(
+        self, key: ArtifactCacheKey, corpus: CanonicalFitCorpus, *, installed_at: datetime,
+    ) -> bool:
+        """Atomically swap in a corpus newer than the one held."""
+
+        cutoff = _parse_ts(corpus.training_cutoff)
+        if cutoff is None or cutoff > installed_at:
+            return False
+        frozen = _frozen_corpus(corpus)
+        with self._lock:
+            held = self._built.get(key, ())
+            if held and cutoff <= held[0][1]:
+                return False
+            self._built[key] = ((frozen, cutoff, installed_at), *held[:1])
+        return True
+
+    def built_cutoff(self, key: ArtifactCacheKey) -> datetime | None:
+        with self._lock:
+            held = self._built.get(key, ())
+        return held[0][1] if held else None
 
     def get_or_load(
         self,
@@ -291,12 +361,7 @@ class CanonicalCorpusCache:
                 or (deadline_monotonic is not None and time.monotonic() >= deadline_monotonic)
             ):
                 return None, None
-            corpus = replace(
-                corpus,
-                records=_freeze_corpus_value(corpus.records),
-                unknown=_freeze_corpus_value(corpus.unknown),
-                command_accounting=_freeze_corpus_value(corpus.command_accounting),
-            )
+            corpus = _frozen_corpus(corpus)
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 return None, None
             # A backward request must not replace the newer corpus used by the
@@ -2742,7 +2807,11 @@ class CanonicalMarketAnchoredFitProvider:
     def warm_corpus(
         self, *, now: datetime, deadline_monotonic: float | None = None,
     ) -> bool:
-        """Prepare and cache the canonical corpus without fitting an artifact."""
+        """Prepare the canonical corpus without fitting an artifact.
+
+        Under a ``CanonicalCorpusBuilder`` this only serves (and wakes the
+        builder); it never loads.
+        """
 
         return self._prepared_corpus(
             now=now, deadline_monotonic=deadline_monotonic,
@@ -2818,38 +2887,55 @@ class CanonicalMarketAnchoredFitProvider:
             deadline_monotonic=deadline_monotonic,
         )[0]
 
+    def _load_corpus(
+        self, handles: tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection],
+        *, cutoff: datetime, deadline_monotonic: float | None,
+    ) -> CanonicalFitCorpus | None:
+        if self._expired(deadline_monotonic):
+            return None
+        try:
+            with ExitStack() as stack:
+                for conn in dict.fromkeys(handles):
+                    stack.enter_context(_sqlite_fit_deadline(conn, deadline_monotonic))
+                corpus = load_canonical_fit_corpus(
+                    handles[0], handles[1], training_cutoff=cutoff,
+                    city_timezone_snapshot=self._city_timezone_snapshot,
+                    forecast_conn=handles[2], deadline_monotonic=deadline_monotonic,
+                    include_cash_proofs=False,
+                    world_schema=self._schemas[0], trade_schema=self._schemas[1],
+                    forecast_schema=self._schemas[2],
+                )
+            if self._expired(deadline_monotonic):
+                return None
+            return corpus
+        except Exception:  # noqa: BLE001 - failed reads are never cached
+            return None
+
     def _corpus(
         self, handles: tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection],
         *, cutoff: datetime, corpus_key: tuple[object, ...] | None,
         deadline_monotonic: float | None,
         minimum_cutoff: datetime | None = None,
     ) -> CanonicalFitCorpus | None:
-        def load_current() -> CanonicalFitCorpus | None:
-            if self._expired(deadline_monotonic):
-                return None
-            try:
-                with ExitStack() as stack:
-                    for conn in dict.fromkeys(handles):
-                        stack.enter_context(_sqlite_fit_deadline(conn, deadline_monotonic))
-                    corpus = load_canonical_fit_corpus(
-                        handles[0], handles[1], training_cutoff=cutoff,
-                        city_timezone_snapshot=self._city_timezone_snapshot,
-                        forecast_conn=handles[2], deadline_monotonic=deadline_monotonic,
-                        include_cash_proofs=False,
-                        world_schema=self._schemas[0], trade_schema=self._schemas[1],
-                        forecast_schema=self._schemas[2],
-                    )
-                if self._expired(deadline_monotonic):
-                    return None
-                return corpus
-            except Exception:  # noqa: BLE001 - failed reads are never cached
-                return None
-
         if corpus_key is None:
-            return load_current()
+            return self._load_corpus(
+                handles, cutoff=cutoff, deadline_monotonic=deadline_monotonic,
+            )
+        builder = self._corpus_cache.builder
+        if builder is not None:
+            # A decision never pays the ~26 s cold load: the builder owns it.
+            corpus = self._corpus_cache.serve(
+                corpus_key, requested_cutoff=cutoff, ttl=self._ttl,
+                minimum_cutoff=minimum_cutoff,
+            )
+            builder.served(corpus_key, hit=corpus is not None)
+            return corpus
         return self._corpus_cache.get_or_load(
             corpus_key, requested_cutoff=cutoff, ttl=self._ttl,
-            load_current=load_current, deadline_monotonic=deadline_monotonic,
+            load_current=lambda: self._load_corpus(
+                handles, cutoff=cutoff, deadline_monotonic=deadline_monotonic,
+            ),
+            deadline_monotonic=deadline_monotonic,
             minimum_cutoff=minimum_cutoff,
         )[0]
 
@@ -2874,6 +2960,366 @@ class CanonicalMarketAnchoredFitProvider:
         except Exception:  # noqa: BLE001 - required-fit callers handle absence
             return None
         return None if self._expired(deadline_monotonic) else artifact
+
+
+# Bump when the persisted envelope changes shape.
+_CORPUS_FILE_FORMAT = "canonical_fit_corpus_file_v1"
+# Source files whose code decides corpus content; a deploy that edits one
+# invalidates every persisted corpus instead of serving the old reader's rows.
+_CORPUS_READER_SOURCES = (
+    Path(__file__),
+    Path(__file__).resolve().parents[1] / "state" / "fill_dedup.py",
+    Path(__file__).resolve().parents[1] / "ingest" / "payout_observer.py",
+)
+
+
+def _corpus_reader_identity() -> str:
+    digest = hashlib.sha256()
+    for source in _CORPUS_READER_SOURCES:
+        digest.update(source.read_bytes())
+    return digest.hexdigest()
+
+
+def _json_identity(value: object) -> object:
+    return json.loads(json.dumps(value))
+
+
+def canonical_corpus_input_watermark(
+    trade_conn: sqlite3.Connection, *, trade_schema: str = "main",
+) -> int:
+    """Identity of the rows whose arrival adds a corpus fit record.
+
+    A record needs an ENTRY command, its confirmed fill and a finalized payout
+    pair.  Certificates, attribution and forecast lineage are written at
+    decision time and fills confirm within minutes; the payout lands days
+    later and is the last input to arrive.  ``payout_observations`` is
+    append-only, so its max resolved id over confirmed-filled ENTRY conditions
+    moves exactly when a record can appear (~50 ms warm, ~17 moves/day; the
+    observer writes every 10 min).
+    New unfilled commands change only coverage, never ``fit_rows``; a rarer
+    fill confirmed after its payout is picked up by the validity refresh.
+    """
+
+    if trade_schema not in ("main", "trades"):
+        raise ValueError("unsupported canonical corpus schema")
+    row = trade_conn.execute(f"""
+        SELECT MAX(p.id) FROM {trade_schema}.payout_observations p
+        WHERE p.state IN ('RESOLVED_ZERO', 'RESOLVED_NONZERO')
+          AND p.condition_id IN (
+            SELECT s.condition_id FROM {trade_schema}.venue_commands c
+            JOIN {trade_schema}.executable_market_snapshots s
+              ON s.snapshot_id = c.snapshot_id
+            WHERE c.intent_kind = 'ENTRY' AND EXISTS (
+              SELECT 1 FROM {trade_schema}.venue_trade_facts f
+              WHERE f.command_id = c.command_id AND UPPER(f.state) = 'CONFIRMED'))
+    """).fetchone()
+    return int(row[0] or 0)
+
+
+def _readonly_canonical_handles() -> tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection]:
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection_read_only,
+        get_world_connection_read_only,
+    )
+
+    return (
+        get_world_connection_read_only(),
+        get_trade_connection_read_only(),
+        get_forecasts_connection_read_only(),
+    )
+
+
+def _corpus_identity(
+    handles: tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection],
+    *, city_timezones: Mapping[str, str], ttl: timedelta,
+) -> tuple[CanonicalMarketAnchoredFitProvider, ArtifactCacheKey]:
+    """The cache key decisions look up for these physical files."""
+
+    provider = CanonicalMarketAnchoredFitProvider(
+        lambda: handles, city_timezones=city_timezones, ttl=ttl,
+        corpus_cache=CanonicalCorpusCache(max_entries=1),
+    )
+    prepared = provider._borrowed_corpus_handles(deadline_monotonic=None)
+    if prepared is None or prepared[2] is None:
+        raise RuntimeError("CANONICAL_CORPUS_IDENTITY_UNAVAILABLE")
+    return provider, prepared[2]
+
+
+def build_canonical_corpus_file(
+    path: Path,
+    *,
+    connects: Callable[[], tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection]],
+    city_timezones: Mapping[str, str],
+    ttl: timedelta = DEFAULT_TTL,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> None:
+    """Load one corpus with no deadline and write it atomically to ``path``."""
+
+    handles = connects()
+    try:
+        provider, key = _corpus_identity(
+            handles, city_timezones=city_timezones, ttl=ttl,
+        )
+        # Read before the load: a row landing mid-load moves the next watermark.
+        watermark = canonical_corpus_input_watermark(handles[1])
+        started = time.monotonic()
+        corpus = provider._load_corpus(
+            handles, cutoff=now().astimezone(timezone.utc), deadline_monotonic=None,
+        )
+        if corpus is None:
+            raise RuntimeError("CANONICAL_CORPUS_LOAD_FAILED")
+        envelope = {
+            "format": _CORPUS_FILE_FORMAT,
+            "reader": _corpus_reader_identity(),
+            "key": key,
+            "watermark": watermark,
+            "build_seconds": time.monotonic() - started,
+            "corpus": {
+                "records": corpus.records,
+                "unknown": corpus.unknown,
+                "command_count": corpus.command_count,
+                "training_cutoff": corpus.training_cutoff,
+                "revision": corpus.revision,
+                "command_accounting": corpus.command_accounting,
+            },
+        }
+    finally:
+        for conn in dict.fromkeys(handles):
+            conn.close()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(envelope, handle, separators=(",", ":"), allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def read_canonical_corpus_file(
+    path: Path, *, key: ArtifactCacheKey,
+) -> tuple[CanonicalFitCorpus, int, float] | None:
+    """A persisted corpus only when every identity field matches exactly."""
+
+    try:
+        with open(path, encoding="utf-8") as handle:
+            envelope = json.load(handle)
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("format") != _CORPUS_FILE_FORMAT
+            or envelope.get("reader") != _corpus_reader_identity()
+            or envelope.get("key") != _json_identity(key)
+        ):
+            return None
+        body = envelope["corpus"]
+        if body["revision"] != CANONICAL_CORPUS_REVISION:
+            return None
+        corpus = _frozen_corpus(CanonicalFitCorpus(
+            records=tuple(body["records"]),
+            unknown=dict(body["unknown"]),
+            command_count=int(body["command_count"]),
+            training_cutoff=str(body["training_cutoff"]),
+            revision=str(body["revision"]),
+            command_accounting=tuple(body["command_accounting"]),
+        ))
+        watermark = envelope["watermark"]
+        build_seconds = float(envelope["build_seconds"])
+        if (
+            type(watermark) is not int
+            or _parse_ts(corpus.training_cutoff) is None
+            or not math.isfinite(build_seconds) or build_seconds < 0
+        ):
+            return None
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+    return corpus, watermark, build_seconds
+
+
+_CORPUS_BUILD_CHILD_CODE = (
+    "import sys; from pathlib import Path; "
+    "from src.calibration.market_anchored_live_fit import _build_corpus_in_child; "
+    "_build_corpus_in_child(Path(sys.argv[1]))"
+)
+
+
+def _build_corpus_in_child(path: Path) -> None:
+    from src.config import runtime_cities_by_name
+
+    build_canonical_corpus_file(
+        path, connects=_readonly_canonical_handles,
+        city_timezones={
+            city: config.timezone for city, config in runtime_cities_by_name().items()
+        },
+    )
+
+
+def _spawn_corpus_build(path: Path) -> None:
+    """Run the CPU-bound load in its own interpreter: it never takes the GIL
+    from the daemon's cuts, and the file it leaves is the restart cache."""
+
+    result = subprocess.run(
+        [sys.executable, "-c", _CORPUS_BUILD_CHILD_CODE, str(path)],
+        cwd=Path(__file__).resolve().parents[2],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"CANONICAL_CORPUS_BUILD_CHILD_EXIT:{result.returncode}")
+
+
+class CanonicalCorpusBuilder:
+    """Owns every canonical corpus load for one daemon; decisions only serve.
+
+    A corpus with cutoff ``c`` serves decisions in ``[c, c + ttl)`` (the
+    policy's ``refit_seconds``).  A build starts when (a) none is installed,
+    (b) the input watermark moved, i.e. a finalized payout can add a fit
+    record, or (c) the installed corpus would expire before another
+    build could finish: ``now >= c + ttl - (2 * last_build + poll)``.  The
+    build runs outside every deadline, writes ``path`` atomically and is then
+    installed by atomic swap; a failed or interrupted build leaves the
+    installed corpus serving.  ``poll_seconds`` only bounds how late a moved
+    watermark is noticed (~30 ms query; payouts land every 10 min).
+    """
+
+    def __init__(
+        self,
+        cache: CanonicalCorpusCache,
+        *,
+        path: Path,
+        city_timezones: Mapping[str, str],
+        connects: Callable[[], tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection]] = _readonly_canonical_handles,
+        build: Callable[[Path], None] = _spawn_corpus_build,
+        ttl: timedelta = DEFAULT_TTL,
+        poll_seconds: float = 60.0,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self._cache = cache
+        self._path = path
+        self._city_timezones = dict(city_timezones)
+        self._connects = connects
+        self._build = build
+        self._ttl = ttl
+        self._poll_seconds = poll_seconds
+        self._now = now
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._key: ArtifactCacheKey | None = None
+        self._watermark: int | None = None
+        self._build_seconds = 0.0
+        self._unbuilt_logged = False
+
+    def _identity(
+        self, *, watermark: bool,
+    ) -> tuple[ArtifactCacheKey, int | None]:
+        handles = self._connects()
+        try:
+            _, key = _corpus_identity(
+                handles, city_timezones=self._city_timezones, ttl=self._ttl,
+            )
+            mark = canonical_corpus_input_watermark(handles[1]) if watermark else None
+        finally:
+            for conn in dict.fromkeys(handles):
+                conn.close()
+        return key, mark
+
+    def _install_file(self, key: ArtifactCacheKey, source: str) -> bool:
+        loaded = read_canonical_corpus_file(self._path, key=key)
+        if loaded is None:
+            return False
+        corpus, watermark, build_seconds = loaded
+        if not self._cache.install(key, corpus, installed_at=self._now()):
+            return False
+        self._key, self._watermark, self._build_seconds = key, watermark, build_seconds
+        self._unbuilt_logged = False
+        _LOG.info(
+            "CANONICAL_CORPUS_INSTALLED source=%s cutoff=%s records=%d watermark=%s build_s=%.1f",
+            source, corpus.training_cutoff, len(corpus.records), watermark, build_seconds,
+        )
+        return True
+
+    def warm_from_disk(self) -> bool:
+        """Boot: install the persisted corpus when its identity still matches."""
+
+        try:
+            key, _ = self._identity(watermark=False)
+        except Exception as exc:  # noqa: BLE001 - the background build retries
+            _LOG.warning("CANONICAL_CORPUS_IDENTITY_UNAVAILABLE:%s", type(exc).__name__)
+            return False
+        return self._install_file(key, "persisted")
+
+    def step(self) -> bool:
+        """Build once if the inputs or the validity window require it."""
+
+        key, watermark = self._identity(watermark=True)
+        cutoff = self._cache.built_cutoff(key)
+        lead = timedelta(seconds=2 * self._build_seconds + self._poll_seconds)
+        if (
+            cutoff is not None
+            and key == self._key
+            and watermark == self._watermark
+            and self._now() < cutoff + self._ttl - lead
+        ):
+            return False
+        self._build(self._path)
+        if not self._install_file(key, "build"):
+            raise RuntimeError("CANONICAL_CORPUS_BUILD_NOT_INSTALLED")
+        return True
+
+    def served(self, key: ArtifactCacheKey, *, hit: bool) -> None:
+        if hit:
+            return
+        if not self._unbuilt_logged:
+            self._unbuilt_logged = True
+            _LOG.warning(
+                "CANONICAL_CORPUS_UNBUILT: no installed corpus is valid at this decision "
+                "instant; BUY is CALIBRATED_PAYOFF_Q_UNAVAILABLE and fit-bound held "
+                "exits are entry_calibration_unavailable until the background build installs"
+            )
+        self._wake.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.step()
+            except Exception as exc:  # noqa: BLE001 - the installed corpus keeps serving
+                _LOG.warning("CANONICAL_CORPUS_BUILD_FAILED:%s:%s", type(exc).__name__, exc)
+            self._wake.wait(self._poll_seconds)
+            self._wake.clear()
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._cache.builder = self
+        # Synchronous and cheap (~0.1 s JSON + one PRAGMA): the first cut after
+        # a restart already serves the persisted corpus when it is still valid.
+        self.warm_from_disk()
+        self._thread = threading.Thread(
+            target=self._run, name="canonical-corpus-builder", daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+
+
+def start_canonical_corpus_builder() -> CanonicalCorpusBuilder:
+    """Attach the daemon's single builder to the shared corpus cache."""
+
+    from src.config import runtime_cities_by_name, state_path
+
+    builder = CanonicalCorpusBuilder(
+        _SHARED_CANONICAL_CORPUS_CACHE,
+        path=state_path("canonical_fit_corpus.json"),
+        city_timezones={
+            city: config.timezone for city, config in runtime_cities_by_name().items()
+        },
+    )
+    builder.start()
+    return builder
 
 
 # The active provider is monitor-scope state only.  Entry selection uses its

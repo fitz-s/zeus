@@ -10912,6 +10912,16 @@ def main():
     # entry-readiness gate until the recovery pass succeeds.
     _start_edli_boot_fill_bridge_recovery()
 
+    # The canonical entry-fit corpus (~26 s cold) is built only by this
+    # background owner, never inside a cut's deadline; the persisted file
+    # serves the first cut after a restart while still inside its validity.
+    try:
+        from src.calibration.market_anchored_live_fit import start_canonical_corpus_builder
+
+        start_canonical_corpus_builder()
+    except Exception as exc:  # noqa: BLE001 - absent corpus = existing unavailable-fit verdict
+        logger.warning("CANONICAL_CORPUS_BUILDER_UNAVAILABLE:%s", type(exc).__name__)
+
     # 守護 (2026-06-03): queue a non-blocking recovery pass for VERIFIED settlement
     # truth already on disk for FILLED positions still sitting phase=active.
     # Runs AFTER fill-bridge recovery so freshly-bridged positions are visible;
