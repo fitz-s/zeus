@@ -58,10 +58,11 @@ UTC = timezone.utc
 
 def _consumed_witness(argv) -> dict:
     """What a real worker reports having read: at least its request file."""
-    from scripts.materialize_replacement_forecast_live import _ConsumedInputs
+    from scripts.materialize_replacement_forecast_live import _ConsumedInputs, _StageReceipt
 
-    consumed = _ConsumedInputs()
-    consumed.read(Path(argv[argv.index("--input-json") + 1]), role="request")
+    request = Path(argv[argv.index("--input-json") + 1])
+    consumed = _ConsumedInputs(_StageReceipt(request, None).attempt_id)  # the parent's claim id
+    consumed.read(request, role="request")
     return consumed.witness()
 
 _REGRESSION_REASON = "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
@@ -2852,25 +2853,47 @@ def test_worker_input_verdict_is_emitted_and_fenced_by_the_queue(
     emitted = json.loads(stderr.strip().splitlines()[-1])
     assert (returncode, emitted["status"], emitted["failure_category"]) == (2, "ERROR", category)
 
+    # Replaying that output against a different claimed request is a crossed
+    # witness, which must never fence. The queue half therefore has the real
+    # worker judge the claimed request itself: its named payload holds the same
+    # malformed body, so the verdict concerns only bytes this claim names.
+    (root / "payload.json").write_text(body, encoding="utf-8")
     name = "Panama_City.2026-06-22.high.20260621T060500Z.json"
-    (requests / name).write_text(json.dumps({
-        "city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high",
+    fenced = category == "INPUT_VERDICT"
+    claim = {
+        "city": "Panama City", "city_timezone": "America/Panama",
+        "target_date": "2026-06-22", "temperature_metric": "high",
         "source_cycle_time": "2026-06-21T06:00:00+00:00",
         "computed_at": "2026-06-21T06:05:00+00:00",
         "baseline_source_run_id": "baseline-run", "openmeteo_source_run_id": "om-run",
-        "openmeteo_payload_json": "payload.json", "precision_metadata_json": "precision.json",
+        "openmeteo_payload_json": "../payload.json", "precision_metadata_json": "precision.json",
         "bins": [{"bin_id": "30C"}],
-    }), encoding="utf-8")
+    }
+    if not fenced:
+        # A field the queue's schema gate admits without but the worker reads:
+        # its absence is a KeyError past a valid payload, no verdict.
+        del claim["city_timezone"]
+        (root / "payload.json").write_text("{}", encoding="utf-8")
+    (requests / name).write_text(json.dumps(claim), encoding="utf-8")
     monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
     monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
     monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+    monkeypatch.setattr(worker, "ROOT", tmp_path / "no-fallback-root")
+    claimed: list[dict] = []
+
+    def runner(argv):
+        request = Path(argv[argv.index("--input-json") + 1])
+        with sqlite3.connect(":memory:") as worker_conn:
+            code, out, err = worker._run_one(request, commit=False, init_schema=False, conn=worker_conn)
+        claimed.append(json.loads(err.strip().splitlines()[-1]))
+        return subprocess.CompletedProcess(list(argv), code, out, err)
+
     report = queue._process_claimed_materialization_batch(
         request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
-        forecast_db=db, limit=1,
-        runner=lambda argv: subprocess.CompletedProcess(list(argv), returncode, stdout, stderr),
+        forecast_db=db, limit=1, runner=runner,
         marker_dir=root / "blocked_attempts", seed_dir=root / "seeds",
     )
-    fenced = category == "INPUT_VERDICT"
+    assert claimed[0]["failure_category"] == category
     assert (requests / name).exists() is not fenced, "a verdict is fenced; anything else is retained"
     assert (queue._UNCHANGED_BLOCKED_SKIP_REASON in report.reason_codes) is fenced
     assert (queue._ERROR_RETAINED_REASON in report.reason_codes) is not fenced
@@ -3000,3 +3023,135 @@ def test_metadata_era_materialization_receipt_is_never_honored(tmp_path, monkeyp
             attempt_fingerprint="fp-a",
         )
         assert queue.failed_seed_identity_fenced(seed_file, conn=conn, decision_at=at)
+
+
+
+def test_dependency_record_resolves_like_the_worker_and_follows_the_manifest(tmp_path) -> None:
+    """Round-5: one resolver, one record. A fallback-resolved file is identified at
+    the path the worker reads, the manifest's artifact is part of the record, and
+    the fingerprint (which hashes the record) moves when either one's bytes move."""
+    import hashlib as _hashlib
+
+    import scripts.materialize_replacement_forecast_live as worker
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    request_dir, fallback = tmp_path / "requests", tmp_path / "root"
+    request_dir.mkdir()
+    fallback.mkdir()
+    artifact = fallback / "artifact.json"
+    artifact.write_bytes(b'{"a": 1}')
+    manifest = fallback / "manifest.json"
+    manifest.write_text(json.dumps({"artifact_path": "artifact.json"}))
+    (fallback / "precision.json").write_bytes(b"{}")
+    payload = {"precision_metadata_json": "precision.json", "openmeteo_manifest_json": "manifest.json"}
+
+    def record():
+        return queue._materialization_dependency_record(payload, request_dir=request_dir, root=fallback)
+
+    entries = {e["role"]: e for e in record() or []}
+    assert entries["precision_metadata"]["path"] == str((fallback / "precision.json").resolve())
+    assert entries["precision_metadata"]["path"] == str(
+        worker.resolve_named_input("precision.json", base_dir=request_dir, root=fallback).resolve())
+    # An unparseable manifest is still identified by its own bytes.
+    assert entries["manifest"]["sha256"] == _hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
+
+    real = RawForecastArtifactManifest.from_file(
+        artifact, source_id=OPENMETEO_SOURCE_ID, product_id=OPENMETEO_PRODUCT_ID,
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-21T06:00:00+00:00", source_available_at="2026-06-21T06:00:00+00:00",
+        captured_at="2026-06-21T06:00:00+00:00", request_url="https://example.invalid",
+        request_params={"latitude": 8.97, "longitude": -79.53},
+    )
+    manifest.write_text(json.dumps({**real.to_dict(), "artifact_path": "artifact.json"}))
+    before = {e["role"]: e for e in record() or []}
+    assert before["manifest_artifact"]["path"] == str(artifact.resolve())
+    artifact.write_bytes(b'{"a": 2}')
+    after = {e["role"]: e for e in record() or []}
+    assert after["manifest_artifact"]["sha256"] != before["manifest_artifact"]["sha256"]
+    # A higher-priority base-relative file appearing changes the resolution.
+    (request_dir / "precision.json").write_bytes(b"{}")
+    moved = {e["role"]: e for e in record() or []}
+    assert moved["precision_metadata"]["path"] == str((request_dir / "precision.json").resolve())
+
+
+@pytest.mark.parametrize("crossed", ("other_attempt", "other_request_bytes", "foreign_file"))
+def test_witness_must_name_the_parent_claim(tmp_path, monkeypatch, crossed) -> None:
+    """Round-5: a witness for another invocation, for request bytes other than the
+    ones the parent claimed, or naming a file outside the claim's dependency record
+    never authorizes a fence. The request is retained, unbound."""
+    import subprocess
+
+    import scripts.materialize_replacement_forecast_live as worker
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "replacement_forecast_live"
+    requests, seeds = root / "requests", root / "seeds"
+    requests.mkdir(parents=True)
+    seeds.mkdir()
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    name = "Panama_City.2026-06-22.high.20260621T060500Z.json"
+    (requests / name).write_text(json.dumps({
+        "city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high",
+        "source_cycle_time": "2026-06-21T06:00:00+00:00",
+        "computed_at": "2026-06-21T06:05:00+00:00",
+        "baseline_source_run_id": "baseline-run", "openmeteo_source_run_id": "om-run",
+        "openmeteo_payload_json": "payload.json", "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
+    monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text("{}")
+
+    def runner(argv):
+        request = Path(argv[argv.index("--input-json") + 1])
+        attempt = worker._StageReceipt(request, None).attempt_id
+        consumed = worker._ConsumedInputs("someone-else" if crossed == "other_attempt" else attempt)
+        if crossed == "other_request_bytes":
+            original = request.read_bytes()
+            request.write_text(json.dumps({**json.loads(original), "target_date": "not-a-date"}))
+            consumed.read(request, role="request")
+            request.write_bytes(original)  # the bytes the parent claimed are back
+        else:
+            consumed.read(request, role="request")
+        if crossed == "foreign_file":
+            consumed.read(foreign, role="precision_metadata")
+        body = {"status": "BLOCKED", "reason_codes": ["REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"],
+                "consumed_inputs": consumed.witness()}
+        return subprocess.CompletedProcess(list(argv), 1, stdout=json.dumps(body), stderr="")
+
+    report = queue._process_claimed_materialization_batch(
+        request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
+        forecast_db=db, limit=1, runner=runner,
+        marker_dir=root / "blocked_attempts", seed_dir=seeds,
+    )
+    assert (requests / name).is_file()
+    assert queue._UNBOUND_VERDICT_REASON in report.reason_codes
+    assert not list((root / "blocked_attempts").glob("*.json"))
+
+
+def test_m2_materialization_receipt_is_evidence_not_a_fence(tmp_path, monkeypatch) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "replacement_forecast_live"
+    seeds = root / "seeds"
+    seeds.mkdir(parents=True)
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    seed_file = seeds / "Panama_City.2026-06-22.high.json"
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
+    request = {"city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high"}
+    queue._write_seed_index_receipt(seed_file, {
+        "status": "MATERIALIZATION_BLOCKED", "seed_file": str(seed_file),
+        "materialization_blocked": {"request": request, "attempt_fingerprint": "fp-a",
+                                    "identity_version": "m2"},
+    })
+    with sqlite3.connect(db) as conn:
+        assert not queue.failed_seed_identity_fenced(
+            seed_file, conn=conn, decision_at=datetime(2026, 6, 21, 6, 6, tzinfo=timezone.utc))

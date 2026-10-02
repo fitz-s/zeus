@@ -446,10 +446,11 @@ def test_request_skips_instrument_expansion_after_current_q_converges(
 
 def _consumed_witness(argv) -> dict:
     """What a real worker reports having read: at least its request file."""
-    from scripts.materialize_replacement_forecast_live import _ConsumedInputs
+    from scripts.materialize_replacement_forecast_live import _ConsumedInputs, _StageReceipt
 
-    consumed = _ConsumedInputs()
-    consumed.read(Path(argv[argv.index("--input-json") + 1]), role="request")
+    request = Path(argv[argv.index("--input-json") + 1])
+    consumed = _ConsumedInputs(_StageReceipt(request, None).attempt_id)  # the parent's claim id
+    consumed.read(request, role="request")
     return consumed.witness()
 
 
