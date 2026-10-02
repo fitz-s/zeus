@@ -113,6 +113,31 @@ removed at child handoff; the parent owns any subsequent test bootstrap.
 The integrated final ZERO/capture/typed-drain subset is re-run after quantity
 containment and passes all 52 cases; combined focused acceptance is 71 passed.
 
+Exact-source required-check closeout (docs-only record): the unchanged source
+and test tree at `01ef666c3c5b04e0ef4011b47986d2545d66feaf` runs the prescribed
+same ten-file data batch once after all containment changes: 268 passed /
+4 failed, zero errors/skips, 2.97 seconds. The four complete JUnit
+`failure.message` values and node identities equal the existing wake, serving
+and final-required XML records exactly, without normalization. They are
+`test_ensemble_client::test_fetch_ensemble_cache_key_includes_role`
+(diagnostic source disabled), `test_obs_v2_writer::test_rejects_bad_target_date`
+(expected target_date wording differs), and
+`test_hk_rejects_vhhh_source::{test_hk_accumulator_source_accepted,
+test_hk_rejects_station_id_vhhh}` (required hourly local_hour absent).
+Evidence: `/tmp/zeus-hk-final-data-required-01ef666c3-20261002.xml` and its
+same-name `.log`; comparison records are
+`/tmp/zeus-hk-{wake,serving,final}-required-20261002.xml`.
+
+The seven exploratory interval failures are also re-run only at their exact
+nodes on final source and with original functions restored in test-process
+memory. All seven node/message pairs match after memory-address normalization
+alone. Those original functions at `68d12d219` are byte-identical to task-start
+`471e5afa`. Evidence:
+`/tmp/zeus-hk-interval-seven-{current,baseline}-20261002.{xml,log}`.
+This closes the previously unproved seven-node delta; it does not turn the
+broader suite into an all-pass result. The temporary read-only settings symlink
+is again removed at handoff; no live configuration, DB or venue write occurred.
+
 Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
