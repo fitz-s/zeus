@@ -4444,6 +4444,25 @@ def _write_blocked_attempt_marker(
     os.replace(temp_path, marker_path)
 
 
+def _subprocess_result_outcome(completed: subprocess.CompletedProcess[str]) -> str:
+    """The worker's own final verdict line (status, reasons, error), for the log only.
+
+    A non-ok result writes its JSON verdict to stdout and only warnings to stderr,
+    so a stderr tail shows parse noise instead of the decline that decided it.
+    """
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, Mapping) and payload.get("status") not in (None, ""):
+                return json.dumps({key: payload[key] for key in
+                    ("status", "reason_codes", "error_type", "error", "failure_category")
+                    if payload.get(key) not in (None, "", [])}, sort_keys=True)[:1000]
+    return "none"
+
+
 def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str]) -> tuple[str, ...]:
     for stream in (completed.stdout or "", completed.stderr or ""):
         for line in reversed(stream.splitlines()):
@@ -7995,11 +8014,12 @@ def _process_claimed_materialization_batch(
                 pass  # no turn stamp: the request still retries, ordered as fresh
             _LOG.log(
                 logging.ERROR if category is FailureCategory.UNCLASSIFIED else logging.WARNING,
-                "materialize[%s] %s %s retained by its request: returncode=%s stderr=%s",
+                "materialize[%s] %s %s retained by its request: returncode=%s outcome=%s stderr=%s",
                 input_json.name,
                 category.value,
                 error_type or "unknown error",
                 completed.returncode,
+                _subprocess_result_outcome(completed),
                 (completed.stderr or "")[-500:],
             )
             error_retained.append(str(restored))
