@@ -2060,10 +2060,9 @@ def _latest_eligible_ensemble_input_mark(
 ) -> tuple[int, datetime] | None:
     """Return the newest decision-time-available full ENS cycle for one family.
 
-    ``day0_remaining_from_iso`` is the family's Day0 tau (normalized by
-    ``day0_remaining_from_iso_of``). With it, a remaining-window row covering
-    [tau, local-day end) is also current evidence once the day has ended
-    (``remaining_window_after_day_end_sql``). None is the prior predicate exactly.
+    ``day0_remaining_from_iso`` remains a caller-compatible scope argument.
+    A partial remaining-window scalar never names a full-target shape, so it
+    cannot supersede a lawful full-target certificate or reset held continuity.
     """
 
     table_ref = _authority_table_ref(conn, "ensemble_snapshots")
@@ -2120,22 +2119,7 @@ def _latest_eligible_ensemble_input_mark(
             current_evidence_ensemble_eligibility_sql,
         )
 
-        from src.data.forecast_extrema_authority import (  # noqa: PLC0415
-            REMAINING_WINDOW_COLUMNS,
-            remaining_window_after_day_end_sql,
-        )
-
-        if day0_remaining_from_iso is None or not REMAINING_WINDOW_COLUMNS.issubset(columns):
-            predicates.append(current_evidence_ensemble_eligibility_sql())
-        else:
-            predicates.append(
-                f"({current_evidence_ensemble_eligibility_sql()}"
-                f" OR {remaining_window_after_day_end_sql()})"
-            )
-            params.extend((
-                day0_remaining_from_iso, day0_remaining_from_iso, day0_remaining_from_iso,
-                decision_time.astimezone(UTC).isoformat(),
-            ))
+        predicates.append(current_evidence_ensemble_eligibility_sql())
     else:
         if "causality_status" in columns:
             predicates.append("causality_status = 'OK'")

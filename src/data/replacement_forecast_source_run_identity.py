@@ -191,16 +191,25 @@ def native_coordinate_certificate_reason(conn, *, shape, city, target_date, metr
     """
     if not isinstance(shape, Mapping):
         return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
-    row = conn.execute("""SELECT es.city, es.target_date, es.temperature_metric, es.dataset_id, es.provenance_json,
-        es.source_cycle_time, es.source_available_at, sr.manifest_hash
+    from src.data.forecast_extrema_authority import current_evidence_ensemble_eligibility_sql
+
+    row = conn.execute(f"""SELECT es.city, es.target_date, es.temperature_metric, es.dataset_id, es.provenance_json,
+        es.source_cycle_time, es.source_available_at, sr.manifest_hash,
+        COALESCE({current_evidence_ensemble_eligibility_sql('es')}, 0)
         FROM ensemble_snapshots es JOIN source_run sr ON sr.source_run_id=es.source_run_id
         WHERE es.snapshot_id=?""", (shape.get("snapshot_id"),)).fetchone()
     if row is None:
         return "REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_MISSING"
     native = dict(zip(("city", "target_date", "temperature_metric", "dataset_id", "provenance_json",
-        "source_cycle_time", "source_available_at", "manifest_hash"), row))
+        "source_cycle_time", "source_available_at", "manifest_hash", "full_target_eligible"), row))
     if (native["city"], native["target_date"], native["temperature_metric"]) != (city, str(target_date), metric):
         return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
+    # SCOPE: this exact certificate snapshot's full-target extrema quantity.
+    # DRAIN: normal family seed/materialization supplies qualified current shape.
+    # RESET: independently lawful exact/interval row; an old partial certificate
+    # cannot authorize ENTRY, held belief or a pinned submit-time reread.
+    if native["full_target_eligible"] != 1:
+        return "REPLACEMENT_CURRENT_EVIDENCE_EXTREMA_WINDOW_INVALID"
     current = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version
     if native["dataset_id"] == current and "native_coordinate_compatibility" not in shape:
         return None

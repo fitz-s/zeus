@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-10-02 (exact-request LOW/HIGH cert supersession); 2026-09-15 (causal baseline completion witness;
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
-# Lifecycle: created=2026-06-12; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-02; last_reused=2026-10-02
 #   (held re-heal: 30-min cooldown replaced by the input-identity fence;
 #   worker ERROR is fenced (input verdict) or owner-retained (transient), never respawned)
 # Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.

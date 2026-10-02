@@ -40,6 +40,79 @@ read-only symlink to live `config/settings.json`, SHA256
 test fixtures write only their private temporary forecast/state surfaces.
 This is local behavior evidence, not live loading or global probability proof.
 
+## 2026-10-02 full-target ENS quantity containment
+
+Independent actual-function evidence shows the current selector can admit a
+`REMAINING_WINDOW_TARGET_LOCAL_DAY` scalar extremum over broad [06Z,16Z)
+as a full-target source-clock shape at tau 15:05Z. All 51 native suffix members
+can differ from those broad extrema; local-day end does not make the quantities
+equal. The native-coordinate certificate guard also returned no refusal for
+such already stored partial shapes. Restore only the materializer's original
+full-target exact/interval eligibility and enforce that same predicate at the
+existing indexed same-snapshot native certificate guard, before its current
+dataset shortcut. ENTRY, held and pinned readers share that guard.
+
+SCOPE: the exact family/snapshot and its full-target quantity qualification.
+DRAIN: a new lawful full-target current shape passes the existing seed and
+materialization loop. RESET: independently qualified full-target exact or
+interval snapshot; stored broad partial certificates stay unavailable. Keep
+existing HWM/queue tau plumbing and no forced global pause or RED transition.
+No invented suffix law: current native crossing [15Z,18Z) has no finite other
+endpoint for all 51 suffix bounds, so it cannot supply the required finite
+member pairs. Missing that data does not complete the profit objective.
+
+Owned source: `replacement_forecast_materializer.py` and
+`replacement_forecast_source_run_identity.py`; existing ENS admission/native
+certificate/public-reader tests and affected registry rows. Acceptance requires
+actual selector HIGH/LOW partial negatives, valid full-target exact/interval
+positives, and normal ENTRY/held/pinned reader rejection of stored partial
+certificates without weakening clocks or geometry. Local commit only.
+
+Confirmed containment interaction: the same stored 29h54-old lawful full-target
+shape survives the no-tau eligible HWM, but frozen tau promotes a newer broad
+partial snapshot and actual held continuity returns
+`REPLACEMENT_PINNED_NEW_ELIGIBLE_ENS_RESET`. Therefore also restore
+`replacement_input_hwm._latest_eligible_ensemble_input_mark` to the shared
+full-target predicate. Keep its optional tau API for callers, but partial rows
+cannot reset or supersede a full-target shape. Cover old-lawful + new-partial
+continuity and the true-new-full-target RESET twin. Raw advisory frontier debt
+is separate from full-target probability authority.
+
+The same-cycle baseline-seed direct query also used the broad partial OR;
+restore its shared full-target predicate and remove the now-unreferenced false
+`remaining_window_after_day_end_sql` quantity assertion. The preserved tau
+arguments no longer widen full-target eligibility; independent Day0 hourly
+vector and observation-clock behavior is unchanged.
+
+Local quantity checkpoint: eight decisive HIGH/LOW tests executed with the
+actual pre-containment functions from `68d12d219` loaded only into test-process
+memory all fail. They reproduce partial public READY, partial selector
+admission, no native quantity refusal and partial HWM advancement. On repaired
+source, the 74 other selected public/HWM/cycle checks pass, and the two final
+held-continuity/baseline twins pass after their fixture uses the ordinary
+conditioning-identity schema initializer. These preserve independent body-proof
+blockers and genuine new-full-target RESET; they do not prove old q tradable.
+The eleven former after-day-end tests now use matching June target/cut/coverage
+clocks and the actual eligible reader, avoiding stale-clock false negatives.
+
+Required data batch: 268 passed / 4 failed, at existing diagnostic-role,
+invalid observation-date message and two Hong Kong hourly-identity fixtures.
+The broader three-file exploratory batch had 96 passes / 8 failures: the
+legacy rebuild's seed-covered failure is independently baseline-reproduced by
+the parent; seven old interval-suite failures are not claimed fixed or passed.
+No unrelated test or business-law cleanup is included. Changed source-rationale
+delta and test freshness checks report zero findings; `py_compile` and
+`git diff --check` pass. Final landing/loading and live source/held convergence
+remain owned by the parent.
+
+Final quantity focused batch: 19 passed (all eight decisive HIGH/LOW cases
+and eleven matching-clock remaining-row checks). Independent source review
+accepts the bounded delta without an actionable finding; no venue/runtime
+convergence follows from this result. Temporary ignored settings symlink is
+removed at child handoff; the parent owns any subsequent test bootstrap.
+The integrated final ZERO/capture/typed-drain subset is re-run after quantity
+containment and passes all 52 cases; combined focused acceptance is 71 passed.
+
 Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active

@@ -1,5 +1,8 @@
 # Created: 2026-09-25
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-02
+# Lifecycle: created=2026-09-25; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Purpose: Defend full-target exact/interval ENS quantity and partial-row exclusion.
+# Reuse: Run before modifying current ENS selection, HWM or native certificate admission.
 # Authority basis: docs/authority/statistical_calibration_addendum_2026-06-13.md D2 (CAR
 #   interval-widening); docs/operations/current/plans/ens_boundary_interval_2026-09-25.md.
 """Antibodies for interval-censored ENS boundary-member admission.
@@ -1194,10 +1197,59 @@ def test_hwm_without_tau_never_admits_a_remaining_window_row() -> None:
     assert _mark(conn, decision="2026-06-07T16:30:00+00:00", tau=None) is None
 
 
-def test_hwm_with_in_day_tau_after_day_end_admits_the_remaining_row() -> None:
+def test_hwm_with_in_day_tau_after_day_end_rejects_partial_shape() -> None:
     conn, _request = _remaining_db()
-    assert _mark(conn, decision="2026-06-07T16:30:00+00:00", tau="2026-06-07T15:05:00+00:00") == (
-        101, datetime(2026, 6, 7, 0, tzinfo=UTC))
+    assert _mark(conn, decision="2026-06-07T16:30:00+00:00", tau="2026-06-07T15:05:00+00:00") is None
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_partial_newer_row_never_resets_legal_full_target_held_continuity(tmp_path, monkeypatch, metric):
+    from src.data import replacement_input_hwm as hwm, replacement_forecast_bundle_reader as reader
+    from src.data import replacement_cycle_advance_trigger as trigger
+    from tests.test_replacement_forecast_materializer import _current_baseline_data_version, _set_target_frontier_coverage
+
+    conn, _ = _remaining_db()
+    conn.execute("UPDATE ensemble_snapshots SET temperature_metric=?,dataset_id=?",
+        (metric, _current_baseline_data_version(metric)))
+    columns = [item[1] for item in conn.execute("PRAGMA table_info(ensemble_snapshots)")]
+    changes = {"snapshot_id": "100", "source_cycle_time": "'2026-06-06T12:00:00+00:00'",
+        "issue_time": "'2026-06-06T12:00:00+00:00'", "forecast_window_attribution_status": "'FULLY_INSIDE_TARGET_LOCAL_DAY'",
+        "contributes_to_target_extrema": "1"}
+    projection = ",".join(changes.get(name, f'"{name}"') for name in columns)
+    conn.execute(f"INSERT INTO ensemble_snapshots ({','.join(columns)}) SELECT {projection} FROM ensemble_snapshots WHERE snapshot_id=101")
+    _set_target_frontier_coverage(conn, snapshot_id=100, coverage_id="old-full", source_run_id="ens-run",
+        track="mx2t6_high_short_horizon", release_key="ecmwf_open_data:mx2t6_high:short")
+    conn.execute("UPDATE source_run_coverage SET temperature_metric=?,expires_at='2026-06-08T00:00:00+00:00'", (metric,))
+    old = datetime(2026, 6, 6, 12, tzinfo=UTC)
+    new = datetime(2026, 6, 7, 0, tzinfo=UTC)
+    cut = datetime(2026, 6, 7, 16, 30, tzinfo=UTC)
+    tau = "2026-06-07T15:05:00+00:00"
+    scope = dict(city="Shanghai", target_date="2026-06-07", metric=metric, decision_time=cut)
+    assert hwm._latest_eligible_ensemble_input_mark(conn, **scope) == (100, old)
+    assert hwm._latest_eligible_ensemble_input_mark(conn, **scope, day0_remaining_from_iso=tau) == (100, old)
+    provenance = {"bayes_precision_fusion": {"current_evidence_shape": {"source_cycle_time": old.isoformat()},
+        "current_value_serving": {"icon_global": {"physical_response": {"frozen_product_identity": {"day0_remaining_from": tau}}}}}}
+    monkeypatch.setattr(reader, "latest_live_input_cycle", lambda *_a, **_k: (new, ()))
+    # An independent physical-body blocker must survive; eliminating a false
+    # partial-row RESET does not restore probability authority by itself.
+    monkeypatch.setattr(reader, "replacement_live_input_lag_reason", lambda *_a, **_k: "TEST_EXISTING_BODY_PROOF_CHANGED")
+    verdict = reader._latest_complete_held_continuity(conn, row={"source_cycle_time": old.isoformat(),
+        "computed_at": "2026-06-07T15:50:00+00:00"}, provenance=provenance, **scope)
+    assert verdict == (reader._HeldContinuityStatus.BLOCKED, "REPLACEMENT_PINNED_RAW_INPUT_HWM:TEST_EXISTING_BODY_PROOF_CHANGED")
+    seed_scope = dict(city="Shanghai", target_date="2026-06-07", metric=metric,
+        target_cycle_iso=new.isoformat(), required_baseline_source_run_id="ens-run",
+        day0_remaining_from_iso=tau, decision_time=cut)
+    # The partial run alone cannot replace a baseline seed.
+    conn.execute("DELETE FROM ensemble_snapshots WHERE snapshot_id=100")
+    with pytest.raises(RuntimeError, match="lacks exact eligible family snapshot"):
+        trigger._superseded_baseline_seed_file(conn, **seed_scope)
+    conn.execute("UPDATE ensemble_snapshots SET forecast_window_attribution_status='FULLY_INSIDE_TARGET_LOCAL_DAY',contributes_to_target_extrema=1")
+    assert hwm._latest_eligible_ensemble_input_mark(conn, **scope, day0_remaining_from_iso=tau) == (101, new)
+    assert reader._latest_complete_held_continuity(conn, row={"source_cycle_time": old.isoformat()},
+        provenance=provenance, **scope) == (reader._HeldContinuityStatus.RESET, "REPLACEMENT_PINNED_NEW_ELIGIBLE_ENS_RESET")
+    trigger._ensure_day0_conditioning_identity_column(conn)
+    assert trigger._superseded_baseline_seed_file(conn, **seed_scope) is None
+    conn.close()
 
 
 @pytest.mark.parametrize(("decision", "tau"), [
@@ -1233,26 +1285,37 @@ def test_hwm_tau_none_sql_is_byte_identical(monkeypatch) -> None:
         decision_time=datetime(2026, 6, 7, 16, 30, tzinfo=UTC))
     final_sql, final_params = seen[-1]
     assert f"{authority.current_evidence_ensemble_eligibility_sql()} AND" in final_sql
-    assert authority.remaining_window_after_day_end_sql() not in final_sql
+    assert authority.REMAINING_WINDOW_ATTRIBUTION_STATUS not in final_sql
     assert "2026-06-07T15:05:00+00:00" not in final_params
 
 
-def test_materializer_selector_serves_the_remaining_row_with_request_tau() -> None:
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_materializer_selector_rejects_broad_remaining_extrema_with_request_tau(metric) -> None:
     from dataclasses import replace as dc_replace
 
     conn, request = _remaining_db()
+    from tests.test_replacement_forecast_materializer import _current_baseline_data_version
+    conn.execute("UPDATE ensemble_snapshots SET temperature_metric=?,dataset_id=?",
+        (metric, _current_baseline_data_version(metric)))
+    conn.execute("UPDATE source_run_coverage SET temperature_metric=?", (metric,))
     request = dc_replace(
-        request, source_cycle_time=datetime(2026, 6, 7, 0, tzinfo=UTC),
+        request, temperature_metric=metric, baseline_data_version=_current_baseline_data_version(metric),
+        source_cycle_time=datetime(2026, 6, 7, 0, tzinfo=UTC),
         computed_at=datetime(2026, 6, 7, 16, 30, tzinfo=UTC),
         day0_observed_extreme_observation_time="2026-06-07T15:05:00+00:00",
     )
-    row = materializer._current_evidence_snapshot_row(conn, request, metric="high", select_sql="snapshot_id")
-    assert row is not None and row[0] == 101
+    row = materializer._current_evidence_snapshot_row(conn, request, metric=metric, select_sql="snapshot_id")
+    assert row is None, "[00Z,16Z) scalar extrema do not describe the [15:05Z,16Z) suffix or full day"
     blind = dc_replace(request, day0_observed_extreme_observation_time=None)
-    assert materializer._current_evidence_snapshot_row(conn, blind, metric="high", select_sql="snapshot_id") is None
+    assert materializer._current_evidence_snapshot_row(conn, blind, metric=metric, select_sql="snapshot_id") is None
+    for status, contributes in (("FULLY_INSIDE_TARGET_LOCAL_DAY", 1), (INTERVAL, 0)):
+        conn.execute("UPDATE ensemble_snapshots SET forecast_window_attribution_status=?, contributes_to_target_extrema=?",
+            (status, contributes))
+        assert materializer._current_evidence_snapshot_row(conn, request, metric=metric,
+            select_sql="snapshot_id") == (101,), "legal full-target point/interval selection stays available"
 
 
-def test_cycle_advance_family_carrier_moves_to_the_remaining_row_only_with_tau() -> None:
+def test_cycle_advance_family_carrier_never_promotes_partial_shape_with_tau() -> None:
     from src.data import replacement_cycle_advance_trigger as trigger
 
     conn, _request = _remaining_db()
@@ -1269,13 +1332,13 @@ def test_cycle_advance_family_carrier_moves_to_the_remaining_row_only_with_tau()
     assert trigger.family_materializable_cycle(conn, (object(),), **kwargs) == (None, ())
     assert trigger.family_materializable_cycle(
         conn, (object(),), **kwargs, day0_remaining_from_iso="2026-06-07T15:05:00+00:00",
-    ) == (datetime(2026, 6, 7, 0, tzinfo=UTC), ())
+    ) == (None, ())
     assert trigger._day0_observation_reseed_cycle(
         conn, city="Shanghai", target_date="2026-06-07", metric="high",
         consumed_cycle=datetime(2026, 6, 6, 12, tzinfo=UTC),
         family_cycle=datetime(2026, 6, 7, 0, tzinfo=UTC), decision_time=decision,
         day0_remaining_from_iso="2026-06-07T15:05:00+00:00",
-    ) == datetime(2026, 6, 7, 0, tzinfo=UTC)
+    ) == datetime(2026, 6, 6, 12, tzinfo=UTC)
 
 
 def test_every_hwm_caller_threads_the_same_tau_parser() -> None:

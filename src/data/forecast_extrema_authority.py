@@ -217,38 +217,6 @@ def interval_ensemble_eligibility_sql(alias: str = "") -> str:
     )
 
 
-# Columns the remaining-window predicate reads beyond the attribution status.
-REMAINING_WINDOW_COLUMNS = frozenset({
-    "local_day_start_utc", "forecast_window_start_utc", "forecast_window_end_utc",
-})
-
-
-def remaining_window_after_day_end_sql(alias: str = "") -> str:
-    """A remaining-window row for a family whose local day has ended (bind: tau, decision).
-
-    Day0 law keys the remaining window on the LAST OBSERVATION tau. After local-day
-    end, a remaining-window row whose window [start, day end) starts at/before tau
-    holds exact member extremes over [tau, day end) — the unobserved suffix the
-    Day0 carrier composes with. Admitted only when tau lies inside the row's own
-    local day, the decision is at/after that day's end, and payload causality is OK.
-    The single writer types REMAINING_WINDOW only for [issue, local-day end), so the
-    row's window end IS its local-day end (DST-correct; no 24 h arithmetic here).
-    Positional binds, in order: (tau, tau, tau, decision).
-    """
-    p = f"{alias}." if alias else ""
-    return (
-        f"({p}forecast_window_attribution_status = '{REMAINING_WINDOW_ATTRIBUTION_STATUS}'"
-        f" AND {p}causality_status = 'OK'"
-        f" AND {p}local_day_start_utc IS NOT NULL"
-        f" AND {p}forecast_window_start_utc IS NOT NULL"
-        f" AND {p}forecast_window_end_utc IS NOT NULL"
-        f" AND julianday(?) >= julianday({p}local_day_start_utc)"
-        f" AND julianday(?) < julianday({p}forecast_window_end_utc)"
-        f" AND julianday({p}forecast_window_start_utc) <= julianday(?)"
-        f" AND julianday(?) >= julianday({p}forecast_window_end_utc))"
-    )
-
-
 def current_evidence_ensemble_eligibility_sql(alias: str = "") -> str:
     """The one ENS current-evidence admission predicate: exact OR interval row.
 

@@ -1454,27 +1454,12 @@ def _superseded_baseline_seed_file(
         return None
     try:
         from src.data.forecast_extrema_authority import (  # noqa: PLC0415
-            REMAINING_WINDOW_COLUMNS,
             current_evidence_ensemble_eligibility_sql,
-            remaining_window_after_day_end_sql,
         )
 
-        # The same admission as the ENS input mark: with the family's Day0 tau, a
-        # remaining-window row over [tau, day end) is this run's family snapshot.
+        # Baseline supersession shares the full-target ENS shape admission law.
+        # A broad partial scalar cannot replace the baseline named by a seed.
         eligibility = current_evidence_ensemble_eligibility_sql("ens")
-        eligibility_params: tuple[object, ...] = ()
-        if (
-            day0_remaining_from_iso is not None
-            and decision_time is not None
-            and REMAINING_WINDOW_COLUMNS.issubset(
-                str(row[1]) for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")
-            )
-        ):
-            eligibility = f"({eligibility} OR {remaining_window_after_day_end_sql('ens')})"
-            eligibility_params = (
-                day0_remaining_from_iso, day0_remaining_from_iso, day0_remaining_from_iso,
-                decision_time.astimezone(UTC).isoformat(),
-            )
         run = conn.execute(
             f"""
             SELECT sr.source_cycle_time
@@ -1494,7 +1479,7 @@ def _superseded_baseline_seed_file(
                )
              LIMIT 1
             """,
-            (required, city, target_date, metric, *eligibility_params),
+            (required, city, target_date, metric),
         ).fetchone()
         if run is None:
             raise RuntimeError(

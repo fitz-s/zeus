@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-30
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Last reused/audited: 2026-10-02
+# Lifecycle: created=2026-06-06; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -4375,6 +4375,92 @@ def _native_low_coverage(tmp_path, monkeypatch):
             normal.conn.close()
             normal.builtin.close()
         next(static, None)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_and_pinned_public_readers_reject_stored_partial_shape(tmp_path, monkeypatch, metric):
+    """A read-only quantity fault view exercises the actual indexed native guard.
+
+    The physical native/public writers construct the positive certificate;
+    the view changes only its bound snapshot's quantity metadata, not clocks,
+    members, source ownership, coordinates or posterior bytes.
+    """
+    def low_world():
+        from tests.test_replacement_forecast_materializer import (
+            _hko_native_surfaces, _hko_source_surface, _shanghai_current_owner_request,
+        )
+        from src.data import replacement_forecast_materializer as mat
+        actual = mat._replacement_bayes_precision_fusion_override
+        native = _hko_native_surfaces.__wrapped__(tmp_path.resolve(), monkeypatch)
+        next(native)
+        source = _hko_source_surface.__wrapped__(tmp_path.resolve(), monkeypatch, None)
+        next(source)
+        conn = builtin = None
+        try:
+            conn, request = _shanghai_current_owner_request(tmp_path.resolve(), monkeypatch,
+                metric="low", computed_at=datetime(2026, 10, 1, 8, 15, tzinfo=UTC))
+            monkeypatch.setattr(mat, "_replacement_bayes_precision_fusion_override", actual)
+            builtin = sqlite3.connect(":memory:")
+            conn.create_function("strftime", 2, lambda fmt, value:
+                request.computed_at.isoformat(timespec="milliseconds")
+                if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now")
+                else builtin.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
+            result = mat.materialize_replacement_forecast_live(conn, request)
+            assert result.ok, result.reason_codes
+            conn.commit()
+            class ReaderClock(datetime):
+                @classmethod
+                def now(cls, tz=None): return request.computed_at.astimezone(tz or UTC)
+            monkeypatch.setattr(reader, "datetime", ReaderClock)
+            yield SimpleNamespace(conn=conn, request=request)
+        finally:
+            if conn is not None: conn.close()
+            if builtin is not None: builtin.close()
+            next(source, None)
+            next(native, None)
+    world = (_shanghai_reader_current_certificate.__wrapped__(tmp_path.resolve(), monkeypatch)
+             if metric == "high" else low_world())
+    normal = next(world)
+    try:
+        conn, request = normal.conn, normal.request
+        row = dict(conn.execute("SELECT * FROM forecast_posteriors WHERE city=? AND target_date=? AND temperature_metric=? ORDER BY posterior_id DESC LIMIT 1",
+            (request.city, str(request.target_date), metric)).fetchone())
+        scope = dict(city=row["city"], target_date=row["target_date"], temperature_metric=metric,
+            decision_time=request.computed_at.isoformat(), current_bin_topology_hash=row["bin_topology_hash"])
+        pinned = dict(**scope, posterior_id=row["posterior_id"], raw_input_hwm_conn=conn)
+        assert reader.read_pinned_replacement_forecast_bundle(conn, **pinned).ok
+        readiness = reader._pinned_readiness_for_posterior(row, posterior_id=row["posterior_id"])
+        kwargs = dict(**scope, readiness=readiness, baseline_bundle=None, require_baseline_bundle=False)
+        for purpose in ReplacementForecastAuthorityPurpose:
+            assert read_replacement_forecast_bundle(conn, **kwargs, authority_purpose=purpose).ok
+        snapshot_id = json.loads(row["dependency_source_run_ids_json"])["current_ensemble_snapshot"]
+        columns = [item[1] for item in conn.execute("PRAGMA table_info(ensemble_snapshots)")]
+        calls = []
+        class PartialView:
+            def execute(self, sql, parameters=()):
+                if " ".join(sql.upper().split()).startswith("SELECT ES.CITY, ES.TARGET_DATE,"):
+                    assert tuple(parameters) == (snapshot_id,)
+                    calls.append(snapshot_id)
+                    projection = ",".join(
+                        "CASE WHEN snapshot_id=? THEN 'REMAINING_WINDOW_TARGET_LOCAL_DAY' ELSE forecast_window_attribution_status END AS forecast_window_attribution_status"
+                        if name == "forecast_window_attribution_status" else
+                        "CASE WHEN snapshot_id=? THEN 0 ELSE contributes_to_target_extrema END AS contributes_to_target_extrema"
+                        if name == "contributes_to_target_extrema" else f'"{name}"'
+                        for name in columns)
+                    sql = f"WITH ensemble_snapshots AS (SELECT {projection} FROM main.ensemble_snapshots) " + sql
+                    parameters = (snapshot_id, snapshot_id, *parameters)
+                return conn.execute(sql, parameters)
+            def __getattr__(self, name): return getattr(conn, name)
+        partial = PartialView()
+        for purpose in ReplacementForecastAuthorityPurpose:
+            blocked = read_replacement_forecast_bundle(partial, **kwargs, authority_purpose=purpose)
+            assert not blocked.ok and blocked.reason_code == "REPLACEMENT_CURRENT_EVIDENCE_EXTREMA_WINDOW_INVALID"
+        blocked = reader.read_pinned_replacement_forecast_bundle(partial, **{**pinned, "raw_input_hwm_conn": partial})
+        assert not blocked.ok and blocked.reason_code == "REPLACEMENT_CURRENT_EVIDENCE_EXTREMA_WINDOW_INVALID"
+        assert len(calls) == len(ReplacementForecastAuthorityPurpose) + 1
+        assert dict(conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (row["posterior_id"],)).fetchone()) == row
+    finally:
+        next(world, None)
 
 
 def _coverage_identity_conn(

@@ -71,7 +71,6 @@ from src.data.forecast_extrema_authority import (
     INTERVAL_CENSORED_ATTRIBUTION_STATUS,
     exact_ensemble_eligibility_sql,
     interval_ensemble_eligibility_sql,
-    remaining_window_after_day_end_sql,
     member_interval_bounds_from_row,
 )
 from src.data.replacement_input_hwm import (
@@ -3938,20 +3937,9 @@ def _current_evidence_snapshot_row(
         ),
         params,
     ).fetchone()
-    remaining = None
-    tau = _day0_remaining_from_iso(request)
-    if tau is not None:
-        # After local-day end the remaining-window row is the current ENS over the
-        # unobserved suffix [tau, day end); the predicate admits nothing otherwise.
-        remaining = conn.execute(
-            query.format(
-                city_predicate="city = ?",
-                select_sql=keyed_sql,
-                eligibility=remaining_window_after_day_end_sql(),
-            ),
-            (*params[:4], tau, tau, tau, decision_at, *params[4:]),
-        ).fetchone()
-    candidates = [tuple(item) for item in (row, interval, remaining) if item is not None]
+    # A broad remaining-window scalar cannot become a full-target shape or a
+    # narrower tau-suffix extremum merely because the local day has ended.
+    candidates = [tuple(item) for item in (row, interval) if item is not None]
     if not candidates:
         return None
     newest = max(candidates, key=lambda item: (str(item[0]), str(item[1]), int(item[2])))

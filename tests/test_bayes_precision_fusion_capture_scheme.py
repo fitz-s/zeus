@@ -1,5 +1,8 @@
 # Created: 2026-09-30
 # Last reused/audited: 2026-10-02
+# Lifecycle: created=2026-09-30; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Purpose: Preserve configured capture selection and exact current-extra verdict parity.
+# Reuse: Run before modifying the shared capture/proof selector.
 # Authority basis: review F2 of the Day0/source-clock rebuild (one source-set law).
 """The capture's model selection uses the same scheme as the representative collapse.
 

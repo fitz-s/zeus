@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-30
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Last reused/audited: 2026-10-02
+# Lifecycle: created=2026-06-06; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Protect replacement source_run/source_run_coverage identity from cross-product lineage drift.
 # Reuse: Run before writing or reading replacement source_run dependencies, readiness rows, or replay provenance.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + Bayes fusion live integration.
@@ -86,6 +86,36 @@ def test_expected_dependency_identity_map_separates_raw_anchor_and_derived_produ
     assert high["soft_anchor_posterior"].source_id == "openmeteo_ecmwf_ifs9_bayes_fusion"
     assert high["soft_anchor_posterior"].data_version.endswith("_high_v1")
     assert low["soft_anchor_posterior"].data_version.endswith("_low_v1")
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_native_certificate_same_snapshot_requires_full_target_extrema(metric):
+    import sqlite3
+    from src.data.replacement_forecast_source_run_identity import native_coordinate_certificate_reason
+    from src.data.forecast_extrema_authority import REMAINING_WINDOW_ATTRIBUTION_STATUS
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE source_run (source_run_id TEXT, manifest_hash TEXT)")
+    conn.execute("INSERT INTO source_run VALUES ('run', 'current')")
+    conn.execute("""CREATE TABLE ensemble_snapshots (snapshot_id INTEGER PRIMARY KEY,
+        city TEXT,target_date TEXT,temperature_metric TEXT,dataset_id TEXT,provenance_json TEXT,
+        source_cycle_time TEXT,source_available_at TEXT,source_run_id TEXT,
+        causality_status TEXT,boundary_ambiguous INTEGER,forecast_window_attribution_status TEXT,
+        contributes_to_target_extrema INTEGER)""")
+    version = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version
+    conn.execute("INSERT INTO ensemble_snapshots VALUES (17,'Hong Kong','2026-10-02',? ,?,'{}',"
+        "'2026-10-02T06:00:00Z','2026-10-02T14:00:00Z','run','OK',0,?,0)",
+        (metric, version, REMAINING_WINDOW_ATTRIBUTION_STATUS))
+    kwargs = dict(shape={"snapshot_id": 17}, city="Hong Kong", target_date="2026-10-02", metric=metric)
+    assert native_coordinate_certificate_reason(conn, **kwargs) == "REPLACEMENT_CURRENT_EVIDENCE_EXTREMA_WINDOW_INVALID"
+    for status, contributes in (("FULLY_INSIDE_TARGET_LOCAL_DAY", 1), ("INTERVAL_CENSORED_TARGET_LOCAL_DAY", 0)):
+        conn.execute("UPDATE ensemble_snapshots SET forecast_window_attribution_status=?,contributes_to_target_extrema=?",
+            (status, contributes))
+        assert native_coordinate_certificate_reason(conn, **kwargs) is None
+    conn.execute("UPDATE ensemble_snapshots SET causality_status='UNKNOWN'")
+    assert native_coordinate_certificate_reason(conn, **kwargs) == "REPLACEMENT_CURRENT_EVIDENCE_EXTREMA_WINDOW_INVALID"
+    assert native_coordinate_certificate_reason(conn, **{**kwargs, "metric": "low" if metric == "high" else "high"}) == "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
+    conn.close()
 
 
 @pytest.mark.parametrize(
