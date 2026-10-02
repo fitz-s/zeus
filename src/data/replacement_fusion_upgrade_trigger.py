@@ -400,7 +400,7 @@ def _latest_posterior_inputs(
     try:
         row = conn.execute(
             """
-            SELECT source_cycle_time, provenance_json
+            SELECT source_cycle_time, provenance_json, computed_at, openmeteo_anchor_id
             FROM forecast_posteriors
             WHERE source_id = ? AND city = ? AND target_date = ? AND temperature_metric = ?
             ORDER BY computed_at DESC
@@ -471,7 +471,10 @@ def _latest_posterior_inputs(
         day0_expected_models,
         day0_bundle_valid,
         source_clock_scheme_bound,
-        prov.get("day0_current_temperature_state") if isinstance(prov.get("day0_current_temperature_state"), dict) else None,
+        _served_current_temperature_state(
+            conn, prov, city=city, target_date=target_date, metric=metric,
+            computed_at=row[2], anchor_id=row[3],
+        ),
         bool(prov.get("day0_remaining_carrier_content_identity")),
         (
             prov.get("q_shape") == "fused_day0_fast_residual_likelihood"
@@ -481,6 +484,40 @@ def _latest_posterior_inputs(
         ),
         source_clock if isinstance(source_clock, Mapping) else {},
     )
+
+
+def _served_current_temperature_state(
+    conn: sqlite3.Connection,
+    prov: Mapping[str, object],
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    computed_at: object,
+    anchor_id: object,
+) -> dict[str, object] | None:
+    """The current-temperature state this posterior consumed AND publishes.
+
+    Equality with the capturable state closes the delivery debt only for a row
+    that passes the shared held-authority rule (the one serving readers apply).
+    An invalid or unready matching row consumed nothing servable: the debt stays.
+    """
+    state = prov.get("day0_current_temperature_state")
+    if not isinstance(state, dict):
+        return None
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        current_evidence_shape_has_held_authority,
+    )
+    from src.data.station_ground_evidence import forecast_db_from_connection  # noqa: PLC0415
+
+    try:
+        servable = current_evidence_shape_has_held_authority(
+            prov, materialized_at=computed_at, city=city, target_date=target_date,
+            metric=metric, anchor_id=anchor_id, forecast_db=forecast_db_from_connection(conn),
+        )
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        servable = False
+    return state if servable else None
 
 
 def _legacy_partial_current_proposal_needs_recompute(

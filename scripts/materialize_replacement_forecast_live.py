@@ -55,8 +55,13 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
     read_current_evidence_snapshot_identity,
     write_prepared_replacement_forecast_live,
 )
-from src.data.raw_forecast_artifact_manifest import read_manifest, write_manifest_to_db  # noqa: E402
-from src.data.replacement_forecast_live_materialization_queue import FailureCategory  # noqa: E402
+from src.data.raw_forecast_artifact_manifest import parse_manifest, write_manifest_to_db  # noqa: E402
+from src.data.replacement_forecast_live_materialization_queue import (  # noqa: E402
+    MATERIALIZATION_IDENTITY_VERSION,
+    MATERIALIZATION_INPUT_VALIDATION_REVISION,
+    FailureCategory,
+)
+from src.data.versioned_file_read import UnsafeFile, VersionedFileReader  # noqa: E402
 
 
 UTC = timezone.utc
@@ -93,6 +98,44 @@ def _validating_request_inputs():
         raise
     except ValueError as exc:
         raise RequestInputInvalid(str(exc)) from exc
+
+
+class InputReadUnsettled(OSError):
+    """A named input was written while it was read: no single version was judged."""
+
+
+class _ConsumedInputs:
+    """Every named file this request's validation consumed, read once each.
+
+    A fresh reader per request (no memo carried between requests), so each read
+    returns the very bytes it hashed and the build parses those bytes. The parent
+    binds a verdict to these entries, never to its own earlier reads.
+    """
+
+    def __init__(self) -> None:
+        self._reader = VersionedFileReader(max_bytes=64 * 1024 * 1024, keep_bodies=False)
+        self.files: dict[str, dict[str, object]] = {}
+
+    def read(self, path: Path, *, role: str = "input") -> bytes:
+        resolved = Path(path).resolve()
+        try:
+            read = self._reader.read(resolved)
+        except UnsafeFile as exc:
+            raise InputReadUnsettled(f"{resolved}: {exc}") from exc
+        if not read.settled or read.body is None:
+            raise InputReadUnsettled(f"{resolved}: written during the read")
+        self.files[str(resolved)] = {
+            "path": str(resolved), "role": role,
+            "version": list(read.version), "sha256": read.sha256,
+        }
+        return read.body
+
+    def witness(self) -> dict[str, object]:
+        return {
+            "identity_version": MATERIALIZATION_IDENTITY_VERSION,
+            "validation_revision": MATERIALIZATION_INPUT_VALIDATION_REVISION,
+            "files": sorted(self.files.values(), key=lambda entry: str(entry["path"])),
+        }
 
 
 class _SQLiteDeadlineGuard:
@@ -729,10 +772,6 @@ def _dt(value: str, *, field_name: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
 def _resolve_input_path(path_value: object, *, base_dir: Path) -> Path:
     path = Path(str(path_value))
     if path.is_absolute():
@@ -1059,8 +1098,10 @@ def _materialize(
     schema_ready: bool = False,
     writer_lock: _WriterLockFactory | None = None,
     stage_receipt: _StageReceipt | None = None,
+    consumed: _ConsumedInputs | None = None,
 ) -> tuple[int, dict[str, object]]:
     stage_receipt = stage_receipt or _StageReceipt(input_json, None)
+    consumed = consumed if consumed is not None else _ConsumedInputs()
     if conn is None:
         from src.state.db import (
             connect_existing_forecasts_db_without_journal_bootstrap,
@@ -1091,6 +1132,7 @@ def _materialize(
                     schema_ready=schema_ready,
                     writer_lock=writer_lock or _forecast_writer_lock,
                     stage_receipt=stage_receipt,
+                    consumed=consumed,
                 )
         finally:
             owned_conn.close()
@@ -1100,7 +1142,7 @@ def _materialize(
     with _validating_request_inputs():
         payload, openmeteo_manifest, metric, target_date, source_cycle_time, \
             anchor_cycle_time, anchor_artifact_id, openmeteo_payload, \
-            openmeteo_raw_payload_bytes = _validated_named_inputs(input_json)
+            openmeteo_raw_payload_bytes = _validated_named_inputs(input_json, consumed)
     # The request is judged against the inputs it names only when the Open-Meteo
     # bytes came from a named file; fetched bytes belong to no such identity.
     validation_scope = _validating_request_inputs
@@ -1140,6 +1182,7 @@ def _materialize(
             anchor_cycle_time=anchor_cycle_time,
             openmeteo_payload=openmeteo_payload,
             openmeteo_raw_payload_bytes=openmeteo_raw_payload_bytes,
+            consumed=consumed,
         )
     return _materialize_request(
         conn, request,
@@ -1150,18 +1193,17 @@ def _materialize(
     )
 
 
-def _validated_named_inputs(input_json: Path):
-    payload = _load_json(input_json)
+def _validated_named_inputs(input_json: Path, consumed: _ConsumedInputs):
+    payload = json.loads(consumed.read(input_json, role="request"))
     if not isinstance(payload, Mapping):
         raise ValueError("input JSON must decode to an object")
     base_dir = input_json.parent
     openmeteo_manifest = None
     if "openmeteo_manifest_json" in payload:
-        openmeteo_manifest = read_manifest(
-            _resolve_input_path(
-                payload["openmeteo_manifest_json"], base_dir=base_dir
-            )
+        manifest_path = _resolve_input_path(
+            payload["openmeteo_manifest_json"], base_dir=base_dir
         )
+        openmeteo_manifest = parse_manifest(consumed.read(manifest_path))
         openmeteo_manifest.verify_artifact(root=ROOT)
     metric = str(payload["temperature_metric"])
     target_date = date.fromisoformat(str(payload["target_date"]))
@@ -1179,9 +1221,9 @@ def _validated_named_inputs(input_json: Path):
     )
     openmeteo_payload = openmeteo_raw_payload_bytes = None
     if "openmeteo_payload_json" in payload:
-        openmeteo_raw_payload_bytes = _resolve_input_path(
+        openmeteo_raw_payload_bytes = consumed.read(_resolve_input_path(
             payload["openmeteo_payload_json"], base_dir=base_dir
-        ).read_bytes()
+        ))
         openmeteo_payload = json.loads(openmeteo_raw_payload_bytes)
         if not isinstance(openmeteo_payload, Mapping):
             raise ValueError("Open-Meteo payload JSON must decode to an object")
@@ -1202,6 +1244,7 @@ def _validated_request(
     anchor_cycle_time: datetime,
     openmeteo_payload: Mapping[str, Any],
     openmeteo_raw_payload_bytes: bytes,
+    consumed: _ConsumedInputs,
 ) -> ReplacementForecastMaterializeRequest:
     openmeteo_anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
         openmeteo_payload,
@@ -1213,9 +1256,9 @@ def _validated_request(
         raise ValueError(
             "input JSON requires precision_metadata_json for Open-Meteo ECMWF IFS 9km anchor"
         )
-    precision_payload = _load_json(
+    precision_payload = json.loads(consumed.read(
         _resolve_input_path(payload["precision_metadata_json"], base_dir=base_dir)
-    )
+    ))
     if not isinstance(precision_payload, Mapping):
         raise ValueError("precision_metadata_json must decode to an object")
     precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
@@ -1437,6 +1480,7 @@ def _run_one(
         logging.getLogger().addHandler(handler)
     stage_receipt = _StageReceipt(input_json, deadline_at)
     stage_receipt.mark("open_read_snapshot")
+    consumed = _ConsumedInputs()
     try:
         if conn is None:
             returncode, response = _materialize(
@@ -1448,6 +1492,7 @@ def _run_one(
                 schema_ready=schema_ready,
                 writer_lock=writer_lock,
                 stage_receipt=stage_receipt,
+                consumed=consumed,
             )
         else:
             with stage_receipt.sqlite_deadline_guard(conn):
@@ -1460,7 +1505,9 @@ def _run_one(
                     schema_ready=schema_ready,
                     writer_lock=writer_lock,
                     stage_receipt=stage_receipt,
+                    consumed=consumed,
                 )
+        response = {**response, "consumed_inputs": consumed.witness()}
         encoded = json.dumps(response, sort_keys=True) + "\n"
         if returncode == 2:
             return returncode, "", log_output.getvalue() + encoded
@@ -1477,7 +1524,7 @@ def _run_one(
         return 75, "", log_output.getvalue() + json.dumps(response, sort_keys=True) + "\n"
     except Exception as exc:
         return 2, "", log_output.getvalue() + json.dumps(
-            _error_response(exc), sort_keys=True
+            {**_error_response(exc), "consumed_inputs": consumed.witness()}, sort_keys=True
         ) + "\n"
     finally:
         if handler is not None:

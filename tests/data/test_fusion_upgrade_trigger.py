@@ -2842,6 +2842,57 @@ def test_no_posterior_is_not_an_upgrade() -> None:
     assert verdict["is_upgrade"] is False
 
 
+def _publication_is_servable(monkeypatch) -> None:
+    """Stand-in for a posterior that passes the shared held-authority rule."""
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_cycle_policy.current_evidence_shape_has_held_authority",
+        lambda *_a, **_k: True,
+    )
+
+
+def test_matching_consumed_state_on_unservable_posterior_stays_owed(monkeypatch) -> None:
+    """Round-4 HIGH: equality closes the delivery debt only against a publication
+    the shared held-authority rule admits; the rule sees the selected row."""
+    current = {"source": "ogimet_metar_eham", "observed_at_utc": "2026-09-27T12:00:00+00:00",
+               "value_native": 20.0}
+    conn = _conn()
+    try:
+        _insert_posterior(conn, city="Amsterdam", target_date="2026-09-27", metric="high",
+                          cycle_iso="2026-09-27T06:00:00+00:00", used_models=[],
+                          computed_at="2026-09-27T12:05:00+00:00")
+        provenance = {"bayes_precision_fusion": {"used_models": []},
+                      "day0_current_temperature_state": current}
+        conn.execute("UPDATE forecast_posteriors SET provenance_json=?", (json.dumps(provenance),))
+        conn.commit()
+        monkeypatch.setattr(trigger, "_capturable_current_temperature_state", lambda **_k: current)
+        monkeypatch.setattr(trigger, "_capturable_inputs_for_scope", lambda *_a, **_k: {})
+
+        def verdict():
+            return trigger.scope_capture_offers_larger_provider_set(
+                conn, city="Amsterdam", target_date="2026-09-27", metric="high",
+                changed_sources=("day0_current_temperature_state",),
+                decision_time=datetime(2026, 9, 27, 12, 10, tzinfo=UTC))
+
+        owed = verdict()
+        assert owed["input_revision_changed"] and owed["is_upgrade"]
+        assert owed["changed_input_revisions"]["day0_current_temperature_state"] == current
+        seen = []
+
+        def rule(prov, **kwargs):
+            seen.append(kwargs)
+            return True
+
+        monkeypatch.setattr(
+            "src.data.replacement_forecast_cycle_policy.current_evidence_shape_has_held_authority",
+            rule,
+        )
+        assert not verdict()["input_revision_changed"]
+        assert seen and seen[-1]["city"] == "Amsterdam" and seen[-1]["metric"] == "high"
+        assert seen[-1]["materialized_at"] == "2026-09-27T12:05:00+00:00"
+    finally:
+        conn.close()
+
+
 def test_same_cycle_same_extreme_new_current_temperature_revisions_reseed(
     tmp_path, monkeypatch,
 ) -> None:
@@ -2905,6 +2956,9 @@ def test_same_cycle_same_extreme_new_current_temperature_revisions_reseed(
     forecast.execute("UPDATE forecast_posteriors SET provenance_json = ? WHERE city = 'Helsinki'",
                      (json.dumps(posterior_provenance),))
     forecast.commit()
+    # Matching consumed state on a row that is not a servable publication: owed.
+    assert verdict(now)["input_revision_changed"] is True
+    _publication_is_servable(monkeypatch)
     assert verdict(now)["input_revision_changed"] is False
     with sqlite3.connect(world_path) as conn:
         later = parse_temperature_coverage(
@@ -2972,7 +3026,11 @@ def test_non_helsinki_current_state_revisions_bootstrap_and_refresh_posterior(
             decision_time=datetime.fromisoformat(f"{target}T{at}+00:00"),
         )
 
-    before = verdict(forecast, at="12:05:00")
+    # Matching consumed state on a row the held-authority rule rejects stays owed.
+    assert verdict(forecast, at="12:05:00")["input_revision_changed"] is True
+    with monkeypatch.context() as servable:
+        _publication_is_servable(servable)
+        before = verdict(forecast, at="12:05:00")
     assert before["input_revision_changed"] is False
     changed = verdict(forecast)
     assert changed["changed_input_sources"] == ["day0_current_temperature_state"]
@@ -3000,6 +3058,9 @@ def test_non_helsinki_current_state_revisions_bootstrap_and_refresh_posterior(
     forecast.execute("UPDATE forecast_posteriors SET provenance_json = ?",
                      (json.dumps({**provenance, "day0_current_temperature_state": revision}),))
     forecast.commit()
+    # Consumed but unpublishable (no held authority): the debt stays owed.
+    assert verdict(forecast)["input_revision_changed"] is True
+    _publication_is_servable(monkeypatch)
     assert verdict(forecast)["input_revision_changed"] is False
     forecast.close()
 
