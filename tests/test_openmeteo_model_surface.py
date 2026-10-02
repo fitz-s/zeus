@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-02 (per-pass surface read memo)
 # Authority basis: finite_evidence_probability_symmetry Sep29 native surface slice; INV-14/47.
 """Real OM entity decoding and immutable static-evidence clock relationships."""
 
@@ -625,3 +625,28 @@ def test_any_rewrite_of_the_asset_is_rehashed_and_rejected(ordinary_static_http,
     path.write_bytes(original)
     assert _validate(proof) is None
     assert len(hashes) == 2
+
+
+def test_surface_read_pass_answers_each_cut_once_and_dies_with_the_pass(ordinary_static_http, monkeypatch):
+    """One pass scans the manifest tree once per (model, cut); the next pass rescans."""
+    scans: list[object] = []
+    real_scan = surface._scan
+    monkeypatch.setattr(surface, "_scan", lambda profile: scans.append(1) or real_scan(profile))
+    cut = "2026-09-29T12:01:00+00:00"
+
+    # No capture yet: an unavailable read is never stored, so the capture made
+    # inside the same pass is seen at once.
+    with surface.model_surface_read_pass():
+        missing = surface.read_model_surface_capture("icon_global", decision_at=cut)
+        assert missing.status == "UNAVAILABLE"
+        capture = surface.ensure_model_surface("icon_global")
+        scans.clear()
+        first = surface.read_model_surface_capture("icon_global", decision_at=cut)
+        again = surface.read_model_surface_capture("icon_global", decision_at=cut)
+        assert first.as_payload() == again.as_payload() == capture.as_payload()
+        assert len(scans) == 1
+
+    scans.clear()
+    with surface.model_surface_read_pass():
+        surface.read_model_surface_capture("icon_global", decision_at=cut)
+    assert len(scans) == 1, "a new pass never inherits the old pass's answer"

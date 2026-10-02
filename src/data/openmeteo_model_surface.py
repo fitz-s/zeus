@@ -13,6 +13,7 @@ Official profiles/sentinels: open-meteo/open-meteo b06f4760fd1f997e5559bb380f64c
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -329,8 +330,45 @@ def _latest(profile: Mapping[str, object], *, decision_at: datetime | None = Non
     return latest
 
 
+_SURFACE_READ_PASS: ContextVar[dict[tuple[str, str], SurfaceAssetCapture] | None] = ContextVar(
+    "model_surface_read_pass", default=None,
+)
+
+
+@contextmanager
+def model_surface_read_pass():
+    """One pass's surface reads: the manifest scan runs once per (model, cut).
+
+    Live 10-02 one target plan read 80 distinct (model, cut) pairs 9,246 times,
+    each a full glob and re-read of every manifest. The memo dies with the
+    pass, so a surface captured afterwards is seen by the next pass; only a
+    READY capture is stored, never an unavailable or invalid read.
+    """
+    if _SURFACE_READ_PASS.get() is not None:
+        yield
+        return
+    token = _SURFACE_READ_PASS.set({})
+    try:
+        yield
+    finally:
+        _SURFACE_READ_PASS.reset(token)
+
+
 def read_model_surface_capture(model: str, *, decision_at: datetime | str) -> SurfaceAssetCapture:
     """Only existing local evidence at this cut; no HTTP, writes, or clock renewal."""
+    memo = _SURFACE_READ_PASS.get()
+    if memo is None:
+        return _read_model_surface_capture(model, decision_at=decision_at)
+    key = (str(model), str(decision_at))
+    hit = memo.get(key)
+    if hit is None:
+        hit = _read_model_surface_capture(model, decision_at=decision_at)
+        if hit.status == "READY":
+            memo[key] = hit
+    return hit
+
+
+def _read_model_surface_capture(model: str, *, decision_at: datetime | str) -> SurfaceAssetCapture:
     try:
         profile = _profile(model)
         found = _latest(profile, decision_at=_utc(decision_at))

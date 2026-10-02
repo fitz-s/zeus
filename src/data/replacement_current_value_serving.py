@@ -56,6 +56,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
 import sqlite3
 import threading
@@ -493,8 +495,55 @@ def _physical_artifact_candidates_by_row(conn: sqlite3.Connection, row: Mapping[
         cursor.close()
 
 
+_PHYSICAL_READ_PASS: ContextVar[dict[tuple[object, ...], str] | None] = ContextVar(
+    "physical_read_pass", default=None,
+)
+
+
+@contextmanager
+def physical_read_pass():
+    """One pass's physical-proof reads, each answered once.
+
+    A pass (the healer's coverage judgement, one target plan) re-reads the same
+    row identity at the same cutoff once per caller (11,742 reads, 2,076
+    distinct on live 10-02). Inside this scope an identical read on the same
+    connection and visible snapshot returns the first answer; the scope dies
+    with the pass, so new captures are always seen by the next one. A read that
+    raises is never stored. Nested scopes share the outer pass.
+    """
+    from src.data.openmeteo_model_surface import model_surface_read_pass  # noqa: PLC0415
+
+    if _PHYSICAL_READ_PASS.get() is not None:
+        yield
+        return
+    token = _PHYSICAL_READ_PASS.set({})
+    try:
+        with model_surface_read_pass():
+            yield
+    finally:
+        _PHYSICAL_READ_PASS.reset(token)
+
+
 def _read_product_identity_at_cutoff(conn: sqlite3.Connection, raw: object, *, deadline_monotonic: float | None = None) -> str:
     """Complete same-issued scan; an observed repair covers only its old unknown-bad prefix."""
+    memo = _PHYSICAL_READ_PASS.get()
+    if memo is None:
+        return _read_product_identity_at_cutoff_uncached(conn, raw, deadline_monotonic=deadline_monotonic)
+    # The visible snapshot of this exact connection, as _snapshot_memo keys it:
+    # a written connection or any other connection's commit is a new key.
+    snapshot = _snapshot_memo(conn).key
+    if snapshot is None:
+        return _read_product_identity_at_cutoff_uncached(conn, raw, deadline_monotonic=deadline_monotonic)
+    key = (id(conn), snapshot[1], str(raw))
+    hit = memo.get(key)
+    if hit is None:
+        hit = memo[key] = _read_product_identity_at_cutoff_uncached(
+            conn, raw, deadline_monotonic=deadline_monotonic,
+        )
+    return hit
+
+
+def _read_product_identity_at_cutoff_uncached(conn: sqlite3.Connection, raw: object, *, deadline_monotonic: float | None = None) -> str:
     row = json.loads(str(raw))
     if row.get("physical_proof_cutoff") is not None and _legacy_hko_context(row):
         deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS

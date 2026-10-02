@@ -2645,6 +2645,30 @@ def build_replacement_forecast_current_target_plan(
 ) -> ReplacementForecastCurrentTargetPlan:
     """Return current market targets and the replacement artifacts needed for them."""
 
+    # One plan is one physical-proof read pass (see physical_read_pass).
+    from src.data.replacement_current_value_serving import physical_read_pass  # noqa: PLC0415
+
+    with physical_read_pass():
+        return _build_replacement_forecast_current_target_plan(
+            forecast_db, limit=limit, min_target_date=min_target_date,
+            require_raw_artifacts=require_raw_artifacts, now_utc=now_utc,
+            required_openmeteo_source_cycle_time=required_openmeteo_source_cycle_time,
+            observation_conn=observation_conn, deadline_monotonic=deadline_monotonic,
+        )
+
+
+def _build_replacement_forecast_current_target_plan(
+    forecast_db: Path | str,
+    *,
+    limit: int | None,
+    min_target_date: date | str | None,
+    require_raw_artifacts: bool,
+    now_utc: datetime | None,
+    required_openmeteo_source_cycle_time: datetime | str | None,
+    observation_conn: sqlite3.Connection | None,
+    deadline_monotonic: float | None,
+) -> ReplacementForecastCurrentTargetPlan:
+
     db_path = Path(forecast_db)
     # Use now_utc as the reference clock when min_target_date is not explicit — avoids
     # wall-clock drift against fixtures or callers that pass a fixed now_utc.

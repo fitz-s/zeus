@@ -3622,6 +3622,30 @@ def _extras_coverage_missing(
     existing materializer cohort selector supplies the simultaneous between term.
     Both require two families. Unknown metadata or an unreadable probe retries.
     """
+    # One coverage judgement is one physical-proof read pass.
+    from src.data.replacement_current_value_serving import physical_read_pass  # noqa: PLC0415
+
+    with physical_read_pass():
+        return _extras_coverage_missing_pass(
+            cfg, cycle, decision_time=decision_time, plan=plan, capture_rows=capture_rows,
+            held_priority=held_priority, deadline_monotonic=deadline_monotonic,
+            cohort_backtrack_candidates=cohort_backtrack_candidates,
+            physical_recovery_candidates=physical_recovery_candidates,
+        )
+
+
+def _extras_coverage_missing_pass(
+    cfg: dict[str, object],
+    cycle: datetime,
+    *,
+    decision_time: datetime | None,
+    plan: object | None,
+    capture_rows: Sequence[object] | None,
+    held_priority: Mapping[tuple[str, str, str], int] | None,
+    deadline_monotonic: float | None,
+    cohort_backtrack_candidates: dict[tuple[str, str, str], tuple[str, datetime]] | None,
+    physical_recovery_candidates: dict[tuple[str, str, str], tuple[str, datetime, str, int]] | None,
+) -> tuple[set[tuple[str, str, str]], int] | None:
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return None

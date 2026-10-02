@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-09-25; last_reused=2026-09-25
+# Lifecycle: created=2026-06-08; last_reviewed=2026-10-02; last_reused=2026-10-02 (physical read pass equivalence)
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -5764,3 +5764,36 @@ def test_normal_unheld_same_issued_bad_third_provider_receipt_has_a_real_drain(t
     repeat = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(world.cfg,
         planning_cycle=world.run, max_wall_clock_seconds=10, include_previous_runs=False, prune_after=False)
     assert len(world.calls) == calls + 1 and world.tracker.calls_today() == quota + 1, repeat
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_physical_read_pass_is_equivalent_to_uncached_reads(tmp_path, monkeypatch, metric):
+    """Memo on and memo off give identical healer coverage and target plans on a
+    frozen scope; inside one pass each identical proof read runs once."""
+    import contextlib
+    from src.data import replacement_current_value_serving as serving
+    from src.data import replacement_forecast_production as production
+    from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
+    world = _normal_hk_three_provider_world(tmp_path, monkeypatch, metric)
+    reads: list[object] = []
+    real_read = serving._read_product_identity_at_cutoff_uncached
+    monkeypatch.setattr(serving, "_read_product_identity_at_cutoff_uncached",
+                        lambda conn, raw, **kw: reads.append(raw) or real_read(conn, raw, **kw))
+
+    def both():
+        reads.clear()
+        backtrack: dict = {}
+        coverage = production._extras_coverage_missing(world.cfg, world.run, decision_time=world.clock[0],
+            capture_rows=world.keys, held_priority={}, cohort_backtrack_candidates=backtrack)
+        coverage_reads = list(reads)
+        plan = build_replacement_forecast_current_target_plan(world.db, require_raw_artifacts=False,
+            now_utc=world.clock[0])
+        return (coverage, backtrack, plan.status, [repr(row) for row in plan.rows]), coverage_reads
+
+    memo_on, on_reads = both()
+    monkeypatch.setattr(serving, "physical_read_pass", contextlib.nullcontext)
+    memo_off, off_reads = both()
+
+    assert memo_on == memo_off
+    assert on_reads and len(set(map(str, on_reads))) == len(on_reads), "each identical read runs once"
+    assert len(off_reads) > len(on_reads)
