@@ -4,6 +4,64 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-10-02 Hong Kong-led global redecision repair
+
+Resume the unfinished operator task from saved task branch `fff222f020df`,
+without treating its October 1 runtime cut as current. This slice starts from
+`origin/live` at `3bfdf7b41f2e464d1c860538e52763d8e4d2dfb8`; current process,
+canonical DB, certificate and venue evidence is sampled separately.
+
+Goal: causal new physical evidence must reach current probability and lawful
+held redecision before an executable exit opportunity disappears. A restart,
+loss summary, forced loss realization or eventual zero-valued holding is not
+completion. Preserve source-issued/fetched/recorded cuts, settlement geometry,
+the current-evidence probability regime and the existing action/risk laws.
+
+Current Hong Kong HIGH lead is position `c133991e-a2a`, YES 29 C, confirmed
+5 shares at 0.12. Its price crossed below the action band at 00:25:50 UTC,
+while its held q remained 0.375162. The first 30.2 C qualified HKO observation
+was available at 01:39:42 UTC and reached the held monitor at 01:40:07.
+Existing completed auctions evaluated SELL and rejected negative mean EV;
+the monitor's family-preparation label alone does not establish a lost lawful
+exit. Existing LOW and native NO-token checks form the symmetry counterpart.
+
+Confirmed bounded repair slices:
+
+1. Normal BPF held physical-proof recovery scans historical families until it
+   exhausts the shared eight-second maintenance budget, then throws away the
+   entire result before current capture/download. A real read-only 19-family
+   scan reproduced `physical_capture_scan_budget_exceeded` at 8.0047 seconds.
+   Bound debt work, preserve explicit incomplete/unknown debt and fair progress,
+   and reserve time for independent current capture. Preserve latest-poison
+   rejection and exact family/source/run/cut proof; never classify an unscanned
+   debt as qualified. SCOPE is the selected held family/product; DRAIN is normal
+   scheduled maintenance with bounded fair continuation; RESET requires real
+   entity/proof followed by a fresh normal seed, not a rewritten clock.
+2. Shared maker-fill population incorrectly applies BUY's limit-below-ask
+   predicate to SELL, discarding legitimate at-ask SELL facts. Thirty real-shaped
+   filled SELL samples reproduce zero usable samples while their book law is
+   legal. Filter by the existing side-specific resting book law, retaining
+   sample causality, price band, confirmed facts and witness thresholds.
+
+The current Day0 innovation-decay assumption, observation publication delay and
+cash-EV versus expected-log constraints remain named causal/design questions.
+They are not changed merely because this order lost. Review only unresolved
+semantics; no mandatory review stages or unrelated registry cleanup.
+
+Acceptance: actual-function RED-to-GREEN antibodies for both defects; required
+affected checks; a source-to-current-certificate-to-held-auction/JIT/confirmed-
+exit antibody with causal clocks, both YES/NO and HIGH/LOW twins, and explicit
+stale/missing/price-band negatives. Measure current runtime stage times after
+landing/loading and verify the maintenance DRAIN actually progresses. Report
+which Hong Kong mechanism is proved, refuted or still unproved, and never claim
+counterfactual profit from later information. Land via normal fast-forward,
+load with the existing deployment script, preserve other tasks and live config.
+
+Ownership: main integrates, owns plan/registries and runtime acceptance. Child
+writers own disjoint source/test slices in temporary task child worktrees;
+read-only lanes provide current facts and mathematical diagnosis. No manual
+venue action or canonical DB repair is part of this implementation.
+
 Latest complete live stored-row audit is loss's existing
 `/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
 SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.
