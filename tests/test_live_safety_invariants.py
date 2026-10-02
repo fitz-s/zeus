@@ -7796,7 +7796,17 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         monkeypatch.setattr(
             cutover_guard,
             "gate_for_intent",
-            lambda _intent: SimpleNamespace(allowed_submit=fault != "read_only"),
+            lambda _intent: cutover_guard.CutoverDecision(
+                allow_submit=fault != "read_only",
+                allow_cancel=False,
+                allow_redemption=False,
+                block_reason="test_read_only" if fault == "read_only" else None,
+                state=(
+                    cutover_guard.CutoverState.BLOCKED
+                    if fault == "read_only"
+                    else cutover_guard.CutoverState.LIVE_ENABLED
+                ),
+            ),
         )
         if fault == "portfolio_unverified":
             portfolio.authority = "unverified"

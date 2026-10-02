@@ -6658,7 +6658,7 @@ def _held_monitor_hold_needs_global_coverage(pos, exit_context, portfolio) -> bo
             return False
         # Authority loss keeps monitoring read-only. This is the existing EXIT
         # capability, independent of the RiskGuard level or BUY admission.
-        return bool(gate_for_intent(IntentKind.EXIT).allowed_submit)
+        return bool(gate_for_intent(IntentKind.EXIT).allow_submit)
     except Exception:  # noqa: BLE001 - unavailable authority cannot publish work.
         return False
 

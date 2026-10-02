@@ -382,6 +382,45 @@ acceptance gate. Actual normal full-scope timeliness still requires the new
 trace; known source-missing roots and old dead Hong Kong exposure are not
 reclassified or recovered by this patch.
 
+Post-load acceptance catches an implementation/test-double defect in the new
+HOLD work qualifier: it reads `CutoverDecision.allowed_submit`, but the real
+dataclass exposes `allow_submit`. The exception-to-unavailable boundary therefore
+returns false in production, while the fixture's matching SimpleNamespace typo
+concealed the interface mismatch. The prior zero-findings review is not evidence
+of this helper's correctness. Correct that single field and replace the fixture
+with actual CutoverDecision values; prove wrong-field RED and correct-field GREEN
+without loosening any qualifier. The monitor writer owns only its two prior files.
+
+Runtime at successor `f5568e03` (contains cfa7; two bounded Day0 connection-open
+deadline changes, own slice bytes otherwise unchanged) proves loaded main and
+sidecars/config/DB roots and released restart guard. A real full receipt now has
+29 holdings: 16 EVALUATED, nine NO_BID and four out-of-band units, not the former
+21 UNKNOWN books. That is not actuation. One normal prepare still takes 44.268
+seconds; actual callbacks are now traceable. A later stable preflight requeues
+with `EDLI_LIVE_CERTIFICATE_BUILD_FAILED:database is busy: global JIT snapshot
+write deferred`. Investigate the actual transaction/lease owner separately;
+do not remove receipt writes or extend freshness/deadlines to obtain a fill.
+
+Interface correction checkpoint: real CutoverDecision positive/read-only values
+replace the misleading namespace. The wrong-field code fails four fresh twins
+while the real read-only case passes; the corrected `allow_submit` field gives
+21 caller passes and main independently repeats 50 HOLD/SELL actuator instances.
+A single canonical RO production sample (2259b2ad-176, MONITOR seq71) has complete
+context, native bid .73, q .8568072977488298, venue-fill exposure 1.36 and actual
+LIVE_ENABLED/allow_submit=True: original helper false, corrected helper true.
+No wake or venue operation is injected by this proof; actual publish/drain still
+requires loading. Successor compatibility gives 151 pass/four failures; all four
+also fail on original cfa7 monitor code with identical normalized failure
+attributes (only memory addresses and pytest-run directory numbers normalized).
+Those failures are not a new-regression or clean all-suite claim.
+
+JIT follow-up refutes a permanent isolated-writer lock: the same loaded process
+passes that exact path before and after the one busy deferral. The generic busy
+message also covers lease acquisition/hold budget; its historical exact owner
+remains unproved. Do not change write priority, budget or snapshot semantics based
+on that single rejection. It remains a retry/observability gap, not an established
+money-path repair. The latency lane owns actual normal-cut callback attribution.
+
 Latest complete live stored-row audit is loss's existing
 `/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
 SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.
