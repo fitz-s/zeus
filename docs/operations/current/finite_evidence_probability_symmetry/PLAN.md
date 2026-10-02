@@ -27,6 +27,23 @@ exit. Existing LOW and native NO-token checks form the symmetry counterpart.
 
 Confirmed bounded repair slices:
 
+0. Core exit-action law conflict, proved against ACTIVE exit authority E2/E6:
+   the implementation additionally requires positive SELL cash EV, although
+   E2 explicitly permits a bid below q when expected log wealth improves.
+   Immutable Hong Kong decision 888561 independently reproduces W=0.858079,
+   held n=5, SELL x=2.4 at 0.19, q=0.4013657819973186, net proceeds=0.437532,
+   positive expected delta log wealth 0.08291646628523747 and cash EV
+   -0.5257458767935645. The former packet-level positive-EV SELL restriction
+   is superseded by the owning E2/E6 law, not by a desired profit label.
+   Restore SELL-specific expected-log admission and size/prefix/JIT parity;
+   continue computing, persisting and reproducing mean EV without treating
+   its sign as an additional SELL veto. BUY positive-EV requirements remain.
+   Ruin, exact wealth/endowment, finite values, quote/depth/fees, price band,
+   maker-fill/no-fill/partial-fill evidence, capital and risk laws remain.
+   E1 cost basis stays absent from permission. The observed partial sale's
+   accounting profit would be 0.149532; that is neither a historical fill nor
+   proof that the entire Hong Kong order could have ended profitably.
+
 1. Normal BPF held physical-proof recovery scans historical families until it
    exhausts the shared eight-second maintenance budget, then throws away the
    entire result before current capture/download. A real read-only 19-family
@@ -43,15 +60,17 @@ Confirmed bounded repair slices:
    legal. Filter by the existing side-specific resting book law, retaining
    sample causality, price band, confirmed facts and witness thresholds.
 
-The current Day0 innovation-decay assumption, observation publication delay and
-cash-EV versus expected-log constraints remain named causal/design questions.
-They are not changed merely because this order lost. Review only unresolved
+The current Day0 innovation-decay assumption and observation publication delay
+remain named causal/design questions. They are not changed merely because
+this order lost. Review only unresolved
 semantics; no mandatory review stages or unrelated registry cleanup.
 
-Acceptance: actual-function RED-to-GREEN antibodies for both defects; required
+Acceptance: actual-function RED-to-GREEN antibodies for the proved defects; required
 affected checks; a source-to-current-certificate-to-held-auction/JIT/confirmed-
 exit antibody with causal clocks, both YES/NO and HIGH/LOW twins, and explicit
-stale/missing/price-band negatives. Measure current runtime stage times after
+stale/missing/price-band negatives. Include the immutable Hong Kong log-positive,
+cash-EV-negative SELL witness through real sizing, common-axis admission and
+JIT, and preserve BUY negative-EV rejection. Measure current runtime stage times after
 landing/loading and verify the maintenance DRAIN actually progresses. Report
 which Hong Kong mechanism is proved, refuted or still unproved, and never claim
 counterfactual profit from later information. Land via normal fast-forward,
