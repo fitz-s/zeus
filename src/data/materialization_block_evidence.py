@@ -167,7 +167,8 @@ def _well_formed(evidence: object, prospective: Mapping[str, object] | None) -> 
     clock roles equal to that request's."""
     if not isinstance(evidence, Mapping) or evidence.get("revision") != EVIDENCE_REVISION:
         return False
-    required = SUPPORTED.get(evidence.get("reason"))  # type: ignore[arg-type]
+    reason = evidence.get("reason")
+    required = SUPPORTED.get(reason) if isinstance(reason, str) else None
     items = evidence.get("items")
     if (
         required is None
@@ -179,8 +180,8 @@ def _well_formed(evidence: object, prospective: Mapping[str, object] | None) -> 
     if (
         not isinstance(runs, (list, tuple))
         or len(runs) != len(_ROLES)
-        or not all(isinstance(run, Mapping) for run in runs)
-        or {run.get("role") for run in runs} != set(_ROLES)
+        or not all(isinstance(run, Mapping) and isinstance(run.get("role"), str) for run in runs)
+        or {run["role"] for run in runs} != set(_ROLES)
     ):
         return False
     if prospective is None:
