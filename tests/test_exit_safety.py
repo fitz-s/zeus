@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-02
 # Lifecycle: created=2026-04-27; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
@@ -15887,9 +15887,14 @@ def test_reauction_deadline_expires_before_external_publish(monkeypatch):
     monkeypatch.setattr(
         exit_lifecycle,
         "latest_held_sell_reauction_obligation",
+        # Complete lineage: only a complete claim can reach external publish.
         lambda *_args, **_kwargs: {
             "schema_version": 4,
             "generation": "deadline-generation",
+            "selection_epoch_identity": "epoch",
+            "sell_book_witness_identity": "book",
+            "debt_event_id": "debt",
+            "monitor_event_id": "monitor",
         },
     )
     monkeypatch.setattr(
@@ -18496,6 +18501,255 @@ def test_malformed_or_unknown_publish_claim_remains_fenced(conn, damage):
                 'day0_window', 'day0_window', 'center_buy', 'tests.test_exit_safety', ?, 'live')''',
         (_NOW.isoformat(), raw))
     assert global_sell_reauction_publish_claim_blocks_exit_command(conn, 'bad-claim')
+
+
+def _seed_pending_lineage_debt(conn, *, position_id='pending-lineage', lineage=None):
+    """Model the 40b12033 debt: a V4 release whose claim lineage is pending."""
+    _seed_canonical_position_identity(
+        conn, position_id=position_id, token_id=YES_TOKEN, shares=10,
+    )
+    conn.execute("UPDATE position_current SET condition_id = 'condition-pending' "
+                 "WHERE position_id = ?", (position_id,))
+    obligation = {
+        'schema_version': 4, 'position_id': position_id, 'held_token_id': YES_TOKEN,
+        'scope_identity': 'scope-pending', 'generation': 'generation-pending',
+        'family': ['Chicago', '2026-10-02', 'high'], 'book_state': 'UNKNOWN',
+        'selection_epoch_identity': '', 'sell_book_witness_identity': '',
+        'debt_event_id': f'{position_id}:exit_retry_released:1',
+        'monitor_event_id': f'{position_id}:monitor_refreshed:0',
+        **(lineage or {}),
+    }
+    payload = {
+        'status': 'ready', 'release_reason': 'GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED',
+        'error': 'global_sell_exit_executable_snapshot_unavailable',
+        'held_sell_reauction_obligation': obligation,
+    }
+    conn.execute('''INSERT INTO position_events
+        (event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+         phase_before, phase_after, strategy_key, source_module, payload_json, env)
+        VALUES (?, ?, 1, 1, 'EXIT_RETRY_RELEASED', ?, 'pending_exit', 'day0_window',
+                'center_buy', 'src.execution.exit_lifecycle', ?, 'live')''',
+        (f'{position_id}:exit_retry_released:1', position_id, _NOW.isoformat(),
+         json.dumps(payload)))
+    conn.commit()
+    return SimpleNamespace(
+        trade_id=position_id, position_id=position_id, token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN, direction='buy_yes', strategy_key='center_buy',
+        env='live', city='Chicago', target_date='2026-10-02',
+        temperature_metric='high',
+        effective_exposure=lambda: SimpleNamespace(shares=10.0),
+    )
+
+
+def _seed_post_debt_monitor(conn, position_id, *, trigger='HOLD', fresh=True, lineage=None):
+    seq = conn.execute('SELECT max(sequence_no)+1 FROM position_events WHERE position_id=?',
+                       (position_id,)).fetchone()[0]
+    event_id = f'{position_id}:monitor_refreshed:{seq}'
+    payload = {
+        'last_monitor_prob_is_fresh': fresh, 'last_monitor_market_price_is_fresh': fresh,
+        'exit_decision_available': True, 'exit_decision_should_exit': False,
+        'exit_decision_trigger': trigger, 'exit_decision_reason': trigger,
+        'held_sell_reauction_monitor_lineage': {
+            'monitor_event_id': event_id, 'selection_epoch_identity': '',
+            'sell_book_witness_identity': '', **(lineage or {}),
+        },
+    }
+    conn.execute('''INSERT INTO position_events
+        (event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+         phase_before, phase_after, strategy_key, source_module, payload_json, env)
+        VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'day0_window', 'day0_window',
+                'center_buy', 'src.engine.cycle_runtime', ?, 'live')''',
+        (event_id, position_id, seq, _NOW.isoformat(), json.dumps(payload)))
+    conn.commit()
+    return event_id
+
+
+def _capture_family_preparation(monkeypatch, *, accepted=True):
+    calls = []
+    monkeypatch.setattr(
+        'src.engine.cycle_runtime._request_current_global_family_preparation',
+        lambda position: calls.append(position.trade_id) or accepted,
+    )
+    return calls
+
+
+def test_pending_lineage_debt_under_fresh_hold_requests_binding_then_retires_typed(
+    conn, monkeypatch, caplog,
+):
+    from src.execution import exit_lifecycle
+
+    position = _seed_pending_lineage_debt(conn)
+    monitor_id = _seed_post_debt_monitor(conn, position.trade_id)
+    preparations = _capture_family_preparation(monkeypatch)
+    requested = []
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+
+    with caplog.at_level('WARNING', logger='src.execution.exit_lifecycle'):
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn, requester=lambda *_a: requested.append(1) or True,
+        )
+
+    # The auction stays the decider: the drain asks it to bind a fresh cut,
+    # never publishes a held request on stale lineage, and never submits.
+    assert preparations == [position.trade_id]
+    assert requested == []
+    assert conn.execute('SELECT count(*) FROM venue_commands').fetchone()[0] == 0
+    assert 'GLOBAL_SELL_DEBT_LINEAGE_UNBINDABLE_HOLD' in caplog.text
+    assert position.trade_id in caplog.text
+    row = conn.execute(
+        "SELECT event_type, venue_status, payload_json FROM position_events "
+        "WHERE position_id=? ORDER BY sequence_no DESC LIMIT 1", (position.trade_id,),
+    ).fetchone()
+    retired = json.loads(row['payload_json'])
+    assert (row['event_type'], row['venue_status']) == (
+        'EXIT_RETRY_RELEASED', 'lineage_unbindable_retired')
+    assert retired['retirement_reason'] == 'GLOBAL_SELL_DEBT_LINEAGE_UNBINDABLE_HOLD'
+    assert retired['retired_by_monitor_event_id'] == monitor_id
+    assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+    assert exit_lifecycle.latest_held_sell_reauction_obligation(conn, position) == {}
+
+    # Durable, restart-idempotent: a second pass finds no debt and does nothing.
+    assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position, conn=conn, requester=lambda *_a: requested.append(1) or True,
+    )
+    assert preparations == [position.trade_id]
+
+    # A later SELL decision still opens a new debt.
+    later = {
+        'status': 'ready', 'release_reason': 'GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED',
+        'error': 'global_sell_exit_executable_snapshot_unavailable',
+        'held_sell_reauction_obligation': {
+            'schema_version': 4, 'position_id': position.trade_id,
+            'held_token_id': YES_TOKEN, 'scope_identity': 'scope-later',
+            'generation': 'generation-later',
+        },
+    }
+    seq = conn.execute('SELECT max(sequence_no)+1 FROM position_events').fetchone()[0]
+    conn.execute('''INSERT INTO position_events
+        (event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+         phase_before, phase_after, strategy_key, source_module, payload_json, env)
+        VALUES (?, ?, 1, ?, 'EXIT_RETRY_RELEASED', ?, 'pending_exit', 'day0_window',
+                'center_buy', 'src.execution.exit_lifecycle', ?, 'live')''',
+        (f'{position.trade_id}:later', position.trade_id, seq, _NOW.isoformat(),
+         json.dumps(later)))
+    conn.commit()
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+    assert exit_lifecycle.latest_held_sell_reauction_obligation(
+        conn, position)['generation'] == 'generation-later'
+
+
+@pytest.mark.parametrize('monitor', ['none', 'stale_hold', 'sell_pending'])
+def test_pending_lineage_debt_without_fresh_hold_requests_binding_and_stays_debt(
+    conn, monkeypatch, caplog, monitor,
+):
+    from src.execution import exit_lifecycle
+
+    position = _seed_pending_lineage_debt(conn)
+    if monitor == 'stale_hold':
+        _seed_post_debt_monitor(conn, position.trade_id, fresh=False)
+    elif monitor == 'sell_pending':
+        _seed_post_debt_monitor(conn, position.trade_id, trigger='GLOBAL_REAUCTION_PENDING')
+    preparations = _capture_family_preparation(monkeypatch)
+
+    with caplog.at_level('WARNING', logger='src.execution.exit_lifecycle'):
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn, requester=lambda *_a: pytest.fail('stale lineage'),
+        )
+
+    assert preparations == [position.trade_id]
+    assert 'LINEAGE_PENDING_FAMILY_PREPARATION_REQUESTED' in caplog.text
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+
+
+def test_pending_lineage_hold_debt_never_retires_without_auction_handoff(
+    conn, monkeypatch, caplog,
+):
+    from src.execution import exit_lifecycle
+
+    position = _seed_pending_lineage_debt(conn)
+    _seed_post_debt_monitor(conn, position.trade_id)
+    _capture_family_preparation(monkeypatch, accepted=False)
+
+    with caplog.at_level('WARNING', logger='src.execution.exit_lifecycle'):
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn, requester=lambda *_a: pytest.fail('stale lineage'),
+        )
+
+    assert 'LINEAGE_PENDING_FAMILY_PREPARATION_PUBLISH_FAILED' in caplog.text
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+
+
+def test_pending_lineage_debt_binds_fresh_monitor_lineage_and_publishes(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.execution.exit_safety import global_sell_reauction_publish_claim_lineage
+
+    position = _seed_pending_lineage_debt(conn)
+    monitor_id = _seed_post_debt_monitor(
+        conn, position.trade_id,
+        lineage={'selection_epoch_identity': 'epoch-now',
+                 'sell_book_witness_identity': 'book-now'},
+    )
+    preparations = _capture_family_preparation(monkeypatch)
+    claims = []
+
+    def requester(released, force_new):
+        row = conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id=? "
+            "ORDER BY sequence_no DESC LIMIT 1", (released.trade_id,),
+        ).fetchone()
+        claims.append((force_new, json.loads(row['payload_json'])))
+        return True
+
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position, conn=conn, requester=requester,
+    )
+    assert preparations == []
+    [(force_new, claim)] = claims
+    assert force_new is True
+    assert global_sell_reauction_publish_claim_lineage(
+        claim, position_id=position.trade_id, held_token_id=YES_TOKEN,
+    ) == 'complete'
+    bound = claim['held_sell_reauction_obligation']
+    assert bound['selection_epoch_identity'] == 'epoch-now'
+    assert bound['sell_book_witness_identity'] == 'book-now'
+    assert bound['monitor_event_id'] == monitor_id
+    assert bound['generation'] == 'generation-pending'
+    assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+
+
+def test_complete_lineage_debt_publishes_without_rebinding(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+
+    lineage = {'selection_epoch_identity': 'epoch-old', 'sell_book_witness_identity': 'book-old'}
+    position = _seed_pending_lineage_debt(conn, lineage=lineage)
+    _seed_post_debt_monitor(conn, position.trade_id)
+    preparations = _capture_family_preparation(monkeypatch)
+    requested = []
+
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position, conn=conn,
+        requester=lambda released, force_new: requested.append(
+            dict(released._held_sell_reauction_obligation)) or True,
+    )
+    assert preparations == []
+    assert requested[0]['selection_epoch_identity'] == 'epoch-old'
+    assert requested[0]['monitor_event_id'] == 'pending-lineage:monitor_refreshed:0'
+
+
+def test_recovery_refusal_is_logged_with_position_and_reason(conn, monkeypatch, caplog):
+    from src.execution import exit_lifecycle
+
+    lineage = {'selection_epoch_identity': 'epoch', 'sell_book_witness_identity': 'book'}
+    position = _seed_pending_lineage_debt(conn, lineage=lineage)
+    _insert_exit_command(conn, command_id='cmd-owned', position_id=position.trade_id,
+                         token_id=YES_TOKEN)
+    conn.commit()
+
+    with caplog.at_level('WARNING', logger='src.execution.exit_lifecycle'):
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn, requester=lambda *_a: pytest.fail('owned'),
+        )
+    assert 'trade_id=pending-lineage reason=COMMAND_OWNERSHIP:COMMAND_OWNED' in caplog.text
 
 
 @pytest.mark.parametrize('missing_no_token', [None, ''])

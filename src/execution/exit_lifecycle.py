@@ -1105,6 +1105,9 @@ def latest_held_sell_reauction_obligation(
             or obligation.get("schema_version") not in {2, 3, 4}
         ):
             continue
+        if obligation.get("state") == "RETIRED":
+            # The newest obligation was typed-retired; no older one revives.
+            return {}
         required = ("scope_identity", "generation", "position_id", "held_token_id")
         if all(str(obligation.get(key) or "").strip() for key in required):
             obligation_position_id = str(
@@ -13049,6 +13052,147 @@ def _record_global_sell_reauction_publish_claim(
         return False
 
 
+GLOBAL_SELL_DEBT_LINEAGE_UNBINDABLE_HOLD = "GLOBAL_SELL_DEBT_LINEAGE_UNBINDABLE_HOLD"
+_V4_CLAIM_LINEAGE_FIELDS = (
+    "selection_epoch_identity",
+    "sell_book_witness_identity",
+    "debt_event_id",
+    "monitor_event_id",
+)
+
+
+def _latest_post_debt_monitor(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> tuple[str, str, dict] | None:
+    """Return (monitor event id, debt event id, payload) for a monitor newer
+    than the latest canonical release, or None when no such monitor exists."""
+
+    release = conn.execute(
+        """
+        SELECT event_id, sequence_no FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+         ORDER BY sequence_no DESC LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    monitor = conn.execute(
+        """
+        SELECT event_id, sequence_no, payload_json FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+         ORDER BY sequence_no DESC LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if release is None or monitor is None or int(monitor[1]) <= int(release[1]):
+        return None
+    payload = json.loads(str(monitor[2] or "{}"))
+    if not isinstance(payload, dict):
+        return None
+    return str(monitor[0] or ""), str(release[0] or ""), payload
+
+
+def _monitor_evidence_is_fresh(payload: Mapping[str, object]) -> bool:
+    return (
+        payload.get("last_monitor_prob_is_fresh") is True
+        and payload.get("last_monitor_market_price_is_fresh") is True
+    )
+
+
+def _retire_unbindable_hold_sell_debt(
+    conn: sqlite3.Connection,
+    position: Position,
+    obligation: Mapping[str, object],
+    *,
+    monitor_event_id: str,
+) -> bool:
+    """Durably retire one pending-lineage V4 debt that a fresh HOLD superseded.
+
+    Caller holds the canonical trade write lease. The retired obligation is the
+    newest obligation-carrying row, so ``latest_held_sell_reauction_obligation``
+    returns no live obligation and a later SELL arms a fresh one.
+    """
+
+    from src.state.db import append_many_and_project
+
+    trade_id = str(getattr(position, "trade_id", "") or "").strip()
+    current = latest_held_sell_reauction_obligation(conn, position)
+    if (
+        str(current.get("generation") or "") != str(obligation.get("generation") or "")
+        or all(str(current.get(key) or "").strip() for key in _V4_CLAIM_LINEAGE_FIELDS)
+        or _canonical_global_sell_command_ownership(
+            conn, position, require_pending_exit=False,
+        ) != "GLOBAL_NO_COMMAND"
+    ):
+        return False
+    cursor = conn.execute(
+        "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+        (trade_id,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return False
+    projection = (
+        dict(row)
+        if isinstance(row, sqlite3.Row)
+        else dict(zip((item[0] for item in cursor.description), row))
+    )
+    phase = str(projection.get("phase") or "")
+    # An in-flight exit owns pending_exit; only a held phase can retire.
+    if phase not in {LifecyclePhase.ACTIVE.value, LifecyclePhase.DAY0_WINDOW.value}:
+        return False
+    sequence_no = _next_canonical_sequence_no(conn, trade_id)
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    projection["updated_at"] = occurred_at
+    event_type = "EXIT_RETRY_RELEASED"
+    retired = {
+        **dict(current),
+        "state": "RETIRED",
+        "retired_reason": GLOBAL_SELL_DEBT_LINEAGE_UNBINDABLE_HOLD,
+        "retired_by_monitor_event_id": monitor_event_id,
+    }
+    event = {
+        "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+        "position_id": trade_id,
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": event_type,
+        "occurred_at": occurred_at,
+        "phase_before": phase,
+        "phase_after": phase,
+        "strategy_key": str(
+            getattr(position, "strategy_key", "")
+            or getattr(position, "strategy", "")
+            or ""
+        ),
+        "decision_id": None,
+        "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+        "order_id": None,
+        "command_id": None,
+        "caused_by": "global_sell_snapshot_reauction",
+        "idempotency_key": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+        "venue_status": "lineage_unbindable_retired",
+        "source_module": "src.execution.exit_lifecycle",
+        "env": str(getattr(position, "env", "") or "live"),
+        "payload_json": json.dumps(
+            {
+                "status": "lineage_unbindable_retired",
+                "global_sell_reauction_status": "retired",
+                "release_reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+                "retirement_reason": GLOBAL_SELL_DEBT_LINEAGE_UNBINDABLE_HOLD,
+                "retired_by_monitor_event_id": monitor_event_id,
+                "held_sell_reauction_obligation": retired,
+            },
+            default=str,
+            sort_keys=True,
+        ),
+    }
+    append_many_and_project(conn, [event], projection)
+    # A later monitor write must persist the retirement, never resurrect debt.
+    setattr(position, "_held_sell_reauction_obligation", retired)
+    return True
+
+
 def recover_global_sell_snapshot_reauction_debt(
     position: Position,
     *,
@@ -13057,6 +13201,31 @@ def recover_global_sell_snapshot_reauction_debt(
     deadline_monotonic: float | None = None,
 ) -> bool:
     """Publish and acknowledge one already-committed canonical release debt."""
+
+    refusal = _recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=requester,
+        deadline_monotonic=deadline_monotonic,
+    )
+    if refusal is None:
+        return True
+    logger.warning(
+        "GLOBAL_SELL_REAUCTION debt not recovered: trade_id=%s reason=%s",
+        getattr(position, "trade_id", ""),
+        refusal,
+    )
+    return False
+
+
+def _recover_global_sell_snapshot_reauction_debt(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+    requester: Callable[[Position, bool], bool],
+    deadline_monotonic: float | None = None,
+) -> str | None:
+    """Return None once recovered, else the typed refusal reason."""
 
     def ensure_live() -> None:
         if (
@@ -13068,20 +13237,63 @@ def recover_global_sell_snapshot_reauction_debt(
     try:
         ensure_live()
     except TimeoutError:
-        return False
+        return "DEADLINE_EXPIRED"
     if not needs_global_sell_snapshot_reauction(position, conn):
-        return False
+        return "NO_DEBT"
     if conn is None or conn.in_transaction:
-        return False
+        return "CONNECTION_UNAVAILABLE_OR_IN_TRANSACTION"
     obligation = latest_held_sell_reauction_obligation(
         conn,
         position,
         deadline_monotonic=deadline_monotonic,
     )
     if not obligation:
-        return False
+        return "OBLIGATION_UNAVAILABLE"
     if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
-        return False
+        return "AWAITING_IN_BAND_LIQUIDITY"
+    trade_id = str(getattr(position, "trade_id", "") or "").strip()
+    retire_monitor_event_id = ""
+    if obligation.get("schema_version") == 4 and not all(
+        str(obligation.get(key) or "").strip() for key in _V4_CLAIM_LINEAGE_FIELDS
+    ):
+        # SCOPE: one V4 debt whose claim lineage is pending. DRAIN: bind the
+        # newest post-debt fresh monitor's global-cut lineage, else ask the
+        # auction to prepare the full family. RESET: a bound claim, or a typed
+        # retirement when a fresh HOLD shows no lineage can bind this debt.
+        try:
+            monitor = _latest_post_debt_monitor(conn, trade_id)
+        except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+            return f"LINEAGE_MONITOR_UNREADABLE:{exc}"
+        monitor_event_id, release_event_id, payload = monitor or ("", "", {})
+        lineage = payload.get("held_sell_reauction_monitor_lineage")
+        lineage = lineage if isinstance(lineage, Mapping) else {}
+        epoch = str(lineage.get("selection_epoch_identity") or "").strip()
+        witness = str(lineage.get("sell_book_witness_identity") or "").strip()
+        if monitor_event_id and _monitor_evidence_is_fresh(payload) and epoch and witness:
+            obligation = {
+                **obligation,
+                "selection_epoch_identity": epoch,
+                "sell_book_witness_identity": witness,
+                "monitor_event_id": monitor_event_id,
+                "debt_event_id": str(obligation.get("debt_event_id") or "").strip()
+                or release_event_id,
+            }
+        else:
+            from src.engine.cycle_runtime import (
+                _request_current_global_family_preparation,
+            )
+
+            if not _request_current_global_family_preparation(position):
+                return "LINEAGE_PENDING_FAMILY_PREPARATION_PUBLISH_FAILED"
+            if not (
+                monitor_event_id
+                and _monitor_evidence_is_fresh(payload)
+                and payload.get("exit_decision_available") is True
+                and payload.get("exit_decision_should_exit") is False
+                and payload.get("exit_decision_trigger") == "HOLD"
+            ):
+                return "LINEAGE_PENDING_FAMILY_PREPARATION_REQUESTED"
+            retire_monitor_event_id = monitor_event_id
     from src.execution.executor import (
         _EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
         _EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
@@ -13089,6 +13301,33 @@ def recover_global_sell_snapshot_reauction_debt(
     )
     from src.state.write_coordinator import WritePriority
 
+    if retire_monitor_event_id:
+        try:
+            ensure_live()
+            with _canonical_trade_write_lease(
+                conn,
+                owner="global_sell_reauction_lineage_retire",
+                deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                priority=WritePriority.MONITOR,
+            ):
+                ensure_live()
+                if not _retire_unbindable_hold_sell_debt(
+                    conn,
+                    position,
+                    obligation,
+                    monitor_event_id=retire_monitor_event_id,
+                ):
+                    conn.rollback()
+                    return "LINEAGE_PENDING_RETIREMENT_REFUSED"
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001 - an uncommitted retirement keeps debt.
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            return f"LINEAGE_PENDING_RETIREMENT_FAILED:{exc}"
+        return f"RETIRED:{GLOBAL_SELL_DEBT_LINEAGE_UNBINDABLE_HOLD}"
     try:
         ensure_live()
         with _canonical_trade_write_lease(
@@ -13099,21 +13338,21 @@ def recover_global_sell_snapshot_reauction_debt(
             priority=WritePriority.MONITOR,
         ):
             ensure_live()
-            if (
-                _canonical_global_sell_command_ownership(
-                    conn,
-                    position,
-                    require_pending_exit=False,
-                )
-                != "GLOBAL_NO_COMMAND"
-                or not _record_global_sell_reauction_publish_claim(
-                    conn,
-                    position,
-                    obligation,
-                )
+            ownership = _canonical_global_sell_command_ownership(
+                conn,
+                position,
+                require_pending_exit=False,
+            )
+            if ownership != "GLOBAL_NO_COMMAND":
+                conn.rollback()
+                return f"COMMAND_OWNERSHIP:{ownership}"
+            if not _record_global_sell_reauction_publish_claim(
+                conn,
+                position,
+                obligation,
             ):
                 conn.rollback()
-                return False
+                return "PUBLISH_CLAIM_REFUSED"
             ensure_live()
             conn.commit()
             ensure_live()
@@ -13122,19 +13361,14 @@ def recover_global_sell_snapshot_reauction_debt(
             conn.rollback()
         except Exception:  # noqa: BLE001
             pass
-        logger.warning(
-            "GLOBAL_SELL_REAUCTION publish claim failed for %s: %s",
-            getattr(position, "trade_id", ""),
-            exc,
-        )
-        return False
+        return f"PUBLISH_CLAIM_FAILED:{exc}"
     setattr(position, "_held_sell_reauction_obligation", obligation)
     try:
         ensure_live()
     except TimeoutError:
-        return False
+        return "DEADLINE_EXPIRED_AFTER_CLAIM"
     if not requester(position, True):
-        return False
+        return "REQUESTER_REJECTED"
     refreshed_obligation = getattr(
         position,
         "_held_sell_reauction_obligation",
@@ -13154,12 +13388,12 @@ def recover_global_sell_snapshot_reauction_debt(
                     deadline_text.replace("Z", "+00:00")
                 ).astimezone(timezone.utc)
             except (ValueError, AttributeError):
-                return False
+                return "COMPLETION_DEADLINE_UNREADABLE"
             if _utcnow().astimezone(timezone.utc) >= original_deadline:
-                return False
+                return "COMPLETION_DEADLINE_EXPIRED_WITHOUT_FRESH_BINDING"
     if not record_global_sell_reauction_reserved(conn, position):
         conn.rollback()
-        return False
+        return "RESERVED_ACK_REFUSED"
     try:
         # The wake is already externally visible. Always durably acknowledge it;
         # a deadline overrun here must not turn one publication into replay debt.
@@ -13169,14 +13403,9 @@ def recover_global_sell_snapshot_reauction_debt(
             conn.rollback()
         except Exception:  # noqa: BLE001 - preserve the original commit failure.
             pass
-        logger.warning(
-            "GLOBAL_SELL_REAUCTION_RESERVED commit failed for %s: %s",
-            getattr(position, "trade_id", ""),
-            exc,
-        )
-        return False
+        return f"RESERVED_COMMIT_FAILED:{exc}"
     position.last_exit_error = ""
-    return True
+    return None
 
 
 def _drain_same_turn_global_sell_reauction_after_no_fill(
