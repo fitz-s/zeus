@@ -4830,7 +4830,14 @@ def monitor_probability_refresh(
         return float(belief.held_side_prob), fresh_pos, True
     if belief is not None:
         _append_monitor_validation(
-            pos, f"replacement_posterior_stale;age_h={belief.age_hours:.2f}"
+            pos,
+            f"replacement_posterior_stale;age_h={belief.age_hours:.2f};"
+            f"basis={belief.freshness_basis}"
+            + (
+                f";raw_input_lag_reason={belief.raw_input_lag_reason}"
+                if belief.raw_input_lag_reason
+                else ""
+            ),
         )
     else:
         _append_monitor_validation(pos, "replacement_posterior_missing")
