@@ -57,9 +57,13 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
 )
 from src.data.raw_forecast_artifact_manifest import parse_manifest, write_manifest_to_db  # noqa: E402
 from src.data.replacement_forecast_live_materialization_queue import (  # noqa: E402
+    MANIFEST_ARTIFACT_ROLE,
     MATERIALIZATION_IDENTITY_VERSION,
     MATERIALIZATION_INPUT_VALIDATION_REVISION,
+    MATERIALIZATION_NAMED_INPUTS,
+    REQUEST_ROLE,
     FailureCategory,
+    resolve_named_input,
 )
 from src.data.versioned_file_read import UnsafeFile, VersionedFileReader  # noqa: E402
 
@@ -112,9 +116,14 @@ class _ConsumedInputs:
     binds a verdict to these entries, never to its own earlier reads.
     """
 
-    def __init__(self) -> None:
-        self._reader = VersionedFileReader(max_bytes=64 * 1024 * 1024, keep_bodies=False)
-        self.files: dict[str, dict[str, object]] = {}
+    def __init__(self, attempt_id: str | None = None) -> None:
+        # Bodies kept: one file may serve two roles (the manifest's artifact is
+        # also the named payload), and each role must get the very bytes hashed.
+        self._reader = VersionedFileReader(max_bytes=64 * 1024 * 1024, keep_bodies=True)
+        self.files: dict[tuple[str, str], dict[str, object]] = {}
+        # The parent's claim id for this invocation, echoed so the parent can bind
+        # the witness to the request it claimed and to nothing else.
+        self.attempt_id = attempt_id
 
     def read(self, path: Path, *, role: str = "input") -> bytes:
         resolved = Path(path).resolve()
@@ -124,7 +133,7 @@ class _ConsumedInputs:
             raise InputReadUnsettled(f"{resolved}: {exc}") from exc
         if not read.settled or read.body is None:
             raise InputReadUnsettled(f"{resolved}: written during the read")
-        self.files[str(resolved)] = {
+        self.files[(str(resolved), role)] = {
             "path": str(resolved), "role": role,
             "version": list(read.version), "sha256": read.sha256,
         }
@@ -134,7 +143,8 @@ class _ConsumedInputs:
         return {
             "identity_version": MATERIALIZATION_IDENTITY_VERSION,
             "validation_revision": MATERIALIZATION_INPUT_VALIDATION_REVISION,
-            "files": sorted(self.files.values(), key=lambda entry: str(entry["path"])),
+            "attempt_id": self.attempt_id,
+            "files": [self.files[key] for key in sorted(self.files)],
         }
 
 
@@ -202,6 +212,17 @@ class _StageReceipt:
     input_json: Path
     deadline_at: datetime | None
     stage: str = "open_read_snapshot"
+    # The parent's claim id for this invocation, carried from the receipt the
+    # queue wrote before spawning and kept across every mark().
+    attempt_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.attempt_id is None:
+            try:
+                prior = json.loads(self.path.read_text(encoding="utf-8"))
+                self.attempt_id = prior.get("attempt_id") if isinstance(prior, dict) else None
+            except (OSError, ValueError):
+                self.attempt_id = None
 
     @property
     def path(self) -> Path:
@@ -227,6 +248,7 @@ class _StageReceipt:
                 else self.deadline_at.astimezone(UTC).isoformat()
             ),
             "updated_at": datetime.now(UTC).isoformat(),
+            **({"attempt_id": self.attempt_id} if self.attempt_id is not None else {}),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
@@ -773,18 +795,8 @@ def _dt(value: str, *, field_name: str) -> datetime:
 
 
 def _resolve_input_path(path_value: object, *, base_dir: Path) -> Path:
-    path = Path(str(path_value))
-    if path.is_absolute():
-        return path
-    candidates = [base_dir / path, ROOT / path, Path.cwd() / path]
-    if len(path.parts) >= 2 and path.parts[0] == ".." and path.parts[1] == "raw_manifests":
-        candidates.append(ROOT / "state" / "replacement_forecast_live" / Path(*path.parts[1:]))
-    candidates.append(ROOT / "state" / "replacement_forecast_live" / path)
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    base_candidate = candidates[0]
-    return base_candidate
+    # The queue resolves the same declarations with the same function.
+    return resolve_named_input(path_value, base_dir=base_dir, root=ROOT)
 
 
 def _bins(payload: Mapping[str, Any]) -> tuple[TemperatureBin, ...]:
@@ -1194,7 +1206,7 @@ def _materialize(
 
 
 def _validated_named_inputs(input_json: Path, consumed: _ConsumedInputs):
-    payload = json.loads(consumed.read(input_json, role="request"))
+    payload = json.loads(consumed.read(input_json, role=REQUEST_ROLE))
     if not isinstance(payload, Mapping):
         raise ValueError("input JSON must decode to an object")
     base_dir = input_json.parent
@@ -1203,8 +1215,13 @@ def _validated_named_inputs(input_json: Path, consumed: _ConsumedInputs):
         manifest_path = _resolve_input_path(
             payload["openmeteo_manifest_json"], base_dir=base_dir
         )
-        openmeteo_manifest = parse_manifest(consumed.read(manifest_path))
-        openmeteo_manifest.verify_artifact(root=ROOT)
+        openmeteo_manifest = parse_manifest(consumed.read(
+            manifest_path, role=MATERIALIZATION_NAMED_INPUTS["openmeteo_manifest_json"],
+        ))
+        # Verify the very bytes the witness records, never an unwitnessed reopen.
+        openmeteo_manifest.verify_artifact_bytes(consumed.read(
+            openmeteo_manifest.artifact_file(root=ROOT), role=MANIFEST_ARTIFACT_ROLE,
+        ))
     metric = str(payload["temperature_metric"])
     target_date = date.fromisoformat(str(payload["target_date"]))
     source_cycle_time = _dt(str(payload["source_cycle_time"]), field_name="source_cycle_time")
@@ -1223,7 +1240,7 @@ def _validated_named_inputs(input_json: Path, consumed: _ConsumedInputs):
     if "openmeteo_payload_json" in payload:
         openmeteo_raw_payload_bytes = consumed.read(_resolve_input_path(
             payload["openmeteo_payload_json"], base_dir=base_dir
-        ))
+        ), role=MATERIALIZATION_NAMED_INPUTS["openmeteo_payload_json"])
         openmeteo_payload = json.loads(openmeteo_raw_payload_bytes)
         if not isinstance(openmeteo_payload, Mapping):
             raise ValueError("Open-Meteo payload JSON must decode to an object")
@@ -1257,7 +1274,8 @@ def _validated_request(
             "input JSON requires precision_metadata_json for Open-Meteo ECMWF IFS 9km anchor"
         )
     precision_payload = json.loads(consumed.read(
-        _resolve_input_path(payload["precision_metadata_json"], base_dir=base_dir)
+        _resolve_input_path(payload["precision_metadata_json"], base_dir=base_dir),
+        role=MATERIALIZATION_NAMED_INPUTS["precision_metadata_json"],
     ))
     if not isinstance(precision_payload, Mapping):
         raise ValueError("precision_metadata_json must decode to an object")
@@ -1480,7 +1498,7 @@ def _run_one(
         logging.getLogger().addHandler(handler)
     stage_receipt = _StageReceipt(input_json, deadline_at)
     stage_receipt.mark("open_read_snapshot")
-    consumed = _ConsumedInputs()
+    consumed = _ConsumedInputs(stage_receipt.attempt_id)
     try:
         if conn is None:
             returncode, response = _materialize(
