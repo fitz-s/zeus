@@ -1,5 +1,60 @@
 # finite_evidence_probability_symmetry -- Plan
 
+## 2026-10-02 Day0 current-state keeper urgency
+
+Confirmed defect: latest HKO current-temperature revision correctly supersedes
+the old own-clock request, but its generic `instrument_set_expansion` trigger
+and explicit `day0_current_temperature_state` revision drop its priority from
+-9 to -3. A one-slot real preclaim then selects ordinary global debt instead
+of the newest HIGH/LOW station evidence. Extend only the existing source-role
+recognizer: HKO/CWA Day0 source, valid conditioning identity, explicit revision
+list and present current-state mapping preserve the own-clock lane. Preserve
+the existing explicit source/trigger behavior and every keeper input byte.
+
+SCOPE: one qualifying station Day0 request. DRAIN: normal coalescing retains
+the latest keeper and normal preclaim attempts it at existing -9 priority.
+RESET: priority derives from the keeper itself on each read; no inherited
+stage field or dependence on the already-superseded old file. Other sources,
+missing/invalid conditioning or current state, and invalid revision lists do
+not gain this lane. No probability authority, freshness, fingerprint, queue
+budget, timestamp or identity change. Root owns landing/loading; this leaf
+owns queue source, existing tests, affected registries and this plan only.
+
+Acceptance: actual preclaim HIGH/LOW HKO and CWA RED/GREEN with old hot request,
+latest current-state keeper and competing ordinary priority debt; latest
+keeper alone remains -9; superseded old request and unchanged bytes verified.
+Negative source/Day0/state/list cases, unchanged gate/current-observation m5
+fingerprint regression checks, focused tests and the required ten data test
+files run at final source tip. Local commit only; no live writes or load.
+
+Local check: four actual HKO/CWA HIGH/LOW preclaim cases are RED on the original
+recognizer (ordinary Seoul selected after correct supersession), then GREEN;
+23 focused cases pass, including nine unqualified-input negatives, keeper-only
+priority, untouched bytes, capital precedence and actual m5 value/clock change.
+Source blob `025f774392c1e1338c5ead6165e90e478d0c052f` is the checked queue change.
+Required ten data files: 268 pass / four baseline failures; all four exact
+node/message pairs match `/tmp/zeus-hk-final-data-required-01ef666c3-20261002.xml`.
+Evidence: `/tmp/zeus-day0-current-urgency-{red,focused,required}-20261002.{xml,log}`.
+An additionally explored old debt assertion still expects -4 for an already
+explicit HKO observation trigger; current and original 8b function both return
+-9 (`assert -9.0 == -4.0`), recorded in the explicit-baseline XML/log; it is
+unchanged, not part of a clean full-file claim. Independent bounded review
+accepts the change. YAML parse, compile, diff, freshness and map checks pass;
+scoped docs has no issues and source has no errors, retaining its existing
+downstream-map warning. Repository-wide registry drift is not repaired.
+Bootstrap uses only a temporary read-only live settings symlink, SHA256
+`d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae`,
+with private temporary test state; the symlink is removed before handoff.
+No live config/DB/venue writes, probability readiness claim, push or load.
+
+Parent's independent read-only replay on a fixed 538-request snapshot also
+passes: actual latest HK HIGH/LOW 21:56:26 keepers change from -3/ranks 161–162
+to -9/ranks 1–2; actual one-slot claim selects latest HIGH. Both old 21:38:19
+and 21:38:23 requests remain superseded. HIGH/LOW keeper payload SHA prefixes
+`0bb1eda4` / `aabae8ef` are unchanged; extrema remain HIGH 27.9 / LOW 25.1 and
+current temperature 25.2 at 21:40 UTC. This proves queue transport urgency,
+not a committed posterior, executable edge, fill, or readiness.
+
 ## 2026-10-02 exact zero-current-extras queue drain
 
 Verified defect: a completed current capture can legitimately select zero

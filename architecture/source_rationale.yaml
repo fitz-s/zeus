@@ -400,6 +400,7 @@ files:
     - src/data/replacement_forecast_production.py
     - scripts/materialize_replacement_forecast_live.py
     - tests/data/test_replacement_cycle_availability.py
+    - tests/data/test_previous_runs_substitution.py
   src/data/replacement_cycle_advance_trigger.py:
     zone: K2_runtime
     authority_role: day0_conditioning_reseed_liveness

@@ -2770,6 +2770,11 @@ def _is_own_clock_station_input_revision(
         str(payload.get("upgrade_trigger") or "").strip()
         == "day0_observation_advanced"
         and day0_source.startswith(("hko_", "cwa_"))
+    ) or (
+        day0_source.startswith(("hko_", "cwa_"))
+        and _CURRENT_TEMPERATURE_IDENTITY_KEY in revision_sources
+        and isinstance(payload.get(_CURRENT_TEMPERATURE_IDENTITY_KEY), Mapping)
+        and _day0_conditioning_identity_key(payload) is not None
     )
 
 

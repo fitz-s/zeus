@@ -5089,6 +5089,127 @@ def test_own_clock_station_revision_enters_priority_without_becoming_held(
     assert station in window
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("city,source", (
+    ("Hong Kong", "hko_hourly_accumulator"),
+    ("Taipei", "cwa_hourly_accumulator"),
+))
+def test_current_state_keeper_preserves_own_clock_preclaim_urgency(
+    tmp_path, monkeypatch, metric, city, source
+):
+    """Latest station bytes win coalescing AND the limit-one claim without inheritance."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    old_path, keeper_path, normal_path = (
+        request_dir / name for name in ("old-hot.json", "latest-state.json", "Seoul.json")
+    )
+    common = {
+        **_minimal_seed(upgrade=False),
+        "city": city, "target_date": "2026-10-03", "temperature_metric": metric,
+        "source_cycle_time": "2026-10-02T12:00:00+00:00",
+        "day0_observed_extreme_source": source,
+        "day0_observed_extreme_observation_time": "2026-10-02T21:40:00+00:00",
+        "day0_observed_extreme_c": 27.9 if metric == "high" else 25.1,
+        "day0_observed_extreme_unit": "C",
+        "day0_observed_extreme_sample_count": 34,
+    }
+    old = {
+        **common, "computed_at": "2026-10-02T21:55:00+00:00",
+        "upgrade_trigger": "day0_observation_advanced",
+    }
+    keeper = {
+        **common, "computed_at": "2026-10-02T21:56:26+00:00",
+        "upgrade_trigger": "instrument_set_expansion",
+        "input_revision_sources": ["day0_current_temperature_state"],
+        "day0_current_temperature_state": {
+            "source": "hko_current_1min_mean" if city == "Hong Kong" else "cwa_current_temperature",
+            "observed_at_utc": "2026-10-02T21:40:00+00:00", "value_native": 25.2,
+        },
+    }
+    normal = {
+        **_minimal_seed(upgrade=False), "city": "Seoul", "target_date": "2026-10-03",
+        "temperature_metric": metric, "computed_at": "2026-10-02T21:50:00+00:00",
+        "source_cycle_time": common["source_cycle_time"],
+    }
+    payloads = {old_path: old, keeper_path: keeper, normal_path: normal}
+    for path, payload in payloads.items():
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    original_bytes = {path: path.read_bytes() for path in payloads}
+    global_scope = frozenset({(city, "2026-10-03", metric), ("Seoul", "2026-10-03", metric)})
+    monkeypatch.setattr(queue_mod, "_current_money_risk_families", lambda: frozenset())
+    monkeypatch.setattr(queue_mod, "_current_global_auction_scope_families", lambda *_args, **_kwargs: global_scope)
+    monkeypatch.setattr(queue_mod, "_current_probability_debt_families", lambda **_kwargs: frozenset())
+
+    def plan():
+        return queue_mod._build_request_claim_read_plan(
+            request_path=request_dir, processed_path=tmp_path / "processed",
+            failed_path=tmp_path / "failed", forecast_db=None, limit=1,
+            lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+        )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None, tuple(payloads), payloads, current_money_risk=frozenset(),
+        current_global_scope=global_scope,
+    )
+    assert priority[old_path.name][0] == -9.0
+    read_plan = plan()
+    assert [(item.path, item.superseded_by) for item in read_plan.superseded] == [
+        (old_path, keeper_path.name)
+    ]
+    assert read_plan.claim.selected_files == (keeper_path,)
+    assert priority[keeper_path.name][0] == -9.0
+    assert all(path.read_bytes() == body for path, body in original_bytes.items())
+    assert json.loads(keeper_path.read_text())["day0_current_temperature_state"]["value_native"] == 25.2
+    # Simulate the normal superseded old-file drain. No persisted/inherited
+    # priority from that old request may be necessary on a subsequent poll.
+    old_path.unlink()
+    standalone = plan()
+    assert standalone.superseded == ()
+    assert standalone.claim.selected_files == (keeper_path,)
+    standalone_priority = queue_mod._cycle_advance_seed_priority_map(
+        None, (keeper_path,), {keeper_path: keeper}, current_money_risk=frozenset(),
+        current_global_scope=global_scope,
+    )
+    assert standalone_priority[keeper_path.name][0] == -9.0
+    assert keeper_path.read_bytes() == original_bytes[keeper_path]
+
+
+@pytest.mark.parametrize("invalid", (
+    "wrong_source", "no_day0", "invalid_day0", "no_state", "invalid_state",
+    "no_revision", "string_revision", "mapping_revision", "wrong_revision",
+))
+def test_current_state_revision_does_not_promote_unqualified_input(invalid):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    payload = {
+        **_minimal_seed(upgrade=True),
+        "day0_observed_extreme_source": "hko_hourly_accumulator",
+        "day0_observed_extreme_observation_time": "2026-10-02T13:20:00+00:00",
+        "day0_observed_extreme_c": 25.1, "day0_observed_extreme_unit": "C",
+        "input_revision_sources": ["day0_current_temperature_state"],
+        "day0_current_temperature_state": {"value_native": 25.2},
+    }
+    if invalid == "wrong_source":
+        payload["day0_observed_extreme_source"] = "metar"
+    elif invalid == "no_day0":
+        for key in tuple(payload):
+            if key.startswith("day0_observed_extreme_") and key != "day0_observed_extreme_source":
+                payload.pop(key)
+    elif invalid == "invalid_day0":
+        payload["day0_observed_extreme_observation_time"] = "unknown"
+    elif invalid in ("no_state", "invalid_state"):
+        payload["day0_current_temperature_state"] = None if invalid == "no_state" else "unknown"
+    else:
+        payload["input_revision_sources"] = {
+            "no_revision": None, "string_revision": "day0_current_temperature_state",
+            "mapping_revision": {"day0_current_temperature_state": True},
+            "wrong_revision": ["ecmwf_ifs"],
+        }[invalid]
+    assert not queue_mod._is_own_clock_station_input_revision(payload)
+
+
 def test_own_clock_station_revision_stays_below_exposed_capital(tmp_path):
     """New source facts lead generic debt without displacing held capital."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
@@ -6607,6 +6728,34 @@ def test_blocked_fingerprint_resets_when_eligible_ensemble_mark_advances(
     assert after_ens is not None
     assert before_ens != after_ens
     assert after_ens == unchanged_after_ens
+
+    assert queue_mod.MATERIALIZATION_IDENTITY_VERSION == "m5"
+    station_state = {
+        "value_native": 25.3, "observed_at_utc": "2026-08-31T01:50:00+00:00",
+    }
+    state_payload = {
+        **base, "computed_at": "2026-08-31T01:55:59+00:00",
+        "day0_current_temperature_state": station_state,
+    }
+    current_state_fingerprint = queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path, forecast_db=forecast_db, payload=state_payload,
+    )
+    assert current_state_fingerprint is not None
+    assert current_state_fingerprint == queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path, forecast_db=forecast_db, payload=state_payload,
+    )
+    assert current_state_fingerprint != queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path, forecast_db=forecast_db,
+        payload={**state_payload, "day0_current_temperature_state": {
+            **station_state, "value_native": 25.2,
+        }},
+    )
+    assert current_state_fingerprint != queue_mod._blocked_attempt_fingerprint(
+        input_json=request_path, forecast_db=forecast_db,
+        payload={**state_payload, "day0_current_temperature_state": {
+            **station_state, "observed_at_utc": "2026-08-31T01:51:00+00:00",
+        }},
+    )
 
 
 @pytest.mark.parametrize(
