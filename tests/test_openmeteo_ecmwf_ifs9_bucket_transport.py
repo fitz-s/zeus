@@ -263,9 +263,39 @@ def test_frozen_o1280_all_sea_neighbourhood_admits_the_providers_only_cell(tmp_p
     assert (proof["cell_is_sea"],proof["cell_is_center"],proof["all_sea_neighbourhood"])==(True,True,True)
     args={key:value for key,value in kwargs.items() if key!="local_cache"}
     assert transport.validate_source_cell_geometry_proof(proof,**args,decision_at="2026-09-30T12:01:00Z") is None
+    # A proof frozen before the producer recorded the derived key claims nothing:
+    # admission reads the replayed bytes (Seoul RKSI 18Z 2026-10-01 rows).
     dropped=deepcopy(proof)
     dropped.pop("all_sea_neighbourhood")
-    assert transport.validate_source_cell_geometry_proof(dropped,**args,decision_at="2026-09-30T12:01:00Z") is not None
+    assert not transport.o1280_selected_cell_admissible(dropped)
+    assert transport.validate_source_cell_geometry_proof(dropped,**args,decision_at="2026-09-30T12:01:00Z") is None
+    # A claim that contradicts the replay is still a mismatch.
+    contradicted={**proof,"all_sea_neighbourhood":False}
+    assert transport.validate_source_cell_geometry_proof(contradicted,**args,decision_at="2026-09-30T12:01:00Z") == "OM9_FROZEN_SOURCE_CELL_MISMATCH"
+
+
+def test_serving_witness_admits_pre_key_all_sea_proof_from_replayed_bytes(tmp_path,monkeypatch):
+    """Seoul 2026-10-02: every ecmwf_ifs row froze its all-sea proof before the
+    producer recorded all_sea_neighbourhood; the serving witness refused them on
+    the absent claim, ecmwf_ifs left served_current and the shape lost its pair."""
+    from src.data.replacement_current_value_serving import _current_model_surface_witness
+    transport,_,data,write,_,kwargs=_actual_o1280_static_fixture(tmp_path,monkeypatch)
+    data[:]=-999
+    write()
+    proof=transport.capture_source_cell_geometry_proof(**kwargs)
+    proof.pop("all_sea_neighbourhood")
+    row={"model":"ecmwf_ifs","physical_proof_cutoff":"2026-09-30T12:01:00Z",
+         "latitude_requested":kwargs["requested_latitude"],"longitude_requested":kwargs["requested_longitude"]}
+    geometry={"source_cell_geometry_proof":proof,"selected_latitude":kwargs["latitude"],
+              "selected_longitude":kwargs["longitude"],"target_dem_elevation_m":kwargs["target_elevation_m"]}
+    witness=_current_model_surface_witness(row,geometry,{})
+    assert witness is not None and witness["geometry"]["native_surface"]=="SEA"
+    # A sea cell beside land stays refused through the same replay.
+    points,_,center=transport.om_get_surrounding_gridpoints(kwargs["requested_latitude"],kwargs["requested_longitude"])
+    data[0,points[(center+1)%len(points)]]=5000
+    write()
+    beside=transport.capture_source_cell_geometry_proof(**kwargs)
+    assert _current_model_surface_witness(row,{**geometry,"source_cell_geometry_proof":beside},{}) is None
 
 
 def test_frozen_o1280_sea_cell_beside_land_is_not_the_providers_selection(tmp_path,monkeypatch):

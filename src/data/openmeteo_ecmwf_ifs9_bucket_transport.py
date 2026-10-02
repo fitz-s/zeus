@@ -1220,7 +1220,14 @@ def validate_source_cell_geometry_proof(proof: Mapping[str,object], *, latitude:
             return "OM9_FROZEN_SOURCE_STATIC_IDENTITY_MISMATCH"
         actual = _o1280_snapshot_cell(body,latitude=requested_latitude,longitude=requested_longitude,target_elevation_m=target_elevation_m)
         actual.update(requested_latitude=requested_latitude,requested_longitude=requested_longitude)
+        # all_sea_neighbourhood is derived from these same replayed bytes. A proof
+        # frozen before the producer recorded it claims nothing; only a claim that
+        # contradicts the replay is a mismatch. Admission reads the replay, never the claim.
+        if "all_sea_neighbourhood" in proof and proof["all_sea_neighbourhood"] is not actual.get("all_sea_neighbourhood", False):
+            return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
         for key,value in actual.items():
+            if key == "all_sea_neighbourhood":
+                continue
             claimed = proof.get(key)
             if isinstance(value,bool):
                 if not isinstance(claimed,bool) or claimed!=value:
@@ -1232,8 +1239,6 @@ def validate_source_cell_geometry_proof(proof: Mapping[str,object], *, latitude:
                     return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
             elif claimed!=value:
                 return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
-        if proof.get("all_sea_neighbourhood", False) is not actual.get("all_sea_neighbourhood", False):
-            return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
         if not o1280_selected_cell_admissible(actual) or not same_grid_cell(float(actual["selected_grid_lat"]),
                 float(actual["selected_grid_lon"]), latitude, longitude):
             return "OM9_FROZEN_SOURCE_SELECTED_CELL_MISMATCH"

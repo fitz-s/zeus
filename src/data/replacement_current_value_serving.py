@@ -1603,10 +1603,10 @@ def _current_model_surface_witness(row: Mapping[str, object], geometry: Mapping[
         # Preserve the existing exact O1280 witness; no other provider may
         # borrow its surface or grid identity.
         proof = geometry.get("source_cell_geometry_proof")
-        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
-            o1280_selected_cell_admissible, validate_source_cell_geometry_proof,
-        )
-        if not isinstance(proof, Mapping) or proof.get("revision") != "openmeteo_ifs9_o1280_source_cell_v1" or not o1280_selected_cell_admissible(proof):
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import validate_source_cell_geometry_proof
+        # Cell admission (o1280_selected_cell_admissible) runs inside the
+        # validator on facts replayed from the frozen static, never on the claim.
+        if not isinstance(proof, Mapping) or proof.get("revision") != "openmeteo_ifs9_o1280_source_cell_v1":
             return None
         try:
             if row.get("physical_proof_cutoff") is None or validate_source_cell_geometry_proof(proof,
