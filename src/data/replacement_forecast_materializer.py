@@ -218,6 +218,9 @@ class ReplacementForecastMaterializeResult:
     posterior_id: int | None
     anchor_id: int | None
     readiness_id: str | None
+    # What the deciding code judged, when it is a covered BLOCKED reason
+    # (``materialization_block_evidence``); None binds nothing.
+    evidence: Mapping[str, object] | None = None
 
     @property
     def ok(self) -> bool:
@@ -4202,6 +4205,8 @@ class _PosteriorComputeResult:
     provenance_payload: dict[str, object] | None
     # The named branch that declined the fusion override; None when it served.
     fusion_decline_reason: str | None = None
+    # Its typed evidence (``materialization_block_evidence``) when covered.
+    fusion_decline_evidence: Mapping[str, object] | None = None
 
 
 def _posterior_block_sub_reason_codes(result: "_PosteriorComputeResult") -> tuple[str, ...]:
@@ -4301,11 +4306,13 @@ class SourceClockSchemeUnavailable(RuntimeError):
 
 
 class BayesPrecisionFusionDeclined(RuntimeError):
-    """The fusion override declined this family; ``reason`` names the branch."""
+    """The fusion override declined this family; ``reason`` names the branch and
+    ``evidence`` (when the branch is covered) the facts it judged."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, evidence: Mapping[str, object] | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.evidence = evidence
 
 
 def _resolve_source_clock_scheme(city: str, metric: str) -> object | None:
@@ -4800,6 +4807,7 @@ def _replacement_bayes_precision_fusion_override(
         _source_clock_predictive_sigma_c: float | None = None
         _source_clock_current_shape: _CurrentEvidenceShape | None = None
         _shape_cohort_models: tuple[str, ...] = ()
+        _shape_cohort_evidence: Mapping[str, object] | None = None
         _source_clock_shape_required = True
         _station_live_omitted = False
         _source_clock_current_value_serving: dict[str, Mapping[str, object]] = {}
@@ -5042,6 +5050,14 @@ def _replacement_bayes_precision_fusion_override(
                     _shape_cohort_models = tuple(
                         m for m in _source_clock_used_models if m in _scheme_coherent_current
                     )
+                    if not _scheme_coherent_current:
+                        from src.data.materialization_block_evidence import no_cohort_item  # noqa: PLC0415
+
+                        _shape_cohort_evidence = no_cohort_item(
+                            city=request.city, metric=metric, target_date=target_date,
+                            decision_time_iso=computed_at.isoformat(),
+                            window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                        )
                     _source_clock_current_shape = _read_current_evidence_shape(
                         conn,
                         request,
@@ -5183,6 +5199,14 @@ def _replacement_bayes_precision_fusion_override(
                 _shape_cohort_models = tuple(
                     str(m) for m in _weights if m in _fallback_coherent_current
                 )
+                if not _fallback_coherent_current and conn is not None:
+                    from src.data.materialization_block_evidence import no_cohort_item  # noqa: PLC0415
+
+                    _shape_cohort_evidence = no_cohort_item(
+                        city=request.city, metric=metric, target_date=target_date,
+                        decision_time_iso=computed_at.isoformat(),
+                        window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                    )
                 _source_clock_current_shape = _read_current_evidence_shape(
                     conn,
                     request,
@@ -5269,6 +5293,14 @@ def _replacement_bayes_precision_fusion_override(
                 if len(_shape_cohort_models) < 2
                 else "CURRENT_SHAPE_ENS_UNAVAILABLE"
             )
+            # Evidence only for the empty-cohort case: the selector found no
+            # coherent pair at all. A one-member cohort or an ENS failure reads
+            # more than this record names, so it binds nothing.
+            _decline_evidence = (
+                _shape_cohort_evidence
+                if not _shape_cohort_models and _shape_cohort_evidence is not None
+                else None
+            )
             try:
                 import logging  # noqa: PLC0415
 
@@ -5284,7 +5316,7 @@ def _replacement_bayes_precision_fusion_override(
                 )
             except Exception:
                 pass
-            raise BayesPrecisionFusionDeclined(_decline)
+            raise BayesPrecisionFusionDeclined(_decline, _decline_evidence)
 
         anchor_raw_artifact = None
         anchor_local_proof = None
@@ -7062,6 +7094,7 @@ def _compute_posterior_payload(
     anchor_value_corrected_c = float(raw_anchor_value_c) - (0.0 if bias_shift_c is None else float(bias_shift_c))
     source_clock_scheme_unavailable = False
     fusion_decline_reason: str | None = None
+    fusion_decline_evidence: Mapping[str, object] | None = None
     try:
         bayes_precision_fusion_override = _replacement_bayes_precision_fusion_override(
             request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c,
@@ -7070,6 +7103,7 @@ def _compute_posterior_payload(
     except BayesPrecisionFusionDeclined as declined:
         bayes_precision_fusion_override = None
         fusion_decline_reason = declined.reason
+        fusion_decline_evidence = declined.evidence
     except SourceClockSchemeUnavailable:
         # SCOPE: this family. DRAIN: a readable scheme artifact. RESET: the next
         # attempt resolves it. Named in the receipt; never another source set.
@@ -8243,6 +8277,7 @@ def _compute_posterior_payload(
             family_id=family_id,
             provenance_payload=None,
             fusion_decline_reason=fusion_decline_reason,
+            fusion_decline_evidence=fusion_decline_evidence,
         )
     runtime_layer = LIVE_RUNTIME_LAYER
     if bayes_precision_fusion_override is not None:
@@ -8972,6 +9007,49 @@ def _serving_key_strictly_newer(
     return False
 
 
+def _cert_regression_evidence(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    incoming_posterior_id: int,
+) -> Mapping[str, object] | None:
+    """What the cert-regression refusal judged: the incumbent certificate's row,
+    its bound posterior's serving key, and the incoming key. LOW is not covered:
+    its retired-dataset yield proof reads further rows this record does not name."""
+    if metric != "high":
+        return None
+    from src.data.materialization_block_evidence import (  # noqa: PLC0415
+        CERT_REGRESSION, blocked_evidence, cert_regression_item,
+    )
+    from src.state.readiness_repo import _compose_scope_key, _to_iso  # noqa: PLC0415
+
+    try:
+        expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
+        scope_key = _compose_scope_key(
+            scope_type="strategy", city_id=request.city_id, city_timezone=request.city_timezone,
+            target_local_date_iso=_to_iso(request.target_date), temperature_metric=metric,
+            physical_quantity=expected.physical_quantity,
+            observation_field=expected.observation_field, data_version=_data_version(metric),
+            strategy_key=STRATEGY_KEY, market_family=None, source_id=SOURCE_ID,
+            track="soft_anchor_posterior", condition_id=None,
+        )
+        incumbent = conn.execute(
+            "SELECT source_run_id FROM readiness_state WHERE scope_key = ?", (scope_key,),
+        ).fetchone()
+        incumbent_id = None if incumbent is None else _bound_posterior_id(incumbent[0])
+        incumbent_key = None if incumbent_id is None else _posterior_serving_key(conn, incumbent_id)
+        incoming_key = _posterior_serving_key(conn, incoming_posterior_id)
+    except Exception:  # noqa: BLE001 - unreadable evidence binds nothing
+        return None
+    if incumbent_id is None or incumbent_key is None or incoming_key is None:
+        return None
+    return blocked_evidence(conn, request, CERT_REGRESSION, [cert_regression_item(
+        scope_key=scope_key, incumbent_posterior_id=incumbent_id,
+        incumbent_key=incumbent_key, incoming_key=incoming_key,
+    )])
+
+
 def _readiness_cert_cycle_regression_reasons(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -9052,6 +9130,32 @@ def _readiness_cert_cycle_regression_reasons(
     return ()
 
 
+def _prewrite_blocked(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    reasons: tuple[str, ...],
+) -> ReplacementForecastMaterializeResult:
+    """A prewrite BLOCKED. A stale anchor cycle alone suffices for BLOCKED and
+    judged only the request plus the materialization clock (the two source_run
+    possession rows; a Day0 frontier rewrite never moves computed_at), so its
+    evidence is those rows. Without a stale cycle the verdict binds nothing."""
+    from src.data.materialization_block_evidence import (  # noqa: PLC0415
+        STALE_CYCLE, blocked_evidence,
+    )
+
+    evidence = None
+    if "REPLACEMENT_MATERIALIZATION_" + STALE_CYCLE in reasons:
+        evidence = blocked_evidence(conn, request, STALE_CYCLE)
+    return ReplacementForecastMaterializeResult(
+        status="BLOCKED",
+        reason_codes=reasons,
+        posterior_id=None,
+        anchor_id=None,
+        readiness_id=None,
+        evidence=evidence,
+    )
+
+
 def _validated_replacement_forecast_request(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -9061,13 +9165,7 @@ def _validated_replacement_forecast_request(
     metric = _metric(request.temperature_metric)
     prewrite_reasons = _prewrite_block_reasons(request)
     if prewrite_reasons:
-        return ReplacementForecastMaterializeResult(
-            status="BLOCKED",
-            reason_codes=prewrite_reasons,
-            posterior_id=None,
-            anchor_id=None,
-            readiness_id=None,
-        )
+        return _prewrite_blocked(conn, request, prewrite_reasons)
     artifact_reasons = _artifact_identity_block_reasons(conn, request)
     if artifact_reasons:
         return ReplacementForecastMaterializeResult(
@@ -9110,13 +9208,7 @@ def _validated_replacement_forecast_request(
     request = frontier_request
     prewrite_reasons = _prewrite_block_reasons(request)
     if prewrite_reasons:
-        return ReplacementForecastMaterializeResult(
-            status="BLOCKED",
-            reason_codes=prewrite_reasons,
-            posterior_id=None,
-            anchor_id=None,
-            readiness_id=None,
-        )
+        return _prewrite_blocked(conn, request, prewrite_reasons)
     return request, metric
 
 
@@ -9312,6 +9404,10 @@ def write_prepared_replacement_forecast_live(
     if anchor_id is None:
         anchor_id = _insert_anchor(conn, request, metric=metric)
     if not posterior.live_eligible:
+        from src.data.materialization_block_evidence import (  # noqa: PLC0415
+            NO_COHERENT_COHORT, blocked_evidence,
+        )
+
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
             reason_codes=(
@@ -9321,6 +9417,12 @@ def write_prepared_replacement_forecast_live(
             posterior_id=None,
             anchor_id=anchor_id,
             readiness_id=None,
+            evidence=(
+                None if posterior.fusion_decline_evidence is None
+                else blocked_evidence(
+                    conn, request, NO_COHERENT_COHORT, [posterior.fusion_decline_evidence],
+                )
+            ),
         )
     if (
         request.day0_enqueue_owner_witness is not None
@@ -9355,6 +9457,9 @@ def write_prepared_replacement_forecast_live(
             posterior_id=posterior_id,
             anchor_id=anchor_id,
             readiness_id=None,
+            evidence=_cert_regression_evidence(
+                conn, request, metric=metric, incoming_posterior_id=posterior_id,
+            ),
         )
     expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
     write_readiness_state(

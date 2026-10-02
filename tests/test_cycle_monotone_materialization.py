@@ -57,20 +57,22 @@ UTC = timezone.utc
 
 
 
-def _database_witness(db) -> dict:
-    """What a real worker reports for a computation verdict: its own DB reads,
-    recorded (one read here) by the same recorder the worker runs under."""
+def _blocked_evidence(db, argv) -> dict:
+    """What a real worker reports for an evidenced computation BLOCKED: typed facts
+    (here the materialization clock: the request's two source_run possession rows)
+    that the parent re-verifies on the queue's forecasts DB."""
     import sqlite3 as _sqlite3
+    from types import SimpleNamespace
 
-    from src.data.sqlite_read_witness import SQLiteReadRecorder, recordable
+    from src.data.materialization_block_evidence import blocked_evidence
 
-    with recordable():
-        conn = _sqlite3.connect(str(db))
+    request = json.loads(Path(argv[argv.index("--input-json") + 1]).read_text())
+    conn = _sqlite3.connect(str(db))  # the queue's forecasts DB (created if absent)
     try:
-        recorder = SQLiteReadRecorder()
-        with recorder:
-            conn.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
-        return recorder.witness()
+        return blocked_evidence(conn, SimpleNamespace(
+            baseline_source_run_id=request.get("baseline_source_run_id"),
+            openmeteo_source_run_id=request.get("openmeteo_source_run_id"),
+        ), "TEST_EVIDENCED_BLOCK")
     finally:
         conn.close()
 
@@ -1772,7 +1774,7 @@ def _held_blocked_harness(
             stdout=json.dumps({"status": "BLOCKED",
                                "reason_codes": ["REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"],
                                "consumed_inputs": _consumed_witness(argv),
-                               "consumed_database": _database_witness(db)}),
+                               "blocked_evidence": _blocked_evidence(db, argv)}),
             stderr="",
         )
 
@@ -3247,75 +3249,9 @@ def test_m2_materialization_receipt_is_evidence_not_a_fence(tmp_path, monkeypatc
             seed_file, conn=conn, decision_at=datetime(2026, 6, 21, 6, 6, tzinfo=timezone.utc))
 
 
-def test_database_witness_digests_what_the_cursor_yielded(tmp_path) -> None:
-    """Round-6: a worker read is digested as its own cursor yields rows, never run
-    twice. The parent's re-execution reproduces it only while the same rows come
-    back: a changed row, a new row past an exhausted cursor, and an emptied
-    selection each break it; a restored row reproduces it again."""
-    import sqlite3 as _sqlite3
 
-    from src.data.sqlite_read_witness import (
-        RecordingConnection, SQLiteReadRecorder, database_reads_reproduce, recordable,
-    )
-
-    db = tmp_path / "f.db"
-    with _sqlite3.connect(db) as setup:
-        setup.execute("CREATE TABLE ensemble_snapshots (snapshot_id INTEGER PRIMARY KEY, members_json TEXT, authority TEXT)")
-        setup.execute("INSERT INTO ensemble_snapshots VALUES (1, '[1,2]', 'VERIFIED')")
-    with recordable():
-        conn = _sqlite3.connect(db)
-    assert isinstance(conn, RecordingConnection)
-    statements: list[str] = []
-    conn.set_trace_callback(statements.append)
-    recorder = SQLiteReadRecorder()
-    with recorder:
-        assert conn.execute("SELECT members_json, authority FROM ensemble_snapshots WHERE snapshot_id = ?",
-                            (1,)).fetchone() == ("[1,2]", "VERIFIED")
-        assert conn.execute("SELECT snapshot_id FROM ensemble_snapshots WHERE authority = 'UNVERIFIED'").fetchall() == []
-    # Each read executed exactly once; the recorder adds one database_list per connection.
-    assert [s for s in statements if s != "PRAGMA database_list"] == [
-        "SELECT members_json, authority FROM ensemble_snapshots WHERE snapshot_id = 1",
-        "SELECT snapshot_id FROM ensemble_snapshots WHERE authority = 'UNVERIFIED'",
-    ]
-    assert statements.count("PRAGMA database_list") == 1
-    witness = recorder.witness()
-    assert witness["complete"] and len(witness["reads"]) == 2
-    assert database_reads_reproduce(witness)
-    with _sqlite3.connect(db) as other:
-        other.execute("UPDATE ensemble_snapshots SET members_json = '[]' WHERE snapshot_id = 1")
-    assert not database_reads_reproduce(witness), "in-place content repair is a change"
-    with _sqlite3.connect(db) as other:
-        other.execute("UPDATE ensemble_snapshots SET members_json = '[1,2]' WHERE snapshot_id = 1")
-    assert database_reads_reproduce(witness)
-    with _sqlite3.connect(db) as other:
-        other.execute("INSERT INTO ensemble_snapshots VALUES (2, '[3]', 'UNVERIFIED')")
-    assert not database_reads_reproduce(witness), "an empty selection that fills is a change"
-    conn.close()
-
-
-def test_database_witness_is_incomplete_when_a_read_cannot_be_reproduced(tmp_path) -> None:
-    import sqlite3 as _sqlite3
-
-    from src.data.sqlite_read_witness import SQLiteReadRecorder, database_reads_reproduce, recordable
-
-    db = tmp_path / "f.db"
-    _sqlite3.connect(db).close()
-    plain = _sqlite3.connect(db)  # opened outside recordable(): cannot digest its reads
-    with recordable():
-        memory = _sqlite3.connect(":memory:")
-    for conn, sql in ((plain, "SELECT 1"), (memory, "SELECT 1")):
-        recorder = SQLiteReadRecorder()
-        with recorder:
-            recorder.watch(conn)
-            conn.execute(sql).fetchall()
-        assert not recorder.witness()["complete"]
-        assert not database_reads_reproduce(recorder.witness())
-    plain.close()
-    memory.close()
-
-
-def test_computation_blocked_without_a_database_witness_is_retained(tmp_path, monkeypatch) -> None:
-    """A BLOCKED whose worker reports no (or an incomplete) database witness binds
+def test_computation_blocked_without_typed_evidence_is_retained(tmp_path, monkeypatch) -> None:
+    """A BLOCKED whose worker reports no (or unverifiable) typed evidence binds
     nothing, however complete its file witness: retained for fair retry."""
     import subprocess
 
@@ -3344,7 +3280,7 @@ def test_computation_blocked_without_a_database_witness_is_retained(tmp_path, mo
     def runner(argv):
         body = {"status": "BLOCKED", "reason_codes": ["REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"],
                 "consumed_inputs": _consumed_witness(argv),
-                "consumed_database": {"complete": False, "incomplete_reason": "x", "reads": []}}
+                "blocked_evidence": {"revision": "a-foreign-revision", "items": []}}
         return subprocess.CompletedProcess(list(argv), 1, stdout=json.dumps(body), stderr="")
 
     report = queue._process_claimed_materialization_batch(
@@ -3377,3 +3313,239 @@ def test_fingerprint_keeps_the_dependency_record_when_a_source_is_missing(tmp_pa
     precision.write_text("[]")
     after = queue._blocked_attempt_fingerprint(input_json=request_dir / "r.json", forecast_db=db, payload=payload)
     assert before is not None and after is not None and before != after
+
+
+def _licensed_worker_queue(tmp_path, monkeypatch):
+    """The licensed current fixture driven through the real worker and real parent:
+    returns (conn, request, consume, fenced, worker) for one claimed request."""
+    import dataclasses
+    import subprocess
+    from datetime import date as _date, datetime as _datetime
+
+    from scripts import materialize_replacement_forecast_live as worker_mod
+    import src.data.replacement_forecast_live_materialization_queue as queue
+    from src.data.station_ground_evidence import forecast_db_from_connection
+    from tests.test_replacement_forecast_materializer_cycle_policy import _licensed_current_context
+
+    def serial(value):
+        if isinstance(value, (_datetime, _date)):
+            return value.isoformat()
+        if dataclasses.is_dataclass(value):
+            return {f.name: serial(getattr(value, f.name)) for f in dataclasses.fields(value)}
+        if isinstance(value, dict):
+            return {k: serial(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [serial(v) for v in value]
+        return value
+
+    gen = _licensed_current_context.__wrapped__(tmp_path, monkeypatch)
+    conn, request, _provenance, _scope = next(gen)
+    root = tmp_path / "queue"
+    requests, seeds = root / "requests", root / "seeds"
+    requests.mkdir(parents=True)
+    seeds.mkdir()
+    raw = tmp_path / "worker_payload.json"
+    raw.write_bytes(request.openmeteo_raw_payload_bytes)
+    precision = tmp_path / "worker_precision.json"
+    precision.write_text(json.dumps(serial(request.openmeteo_precision_guard.metadata)))
+    payload = {f.name: serial(getattr(request, f.name)) for f in dataclasses.fields(request)
+               if f.name not in ("openmeteo_anchor", "openmeteo_precision_guard", "openmeteo_raw_payload_bytes")}
+    payload.update(openmeteo_payload_json=str(raw), precision_metadata_json=str(precision),
+                   openmeteo_source_cycle_time=request.openmeteo_anchor.source_cycle_time.isoformat(),
+                   openmeteo_anchor_artifact_id=request.anchor_artifact_id)
+    path = requests / "Shanghai.current.json"
+    path.write_text(json.dumps(payload))
+    db = forecast_db_from_connection(conn)
+    responses: list[dict] = []
+
+    def worker(f=path):
+        if not f.exists():  # a fenced request left requests/; validate the same bytes
+            f.write_text(json.dumps(payload))
+        return worker_mod._run_one(f, commit=False, init_schema=False, conn=conn)
+
+    def consume(during=None):
+        def runner(argv):
+            f = Path(argv[argv.index("--input-json") + 1])
+            code, out, err = worker(f)
+            responses.append(json.loads((out or err).strip().splitlines()[-1]))
+            if during is not None:
+                during()
+            return subprocess.CompletedProcess(argv, code, out, err)
+
+        path.write_text(json.dumps(payload))
+        return queue._process_claimed_materialization_batch(
+            request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
+            forecast_db=db, limit=1, runner=runner, marker_dir=root / "blocked_attempts", seed_dir=seeds,
+        )
+
+    def fenced():
+        return queue.failed_seed_identity_fenced(seeds / path.name, conn=conn, decision_at=request.computed_at)
+
+    return gen, conn, consume, fenced, worker, responses, queue
+
+
+def _split_provider_cohort(conn, cycle):
+    conn.execute(
+        "UPDATE raw_model_forecasts SET source_cycle_time = ? WHERE model = 'ukmo_global_deterministic_10km'",
+        (cycle,),
+    )
+    conn.commit()
+
+
+@pytest.mark.parametrize("change", ("in_place_repair", "selection_fills"))
+def test_typed_evidence_binds_the_empty_cohort_and_reopens_when_it_heals(
+    tmp_path, monkeypatch, change,
+) -> None:
+    """Round-7: the real worker's REQUIREMENTS_NOT_MET (no coherent current provider
+    cohort) carries typed evidence; the real parent fences it; it reopens once a
+    coherent pair exists, whether a row is repaired in place (its cycle moves back
+    into the window) or the empty selection fills (the provider's row arrives)."""
+    gen, conn, consume, fenced, worker, responses, queue = _licensed_worker_queue(tmp_path, monkeypatch)
+    columns = [d[1] for d in conn.execute("PRAGMA table_info(raw_model_forecasts)")]
+    ukmo = tuple(conn.execute(
+        "SELECT * FROM raw_model_forecasts WHERE model = 'ukmo_global_deterministic_10km'"
+    ).fetchone())
+    original = ukmo[columns.index("source_cycle_time")]
+
+    def restore():
+        conn.execute("DELETE FROM raw_model_forecasts WHERE model = 'ukmo_global_deterministic_10km'")
+        conn.execute(
+            f"INSERT INTO raw_model_forecasts ({','.join(columns)}) VALUES ({','.join('?' * len(columns))})",
+            ukmo,
+        )
+        conn.commit()
+
+    try:
+        assert worker()[0] == 0
+        if change == "in_place_repair":
+            _split_provider_cohort(conn, "2026-09-30T18:00:00+00:00")
+        else:
+            conn.execute("DELETE FROM raw_model_forecasts WHERE model = 'ukmo_global_deterministic_10km'")
+            conn.commit()
+        report = consume()
+        assert responses[0]["status"] == "BLOCKED"
+        assert responses[0]["blocked_evidence"]["reason"] == "NO_COHERENT_CURRENT_PROVIDER_COHORT"
+        assert queue._UNCHANGED_BLOCKED_SKIP_REASON in report.reason_codes
+        assert fenced(), "the evidenced verdict on an unchanged empty cohort binds"
+        if change == "in_place_repair":
+            _split_provider_cohort(conn, original)
+        else:
+            restore()
+        assert worker()[0] == 0
+        assert not fenced(), "the cohort healed; the fence must reopen"
+    finally:
+        restore()
+        next(gen, None)
+
+
+def test_typed_evidence_aba_never_fences_the_state_the_worker_did_not_judge(tmp_path, monkeypatch) -> None:
+    """A->B->A: the worker judges B (cohort split) and the cohort is restored before
+    the parent decides. Its evidence no longer holds, so nothing is fenced."""
+    gen, conn, consume, fenced, worker, responses, queue = _licensed_worker_queue(tmp_path, monkeypatch)
+    original = conn.execute(
+        "SELECT source_cycle_time FROM raw_model_forecasts WHERE model = 'ukmo_global_deterministic_10km'"
+    ).fetchone()[0]
+    try:
+        _split_provider_cohort(conn, "2026-09-30T18:00:00+00:00")
+        report = consume(during=lambda: _split_provider_cohort(conn, original))
+        assert responses[0]["status"] == "BLOCKED" and responses[0].get("blocked_evidence")
+        assert queue._UNBOUND_VERDICT_REASON in report.reason_codes
+        assert not fenced()
+        assert worker()[0] == 0
+    finally:
+        _split_provider_cohort(conn, original)
+        next(gen, None)
+
+
+def test_unsupported_blocked_reason_stays_unbound(tmp_path, monkeypatch) -> None:
+    """A computation BLOCKED with no typed evidence (here an ENS shape failure, which
+    reads more than any covered record names) is retained, never fenced."""
+    gen, conn, consume, fenced, worker, responses, queue = _licensed_worker_queue(tmp_path, monkeypatch)
+    snapshot = conn.execute("SELECT MAX(snapshot_id) FROM ensemble_snapshots").fetchone()[0]
+    original = conn.execute(
+        "SELECT members_json FROM ensemble_snapshots WHERE snapshot_id = ?", (snapshot,)
+    ).fetchone()[0]
+    try:
+        conn.execute("UPDATE ensemble_snapshots SET members_json = '[]' WHERE snapshot_id = ?", (snapshot,))
+        conn.commit()
+        report = consume()
+        assert responses[0]["status"] == "BLOCKED" and "blocked_evidence" not in responses[0]
+        assert queue._UNBOUND_VERDICT_REASON in report.reason_codes
+        assert not fenced()
+    finally:
+        conn.execute("UPDATE ensemble_snapshots SET members_json = ? WHERE snapshot_id = ?", (original, snapshot))
+        conn.commit()
+        next(gen, None)
+
+
+def test_m4_receipt_is_evidence_not_a_fence(tmp_path, monkeypatch) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "replacement_forecast_live"
+    seeds = root / "seeds"
+    seeds.mkdir(parents=True)
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    seed_file = seeds / "Panama_City.2026-06-22.high.json"
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
+    request = {"city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high"}
+    queue._write_seed_index_receipt(seed_file, {
+        "status": "MATERIALIZATION_BLOCKED", "seed_file": str(seed_file),
+        "materialization_blocked": {"request": request, "attempt_fingerprint": "fp-a",
+                                    "identity_version": "m4"},
+    })
+    with sqlite3.connect(db) as conn:
+        assert not queue.failed_seed_identity_fenced(
+            seed_file, conn=conn, decision_at=datetime(2026, 6, 21, 6, 6, tzinfo=timezone.utc))
+
+
+def test_cert_regression_and_stale_cycle_evidence_reverify_their_own_rows(tmp_path) -> None:
+    """The two other covered reasons hold exactly while their judged rows hold:
+    the incumbent certificate and its posterior's serving key; the clock's
+    source_run possession rows."""
+    from datetime import datetime as _datetime, timezone as _tz
+    from types import SimpleNamespace
+
+    from src.data.materialization_block_evidence import (
+        CERT_REGRESSION, STALE_CYCLE, blocked_evidence, cert_regression_item, evidence_holds,
+    )
+
+    db = tmp_path / "f.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE source_run (source_run_id TEXT PRIMARY KEY, fetch_finished_at TEXT);
+        CREATE TABLE readiness_state (scope_key TEXT PRIMARY KEY, source_run_id TEXT);
+        CREATE TABLE forecast_posteriors (posterior_id INTEGER PRIMARY KEY,
+            source_cycle_time TEXT, computed_at TEXT);
+        INSERT INTO source_run VALUES ('base', '2026-10-01T09:00:00+00:00');
+        INSERT INTO readiness_state VALUES ('scope', 'posterior:7');
+        INSERT INTO forecast_posteriors VALUES (7, '2026-10-01T12:00:00+00:00', '2026-10-01T13:00:00+00:00');
+    """)
+    conn.commit()
+    request = SimpleNamespace(baseline_source_run_id="base", openmeteo_source_run_id="om")
+    utc = lambda h: _datetime(2026, 10, 1, h, tzinfo=_tz.utc)  # noqa: E731
+    cert = blocked_evidence(conn, request, CERT_REGRESSION, [cert_regression_item(
+        scope_key="scope", incumbent_posterior_id=7,
+        incumbent_key=(utc(12), utc(13)), incoming_key=(utc(6), utc(14)),
+    )])
+    stale = blocked_evidence(conn, request, STALE_CYCLE)
+    assert evidence_holds(conn, cert) and evidence_holds(conn, stale)
+    conn.execute("UPDATE readiness_state SET source_run_id = 'posterior:8'")
+    conn.commit()
+    assert not evidence_holds(conn, cert), "a newer certificate ends the regression"
+    conn.execute("UPDATE readiness_state SET source_run_id = 'posterior:7'")
+    conn.execute("UPDATE source_run SET fetch_finished_at = '2026-10-01T10:00:00+00:00'")
+    conn.commit()
+    assert not evidence_holds(conn, stale), "a moved possession clock moves computed_at"
+    assert not evidence_holds(conn, cert)
+    conn.execute("INSERT INTO source_run VALUES ('om', '2026-10-01T09:30:00+00:00')")
+    conn.execute("UPDATE source_run SET fetch_finished_at = '2026-10-01T09:00:00+00:00' WHERE source_run_id='base'")
+    conn.commit()
+    assert not evidence_holds(conn, stale), "an absent possession row that appears is a change"
+    conn.execute("DELETE FROM source_run WHERE source_run_id = 'om'")
+    conn.commit()
+    assert evidence_holds(conn, stale) and evidence_holds(conn, cert)
+    for broken in ({}, {"revision": "x", "items": []}, {**stale, "items": stale["items"][1:]}):
+        assert not evidence_holds(conn, broken)
+    conn.close()
