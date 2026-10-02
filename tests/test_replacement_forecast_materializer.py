@@ -1650,16 +1650,17 @@ def test_hourly_cwa_extreme_retains_reader_and_cold_start_center_without_ground_
     )
 
     _qualify_raw_fixture_rows(conn)
-    override = materializer_mod._replacement_bayes_precision_fusion_override(
-        request, metric=metric, anchor_value_corrected_c=25.0, conn=conn,
-    )
+    with pytest.raises(materializer_mod.BayesPrecisionFusionDeclined) as declined:
+        materializer_mod._replacement_bayes_precision_fusion_override(
+            request, metric=metric, anchor_value_corrected_c=25.0, conn=conn,
+        )
 
     # Refuted original full-q premise: RCSS has no registered canonical
     # ground route. A scheme cannot legalize it or the mixed gfs_global grid.
     from src.data.replacement_current_value_serving import (
         read_current_instrument_values, station_ground_target_coverage_for_city,
     )
-    assert override is None
+    assert declined.value.reason.startswith("STATION_GROUND_")
     assert any("current provider precision DATA_DEGRADED for Taipei 2026-07-24"
                in entry.message and "TARGET_STATION_GROUND_EVIDENCE_INVALID" in entry.message
                for entry in caplog.records)
@@ -5010,6 +5011,31 @@ def test_wu_composite_missing_fusion_retains_typed_capture_missing(
     )
     assert result.live_eligible is False
     assert result.replacement_q_mode == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
+
+
+def test_fusion_decline_names_its_branch_in_the_block_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seoul 2026-10-02: the override returned None quietly; the receipt said only
+    CAPTURE:STALE_HISTORY_ONLY. The declining branch now rides the receipt."""
+
+    def _declined(*_args, **_kwargs):
+        raise materializer_mod.BayesPrecisionFusionDeclined(
+            "CURRENT_SHAPE_PROVIDER_COHORT_BELOW_PAIR"
+        )
+
+    monkeypatch.setattr(
+        materializer_mod, "_replacement_bayes_precision_fusion_override", _declined,
+    )
+    result = materializer_mod._compute_posterior_payload(
+        _conn(), _request(), metric="high", anchor_id=1,
+    )
+    assert result.live_eligible is False
+    assert result.capture_status == "STALE_HISTORY_ONLY"
+    assert result.fusion_decline_reason == "CURRENT_SHAPE_PROVIDER_COHORT_BELOW_PAIR"
+    assert "FUSION_DECLINED:CURRENT_SHAPE_PROVIDER_COHORT_BELOW_PAIR" in (
+        materializer_mod._posterior_block_sub_reason_codes(result)
+    )
 
 
 @pytest.mark.usefixtures("_hko_source_surface")

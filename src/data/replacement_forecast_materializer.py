@@ -4200,6 +4200,8 @@ class _PosteriorComputeResult:
     posterior_config_hash: str
     family_id: str
     provenance_payload: dict[str, object] | None
+    # The named branch that declined the fusion override; None when it served.
+    fusion_decline_reason: str | None = None
 
 
 def _posterior_block_sub_reason_codes(result: "_PosteriorComputeResult") -> tuple[str, ...]:
@@ -4215,6 +4217,8 @@ def _posterior_block_sub_reason_codes(result: "_PosteriorComputeResult") -> tupl
     """
     codes: list[str] = [f"Q_MODE:{result.replacement_q_mode}"]
     codes.append(f"CAPTURE:{result.capture_status}")
+    if result.fusion_decline_reason is not None:
+        codes.append(f"FUSION_DECLINED:{result.fusion_decline_reason}")
     if result.predictive_sigma_c is None:
         codes.append("PREDICTIVE_SIGMA:MISSING")
     if result.q_lcb_map is None:
@@ -4294,6 +4298,14 @@ def _bayes_precision_fusion_lead_bucket(lead_days: int) -> str:
 
 class SourceClockSchemeUnavailable(RuntimeError):
     """The city's source-clock scheme could not be resolved (named, never silent)."""
+
+
+class BayesPrecisionFusionDeclined(RuntimeError):
+    """The fusion override declined this family; ``reason`` names the branch."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _resolve_source_clock_scheme(city: str, metric: str) -> object | None:
@@ -4395,7 +4407,7 @@ def _replacement_bayes_precision_fusion_override(
 
         city_obj = runtime_cities_by_name().get(request.city)
         if city_obj is None:
-            return None
+            raise BayesPrecisionFusionDeclined("CITY_NOT_CONFIGURED")
         lat = float(getattr(city_obj, "lat"))
         lon = float(getattr(city_obj, "lon"))
         tz_name = str(getattr(city_obj, "timezone", request.city_timezone))
@@ -4415,7 +4427,7 @@ def _replacement_bayes_precision_fusion_override(
             logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                 "current provider precision DATA_DEGRADED for %s %s %s: %s",
                 request.city,target_date,metric,ground_target_coverage["reason"])
-            return None
+            raise BayesPrecisionFusionDeclined(f"STATION_GROUND_{ground_target_coverage['status']}")
         # BLOCKER 6: lead in the CITY-LOCAL date (tz_name), NOT the UTC date. Cross-timezone the
         # UTC date is off-by-one -> wrong lead bucket / regional eligibility / sigma.
         lead_days = _bayes_precision_fusion_city_local_lead_days(
@@ -4510,7 +4522,7 @@ def _replacement_bayes_precision_fusion_override(
                 "(no network fetch and no anchor-only live surrogate in q path)",
                 request.city, metric, target_date, lead_days, source_cycle_iso,
             )
-            return None
+            raise BayesPrecisionFusionDeclined("PERSISTED_CURRENT_CAPTURE_MISSING")
 
         # ARRIVAL GUARD inputs (C1-AVAIL-CLOCK, 2026-06-16): the honest per-model availability is
         # PROOF OF POSSESSION = the served row's captured_at, routed through the canonical producer
@@ -4568,7 +4580,7 @@ def _replacement_bayes_precision_fusion_override(
                 )
             except Exception:
                 pass
-            return None
+            raise BayesPrecisionFusionDeclined("ZERO_MULTI_MODEL_EXTRAS")
 
         fused = fuse_bayes_precision_posterior(
             anchor_z=capture.anchor_z, anchor_tau0=capture.anchor_tau0,
@@ -4787,6 +4799,7 @@ def _replacement_bayes_precision_fusion_override(
         _source_clock_center_sigma_c: float | None = None
         _source_clock_predictive_sigma_c: float | None = None
         _source_clock_current_shape: _CurrentEvidenceShape | None = None
+        _shape_cohort_models: tuple[str, ...] = ()
         _source_clock_shape_required = True
         _station_live_omitted = False
         _source_clock_current_value_serving: dict[str, Mapping[str, object]] = {}
@@ -5026,6 +5039,9 @@ def _replacement_bayes_precision_fusion_override(
                             _source_clock_dep_ids.add(
                                 int(_served.raw_model_forecast_id)
                             )
+                    _shape_cohort_models = tuple(
+                        m for m in _source_clock_used_models if m in _scheme_coherent_current
+                    )
                     _source_clock_current_shape = _read_current_evidence_shape(
                         conn,
                         request,
@@ -5164,6 +5180,9 @@ def _replacement_bayes_precision_fusion_override(
                 )
                 for _served in _fallback_coherent_current.values():
                     _source_clock_dep_ids.add(int(_served.raw_model_forecast_id))
+                _shape_cohort_models = tuple(
+                    str(m) for m in _weights if m in _fallback_coherent_current
+                )
                 _source_clock_current_shape = _read_current_evidence_shape(
                     conn,
                     request,
@@ -5240,22 +5259,32 @@ def _replacement_bayes_precision_fusion_override(
             # Returning no override leaves the materialized row explicitly
             # non-live (CAPTURE_MISSING) and preserves blocked-candidate
             # observability without creating an alternate tradeable q.
-            return None
+            raise BayesPrecisionFusionDeclined("SOURCE_CLOCK_EVALUATION_FAILED")
 
         if _source_clock_current_shape is None:
+            # The shape needs a simultaneous pair; fewer than two coherent
+            # current provider families is a different fix than a bad ENS carrier.
+            _decline = (
+                "CURRENT_SHAPE_PROVIDER_COHORT_BELOW_PAIR"
+                if len(_shape_cohort_models) < 2
+                else "CURRENT_SHAPE_ENS_UNAVAILABLE"
+            )
             try:
                 import logging  # noqa: PLC0415
 
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                     "replacement_0_1 BAYES_PRECISION_FUSION current ENS shape MISSING for %s %s %s -> "
-                    "live posterior blocked (no historical-width substitute)",
+                    "live posterior blocked (no historical-width substitute): %s cohort=%s served=%s",
                     request.city,
                     metric,
                     target_date,
+                    _decline,
+                    list(_shape_cohort_models),
+                    sorted(served_current),
                 )
             except Exception:
                 pass
-            return None
+            raise BayesPrecisionFusionDeclined(_decline)
 
         anchor_raw_artifact = None
         anchor_local_proof = None
@@ -5274,7 +5303,7 @@ def _replacement_bayes_precision_fusion_override(
                         city=request.city, target_date=str(request.target_date), metric=metric,
                         decision_at=computed_at)
                 except (ValueError, OSError):
-                    return None
+                    raise BayesPrecisionFusionDeclined("ANCHOR_LOCAL_PROOF_UNREADABLE")
                 if local is not None:
                     from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionMetadata
                     from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
@@ -5284,7 +5313,7 @@ def _replacement_bayes_precision_fusion_override(
                         or request.openmeteo_raw_payload_bytes is None
                         or hashlib.sha256(request.openmeteo_raw_payload_bytes).hexdigest() != anchor_raw_artifact["sha256"]
                         or computed_at >= replacement_readiness_expires_at(_to_utc(local.original_body_artifact["source_cycle_time"],field_name="source_cycle_time"))):
-                        return None
+                        raise BayesPrecisionFusionDeclined("ANCHOR_LOCAL_PROOF_MISMATCH")
                     anchor_local_proof = anchor_local_proof_dependency(local, forecast_db=ground_db)
         _source_clock_current_shape = _bind_provider_geometry_identity(
             _source_clock_current_shape,
@@ -5500,7 +5529,7 @@ def _replacement_bayes_precision_fusion_override(
                 _source_clock_current_shape, "member_bounds_c", None
             ),
         )
-    except SourceClockSchemeUnavailable:
+    except (SourceClockSchemeUnavailable, BayesPrecisionFusionDeclined):
         raise  # a named family failure, surfaced by the caller's capture status
     except Exception as exc:  # fail-soft: never break blocked-candidate materialization
         try:
@@ -5510,7 +5539,7 @@ def _replacement_bayes_precision_fusion_override(
             )
         except Exception:
             pass
-        return None
+        raise BayesPrecisionFusionDeclined(f"WIRING_ERROR_{type(exc).__name__}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -7032,11 +7061,15 @@ def _compute_posterior_payload(
     raw_anchor_value_c = request.openmeteo_anchor.high_c if metric == "high" else request.openmeteo_anchor.low_c
     anchor_value_corrected_c = float(raw_anchor_value_c) - (0.0 if bias_shift_c is None else float(bias_shift_c))
     source_clock_scheme_unavailable = False
+    fusion_decline_reason: str | None = None
     try:
         bayes_precision_fusion_override = _replacement_bayes_precision_fusion_override(
             request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c,
             conn=conn,
         )
+    except BayesPrecisionFusionDeclined as declined:
+        bayes_precision_fusion_override = None
+        fusion_decline_reason = declined.reason
     except SourceClockSchemeUnavailable:
         # SCOPE: this family. DRAIN: a readable scheme artifact. RESET: the next
         # attempt resolves it. Named in the receipt; never another source set.
@@ -8209,6 +8242,7 @@ def _compute_posterior_payload(
             posterior_config_hash=posterior_config_hash,
             family_id=family_id,
             provenance_payload=None,
+            fusion_decline_reason=fusion_decline_reason,
         )
     runtime_layer = LIVE_RUNTIME_LAYER
     if bayes_precision_fusion_override is not None:
