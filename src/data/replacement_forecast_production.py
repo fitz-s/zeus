@@ -1475,7 +1475,7 @@ def _held_legacy_physical_proof_recovery_candidates(
     from src.config import cities_by_name
     from src.state.db import _connect_read_only
     from src.data.replacement_current_value_serving import (
-        current_value_serving_schema, physical_capture_debt_reason,
+        CurrentValueServingReadUnavailable, current_value_serving_schema, physical_capture_debt_reason,
     )
 
     candidates: dict[tuple[str, str, str], tuple[str, datetime, str, int]] = {}
@@ -1539,12 +1539,32 @@ def _held_legacy_physical_proof_recovery_candidates(
                 finally:
                     cursor.close()
                 unknown.discard(scope)
-            except (TimeoutError, sqlite3.OperationalError):
+            except (TimeoutError, sqlite3.OperationalError) as exc:
+                physical_budget_expired = (
+                    isinstance(exc, CurrentValueServingReadUnavailable)
+                    and str(exc) == "physical_capture_scan_budget_exceeded"
+                )
+                if not physical_budget_expired and not (
+                    scope_deadline is not None and time.monotonic() >= scope_deadline
+                    and str(exc).lower() in {
+                        "interrupted", "db_connection_deadline_expired",
+                        "replacement source preflight deadline expired",
+                    }
+                ):
+                    raise
                 # Complete exact-row classification alone grants repair cost.
                 # A partial family remains unknown; earlier debt survives.
                 continue
         return candidates
-    except (TimeoutError, sqlite3.OperationalError):
+    except (TimeoutError, sqlite3.OperationalError) as exc:
+        if not (
+            deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
+            and str(exc).lower() in {
+                "interrupted", "db_connection_deadline_expired",
+                "replacement source preflight deadline expired",
+            }
+        ):
+            raise
         return candidates
     finally:
         if conn is not None:

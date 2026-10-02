@@ -874,6 +874,98 @@ def test_held_physical_debt_deadline_keeps_an_already_proven_candidate(
     assert result[("Chicago", "2026-06-17", "high")][2] == "HTTP_CAPTURE_RECEIPT_MISSING"
 
 
+@pytest.mark.parametrize("where,error,after_deadline", (
+    ("row", "no such column: missing_column", False),
+    ("row", "no such table: missing_table", False),
+    ("row", "database disk image is malformed", False),
+    ("row", "interrupted", False),
+    ("schema", "database disk image is malformed", False),
+    ("schema", "no such column: missing_column", False),
+    ("row", "no such column: missing_column", True),
+    ("schema", "database disk image is malformed", True),
+))
+def test_held_physical_nonbudget_database_failure_keeps_its_diagnostic(
+    tmp_path, monkeypatch, where, error, after_deadline,
+) -> None:
+    from src.data import replacement_current_value_serving as serving
+
+    db = _held_physical_scan_db(tmp_path)
+    clock = [time.monotonic()]
+    deadline = clock[0] + 30.0
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+    def broken(conn, **_kwargs):
+        if after_deadline:
+            clock[0] = deadline
+        if error.startswith("no such column"):
+            return conn.execute("SELECT missing_column FROM raw_model_forecasts").fetchone()
+        if error.startswith("no such table"):
+            return conn.execute("SELECT * FROM missing_table").fetchone()
+        raise sqlite3.OperationalError(error)
+
+    monkeypatch.setattr(serving, "current_value_serving_schema" if where == "schema"
+                        else "physical_capture_debt_reason", broken)
+    with pytest.raises(sqlite3.OperationalError, match=error):
+        prod._held_legacy_physical_proof_recovery_candidates(
+            db, {("Chicago", "2026-06-17", "high"): 0},
+            decision_time=_CYCLE + timedelta(hours=10), deadline_monotonic=deadline,
+        )
+
+
+def test_normal_held_physical_nonbudget_database_failure_reports_failsoft_error(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import bayes_precision_fusion_download as downloader
+    from src.data import replacement_current_value_serving as serving
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    db = _held_physical_scan_db(tmp_path)
+    scope = ("Chicago", "2026-06-17", "high")
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_kwargs: {scope: 0})
+    monkeypatch.setattr(downloader, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    def broken(conn, **_kwargs):
+        return conn.execute("SELECT missing_column FROM raw_model_forecasts").fetchone()
+    def forbidden(**_kwargs):
+        raise AssertionError("a structural DB failure must retain its FAILSOFT diagnostic")
+    monkeypatch.setattr(serving, "physical_capture_debt_reason", broken)
+    monkeypatch.setattr(downloader, "download_bayes_precision_fusion_extra_raw_inputs", forbidden)
+    report = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": db}, max_wall_clock_seconds=8.0, planning_cycle=_CYCLE,
+        capture_target_scopes=(scope,),
+    )
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
+    assert report["error"] == "no such column: missing_column"
+
+
+def test_held_physical_actual_sqlite_deadline_interrupt_keeps_proven_progress(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import replacement_current_value_serving as serving
+
+    db = _held_physical_scan_db(tmp_path)
+    clock = [time.monotonic()]
+    deadline = clock[0] + 2.0
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+
+    def classify(conn, *, raw_model_forecast_id, deadline_monotonic, **_kwargs):
+        city = conn.execute("SELECT city FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+                            (raw_model_forecast_id,)).fetchone()[0]
+        if city == "Chicago":
+            return "HTTP_CAPTURE_RECEIPT_MISSING"
+        clock[0] = deadline_monotonic
+        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline_monotonic), 1)
+        return conn.execute("SELECT COUNT(*) FROM raw_model_forecasts").fetchone()
+
+    monkeypatch.setattr(serving, "physical_capture_debt_reason", classify)
+    report: dict = {}
+    result = prod._held_legacy_physical_proof_recovery_candidates(
+        db, {(city, "2026-06-17", "high"): 0 for city in ("Chicago", "Denver")},
+        decision_time=_CYCLE + timedelta(hours=10), deadline_monotonic=deadline, scan_report=report,
+    )
+    assert set(result) == {("Chicago", "2026-06-17", "high")}
+    assert report["unknown_scopes"] == (("Denver", "2026-06-17", "high"),)
+    assert report["status"] == "TIMEBOXED_INCOMPLETE"
+
+
 @pytest.mark.parametrize("coverage_complete,coverage_times_out", ((False, False), (True, False), (False, True)))
 def test_normal_held_physical_scan_reserves_capture_and_advances_with_zero_capture_attempts(
     tmp_path, monkeypatch, coverage_complete, coverage_times_out,
