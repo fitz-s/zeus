@@ -444,6 +444,25 @@ def test_request_skips_instrument_expansion_after_current_q_converges(
     assert receipt["result_evidence"]["subprocess_spawned"] is False
 
 
+
+def _database_witness(db) -> dict:
+    """What a real worker reports for a computation verdict: its own DB reads,
+    recorded (one read here) by the same recorder the worker runs under."""
+    import sqlite3 as _sqlite3
+
+    from src.data.sqlite_read_witness import SQLiteReadRecorder, recordable
+
+    with recordable():
+        conn = _sqlite3.connect(str(db))
+    try:
+        recorder = SQLiteReadRecorder()
+        with recorder:
+            conn.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
+        return recorder.witness()
+    finally:
+        conn.close()
+
+
 def _consumed_witness(argv) -> dict:
     """What a real worker reports having read: at least its request file."""
     from scripts.materialize_replacement_forecast_live import _ConsumedInputs, _StageReceipt
@@ -6423,6 +6442,7 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
                     "status": "BLOCKED",
                     "reason_codes": [blocked_reason],
                     "consumed_inputs": _consumed_witness(argv),
+                    "consumed_database": _database_witness(tmp_path / "witness.db"),
                 }
             )
             + "\n",
@@ -6568,6 +6588,7 @@ def test_blocked_source_clock_request_retries_only_on_new_provider_family(
                         "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
                     ],
                     "consumed_inputs": _consumed_witness(argv),
+                    "consumed_database": _database_witness(db_path),
                 }
             )
             + "\n",

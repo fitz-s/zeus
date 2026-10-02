@@ -56,6 +56,25 @@ from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 UTC = timezone.utc
 
 
+
+def _database_witness(db) -> dict:
+    """What a real worker reports for a computation verdict: its own DB reads,
+    recorded (one read here) by the same recorder the worker runs under."""
+    import sqlite3 as _sqlite3
+
+    from src.data.sqlite_read_witness import SQLiteReadRecorder, recordable
+
+    with recordable():
+        conn = _sqlite3.connect(str(db))
+    try:
+        recorder = SQLiteReadRecorder()
+        with recorder:
+            conn.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
+        return recorder.witness()
+    finally:
+        conn.close()
+
+
 def _consumed_witness(argv) -> dict:
     """What a real worker reports having read: at least its request file."""
     from scripts.materialize_replacement_forecast_live import _ConsumedInputs, _StageReceipt
@@ -1752,7 +1771,8 @@ def _held_blocked_harness(
             list(argv), 2,
             stdout=json.dumps({"status": "BLOCKED",
                                "reason_codes": ["REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"],
-                               "consumed_inputs": _consumed_witness(argv)}),
+                               "consumed_inputs": _consumed_witness(argv),
+                               "consumed_database": _database_witness(db)}),
             stderr="",
         )
 
@@ -3225,3 +3245,135 @@ def test_m2_materialization_receipt_is_evidence_not_a_fence(tmp_path, monkeypatc
     with sqlite3.connect(db) as conn:
         assert not queue.failed_seed_identity_fenced(
             seed_file, conn=conn, decision_at=datetime(2026, 6, 21, 6, 6, tzinfo=timezone.utc))
+
+
+def test_database_witness_digests_what_the_cursor_yielded(tmp_path) -> None:
+    """Round-6: a worker read is digested as its own cursor yields rows, never run
+    twice. The parent's re-execution reproduces it only while the same rows come
+    back: a changed row, a new row past an exhausted cursor, and an emptied
+    selection each break it; a restored row reproduces it again."""
+    import sqlite3 as _sqlite3
+
+    from src.data.sqlite_read_witness import (
+        RecordingConnection, SQLiteReadRecorder, database_reads_reproduce, recordable,
+    )
+
+    db = tmp_path / "f.db"
+    with _sqlite3.connect(db) as setup:
+        setup.execute("CREATE TABLE ensemble_snapshots (snapshot_id INTEGER PRIMARY KEY, members_json TEXT, authority TEXT)")
+        setup.execute("INSERT INTO ensemble_snapshots VALUES (1, '[1,2]', 'VERIFIED')")
+    with recordable():
+        conn = _sqlite3.connect(db)
+    assert isinstance(conn, RecordingConnection)
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    recorder = SQLiteReadRecorder()
+    with recorder:
+        assert conn.execute("SELECT members_json, authority FROM ensemble_snapshots WHERE snapshot_id = ?",
+                            (1,)).fetchone() == ("[1,2]", "VERIFIED")
+        assert conn.execute("SELECT snapshot_id FROM ensemble_snapshots WHERE authority = 'UNVERIFIED'").fetchall() == []
+    # Each read executed exactly once; the recorder adds one database_list per connection.
+    assert [s for s in statements if s != "PRAGMA database_list"] == [
+        "SELECT members_json, authority FROM ensemble_snapshots WHERE snapshot_id = 1",
+        "SELECT snapshot_id FROM ensemble_snapshots WHERE authority = 'UNVERIFIED'",
+    ]
+    assert statements.count("PRAGMA database_list") == 1
+    witness = recorder.witness()
+    assert witness["complete"] and len(witness["reads"]) == 2
+    assert database_reads_reproduce(witness)
+    with _sqlite3.connect(db) as other:
+        other.execute("UPDATE ensemble_snapshots SET members_json = '[]' WHERE snapshot_id = 1")
+    assert not database_reads_reproduce(witness), "in-place content repair is a change"
+    with _sqlite3.connect(db) as other:
+        other.execute("UPDATE ensemble_snapshots SET members_json = '[1,2]' WHERE snapshot_id = 1")
+    assert database_reads_reproduce(witness)
+    with _sqlite3.connect(db) as other:
+        other.execute("INSERT INTO ensemble_snapshots VALUES (2, '[3]', 'UNVERIFIED')")
+    assert not database_reads_reproduce(witness), "an empty selection that fills is a change"
+    conn.close()
+
+
+def test_database_witness_is_incomplete_when_a_read_cannot_be_reproduced(tmp_path) -> None:
+    import sqlite3 as _sqlite3
+
+    from src.data.sqlite_read_witness import SQLiteReadRecorder, database_reads_reproduce, recordable
+
+    db = tmp_path / "f.db"
+    _sqlite3.connect(db).close()
+    plain = _sqlite3.connect(db)  # opened outside recordable(): cannot digest its reads
+    with recordable():
+        memory = _sqlite3.connect(":memory:")
+    for conn, sql in ((plain, "SELECT 1"), (memory, "SELECT 1")):
+        recorder = SQLiteReadRecorder()
+        with recorder:
+            recorder.watch(conn)
+            conn.execute(sql).fetchall()
+        assert not recorder.witness()["complete"]
+        assert not database_reads_reproduce(recorder.witness())
+    plain.close()
+    memory.close()
+
+
+def test_computation_blocked_without_a_database_witness_is_retained(tmp_path, monkeypatch) -> None:
+    """A BLOCKED whose worker reports no (or an incomplete) database witness binds
+    nothing, however complete its file witness: retained for fair retry."""
+    import subprocess
+
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "replacement_forecast_live"
+    requests, seeds = root / "requests", root / "seeds"
+    requests.mkdir(parents=True)
+    seeds.mkdir()
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    name = "Panama_City.2026-06-22.high.20260621T060500Z.json"
+    (requests / name).write_text(json.dumps({
+        "city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high",
+        "source_cycle_time": "2026-06-21T06:00:00+00:00",
+        "computed_at": "2026-06-21T06:05:00+00:00",
+        "baseline_source_run_id": "baseline-run", "openmeteo_source_run_id": "om-run",
+        "openmeteo_payload_json": "payload.json", "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
+    monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+
+    def runner(argv):
+        body = {"status": "BLOCKED", "reason_codes": ["REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"],
+                "consumed_inputs": _consumed_witness(argv),
+                "consumed_database": {"complete": False, "incomplete_reason": "x", "reads": []}}
+        return subprocess.CompletedProcess(list(argv), 1, stdout=json.dumps(body), stderr="")
+
+    report = queue._process_claimed_materialization_batch(
+        request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
+        forecast_db=db, limit=1, runner=runner,
+        marker_dir=root / "blocked_attempts", seed_dir=seeds,
+    )
+    assert (requests / name).is_file()
+    assert queue._UNBOUND_VERDICT_REASON in report.reason_codes
+    assert not list((root / "blocked_attempts").glob("*.json"))
+
+
+def test_fingerprint_keeps_the_dependency_record_when_a_source_is_missing(tmp_path, monkeypatch) -> None:
+    """Round-6 BLOCKER 2: a missing configured source is one more identity component;
+    the file record is still hashed, so a named-file repair moves the fingerprint."""
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    precision = request_dir / "precision.json"
+    precision.write_text("{}")
+    payload = {"city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high",
+               "source_cycle_time": "2026-06-21T06:00:00+00:00",
+               "computed_at": "2026-06-21T06:05:00+00:00", "precision_metadata_json": "precision.json"}
+    monkeypatch.setattr(queue, "_source_clock_missing_configured_sources", lambda *_a, **_k: ("gfs_hrrr",))
+    before = queue._blocked_attempt_fingerprint(input_json=request_dir / "r.json", forecast_db=db, payload=payload)
+    precision.write_text("[]")
+    after = queue._blocked_attempt_fingerprint(input_json=request_dir / "r.json", forecast_db=db, payload=payload)
+    assert before is not None and after is not None and before != after
