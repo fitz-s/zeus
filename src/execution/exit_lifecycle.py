@@ -3268,15 +3268,26 @@ class GlobalSellExecutionAuthority:
             or decision.terminal_wealth is not None
             or decision.robust_delta_log_wealth != 0.0
             or decision.robust_ev_usd != 0.0
-            or expected_terminal.expected_delta_log_wealth <= 0.0
-            or expected_terminal.expected_ev_usd <= 0.0
+            or not math.isfinite(expected_terminal.expected_ev_usd)
+            or not (
+                expected_terminal.ruin_probability_reduction > 0.0
+                or (
+                    expected_terminal.ruin_probability_reduction == 0.0
+                    and expected_terminal.expected_delta_log_wealth > 0.0
+                )
+            )
         ) if mean_sell else (
             decision.terminal_wealth is None
             or expected_terminal is not None
             or not math.isfinite(decision.robust_delta_log_wealth)
-            or decision.robust_delta_log_wealth <= 0
+            or not (
+                decision.ruin_probability_reduction > 0.0
+                or (
+                    decision.ruin_probability_reduction == 0.0
+                    and decision.robust_delta_log_wealth > 0.0
+                )
+            )
             or not math.isfinite(decision.robust_ev_usd)
-            or decision.robust_ev_usd <= 0
         )
         if (
             jit_candidate.execution_curve_identity
@@ -3287,8 +3298,14 @@ class GlobalSellExecutionAuthority:
             or decision.shares > jit_candidate.held_shares
             or action_economics_invalid
             or expected_growth is None
-            or expected_growth.expected_delta_log_wealth <= 0.0
-            or expected_growth.expected_ev_usd <= 0.0
+            or not math.isfinite(expected_growth.expected_ev_usd)
+            or not (
+                expected_growth.ruin_probability_reduction > 0.0
+                or (
+                    expected_growth.ruin_probability_reduction == 0.0
+                    and expected_growth.expected_delta_log_wealth > 0.0
+                )
+            )
         ):
             raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_INVALID")
         proposal = jit_candidate.economic_sell_curve

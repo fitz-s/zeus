@@ -1,7 +1,8 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-30
-# Lifecycle: created=2026-07-03; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Last reused/audited: 2026-10-02
+# Lifecycle: created=2026-07-03; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Authority basis: current global auction, executable Kelly, and wealth contracts
+#                 + exit_portfolio_execution_authority_2026-06-13 E2/E6
 """Current global-auction solver properties over executable portfolio wealth."""
 
 from __future__ import annotations
@@ -4427,6 +4428,206 @@ def test_hong_kong_day0_sell_uses_current_point_not_confidence_stress_mean():
     assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
 
 
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_hong_kong_log_positive_cash_ev_negative_sell_enters_auction(side, metric):
+    """E2/E6 regression using decision 888561 economics and newly supplied depth.
+
+    The immutable receipt proves these wealth/q/fee numbers, not this fixture's
+    complete bid depth or a historical fill. Cost basis is absent from permission.
+    """
+    held_q = 0.4013657819973186
+    sell = _global_sell_candidate(
+        candidate_id=f"hong-kong-log-law-{metric}-{side}",
+        family=f"Hong Kong|2026-10-02|{metric}",
+        side=side,
+        held_q=held_q,
+        bids=(("0.19", "5"),),
+        shares="5",
+        fee="0.05",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="immature",
+        exit_authority_reason="current_statistical_probability",
+    )
+    endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=Decimal("0.858079"),
+        win_wealth_floor_usd=Decimal("5.858079"),
+        current_token_shares=Decimal("5"),
+        ledger_snapshot_id=sell.ledger_snapshot_id,
+    )
+
+    decision = _global_select(
+        (sell,), floor="0.858079", ceiling="0.858079", cash="0.858079",
+        candidate_portfolio_endowment_resolver=lambda _candidate: endowment,
+    )
+
+    assert decision.candidate is sell
+    assert decision.shares == Decimal("2.40")
+    assert decision.cash_proceeds_usd == Decimal("0.437532")
+    terminal = decision.expected_terminal_wealth
+    assert terminal is not None
+    assert terminal.wealth_after_loss_usd == Decimal("3.895611")
+    assert terminal.wealth_after_win_usd == Decimal("1.295611")
+    independent_log = held_q * math.log(3.895611 / 5.858079) + (
+        1.0 - held_q
+    ) * math.log(1.295611 / 0.858079)
+    independent_ev = 0.437532 - 2.4 * held_q
+    assert terminal.expected_delta_log_wealth == pytest.approx(independent_log)
+    assert terminal.expected_delta_log_wealth == pytest.approx(0.08291646628523747)
+    assert terminal.expected_ev_usd == pytest.approx(independent_ev)
+    assert terminal.expected_ev_usd < 0
+    for forged_ev in (abs(terminal.expected_ev_usd), float("nan")):
+        with pytest.raises(ValueError):
+            replace(terminal, expected_ev_usd=forged_ev)
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(
+        independent_log
+    )
+    assert decision.expected_growth.expected_ev_usd == pytest.approx(independent_ev)
+    assert not S._positive_common_expected_growth(
+        decision.expected_growth,
+        capital_lock_hours=decision.capital_lock_hours,
+        action="BUY",
+    )
+    counterfactual = decision.candidate_evaluations[0].sell_point_counterfactual
+    assert counterfactual is not None
+    assert counterfactual.status == "POSITIVE"
+    assert counterfactual.expected_ev_usd < 0
+    cert = S.global_sell_fak_prefix_certificate(decision)
+    assert cert["delta_log_wealth_lower_bound"] > 0
+    assert cert["ev_lower_bound_usd"] < 0
+    worse_curve = replace(
+        sell.executable_sell_curve,
+        levels=(BookLevel(price=Decimal("0.05"), size=Decimal("5")),),
+    )
+    worse_current = replace(
+        sell, executable_sell_curve=worse_curve, proposal_sell_curve=worse_curve,
+        execution_curve_identity=S.executable_curve_identity(worse_curve),
+    )
+    with pytest.raises(ValueError, match="fill economics non-positive"):
+        S.global_sell_fak_prefix_certificate(decision, current_candidate=worse_current)
+    # Independently enumerate every submitted cent prefix against the submitted
+    # floor with twice the unrounded fee, rather than assuming a full fill.
+    size = Decimal("0.01")
+    while size <= decision.shares:
+        proceeds = size * Decimal("0.17461")
+        delta_log, ev = S.global_sell_fill_prefix_objective(
+            decision, filled_shares=size, net_proceeds_usd=proceeds,
+        )
+        assert delta_log > 0
+        assert ev < 0
+        size += Decimal("0.01")
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_cash_ev_negative_maker_sell_scores_zero_partial_full_fill_distribution(side):
+    held_q = 0.4013657819973186
+    taker = _global_sell_candidate(
+        candidate_id=f"log-law-maker-{side}", family=f"log-law-maker-{side}",
+        side=side, held_q=held_q, bids=(("0.19", "5"),), shares="5",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    proposal = S.passive_sell_proposal_curve(
+        taker.executable_sell_curve, capacity=Decimal("5")
+    )
+    provisional = replace(
+        taker, execution_mode="MAKER_REST", proposal_sell_curve=proposal,
+        fill_probability=0.5, fill_probability_source="unbound",
+        rest_deadline_minutes=20.0, asset_epoch_identity="log-law-maker-epoch",
+    )
+    outcomes = (
+        S.MakerFillOutcome(Decimal("0.5"), Decimal("0"), Decimal("0")),
+        S.MakerFillOutcome(Decimal("0.3"), Decimal("0.5"), Decimal("0.191")),
+        S.MakerFillOutcome(Decimal("0.2"), Decimal("1"), Decimal("0.191")),
+    )
+    witness = _current_maker_witness(
+        provisional, proposal=proposal, asset_epoch="log-law-maker-epoch",
+        outcomes=outcomes,
+    )
+    maker = replace(
+        provisional, maker_fill_witness=witness,
+        fill_probability_source=witness.witness_identity,
+    )
+    decision = _global_select(
+        (maker,), floor="0.858079", ceiling="0.858079", cash="0.858079",
+    )
+
+    assert decision.candidate is maker
+    assert decision.expected_growth.expected_ev_usd < 0
+    independent_log = independent_ev = 0.0
+    for outcome in outcomes:
+        size = decision.shares * outcome.fill_fraction
+        proceeds = size * outcome.proceeds_per_share_usd
+        delta_log = held_q * math.log(float(
+            (Decimal("5.858079") - size + proceeds) / Decimal("5.858079")
+        )) + (1 - held_q) * math.log(float(
+            (Decimal("0.858079") + proceeds) / Decimal("0.858079")
+        ))
+        independent_log += float(outcome.probability) * delta_log
+        independent_ev += float(outcome.probability) * (float(proceeds) - held_q * float(size))
+        assert delta_log >= 0
+    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(independent_log)
+    assert decision.expected_growth.expected_ev_usd == pytest.approx(independent_ev)
+    assert independent_log > 0
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize("failure", ("quote", "probability", "wealth", "depth"))
+def test_log_positive_sell_still_requires_current_executable_truth(side, failure):
+    sell = _global_sell_candidate(
+        candidate_id=f"log-law-negative-{side}-{failure}",
+        family=f"log-law-negative-{side}-{failure}", side=side,
+        held_q=0.4013657819973186,
+        bids=((("0.19", "0.001"),) if failure == "depth" else (("0.19", "5"),)),
+        shares="5", probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    kwargs = {}
+    if failure == "quote":
+        sell = replace(sell, book_captured_at_utc=_DECISION_AT - timedelta(seconds=2))
+    elif failure == "probability":
+        kwargs["current_probabilities"] = {}
+    elif failure == "wealth":
+        kwargs["current_wealth_identity"] = "superseded-current-capital"
+    decision = _global_select(
+        (sell,), floor="0.858079", ceiling="0.858079", cash="0.858079", **kwargs,
+    )
+    assert decision.candidate is None
+    assert decision.rejection_reasons[sell.candidate_id] == {
+        "quote": "QUOTE_EXPIRED",
+        "probability": "PROBABILITY_AUTHORITY_SUPERSEDED",
+        "wealth": "CAPITAL_IDENTITY_SUPERSEDED",
+        "depth": "DEPTH_INFEASIBLE",
+    }[failure]
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_buy_positive_cash_ev_gate_survives_a_log_positive_portfolio_hedge(side):
+    """SELL's E2 exception cannot authorize a negative-EV sibling BUY."""
+    q = 0.4013657819973186
+    buy = _global_candidate(
+        candidate_id=f"negative-ev-hedge-{side}",
+        family=f"negative-ev-hedge-{side}", side=side, q=q,
+        levels=(("0.60", "5"),),
+    )
+    independent_log = q * math.log(8.98079 / 8.58079) + (1 - q) * math.log(
+        57.98079 / 58.58079
+    )
+    assert independent_log > 0
+    assert q - 0.60 < 0
+    endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=Decimal("58.58079"),
+        win_wealth_floor_usd=Decimal("8.58079"),
+        current_token_shares=Decimal("0"),
+        ledger_snapshot_id=buy.ledger_snapshot_id,
+    )
+    decision = _global_select(
+        (buy,), floor="8.58079", ceiling="8.58079", cash="8.58079",
+        candidate_portfolio_endowment_resolver=lambda _: endowment,
+    )
+    assert decision.candidate is None
+    assert decision.rejection_reasons[buy.candidate_id] == "NON_POSITIVE_EXPECTED_OBJECTIVE"
+
+
 def test_mature_mean_sell_cannot_masquerade_as_robust_certificate():
     mature = _global_sell_candidate(
         candidate_id="mature-explicit-mean",
@@ -8107,10 +8308,10 @@ def test_family_calibration_changes_mean_sell_hold_decision():
     assert plain.candidate is sell
     assert plain.expected_terminal_wealth is not None
     assert plain.expected_terminal_wealth.held_probability_mean == pytest.approx(0.30)
-    assert with_family_resolver.candidate is None
-    assert with_family_resolver.rejection_reasons[sell.candidate_id] == (
-        "NON_POSITIVE_EXPECTED_OBJECTIVE"
-    )
+    assert with_family_resolver.candidate is sell
+    assert with_family_resolver.expected_terminal_wealth.expected_delta_log_wealth > 0
+    assert with_family_resolver.expected_terminal_wealth.held_probability_mean == pytest.approx(0.60)
+    assert with_family_resolver.expected_terminal_wealth.expected_ev_usd == pytest.approx(0)
 
 
 def test_mean_buy_and_sell_share_expected_axis_and_sell_correction_carries():
@@ -9371,7 +9572,8 @@ def test_selector_consults_the_shared_predicate_before_it_binds_an_order(monkeyp
     taker, maker = _live_residue_maker_pair("parity")
     seen = []
 
-    def reject_all(expected_growth, *, capital_lock_hours):
+    def reject_all(expected_growth, *, capital_lock_hours, action):
+        assert action == "BUY"
         seen.append(expected_growth)
         return False
 
