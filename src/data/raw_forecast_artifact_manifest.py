@@ -542,6 +542,21 @@ def publish_anchor_precision_transport(body_path: Path | str, precision: Mapping
 
 
 def anchor_transport_manifest_path(manifest: RawForecastArtifactManifest, output_dir: Path) -> Path:
+    """Name every coordinate the manifest binds, including WHICH body file it points at.
+
+    A same-byte body can exist as the canonical file and as a ``.geometry-<sha12>``
+    sibling; both share sha, city and precision, so the name carries the body variant
+    (``body`` or ``geometry-<sha12>``) or two distinct manifests seal one path.
+    """
+    sibling = f"geometry-{manifest.sha256[:12]}"
+    variant = sibling if Path(manifest.artifact_path).stem.endswith(f".{sibling}") else "body"
+    legacy = anchor_transport_manifest_legacy_path(manifest, output_dir)
+    return legacy.with_name(legacy.name.replace(".precision-", f".{variant}.precision-", 1))
+
+
+def anchor_transport_manifest_legacy_path(manifest: RawForecastArtifactManifest, output_dir: Path) -> Path:
+    """Pre-variant name: it does not say which same-byte body it points at, so a
+    reader trusts it only after checking its artifact_path."""
     precision = Path(str(manifest.product_metadata["precision_metadata_json"]))
     digest = precision.stem.rsplit(".precision-", 1)[-1]
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
@@ -553,8 +568,12 @@ def anchor_transport_manifest_path(manifest: RawForecastArtifactManifest, output
 
 
 def publish_anchor_transport_manifest(manifest: RawForecastArtifactManifest, output_dir: Path) -> Path:
+    encoded = _proof_json(manifest.to_dict())
+    legacy = anchor_transport_manifest_legacy_path(manifest, output_dir)
+    if not legacy.is_symlink() and legacy.is_file() and legacy.read_bytes() == encoded:
+        return legacy
     path = anchor_transport_manifest_path(manifest, output_dir)
-    _write_local_proof_file(path, _proof_json(manifest.to_dict()))
+    _write_local_proof_file(path, encoded)
     return path
 
 

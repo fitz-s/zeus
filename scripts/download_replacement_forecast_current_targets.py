@@ -67,6 +67,7 @@ from src.data.raw_forecast_artifact_manifest import (  # noqa: E402
     anchor_precision_transport_path,
     publish_anchor_precision_transport,
     anchor_transport_manifest_path,
+    anchor_transport_manifest_legacy_path,
     publish_anchor_transport_manifest,
 )
 from src.data.replacement_forecast_current_target_plan import (  # noqa: E402
@@ -911,6 +912,15 @@ def _anchor_local_proof_transport(
     )
     manifest.verify_artifact()
     manifest_path = anchor_transport_manifest_path(manifest, raw_dir.parent)
+    legacy_path = anchor_transport_manifest_legacy_path(manifest, raw_dir.parent)
+    if not manifest_path.exists() and not legacy_path.is_symlink() and legacy_path.is_file():
+        # A pre-variant name is this transport only when it points at this body.
+        try:
+            legacy_body = Path(read_manifest(legacy_path).artifact_path).resolve()
+        except (OSError, ValueError, KeyError, TypeError):
+            legacy_body = None
+        if legacy_body == owned.resolve():
+            manifest_path = legacy_path
     # Validate every existing file before publishing anything. An existing
     # corrupt/new truth is never overwritten using an older frozen proof.
     missing: list[tuple[Path, object]] = []
@@ -2545,9 +2555,9 @@ def download_current_target_raw_inputs(
                 })
                 mark_processed(target)
                 continue
-            if base_payload_path.exists() and (
-                not payload_is_materializable or base_payload_path.read_bytes() != scoped_bytes
-            ):
+            # Identical bytes reuse the canonical body: validity is a function of the
+            # bytes, so a same-byte sibling only aliases one body under two paths.
+            if base_payload_path.exists() and base_payload_path.read_bytes() != scoped_bytes:
                 payload_path = base_payload_path.with_name(
                     f"{base_payload_path.stem}.geometry-{hashlib.sha256(scoped_bytes).hexdigest()[:12]}.json"
                 )
@@ -2615,62 +2625,85 @@ def download_current_target_raw_inputs(
         # instead of a deferred BEGIN failing on the SELECT->INSERT upgrade under
         # rollback-journal (delete) mode contention (the forecast-DB lock storm).
         conn.execute("BEGIN IMMEDIATE")
+    failed_families: set[tuple[str, str, str]] = set()
     try:
         for manifest in manifests:
-            # Manifest-drift guard (2026-07-08 posterior blackout): the manifest was built
-            # from the on-disk artifact above, but on the reuse path (payload_path.exists())
-            # the file can have been rewritten with a benign serialization change AFTER an
-            # earlier pin - the trailing "\n" _write_json appends (e2cd7a9bc, 2026-06-24) -
-            # or by a concurrent cycle. If the bytes on disk no longer match this manifest's
-            # byte_size/sha, re-pin from the CURRENT file so BOTH the raw_manifests/*.json
-            # file and the DB row describe the exact artifact verify_artifact will stat,
-            # instead of persisting a stale size that aborts materialization. A MISSING
-            # artifact is left to write_manifest_to_db's verify to raise (not re-pinned).
-            if not manifest_matches_artifact(manifest) and Path(manifest.artifact_path).exists():
-                manifest = repin_manifest_from_file(manifest)
+            # One family's bad proof or transport is that family's skip, never the
+            # batch's: a raise used to roll back every certified family in the pass.
+            family = (str(manifest.product_metadata.get("city")),
+                      str(manifest.product_metadata.get("target_date")),
+                      str(manifest.product_metadata.get("metric")))
+            family_ids: list[int] = []
+            family_proof_ids: list[int] = []
             if conn is not None:
-                artifact_id = write_manifest_to_db(
-                    conn, manifest, verify_artifact=True, repin_on_drift=True,
-                )
-                db_artifact_ids.append(artifact_id)
-                # Same-body reuse retains the canonical run, even when this
-                # local transport adds newly possessed precision. A transport
-                # label cannot create a new provider issue or source run.
-                if manifest.source_id == OPENMETEO_SOURCE_ID:
-                    cursor = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(artifact_id,))
-                    canonical = dict(zip((column[0] for column in cursor.description),cursor.fetchone()))
-                    metadata = json.loads(canonical["artifact_metadata_json"])
-                    original_run = metadata.get("source_run_id") or (
-                        f"raw:{manifest.source_id}:{manifest.data_version}:"
-                        f"{datetime.fromisoformat(canonical['source_cycle_time'].replace('Z','+00:00')).astimezone(UTC).isoformat()}")
-                    manifest = replace(manifest,
-                        source_cycle_time=datetime.fromisoformat(canonical["source_cycle_time"].replace("Z","+00:00")),
-                        source_available_at=datetime.fromisoformat(canonical["source_available_at"].replace("Z","+00:00")),
-                        captured_at=datetime.fromisoformat(canonical["captured_at"].replace("Z","+00:00")),
-                        request_url=canonical["request_url"],request_params=json.loads(canonical["request_params_json"]),
-                        product_metadata={**metadata,"source_run_id":original_run,
-                            "openmeteo_payload_json":manifest.artifact_path,
-                            "precision_metadata_json":manifest.product_metadata["precision_metadata_json"]})
-                # A same-byte row retains its original path, metadata and first
-                # clocks. Freeze this actual producer's independently possessed
-                # body/precision as a separate local dependency, never as HTTP
-                # freshness or an UPDATE of the original artifact.
-                precision = json.loads(Path(str(manifest.product_metadata["precision_metadata_json"])).read_bytes())
-                raw = Path(manifest.artifact_path).read_bytes()
-                cut = datetime.now(tz=UTC)
-                guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-                    OpenMeteoIfs9PrecisionMetadata(**precision), raw_payload_bytes=raw, decision_at=cut,
-                )
-                if not guard.passable_for_live_materialization:
-                    raise ValueError("anchor local proof precision invalid: " + ";".join(guard.reason_codes))
-                if not anchor_local_proof_covers_owned_window(raw, precision, cycle=manifest.source_cycle_time, decision_at=cut):
-                    raise ValueError("partial local-day coverage: missing, duplicate or unordered hourly slots")
-                local_proof_artifact_ids.append(write_anchor_local_proof(
-                    conn, artifact_id, manifest, precision_metadata=precision,
-                    deadline_monotonic=deadline_monotonic,
-                ))
-            manifest_path = _write_manifest_file(output_dir, manifest)
-            written_manifests.append(str(manifest_path))
+                conn.execute("SAVEPOINT current_target_family")
+            try:
+                # Manifest-drift guard (2026-07-08 posterior blackout): the manifest was built
+                # from the on-disk artifact above, but on the reuse path (payload_path.exists())
+                # the file can have been rewritten with a benign serialization change AFTER an
+                # earlier pin - the trailing "\n" _write_json appends (e2cd7a9bc, 2026-06-24) -
+                # or by a concurrent cycle. If the bytes on disk no longer match this manifest's
+                # byte_size/sha, re-pin from the CURRENT file so BOTH the raw_manifests/*.json
+                # file and the DB row describe the exact artifact verify_artifact will stat,
+                # instead of persisting a stale size that aborts materialization. A MISSING
+                # artifact is left to write_manifest_to_db's verify to raise (not re-pinned).
+                if not manifest_matches_artifact(manifest) and Path(manifest.artifact_path).exists():
+                    manifest = repin_manifest_from_file(manifest)
+                if conn is not None:
+                    artifact_id = write_manifest_to_db(
+                        conn, manifest, verify_artifact=True, repin_on_drift=True,
+                    )
+                    family_ids = [artifact_id]
+                    # Same-body reuse retains the canonical run, even when this
+                    # local transport adds newly possessed precision. A transport
+                    # label cannot create a new provider issue or source run.
+                    if manifest.source_id == OPENMETEO_SOURCE_ID:
+                        cursor = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",(artifact_id,))
+                        canonical = dict(zip((column[0] for column in cursor.description),cursor.fetchone()))
+                        metadata = json.loads(canonical["artifact_metadata_json"])
+                        original_run = metadata.get("source_run_id") or (
+                            f"raw:{manifest.source_id}:{manifest.data_version}:"
+                            f"{datetime.fromisoformat(canonical['source_cycle_time'].replace('Z','+00:00')).astimezone(UTC).isoformat()}")
+                        manifest = replace(manifest,
+                            source_cycle_time=datetime.fromisoformat(canonical["source_cycle_time"].replace("Z","+00:00")),
+                            source_available_at=datetime.fromisoformat(canonical["source_available_at"].replace("Z","+00:00")),
+                            captured_at=datetime.fromisoformat(canonical["captured_at"].replace("Z","+00:00")),
+                            request_url=canonical["request_url"],request_params=json.loads(canonical["request_params_json"]),
+                            product_metadata={**metadata,"source_run_id":original_run,
+                                "openmeteo_payload_json":manifest.artifact_path,
+                                "precision_metadata_json":manifest.product_metadata["precision_metadata_json"]})
+                    # A same-byte row retains its original path, metadata and first
+                    # clocks. Freeze this actual producer's independently possessed
+                    # body/precision as a separate local dependency, never as HTTP
+                    # freshness or an UPDATE of the original artifact.
+                    precision = json.loads(Path(str(manifest.product_metadata["precision_metadata_json"])).read_bytes())
+                    raw = Path(manifest.artifact_path).read_bytes()
+                    cut = datetime.now(tz=UTC)
+                    guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+                        OpenMeteoIfs9PrecisionMetadata(**precision), raw_payload_bytes=raw, decision_at=cut,
+                    )
+                    if not guard.passable_for_live_materialization:
+                        raise ValueError("anchor local proof precision invalid: " + ";".join(guard.reason_codes))
+                    if not anchor_local_proof_covers_owned_window(raw, precision, cycle=manifest.source_cycle_time, decision_at=cut):
+                        raise ValueError("partial local-day coverage: missing, duplicate or unordered hourly slots")
+                    family_proof_ids = [write_anchor_local_proof(
+                        conn, artifact_id, manifest, precision_metadata=precision,
+                        deadline_monotonic=deadline_monotonic,
+                    )]
+                manifest_path = _write_manifest_file(output_dir, manifest)
+                written_manifests.append(str(manifest_path))
+            except ValueError as family_exc:
+                if conn is not None:
+                    conn.execute("ROLLBACK TO current_target_family")
+                    conn.execute("RELEASE current_target_family")
+                failed_families.add(family)
+                skipped_cities.append({"city": family[0], "target_date": family[1], "metric": family[2],
+                                        "reason": f"OM9_FAMILY_COMMIT_FAILED:{str(family_exc)[:160]}"})
+                continue
+            if conn is not None:
+                conn.execute("RELEASE current_target_family")
+            db_artifact_ids.extend(family_ids)
+            local_proof_artifact_ids.extend(family_proof_ids)
         if conn is not None:
             conn.commit()
     except Exception:
@@ -2680,6 +2713,9 @@ def download_current_target_raw_inputs(
     finally:
         if conn is not None:
             conn.close()
+    manifests = [m for m in manifests if (str(m.product_metadata.get("city")),
+                 str(m.product_metadata.get("target_date")),
+                 str(m.product_metadata.get("metric"))) not in failed_families]
     if write_db:
         _publish_source_geometry_faults(
             skipped_cities,

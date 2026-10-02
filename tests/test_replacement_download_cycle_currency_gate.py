@@ -4471,3 +4471,75 @@ def test_unproven_station_ground_skips_the_provider_and_names_the_reason(
     assert requested == [("London", "2026-06-10")]
     assert {"city": "Tel Aviv", "target_date": "2026-06-10", "metric": "high",
             "reason": f"OM9_SOURCE_GEOMETRY_LOCAL_BLOCK:{reason}"} in report["skipped_cities"]
+
+
+def test_identical_refetch_reuses_canonical_body_without_sibling(
+    tmp_path, monkeypatch,
+) -> None:
+    """A fresh fetch whose scoped bytes equal the existing body writes no .geometry alias.
+
+    The alias made one body two paths; their transport manifests then shared one
+    sealed name and every current-target batch raised sealed_file_changed.
+    """
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    correct = {**_source_geometry_payload(monkeypatch), "utc_offset_seconds": -18000,
+               "hourly": {"time": [f"2026-06-10T{hour:02d}:00" for hour in range(24)],
+                          "temperature_2m": [20.0 + hour / 10 for hour in range(24)]}}
+    raw_dir = tmp_path / "raw" / "20260609T000000Z"
+    raw_dir.mkdir(parents=True)
+    original = raw_dir / "openmeteo_Dallas_2026-06-10_high_20260609T000000Z.json"
+    dl._write_json(original, dl._current_target_scoped_payload(
+        correct, city="Dallas", target_date="2026-06-10", metric="high",
+    ))
+    old_raw = original.read_bytes()
+    monkeypatch.setattr(dl, "_current_target_witnessed_cached_path", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr(dl, "_current_target_source_geometry_check", lambda city, day, raw, *, anchor_sigma_c: (
+        dl._precision_metadata(city, day, anchor_sigma_c=anchor_sigma_c), None, False))
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda *_args: False)
+    monkeypatch.setattr(dl, "_fetch_meta_stamped_anchor_wave", lambda requests, **_k: ({}, {}))
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", lambda **_k: (
+        correct, {"openmeteo_endpoint": "standard_api_meta_stamped",
+                  "run_authority": "provider_meta_declared"}))
+    result = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecast.db", output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE, limit=None, write_db=False,
+        release_lag_hours=14.0, anchor_sigma_c=3.0,
+        required_scopes=(("Dallas", "2026-06-10", "high"),))
+    assert result["written_manifest_count"] == 1
+    assert original.read_bytes() == old_raw
+    assert list(raw_dir.glob("*.geometry-*.json")) == []
+    manifest = json.loads(Path(result["written_manifests"][0]).read_bytes())
+    assert manifest["artifact_path"] == str(original)
+
+
+def test_one_family_transport_failure_does_not_void_the_batch(tmp_path, monkeypatch) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    correct = {**_source_geometry_payload(monkeypatch), "utc_offset_seconds": -18000,
+               "hourly": {"time": [f"2026-06-10T{hour:02d}:00" for hour in range(24)],
+                          "temperature_2m": [20.0 + hour / 10 for hour in range(24)]}}
+    monkeypatch.setattr(dl, "_current_target_source_geometry_check", lambda city, day, raw, *, anchor_sigma_c: (
+        dl._precision_metadata(city, day, anchor_sigma_c=anchor_sigma_c), None, False))
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda *_args: False)
+    monkeypatch.setattr(dl, "_fetch_meta_stamped_anchor_wave", lambda requests, **_k: ({}, {}))
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", lambda **_k: (
+        correct, {"openmeteo_endpoint": "standard_api_meta_stamped",
+                  "run_authority": "provider_meta_declared"}))
+    real = dl._write_manifest_file
+
+    def write(output_dir, manifest):
+        if manifest.product_metadata["metric"] == "low":
+            raise ValueError("anchor_local_proof:sealed_file_changed")
+        return real(output_dir, manifest)
+
+    monkeypatch.setattr(dl, "_write_manifest_file", write)
+    result = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecast.db", output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE, limit=None, write_db=False,
+        release_lag_hours=14.0, anchor_sigma_c=3.0,
+        required_scopes=(("Dallas", "2026-06-10", "high"), ("Dallas", "2026-06-10", "low")))
+    assert result["written_manifest_count"] == 1
+    assert result["manifest_count"] == 1
+    assert any(row["metric"] == "low" and row["reason"].startswith("OM9_FAMILY_COMMIT_FAILED:")
+               for row in result["skipped_cities"])

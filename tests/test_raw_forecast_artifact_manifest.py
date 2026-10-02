@@ -927,3 +927,45 @@ def test_self_consistent_foreign_original_request_cannot_mint_local_proof(tmp_pa
     with pytest.raises(ValueError, match="anchor_local_proof"):
         _read_local(conn, original_id, original, datetime.now(timezone.utc))
     conn.close()
+
+
+def test_anchor_transport_manifest_name_binds_the_body_variant(tmp_path):
+    """Same-byte canonical and .geometry sibling bodies are distinct manifests, never one sealed path."""
+    raw = tmp_path / "20261001T180000Z"
+    raw.mkdir()
+    data = b'{"same":"bytes"}\n'
+    base = raw / "openmeteo_Toronto_2026-10-01_high_20261001T180000Z.json"
+    base.write_bytes(data)
+    run = datetime(2026, 10, 1, 18, tzinfo=timezone.utc)
+
+    def manifest(body):
+        return RawForecastArtifactManifest.from_file(
+            body, source_id=SOURCE_ID, product_id=PRODUCT_ID, data_version=HIGH_DATA_VERSION,
+            source_cycle_time=run, source_available_at=run, captured_at=run,
+            request_url=SINGLE_RUNS_FORECAST_URL, request_params={"run": "2026-10-01T18:00"},
+            product_metadata={"city": "Toronto", "target_date": "2026-10-01", "metric": "high",
+                              "precision_metadata_json": str(body.with_name(f"{body.stem}.precision-{'a' * 64}.json"))},
+        )
+
+    base_manifest = manifest(base)
+    sibling = raw / f"{base.stem}.geometry-{base_manifest.sha256[:12]}.json"
+    sibling.write_bytes(data)
+    sibling_manifest = manifest(sibling)
+    # A legacy (pre-variant) file for the canonical body is reused, never rewritten.
+    legacy = manifest_module.anchor_transport_manifest_legacy_path(base_manifest, tmp_path)
+    legacy.write_bytes(manifest_module._proof_json(base_manifest.to_dict()))
+    before = legacy.stat().st_mtime_ns
+    assert manifest_module.publish_anchor_transport_manifest(base_manifest, tmp_path) == legacy
+    assert legacy.stat().st_mtime_ns == before
+    # The sibling's manifest hit that legacy name and raised sealed_file_changed; now it has its own file.
+    written = manifest_module.publish_anchor_transport_manifest(sibling_manifest, tmp_path)
+    assert written != legacy and f".geometry-{base_manifest.sha256[:12]}.precision-" in written.name
+    assert json.loads(written.read_bytes())["artifact_path"] == str(sibling)
+    assert manifest_module.publish_anchor_transport_manifest(sibling_manifest, tmp_path) == written
+    assert legacy.read_bytes() == manifest_module._proof_json(base_manifest.to_dict())
+    # A fresh canonical publish (no legacy file) names the body variant.
+    legacy.unlink()
+    fresh = manifest_module.publish_anchor_transport_manifest(base_manifest, tmp_path)
+    assert ".body.precision-" in fresh.name and fresh != written
+    with pytest.raises(ValueError, match="sealed_file_changed"):
+        manifest_module._write_local_proof_file(fresh, b"other")
