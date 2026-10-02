@@ -107,6 +107,8 @@ def test_every_bpf_current_read_in_the_materializer_names_the_family_tau():
     import inspect
     from src.data import replacement_forecast_materializer as m
     source = inspect.getsource(m._replacement_bayes_precision_fusion_override)
-    reads = source.count("read_current_instrument_values(") + source.count("read_freshest_coherent_instrument_values(")
-    assert reads == 3
-    assert source.count("day0_remaining_from_iso=_day0_remaining_from_iso(request)") == reads
+    import re
+    reads = re.findall(r"read_(?:current_instrument_values|freshest_coherent_instrument_values)\((.*?)\n\s*\)",
+                       source, flags=re.S)
+    assert len(reads) == 3
+    assert all("day0_remaining_from_iso=_day0_remaining_from_iso(request)" in call for call in reads)

@@ -47,6 +47,7 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
     PreparedReplacementForecastSnapshotStale,
     ReplacementForecastMaterializeRequest,
     ReplacementForecastMaterializeResult,
+    _day0_remaining_from_iso,
     _ensure_replacement_frontier_indexes,
     _ensure_replacement_identity_columns,
     day0_enqueue_ownership_witness_from_payload,
@@ -608,6 +609,8 @@ def _build_target_dependency_witness(
             decision_time_iso=_utc_iso(request.computed_at, field_name="computed_at"),
             models=None,
             schema=provider_schema,
+            # The writer proves the same remaining window prepare served.
+            day0_remaining_from_iso=_day0_remaining_from_iso(request),
         )
         provider_sentinels = read_current_instrument_frontier_sentinel_ids(
             conn,

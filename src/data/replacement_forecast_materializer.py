@@ -2208,10 +2208,23 @@ def _day0_remaining_vector_witness(
         return None
 
 
+def day0_remaining_from_iso_of(observation_time: object) -> str | None:
+    """Day0 tau text from a request/payload's day0_observed_extreme_observation_time.
+
+    The one normalization every reader of the same family uses (prepare, writer
+    witness, queue fence), so their remaining-window boundaries cannot disagree.
+    """
+    if observation_time is None:
+        return None
+    try:
+        return _to_utc(observation_time, field_name="day0_observed_extreme_observation_time").isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
 def _day0_remaining_from_iso(request: ReplacementForecastMaterializeRequest) -> str | None:
     """The family's last authorized observation tau, as the request's conditioning carries it."""
-    observed = _day0_observed_extreme_time(request)
-    return None if observed is None else observed.isoformat()
+    return day0_remaining_from_iso_of(request.day0_observed_extreme_observation_time)
 
 
 def _day0_observed_extreme_time(request: ReplacementForecastMaterializeRequest) -> datetime | None:
@@ -5064,6 +5077,7 @@ def _replacement_bayes_precision_fusion_override(
                         _shape_cohort_evidence = no_cohort_item(
                             decision_time_iso=computed_at.isoformat(),
                             window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                            day0_remaining_from_iso=_day0_remaining_from_iso(request),
                         )
                     _source_clock_current_shape = _read_current_evidence_shape(
                         conn,
@@ -5213,6 +5227,7 @@ def _replacement_bayes_precision_fusion_override(
                     _shape_cohort_evidence = no_cohort_item(
                         decision_time_iso=computed_at.isoformat(),
                         window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                        day0_remaining_from_iso=_day0_remaining_from_iso(request),
                     )
                 _source_clock_current_shape = _read_current_evidence_shape(
                     conn,

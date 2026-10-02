@@ -1986,6 +1986,7 @@ def read_current_instrument_frontier_identity(
     models: tuple[str, ...] | None,
     schema: CurrentValueServingSchema,
     max_substitution_age_hours: float = PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+    day0_remaining_from_iso: str | None = None,
 ) -> tuple[tuple[str, int | None], ...]:
     """Run the complete production selector in prepare and return winner IDs."""
 
@@ -2012,6 +2013,7 @@ def read_current_instrument_frontier_identity(
         decision_iso=decision_iso,
         schema=schema,
         max_substitution_age_hours=max_substitution_age_hours,
+        day0_remaining_from_iso=day0_remaining_from_iso,
     ):
         model = str(row[1])
         if requested is not None and model not in requested:

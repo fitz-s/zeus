@@ -3433,6 +3433,9 @@ def _source_clock_missing_configured_sources(
         from src.data.replacement_current_value_serving import (  # noqa: PLC0415
             read_current_instrument_values,
         )
+        from src.data.replacement_forecast_materializer import (  # noqa: PLC0415
+            day0_remaining_from_iso_of,
+        )
         from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
             scheme_for_city,
         )
@@ -3451,6 +3454,8 @@ def _source_clock_missing_configured_sources(
             source_cycle_time_iso=cycle.isoformat(),
             include_station_sources=True,
             decision_time_iso=str(payload["computed_at"]) if payload.get("computed_at") is not None else None,
+            day0_remaining_from_iso=day0_remaining_from_iso_of(
+                payload.get("day0_observed_extreme_observation_time")),
         )
     except Exception:  # noqa: BLE001 - uncertainty must retain the existing retry behavior
         return None
@@ -3788,6 +3793,10 @@ def _blocked_attempt_fingerprint(
 
             scheme = scheme_for_city(scope[0], metric=scope[2])
             configured_models = None if scheme is None else tuple(scheme.final_sources)
+            from src.data.replacement_forecast_materializer import day0_remaining_from_iso_of
+
+            # The same tau the worker's prepare reads from this request.
+            day0_tau = day0_remaining_from_iso_of(payload.get("day0_observed_extreme_observation_time"))
             source_clock_frontier = read_current_instrument_frontier_identity(
                 conn,
                 city=scope[0],
@@ -3796,6 +3805,7 @@ def _blocked_attempt_fingerprint(
                 decision_time_iso=computed_at.isoformat(),
                 models=configured_models,
                 schema=current_value_serving_schema(conn),
+                day0_remaining_from_iso=day0_tau,
             )
             from src.data.replacement_current_value_serving import (
                 read_current_instrument_values, physical_source_proof_dependency,
@@ -3804,6 +3814,7 @@ def _blocked_attempt_fingerprint(
                 conn, city=scope[0], metric=scope[2], target_date=scope[1],
                 source_cycle_time_iso=str(payload.get("source_cycle_time") or computed_at.isoformat()),
                 include_station_sources=True, decision_time_iso=computed_at.isoformat(),
+                day0_remaining_from_iso=day0_tau,
             )
             physical_proof_frontier = {
                 model: physical_source_proof_dependency(value.physical_response)

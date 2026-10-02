@@ -136,12 +136,17 @@ def cert_regression_item(
     }
 
 
-def no_cohort_item(*, window_hours: float, decision_time_iso: str) -> dict[str, object]:
-    return {
+def no_cohort_item(*, window_hours: float, decision_time_iso: str,
+                   day0_remaining_from_iso: str | None = None) -> dict[str, object]:
+    item = {
         "kind": NO_COHERENT_COHORT,
         "window_hours": float(window_hours),
         "decision_time_iso": decision_time_iso,
     }
+    if day0_remaining_from_iso is not None:
+        # The Day0 tau the selector read; absent, the item is exactly as before.
+        item["day0_remaining_from_iso"] = day0_remaining_from_iso
+    return item
 
 
 def blocked_evidence(conn: sqlite3.Connection, request, reason: str, items=()) -> dict[str, object]:
@@ -212,7 +217,8 @@ def _family_models(conn: sqlite3.Connection, scope: Mapping[str, object]) -> tup
     )
 
 
-def _cohort_empty(conn, scope: Mapping[str, object], at: datetime, window_hours: float) -> bool:
+def _cohort_empty(conn, scope: Mapping[str, object], at: datetime, window_hours: float,
+                  day0_remaining_from_iso: str | None = None) -> bool:
     from src.data.replacement_current_value_serving import (  # noqa: PLC0415
         read_freshest_coherent_instrument_values,
     )
@@ -227,6 +233,7 @@ def _cohort_empty(conn, scope: Mapping[str, object], at: datetime, window_hours:
         models=models,
         cohort_window_hours=float(window_hours),
         include_station_sources=True,
+        day0_remaining_from_iso=day0_remaining_from_iso,
     )
 
 
@@ -261,7 +268,7 @@ def _recorded_facts_hold(conn, evidence: Mapping[str, object]) -> bool:
     if evidence["reason"] == NO_COHERENT_COHORT:
         return _cohort_empty(
             conn, evidence["scope"], _utc(item["decision_time_iso"], "decision_time_iso"),
-            item["window_hours"],
+            item["window_hours"], item.get("day0_remaining_from_iso"),
         )
     return True  # STALE_CYCLE: a function of the request and the unchanged clock
 
@@ -280,7 +287,10 @@ def _prospective_blocks(conn, evidence: Mapping[str, object], payload: Mapping[s
         incumbent = _incumbent_key(conn, item)
         prospective = (_utc(payload["source_cycle_time"], "source_cycle_time"), effective)
         return incumbent is not None and _serving_key_strictly_newer(incumbent, prospective)
-    return _cohort_empty(conn, payload, effective, item["window_hours"])
+    from src.data.replacement_forecast_materializer import day0_remaining_from_iso_of  # noqa: PLC0415
+
+    return _cohort_empty(conn, payload, effective, item["window_hours"],
+        day0_remaining_from_iso_of(payload.get("day0_observed_extreme_observation_time")))
 
 
 def evidence_holds(
