@@ -1339,12 +1339,14 @@ def _prefill_allocator_capacity_usd(
     when the lots cannot be split (an allocator without them), this is the
     allocator's own ``capacity_usd``.
 
-    The lots carry no position identity, so another holding of the same
-    token is indistinguishable from the order's own fill.
-    ``other_token_exposure_usd`` is that holding's exposure (upper bound):
-    removal stops at the token's lot total minus it, so what is removed is
-    provably the order's own fill. Any error leaves the headroom below the
-    true pre-fill value (toward CANCEL), never above it.
+    The lots carry no position identity, so any other exposure on the token
+    (another position, or this position's earlier orders) is
+    indistinguishable from the order's own fill.
+    ``other_token_exposure_usd`` is an upper bound on that exposure
+    (``_other_token_exposure_usd``): removal stops at the token's lot total
+    minus it, so what is removed is provably the order's own fill. Any error
+    leaves the headroom below the true pre-fill value (toward CANCEL), never
+    above it.
     """
     from decimal import ROUND_CEILING
 
@@ -1448,20 +1450,59 @@ def _prefill_wealth(wealth: Any, *, token_id: str, filled_cost_usd: Decimal):
     )
 
 
+def _position_filled_by_this_order_alone(trade_conn: sqlite3.Connection, rest: Mapping[str, Any]) -> bool:
+    """Whether no ENTRY command other than this rest has a fill on its position.
+
+    A certified increment reuses an earlier ENTRY's ``position_id``, so the
+    position row can carry earlier orders' fills. Unreadable or unbound is
+    "not proven" (False): the caller then counts the whole position as
+    another order's exposure, which can only lower the restored headroom."""
+    from src.state.collateral_ledger import _proven_filled_size
+
+    position_id = str(rest.get("position_id") or "")
+    command_id = str(rest.get("command_id") or "")
+    if not position_id or not command_id:
+        return False
+    try:
+        siblings = [
+            str(row[0])
+            for row in trade_conn.execute(
+                "SELECT command_id FROM venue_commands "
+                "WHERE position_id = ? AND intent_kind = 'ENTRY' AND command_id <> ?",
+                (position_id, command_id),
+            )
+        ]
+        return all(_proven_filled_size(trade_conn, sibling) <= 0 for sibling in siblings)
+    except sqlite3.Error:
+        return False
+
+
 def _other_token_exposure_usd(
-    positions: Iterable[Any], *, token_id: str, own_position_id: str,
+    positions: Iterable[Any],
+    *,
+    token_id: str,
+    own_position_id: str,
+    own_position_is_this_order_alone: bool,
 ) -> Decimal:
-    """Exposure of every current position holding ``token_id`` other than the
-    order's own, as the allocator values a position (governor.py
-    ``_current_position_exposure_lots``): max(cost, chain cost, max(shares,
-    chain shares) x entry price). An upper bound on what those positions put
-    in the token's lots, so the own-fill removal never takes from them."""
+    """Upper bound on the token's lot exposure that is NOT this order's fill.
+
+    Every current position holding ``token_id``, valued as the allocator
+    values a position (governor.py ``_current_position_exposure_lots``):
+    max(cost, chain cost, max(shares, chain shares) x entry price). The
+    order's own position is left out only when it is provably this order's
+    alone (``own_position_is_this_order_alone``: no other ENTRY command on
+    that position has a fill); otherwise it may carry earlier orders' lots,
+    and the row does not say which part is this order's or whether this
+    order's fill is in it yet, so all of it counts as not this order's. The
+    own-fill removal then never takes from another order's exposure."""
     from src.engine.global_auction_universe import _position_token
 
     total = Decimal("0")
     for position in positions:
         position_id = str(getattr(position, "position_id", "") or getattr(position, "trade_id", "") or "")
-        if (own_position_id and position_id == own_position_id) or _position_token(position) != token_id:
+        if _position_token(position) != token_id or (
+            own_position_is_this_order_alone and own_position_id and position_id == own_position_id
+        ):
             continue
 
         def amount(name: str) -> Decimal:
@@ -1853,6 +1894,9 @@ def _capture_standing_entry_values(
                         positions,
                         token_id=str(rest["token_id"]),
                         own_position_id=str(rest.get("position_id") or ""),
+                        own_position_is_this_order_alone=_position_filled_by_this_order_alone(
+                            trade_conn, rest,
+                        ),
                     ),
                 )
                 valuation = value_standing_entry(

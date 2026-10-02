@@ -13,7 +13,6 @@ import json
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from decimal import Decimal as D
 from types import SimpleNamespace
 
@@ -1295,74 +1294,210 @@ class TestFillSplitInvarianceUnderABindingCap:
                                     for h, v in decisions.items()}
 
 
-class TestSharedTokenRestorationNeverOverRestores:
-    """E1: the allocator's lots carry no position identity, so another current
-    position on the rest's token is indistinguishable from the rest's own
-    fill. Restored headroom must never exceed the true pre-fill value (the
-    lots with only the own fill removed): any error leans toward CANCEL."""
+# ---------------------------------------------------------------------------
+# E1/F1: restored allocator headroom is never above the true pre-fill headroom.
+# Driven through _capture_standing_entry_values (an interface every commit of
+# this stack has) with a real RiskAllocator and a real portfolio row: the
+# capital limit the pass hands value_standing_entry is spied, and its
+# allocator part is checked against truth = the allocator's own capacity on
+# the lots with ONLY this order's fill removed. A cap well below the strategy
+# and single-position limits makes the allocator term the binding one.
+# ---------------------------------------------------------------------------
 
-    CAP = D("10")
+_CAP = D("6")
 
-    def _authority(self, lots):
-        from src.risk_allocator import AuctionCapitalAuthority, CapPolicy, ExposureLot, RiskAllocator
 
-        return AuctionCapitalAuthority(
-            RiskAllocator(
-                CapPolicy(max_per_market_micro=int(self.CAP * 1_000_000)),
-                [
-                    ExposureLot(market_id="gamma", event_id="event", resolution_window="default",
-                                token_id=TOKEN, exposure_micro=int(D(usd) * 1_000_000), state=state,
-                                correlation_key=FAMILY_KEY)
-                    for usd, state in lots
-                ],
-            )
-        )
+def _matrix_capture(monkeypatch, *, older_own, this_fill, row_has_fill, lot_state, other):
+    """Run one C3 capture and return (spied capital limit, truth headroom).
 
-    def _headroom(self, lots, *, own_fill, other):
-        return C._prefill_allocator_capacity_usd(
-            self._authority(lots), market_id="gamma", event_id="event", correlation_key=FAMILY_KEY,
-            token_id=TOKEN, own_filled_cost_usd=D(own_fill), other_token_exposure_usd=D(other),
-        )
-
-    def _truth(self, other_lots):
-        return Decimal(self._authority(other_lots).capacity_usd(
-            market_id="gamma", event_id="event", correlation_key=FAMILY_KEY,
-        ))
-
-    @pytest.mark.parametrize(
-        "own_lots,other_lots,own_fill,other",
-        [
-            # Reviewer probe 1: own fill unpublished, other holding $3 CONFIRMED.
-            ([], [("3", "CONFIRMED_EXPOSURE")], "2.6", "3"),
-            # Reviewer probe 2: own fill partly published OPTIMISTIC, other $3 CONFIRMED.
-            ([("1.3", "OPTIMISTIC_EXPOSURE")], [("3", "CONFIRMED_EXPOSURE")], "2.6", "3"),
-            # Reviewer probe 3: own fill CONFIRMED, other $2.60 OPTIMISTIC.
-            ([("2.6", "CONFIRMED_EXPOSURE")], [("2.6", "OPTIMISTIC_EXPOSURE")], "2.6", "2.6"),
-        ],
-        ids=["own_unpublished", "own_partly_optimistic", "other_optimistic"],
+    older_own: an earlier ENTRY order on the SAME position already filled
+    (its lot is in the allocator and its shares are in the position row).
+    this_fill: this rest's own filled shares at 0.50; row_has_fill: the
+    position row already carries them; lot_state: how this fill is in the
+    allocator's lots (None = not yet published). other: another position on
+    the same token as (cost, chain cost, shares, entry price, lot state)."""
+    from src.control.heartbeat_supervisor import HeartbeatHealth
+    from src.risk_allocator import (
+        AuctionCapitalAuthority,
+        CapPolicy,
+        ExposureLot,
+        GovernorState,
+        RiskAllocator,
+        configure_global_allocator,
     )
-    def test_reviewer_probes_never_exceed_the_true_prefill_headroom(
-        self, own_lots, other_lots, own_fill, other,
+    from src.state import portfolio as portfolio_module
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table
+    from tests.execution.test_staleness_cancel import _seed_open_entry
+
+    _real_authority_harness(monkeypatch, q=0.75)
+    conn = _trade_db()
+    at = datetime.now(UTC)
+    price, size, h = D("0.50"), D("13"), D(this_fill)
+    _seed_open_entry(
+        conn, command_id="cmd", token_id=TOKEN, venue_order_id="venue-1", q_version="q-submitted",
+        created_at=at - timedelta(hours=1), fact_state="PARTIALLY_MATCHED" if h else "LIVE",
+        matched_size=str(h), remaining_size=str(size - h),
+    )
+    conn.execute("UPDATE venue_commands SET size=13.0, position_id='pos-cmd' WHERE command_id='cmd'")
+    older_shares = D("6") if older_own else D("0")
+    if older_own:
+        # The earlier ENTRY on the same position: filled 6 sh @ 0.50, terminal.
+        _seed_open_entry(
+            conn, command_id="cmd-older", token_id=TOKEN, venue_order_id="venue-0",
+            q_version="q-older", created_at=at - timedelta(hours=5),
+            fact_state="MATCHED", matched_size="6", remaining_size="0",
+        )
+        conn.execute(
+            "UPDATE venue_commands SET position_id='pos-cmd', state='FILLED', size=6.0 "
+            "WHERE command_id='cmd-older'"
+        )
+    conn.execute(
+        "INSERT INTO collateral_reservations (command_id, reservation_type, amount, created_at) "
+        "VALUES ('cmd', 'PUSD_BUY', ?, ?)", (int(size * price * 1_000_000), at.isoformat()),
+    )
+    ensure_table(conn)
+    open_entry_exposure_obligation(
+        conn, command_id="cmd", owner_domain="test", token_id=TOKEN, condition_id=f"cond-{TOKEN}",
+        shares=float(size), cost_basis_usd=float(size * price),
+    )
+    row_shares = older_shares + (h if row_has_fill else D("0"))
+    # The wealth witness attributes a token's chain balance whole to each
+    # position on it, so with two positions on one token the snapshot leaves
+    # the token out and each position carries its own shares.
+    chain_shares = row_shares if not other else D("0")
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots (pusd_balance_micro,pusd_allowance_micro,"
+        "usdc_e_legacy_balance_micro,ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,captured_at,authority_tier,"
+        "raw_balance_payload_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            int((D("400") - (older_shares + h) * price) * 1_000_000), 10**12, 0,
+            json.dumps({TOKEN: int(chain_shares * 1_000_000)} if chain_shares else {}),
+            "{}", int(size * price * 1_000_000), "{}", (at - timedelta(seconds=5)).isoformat(), "CHAIN", "h",
+        ),
+    )
+    conn.commit()
+
+    def position(pid, *, shares, cost, chain_cost, entry):
+        return SimpleNamespace(
+            position_id=pid, trade_id=pid, direction="buy_yes", token_id=TOKEN, no_token_id=f"{TOKEN}-no",
+            condition_id=f"cond-{TOKEN}", shares=float(shares), cost_basis_usd=float(cost),
+            chain_cost_basis_usd=float(chain_cost), entry_price=float(entry), chain_state="synced",
+            chain_shares=float(shares), state="active", city=FAMILY[0], target_date=FAMILY[1],
+            temperature_metric=FAMILY[2], entry_method="", strategy_key="",
+        )
+
+    positions = []
+    if row_shares:
+        positions.append(position("pos-cmd", shares=row_shares, cost=row_shares * price,
+                                  chain_cost=row_shares * price, entry=price))
+    if other:
+        cost, chain_cost, shares, entry, _state = other
+        positions.append(position("pos-other", shares=D(shares), cost=D(cost), chain_cost=D(chain_cost),
+                                  entry=D(entry)))
+    if positions:
+        real_load = portfolio_module.load_runtime_open_portfolio
+
+        def with_positions(c):
+            from dataclasses import replace as dc_replace
+
+            return dc_replace(real_load(c), positions=list(positions))
+
+        monkeypatch.setattr(portfolio_module, "load_runtime_open_portfolio", with_positions)
+
+    def lot(usd, state):
+        return ExposureLot(market_id="gamma", event_id="event", resolution_window="default", token_id=TOKEN,
+                           exposure_micro=int(D(usd) * 1_000_000), state=state, correlation_key=FAMILY_KEY)
+
+    other_lots = []
+    if older_own:
+        other_lots.append(lot(older_shares * price, "CONFIRMED_EXPOSURE"))
+    if other:
+        cost, chain_cost, shares, entry, state = other
+        other_lots.append(lot(max(D(cost), D(chain_cost), D(shares) * D(entry)), state))
+    own_lots = [lot(h * price, lot_state)] if h and lot_state else []
+    policy = CapPolicy(max_per_market_micro=int(_CAP * 1_000_000))
+    configure_global_allocator(
+        RiskAllocator(policy, [*own_lots, *other_lots]),
+        GovernorState(current_drawdown_pct=0.0, heartbeat_health=HeartbeatHealth.HEALTHY, ws_gap_active=False,
+                      ws_gap_seconds=0, unknown_side_effect_count=0, reconcile_finding_count=0),
+    )
+    truth = D(AuctionCapitalAuthority(RiskAllocator(policy, other_lots)).capacity_usd(
+        market_id="gamma", event_id="event", correlation_key=FAMILY_KEY,
+    ))
+    current = D(AuctionCapitalAuthority(RiskAllocator(policy, [*own_lots, *other_lots])).capacity_usd(
+        market_id="gamma", event_id="event", correlation_key=FAMILY_KEY,
+    ))
+    monkeypatch.setattr(C, "_snapshot_row", lambda _c, _sid: {**_snapshot(), "condition_id": f"cond-{TOKEN}"})
+    seen = []
+    real_value = C.value_standing_entry
+
+    def spy(*a, **k):
+        seen.append(D(k["capital_limit_usd"]))
+        return real_value(*a, **k)
+
+    monkeypatch.setattr(C, "value_standing_entry", spy)
+    rests = [r for r in C.find_open_entry_rests(conn) if r["command_id"] == "cmd"]
+    C._capture_standing_entry_values(
+        conn, sqlite3.connect(":memory:"), sqlite3.connect(":memory:"), rests,
+        families={"cmd": FAMILY}, clock=lambda: at,
+    )
+    assert len(seen) == 1, "the pass must reach value_standing_entry"
+    return current, seen[0], truth
+
+
+# (case id, older_own, this_fill, row_has_fill, lot_state, other, label)
+#   FIX: an earlier commit over-restores (headroom above truth) and fails this
+#        case behaviourally (3f52be67b: every FIX; 997a86fce: older own lot).
+#   PIN: every earlier commit already within [current, truth]; regression pin.
+# With an older own lot, the order's share of the position row is not
+# provable, so the own position counts as another order's and restoration
+# stays at the current headroom (below truth, toward CANCEL).
+_RESTORATION_MATRIX = [
+    ("no_fill", False, "0", False, None, None, "PIN"),
+    ("own_alone_published_confirmed", False, "2.6", True, "CONFIRMED_EXPOSURE", None, "PIN"),
+    ("own_alone_published_optimistic", False, "2.6", True, "OPTIMISTIC_EXPOSURE", None, "PIN"),
+    ("own_alone_unpublished", False, "2.6", False, None, None, "PIN"),
+    ("older_own_fill_unpublished_row_without", True, "2.6", False, None, None, "FIX"),
+    ("older_own_fill_unpublished_row_with", True, "2.6", True, None, None, "FIX"),
+    ("older_own_fill_part_optimistic", True, "2.6", True, "OPTIMISTIC_EXPOSURE", None, "PIN"),
+    ("older_own_fill_confirmed", True, "2.6", True, "CONFIRMED_EXPOSURE", None, "PIN"),
+    ("other_confirmed_fill_unpublished", False, "2.6", False, None,
+     ("1.5", "1.5", "3", "0.50", "CONFIRMED_EXPOSURE"), "FIX"),
+    ("other_chain_cost_above_cost", False, "2.6", False, None,
+     ("1.0", "2.0", "3", "0.50", "CONFIRMED_EXPOSURE"), "FIX"),
+    ("other_shares_x_entry_above_cost", False, "2.6", False, None,
+     ("1.0", "1.0", "4", "0.60", "CONFIRMED_EXPOSURE"), "FIX"),
+    ("other_optimistic_fill_confirmed", False, "2.6", True, "CONFIRMED_EXPOSURE",
+     ("1.3", "1.3", "2.6", "0.50", "OPTIMISTIC_EXPOSURE"), "PIN"),
+    ("older_own_and_other_fill_unpublished", True, "2.6", False, None,
+     ("1.5", "1.5", "3", "0.50", "CONFIRMED_EXPOSURE"), "FIX"),
+]
+
+
+class TestRestoredHeadroomNeverAboveTruePrefill:
+    @pytest.mark.parametrize(
+        "older_own,this_fill,row_has_fill,lot_state,other,label",
+        [case[1:] for case in _RESTORATION_MATRIX],
+        ids=[case[0] for case in _RESTORATION_MATRIX],
+    )
+    def test_headroom_is_within_current_and_true_prefill(
+        self, monkeypatch, older_own, this_fill, row_has_fill, lot_state, other, label,
     ):
-        headroom = self._headroom([*own_lots, *other_lots], own_fill=own_fill, other=other)
-        current = self._truth([*own_lots, *other_lots])
-        truth = self._truth(other_lots)
-        assert current <= headroom <= truth, (current, headroom, truth)
+        current, restored, truth = _matrix_capture(
+            monkeypatch, older_own=older_own, this_fill=this_fill, row_has_fill=row_has_fill,
+            lot_state=lot_state, other=other,
+        )
+        assert restored <= truth, (label, current, restored, truth)
+        assert restored >= min(current, truth), (label, current, restored, truth)
 
-    def test_without_another_holding_the_own_fill_is_restored_exactly(self):
-        for state in ("CONFIRMED_EXPOSURE", "OPTIMISTIC_EXPOSURE"):
-            assert self._headroom([("2.6", state)], own_fill="2.6", other="0") == self.CAP
-
-    def test_other_holdings_exposure_is_valued_as_the_allocator_values_a_position(self):
-        other = SimpleNamespace(position_id="pos-other", trade_id="pos-other", direction="buy_yes",
-                                token_id=TOKEN, no_token_id="no", shares=4.0, chain_shares=5.0,
-                                cost_basis_usd=1.0, chain_cost_basis_usd=1.5, entry_price=0.6)
-        own = SimpleNamespace(position_id="pos-cmd", trade_id="pos-cmd", direction="buy_yes",
-                              token_id=TOKEN, no_token_id="no", shares=9.0, chain_shares=9.0,
-                              cost_basis_usd=4.5, chain_cost_basis_usd=4.5, entry_price=0.5)
-        unrelated = SimpleNamespace(position_id="pos-x", trade_id="pos-x", direction="buy_no",
-                                    token_id=TOKEN, no_token_id="other-no", shares=9.0, chain_shares=0.0,
-                                    cost_basis_usd=9.0, chain_cost_basis_usd=0.0, entry_price=1.0)
-        assert C._other_token_exposure_usd(
-            [other, own, unrelated], token_id=TOKEN, own_position_id="pos-cmd",
-        ) == D("3.0")
+    @pytest.mark.parametrize("lot_state", [None, "CONFIRMED_EXPOSURE", "OPTIMISTIC_EXPOSURE"])
+    def test_own_fill_alone_is_restored_exactly(self, monkeypatch, lot_state):
+        # No older own lot, no other holding: the restoration must equal the
+        # true pre-fill headroom (the D1 fill-split property depends on it).
+        _current, restored, truth = _matrix_capture(
+            monkeypatch, older_own=False, this_fill="2.6", row_has_fill=lot_state is not None,
+            lot_state=lot_state, other=None,
+        )
+        assert restored == truth
