@@ -55,6 +55,15 @@ from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 UTC = timezone.utc
 
+
+def _consumed_witness(argv) -> dict:
+    """What a real worker reports having read: at least its request file."""
+    from scripts.materialize_replacement_forecast_live import _ConsumedInputs
+
+    consumed = _ConsumedInputs()
+    consumed.read(Path(argv[argv.index("--input-json") + 1]), role="request")
+    return consumed.witness()
+
 _REGRESSION_REASON = "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
 
 
@@ -1741,7 +1750,8 @@ def _held_blocked_harness(
         return subprocess.CompletedProcess(
             list(argv), 2,
             stdout=json.dumps({"status": "BLOCKED",
-                               "reason_codes": ["REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"]}),
+                               "reason_codes": ["REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"],
+                               "consumed_inputs": _consumed_witness(argv)}),
             stderr="",
         )
 
@@ -1852,14 +1862,17 @@ def test_held_materialization_error_is_fenced_or_owned_never_respawned(
     monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
     monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
     monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
-    body = "" if error_type is None else json.dumps({
-        "status": "ERROR", "error_type": error_type,
-        **({} if category is None else {"failure_category": category}),
-    })
+    def body(argv) -> str:
+        return "" if error_type is None else json.dumps({
+            "status": "ERROR", "error_type": error_type,
+            **({} if category is None else {"failure_category": category}),
+            "consumed_inputs": _consumed_witness(argv),
+        })
+
     report = queue._process_claimed_materialization_batch(
         request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
         forecast_db=db, limit=1,
-        runner=lambda argv: subprocess.CompletedProcess(list(argv), 2, stdout="", stderr=body),
+        runner=lambda argv: subprocess.CompletedProcess(list(argv), 2, stdout="", stderr=body(argv)),
         marker_dir=root / "blocked_attempts", seed_dir=seeds,
     )
     assert (requests / seed_file.name).is_file() is retained
@@ -2976,3 +2989,84 @@ def test_worker_fetched_payload_defect_is_never_an_input_verdict(tmp_path, monke
     assert (returncode, emitted["error_type"], emitted["failure_category"]) == (
         2, "ValueError", "UNCLASSIFIED",
     )
+
+
+
+@pytest.mark.parametrize("witness", ("absent", "rewritten"))
+def test_unbound_blocked_verdict_is_retained_not_fenced(tmp_path, monkeypatch, witness) -> None:
+    """Round-4 BLOCKER (ordinary BLOCKED shares the boundary): a verdict with no
+    consumed-input witness, or whose consumed file changed after the worker read
+    it, binds nothing. It is retained for fair retry with its diagnostic and the
+    unbound reason; no marker or producer receipt is written."""
+    import subprocess
+
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "replacement_forecast_live"
+    requests, seeds = root / "requests", root / "seeds"
+    requests.mkdir(parents=True)
+    seeds.mkdir()
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    name = "Panama_City.2026-06-22.high.20260621T060500Z.json"
+    (requests / name).write_text(json.dumps({
+        "city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high",
+        "source_cycle_time": "2026-06-21T06:00:00+00:00",
+        "computed_at": "2026-06-21T06:05:00+00:00",
+        "baseline_source_run_id": "baseline-run", "openmeteo_source_run_id": "om-run",
+        "openmeteo_payload_json": "payload.json", "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
+    monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+
+    def runner(argv):
+        body = {"status": "BLOCKED", "reason_codes": ["REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"]}
+        if witness == "rewritten":
+            body["consumed_inputs"] = _consumed_witness(argv)
+            request = Path(argv[argv.index("--input-json") + 1])
+            request.write_bytes(request.read_bytes())  # same bytes, new version
+        return subprocess.CompletedProcess(list(argv), 1, stdout=json.dumps(body), stderr="")
+
+    report = queue._process_claimed_materialization_batch(
+        request_path=requests, processed_path=root / "processed", failed_path=root / "failed",
+        forecast_db=db, limit=1, runner=runner,
+        marker_dir=root / "blocked_attempts", seed_dir=seeds,
+    )
+    assert (requests / name).is_file(), "unbound verdict keeps its single owner"
+    assert queue._UNBOUND_VERDICT_REASON in report.reason_codes
+    assert queue._UNCHANGED_BLOCKED_SKIP_REASON not in report.reason_codes
+    assert not report.failed_count
+    assert not list((root / "blocked_attempts").glob("*.json"))
+    stage = json.loads((requests / f"{name}.stage").read_text())
+    assert stage["last_failure"]["verdict_bound_to_inputs"] is False
+
+
+def test_metadata_era_materialization_receipt_is_never_honored(tmp_path, monkeypatch) -> None:
+    """A materialization-blocked receipt without the m2 identity version stays on
+    disk as evidence and never fences the producer, even if its fingerprint matches."""
+    import src.data.replacement_forecast_live_materialization_queue as queue
+
+    root = tmp_path / "replacement_forecast_live"
+    seeds = root / "seeds"
+    seeds.mkdir(parents=True)
+    db = tmp_path / "forecasts.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    seed_file = seeds / "Panama_City.2026-06-22.high.json"
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "fp-a")
+    request = {"city": "Panama City", "target_date": "2026-06-22", "temperature_metric": "high"}
+    queue._write_seed_index_receipt(seed_file, {
+        "status": "MATERIALIZATION_BLOCKED", "seed_file": str(seed_file),
+        "materialization_blocked": {"request": request, "attempt_fingerprint": "fp-a"},
+    })
+    at = datetime(2026, 6, 21, 6, 6, tzinfo=timezone.utc)
+    with sqlite3.connect(db) as conn:
+        assert not queue.failed_seed_identity_fenced(seed_file, conn=conn, decision_at=at)
+        queue._record_materialization_blocked_identity(
+            root / "requests" / seed_file.name, seed_dir=seeds, request_payload=request,
+            attempt_fingerprint="fp-a",
+        )
+        assert queue.failed_seed_identity_fenced(seed_file, conn=conn, decision_at=at)
