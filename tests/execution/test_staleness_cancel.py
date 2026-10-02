@@ -758,7 +758,7 @@ class TestRunC3StandingValuation:
         _seed_open_entry(trade_conn, command_id="c1", token_id="tok1", venue_order_id="v1", q_version="q")
         monkeypatch.setattr(staleness_cancel_module, "resolve_order_families", lambda *_a: {"c1": FAMILY})
         monkeypatch.setattr(
-            staleness_cancel_module, "_capture_standing_entry_values", lambda *_a, **_k: valuations
+            staleness_cancel_module, "_capture_standing_entry_values", lambda *_a, **_k: (NOW, valuations)
         )
         if journal_fault:
             from src.state.write_coordinator import WriteLeaseTimeout
@@ -789,7 +789,7 @@ class TestRunC3StandingValuation:
         client = _Client(cancel_responses=responses)
         result = run_c3_staleness_cancel_cycle(
             trade_conn, trade_conn, object(), client,
-            world_conn_ro=object(), now=NOW, rate_budget=rate_budget,
+            world_conn_ro=object(), clock=lambda: NOW, rate_budget=rate_budget,
         )
         return trade_conn, client, result, observed_before_sdk
 
@@ -857,7 +857,7 @@ class TestRunC3StandingValuation:
         client = _FakeGatewayClient(cancel_responses=[[{"canceled": True, "orderID": "v1"}]])
 
         result = run_c3_staleness_cancel_cycle(
-            trade_conn, trade_conn, object(), client, world_conn_ro=object(), now=NOW
+            trade_conn, trade_conn, object(), client, world_conn_ro=object(), clock=lambda: NOW
         )
 
         assert client.cancel_calls == [["v1"]]
@@ -895,7 +895,7 @@ class TestRunC3StandingValuation:
 
         def _capture(_trade, _forecasts, _world, active, **_k):
             valued.append([str(e["command_id"]) for e in active])
-            return []
+            return NOW, []
 
         monkeypatch.setattr(staleness_cancel_module, "_capture_standing_entry_values", _capture)
         import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
@@ -907,7 +907,7 @@ class TestRunC3StandingValuation:
 
         result = run_c3_staleness_cancel_cycle(
             trade_conn, trade_conn, object(), _FakeGatewayClient([]),
-            world_conn_ro=object(), now=NOW, families={("miami", "2026-07-04", "HIGH")},
+            world_conn_ro=object(), clock=lambda: NOW, families={("miami", "2026-07-04", "HIGH")},
         )
 
         assert valued == [["c-in"]]
@@ -925,10 +925,10 @@ class TestRunC3StandingValuation:
         monkeypatch.setattr(
             staleness_cancel_module,
             "_capture_standing_entry_values",
-            lambda *_a, **_k: [
+            lambda *_a, **_k: (NOW, [
                 replace_valuation(_valuation("CANCEL"), command_id=cid, venue_order_id=vid, token_id=tok)
                 for cid, vid, tok in (("c-good", "v-good", "tok-good"), ("c-bad", "v-bad", "tok-bad"))
-            ],
+            ]),
         )
         import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
 
@@ -941,7 +941,7 @@ class TestRunC3StandingValuation:
         )
 
         result = run_c3_staleness_cancel_cycle(
-            trade_conn, trade_conn, object(), client, world_conn_ro=object(), now=NOW
+            trade_conn, trade_conn, object(), client, world_conn_ro=object(), clock=lambda: NOW
         )
 
         assert conn_state(trade_conn, "c-good") == "CANCELLED"
@@ -986,7 +986,7 @@ class TestMainC3StandingValuationGlue:
         def _run(trade_ro, trade_rw, forecasts_ro, client, **kwargs):
             calls.append(kwargs)
             return {
-                "scanned": 1, "kept": 1, "journaled": 0, "cancel_set_size": 0,
+                "scanned": 1, "kept": 1, "deferred": 0, "journaled": 0, "cancel_set_size": 0,
                 "confirmed_families": set(), "valuations": [], "outcomes": [],
                 "day0_cancel_set_size": 0,
             }
@@ -1013,19 +1013,13 @@ class TestMainC3StandingValuationGlue:
         assert len(calls) == 1
         assert "affected_cities" not in calls[0]
         assert calls[0]["families"] is None
+        # F1: the job passes no decision instant; the pass takes its own.
+        assert "now" not in calls[0] and "clock" not in calls[0]
         assert isinstance(calls[0]["world_conn_ro"], _Conn)
 
     def test_belief_and_day0_wakes_run_the_same_valuation_on_their_families(self, monkeypatch):
         import src.main as main_module
 
-        runs: list[frozenset] = []
-        monkeypatch.setattr(
-            main_module,
-            "_run_standing_entry_valuation",
-            lambda *, now, families: runs.append(families) or {
-                "scanned": 0, "kept": 0, "cancel_set_size": 0, "confirmed_families": set(),
-            },
-        )
         family = ("Miami", "2026-07-04", "high")
         day0_family = ("Paris", "2026-07-04", "low")
         monkeypatch.setattr(
@@ -1035,64 +1029,129 @@ class TestMainC3StandingValuationGlue:
             SimpleNamespace(reason="forecast_posterior_advanced", forecast_families=(family,), event_ids=()),
             SimpleNamespace(reason="day0_extreme_event_committed", forecast_families=(), event_ids=("e1",)),
         )
-        main_module._standing_entry_valuation_lock.acquire()
-        main_module._standing_entry_wake_valuation(wakes)
+        assert main_module._standing_entry_wake_families(wakes) == frozenset({family, day0_family})
 
-        assert runs == [frozenset({family, day0_family})]
+        runs: list[frozenset] = []
+        monkeypatch.setattr(
+            main_module,
+            "_run_standing_entry_valuation",
+            lambda *, families: runs.append(families) or {
+                "scanned": 0, "kept": 0, "deferred": 0, "cancel_set_size": 0,
+                "confirmed_families": set(),
+            },
+        )
+        main_module._standing_entry_valuation_lock.acquire()
+        main_module._standing_entry_wake_valuation(frozenset({family}))
+
+        assert runs == [frozenset({family})]
         assert not main_module._standing_entry_valuation_lock.locked()
 
-    def test_new_queued_wakes_start_one_pass_without_being_consumed(self, monkeypatch):
-        import src.main as main_module
-        import src.runtime.reactor_wake as reactor_wake
 
+def _wake_harness(monkeypatch, wakes_by_reason, *, published=True, corpus_pending=False):
+    import src.calibration.market_anchored_live_fit as fit
+    import src.main as main_module
+    import src.risk_allocator as risk_allocator
+    import src.runtime.reactor_wake as reactor_wake
+
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(risk_allocator, "global_allocator_ever_published", lambda: published)
+    monkeypatch.setattr(fit, "canonical_entry_fit_corpus_pending", lambda: corpus_pending)
+    monkeypatch.setattr(
+        reactor_wake, "reactor_wakes_for_reason",
+        lambda reason, **_k: tuple(wakes_by_reason.get(reason, ())),
+    )
+    started: list[frozenset] = []
+
+    class _Thread:
+        def __init__(self, *, target, args, name, daemon):
+            started.append(args[0])
+
+        def start(self):
+            main_module._standing_entry_valuation_lock.release()
+
+    monkeypatch.setattr(main_module.threading, "Thread", _Thread)
+    monkeypatch.setattr(main_module, "_standing_entry_seen_wake_ids", set())
+    monkeypatch.setattr(main_module, "_standing_entry_pending_families", set())
+    return main_module, started
+
+
+def _wake(wake_id, family, reason="forecast_posterior_advanced"):
+    return SimpleNamespace(wake_id=wake_id, reason=reason, forecast_families=(family,), event_ids=())
+
+
+class TestStandingEntryWakeDispatch:
+    def test_new_wakes_start_one_pass_without_being_consumed(self, monkeypatch):
         family = ("Miami", "2026-07-04", "high")
-        wake = SimpleNamespace(
-            wake_id="w1", reason="forecast_posterior_advanced", forecast_families=(family,), event_ids=()
+        main_module, started = _wake_harness(
+            monkeypatch, {"forecast_posterior_advanced": [_wake("w1", family)]}
         )
-        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
-        monkeypatch.setattr(
-            reactor_wake,
-            "reactor_wakes_for_reason",
-            lambda reason, **_k: (wake,) if reason == "forecast_posterior_advanced" else (),
-        )
-        started: list[tuple] = []
-
-        class _Thread:
-            def __init__(self, *, target, args, name, daemon):
-                started.append(args[0])
-
-            def start(self):
-                main_module._standing_entry_valuation_lock.release()
-
-        monkeypatch.setattr(main_module.threading, "Thread", _Thread)
-        monkeypatch.setattr(main_module, "_standing_entry_valued_wake_ids", set())
 
         main_module._value_standing_entries_for_new_wakes()
         main_module._value_standing_entries_for_new_wakes()
 
-        assert [tuple(w.wake_id for w in batch) for batch in started] == [("w1",)]
+        assert started == [frozenset({family})]
 
-    def test_a_held_valuation_lock_defers_the_wake_to_the_next_poll(self, monkeypatch):
-        import src.main as main_module
-        import src.runtime.reactor_wake as reactor_wake
+    def test_boot_replay_coalesces_to_one_pass_per_family(self, monkeypatch):
+        miami = ("Miami", "2026-07-04", "high")
+        paris = ("Paris", "2026-07-04", "low")
+        queue = [_wake(f"w{i}", miami if i % 2 else paris) for i in range(40)]
+        main_module, started = _wake_harness(
+            monkeypatch, {"forecast_posterior_advanced": queue}
+        )
 
-        wake = SimpleNamespace(
-            wake_id="w2", reason="forecast_posterior_advanced",
-            forecast_families=(("Miami", "2026-07-04", "high"),), event_ids=(),
+        main_module._value_standing_entries_for_new_wakes()
+
+        assert started == [frozenset({miami, paris})]
+
+    def test_wakes_wait_until_the_allocator_has_published_once(self, monkeypatch):
+        family = ("Miami", "2026-07-04", "high")
+        main_module, started = _wake_harness(
+            monkeypatch, {"forecast_posterior_advanced": [_wake("w1", family)]}, published=False,
         )
-        monkeypatch.setattr(main_module, "get_mode", lambda: "live")
-        monkeypatch.setattr(
-            reactor_wake, "reactor_wakes_for_reason",
-            lambda reason, **_k: (wake,) if reason == "forecast_posterior_advanced" else (),
+
+        main_module._value_standing_entries_for_new_wakes()
+        assert started == []
+        assert main_module._standing_entry_seen_wake_ids == set()
+
+    def test_wakes_wait_until_the_fit_corpus_is_installed(self, monkeypatch):
+        family = ("Miami", "2026-07-04", "high")
+        main_module, started = _wake_harness(
+            monkeypatch, {"forecast_posterior_advanced": [_wake("w1", family)]}, corpus_pending=True,
         )
-        monkeypatch.setattr(main_module, "_standing_entry_valued_wake_ids", set())
+
+        main_module._value_standing_entries_for_new_wakes()
+        assert started == []
+
+    def test_a_held_lock_queues_the_family_for_the_next_poll(self, monkeypatch):
+        # m2: the C3 tick (or a pass in flight) holds the lock and the reactor
+        # acknowledges the wake meanwhile: the family is still valued next poll.
+        family = ("Miami", "2026-07-04", "high")
+        queue = {"forecast_posterior_advanced": [_wake("w2", family)]}
+        main_module, started = _wake_harness(monkeypatch, queue)
         main_module._standing_entry_valuation_lock.acquire()
         try:
             main_module._value_standing_entries_for_new_wakes()
         finally:
             main_module._standing_entry_valuation_lock.release()
+        assert started == []
+        queue["forecast_posterior_advanced"] = []  # acknowledged by the reactor
 
-        assert main_module._standing_entry_valued_wake_ids == set()
+        main_module._value_standing_entries_for_new_wakes()
+
+        assert started == [frozenset({family})]
+
+    def test_a_dispatch_fault_never_skips_reactor_wake_service(self, monkeypatch):
+        # m1: the valuation dispatch has its own try in the wake listener.
+        import inspect
+
+        import src.main as main_module
+
+        source = inspect.getsource(main_module._run_edli_reactor_wake_listener)
+        dispatch = source.index("_value_standing_entries_for_new_wakes()")
+        reactor = source.index("_edli_reactor_wake_poll_once()")
+        between = source[dispatch:reactor]
+        assert "except Exception" in between
+        assert between.count("try:") == 1
 
 
 def test_pending_cancel_is_retried_without_valuation_or_day0_classification(monkeypatch):
@@ -1140,7 +1199,7 @@ def test_pending_cancel_is_retried_without_valuation_or_day0_classification(monk
     monkeypatch.setattr(venue_command_repo, "get_command", lambda *_args: {"state": "CANCELLED"})
 
     result = run_c3_staleness_cancel_cycle(
-        object(), object(), object(), object(), world_conn_ro=object(), now=NOW
+        object(), object(), object(), object(), world_conn_ro=object(), clock=lambda: NOW
     )
 
     assert submitted == [["c-pending"]]
@@ -1187,7 +1246,7 @@ def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch, 
     budget = _RateBudget()
     first = run_c3_staleness_cancel_cycle(
         trade_conn, trade_conn, forecasts_conn, client,
-        world_conn_ro=object(), now=NOW, rate_budget=budget,
+        world_conn_ro=object(), clock=lambda: NOW, rate_budget=budget,
     )
     assert first["outcomes"][0].status == "not_attempted"
     assert "command_id=c-pending status=not_attempted reason=rate_budget_DENIED" in caplog.text
@@ -1200,7 +1259,7 @@ def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch, 
 
     second = run_c3_staleness_cancel_cycle(
         trade_conn, trade_conn, forecasts_conn, client,
-        world_conn_ro=object(), now=NOW, rate_budget=budget,
+        world_conn_ro=object(), clock=lambda: NOW, rate_budget=budget,
     )
     assert second["outcomes"][0].status == "acked"
     assert client.cancel_calls == [["v-pending"]]
@@ -1216,7 +1275,7 @@ def test_pending_cancel_real_batch_retry_rate_denial_ack_and_dedup(monkeypatch, 
 
     third = run_c3_staleness_cancel_cycle(
         trade_conn, trade_conn, forecasts_conn, client,
-        world_conn_ro=object(), now=NOW, rate_budget=budget,
+        world_conn_ro=object(), clock=lambda: NOW, rate_budget=budget,
     )
     assert third["cancel_set_size"] == 0
     assert client.cancel_calls == [["v-pending"]]
@@ -1503,7 +1562,7 @@ def test_c3_day0_cancel_uses_batch_journal_and_confirms_family(monkeypatch):
     monkeypatch.setattr(
         staleness_cancel,
         "_capture_standing_entry_values",
-        lambda *_args, **_kwargs: [_keep("c-day0", "v-day0", "tok-day0")],
+        lambda *_args, **_kwargs: (NOW, [_keep("c-day0", "v-day0", "tok-day0")]),
     )
     monkeypatch.setattr(
         day0_hard_fact_exit,
@@ -1528,7 +1587,7 @@ def test_c3_day0_cancel_uses_batch_journal_and_confirms_family(monkeypatch):
         forecasts_conn,
         client,
         world_conn_ro=object(),
-        now=NOW,
+        clock=lambda: NOW,
     )
 
     assert result["day0_cancel_set_size"] == 1
@@ -1595,13 +1654,13 @@ def test_day0_classification_failure_does_not_suppress_valuation(monkeypatch) ->
     monkeypatch.setattr(
         staleness_cancel,
         "_capture_standing_entry_values",
-        lambda *_args, **_kwargs: [
+        lambda *_args, **_kwargs: (NOW, [
             staleness_cancel.StandingEntryValuation(
                 command_id="c1", venue_order_id="v1", token_id="tok1", family=FAMILY,
                 action="CANCEL", reason="CURRENT_MEAN_VALUE_NON_POSITIVE",
                 evidence={"authority_valid": True},
             )
-        ],
+        ]),
     )
     submitted: list[list[str]] = []
 
@@ -1612,7 +1671,7 @@ def test_day0_classification_failure_does_not_suppress_valuation(monkeypatch) ->
     monkeypatch.setattr(batch_order_submission, "cancel_commands_batch", _cancel_batch)
 
     result = run_c3_staleness_cancel_cycle(
-        trade_conn, trade_conn, object(), object(), world_conn_ro=object(), now=NOW
+        trade_conn, trade_conn, object(), object(), world_conn_ro=object(), clock=lambda: NOW
     )
 
     assert submitted == [["c1"]]

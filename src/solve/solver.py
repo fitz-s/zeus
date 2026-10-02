@@ -6812,14 +6812,20 @@ def _score_global_single_order_buy_expected(
 class ExistingBuyValuation:
     """An existing BUY remainder valued as the order it is.
 
-    ``decision`` scores exactly ``shares`` at the order's own limit on the
-    posterior-mean expected axis (no lot floor: the order already exists).
-    ``full_kelly_target_shares`` is the selector's Kelly reference holding
-    ``T`` at that limit, ``legal_lot_shares`` the selector's smallest legal
-    fresh order there; both size only a fresh order.
+    ``expected_growth`` is the remainder's common-axis growth (None with
+    ``no_value_reason`` when it is not positive by the selector's own law,
+    ``_positive_common_expected_growth``). ``full_kelly_target_shares`` is the
+    selector's Kelly reference holding ``T`` at the order's limit and
+    ``legal_lot_shares`` its smallest legal fresh order there; both size only
+    a fresh order. No ``GlobalSingleOrderDecision`` is built: that type
+    certifies a fresh order's sizing, which an existing order need not meet.
     """
 
-    decision: GlobalSingleOrderDecision
+    shares: Decimal
+    cost_usd: Decimal
+    expected_terminal_wealth: ExpectedBuyTerminalWealthCertificate | None
+    expected_growth: ExpectedGrowthComparison | None
+    no_value_reason: str | None
     full_kelly_target_shares: Decimal
     fractional_kelly_target_shares: Decimal
     legal_lot_shares: Decimal
@@ -6834,15 +6840,23 @@ def score_existing_buy_expected(
     wealth_ceiling_usd: Decimal,
     fractional_kelly_multiplier: Decimal,
     current_token_shares: Decimal,
+    probability_witness: FamilyPayoffWitness,
+    resolution_at: datetime | None,
+    decision_at_utc: datetime,
+    action_mode: CapitalActionMode,
 ) -> ExistingBuyValuation:
     """Score an already-resting BUY remainder of exactly ``shares``.
 
-    Same objective as ``_score_global_single_order_buy_expected``: the
+    The selector's own laws, applied to an order that exists: the
     posterior-mean expected log wealth (``_single_order_metrics`` at the mean
-    q) over the candidate's own economic curve and terminal branches. The lot
+    q) over the candidate's own curve and terminal branches, its common-axis
+    growth (``_expected_growth_of_action`` over ``capital_lock_hours_until``)
+    and the positivity law (``_positive_common_expected_growth``). The lot
     floor and the cash/allocator envelope size a fresh order and are not
     re-applied: the remainder's reservation is already held. The Kelly
     reference ``T`` and the legal lot are the selector's own, at this limit.
+    A remainder whose loss branch would leave no wealth has no value.
+    Horizon authority missing raises ``ValueError`` (lost authority).
     """
 
     mean_q = float(payoff_probability_mean)
@@ -6868,10 +6882,34 @@ def score_existing_buy_expected(
         wealth_ceiling_usd=wealth_ceiling_usd,
         risk_unit_cost=_global_buy_risk_reference_unit_cost(candidate, limit_price),
     )
-    legal_lot = _single_order_legal_minimum_lot(candidate)
+    # The fresh lot at this limit, independent of the remainder's own depth:
+    # the curve the remainder is scored on is only as deep as the remainder.
+    legal_lot = _single_order_legal_minimum_lot(
+        replace(
+            candidate,
+            proposal_cost_curve=replace(
+                candidate.economic_cost_curve,
+                levels=(
+                    replace(
+                        candidate.economic_cost_curve.levels[-1],
+                        size=max(
+                            remainder,
+                            candidate.economic_cost_curve.min_order_size
+                            + _SIZE_QUANTUM,
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
     if legal_lot is None:
         raise ValueError("existing BUY has no legal lot at its limit")
-    expected_du, expected_ev, efficiency, cost = _single_order_metrics(
+    capital_lock_hours, horizon_reason = capital_lock_hours_until(
+        resolution_at, decision_at_utc=decision_at_utc, action_mode=action_mode,
+    )
+    if capital_lock_hours is None:
+        raise ValueError(f"EXISTING_BUY_CAPITAL_HORIZON_INVALID:{horizon_reason}")
+    expected_du, expected_ev, _efficiency, cost = _single_order_metrics(
         candidate,
         q_samples=np.full(1, mean_q, dtype=np.float64),
         shares=remainder,
@@ -6881,53 +6919,58 @@ def score_existing_buy_expected(
         robust_q=mean_q,
         enforce_venue_minimum=False,
     )
+
+    def valuation(
+        terminal: ExpectedBuyTerminalWealthCertificate | None,
+        growth: ExpectedGrowthComparison | None,
+        reason: str | None,
+    ) -> ExistingBuyValuation:
+        return ExistingBuyValuation(
+            shares=remainder,
+            cost_usd=cost,
+            expected_terminal_wealth=terminal,
+            expected_growth=growth,
+            no_value_reason=reason,
+            full_kelly_target_shares=full_target,
+            fractional_kelly_target_shares=full_target * multiplier,
+            legal_lot_shares=legal_lot,
+        )
+
     if not (math.isfinite(expected_du) and math.isfinite(expected_ev)):
-        raise ValueError("existing BUY remainder breaches the wealth domain")
-    terminal = _binary_terminal_wealth_certificate(
+        return valuation(None, None, "EXISTING_BUY_LOSS_BRANCH_EXHAUSTS_WEALTH")
+    binary = _binary_terminal_wealth_certificate(
         robust_q=mean_q,
         shares=remainder,
         cost_usd=cost,
         wealth_floor_usd=wealth_floor_usd,
         wealth_ceiling_usd=wealth_ceiling_usd,
     )
-    limit, expected_fill_price, max_spend = _single_order_execution_boundary(
-        candidate, remainder, enforce_live_fill_band=False,
+    terminal = ExpectedBuyTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        win_probability_mean=mean_q,
+        loss_probability_mean=1.0 - mean_q,
+        loss_payoff_usd=binary.loss_payoff_usd,
+        win_payoff_usd=binary.win_payoff_usd,
+        wealth_after_loss_usd=binary.wealth_after_loss_usd,
+        wealth_after_win_usd=binary.wealth_after_win_usd,
+        expected_delta_log_wealth=expected_du,
+        expected_ev_usd=expected_ev,
+        ruin_probability_reduction=0.0,
     )
-    decision = GlobalSingleOrderDecision(
-        candidate=candidate,
+    growth = _expected_growth_of_action(
+        candidate,
         shares=remainder,
         cost_usd=cost,
-        robust_delta_log_wealth=0.0,
-        robust_ev_usd=0.0,
-        capital_efficiency=0.0,
-        no_trade_reason=None,
-        limit_price=limit,
-        expected_fill_price_before_fee=expected_fill_price,
-        max_spend_usd=max_spend,
-        current_token_shares=held,
-        full_kelly_target_shares=full_target,
-        fractional_kelly_target_shares=full_target * multiplier,
-        buy_sizing_mode="FRACTIONAL_TARGET",
-        expected_terminal_wealth=ExpectedBuyTerminalWealthCertificate(
-            probability_basis="POSTERIOR_PREDICTIVE_MEAN",
-            win_probability_mean=mean_q,
-            loss_probability_mean=1.0 - mean_q,
-            loss_payoff_usd=terminal.loss_payoff_usd,
-            win_payoff_usd=terminal.win_payoff_usd,
-            wealth_after_loss_usd=terminal.wealth_after_loss_usd,
-            wealth_after_win_usd=terminal.wealth_after_win_usd,
-            expected_delta_log_wealth=expected_du,
-            expected_ev_usd=expected_ev,
-            ruin_probability_reduction=0.0,
-        ),
+        expected_terminal_wealth=terminal,
+        terminal_wealth=None,
+        probability_witness=probability_witness,
+        capital_lock_hours=capital_lock_hours,
     )
-    del efficiency
-    return ExistingBuyValuation(
-        decision=decision,
-        full_kelly_target_shares=full_target,
-        fractional_kelly_target_shares=full_target * multiplier,
-        legal_lot_shares=legal_lot,
-    )
+    if not _positive_common_expected_growth(
+        growth, capital_lock_hours=growth.capital_lock_hours,
+    ):
+        return valuation(terminal, growth, _NON_POSITIVE_EXPECTED_GROWTH)
+    return valuation(terminal, growth, None)
 
 
 def _global_sell_fill_prefix_extended_objective(
@@ -7593,14 +7636,37 @@ def _expected_growth_comparison(
     candidate = score.candidate
     if candidate is None:
         raise ValueError("expected comparison requires an executable candidate")
-    if score.expected_terminal_wealth is not None:
-        expected_du = score.expected_terminal_wealth.expected_delta_log_wealth
-        expected_ev = score.expected_terminal_wealth.expected_ev_usd
+    return _expected_growth_of_action(
+        candidate,
+        shares=score.shares,
+        cost_usd=score.cost_usd,
+        expected_terminal_wealth=score.expected_terminal_wealth,
+        terminal_wealth=score.terminal_wealth,
+        probability_witness=probability_witness,
+        capital_lock_hours=capital_lock_hours,
+    )
+
+
+def _expected_growth_of_action(
+    candidate: GlobalSingleOrderAnyCandidate,
+    *,
+    shares: Decimal,
+    cost_usd: Decimal,
+    expected_terminal_wealth: ExpectedActionTerminalWealthCertificate | None,
+    terminal_wealth: BinaryTerminalWealthCertificate | None,
+    probability_witness: FamilyPayoffWitness,
+    capital_lock_hours: float,
+) -> ExpectedGrowthComparison:
+    """The common posterior-mean growth axis of one fixed action."""
+
+    if expected_terminal_wealth is not None:
+        expected_du = expected_terminal_wealth.expected_delta_log_wealth
+        expected_ev = expected_terminal_wealth.expected_ev_usd
         expected_ruin_reduction = (
-            score.expected_terminal_wealth.ruin_probability_reduction
+            expected_terminal_wealth.ruin_probability_reduction
         )
     else:
-        terminal = score.terminal_wealth
+        terminal = terminal_wealth
         held_q = family_payoff_point_q(
             probability_witness,
             bin_id=candidate.bin_id,
@@ -7628,13 +7694,13 @@ def _expected_growth_comparison(
             terminal.win_payoff_usd
         )
     effective_lock_hours = capital_lock_hours
-    expected_cost = float(score.cost_usd)
+    expected_cost = float(cost_usd)
     if getattr(candidate, "execution_mode", "TAKER_LIMIT") == "MAKER_REST":
         witness = getattr(candidate, "maker_fill_witness", None)
         if not isinstance(witness, CurrentMakerFillWitness):
             raise ValueError("maker expected economics requires current witness")
         rest_hours = float(candidate.rest_deadline_minutes) / 60.0
-        terminal = score.expected_terminal_wealth
+        terminal = expected_terminal_wealth
         if terminal is None:
             raise ValueError("maker expected economics lacks posterior-mean terminal witness")
         if isinstance(candidate, GlobalSingleOrderSellCandidate):
@@ -7652,7 +7718,7 @@ def _expected_growth_comparison(
         for outcome in witness.outcomes:
             fraction = float(outcome.fill_fraction)
             probability = float(outcome.probability)
-            filled = score.shares * outcome.fill_fraction
+            filled = shares * outcome.fill_fraction
             proceeds = filled * outcome.proceeds_per_share_usd
             if isinstance(candidate, GlobalSingleOrderSellCandidate):
                 loss_after = loss_base - filled + proceeds
@@ -7956,6 +8022,27 @@ CapitalActionMode = Literal[
 ]
 
 
+def capital_lock_hours_until(
+    resolution_at: datetime | None,
+    *,
+    decision_at_utc: datetime,
+    action_mode: CapitalActionMode,
+) -> tuple[float | None, str | None]:
+    """Hours of capital lock from the decision to the family's resolution."""
+
+    if resolution_at is None:
+        return None, "CAPITAL_HORIZON_AUTHORITY_MISSING"
+    capital_lock_hours = (
+        resolution_at - decision_at_utc.astimezone(timezone.utc)
+    ).total_seconds() / 3600.0
+    if not math.isfinite(capital_lock_hours) or (
+        capital_lock_hours <= 0.0
+        and action_mode != "IMMEDIATE_TAKER_SELL"
+    ):
+        return None, "CAPITAL_HORIZON_NON_POSITIVE"
+    return capital_lock_hours, None
+
+
 def bind_score_capital_horizon(
     score: GlobalSingleOrderDecision,
     *,
@@ -7973,16 +8060,11 @@ def bind_score_capital_horizon(
     proposal's rejection and drops from the argmax, because an order that
     cannot pass its own invariant is not in the feasible set.
     """
-    if resolution_at is None:
-        return None, "CAPITAL_HORIZON_AUTHORITY_MISSING"
-    capital_lock_hours = (
-        resolution_at - decision_at_utc.astimezone(timezone.utc)
-    ).total_seconds() / 3600.0
-    if not math.isfinite(capital_lock_hours) or (
-        capital_lock_hours <= 0.0
-        and action_mode != "IMMEDIATE_TAKER_SELL"
-    ):
-        return None, "CAPITAL_HORIZON_NON_POSITIVE"
+    capital_lock_hours, horizon_reason = capital_lock_hours_until(
+        resolution_at, decision_at_utc=decision_at_utc, action_mode=action_mode,
+    )
+    if capital_lock_hours is None:
+        return None, horizon_reason
     candidate = score.candidate
     if candidate is None:
         return None, "EXPECTED_COMPARISON_CANDIDATE_MISSING"

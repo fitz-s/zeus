@@ -219,7 +219,7 @@ def _prepared(witness, **fields):
 
 def _value(*, q=0.75, posterior="posterior-a", cash="100", multiplier="0.125",
            capital_limit="100", size="10", matched="0", price="0.50", prepared_fields=None,
-           resolution_at=RESOLUTION_AT):
+           resolution_at=RESOLUTION_AT, resolver=None):
     witness = _witness(q=q, posterior=posterior)
     rows = [_obligation_row(shares=size, cost=str(D(size) * D(price)))]
     own = C._own_reservation_wealth(
@@ -239,60 +239,62 @@ def _value(*, q=0.75, posterior="posterior-a", cash="100", multiplier="0.125",
         holdings_snapshot=_holdings(witness, own),
         fractional_kelly_multiplier=D(multiplier),
         capital_limit_usd=D(capital_limit),
-        payoff_q_correction_resolver=None,
+        payoff_q_correction_resolver=resolver,
         resolution_at=resolution_at,
         now=NOW,
     )
 
 
-class TestRStarIsTheSelectorsOwnSizer:
-    def test_target_equals_selector_buy_sizer_at_the_rest_limit(self):
+class TestTheRestIsValuedAsTheOrderItIs:
+    def test_value_is_the_selectors_expected_objective_for_exactly_the_remainder(self):
         value = _value()
 
         witness = _witness(q=0.75)
         own = _own_view()
         candidate = C._rest_candidate(
             _rest(), snapshot=_snapshot(), binding=witness.bindings[0], side="YES",
-            probability_witness=witness, capacity=S.maker_buy_capacity(own.spendable_cash_usd, D("0.50")),
+            probability_witness=witness, capacity=D("10"),
             ledger_snapshot_id=own.ledger_snapshot_id, now=NOW,
         )
-        expected = S._score_global_single_order_buy_expected(
-            candidate,
-            payoff_probability_mean=0.75,
-            sample_count=400,
-            band_alpha=0.05,
-            wealth_floor_usd=own.strategy_capital_allocation.utility_liquid_cash_usd,
-            wealth_ceiling_usd=own.strategy_capital_allocation.utility_liquid_cash_usd,
-            spendable_cash_usd=own.spendable_cash_usd,
-            capital_limit_usd=D("100"),
-            fractional_kelly_multiplier=D("0.125"),
-            current_token_shares=D("0"),
+        liquid = own.strategy_capital_allocation.utility_liquid_cash_usd
+        du, ev, _eff, cost = S._single_order_metrics(
+            candidate, q_samples=np.full(1, 0.75), shares=D("10"),
+            wealth_floor_usd=liquid, wealth_ceiling_usd=liquid, alpha=1.0, robust_q=0.75,
         )
-        assert expected.candidate is not None
-        assert D(value.evidence["target_remaining"]) == expected.shares
-        assert D(value.evidence["fractional_kelly_target_shares"]) == (
-            expected.fractional_kelly_target_shares
+        assert value.evidence["conditional_gain"] == pytest.approx(du)
+        assert value.evidence["expected_growth"]["expected_ev_usd"] == pytest.approx(ev)
+        assert value.evidence["remainder_cost_usd"] == str(cost)
+        target = S._global_buy_kelly_reference_target(
+            held_shares=D("0"), robust_q=0.75, wealth_floor_usd=liquid,
+            wealth_ceiling_usd=liquid, risk_unit_cost=D("0.50"),
         )
-        assert value.evidence["conditional_gain"] == pytest.approx(
-            expected.expected_terminal_wealth.expected_delta_log_wealth
-        )
+        assert D(value.evidence["full_kelly_target_shares"]) == target
+        assert D(value.evidence["fractional_kelly_target_shares"]) == target * D("0.125")
 
-    def test_sizer_is_called_not_reimplemented(self, monkeypatch):
+    def test_the_selectors_metric_and_growth_laws_are_called_not_reimplemented(self, monkeypatch):
         calls = []
-        real = S._score_global_single_order_buy_expected
+        real_metrics = S._single_order_metrics
+        real_growth = S._expected_growth_of_action
+        real_positive = S._positive_common_expected_growth
 
-        def spy(candidate, **kwargs):
-            calls.append((candidate.execution_mode, candidate.economic_cost_curve.levels[0].price, kwargs))
-            return real(candidate, **kwargs)
+        def spy_metrics(candidate, **kwargs):
+            calls.append(("metrics", candidate.execution_mode, kwargs["shares"]))
+            return real_metrics(candidate, **kwargs)
 
-        monkeypatch.setattr(S, "_score_global_single_order_buy_expected", spy)
-        _value(multiplier="0.125")
+        def spy_growth(candidate, **kwargs):
+            calls.append(("growth", kwargs["shares"]))
+            return real_growth(candidate, **kwargs)
 
-        assert len(calls) == 1
-        mode, limit, kwargs = calls[0]
-        assert (mode, limit) == ("MAKER_REST", D("0.50"))
-        assert kwargs["fractional_kelly_multiplier"] == D("0.125")
-        assert kwargs["payoff_probability_mean"] == pytest.approx(0.75)
+        def spy_positive(growth, **kwargs):
+            calls.append(("positive",))
+            return real_positive(growth, **kwargs)
+
+        monkeypatch.setattr(S, "_single_order_metrics", spy_metrics)
+        monkeypatch.setattr(S, "_expected_growth_of_action", spy_growth)
+        monkeypatch.setattr(S, "_positive_common_expected_growth", spy_positive)
+        _value(size="10", matched="4")
+
+        assert calls == [("metrics", "MAKER_REST", D("6")), ("growth", D("6")), ("positive",)]
 
     def test_own_reservation_is_available_to_its_own_remainder(self):
         base = _wealth(cash="100", reservation="5")
@@ -315,10 +317,6 @@ class TestRStarIsTheSelectorsOwnSizer:
         assert own.native_commitments_micro == ((TOKEN, 2_000_000),)
 
     def test_partial_fill_on_native_holdings_is_counted_once(self):
-        # The collateral snapshot already holds the 4 filled shares and the
-        # runtime position carries them. The witness counts them there and
-        # through the OPEN obligation's projection gap; the counterfactual
-        # must add nothing on top: R* sees exactly the 4 held shares.
         native = {TOKEN: 4_000_000}
         position = SimpleNamespace(
             position_id="pos-cmd", trade_id="pos-cmd", direction="buy_yes", token_id=TOKEN,
@@ -334,14 +332,13 @@ class TestRStarIsTheSelectorsOwnSizer:
 
         assert own.pending_entry_endowments_micro == ()
         assert own.native_holdings_micro == ((TOKEN, 4_000_000),)
-        # Held shares' cost stays committed; only the open obligation's cost leaves.
         assert own.native_commitments_micro == ((TOKEN, 2_000_000),)
         assert own.spendable_cash_usd == D("103")
         witness = _witness(q=0.75)
         bound = _holdings(witness, own, positions=(position,))
         candidate = C._rest_candidate(
             _rest(matched="4"), snapshot=_snapshot(), binding=witness.bindings[0], side="YES",
-            probability_witness=witness, capacity=D("100"), ledger_snapshot_id=own.ledger_snapshot_id,
+            probability_witness=witness, capacity=D("6"), ledger_snapshot_id=own.ledger_snapshot_id,
             now=NOW,
         )
         from src.engine.global_single_order_auction import _candidate_portfolio_endowment
@@ -358,26 +355,19 @@ class TestRStarIsTheSelectorsOwnSizer:
 
 
 class TestDisposition:
-    def test_positive_value_at_or_under_target_keeps(self):
+    def test_positive_value_within_target_keeps(self):
         value = _value(q=0.75)
         assert value.action == "KEEP"
         assert value.evidence["authority_valid"] is True
         assert value.evidence["expected_growth"]["capital_lock_hours"] == pytest.approx(36.0)
 
-    def test_target_more_than_a_lot_below_remainder_cancels(self):
-        # No amend and no same-order re-post: a lot-sized reduction cancels and
-        # the family's confirmed-cancel redecision sizes a fresh order.
+    def test_order_more_than_a_lot_above_target_cancels(self):
         value = _value(q=0.75, size="60")
-        target = D(value.evidence["target_remaining"])
-        assert D("60") - target >= D("5")
+        assert D("60") - D(value.evidence["fractional_kelly_target_shares"]) >= D("5")
         assert value.action == "CANCEL"
         assert value.reason == "CURRENT_FRACTIONAL_TARGET_REDUCED"
 
     def test_day0_saturated_certainty_is_refuted_like_the_selector(self):
-        value = _value(
-            q=1.0,
-            prepared_fields={},
-        )
         witness = _witness(q=1.0)
         refuted = _value(
             q=1.0,
@@ -386,7 +376,6 @@ class TestDisposition:
                 "day0_saturation_witness_identity": witness.witness_identity,
             },
         )
-        assert value.reason != refuted.reason
         assert refuted.action == "CANCEL"
         assert refuted.reason == "ENTRY_REST_BUY_REFUTED:DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED"
 
@@ -394,44 +383,45 @@ class TestDisposition:
         value = _value(q=0.75, resolution_at=None)
         assert value.action == "CANCEL"
         assert value.evidence["authority_valid"] is False
-        assert value.reason == "ENTRY_REST_CAPITAL_HORIZON_INVALID:CAPITAL_HORIZON_AUTHORITY_MISSING"
+        assert value.reason == (
+            "ENTRY_REST_CAPITAL_HORIZON_INVALID:"
+            "EXISTING_BUY_CAPITAL_HORIZON_INVALID:CAPITAL_HORIZON_AUTHORITY_MISSING"
+        )
 
     @pytest.mark.parametrize("q", [0.50, 0.30])
     def test_non_positive_value_at_the_limit_cancels(self, q):
         value = _value(q=q)
         assert value.action == "CANCEL"
-        assert value.evidence["target_remaining"] == "0"
+        assert value.reason.startswith("CURRENT_MEAN_VALUE_NON_POSITIVE")
 
-    def test_own_reservation_alone_keeps_funding_its_rest(self):
-        # No free cash: the order's own reservation still funds its remainder.
-        value = _value(cash="0")
-        assert value.reason != "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT:MAKER_CASH_CAPACITY_BELOW_LOT"
-        assert D(value.evidence["proposal_capacity_shares"]) >= D("5")
+    def test_own_reservation_funds_its_rest_without_free_cash(self):
+        # $5 free cash plus the rest's own $5: a fresh order's cash envelope
+        # (maker capacity of free cash) would cap it, the existing order is
+        # valued as it is and kept inside full Kelly.
+        assert _value(cash="5", size="10").action == "KEEP"
+        # With no wealth beyond its own reservation the same order would be
+        # the whole bankroll: beyond full Kelly, so cancelled.
+        assert _value(cash="0", size="10").action == "CANCEL"
 
-    def test_target_below_one_lot_cancels(self):
-        # q=0.51 at 0.50: even full Kelly is below one 5-share lot.
-        value = _value(q=0.51)
-        assert value.evidence["target_remaining"] == "0"
-        assert value.action == "CANCEL"
-        assert value.reason.startswith("FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT")
-
-    def test_selector_small_capital_lot_rule_applies_to_the_rest(self):
-        # q=0.52: 1/8-Kelly (~1 share) is below one lot but full Kelly (~8.4)
-        # admits one lot, exactly as the selector sizes a fresh order. A
-        # 10-share rest is one lot above that target, so it resizes.
-        value = _value(q=0.52)
+    def test_selector_small_capital_rule_keeps_a_one_lot_rest(self):
+        # q=0.52: 1/8-Kelly (~1 share) is below one lot but full Kelly (~8)
+        # admits one lot, exactly as the selector sizes a fresh order.
+        value = _value(q=0.52, size="5")
         assert D(value.evidence["fractional_kelly_target_shares"]) < D("5")
         assert D(value.evidence["full_kelly_target_shares"]) >= D("5")
-        assert value.evidence["target_remaining"] == "5"
+        assert value.action == "KEEP"
+
+    def test_capital_envelope_still_binds_the_existing_order(self):
+        value = _value(q=0.75, capital_limit="4")
         assert value.action == "CANCEL"
-        assert value.reason == "CURRENT_FRACTIONAL_TARGET_REDUCED"
+        assert value.reason == "CURRENT_CAPITAL_LIMIT_EXCEEDED"
 
     def test_posterior_identity_alone_never_changes_the_disposition(self):
         before = _value(q=0.75, posterior="posterior-a")
         after = _value(q=0.75, posterior="posterior-b")
 
         assert before.action == after.action == "KEEP"
-        assert before.evidence["target_remaining"] == after.evidence["target_remaining"]
+        assert before.evidence["conditional_gain"] == after.evidence["conditional_gain"]
         assert before.evidence["probability_witness_identity"] != (
             after.evidence["probability_witness_identity"]
         )
@@ -441,6 +431,32 @@ class TestDisposition:
 
         assert "created_at" not in inspect.getsource(C.value_standing_entry)
         assert "created_at" not in inspect.getsource(C._capture_standing_entry_values)
+
+
+class TestPartialFillMonotonicity:
+    """F3: the disposition depends on the order's full size, never on its fills.
+
+    Reviewer probe matrix: a 5-share rest at 0.50, lot 5, cash 100, k=1/8. At
+    q 0.60-0.62 the unfilled rest was KEPT while 1-3 filled shares CANCELLED it,
+    stranding unsellable dust (and a higher q flipped KEEP to CANCEL).
+    """
+
+    @pytest.mark.parametrize("q", [0.59, 0.60, 0.61, 0.62, 0.70])
+    def test_reviewer_matrix_has_one_verdict_per_q(self, q):
+        verdicts = {
+            matched: _value(q=q, size="5", matched=matched).action
+            for matched in ("0", "1", "2", "3", "4")
+        }
+        assert len(set(verdicts.values())) == 1, verdicts
+        assert set(verdicts.values()) == {"KEEP"}
+
+    @pytest.mark.parametrize("size", ["5", "10", "25", "60"])
+    @pytest.mark.parametrize("q", [0.52, 0.56, 0.6, 0.75, 0.9])
+    def test_verdict_is_monotone_in_filled_size(self, size, q):
+        size_d = D(size)
+        fills = [str((size_d * D(i) / D(10)).quantize(D("0.01"))) for i in range(10)]
+        verdicts = {_value(q=q, size=size, matched=m).action for m in fills}
+        assert len(verdicts) == 1, (size, q, verdicts)
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +561,7 @@ class TestStandingEntryTrace:
         venue = Venue()
         result = C.run_c3_staleness_cancel_cycle(
             conn, conn, sqlite3.connect(":memory:"), venue,
-            world_conn_ro=sqlite3.connect(":memory:"), now=NOW,
+            world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: NOW,
         )
         return conn, venue, result
 
@@ -618,7 +634,7 @@ def test_blocked_probability_authority_cancels_through_the_persisted_path(monkey
 
     result = C.run_c3_staleness_cancel_cycle(
         conn, conn, sqlite3.connect(":memory:"), Venue(),
-        world_conn_ro=sqlite3.connect(":memory:"), now=NOW,
+        world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: NOW,
     )
 
     valuation = result["valuations"][0]
@@ -651,11 +667,270 @@ def test_an_unreadable_order_cancels_that_order_and_values_the_rest(monkeypatch)
         {"command_id": "cmd", "venue_order_id": "venue-1", "token_id": TOKEN},
     ]
 
-    values = C._capture_standing_entry_values(
+    _at, values = C._capture_standing_entry_values(
         conn, sqlite3.connect(":memory:"), sqlite3.connect(":memory:"), entries,
-        families={"cmd-bad": FAMILY, "cmd": FAMILY}, now=NOW,
+        families={"cmd-bad": FAMILY, "cmd": FAMILY}, clock=lambda: NOW,
     )
 
     assert [(v.command_id, v.action) for v in values] == [("cmd-bad", "CANCEL"), ("cmd", "CANCEL")]
     assert values[0].reason == "ENTRY_REST_COMMAND_UNREADABLE:OperationalError"
     assert values[1].reason.startswith("ENTRY_REST_CURRENT_SCOPE_UNAVAILABLE")
+
+
+# ---------------------------------------------------------------------------
+# F1 / F2 on the REAL wealth witness and the REAL allocator lifecycle. Only
+# the probability authority (scope scan + family prep) is a fixture here; the
+# end-to-end real-probability test lives in test_standing_entry_e2e.py.
+# ---------------------------------------------------------------------------
+
+
+def _seed_real_wealth(conn, *, captured_at, pusd_micro=100_000_000):
+    """The rest's obligation plus one CHAIN collateral snapshot at ``captured_at``."""
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table
+
+    ensure_table(conn)
+    open_entry_exposure_obligation(
+        conn, command_id="cmd", owner_domain="test", token_id=TOKEN,
+        condition_id=f"cond-{TOKEN}", shares=10.0, cost_basis_usd=5.0,
+    )
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots ("
+        "pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,"
+        "ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,"
+        "captured_at,authority_tier,raw_balance_payload_hash"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (pusd_micro, 10**12, 0, "{}", "{}", 0, "{}", captured_at.isoformat(), "CHAIN", "h"),
+    )
+    conn.commit()
+
+
+def _real_authority_harness(monkeypatch, *, q=0.75):
+    """Probability authority is a fixture; wealth, portfolio and allocator are real."""
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine import global_auction_universe as universe
+    from src.engine import global_batch_runtime as runtime
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+    from src.execution import day0_hard_fact_exit
+
+    monkeypatch.setattr(C, "resolve_order_families", lambda *_a: {"cmd": FAMILY})
+    monkeypatch.setattr(C, "_snapshot_row", lambda _c, _sid: {**_snapshot(), "condition_id": f"cond-{TOKEN}"})
+    event = SimpleNamespace(
+        event_id="evt",
+        payload_json=json.dumps({"city": FAMILY[0], "target_date": FAMILY[1], "metric": FAMILY[2]}),
+    )
+    # These tests run on the real clock (the real witness checks snapshot
+    # age); the family resolves 36 h after the pass.
+    monkeypatch.setattr(
+        universe, "scan_current_global_auction_scope",
+        lambda **k: SimpleNamespace(
+            events=(event,),
+            resolution_at_by_family={FAMILY_KEY: k["decision_at_utc"] + timedelta(hours=36)},
+        ),
+    )
+    witness = _witness(q=q)
+    bindings = (
+        S.OutcomeTokenBinding(bin_id="bin-rest", condition_id=f"cond-{TOKEN}",
+                              yes_token_id=TOKEN, no_token_id=f"{TOKEN}-no"),
+        witness.bindings[1],
+    )
+    fields = {
+        name: getattr(witness, name)
+        for name in (
+            "family_key", "q_version", "resolution_identity", "topology_identity",
+            "posterior_identity_hash", "source_truth_identity", "authority_certificate_hash",
+            "band_alpha", "band_basis", "yes_point_q", "yes_q_samples", "captured_at_utc",
+        )
+    }
+    fields["bindings"] = bindings
+    witness = S.JointOutcomeProbabilityWitness(
+        **fields, max_age=witness.max_age,
+        witness_identity=S.joint_probability_witness_identity(**fields),
+    )
+    monkeypatch.setattr(
+        adapter, "_prepare_current_global_probability_family",
+        lambda *_a, **_k: PreparedGlobalFamily(decision_id="d", probability_witness=witness, candidate_seeds=()),
+    )
+    monkeypatch.setattr(adapter, "_runtime_kelly_multiplier", lambda: 0.125)
+    monkeypatch.setattr(
+        runtime, "_market_anchored_correction_resolver", lambda *_a, **_k: (lambda *_c: None),
+    )
+    monkeypatch.setattr(
+        "src.runtime.bankroll_provider.current_zeus_capital_allocation_setting",
+        lambda: {"mode": "wallet_total"},
+    )
+    monkeypatch.setattr(day0_hard_fact_exit, "classify_day0_dead_bin_entry_cancels", lambda *_a, **_k: [])
+
+
+class _NoCancelVenue:
+    def __init__(self):
+        self.calls = []
+
+    def cancel_orders_batch(self, ids):
+        self.calls.append(list(ids))
+        return [{"canceled": True, "orderID": i} for i in ids]
+
+
+def _publish_real_allocator(conn):
+    from src.control.heartbeat_supervisor import HeartbeatHealth
+    from src.risk_allocator import GovernorState, RiskAllocator, configure_global_allocator, load_cap_policy
+
+    configure_global_allocator(
+        RiskAllocator.from_position_lots(conn, load_cap_policy()),
+        GovernorState(
+            current_drawdown_pct=0.0, heartbeat_health=HeartbeatHealth.HEALTHY,
+            ws_gap_active=False, ws_gap_seconds=0, unknown_side_effect_count=0,
+            reconcile_finding_count=0,
+        ),
+    )
+
+
+class TestRealWitnessDecisionInstant:
+    """F1: a collateral snapshot written after the job started can never be
+    "from the future" for the pass: the decision instant is read after the
+    trade read snapshot is pinned."""
+
+    def test_snapshot_landing_after_job_start_keeps_the_rest(self, monkeypatch):
+        conn = _trade_db()
+        _seed_early_rest(conn)
+        _real_authority_harness(monkeypatch)
+        _publish_real_allocator(conn)
+        job_start = datetime.now(UTC)
+        # The snapshot lands 2 s after the job started (it was waiting on the
+        # valuation lock), before the pass reads.
+        _seed_real_wealth(conn, captured_at=job_start + timedelta(seconds=2))
+        ticks = iter([job_start, job_start + timedelta(seconds=3), job_start + timedelta(seconds=3)])
+
+        def clock():
+            return next(ticks, job_start + timedelta(seconds=3))
+
+        venue = _NoCancelVenue()
+        result = C.run_c3_staleness_cancel_cycle(
+            conn, conn, sqlite3.connect(":memory:"), venue,
+            world_conn_ro=sqlite3.connect(":memory:"), clock=clock,
+        )
+
+        valuation = result["valuations"][0]
+        assert valuation.action == "KEEP", valuation.reason
+        assert venue.calls == []
+
+    def test_negative_control_a_pre_lock_instant_would_reject_the_same_snapshot(self, monkeypatch):
+        # The REAL witness itself refuses a snapshot captured after the
+        # decision instant: exactly what a pre-lock `now` handed it.
+        from src.engine.global_auction_universe import current_portfolio_wealth_witness
+        from src.state.portfolio import load_runtime_open_portfolio
+
+        conn = _trade_db()
+        _seed_early_rest(conn)
+        monkeypatch.setattr(
+            "src.runtime.bankroll_provider.current_zeus_capital_allocation_setting",
+            lambda: {"mode": "wallet_total"},
+        )
+        job_start = datetime.now(UTC)
+        _seed_real_wealth(conn, captured_at=job_start + timedelta(seconds=2))
+        with pytest.raises(ValueError, match="CURRENT_WEALTH_COLLATERAL_EXPIRED"):
+            current_portfolio_wealth_witness(
+                conn, decision_at_utc=job_start, max_age=timedelta(minutes=3),
+                portfolio_state=load_runtime_open_portfolio(conn),
+            )
+
+
+class TestRealAllocatorLifecycle:
+    """F2: before the allocator's first publish the pass decides nothing; a
+    later loss of authority still fails closed."""
+
+    def test_unpublished_allocator_defers_every_rest(self, monkeypatch):
+        import src.risk_allocator.governor as governor
+        from src.risk_allocator import clear_global_allocator
+
+        conn = _trade_db()
+        _seed_early_rest(conn)
+        _real_authority_harness(monkeypatch)
+        at = datetime.now(UTC)
+        _seed_real_wealth(conn, captured_at=at - timedelta(seconds=5))
+        clear_global_allocator()
+        monkeypatch.setattr(governor, "_GLOBAL_ALLOCATOR_EVER_PUBLISHED", False)
+        venue = _NoCancelVenue()
+
+        result = C.run_c3_staleness_cancel_cycle(
+            conn, conn, sqlite3.connect(":memory:"), venue,
+            world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+        )
+
+        valuation = result["valuations"][0]
+        assert valuation.action == "DEFER"
+        assert valuation.reason == "ENTRY_REST_AUTHORITY_PENDING:allocator_not_published"
+        assert venue.calls == []
+        assert result["deferred"] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM decision_log WHERE mode='standing_entry_revaluation'"
+        ).fetchone()[0] == 0
+
+    def test_after_first_publish_the_rest_is_valued(self, monkeypatch):
+        import src.risk_allocator.governor as governor
+
+        conn = _trade_db()
+        _seed_early_rest(conn)
+        _real_authority_harness(monkeypatch)
+        monkeypatch.setattr(governor, "_GLOBAL_ALLOCATOR_EVER_PUBLISHED", False)
+        _publish_real_allocator(conn)
+        at = datetime.now(UTC)
+        _seed_real_wealth(conn, captured_at=at - timedelta(seconds=5))
+
+        result = C.run_c3_staleness_cancel_cycle(
+            conn, conn, sqlite3.connect(":memory:"), _NoCancelVenue(),
+            world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+        )
+
+        assert result["valuations"][0].action == "KEEP", result["valuations"][0].reason
+
+    def test_a_cleared_allocator_after_publish_fails_closed(self, monkeypatch):
+        import src.risk_allocator.governor as governor
+        from src.risk_allocator import clear_global_allocator
+
+        conn = _trade_db()
+        _seed_early_rest(conn)
+        _real_authority_harness(monkeypatch)
+        monkeypatch.setattr(governor, "_GLOBAL_ALLOCATOR_EVER_PUBLISHED", False)
+        _publish_real_allocator(conn)
+        clear_global_allocator()
+        at = datetime.now(UTC)
+        _seed_real_wealth(conn, captured_at=at - timedelta(seconds=5))
+        venue = _NoCancelVenue()
+
+        result = C.run_c3_staleness_cancel_cycle(
+            conn, conn, sqlite3.connect(":memory:"), venue,
+            world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+        )
+
+        valuation = result["valuations"][0]
+        assert valuation.action == "CANCEL"
+        assert valuation.reason == "ENTRY_REST_PORTFOLIO_AUTHORITY_INVALID:AllocationDenied"
+        assert venue.calls == [["venue-1"]]
+
+    def test_uninstalled_fit_corpus_defers_without_an_inline_build(self, monkeypatch):
+        import src.calibration.market_anchored_live_fit as fit
+
+        conn = _trade_db()
+        _seed_early_rest(conn)
+        _real_authority_harness(monkeypatch)
+        _publish_real_allocator(conn)
+        at = datetime.now(UTC)
+        _seed_real_wealth(conn, captured_at=at - timedelta(seconds=5))
+        cache = fit.CanonicalCorpusCache()
+        loads = []
+        cache.builder = SimpleNamespace(served=lambda *_a, **_k: None)
+        monkeypatch.setattr(fit, "_SHARED_CANONICAL_CORPUS_CACHE", cache)
+        monkeypatch.setattr(fit, "load_canonical_fit_corpus", lambda *a, **k: loads.append(1))
+        venue = _NoCancelVenue()
+
+        result = C.run_c3_staleness_cancel_cycle(
+            conn, conn, sqlite3.connect(":memory:"), venue,
+            world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+        )
+
+        valuation = result["valuations"][0]
+        assert valuation.action == "DEFER"
+        assert valuation.reason == "ENTRY_REST_AUTHORITY_PENDING:fit_corpus_not_installed"
+        assert venue.calls == [] and loads == []

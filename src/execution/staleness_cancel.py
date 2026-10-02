@@ -5,21 +5,23 @@
 #   standing ENTRY keep-by-value law (operator, 2026-09-30): an open ENTRY rest keeps
 #   working toward its current fractional-Kelly target; age and posterior identity are
 #   revaluation triggers, never cancellation authority.
-"""C3: value every open ENTRY rest -> KEEP / RESIZE / CANCEL -> reconciled re-solve.
+"""C3: value every open ENTRY rest -> KEEP / CANCEL / DEFER -> reconciled re-solve.
 
-Every recurring tick revalues each open ENTRY rest with the selector's own BUY
-sizer (``solver._score_global_single_order_buy_expected``) at the rest's own
-limit, on current probability, wealth and holdings. ``entry_rest_disposition``
-turns that valuation into one action:
+Every recurring tick (and every belief/Day0 wake for the rest's family)
+revalues each open ENTRY rest as the order it is: its open remainder at its
+own limit, on the selector's own laws, current probability, wealth and
+holdings. ``entry_rest_disposition`` turns that valuation into one action:
 
 - KEEP: the authority this valuation used is journaled as an append-only
   ``decision_log`` row bound to the same venue order id; no venue call. The
   submission certificate and ``venue_commands.q_version`` are never rewritten.
-- RESIZE: the venue client has no amend, so a resize is a persisted cancel
-  (``cancel_commands_batch``), confirmed terminal reconciliation, then a fresh
-  redecision for the family.
-- CANCEL: the same persisted batch cancel. Unavailable or blocked probability
-  authority cancels protectively; it never licenses further fills.
+- CANCEL: a persisted batch cancel (``cancel_commands_batch``) with a named
+  reason; the venue has no amend, so a smaller target is a cancel and the
+  family's confirmed-cancel redecision sizes a fresh order. Unavailable or
+  blocked authority cancels protectively; it never licenses further fills.
+- DEFER: authority this process has not loaded yet (the allocator before its
+  first publish, the fit corpus before its first install) yields no decision
+  this pass; any other missing authority still fails closed.
 
 All reads finish before the TRADE write lease (INV-37). Day0 dead-bin/anomaly
 classification is a separate, unconditional protective lane merged before the
@@ -32,10 +34,11 @@ import hashlib
 import json
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_FLOOR, Decimal
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from src.state.canonical_projections import OPEN_ORDER_FACT_STATES
 from src.state.order_state_predicates import entry_rest_disposition
@@ -52,6 +55,10 @@ OPEN_REST_FACT_STATES = tuple(sorted(OPEN_ORDER_FACT_STATES))
 FamilyKey = tuple[str, str, str]
 
 STANDING_ENTRY_DECISION_MODE = "standing_entry_revaluation"
+# Origin of a confirmed C3 cancel's redecision: the family just lost its rest
+# and is owed the retired rest-pull continuity (phase-exempt emit, reactor
+# expiry grace).
+C3_CANCEL_REDECISION_ORIGIN = "c3_staleness_cancel"
 _MICRO = Decimal("1000000")
 
 
@@ -394,9 +401,53 @@ class StandingEntryValuation:
     venue_order_id: str
     token_id: str
     family: FamilyKey | None
-    action: str  # KEEP | RESIZE | CANCEL
+    action: str  # KEEP | CANCEL | DEFER
     reason: str
     evidence: Mapping[str, Any]
+
+
+# One valuation pass may hold its trade read snapshot and consult the
+# correction resolver no longer than this; an expired pass cancels nothing it
+# could not value (DEFER), and the next pass values on fresher inputs.
+STANDING_ENTRY_PASS_BUDGET_SECONDS = 60.0
+
+
+def _deferred(entry: Mapping[str, Any], family: FamilyKey | None, reason: str) -> StandingEntryValuation:
+    """Authority this process has not loaded yet: no decision, no venue action."""
+
+    return StandingEntryValuation(
+        command_id=str(entry.get("command_id") or ""),
+        venue_order_id=str(entry.get("venue_order_id") or ""),
+        token_id=str(entry.get("token_id") or ""),
+        family=family,
+        action="DEFER",
+        reason=reason,
+        evidence={"authority_valid": None, "reason": reason},
+    )
+
+
+def _authority_pending_reason(exc: BaseException | None = None) -> str | None:
+    """Name authority that is not loaded yet; every other unknown is None.
+
+    Only two states qualify: the allocator never published in this process
+    (an ``allocator_not_configured`` denial before the first publish), and the
+    canonical fit corpus never installed by its builder. A stale or cleared
+    allocator, or a missing fit once a corpus is installed, is lost authority
+    and fails closed.
+    """
+
+    from src.calibration.market_anchored_live_fit import canonical_entry_fit_corpus_pending
+    from src.risk_allocator import AllocationDenied, global_allocator_ever_published
+
+    if (
+        isinstance(exc, AllocationDenied)
+        and exc.decision.reason == "allocator_not_configured"
+        and not global_allocator_ever_published()
+    ):
+        return "ENTRY_REST_AUTHORITY_PENDING:allocator_not_published"
+    if canonical_entry_fit_corpus_pending():
+        return "ENTRY_REST_AUTHORITY_PENDING:fit_corpus_not_installed"
+    return None
 
 
 def _protective(entry: Mapping[str, Any], family: FamilyKey | None, reason: str) -> StandingEntryValuation:
@@ -612,14 +663,13 @@ def _rest_candidate(
 ):
     """The open rest as the selector's own MAKER_REST BUY proposal at its limit.
 
-    The economic curve is one level: the rest's own limit, the selector's own
-    proposal capacity (``maker_buy_capacity`` of current cash), zero maker fee,
-    its submission snapshot's tick and lot. The open remainder does not bound
-    R*: it is compared with R* afterwards. The executable ask ladder is that
-    snapshot's; it only satisfies the candidate's non-crossing shape and is
-    never read by the BUY sizer.
+    The economic curve is one level at the rest's own limit, ``capacity``
+    shares deep (the open remainder: the order already exists, so no cash
+    envelope re-sizes it), zero maker fee, its submission snapshot's tick and
+    lot. The executable ask ladder is that snapshot's; it only satisfies the
+    candidate's non-crossing shape and is never read by the scorer.
 
-    R* is conditional on fill, so the maker witness is the certain-fill one
+    The value is conditional on fill, so the maker witness is the certain-fill one
     (one outcome: probability 1, full fill at the limit). The common
     expected-growth law (``bind_score_capital_horizon``) then values the
     order over its capital horizon exactly as the selector values a filled
@@ -719,12 +769,6 @@ def _rest_candidate(
     )
 
 
-# The selector's own common-axis failures: the proposal is worth nothing on
-# the common expected-growth axis. Every other binding failure is lost
-# authority (protective).
-_OWN_LAW_HORIZON_PREFIXES = ("NON_POSITIVE_EXPECTED_GROWTH", "COMMON_SCORE_BINDING_INVALID:")
-
-
 def value_standing_entry(
     entry: Mapping[str, Any],
     *,
@@ -741,14 +785,17 @@ def value_standing_entry(
 ) -> StandingEntryValuation:
     """Disposition of one open ENTRY rest from the selector's own BUY laws.
 
-    In selector order: the market-anchored correction
+    The rest is valued as the order it is (``score_existing_buy_expected``):
+    exactly its open remainder at its own limit, on the selector's
+    posterior-mean expected objective, given the holding its own fills already
+    created (counted once). In selector order: the market-anchored correction
     (``resolve_candidate_payoff_q_correction``), the post-calibration BUY
-    refutation (``buy_probability_rejection``), the posterior-mean BUY sizer
-    (``_score_global_single_order_buy_expected``) at the rest's own limit with
-    the same multiplier, wealth floor/ceiling, held shares and capital limit,
-    and the common expected-growth binding (``bind_score_capital_horizon``).
-    Holdings include this order's filled part once; its own unfilled
-    reservation is credited back (``wealth`` is already that view).
+    refutation (``buy_probability_rejection``), the remainder's expected
+    growth on the common axis (``bind_score_capital_horizon``) against the
+    selector's Kelly holdings at that limit, then ``entry_rest_disposition``
+    and the selector's per-token capital envelope. The lot floor and the cash
+    envelope size only a fresh order; ``wealth`` already credits the rest's
+    own unfilled reservation back.
     """
     from src.engine.global_batch_runtime import _prepared_candidate_payoff_q_lcb_caps
     from src.engine.global_single_order_auction import (
@@ -757,12 +804,9 @@ def value_standing_entry(
         day0_saturated_sides_by_family,
     )
     from src.solve.solver import (
-        _score_global_single_order_buy_expected,
-        bind_score_capital_horizon,
         family_payoff_point_q,
-        family_payoff_q_samples,
-        maker_buy_capacity,
         resolve_candidate_payoff_q_correction,
+        score_existing_buy_expected,
     )
 
     probability_witness = prepared.probability_witness
@@ -783,7 +827,6 @@ def value_standing_entry(
     size = Decimal(str(entry["size"]))
     filled = Decimal(str(entry.get("matched_size") or "0"))
     remaining = size - filled
-    minimum = Decimal(str(snapshot["min_order_size"]))
     if remaining <= 0:
         return _protective(entry, family, "ENTRY_REST_REMAINDER_NOT_POSITIVE")
     base_evidence: dict[str, Any] = {
@@ -798,7 +841,6 @@ def value_standing_entry(
         "limit_price": str(price),
         "filled_shares": str(filled),
         "open_remaining": str(remaining),
-        "minimum_order_size": str(minimum),
     }
 
     def valued(action: str, reason: str, evidence: Mapping[str, Any]) -> StandingEntryValuation:
@@ -812,34 +854,20 @@ def value_standing_entry(
             evidence={**base_evidence, **evidence},
         )
 
-    capacity = maker_buy_capacity(wealth.spendable_cash_usd, price)
-    if capacity < minimum:
-        # The selector offers no maker proposal below one lot of current cash:
-        # the target is below a legal lot. This is a value outcome, not a fault.
-        action, reason = entry_rest_disposition(
-            open_remaining=remaining,
-            target_remaining=Decimal("0"),
-            minimum_order_size=minimum,
-            conditional_gain=0.0,
-        )
-        return valued(
-            action,
-            f"{reason}:MAKER_CASH_CAPACITY_BELOW_LOT",
-            {"spendable_cash_usd": str(wealth.spendable_cash_usd), "target_remaining": "0"},
-        )
+    # The proposal curve carries the remainder itself; the cash envelope is
+    # a fresh order's bound, and the remainder's cash is already reserved.
     candidate = _rest_candidate(
         entry,
         snapshot=snapshot,
         binding=binding,
         side=side,
         probability_witness=probability_witness,
-        capacity=capacity,
+        capacity=remaining,
         ledger_snapshot_id=wealth.ledger_snapshot_id,
         now=now,
     )
     raw_q = family_payoff_point_q(probability_witness, bin_id=binding.bin_id, side=side)
-    samples = family_payoff_q_samples(probability_witness, bin_id=binding.bin_id, side=side)
-    if raw_q is None or samples is None:
+    if raw_q is None:
         return _protective(entry, family, "ENTRY_REST_POINT_PROBABILITY_UNAVAILABLE")
     try:
         correction = resolve_candidate_payoff_q_correction(
@@ -878,73 +906,72 @@ def value_standing_entry(
         payoff_q_lcb_by_candidate=_prepared_candidate_payoff_q_lcb_caps({command_id: prepared}),
     )
     if refutation is not None:
-        return valued("CANCEL", f"ENTRY_REST_BUY_REFUTED:{refutation}", {**q_evidence, "target_remaining": "0"})
+        return valued("CANCEL", f"ENTRY_REST_BUY_REFUTED:{refutation}", q_evidence)
     endowment = _candidate_portfolio_endowment(
         candidate,
         probability_witness=probability_witness,
         holdings_snapshot=holdings_snapshot,
         wealth_witness=wealth,
     )
-    score = _score_global_single_order_buy_expected(
-        candidate,
-        payoff_probability_mean=q,
-        sample_count=int(samples.size),
-        band_alpha=float(probability_witness.band_alpha),
-        wealth_floor_usd=endowment.loss_wealth_floor_usd,
-        wealth_ceiling_usd=endowment.win_wealth_floor_usd,
-        spendable_cash_usd=wealth.spendable_cash_usd,
-        capital_limit_usd=capital_limit_usd,
-        fractional_kelly_multiplier=fractional_kelly_multiplier,
-        current_token_shares=endowment.current_token_shares,
-    )
-    target = score.shares if score.candidate is not None else Decimal("0")
-    gain = 0.0
-    growth = None
-    horizon_reason = None
-    if score.candidate is not None:
-        bound, horizon_reason = bind_score_capital_horizon(
-            score,
-            resolution_at=resolution_at,
+    try:
+        existing = score_existing_buy_expected(
+            candidate,
+            shares=remaining,
+            payoff_probability_mean=q,
+            wealth_floor_usd=endowment.loss_wealth_floor_usd,
+            wealth_ceiling_usd=endowment.win_wealth_floor_usd,
+            fractional_kelly_multiplier=fractional_kelly_multiplier,
+            current_token_shares=endowment.current_token_shares,
             probability_witness=probability_witness,
+            resolution_at=resolution_at,
             decision_at_utc=now,
             action_mode="CONTINGENT_MAKER_REST_BUY",
         )
-        if bound is not None:
-            growth = bound.expected_growth
-            gain = float(growth.expected_delta_log_wealth)
-        elif not str(horizon_reason or "").startswith(_OWN_LAW_HORIZON_PREFIXES):
-            return _protective(entry, family, f"ENTRY_REST_CAPITAL_HORIZON_INVALID:{horizon_reason}")
-    action, reason = entry_rest_disposition(
-        open_remaining=remaining,
-        target_remaining=target,
-        minimum_order_size=minimum,
-        conditional_gain=gain,
+    except ValueError as exc:
+        return _protective(entry, family, f"ENTRY_REST_CAPITAL_HORIZON_INVALID:{exc}")
+    growth = existing.expected_growth
+    gain = (
+        float(growth.expected_delta_log_wealth)
+        if growth is not None and existing.no_value_reason is None
+        else 0.0
     )
-    if action == "CANCEL" and (horizon_reason or score.no_trade_reason):
-        reason = f"{reason}:{horizon_reason or score.no_trade_reason}"
+    action, reason = entry_rest_disposition(
+        held_shares=endowment.current_token_shares,
+        open_remaining=remaining,
+        full_kelly_target_shares=existing.full_kelly_target_shares,
+        fractional_kelly_target_shares=existing.fractional_kelly_target_shares,
+        legal_lot_shares=existing.legal_lot_shares,
+        remainder_gain=gain,
+    )
+    if action == "CANCEL" and existing.no_value_reason:
+        reason = f"{reason}:{existing.no_value_reason}"
+    if action == "KEEP" and existing.cost_usd > capital_limit_usd:
+        # The same per-token capital envelope a fresh order is sized inside;
+        # it depends on the fills only through the order's total cost.
+        action, reason = "CANCEL", "CURRENT_CAPITAL_LIMIT_EXCEEDED"
     return valued(
         action,
         reason,
         {
             **q_evidence,
-            "proposal_capacity_shares": str(capacity),
             "current_token_shares": str(endowment.current_token_shares),
-            "full_kelly_target_shares": str(score.full_kelly_target_shares),
-            "fractional_kelly_target_shares": str(score.fractional_kelly_target_shares),
-            "target_remaining": str(target),
-            "sizing_no_trade_reason": score.no_trade_reason,
-            "capital_horizon_reason": horizon_reason,
+            "full_kelly_target_shares": str(existing.full_kelly_target_shares),
+            "fractional_kelly_target_shares": str(existing.fractional_kelly_target_shares),
+            "legal_lot_shares": str(existing.legal_lot_shares),
+            "remainder_no_value_reason": existing.no_value_reason,
             "resolution_at_utc": None if resolution_at is None else resolution_at.isoformat(),
             "conditional_gain": gain,
             "expected_growth": None
             if growth is None
             else {
+                "ruin_probability_reduction": growth.ruin_probability_reduction,
                 "expected_delta_log_wealth": growth.expected_delta_log_wealth,
                 "expected_ev_usd": growth.expected_ev_usd,
                 "capital_lock_hours": growth.capital_lock_hours,
                 "expected_capital_efficiency": growth.expected_capital_efficiency,
             },
             "fractional_kelly_multiplier": str(fractional_kelly_multiplier),
+            "remainder_cost_usd": str(existing.cost_usd),
             "capital_limit_usd": str(capital_limit_usd),
         },
     )
@@ -989,9 +1016,16 @@ def _capture_standing_entry_values(
     entries: list[dict[str, Any]],
     *,
     families: Mapping[str, FamilyKey | None],
-    now: datetime,
-) -> list[StandingEntryValuation]:
+    clock: Callable[[], datetime],
+    deadline_monotonic: float | None = None,
+) -> tuple[datetime, list[StandingEntryValuation]]:
     """Read every input before any write: current scope, q, wealth, holdings.
+
+    The decision instant is taken from ``clock`` after the trade read snapshot
+    is established, so no fact this pass reads (collateral snapshot,
+    posterior, readiness) can be stamped after it: a witness from the future
+    is impossible by construction, not clamped. Returns that instant and one
+    valuation per order.
 
     Reuses the selector's own readers and adapter: the current global scope
     (and its per-family resolution time), ``_prepare_current_global_probability_family``
@@ -1019,7 +1053,14 @@ def _capture_standing_entry_values(
     owns_txn = not trade_conn.in_transaction
     if owns_txn:
         trade_conn.execute("BEGIN")
+    now = clock()
     try:
+        # The first read pins this transaction's WAL snapshot; the decision
+        # instant is taken after it (F1: never earlier than any fact read).
+        trade_conn.execute("SELECT 1 FROM venue_commands LIMIT 1").fetchone()
+        now = clock()
+        if now.tzinfo is None:
+            raise ValueError("STANDING_ENTRY_CLOCK_NAIVE")
         for entry in entries:
             command_id = str(entry["command_id"])
             try:
@@ -1079,6 +1120,21 @@ def _capture_standing_entry_values(
                 if prepared is None:
                     blocked[family] = "ENTRY_REST_PROBABILITY_UNAVAILABLE"
                     continue
+                try:
+                    # Native token identity exactly as the selector's book
+                    # epoch binds it before holdings, from persisted executable
+                    # snapshots only (no Gamma/CLOB call in this pass).
+                    witness = prepared.probability_witness
+                    bound_witness = universe.bind_current_global_probability_tokens(
+                        forecasts_conn,
+                        probability_witnesses={witness.family_key: witness},
+                        trade_conn=trade_conn,
+                        checked_at_utc=now,
+                    )[witness.family_key]
+                    prepared = runtime._rebind_prepared_probability(prepared, bound_witness)
+                except Exception as exc:  # noqa: BLE001 - unbound identity is no authority
+                    blocked[family] = f"ENTRY_REST_TOKEN_IDENTITY_UNAVAILABLE:{type(exc).__name__}:{exc}"
+                    continue
                 prepared_by_family[family] = (event, prepared)
         for rest in rests:
             command_id = str(rest["command_id"])
@@ -1089,7 +1145,14 @@ def _capture_standing_entry_values(
                 )
         active = [r for r in rests if str(r["command_id"]) not in values]
         if not active:
-            return [values[c] for c in order]
+            return now, [values[c] for c in order]
+        pending = _authority_pending_reason()
+        if pending is not None:
+            for rest in active:
+                values[str(rest["command_id"])] = _deferred(
+                    rest, families.get(str(rest["command_id"])), pending
+                )
+            return now, [values[c] for c in order]
         try:
             portfolio = load_runtime_open_portfolio(trade_conn)
             positions = tuple(getattr(portfolio, "positions", ()) or ())
@@ -1112,10 +1175,14 @@ def _capture_standing_entry_values(
                 prepared.probability_witness.family_key: prepared
                 for _event, prepared in prepared_by_family.values()
             }
+            # The selector's public resolver entry, outside any cut: no cut
+            # memo exists here, so every scope is computed fully, and under the
+            # daemon's corpus builder it only serves (never loads in-line).
             correction = runtime._market_anchored_correction_resolver(
                 world_conn,
                 trade_conn=trade_conn,
                 forecast_conn=forecasts_conn,
+                deadline_monotonic=deadline_monotonic,
                 target_context_by_family=runtime._target_context_by_family(
                     {
                         prepared.probability_witness.family_key: event
@@ -1133,18 +1200,26 @@ def _capture_standing_entry_values(
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - no current wealth is no new exposure
+            pending = _authority_pending_reason(exc)
             for rest in active:
                 command_id = str(rest["command_id"])
-                values[command_id] = _protective(
-                    rest,
-                    families.get(command_id),
-                    f"ENTRY_REST_PORTFOLIO_AUTHORITY_INVALID:{type(exc).__name__}",
+                values[command_id] = (
+                    _deferred(rest, families.get(command_id), pending)
+                    if pending is not None
+                    else _protective(
+                        rest,
+                        families.get(command_id),
+                        f"ENTRY_REST_PORTFOLIO_AUTHORITY_INVALID:{type(exc).__name__}",
+                    )
                 )
-            return [values[c] for c in order]
+            return now, [values[c] for c in order]
         for rest in active:
             command_id = str(rest["command_id"])
             family = families[command_id]
             event, prepared = prepared_by_family[family]
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                values[command_id] = _deferred(rest, family, "ENTRY_REST_PASS_DEADLINE")
+                continue
             try:
                 snapshot = _snapshot_row(trade_conn, str(rest.get("snapshot_id") or ""))
                 if snapshot is None:
@@ -1195,7 +1270,7 @@ def _capture_standing_entry_values(
                     family,
                     f"ENTRY_REST_VALUE_AUTHORITY_INVALID:{type(exc).__name__}:{exc}",
                 )
-        return [values[c] for c in order]
+        return now, [values[c] for c in order]
     finally:
         if owns_txn and trade_conn.in_transaction:
             trade_conn.rollback()
@@ -1214,7 +1289,6 @@ def _authority_identity(valuation: StandingEntryValuation) -> str:
             "q_version",
             "posterior_identity_hash",
             "acting_q",
-            "target_remaining",
             "open_remaining",
             "limit_price",
             "authority_valid",
@@ -1329,11 +1403,17 @@ def run_c3_staleness_cancel_cycle(
     client: Any,
     *,
     world_conn_ro: sqlite3.Connection,
-    now: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
     rate_budget: Any = None,
     families: Iterable[Iterable[object]] | None = None,
+    budget_seconds: float = STANDING_ENTRY_PASS_BUDGET_SECONDS,
 ) -> dict[str, Any]:
     """Value open ENTRY rests and cancel only what current value rejects.
+
+    ``clock`` supplies the decision instant; the capture reads it after its
+    trade read snapshot is pinned, so the instant is never earlier than any
+    fact the pass reads. ``budget_seconds`` bounds the read snapshot and the
+    correction resolver; a rest left unvalued when it runs out is DEFERRED.
 
     ``families`` restricts the pass to the open rests of those families (a
     belief or Day0 wake for them); ``None`` is the full tick, which also
@@ -1353,7 +1433,9 @@ def run_c3_staleness_cancel_cycle(
     from src.execution.day0_hard_fact_exit import classify_day0_dead_bin_entry_cancels
     from src.state.venue_command_repo import get_command
 
-    at = now or datetime.now(UTC)
+    read_clock = clock or (lambda: datetime.now(UTC))
+    deadline_monotonic = time.monotonic() + float(budget_seconds)
+    at = read_clock()
     full_tick = families is None
     entries = find_open_entry_rests(trade_conn_ro, include_pending_cancels=full_tick)
     families_by_command = resolve_order_families(entries, trade_conn_ro, forecasts_conn_ro)
@@ -1386,13 +1468,14 @@ def run_c3_staleness_cancel_cycle(
     journaled_rows = 0
     if active:
         try:
-            valuations = _capture_standing_entry_values(
+            at, valuations = _capture_standing_entry_values(
                 trade_conn_ro,
                 forecasts_conn_ro,
                 world_conn_ro,
                 active,
                 families=families_by_command,
-                now=at,
+                clock=read_clock,
+                deadline_monotonic=deadline_monotonic,
             )
         except Exception as exc:  # noqa: BLE001 - an unvalued rest never keeps filling
             logger.warning("C3 standing valuation failed; cancelling protectively: %s", exc)
@@ -1407,7 +1490,10 @@ def run_c3_staleness_cancel_cycle(
         journaled = read_journaled_identities(trade_conn_ro, now=at)
         try:
             journaled_rows = persist_standing_entry_values(
-                trade_conn_rw, valuations, now=at, journaled=journaled
+                trade_conn_rw,
+                [v for v in valuations if v.action != "DEFER"],
+                now=at,
+                journaled=journaled,
             )
         except Exception as exc:  # noqa: BLE001 - bookkeeping never blocks a cancel
             logger.warning(
@@ -1450,6 +1536,7 @@ def run_c3_staleness_cancel_cycle(
         "scanned": len(entries),
         "valuations": valuations,
         "kept": sum(v.action == "KEEP" for v in valuations),
+        "deferred": sum(v.action == "DEFER" for v in valuations),
         "journaled": journaled_rows,
         "cancel_set_size": len(cancel_set),
         "day0_cancel_set_size": len(day0_cancel_set),
@@ -1492,9 +1579,11 @@ def run_c3_staleness_cancel_cycle(
             confirmed.add(family)
     result["confirmed_families"] = confirmed - blocked
     logger.info(
-        "c3_staleness_cancel: scanned=%d kept=%d journaled=%d cancel_set=%d confirmed_families=%d",
+        "c3_staleness_cancel: scanned=%d kept=%d deferred=%d journaled=%d cancel_set=%d "
+        "confirmed_families=%d",
         result["scanned"],
         result["kept"],
+        result["deferred"],
         result["journaled"],
         result["cancel_set_size"],
         len(result["confirmed_families"]),

@@ -7588,19 +7588,38 @@ def _service_pending_collateral_authority_wake() -> bool | None:
     return None
 
 
-_standing_entry_valued_wake_ids: set[str] = set()
+_standing_entry_seen_wake_ids: set[str] = set()
+# Families woken but not yet valued. A wake marks its families here the poll it
+# is first seen, so neither a busy lock (the C3 tick or a pass in flight) nor
+# the reactor acknowledging the wake first loses the targeted valuation; boot
+# replay of the whole queue coalesces to one pass per family.
+_standing_entry_pending_families: set[tuple[str, str, str]] = set()
+
+
+def _standing_entry_authority_loaded() -> bool:
+    """Whether the valuation's own authorities exist yet in this process.
+
+    The allocator must have published once and the fit corpus builder must
+    have installed once. Before that a pass could only cancel on "not loaded
+    yet", so wakes stay queued for the first pass after both exist.
+    """
+
+    from src.calibration.market_anchored_live_fit import canonical_entry_fit_corpus_pending
+    from src.risk_allocator import global_allocator_ever_published
+
+    return global_allocator_ever_published() and not canonical_entry_fit_corpus_pending()
 
 
 def _value_standing_entries_for_new_wakes() -> None:
-    """Start one standing ENTRY valuation pass for new belief/Day0 wakes.
+    """Start one standing ENTRY valuation pass for woken families.
 
     Reads the durable wake queue without consuming it: the reactor still owns
-    every wake's acknowledgement. The pass runs on its own thread, so the
-    wake listener never waits on it before serving the reactor. A wake is
-    marked valued only when its pass starts; while a pass (or the C3 tick)
-    holds the valuation lock, new wakes wait for the next poll.
+    every wake's acknowledgement. Nothing is marked until the valuation's
+    authority is loaded. New wakes add their families to the pending set; one
+    pass on its own thread values the whole set when the valuation lock is
+    free, so the wake listener never waits on it.
     """
-    if get_mode() != "live":
+    if get_mode() != "live" or not _standing_entry_authority_loaded():
         return
     from src.runtime.reactor_wake import reactor_wakes_for_reason
 
@@ -7609,23 +7628,30 @@ def _value_standing_entries_for_new_wakes() -> None:
         for reason in sorted(_STANDING_ENTRY_VALUATION_WAKE_REASONS)
         for wake in reactor_wakes_for_reason(reason)
     }
-    _standing_entry_valued_wake_ids.intersection_update(queued)
     new = tuple(
-        wake for wake_id, wake in queued.items() if wake_id not in _standing_entry_valued_wake_ids
+        wake for wake_id, wake in queued.items() if wake_id not in _standing_entry_seen_wake_ids
     )
-    if not new or not _standing_entry_valuation_lock.acquire(blocking=False):
+    if new:
+        _standing_entry_pending_families.update(_standing_entry_wake_families(new))
+        _standing_entry_seen_wake_ids.update(wake.wake_id for wake in new)
+    _standing_entry_seen_wake_ids.intersection_update(queued)
+    if not _standing_entry_pending_families or not _standing_entry_valuation_lock.acquire(
+        blocking=False
+    ):
         return
+    families = frozenset(_standing_entry_pending_families)
+    _standing_entry_pending_families.clear()
     try:
         threading.Thread(
             target=_standing_entry_wake_valuation,
-            args=(new,),
+            args=(families,),
             name="standing-entry-wake-valuation",
             daemon=True,
         ).start()
     except BaseException:
+        _standing_entry_pending_families.update(families)
         _standing_entry_valuation_lock.release()
         raise
-    _standing_entry_valued_wake_ids.update(wake.wake_id for wake in new)
 
 
 def _run_edli_reactor_wake_listener(
@@ -7653,8 +7679,11 @@ def _run_edli_reactor_wake_listener(
                     if stop_event.wait(fallback_seconds):
                         break
             try:
-                _consume_live_control_commands()
                 _value_standing_entries_for_new_wakes()
+            except Exception:
+                logger.exception("standing ENTRY wake valuation dispatch failed")
+            try:
+                _consume_live_control_commands()
                 collateral_serviced = _service_pending_collateral_authority_wake()
                 if collateral_serviced is None:
                     _edli_reactor_wake_poll_once()
@@ -8646,6 +8675,7 @@ def _emit_live_redecision_events_for_families(
     received_at: str,
     origin: str,
     return_deferred: bool = False,
+    phase_filter_exempt_families: set[tuple[str, str, str]] | None = None,
 ) -> int | None:
     """Emit standard live redecision rows for already-live order management work."""
 
@@ -8691,6 +8721,7 @@ def _emit_live_redecision_events_for_families(
             source=_edli_next_redecision_source(),
             event_type=REDECISION_EVENT_TYPE,
             restrict_to_families=families,
+            phase_filter_exempt_families=phase_filter_exempt_families,
         )
         write_results = EventWriter(world).write_many(
             [_redecision_event_with_origin(event, origin) for event in events]
@@ -8826,28 +8857,6 @@ def _emit_command_recovery_redecision_continuations(
         return False
 
 
-def _emit_rest_pull_redecisions(
-    families: set[tuple[str, str, str]],
-    *,
-    decision_time: datetime,
-    received_at: str,
-) -> int:
-    """Emit one standard redecision per pulled maker rest family.
-
-    This is live order management, not a second forecast lane. A pulled rest has
-    either finished as terminal no-fill or is about to leave the open-rest screen,
-    so continuity must be a durable ``EDLI_REDECISION_PENDING`` row that the normal
-    reactor path consumes on the next cycle.
-    """
-
-    return _emit_live_redecision_events_for_families(
-        families,
-        decision_time=decision_time,
-        received_at=received_at,
-        origin="rest_pull",
-    )
-
-
 _C3_STALENESS_CANCEL_CONSUMER = "c3_staleness_cancel_v1"
 _c3_staleness_rate_budget = None
 
@@ -8947,9 +8956,24 @@ def _c3_staleness_cancel_cycle() -> None:
 
     # UNCONDITIONAL: every open rest is revalued every tick regardless of
     # claimed_ids. A wake pass in flight finishes first (one valuation at a
-    # time); the full tick then values every rest on fresher inputs.
-    with _standing_entry_valuation_lock:
-        stats = _run_standing_entry_valuation(now=now, families=None)
+    # time); its decision instant is taken inside the pass, after the lock and
+    # the trade read snapshot, never from this job's start.
+    if not _standing_entry_valuation_lock.acquire(
+        timeout=_STANDING_ENTRY_TICK_LOCK_WAIT_SECONDS
+    ):
+        logger.warning(
+            "c3_staleness_cancel: valuation lock held for %.0fs; the next tick values",
+            _STANDING_ENTRY_TICK_LOCK_WAIT_SECONDS,
+        )
+        stats = {
+            "scanned": 0, "kept": 0, "deferred": 0, "journaled": 0,
+            "cancel_set_size": 0, "confirmed_families": set(),
+        }
+    else:
+        try:
+            stats = _run_standing_entry_valuation(families=None)
+        finally:
+            _standing_entry_valuation_lock.release()
 
     if claimed_ids:
         world2 = get_world_connection()
@@ -8962,11 +8986,12 @@ def _c3_staleness_cancel_cycle() -> None:
             world2.close()
 
     logger.info(
-        "c3_staleness_cancel: events=%d scanned=%d kept=%d journaled=%d cancel_set=%d "
-        "confirmed_families=%d",
+        "c3_staleness_cancel: events=%d scanned=%d kept=%d deferred=%d journaled=%d "
+        "cancel_set=%d confirmed_families=%d",
         len(claimed_ids),
         stats["scanned"],
         stats["kept"],
+        stats["deferred"],
         stats["journaled"],
         stats["cancel_set_size"],
         len(stats["confirmed_families"]),
@@ -8974,6 +8999,9 @@ def _c3_staleness_cancel_cycle() -> None:
 
 
 _standing_entry_valuation_lock = threading.Lock()
+# A pass is bounded by STANDING_ENTRY_PASS_BUDGET_SECONDS; the tick waits for
+# one in-flight pass at most this long, then leaves the rests to the next tick.
+_STANDING_ENTRY_TICK_LOCK_WAIT_SECONDS = 90.0
 # Wakes whose reason can change an open ENTRY rest's value: a new served
 # posterior, a current-temperature print (reseeds belief), a Day0 hard fact.
 _STANDING_ENTRY_VALUATION_WAKE_REASONS = frozenset(
@@ -8987,7 +9015,6 @@ _STANDING_ENTRY_VALUATION_WAKE_REASONS = frozenset(
 
 def _run_standing_entry_valuation(
     *,
-    now: datetime,
     families: frozenset[tuple[str, str, str]] | None,
 ) -> dict:
     """One standing ENTRY valuation pass, then its confirmed-cancel redecision.
@@ -9016,7 +9043,6 @@ def _run_standing_entry_valuation(
             forecasts_ro,
             PolymarketClient(),
             world_conn_ro=world_ro,
-            now=now,
             rate_budget=_get_c3_staleness_rate_budget(),
             families=families,
         )
@@ -9031,12 +9057,19 @@ def _run_standing_entry_valuation(
     # job (the cancels already succeeded; the worst case without the re-decision is
     # the family waits for the round-robin).
     if stats["confirmed_families"]:
+        from src.execution.staleness_cancel import C3_CANCEL_REDECISION_ORIGIN
+
+        emit_at = datetime.now(timezone.utc)
         try:
+            # Rest-pull continuity: the confirmed family re-decides even in a
+            # phase the generic emit filters (Day0), and the reactor keeps the
+            # row through its own grace window (C3_CANCEL_REDECISION_ORIGIN).
             emitted = _emit_live_redecision_events_for_families(
                 stats["confirmed_families"],
-                decision_time=now,
-                received_at=now.isoformat(),
-                origin="c3_staleness_cancel",
+                decision_time=emit_at,
+                received_at=emit_at.isoformat(),
+                origin=C3_CANCEL_REDECISION_ORIGIN,
+                phase_filter_exempt_families=set(stats["confirmed_families"]),
             )
             logger.info(
                 "c3_staleness_cancel: re-decision emit families=%d events_emitted=%d",
@@ -9068,27 +9101,24 @@ def _standing_entry_wake_families(wakes: tuple[Any, ...]) -> frozenset[tuple[str
     return frozenset(families)
 
 
-def _standing_entry_wake_valuation(wakes: tuple[Any, ...]) -> None:
-    """Value the open ENTRY rests of these wakes' families now.
+def _standing_entry_wake_valuation(families: frozenset[tuple[str, str, str]]) -> None:
+    """Value the open ENTRY rests of woken families now.
 
-    The same valuation as the C3 tick, restricted to the named families, so
+    The same valuation as the C3 tick, restricted to these families, so
     belief-worsening protection does not wait for the 5-minute tick. The
     caller acquired ``_standing_entry_valuation_lock``; this releases it.
     Never raises: the C3 tick remains the backstop.
     """
     try:
-        families = _standing_entry_wake_families(wakes)
-        if not families:
-            return
-        stats = _run_standing_entry_valuation(now=datetime.now(timezone.utc), families=families)
+        stats = _run_standing_entry_valuation(families=families)
         if stats["scanned"]:
             logger.info(
-                "standing_entry_wake_valuation: wakes=%d families=%d scanned=%d kept=%d "
+                "standing_entry_wake_valuation: families=%d scanned=%d kept=%d deferred=%d "
                 "cancel_set=%d",
-                len(wakes),
                 len(families),
                 stats["scanned"],
                 stats["kept"],
+                stats["deferred"],
                 stats["cancel_set_size"],
             )
     except Exception:  # noqa: BLE001 - the C3 tick remains the backstop
@@ -11158,8 +11188,8 @@ def main():
         )
         # CONTINUOUS RE-DECISION P2 screen (resurrection 2026-06-12): reacts to PRICE movement
         # between forecast cycles. Reads cached beliefs × freshest executable prices (RO, no HTTP),
-        # enqueues EDLI_REDECISION_PENDING for families whose edge fired, and pulls/​re-decides
-        # abandoned maker rests (§4.5). ~90s cadence (well inside the executable-price freshness
+        # enqueues EDLI_REDECISION_PENDING for families whose edge fired; resting ENTRY value
+        # is the C3 standing valuation's, not this screen's. ~90s cadence (well inside the executable-price freshness
         # window the substrate warmer maintains). Wave-1 2026-06-12: always REGISTERED; the job
         # body runs in the one live topology. Data + cancel only, fail-soft.
         # max_instances=1/coalesce so overlapping triggers skip.

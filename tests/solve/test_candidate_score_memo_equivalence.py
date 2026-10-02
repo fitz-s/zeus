@@ -352,3 +352,49 @@ def test_decimal_capital_inputs_are_unchanged_by_memo(counting_provider):
     )
     assert small.cost_usd <= Decimal("5")
     assert large.cost_usd >= small.cost_usd
+
+
+def test_keep_valuation_outside_any_cut_equals_the_in_cut_correction(counting_provider, monkeypatch):
+    """A keep valuation runs outside every cut (the C3 tick, a wake pass): no
+    cut memo exists, so it calls the selector's public resolver entry, which
+    computes fully. The correction it acts on equals the one an in-cut score
+    of the same inputs uses."""
+
+    witnesses, candidates = _cut(5, families=2)
+    resolver = _resolver(witnesses)
+    # In-cut: the selector's own scoring warms the cut-local scope memo.
+    in_cut_decision = _select(candidates, witnesses, resolver)
+    assert in_cut_decision.candidate_evaluations
+    for candidate in candidates[:4]:
+        witness = witnesses[candidate.family_key]
+        raw_q = S.family_payoff_point_q(witness, bin_id=candidate.bin_id, side=candidate.side)
+        in_cut = S.resolve_candidate_payoff_q_correction(
+            candidate, raw_q=raw_q, witness=witness, resolver=resolver,
+            decision_at_utc=T._DECISION_AT,
+        )
+        # Outside any cut: a fresh resolver, no memo, the same public entry.
+        counting_provider.calls = []
+        outside = S.resolve_candidate_payoff_q_correction(
+            candidate, raw_q=raw_q, witness=witness, resolver=_resolver(witnesses),
+            decision_at_utc=T._DECISION_AT,
+        )
+        assert counting_provider.calls, "outside a cut the provider is asked, never a stale memo"
+        assert repr(outside) == repr(in_cut)
+
+
+def test_keep_valuation_calls_the_selectors_public_resolver_entry(monkeypatch):
+    """The C3 valuation reaches the correction only through the selector's
+    public entry (``resolve_candidate_payoff_q_correction``) and the resolver
+    factory (``_market_anchored_correction_resolver``); it never reads a
+    cut-local memo."""
+
+    import inspect
+
+    import src.execution.staleness_cancel as C
+
+    value_source = inspect.getsource(C.value_standing_entry)
+    capture_source = inspect.getsource(C._capture_standing_entry_values)
+    assert "resolve_candidate_payoff_q_correction(" in value_source
+    assert "runtime._market_anchored_correction_resolver(" in capture_source
+    for memo in ("scoped_answers", "_POSTERIOR_REVISION_BY_DIGEST", "scoped_fit"):
+        assert memo not in value_source and memo not in capture_source

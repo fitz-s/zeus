@@ -13141,6 +13141,10 @@ def _finite_nonnegative_float(value: object) -> float | None:
 _edli_redecision_confirm_refresh_lock = threading.Lock()
 _REDECISION_PENDING_EXPIRY_GRACE_SECONDS = 300
 _REDECISION_FRESH_SCREEN_SUPERSEDE_GRACE_SECONDS = 75
+# A confirmed C3 cancel's redecision is the continuity of a family that just
+# lost its resting order; a generic no-edge screen must not expire it before
+# the reactor can re-decide from current evidence (the retired rest-pull grace).
+_REDECISION_C3_CANCEL_EXPIRY_GRACE_SECONDS = 20 * 60
 
 
 _edli_redecision_screen_belief_cursor: int = 0
@@ -14351,6 +14355,33 @@ def _redecision_payload_origin(payload: Mapping[str, Any]) -> str:
     return str(payload.get("redecision_origin") or "").strip().lower()
 
 
+def _preserve_recent_c3_cancel_redecision(
+    payload: Mapping[str, Any],
+    *,
+    event_created_at: str,
+    decision_dt: datetime,
+) -> bool:
+    """Keep a confirmed C3 cancel's redecision alive through its grace window.
+
+    The cancelled rest has left the open-rest set, so this redecision row is
+    the family's only continuity proof; expiring it on the next generic
+    no-edge screen would end the family's re-decision before it ran.
+    """
+
+    from src.execution.staleness_cancel import C3_CANCEL_REDECISION_ORIGIN
+
+    if _redecision_payload_origin(payload) != C3_CANCEL_REDECISION_ORIGIN:
+        return False
+    try:
+        created_dt = datetime.fromisoformat(str(event_created_at).replace("Z", "+00:00"))
+        if created_dt.tzinfo is None:
+            created_dt = created_dt.replace(tzinfo=timezone.utc)
+        age_seconds = (decision_dt - created_dt.astimezone(timezone.utc)).total_seconds()
+    except Exception:  # noqa: BLE001
+        return False
+    return 0.0 <= age_seconds < float(_REDECISION_C3_CANCEL_EXPIRY_GRACE_SECONDS)
+
+
 def _edli_plan_unadmitted_redecision_expiry(
     world_conn,
     admitted_families: set[tuple[str, str, str]],
@@ -14502,6 +14533,7 @@ def _edli_plan_unadmitted_redecision_expiry(
         try:
             event_id = str(row[0] or "")
             payload = json.loads(str(row[5] or "{}"))
+            event_created_at = str(row[6] or "")
             family = (
                 str(payload.get("city") or "").strip(),
                 str(payload.get("target_date") or "").strip(),
@@ -14513,6 +14545,12 @@ def _edli_plan_unadmitted_redecision_expiry(
         if generation is None or not all(family):
             continue
         if family not in admitted_families:
+            if _preserve_recent_c3_cancel_redecision(
+                payload,
+                event_created_at=event_created_at,
+                decision_dt=decision_dt,
+            ):
+                continue
             reason = "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value"
             expire_by_reason.setdefault(reason, []).append(generation)
         elif supersede_stale_admitted:

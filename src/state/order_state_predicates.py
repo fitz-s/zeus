@@ -63,34 +63,55 @@ def is_delayed(
 
 def entry_rest_disposition(
     *,
+    held_shares: Decimal,
     open_remaining: Decimal,
-    target_remaining: Decimal,
-    minimum_order_size: Decimal,
-    conditional_gain: float,
+    full_kelly_target_shares: Decimal,
+    fractional_kelly_target_shares: Decimal,
+    legal_lot_shares: Decimal,
+    remainder_gain: float,
 ) -> tuple[str, str]:
-    """Dispose one open ENTRY rest from its current valuation: KEEP or CANCEL.
+    """Dispose one open ENTRY rest as the order it is: KEEP or CANCEL.
 
-    ``target_remaining`` is the selector's fractional-Kelly remaining quantity
-    R* at the rest's own limit; ``conditional_gain`` is the expected log-wealth
-    gain of the quantity that would keep working. The venue has no amend, so a
-    target at least one legal lot below the open remainder cancels; the
-    family's confirmed-cancel redecision then sizes a fresh order from scratch
-    under every ordinary entry law (there is no same-order re-post). A
-    reduction smaller than one legal lot keeps the incumbent unchanged.
+    ``h`` held shares (the order's own fills counted once), ``r`` the open
+    remainder, ``T``/``κT`` the selector's full/fractional Kelly holdings at
+    the order's limit, ``L`` its legal lot, ``g`` the remainder's own
+    common-axis expected growth given ``h``.
+
+    The lot floor sizes only a NEW order; an existing remainder is a legal
+    order already. KEEP iff ``g > 0``, ``h + r <= T`` and the final holding is
+    within the selector's target: ``h + r <= κT`` while ``κT >= L``, or, under
+    the selector's small-capital rule (``κT < L``, ``small_capital_minimum_lot_admits``),
+    ``h + r <= T`` alone. Above the fractional target by less than one lot is
+    still kept: a sub-lot overshoot cannot be cut without cancelling the whole
+    remainder, and cancelling a partly filled order strands its fill as an
+    unsellable sub-lot holding the redecision cannot top up. So the
+    disposition depends on ``h`` only through ``h + r`` (the order's full
+    size), never on how much of it has filled.
     """
-    values = (open_remaining, target_remaining, minimum_order_size)
+    values = (
+        held_shares,
+        open_remaining,
+        full_kelly_target_shares,
+        fractional_kelly_target_shares,
+        legal_lot_shares,
+    )
     if (
         any(not isinstance(v, Decimal) or not v.is_finite() for v in values)
+        or held_shares < 0
         or open_remaining <= 0
-        or target_remaining < 0
-        or minimum_order_size <= 0
-        or not math.isfinite(conditional_gain)
+        or full_kelly_target_shares < 0
+        or fractional_kelly_target_shares < 0
+        or legal_lot_shares <= 0
+        or not math.isfinite(remainder_gain)
     ):
         raise ValueError("ENTRY_REST_VALUE_INVALID")
-    if target_remaining < minimum_order_size:
-        return "CANCEL", "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT"
-    if conditional_gain <= 0:
+    if remainder_gain <= 0:
         return "CANCEL", "CURRENT_MEAN_VALUE_NON_POSITIVE"
-    if open_remaining - target_remaining >= minimum_order_size:
+    final = held_shares + open_remaining
+    if final > full_kelly_target_shares:
+        return "CANCEL", "CURRENT_FULL_KELLY_TARGET_EXCEEDED"
+    small_capital = fractional_kelly_target_shares < legal_lot_shares
+    if not small_capital and final - fractional_kelly_target_shares >= legal_lot_shares:
+        # No amend: the confirmed-cancel redecision sizes a fresh order.
         return "CANCEL", "CURRENT_FRACTIONAL_TARGET_REDUCED"
     return "KEEP", "CURRENT_ENTRY_REST_VALUE_POSITIVE"
