@@ -1877,6 +1877,107 @@ def _terminal_fak_partial_submit_fill(
     return filled, fill_price
 
 
+# Reasons execute_exit_order writes on SUBMIT_REJECTED strictly before the SDK
+# submit call (executor.py reject_final_pre_venue_cancellation, client init,
+# RED B2 expiry, _exit_execution_authority_deadline_error). A positive set:
+# any other reason, including post-SDK missing_order_id, stays command-owned.
+_PRE_VENUE_EXIT_REJECTION_REASONS = frozenset({
+    "global_final_authority_revoked_pre_venue",
+    "pre_submit_client_init_failed",
+    "RED_B2_EXPIRED",
+    "exit_execution_authority_deadline_invalid",
+    "exit_execution_authority_deadline_naive",
+    "exit_execution_authority_snapshot_deadline_unavailable",
+    "exit_execution_authority_snapshot_deadline_naive",
+    "exit_execution_authority_deadline_required",
+    "exit_execution_authority_expired_before_venue_submit",
+})
+_PRE_VENUE_EXIT_REJECTION_PREFIX = "global_final_authority_unavailable_pre_venue:"
+
+
+def _command_terminally_rejected_without_venue_order(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    position_id: str,
+) -> bool:
+    """Whether a command carries positive proof that no venue order exists.
+
+    Accepts exactly two proofs on the terminal SUBMIT_REJECTED:
+    (a) a typed pre-SDK reason with no post-SDK envelope in the payload;
+    (b) the complete deterministic FAK no-match proof, revalidated by
+        ``_global_sell_sync_no_side_effect_reauction_error``.
+    Anything else (missing_order_id, generic success_false, unknown reasons,
+    any ack/unknown/review event or fact) stays command-owned.
+    """
+
+    try:
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ? LIMIT 1",
+            (command_id,),
+        ).fetchone()
+        if state is None or str(state[0] or "").upper() != "REJECTED":
+            return False
+        history = conn.execute(
+            """
+            SELECT event_type, state_after, payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+             ORDER BY sequence_no
+            """,
+            (command_id,),
+        ).fetchall()
+        if (
+            not history
+            or str(history[-1][0] or "") != "SUBMIT_REJECTED"
+            or str(history[-1][1] or "").upper() != "REJECTED"
+            or any(
+                str(row[0] or "") not in {
+                    "INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_REJECTED",
+                }
+                for row in history
+            )
+        ):
+            return False
+        for table in ("venue_order_facts", "venue_trade_facts"):
+            if conn.execute(
+                f"SELECT 1 FROM {table} WHERE command_id = ? LIMIT 1",
+                (command_id,),
+            ).fetchone() is not None:
+                return False
+        payload = json.loads(str(history[-1][2] or "{}"))
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    reason = str(payload.get("reason") or "")
+    pre_venue = (
+        reason in _PRE_VENUE_EXIT_REJECTION_REASONS
+        or reason.startswith(_PRE_VENUE_EXIT_REJECTION_PREFIX)
+    )
+    if pre_venue:
+        # Every post-SDK rejection writer carries the final envelope receipt.
+        return (
+            payload.get("sdk_submit_attempted") in (None, False)
+            and "final_submission_envelope_id" not in payload
+            and "proof_class" not in payload
+        )
+    if reason == "venue_fak_no_match_400":
+        return str(
+            _global_sell_sync_no_side_effect_reauction_error(
+                conn,
+                OrderResult(
+                    trade_id=position_id,
+                    status="rejected",
+                    reason=reason,
+                    command_id=command_id,
+                    command_state="REJECTED",
+                ),
+            )
+        ).startswith("global_sell_exit_fak_no_fill_reauction:")
+    return False
+
+
 def _canonical_global_sell_command_ownership(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -1977,6 +2078,19 @@ def _canonical_global_sell_command_ownership(
         except sqlite3.Error:
             return "UNKNOWN"
         if binding is None:
+            if _is_exact_held_sell_command(
+                conn,
+                position_id=position_id,
+                command_id=command_id,
+                held_token_id=_asset_id_for_position(position),
+                expected_state="REJECTED",
+            ) and _command_terminally_rejected_without_venue_order(
+                conn, command_id, position_id=position_id,
+            ):
+                # SCOPE: one never-posted command whose own history proves no
+                # venue order. DRAIN: none needed; it holds no slot. RESET: a
+                # late fill/order fact or state change re-fences it.
+                continue
             return "COMMAND_OWNED"
         binding_sequence = int(binding[0])
         if binding_sequence > intent_sequence and not (
@@ -12416,6 +12530,11 @@ def check_pending_retries(
         previous_error = _latest_exit_reject_error(conn, position)
     command_ownership = _canonical_global_sell_command_ownership(conn, position)
     if command_ownership in {"COMMAND_OWNED", "UNKNOWN"}:
+        logger.info(
+            "EXIT_RETRY not released: trade_id=%s reason=COMMAND_OWNERSHIP:%s",
+            getattr(position, "trade_id", ""),
+            command_ownership,
+        )
         return False
     post_only_cross_reauction = _is_post_only_cross_reauction_error(previous_error)
     if post_only_cross_reauction and not _post_only_cross_reauction_proof_for_position(

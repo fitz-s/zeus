@@ -18752,6 +18752,122 @@ def test_recovery_refusal_is_logged_with_position_and_reason(conn, monkeypatch, 
     assert 'trade_id=pending-lineage reason=COMMAND_OWNERSHIP:COMMAND_OWNED' in caplog.text
 
 
+_FAK_PROOF_PREDICATES = {
+    'structured_v2_fak_no_match': True, 'final_envelope_command_matches': True,
+    'final_envelope_is_fak': True, 'deterministic_order_id_matches': True,
+}
+
+
+def _seed_rejected_global_sell(conn, *, case):
+    """One global SELL whose only EXIT command was rejected (40b12033 / e46e35cf)."""
+    from src.state.venue_command_repo import append_event
+
+    position_id, command_id = 'rejected-sell', 'cmd-rejected'
+    _seed_canonical_position_identity(conn, position_id=position_id, token_id=YES_TOKEN,
+                                      shares=10)
+    conn.execute("UPDATE position_current SET phase='pending_exit' WHERE position_id=?",
+                 (position_id,))
+    _seed_exit_intent_event(conn, position_id=position_id, shares=0.47, close_position=False,
+                            reason='GLOBAL_CAPITAL_OPTIMAL_SELL')
+    _insert_exit_command(conn, command_id=command_id, position_id=position_id,
+                         token_id=YES_TOKEN, size=0.47, price=0.14, order_type='FAK',
+                         post_only=False)
+    append_event(conn, command_id=command_id, event_type='SUBMIT_REQUESTED',
+                 occurred_at=_NOW.isoformat())
+    venue_order_id = f"0x{'c' * 64}"
+    final_envelope = {}
+    if case in {'fak_no_match_proof', 'fak_no_match_incomplete', 'success_false',
+                'missing_order_id'}:
+        envelope_id = _ensure_envelope(
+            conn, token_id=YES_TOKEN, envelope_id=f'final-{command_id}', price=0.14,
+            order_type='FAK', post_only=False,
+            order_id=venue_order_id if case != 'missing_order_id' else None,
+            signed_order_hash='d' * 64,
+            error_code=('venue_fak_no_match_400'
+                        if case.startswith('fak_no_match') else None),
+        )
+        final_envelope = {'final_submission_envelope_id': envelope_id,
+                          'final_submission_envelope_command_id': command_id}
+        if case != 'missing_order_id':
+            conn.execute("UPDATE venue_commands SET venue_order_id=? WHERE command_id=?",
+                         (venue_order_id, command_id))
+    payload = {
+        'pre_venue': {'reason': 'global_final_authority_revoked_pre_venue'},
+        'pre_venue_with_envelope': {'reason': 'global_final_authority_revoked_pre_venue',
+                                    'final_submission_envelope_id': 'x'},
+        'acked': None,
+        'trade_fact': {'reason': 'global_final_authority_revoked_pre_venue'},
+        'token_drift': {'reason': 'global_final_authority_revoked_pre_venue'},
+        'unknown_reason': {'reason': 'something_new'},
+        'missing_order_id': {'reason': 'missing_order_id', **final_envelope},
+        'success_false': {'reason': 'venue_rejected_400', 'detail': 'tick size',
+                          **final_envelope},
+        'fak_no_match_incomplete': {
+            'reason': 'venue_fak_no_match_400', 'proof_class':
+            'deterministic_venue_fak_no_match_400', 'terminal_no_fill': True,
+            'exposure_created': False, 'venue_order_id': venue_order_id,
+            'required_predicates': {**_FAK_PROOF_PREDICATES,
+                                    'deterministic_order_id_matches': False},
+            **final_envelope},
+        'fak_no_match_proof': {
+            'reason': 'venue_fak_no_match_400', 'proof_class':
+            'deterministic_venue_fak_no_match_400', 'terminal_no_fill': True,
+            'exposure_created': False, 'venue_order_id': venue_order_id,
+            'required_predicates': dict(_FAK_PROOF_PREDICATES), **final_envelope},
+    }[case]
+    if case == 'acked':
+        append_event(conn, command_id=command_id, event_type='SUBMIT_ACKED',
+                     occurred_at=_NOW.isoformat())
+    else:
+        append_event(conn, command_id=command_id, event_type='SUBMIT_REJECTED',
+                     occurred_at=_NOW.isoformat(), payload=payload)
+    if case == 'trade_fact':
+        conn.execute("INSERT INTO venue_trade_facts (trade_id, venue_order_id, command_id, "
+                     "state, filled_size, fill_price, source, observed_at, local_sequence, "
+                     "raw_payload_hash, raw_payload_json) VALUES ('late-fill', 'ord', ?, "
+                     "'MATCHED', '0.47', '0.14', 'WS_USER', ?, 1, 'h', '{}')",
+                     (command_id, _NOW.isoformat()))
+    if case == 'token_drift':
+        conn.execute("UPDATE venue_commands SET token_id='other-token' WHERE command_id=?",
+                     (command_id,))
+    conn.commit()
+    return SimpleNamespace(
+        trade_id=position_id, position_id=position_id, token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN, direction='buy_yes', state='pending_exit',
+        exit_state='retry_pending', strategy_key='center_buy', env='live',
+        effective_exposure=lambda: SimpleNamespace(shares=10.0),
+    )
+
+
+@pytest.mark.parametrize('case', ['pre_venue', 'fak_no_match_proof'])
+def test_rejected_sell_with_positive_no_order_proof_frees_global_slot(conn, case):
+    from src.execution import exit_lifecycle
+
+    position = _seed_rejected_global_sell(conn, case=case)
+
+    # Exact durable proof that no venue order exists: the auction may re-decide.
+    assert exit_lifecycle._canonical_global_sell_command_ownership(
+        conn, position) == 'GLOBAL_NO_COMMAND'
+    assert exit_lifecycle.has_global_sell_snapshot_reauction_retry(position, conn)
+
+
+@pytest.mark.parametrize('case', [
+    'missing_order_id', 'success_false', 'fak_no_match_incomplete', 'unknown_reason',
+    'pre_venue_with_envelope', 'acked', 'trade_fact', 'token_drift',
+])
+def test_rejected_sell_without_positive_no_order_proof_stays_owned(conn, case, caplog):
+    from src.execution import exit_lifecycle
+
+    position = _seed_rejected_global_sell(conn, case=case)
+
+    # A post-SDK rejection may hide a live venue order: never free the slot.
+    assert exit_lifecycle._canonical_global_sell_command_ownership(
+        conn, position) == 'COMMAND_OWNED'
+    with caplog.at_level('INFO', logger='src.execution.exit_lifecycle'):
+        assert not exit_lifecycle.check_pending_retries(position, conn=conn)
+    assert 'trade_id=rejected-sell reason=COMMAND_OWNERSHIP:COMMAND_OWNED' in caplog.text
+
+
 @pytest.mark.parametrize('missing_no_token', [None, ''])
 def test_unarmed_claim_with_missing_canonical_no_token_stays_fenced(conn, missing_no_token):
     from src.execution.exit_safety import global_sell_reauction_publish_claim_blocks_exit_command
