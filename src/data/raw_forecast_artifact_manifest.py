@@ -182,10 +182,14 @@ class RawForecastArtifactManifest:
             payload[key] = payload[key].astimezone(UTC).isoformat()
         return payload
 
-    def verify_artifact(self, *, root: Path | str | None = None) -> None:
+    def artifact_file(self, *, root: Path | str | None = None) -> Path:
         artifact_path = Path(self.artifact_path)
         if root is not None and not artifact_path.is_absolute():
             artifact_path = Path(root) / artifact_path
+        return artifact_path
+
+    def verify_artifact(self, *, root: Path | str | None = None) -> None:
+        artifact_path = self.artifact_file(root=root)
         if not artifact_path.exists():
             raise FileNotFoundError(str(artifact_path))
         actual_size = artifact_path.stat().st_size
@@ -193,6 +197,13 @@ class RawForecastArtifactManifest:
             raise ValueError(f"artifact byte_size mismatch: expected {self.byte_size}, got {actual_size}")
         actual_sha = sha256_file(artifact_path)
         if actual_sha != self.sha256:
+            raise ValueError("artifact sha256 mismatch")
+
+    def verify_artifact_bytes(self, body: bytes) -> None:
+        """The check ``verify_artifact`` makes, on bytes a caller already read and hashed."""
+        if len(body) != self.byte_size:
+            raise ValueError(f"artifact byte_size mismatch: expected {self.byte_size}, got {len(body)}")
+        if hashlib.sha256(body).hexdigest() != self.sha256:
             raise ValueError("artifact sha256 mismatch")
 
     def manifest_sha256(self) -> str:

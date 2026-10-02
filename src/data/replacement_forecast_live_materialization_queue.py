@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.config import PROJECT_ROOT
@@ -376,6 +377,10 @@ class _PendingMaterialization:
     request_payload: Mapping[str, object] | None
     marker_path: Path | None
     attempt_fingerprint: str | None
+    # The claim this invocation answers: an id the worker echoes from its stage
+    # receipt, and the sha256 of the request bytes the parent claimed.
+    attempt_id: str | None = None
+    claimed_request_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -464,6 +469,7 @@ def _write_stage_receipt(
     *,
     stage: str,
     deadline_at: datetime,
+    attempt_id: str | None = None,
 ) -> None:
     """Atomically expose the last known child stage without touching canonical DBs."""
 
@@ -474,6 +480,7 @@ def _write_stage_receipt(
         "stage": stage,
         "deadline_at": deadline_at.astimezone(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
+        **({"attempt_id": attempt_id} if attempt_id is not None else {}),
     }
     _write_stage_receipt_payload(input_json, payload)
 
@@ -1195,8 +1202,13 @@ def _record_materialization_blocked_identity(
     seed_dir: Path | None,
     request_payload: Mapping[str, object],
     attempt_fingerprint: str | None,
+    dependencies: Sequence[Mapping[str, object]] | None = None,
 ) -> None:
-    """Index a no-posterior request outcome under its seed for producer fences."""
+    """Index a no-posterior request outcome under its seed for producer fences.
+
+    ``dependencies`` is the resolved record the verdict was bound to, kept as
+    evidence; the fence itself is the fingerprint, which hashes that record.
+    """
     if seed_dir is None or attempt_fingerprint is None:
         return
     seed_path = seed_dir / _stable_request_id(input_json)
@@ -1208,6 +1220,7 @@ def _record_materialization_blocked_identity(
                 "request": dict(request_payload),
                 "attempt_fingerprint": attempt_fingerprint,
                 "identity_version": MATERIALIZATION_IDENTITY_VERSION,
+                **({"dependencies": list(dependencies)} if dependencies is not None else {}),
             },
         })
     except (OSError, ValueError):
@@ -3242,19 +3255,99 @@ _TRANSIENT_BLOCK_RETRY_REASONS = frozenset(
 )
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
 # Version of the materialization attempt identity (blocked-attempt markers and
-# materialization-blocked receipts). m2 keys each named input file on the sha256
-# of its bytes and fences only a worker outcome whose consumed-input witness still
-# re-reads byte- and version-identical. Unversioned identities keyed files on
-# (mtime, size): they never match an m2 fingerprint, so they are never honored.
-MATERIALIZATION_IDENTITY_VERSION = "m2"
+# materialization-blocked receipts). m3 keys the attempt on its resolved
+# dependency record (every named input and the manifest's artifact, each by the
+# path one resolver chose and the sha256 of its bytes) and fences only a worker
+# outcome whose witness names this claim and judged exactly those bytes. Older
+# identities never match an m3 fingerprint and are never honored: unversioned
+# keyed files on (mtime, size); m2 omitted the manifest, its artifact and the
+# resolver's fallback paths.
+MATERIALIZATION_IDENTITY_VERSION = "m3"
 # Revision of the worker's named-input validation; part of every witness.
-MATERIALIZATION_INPUT_VALIDATION_REVISION = "worker-named-inputs-r1"
+MATERIALIZATION_INPUT_VALIDATION_REVISION = "worker-named-inputs-r2"
+# The files a request names, by request field -> witness role. The worker reads
+# exactly these (and the manifest's artifact); the parent resolves the same set.
+MATERIALIZATION_NAMED_INPUTS = {
+    "openmeteo_manifest_json": "manifest",
+    "openmeteo_payload_json": "openmeteo_payload",
+    "precision_metadata_json": "precision_metadata",
+}
+MANIFEST_ARTIFACT_ROLE = "manifest_artifact"
+REQUEST_ROLE = "request"
+# Manifests are parsed from the bytes they were hashed from, so bodies are kept.
+_MANIFEST_READER = VersionedFileReader(max_bytes=1024 * 1024, keep_bodies=True, max_paths=4096)
+
+
+def resolve_named_input(value: object, *, base_dir: Path, root: Path) -> Path:
+    """The one resolver for a request's named input: first existing candidate."""
+    path = Path(str(value))
+    if path.is_absolute():
+        return path
+    candidates = [base_dir / path, root / path, Path.cwd() / path]
+    if len(path.parts) >= 2 and path.parts[0] == ".." and path.parts[1] == "raw_manifests":
+        candidates.append(root / "state" / "replacement_forecast_live" / Path(*path.parts[1:]))
+    candidates.append(root / "state" / "replacement_forecast_live" / path)
+    return next((candidate for candidate in candidates if candidate.exists()), candidates[0])
+
+
+class _DependencyUnknown(Exception):
+    """A dependency's bytes could not be read as one version: no identity."""
+
+
+def _materialization_dependency_record(
+    payload: Mapping[str, object],
+    *,
+    request_dir: Path,
+    root: Path = PROJECT_ROOT,
+) -> list[dict[str, object]] | None:
+    """Every file a request's named-input validation reads, resolved once.
+
+    SCOPE: one request. Each entry is (role, declared value, resolved path, sha256
+    of its bytes); "absent" for a resolved path with no file, and the manifest's
+    artifact follows from the manifest bytes themselves. The same record is the
+    reset identity (the attempt fingerprint hashes it) and the admission set (a
+    worker's witness must lie inside it). None when any read is unknown
+    (permission, I/O, a symlink, a write during the read): unknown never fences.
+    """
+    entries: list[dict[str, object]] = []
+
+    def read(role: str, declared: object, path: Path, reader: VersionedFileReader):
+        try:
+            result = reader.read(path)
+        except (FileNotFoundError, NotADirectoryError):
+            entries.append({"role": role, "declared": declared, "path": str(path), "sha256": "absent"})
+            return None
+        except (OSError, UnsafeFile) as exc:
+            raise _DependencyUnknown(str(path)) from exc
+        if not result.settled:
+            raise _DependencyUnknown(str(path))
+        entries.append({
+            "role": role, "declared": declared,
+            "path": str(path.resolve()), "sha256": result.sha256,
+        })
+        return result
+
+    try:
+        for field, role in MATERIALIZATION_NAMED_INPUTS.items():
+            declared = payload.get(field)
+            if declared in (None, ""):
+                continue
+            path = resolve_named_input(declared, base_dir=request_dir, root=root)
+            result = read(role, declared, path, _MANIFEST_READER if role == "manifest" else _SEED_INPUT_READER)
+            if role != "manifest" or result is None:
+                continue
+            from src.data.raw_forecast_artifact_manifest import parse_manifest  # noqa: PLC0415
+
+            try:
+                artifact = parse_manifest(result.body or b"").artifact_file(root=root)
+            except (ValueError, TypeError, UnicodeDecodeError):
+                # The manifest bytes (already an entry) are the whole identity.
+                continue
+            read(MANIFEST_ARTIFACT_ROLE, None, artifact, _SEED_INPUT_READER)
+    except _DependencyUnknown:
+        return None
+    return entries
 _UNBOUND_VERDICT_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_VERDICT_NOT_BOUND_TO_INPUTS"
-_ATTEMPT_INPUT_PATH_FIELDS = (
-    "openmeteo_payload_json",
-    "precision_metadata_json",
-    "aifs_samples_json",
-)
 
 
 def _source_clock_missing_configured_sources(
@@ -3736,25 +3829,11 @@ def _blocked_attempt_fingerprint(
         raise
     except Exception:  # noqa: BLE001 - unknown watermark must retry, never suppress work
         return None
-    file_revisions: dict[str, str] = {}
+    dependencies = None
     if not missing_sources:
-        for field in _ATTEMPT_INPUT_PATH_FIELDS:
-            raw_path = payload.get(field)
-            if raw_path in (None, ""):
-                continue
-            path = Path(str(raw_path))
-            if not path.is_absolute():
-                path = input_json.parent / path
-            try:
-                read = _SEED_INPUT_READER.read(path)
-            except (FileNotFoundError, NotADirectoryError):
-                file_revisions[field] = "absent"
-                continue
-            except (OSError, UnsafeFile):
-                return None  # unknown read state never fences
-            if not read.settled:
-                return None
-            file_revisions[field] = read.sha256
+        dependencies = _materialization_dependency_record(payload, request_dir=input_json.parent)
+        if dependencies is None:
+            return None  # unknown read state never fences
     logic_revisions: dict[str, tuple[int, int] | None] = {}
     for path in (
         PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
@@ -3779,7 +3858,7 @@ def _blocked_attempt_fingerprint(
                 for key, value in payload.items()
                 if key not in _ATTEMPT_CLOCK_FIELDS
             },
-            "files": file_revisions,
+            "dependencies": dependencies,
             "raw": {
                 "missing_configured_sources": missing_sources,
                 "source_clock_frontier": source_clock_frontier,
@@ -3824,6 +3903,63 @@ def _subprocess_result_consumed_inputs(
     return None
 
 
+def _witness_names_claim(
+    witness: Mapping[str, object] | None,
+    *,
+    input_json: Path,
+    attempt_id: str | None,
+    claimed_request_sha256: str | None,
+    record: Sequence[Mapping[str, object]],
+) -> bool:
+    """Whether a witness reports THIS claimed invocation and nothing outside it.
+
+    SCOPE: one worker outcome. It must carry the attempt id the parent issued, one
+    request read of the exact claimed path whose bytes hash to what the parent
+    claimed, and every other read must be an entry of the dependency record
+    resolved from that request, with the same role, path and bytes. A worker that
+    stopped early may report fewer reads; it may never report a foreign one.
+    """
+    if (
+        not isinstance(witness, Mapping)
+        or attempt_id is None
+        or claimed_request_sha256 is None
+        or witness.get("attempt_id") != attempt_id
+    ):
+        return False
+    files = witness.get("files")
+    if not isinstance(files, (list, tuple)):
+        return False
+    requests = [e for e in files if isinstance(e, Mapping) and e.get("role") == REQUEST_ROLE]
+    if (
+        len(requests) != 1
+        or requests[0].get("path") != str(input_json.resolve())
+        or requests[0].get("sha256") != claimed_request_sha256
+    ):
+        return False
+    allowed = {
+        (str(e["role"]), str(e["path"]), str(e["sha256"]))
+        for e in record if e.get("sha256") != "absent"
+    }
+    return all(
+        isinstance(e, Mapping)
+        and (str(e.get("role")), str(e.get("path")), str(e.get("sha256"))) in allowed
+        for e in files if e is not requests[0]
+    )
+
+
+def _claimed_request_sha256(
+    input_json: Path, payload: Mapping[str, object] | None,
+) -> str | None:
+    """sha256 of the request bytes the parent claimed, when they encode ``payload``."""
+    if payload is None:
+        return None
+    try:
+        body = input_json.read_bytes()
+        return hashlib.sha256(body).hexdigest() if json.loads(body) == payload else None
+    except (OSError, ValueError):
+        return None
+
+
 def _consumed_inputs_unchanged(witness: Mapping[str, object] | None) -> bool:
     """Whether every file the worker consumed still holds the version and bytes it
     judged. Only then is the worker's verdict a verdict on the current inputs.
@@ -3855,30 +3991,44 @@ def _consumed_inputs_unchanged(witness: Mapping[str, object] | None) -> bool:
     return True
 
 
-def _bound_verdict_fingerprint(
+def _bound_verdict(
     completed: subprocess.CompletedProcess[str],
     *,
-    input_json: Path,
-    payload: Mapping[str, object],
+    item: "_PendingMaterialization",
     forecast_db: Path | str | None,
-    claimed: str | None,
-) -> str | None:
-    """The attempt identity a worker verdict may fence, or None when unbound.
+) -> tuple[str, list[dict[str, object]]] | None:
+    """(fingerprint, dependency record) a worker verdict may fence, or None.
 
-    ``claimed`` is the fingerprint taken before the worker ran. The verdict binds
-    only when (1) every file the worker consumed still holds the version and bytes
-    it judged, and (2) the fingerprint is the same after the worker as before it,
-    so no fingerprinted input (file bytes or DB frontier) moved across the run.
-    The witness is checked on both sides of the recompute: versions only move
-    forward, so this also rejects A->B->A, where the worker judged B.
+    Binds only when (1) the witness names this claim and stays inside the record
+    resolved from the claimed request, (2) every file the worker read still holds
+    the version and bytes it judged, and (3) the fingerprint (which hashes that
+    record) is the same after the worker as before it. The witness is re-read on
+    both sides of the recompute: versions only move forward, so this rejects
+    A->B->A, where the worker judged B.
     """
     witness = _subprocess_result_consumed_inputs(completed)
-    if claimed is None or not _consumed_inputs_unchanged(witness):
+    payload = item.request_payload
+    if (
+        payload is None
+        or item.attempt_fingerprint is None
+        or not _consumed_inputs_unchanged(witness)
+    ):
         return None
     after = _blocked_attempt_fingerprint(
-        input_json=input_json, forecast_db=forecast_db, payload=payload,
+        input_json=item.input_json, forecast_db=forecast_db, payload=payload,
     )
-    return claimed if after == claimed and _consumed_inputs_unchanged(witness) else None
+    record = _materialization_dependency_record(payload, request_dir=item.input_json.parent)
+    if (
+        after != item.attempt_fingerprint
+        or record is None
+        or not _witness_names_claim(
+            witness, input_json=item.input_json, attempt_id=item.attempt_id,
+            claimed_request_sha256=item.claimed_request_sha256, record=record,
+        )
+        or not _consumed_inputs_unchanged(witness)
+    ):
+        return None
+    return after, record
 
 
 def _blocked_attempt_marker_path(
@@ -4137,6 +4287,7 @@ def _write_blocked_attempt_marker(
     marker_path: Path | None,
     payload: Mapping[str, object],
     fingerprint: str | None,
+    dependencies: Sequence[Mapping[str, object]] | None = None,
 ) -> None:
     if marker_path is None or fingerprint is None:
         return
@@ -4149,6 +4300,7 @@ def _write_blocked_attempt_marker(
                 "reason_codes": [_UNCHANGED_BLOCKED_REASON],
                 "attempt_fingerprint": fingerprint,
                 "identity_version": MATERIALIZATION_IDENTITY_VERSION,
+                **({"dependencies": list(dependencies)} if dependencies is not None else {}),
                 "city": payload.get("city"),
                 "target_date": payload.get("target_date"),
                 "temperature_metric": payload.get("temperature_metric"),
@@ -7453,10 +7605,12 @@ def _process_claimed_materialization_batch(
             unchanged_success.append(str(receipt))
             continue
         child_deadline = _child_deadline_at()
+        attempt_id = uuid4().hex
         _write_stage_receipt(
             input_json,
             stage="open_read_snapshot",
             deadline_at=child_deadline,
+            attempt_id=attempt_id,
         )
         pending.append(
             _PendingMaterialization(
@@ -7468,6 +7622,8 @@ def _process_claimed_materialization_batch(
                 request_payload=request_payload,
                 marker_path=marker_path,
                 attempt_fingerprint=attempt_fingerprint,
+                attempt_id=attempt_id,
+                claimed_request_sha256=_claimed_request_sha256(input_json, request_payload),
             )
         )
     if runner is None:
@@ -7603,13 +7759,8 @@ def _process_claimed_materialization_batch(
             stale_day0_superseded.append(str(receipt))
         elif (
             verdict
-            and (
-                bound_fingerprint := _bound_verdict_fingerprint(
-                    completed, input_json=input_json,
-                    payload=item.request_payload, forecast_db=forecast_db,
-                    claimed=item.attempt_fingerprint,
-                )
-            ) is not None
+            and (bound := _bound_verdict(completed, item=item, forecast_db=forecast_db))
+            is not None
         ):
             # SCOPE: this request's exact attempt fingerprint, recomputed after
             # the worker and bound to the bytes it consumed. BLOCKED or an
@@ -7618,17 +7769,19 @@ def _process_claimed_materialization_batch(
             verdict_reasons = result_reason_codes or (
                 f"ERROR:{_subprocess_result_error_type(completed)}",
             )
+            bound_fingerprint, dependencies = bound
             try:
                 _write_blocked_attempt_marker(
                     marker_path=item.marker_path,
                     payload=item.request_payload,
                     fingerprint=bound_fingerprint,
+                    dependencies=dependencies,
                 )
             except OSError:
                 pass
             _record_materialization_blocked_identity(
                 input_json, seed_dir=seed_dir, request_payload=item.request_payload,
-                attempt_fingerprint=bound_fingerprint,
+                attempt_fingerprint=bound_fingerprint, dependencies=dependencies,
             )
             receipt = _record_latest_terminal_request(
                 input_json,
