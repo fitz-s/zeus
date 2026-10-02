@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-23
+# Last reused/audited: 2026-10-02 (local-proof candidate set)
 # Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
@@ -4086,3 +4086,51 @@ def test_current_target_plan_post_fetch_filter_survives_invalid_timezone(
     assert _scope_present(plan, "London", "2026-09-14")
     assert not _scope_present(plan, "SaoPaulo", "2026-09-13")
     assert _scope_present(plan, "SaoPaulo", "2026-09-14")
+
+
+def test_anchor_local_proof_candidate_set_matches_the_per_row_probe_exactly() -> None:
+    """The once-per-index candidate set accepts exactly the ids the old per-row
+    SQL probe accepted (it scanned the whole artifact table for every row)."""
+    import itertools
+
+    from src.data.replacement_forecast_current_target_plan import _anchor_local_proof_candidate_ids
+
+    revision = "openmeteo_anchor_local_proof_possession_v1"
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE raw_forecast_artifacts (data_version TEXT,"
+                 " artifact_metadata_json TEXT, artifact_path TEXT)")
+    rows = [
+        (revision, '{"original_artifact_id": 101}', "/x/unrelated.json"),          # metadata id
+        (revision, '{"original_artifact_id": 102.0}', None),                       # real id
+        (revision, '{"original_artifact_id": "103"}', None),                       # text: no match
+        (revision, '{"original_artifact_id": true}', None),                        # JSON true == 1
+        (revision, "not json", "/a/b/openmeteo_anchor_local_proof_104_ab.json"),   # path id
+        (revision, None, "openmeteo_anchor_local_proof_105_ab.json"),              # no slash
+        (revision, None, "/a/OPENMETEO_ANCHOR_LOCAL_PROOF_106_ab.json"),           # case
+        (revision, None, "/a/openmeteo_anchor_local_proof_0107_ab.json"),          # leading zero
+        (revision, None, "/a/openmeteo_anchor_local_proof_108_ab.json.bak"),       # suffix
+        (revision, None, "/a/openmeteo_anchor_local_proof_109_.json"),             # empty tail
+        (revision, None, "/a/openmeteo_anchor_local_proof_110.json"),              # no underscore
+        (revision, None, "/a/openmeteo_anchor_local_proof_111_x/openmeteo_anchor_local_proof_112_y.json"),
+        (revision, None, "/a/openmeteo_anchor_local_proof_-113_ab.json"),          # negative
+        (revision, '{"original_artifact_id": 114}', "/a/openmeteo_anchor_local_proof_115_ab.json"),
+        ("other_revision", '{"original_artifact_id": 116}',
+         "/a/openmeteo_anchor_local_proof_116_ab.json"),                           # other revision
+        (revision, '{"cities": ["x"]}', "/a/openmeteo_anchor_local_proof_1170_ab.json"),
+    ]
+    conn.executemany("INSERT INTO raw_forecast_artifacts VALUES (?,?,?)", rows)
+
+    def old_probe(aid: int) -> bool:
+        return conn.execute(
+            """SELECT 1 FROM raw_forecast_artifacts
+                WHERE data_version=? AND ((json_valid(artifact_metadata_json)
+                  AND json_extract(artifact_metadata_json,'$.original_artifact_id')=?)
+                  OR artifact_path GLOB ?) LIMIT 1""",
+            (revision, aid, f"*/openmeteo_anchor_local_proof_{aid}_*.json"),
+        ).fetchone() is not None
+
+    candidates = _anchor_local_proof_candidate_ids(conn, revision)
+    probed = list(itertools.chain(range(-120, 130), (1170, 117, 107, 0)))
+    assert {aid for aid in probed if old_probe(aid)} == {aid for aid in probed if aid in candidates}
+    assert {1, 101, 102, 104, 109, 111, 112, -113, 114, 115, 1170} <= candidates
+    assert not {103, 105, 106, 107, 108, 110, 116} & candidates

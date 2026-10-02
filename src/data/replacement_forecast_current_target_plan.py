@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -471,6 +472,37 @@ def _openmeteo_manifest_horizon_allows_target_date(
     return start <= wanted <= start + timedelta(days=max_extra_days)
 
 
+_ANCHOR_LOCAL_PROOF_PATH_ID = re.compile(r"/openmeteo_anchor_local_proof_(-?[0-9]+)_")
+
+
+def _anchor_local_proof_candidate_ids(conn: sqlite3.Connection, revision: str) -> frozenset[object]:
+    """Every artifact id the per-row structural candidate probe would accept.
+
+    The probe matched a proof row when json_extract(meta, '$.original_artifact_id')
+    equals the id (SQLite comparison: an integer or an equal real, never text)
+    or when artifact_path GLOBs ``*/openmeteo_anchor_local_proof_{id}_*.json``:
+    a case-sensitive ``/openmeteo_anchor_local_proof_<id>_`` anywhere after a
+    slash, with the id's canonical decimal spelling, and the path ending in
+    ``.json`` after it. The values come from SQLite's own json_extract, so a
+    JSON true reads as 1 exactly as the probe compared it.
+    """
+    ids: set[object] = set()
+    for original, path in conn.execute(
+        "SELECT CASE WHEN json_valid(artifact_metadata_json)"
+        " THEN json_extract(artifact_metadata_json,'$.original_artifact_id') END,"
+        " artifact_path FROM raw_forecast_artifacts WHERE data_version=?",
+        (revision,),
+    ):
+        if isinstance(original, (int, float)) and not isinstance(original, bool):
+            ids.add(original)
+        if isinstance(path, str) and path.endswith(".json"):
+            for match in _ANCHOR_LOCAL_PROOF_PATH_ID.finditer(path):
+                digits = match.group(1)
+                if match.end() <= len(path) - len(".json") and digits == str(int(digits)):
+                    ids.add(int(digits))
+    return frozenset(ids)
+
+
 def _load_openmeteo_manifest_index(
     conn: sqlite3.Connection,
     *,
@@ -547,6 +579,12 @@ def _load_openmeteo_manifest_index(
         "SELECT 1 FROM raw_forecast_artifacts WHERE data_version=? LIMIT 1",
         (ANCHOR_LOCAL_PROOF_REVISION,),
     ).fetchone() is not None
+    # The local-proof candidate set, read once: a per-row probe scanned the
+    # whole artifact table (no data_version index) for every manifest row.
+    proof_candidates = (
+        _anchor_local_proof_candidate_ids(conn, ANCHOR_LOCAL_PROOF_REVISION)
+        if local_proofs_present else frozenset()
+    )
     index: dict[tuple[str, str, str], list[_OpenMeteoManifest]] = {}
     for row in rows:
         _check_target_plan_deadline(deadline_monotonic)
@@ -558,12 +596,7 @@ def _load_openmeteo_manifest_index(
             aid = int(row["artifact_id"])
             # This is only a structural candidate check. The strict typed
             # reader below owns full prefix, request, bytes and clock proof.
-            candidate = conn.execute("""SELECT 1 FROM raw_forecast_artifacts
-                WHERE data_version=? AND ((json_valid(artifact_metadata_json)
-                  AND json_extract(artifact_metadata_json,'$.original_artifact_id')=?)
-                  OR artifact_path GLOB ?) LIMIT 1""",
-                (ANCHOR_LOCAL_PROOF_REVISION,aid,f"*/openmeteo_anchor_local_proof_{aid}_*.json")).fetchone()
-            if candidate is not None:
+            if aid in proof_candidates:
                 try:
                     local = read_anchor_local_proof(conn,aid,city=str(metadata["city"]),
                         target_date=str(metadata["target_date"]),metric=str(metadata["metric"]),
