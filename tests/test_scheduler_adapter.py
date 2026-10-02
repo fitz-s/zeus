@@ -2,7 +2,7 @@
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-10-02 (station-ground archive vs broad reseed)
+# Last reused or audited: 2026-10-02 (station-ground archive; carried RETRY_PENDING debt)
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -431,6 +431,138 @@ def test_broad_reseed_with_a_station_ground_archive_completes_and_commits_the_cu
 
     assert loaded == [()]
     assert advances == [("ecmwf_ifs",)]
+
+
+def _retry_debt_world(monkeypatch, tmp_path, cycle_reports):
+    """Broad batches whose cycle-advance passes return ``cycle_reports`` in order."""
+    import src.data.replacement_fusion_upgrade_trigger as fusion_trigger
+    import src.data.replacement_cycle_advance_trigger as cycle_trigger
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setattr(ingest_main, "_BROAD_RESEED_CARRIED", set())
+    monkeypatch.setattr(fusion_trigger, "enqueue_fusion_upgrade_reseeds",
+                        lambda **_k: {"status": "FUSION_UPGRADE_TRIGGER"})
+    calls: list[object] = []
+
+    def cycle(**kwargs):
+        calls.append(kwargs.get("scopes"))
+        return cycle_reports.pop(0)
+
+    monkeypatch.setattr(cycle_trigger, "enqueue_cycle_advance_reseeds", cycle)
+    advances: list[object] = []
+    monkeypatch.setattr("src.data.source_clock_update_probe.advance_source_clock_cursor",
+                        lambda _p, *, sources: advances.append(sources) or sources)
+    raw_dir = tmp_path / "raw_manifests"
+    raw_dir.mkdir(exist_ok=True)
+
+    def enqueue(cursor_value):
+        ingest_main._enqueue_broad_reseed_batch(
+            {"forecast_db": tmp_path / "f.db", "seed_dir": tmp_path / "seeds",
+             "raw_manifest_dir": raw_dir},
+            include_cycle_advance=True,
+            source_clock_payload={
+                "cursor_path": str(tmp_path / "cursor.json"), "updated_sources": ["icon_global"],
+                "cursor_values": {"icon_global": cursor_value},
+                "cursor_preimage": {"icon_global": None},
+            },
+            cursor_sources=("icon_global",),
+            download_report={"status": "downloaded"},
+        )
+
+    return ingest_main, calls, advances, enqueue
+
+
+def test_one_retry_pending_family_commits_the_cursor_and_is_redecided_next_batch(
+    monkeypatch, broad_reseed_join, tmp_path,
+) -> None:
+    """A per-family queue-lock wait is that family's, never the batch's (live 10-02:
+    one RETRY_PENDING discarded a 1,945 s batch and held every source's cursor)."""
+    family = ("Tokyo", "2026-10-04", "high")
+    ingest_main, calls, advances, enqueue = _retry_debt_world(monkeypatch, tmp_path, [
+        {"status": "CYCLE_ADVANCE_RETRY_PENDING", "retry_pending": 1,
+         "retry_pending_scopes": [family]},
+        {"status": "CYCLE_ADVANCE_TRIGGER", "retry_pending": 0, "retry_pending_scopes": []},
+        {"status": "CYCLE_ADVANCE_TRIGGER", "retry_pending": 0, "retry_pending_scopes": []},
+    ])
+
+    enqueue("v1")
+    broad_reseed_join()
+    assert advances == [("icon_global",)]
+    assert ingest_main._BROAD_RESEED_CARRIED == {family}
+
+    enqueue("v2")
+    broad_reseed_join()
+    assert calls[0] is None and calls[1] == (family,) and calls[2] is None
+    assert ingest_main._BROAD_RESEED_CARRIED == set()
+
+
+@pytest.mark.parametrize("report", [
+    {"status": "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE", "retry_pending": 0,
+     "retry_pending_scopes": []},
+    {"status": "CYCLE_ADVANCE_TRIGGER_FAILSOFT_SKIPPED"},
+    {"status": "CYCLE_ADVANCE_RETRY_PENDING", "retry_pending": 1},
+])
+def test_unnamed_or_non_family_cycle_failures_still_block_the_cursor(
+    monkeypatch, broad_reseed_join, tmp_path, report,
+) -> None:
+    ingest_main, _calls, advances, enqueue = _retry_debt_world(
+        monkeypatch, tmp_path, [report])
+
+    enqueue("v1")
+    broad_reseed_join()
+
+    assert advances == []
+    assert ingest_main._BROAD_RESEED_CARRIED == set()
+
+
+def test_carried_debt_is_rebuilt_at_boot_from_unconsumed_markers(monkeypatch, tmp_path) -> None:
+    """A restart loses the in-memory set; the durable marker rebuilds it."""
+    import sqlite3
+
+    import src.data.replacement_cycle_advance_trigger as cycle_trigger
+    import src.ingest_main as ingest_main
+    from src.data.replacement_forecast_readiness import SOURCE_ID
+
+    db = tmp_path / "f.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE cycle_advance_enqueues (city TEXT, target_date TEXT,"
+                     " metric TEXT, target_cycle_time TEXT)")
+        conn.execute("CREATE TABLE forecast_posteriors (source_id TEXT, city TEXT,"
+                     " target_date TEXT, temperature_metric TEXT, source_cycle_time TEXT,"
+                     " computed_at TEXT)")
+        conn.executemany("INSERT INTO cycle_advance_enqueues VALUES (?,?,?,?)", [
+            ("Tokyo", "2099-01-03", "high", "2099-01-01T18:00:00+00:00"),
+            ("Paris", "2099-01-03", "low", "2099-01-01T18:00:00+00:00"),
+            ("Lagos", "2099-01-03", "high", "2099-01-01T12:00:00+00:00"),
+        ])
+        conn.executemany("INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?)", [
+            (SOURCE_ID, "Paris", "2099-01-03", "low", "2099-01-01T18:00:00+00:00", "x"),
+            (SOURCE_ID, "Lagos", "2099-01-03", "high", "2099-01-01T06:00:00+00:00", "x"),
+        ])
+    monkeypatch.setattr(ingest_main, "_BROAD_RESEED_CARRIED", None)
+    seen: list[object] = []
+    monkeypatch.setattr(cycle_trigger, "enqueue_cycle_advance_reseeds",
+                        lambda **kwargs: seen.append(kwargs.get("scopes")) or {
+                            "status": "CYCLE_ADVANCE_TRIGGER"})
+    cfg = {"forecast_db": db, "seed_dir": tmp_path / "seeds",
+           "raw_manifest_dir": tmp_path / "raw"}
+
+    assert ingest_main._carried_retry_debt_pending(cfg)
+    assert ingest_main._BROAD_RESEED_CARRIED == {
+        ("Tokyo", "2099-01-03", "high"), ("Lagos", "2099-01-03", "high"),
+    }
+    ingest_main._drain_carried_retry_debt(cfg)
+    assert seen == [(("Lagos", "2099-01-03", "high"), ("Tokyo", "2099-01-03", "high"))]
+    assert not ingest_main._carried_retry_debt_pending(cfg)
+
+
+def test_unreadable_marker_store_is_not_memoized_as_no_debt(monkeypatch, tmp_path) -> None:
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setattr(ingest_main, "_BROAD_RESEED_CARRIED", None)
+    cfg = {"forecast_db": tmp_path / "absent.db"}
+    assert not ingest_main._carried_retry_debt_pending(cfg)
+    assert ingest_main._BROAD_RESEED_CARRIED is None
 
 
 @pytest.mark.parametrize("change", [

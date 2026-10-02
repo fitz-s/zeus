@@ -1844,6 +1844,8 @@ def enqueue_cycle_advance_reseeds(
         "causal_baseline_scope_failed": 0,
         "causal_baseline_already_consumed": 0,
         "retry_pending": 0,
+        # Exact families behind retry_pending: the caller carries them forward.
+        "retry_pending_scopes": [],
         "day0_identity_incomplete": 0,
         RESEED_SKIPPED_TARGET_LOCAL_DAY_ENDED: 0,
         "enqueued": [],
@@ -2156,6 +2158,7 @@ def enqueue_cycle_advance_reseeds(
                     conn.commit()
                 elif enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
                     report["retry_pending"] = int(report.get("retry_pending", 0)) + 1
+                    report["retry_pending_scopes"].append((city, target_date, metric))
                 continue
             # Both legs present for the family: the family-scoped cycle is the authoritative target.
             # If it is NOT strictly newer than the consumed cycle, the global verdict was a false
@@ -2276,6 +2279,7 @@ def enqueue_cycle_advance_reseeds(
                 )
             except _CycleAdvanceRetryPending as exc:
                 report["retry_pending"] = int(report.get("retry_pending", 0)) + 1
+                report["retry_pending_scopes"].append((city, target_date, metric))
                 _LOG.info(
                     "cycle-advance committed ENS baseline owner pending for %s/%s/%s: %s",
                     city,
@@ -2317,6 +2321,7 @@ def enqueue_cycle_advance_reseeds(
                 )
                 if enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
                     report["retry_pending"] = int(report.get("retry_pending", 0)) + 1
+                    report["retry_pending_scopes"].append((city, target_date, metric))
                     continue
                 if enqueue_decision is _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED:
                     report["already_enqueued"] = int(report["already_enqueued"]) + 1
@@ -2467,6 +2472,7 @@ def enqueue_cycle_advance_reseeds(
                 )
             elif inserted:
                 report["retry_pending"] = int(report["retry_pending"]) + 1
+                report["retry_pending_scopes"].append((city, target_date, metric))
             else:
                 report["already_enqueued"] = int(report["already_enqueued"]) + 1
     finally:

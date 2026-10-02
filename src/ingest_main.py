@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -111,6 +112,15 @@ _BROAD_RESEED_PROVEN: dict[tuple[str, str, str], tuple[int, dict[str, object]]] 
 # callback's own completion. RESET: the last completion removes it; a failed
 # callback first blocks its source and the anchor.
 _BROAD_RESEED_OPEN: dict[int, dict[str, Any]] = {}
+# SCOPE: families whose cycle-advance re-decision returned RETRY_PENDING (an
+# owner in flight, a busy queue lock): their own wait, never the batch's.
+# DRAIN: every broad batch re-decides them first through the scoped per-family
+# path, with no cursor claim; the maintenance tick keeps a batch queued while
+# any remain. RESET: a scope leaves when a re-decision no longer reports it.
+# None = not yet rebuilt in this process: the durable fact is a
+# cycle_advance_enqueues marker whose target cycle no live posterior has
+# consumed (_rebuild_carried_retry_debt), so a restart loses nothing.
+_BROAD_RESEED_CARRIED: set[tuple[str, str, str]] | None = None
 # A commit callback also writes the current-target ECMWF IFS anchor.
 _BROAD_RESEED_ANCHOR_SOURCE = "ecmwf_ifs"
 # Receipt statuses returned before any provider write: the scoped source-clock
@@ -3211,14 +3221,145 @@ def _replacement_maintenance_lane_error(
 
 
 def _replacement_reseed_error(prefix: str, report: object) -> str | None:
-    """Require the trigger's sole success receipt; absence remains retryable debt."""
+    """Require the trigger's sole success receipt; absence remains retryable debt.
+
+    A cycle-advance pass whose only shortfall is named per-family RETRY_PENDING
+    published everything else: those families are carried forward by name
+    (_carry_retry_pending_scopes) and the pass counts as published.
+    """
     expected = _REPLACEMENT_RESEED_SUCCESS_STATUS[prefix]
     if not isinstance(report, dict):
         return f"{prefix}:RESEED_CONFIGURATION_UNAVAILABLE"
     status = str(report.get("status") or "")
     if status == expected:
         return None
+    if prefix == "cycle_advance" and _carry_retry_pending_scopes(report):
+        return None
     return f"{prefix}:{status or 'RESEED_STATUS_MISSING'}"
+
+
+def _carry_retry_pending_scopes(report: dict[str, object]) -> bool:
+    """Carry a pass's named RETRY_PENDING families; False when they are unnamed."""
+    if str(report.get("status") or "") != "CYCLE_ADVANCE_RETRY_PENDING":
+        return False
+    raw = report.get("retry_pending_scopes")
+    if not isinstance(raw, (list, tuple)) or len(raw) != int(report.get("retry_pending") or 0):
+        return False
+    scopes = {
+        tuple(str(part) for part in scope)
+        for scope in raw
+        if isinstance(scope, (list, tuple)) and len(scope) == 3
+    }
+    if len(scopes) != len({tuple(map(str, scope)) for scope in raw}):
+        return False
+    global _BROAD_RESEED_CARRIED
+    with _BROAD_RESEED_CONDITION:
+        _BROAD_RESEED_CARRIED = (_BROAD_RESEED_CARRIED or set()) | scopes
+    return True
+
+
+def _rebuild_carried_retry_debt(cfg: dict[str, object]) -> None:
+    """Rebuild the carried set once per process from its durable fact.
+
+    A RETRY_PENDING family has a cycle_advance_enqueues marker at its target
+    cycle (the owner in flight, the retained superseded marker, or the inserted
+    but unpublished one); until a live posterior consumes that cycle it is
+    debt. The rebuild over-includes healthy in-flight seeds, which the scoped
+    re-decision classifies ALREADY_ENQUEUED and drops. A failed read leaves the
+    set unbuilt, so the next tick retries; it is never memoized as empty.
+    """
+    global _BROAD_RESEED_CARRIED
+    with _BROAD_RESEED_CONDITION:
+        if _BROAD_RESEED_CARRIED is not None:
+            return
+    forecast_db = cfg.get("forecast_db")
+    if forecast_db is None:
+        return
+    from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+        _default_min_target_date,
+    )
+    from src.data.replacement_forecast_readiness import SOURCE_ID  # noqa: PLC0415
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+
+    try:
+        conn = _connect_read_only(Path(str(forecast_db)))
+        try:
+            rows = conn.execute(
+                """
+                SELECT m.city, m.target_date, m.metric, MAX(m.target_cycle_time),
+                       (SELECT p.source_cycle_time FROM forecast_posteriors p
+                         WHERE p.source_id = ? AND p.city = m.city
+                           AND p.target_date = m.target_date
+                           AND p.temperature_metric = m.metric
+                         ORDER BY p.computed_at DESC LIMIT 1)
+                  FROM cycle_advance_enqueues m
+                 WHERE m.target_date >= ?
+                 GROUP BY m.city, m.target_date, m.metric
+                """,
+                (SOURCE_ID, _default_min_target_date(datetime.now(timezone.utc))),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.warning("carried cycle-advance debt rebuild failed; retrying next tick: %s", exc)
+        return
+    debt = set()
+    for city, target_date, metric, target_cycle, consumed in rows:
+        target = _utc_or_none(target_cycle)
+        if target is None:
+            continue
+        done = _utc_or_none(consumed)
+        if done is None or done < target:
+            debt.add((str(city), str(target_date), str(metric)))
+    with _BROAD_RESEED_CONDITION:
+        if _BROAD_RESEED_CARRIED is None:
+            _BROAD_RESEED_CARRIED = debt
+        else:
+            _BROAD_RESEED_CARRIED |= debt
+
+
+def _utc_or_none(value: object) -> datetime | None:
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return stamp.astimezone(timezone.utc) if stamp.tzinfo is not None else None
+
+
+def _drain_carried_retry_debt(cfg: dict[str, object]) -> None:
+    """Re-decide every carried family through the scoped path; no cursor claim."""
+    global _BROAD_RESEED_CARRIED
+    from src.data.replacement_forecast_production import (  # noqa: PLC0415
+        _enqueue_cycle_advance_reseeds_if_needed,
+    )
+
+    _rebuild_carried_retry_debt(cfg)
+    with _BROAD_RESEED_CONDITION:
+        carried = tuple(sorted(_BROAD_RESEED_CARRIED or ()))
+        if _BROAD_RESEED_CARRIED is not None:
+            _BROAD_RESEED_CARRIED -= set(carried)
+    if not carried:
+        return
+    try:
+        report = _enqueue_cycle_advance_reseeds_if_needed(
+            cfg, scopes=carried, limit=len(carried),
+        )
+    except Exception as exc:  # noqa: BLE001 - the debt stays carried
+        report = {"status": f"CYCLE_ADVANCE_CARRIED_FAILSOFT:{type(exc).__name__}"}
+    if _replacement_reseed_error("cycle_advance", report) is not None:
+        # An unclassified pass re-decided nothing provably: keep every scope.
+        with _BROAD_RESEED_CONDITION:
+            _BROAD_RESEED_CARRIED = (_BROAD_RESEED_CARRIED or set()) | set(carried)
+        logger.warning(
+            "carried cycle-advance debt re-decision retryable: scopes=%d status=%s",
+            len(carried), (report or {}).get("status") if isinstance(report, dict) else None,
+        )
+
+
+def _carried_retry_debt_pending(cfg: dict[str, object]) -> bool:
+    _rebuild_carried_retry_debt(cfg)
+    with _BROAD_RESEED_CONDITION:
+        return bool(_BROAD_RESEED_CARRIED)
 
 
 @_scheduler_job("ingest_replacement_maintenance")
@@ -3655,7 +3796,7 @@ def _replacement_maintenance_tick():
             if committed_reseed_report_count == 2
             else "REPLACEMENT_MAINTENANCE_BROAD_NOT_DUE"
         )
-    elif download_timeboxed or _remaining_budget() <= 0.0:
+    elif download_timeboxed or _remaining_budget() <= 0.0 or _carried_retry_debt_pending(cfg):
         # SCOPE: this due catch-up, without a provider-cursor or raw-commit claim.
         # DRAIN: the existing single broad worker scans inputs already on disk;
         # its bounded pending batch coalesces repeated no-commit requests.
@@ -3781,6 +3922,8 @@ def _run_broad_reseed_batch(batch: dict[str, Any]) -> bool:
     cfg = batch["cfg"]
     snapshot: dict[str, object] = {}
     errors: list[str] = []
+    # Carried families are re-decided first; their own wait never fails this batch.
+    _drain_carried_retry_debt(cfg)
     for request in batch["requests"].values():
         # Each distinct raw receipt retains its original trigger limit. Sharing
         # one scan across several receipts could acknowledge unvisited scopes.
