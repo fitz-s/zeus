@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-09-30
+# Last reused/audited: 2026-10-02
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -3832,7 +3832,13 @@ def test_global_entry_jit_clob_identity_uses_submit_priority():
 
     source = inspect.getsource(era._global_preflight_entry_jit_receipt)
 
-    assert "public_request_priority=RequestPriority.SUBMIT_JIT" in source
+    # The CLOB identity read goes through the shared preflight transport, keyed
+    # on SUBMIT_JIT; tests/engine/test_global_preflight_clob_client_reuse.py
+    # proves that key reaches PolymarketClient(public_request_priority=...).
+    assert (
+        "_global_preflight_clob_client(\n"
+        "                priority=RequestPriority.SUBMIT_JIT,"
+    ) in source
 
 
 @pytest.mark.parametrize(

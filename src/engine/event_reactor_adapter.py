@@ -667,6 +667,33 @@ _GLOBAL_PROBABILITY_SUPERSEDED_POSTERIOR_REASONS = (
 )
 
 
+_GLOBAL_PREFLIGHT_CLOB_CLIENTS: dict[tuple[object, object, float], object] = {}
+_GLOBAL_PREFLIGHT_CLOB_CLIENTS_LOCK = threading.Lock()
+
+
+def _global_preflight_clob_client(*, priority, timeout_seconds: float):
+    """One warm public CLOB transport per (class, priority, timeout).
+
+    Every request still goes to the venue (FC-03); only the TLS connection is
+    reused. Priority stays per client, and the request governor is the module
+    singleton, so sharing changes neither. Only public endpoints are called
+    through this client; authenticated venue I/O builds its own client.
+    """
+
+    from src.data.polymarket_client import PolymarketClient
+
+    key = (PolymarketClient, priority, float(timeout_seconds))
+    with _GLOBAL_PREFLIGHT_CLOB_CLIENTS_LOCK:
+        client = _GLOBAL_PREFLIGHT_CLOB_CLIENTS.get(key)
+        if client is None:
+            client = PolymarketClient(
+                public_http_timeout=timeout_seconds,
+                public_request_priority=priority,
+            )
+            _GLOBAL_PREFLIGHT_CLOB_CLIENTS[key] = client
+        return client
+
+
 def _global_current_gamma_client(*, timeout_seconds: float):
     """Keep late Gamma requests off the reactor's deadline boundary."""
 
@@ -15171,554 +15198,553 @@ def _submit_current_global_sell(
         )
 
     try:
-        from src.data.polymarket_client import PolymarketClient
         from src.data.polymarket_request_governor import RequestPriority
 
-        with PolymarketClient(
-            public_http_timeout=timeout,
-            public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
-        ) as clob:
-            if jit_handoff is not None and preflight_only:
-                # A preflight retry may reuse its still-current exact venue
-                # cut.  Actuation must recapture the book after the slower
-                # probability/wealth/position checks above: the preflight book
-                # is ranking evidence, not submit-time executable truth.
-                current_candidate = jit_handoff.candidate
-                raw_book = dict(jit_handoff.raw_book)
-                market_authority = jit_handoff.authority
-                book_captured_at_utc = market_authority.snapshot.captured_at
-            else:
-                raw_book: dict[str, object] = {}
-                current_book_captured_at: datetime | None = None
-                candidate_token_id = str(
-                    getattr(candidate, "token_id", "") or ""
-                )
+        clob = _global_preflight_clob_client(
+            priority=RequestPriority.HELD_REDUCE_ONLY,
+            timeout_seconds=timeout,
+        )
+        if jit_handoff is not None and preflight_only:
+            # A preflight retry may reuse its still-current exact venue
+            # cut.  Actuation must recapture the book after the slower
+            # probability/wealth/position checks above: the preflight book
+            # is ranking evidence, not submit-time executable truth.
+            current_candidate = jit_handoff.candidate
+            raw_book = dict(jit_handoff.raw_book)
+            market_authority = jit_handoff.authority
+            book_captured_at_utc = market_authority.snapshot.captured_at
+        else:
+            raw_book: dict[str, object] = {}
+            current_book_captured_at: datetime | None = None
+            candidate_token_id = str(
+                getattr(candidate, "token_id", "") or ""
+            )
 
-                def _capture_final_sell_book():
-                    nonlocal current_book_captured_at
-                    try:
-                        books = clob.get_orderbook_snapshots(
-                            [candidate_token_id],
-                            timeout=timeout,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - authority transport
-                        raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
-                    current_book = books.get(candidate_token_id)
-                    if not isinstance(current_book, Mapping):
-                        raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
-                    raw_book.clear()
-                    raw_book.update(dict(current_book))
-                    current_book_captured_at = datetime.now(UTC)
-                    return raw_book, current_book_captured_at
-
+            def _capture_final_sell_book():
+                nonlocal current_book_captured_at
                 try:
-                    try:
-                        gamma = _global_current_gamma_client(timeout_seconds=timeout)
-                    except Exception as exc:  # noqa: BLE001 - authority transport
-                        raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
-
-                    def _held_gamma_get(path, *, params=None, timeout):
-                        return _governed_global_gamma_get(
-                            gamma,
-                            path,
-                            params=params,
-                            timeout=float(timeout),
-                            priority=RequestPriority.HELD_REDUCE_ONLY,
-                        )
-
-                    market_authority = _current_global_market_authority(
-                        condition_id=str(
-                            getattr(candidate, "condition_id", "") or ""
-                        ),
-                        token_id=str(getattr(candidate, "token_id", "") or ""),
-                        side=str(getattr(candidate, "side", "") or ""),
-                        gamma_get=_held_gamma_get,
-                        clob_market_get=clob.get_held_clob_market_info,
-                        raw_book=None,
-                        captured_at_utc=None,
+                    books = clob.get_orderbook_snapshots(
+                        [candidate_token_id],
                         timeout=timeout,
-                        raw_book_provider=_capture_final_sell_book,
-                        trade_conn=trade_conn,
                     )
-                except ValueError as rest_exc:
-                    if not _is_global_jit_authority_failure(str(rest_exc)):
-                        raise
-                    if (
-                        current_book_captured_at is None
-                        and not str(rest_exc).startswith(
-                            "GLOBAL_JIT_RAW_BOOK_UNAVAILABLE"
-                        )
-                    ):
-                        try:
-                            _capture_final_sell_book()
-                        except ValueError:
-                            raw_book.clear()
-                            current_book_captured_at = None
-                    logging.getLogger(__name__).info(
-                        "global SELL JIT durable-metadata fallback: "
-                        "primary_reason=%s current_raw_book=%s",
-                        rest_exc,
-                        current_book_captured_at is not None,
-                    )
-                    raw_book, market_authority = _durable_global_sell_market_authority(
-                        trade_conn,
-                        condition_id=str(getattr(candidate, "condition_id", "") or ""),
-                        token_id=str(getattr(candidate, "token_id", "") or ""),
-                        side=str(getattr(candidate, "side", "") or ""),
-                        submit_at=datetime.now(UTC),
-                        current_raw_book=(
-                            raw_book if current_book_captured_at is not None else None
-                        ),
-                        current_book_captured_at=current_book_captured_at,
-                    )
-                book_captured_at_utc = market_authority.snapshot.captured_at
+                except Exception as exc:  # noqa: BLE001 - authority transport
+                    raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
+                current_book = books.get(candidate_token_id)
+                if not isinstance(current_book, Mapping):
+                    raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
+                raw_book.clear()
+                raw_book.update(dict(current_book))
+                current_book_captured_at = datetime.now(UTC)
+                return raw_book, current_book_captured_at
+
+            try:
                 try:
-                    current_candidate = _global_sell_candidate_from_raw_book(
-                        candidate,
-                        raw_book,
-                        captured_at_utc=book_captured_at_utc,
-                        market_authority=market_authority,
+                    gamma = _global_current_gamma_client(timeout_seconds=timeout)
+                except Exception as exc:  # noqa: BLE001 - authority transport
+                    raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
+
+                def _held_gamma_get(path, *, params=None, timeout):
+                    return _governed_global_gamma_get(
+                        gamma,
+                        path,
+                        params=params,
+                        timeout=float(timeout),
+                        priority=RequestPriority.HELD_REDUCE_ONLY,
                     )
-                except ValueError as exc:
-                    if not str(exc).startswith(
-                        (
-                            "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:",
-                            "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:",
-                        )
-                    ):
-                        raise
-                    return _global_sell_receipt(
-                        event,
-                        global_actuation=global_actuation,
-                        reason=(
-                            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-                            f"{exc}"
-                        ),
-                        proof_accepted=False,
-                        jit_handoff=jit_handoff,
+
+                market_authority = _current_global_market_authority(
+                    condition_id=str(
+                        getattr(candidate, "condition_id", "") or ""
+                    ),
+                    token_id=str(getattr(candidate, "token_id", "") or ""),
+                    side=str(getattr(candidate, "side", "") or ""),
+                    gamma_get=_held_gamma_get,
+                    clob_market_get=clob.get_held_clob_market_info,
+                    raw_book=None,
+                    captured_at_utc=None,
+                    timeout=timeout,
+                    raw_book_provider=_capture_final_sell_book,
+                    trade_conn=trade_conn,
+                )
+            except ValueError as rest_exc:
+                if not _is_global_jit_authority_failure(str(rest_exc)):
+                    raise
+                if (
+                    current_book_captured_at is None
+                    and not str(rest_exc).startswith(
+                        "GLOBAL_JIT_RAW_BOOK_UNAVAILABLE"
                     )
-            _persist_global_jit_authority_snapshot_for_preflight(
-                trade_conn,
-                market_authority,
-                priority="monitor",
-            )
-            jit_handoff = jit_handoff or _GlobalJitHandoff(
-                candidate=current_candidate,
-                authority=market_authority,
-                raw_book_json=_canonical_global_jit_raw_book(raw_book),
-            )
-            drift = _global_sell_execution_economics_drift(
-                decision=decision,
-                current_candidate=current_candidate,
-            )
-            if drift is not None:
+                ):
+                    try:
+                        _capture_final_sell_book()
+                    except ValueError:
+                        raw_book.clear()
+                        current_book_captured_at = None
+                logging.getLogger(__name__).info(
+                    "global SELL JIT durable-metadata fallback: "
+                    "primary_reason=%s current_raw_book=%s",
+                    rest_exc,
+                    current_book_captured_at is not None,
+                )
+                raw_book, market_authority = _durable_global_sell_market_authority(
+                    trade_conn,
+                    condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                    token_id=str(getattr(candidate, "token_id", "") or ""),
+                    side=str(getattr(candidate, "side", "") or ""),
+                    submit_at=datetime.now(UTC),
+                    current_raw_book=(
+                        raw_book if current_book_captured_at is not None else None
+                    ),
+                    current_book_captured_at=current_book_captured_at,
+                )
+            book_captured_at_utc = market_authority.snapshot.captured_at
+            try:
+                current_candidate = _global_sell_candidate_from_raw_book(
+                    candidate,
+                    raw_book,
+                    captured_at_utc=book_captured_at_utc,
+                    market_authority=market_authority,
+                )
+            except ValueError as exc:
+                if not str(exc).startswith(
+                    (
+                        "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:",
+                        "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:",
+                    )
+                ):
+                    raise
                 return _global_sell_receipt(
                     event,
                     global_actuation=global_actuation,
                     reason=(
-                        "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
-                        f"curve_economics:{drift}"
+                        "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+                        f"{exc}"
                     ),
                     proof_accepted=False,
-                    jit_candidate=current_candidate,
                     jit_handoff=jit_handoff,
                 )
-            from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+        _persist_global_jit_authority_snapshot_for_preflight(
+            trade_conn,
+            market_authority,
+            priority="monitor",
+        )
+        jit_handoff = jit_handoff or _GlobalJitHandoff(
+            candidate=current_candidate,
+            authority=market_authority,
+            raw_book_json=_canonical_global_jit_raw_book(raw_book),
+        )
+        drift = _global_sell_execution_economics_drift(
+            decision=decision,
+            current_candidate=current_candidate,
+        )
+        if drift is not None:
+            return _global_sell_receipt(
+                event,
+                global_actuation=global_actuation,
+                reason=(
+                    "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
+                    f"curve_economics:{drift}"
+                ),
+                proof_accepted=False,
+                jit_candidate=current_candidate,
+                jit_handoff=jit_handoff,
+            )
+        from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
 
-            execution_authority = GlobalSellExecutionAuthority.from_current(
-                actuation=global_actuation,
+        execution_authority = GlobalSellExecutionAuthority.from_current(
+            actuation=global_actuation,
+            jit_candidate=current_candidate,
+        )
+        try:
+            sell_limit_price = execution_authority.limit_price()
+        except ValueError as exc:
+            # SCOPE: only this SELL candidate lacks a venue-legal submitted
+            # price. DRAIN: the same cut can rank the remaining actions.
+            # RESET: the next cut rebuilds the JIT bid and tick.
+            return _global_sell_receipt(
+                event,
+                global_actuation=global_actuation,
+                reason=f"GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:{exc}",
+                proof_accepted=False,
                 jit_candidate=current_candidate,
             )
-            try:
-                sell_limit_price = execution_authority.limit_price()
-            except ValueError as exc:
-                # SCOPE: only this SELL candidate lacks a venue-legal submitted
-                # price. DRAIN: the same cut can rank the remaining actions.
-                # RESET: the next cut rebuilds the JIT bid and tick.
-                return _global_sell_receipt(
-                    event,
-                    global_actuation=global_actuation,
-                    reason=f"GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:{exc}",
-                    proof_accepted=False,
-                    jit_candidate=current_candidate,
-                )
-            try:
-                receipt_ref = getattr(global_actuation, "auction_receipt_ref", None)
-                if type(receipt_ref) is not GlobalAuctionReceiptRef:
-                    raise ValueError("GLOBAL_SELL_RECEIPT_REF_MISSING")
-                receipt_ref.assert_matches_actuation(
-                    winner_event_id=global_actuation.winner_event_id,
-                    winner_candidate_id=candidate.candidate_id,
-                    winner_actuation_identity=global_actuation.actuation_identity,
-                    selection_epoch_identity=global_actuation.selection_epoch_identity,
-                )
-                closure_token_id = (
-                    str(getattr(position, "token_id", "") or "")
-                    if str(getattr(candidate, "side", "") or "") == "YES"
-                    else str(getattr(position, "no_token_id", "") or "")
-                )
-                receipt_closure = GlobalSellReceiptClosure(
-                    receipt_ref=receipt_ref,
-                    position_id=str(getattr(position, "trade_id", "") or ""),
-                    condition_id=str(getattr(position, "condition_id", "") or ""),
-                    token_id=closure_token_id,
-                    action="SELL",
-                    execution_mode=str(
-                        getattr(current_candidate, "execution_mode", "") or ""
-                    ),
-                    winner_event_id=str(global_actuation.winner_event_id),
-                    winner_candidate_id=str(candidate.candidate_id),
-                    winner_actuation_identity=str(global_actuation.actuation_identity),
-                    selection_epoch_identity=str(
-                        global_actuation.selection_epoch_identity
-                    ),
-                )
-            except (AttributeError, TypeError, ValueError) as exc:
-                # INV-47 SCOPE: only this global SELL candidate is blocked.
-                # DRAIN: the next auction actuation must carry its exact receipt.
-                # RESET: a matching typed receipt reference rebuilds the closure.
-                return _global_sell_receipt(
-                    event,
-                    global_actuation=global_actuation,
-                    reason=f"GLOBAL_SELL_RECEIPT_CLOSURE_INVALID:{type(exc).__name__}:{exc}",
-                    proof_accepted=False,
-                    jit_candidate=current_candidate,
-                    jit_handoff=jit_handoff,
-                )
-            if preflight_only:
-                from src.execution.collateral import (
-                    prepare_collateral_snapshot_for_submit,
-                )
-                from src.state.collateral_ledger import (
-                    CollateralInsufficient,
-                    assert_snapshot_allows_sell,
-                )
+        try:
+            receipt_ref = getattr(global_actuation, "auction_receipt_ref", None)
+            if type(receipt_ref) is not GlobalAuctionReceiptRef:
+                raise ValueError("GLOBAL_SELL_RECEIPT_REF_MISSING")
+            receipt_ref.assert_matches_actuation(
+                winner_event_id=global_actuation.winner_event_id,
+                winner_candidate_id=candidate.candidate_id,
+                winner_actuation_identity=global_actuation.actuation_identity,
+                selection_epoch_identity=global_actuation.selection_epoch_identity,
+            )
+            closure_token_id = (
+                str(getattr(position, "token_id", "") or "")
+                if str(getattr(candidate, "side", "") or "") == "YES"
+                else str(getattr(position, "no_token_id", "") or "")
+            )
+            receipt_closure = GlobalSellReceiptClosure(
+                receipt_ref=receipt_ref,
+                position_id=str(getattr(position, "trade_id", "") or ""),
+                condition_id=str(getattr(position, "condition_id", "") or ""),
+                token_id=closure_token_id,
+                action="SELL",
+                execution_mode=str(
+                    getattr(current_candidate, "execution_mode", "") or ""
+                ),
+                winner_event_id=str(global_actuation.winner_event_id),
+                winner_candidate_id=str(candidate.candidate_id),
+                winner_actuation_identity=str(global_actuation.actuation_identity),
+                selection_epoch_identity=str(
+                    global_actuation.selection_epoch_identity
+                ),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            # INV-47 SCOPE: only this global SELL candidate is blocked.
+            # DRAIN: the next auction actuation must carry its exact receipt.
+            # RESET: a matching typed receipt reference rebuilds the closure.
+            return _global_sell_receipt(
+                event,
+                global_actuation=global_actuation,
+                reason=f"GLOBAL_SELL_RECEIPT_CLOSURE_INVALID:{type(exc).__name__}:{exc}",
+                proof_accepted=False,
+                jit_candidate=current_candidate,
+                jit_handoff=jit_handoff,
+            )
+        if preflight_only:
+            from src.execution.collateral import (
+                prepare_collateral_snapshot_for_submit,
+            )
+            from src.state.collateral_ledger import (
+                CollateralInsufficient,
+                assert_snapshot_allows_sell,
+            )
 
-                token_id = str(getattr(candidate, "token_id", "") or "")
-                shares = float(
-                    Decimal(str(getattr(decision, "shares", "0") or "0"))
-                )
-                prepared_collateral = prepare_collateral_snapshot_for_submit(
-                    trade_conn,
-                    action="exit_submit",
+            token_id = str(getattr(candidate, "token_id", "") or "")
+            shares = float(
+                Decimal(str(getattr(decision, "shares", "0") or "0"))
+            )
+            prepared_collateral = prepare_collateral_snapshot_for_submit(
+                trade_conn,
+                action="exit_submit",
+                token_id=token_id,
+                shares=shares,
+            )
+            try:
+                assert_snapshot_allows_sell(
+                    prepared_collateral.snapshot,
                     token_id=token_id,
-                    shares=shares,
+                    size=shares,
                 )
-                try:
-                    assert_snapshot_allows_sell(
-                        prepared_collateral.snapshot,
-                        token_id=token_id,
-                        size=shares,
-                    )
-                except CollateralInsufficient as exc:
-                    # SCOPE: this exact SELL token only. DRAIN: the batch
-                    # excludes it and re-solves the remaining actions in this
-                    # cut. RESET: the next cut re-reads targeted chain
-                    # inventory and approval before claim.
-                    return _global_sell_receipt(
-                        event,
-                        global_actuation=global_actuation,
-                        reason=f"GLOBAL_SELL_COLLATERAL_UNAVAILABLE:{exc}",
-                        proof_accepted=False,
-                        jit_candidate=current_candidate,
-                        jit_handoff=jit_handoff,
-                    )
+            except CollateralInsufficient as exc:
+                # SCOPE: this exact SELL token only. DRAIN: the batch
+                # excludes it and re-solves the remaining actions in this
+                # cut. RESET: the next cut re-reads targeted chain
+                # inventory and approval before claim.
                 return _global_sell_receipt(
                     event,
                     global_actuation=global_actuation,
-                    reason="GLOBAL_SELL_PREFLIGHT_STABLE",
-                    proof_accepted=True,
+                    reason=f"GLOBAL_SELL_COLLATERAL_UNAVAILABLE:{exc}",
+                    proof_accepted=False,
+                    jit_candidate=current_candidate,
                     jit_handoff=jit_handoff,
                 )
-            from src.execution.exit_lifecycle import (
-                ExitExecutionEvidence,
-                ExitIntent,
-                execute_exit,
+            return _global_sell_receipt(
+                event,
+                global_actuation=global_actuation,
+                reason="GLOBAL_SELL_PREFLIGHT_STABLE",
+                proof_accepted=True,
+                jit_handoff=jit_handoff,
             )
-            from src.state.portfolio import ExitContext
+        from src.execution.exit_lifecycle import (
+            ExitExecutionEvidence,
+            ExitIntent,
+            execute_exit,
+        )
+        from src.state.portfolio import ExitContext
 
-            proceeds, current_vwap, _current_limit = (
-                current_candidate.economic_sell_curve.proceeds_for_shares(
-                    Decimal(str(getattr(decision, "shares", "0") or "0"))
-                )
+        proceeds, current_vwap, _current_limit = (
+            current_candidate.economic_sell_curve.proceeds_for_shares(
+                Decimal(str(getattr(decision, "shares", "0") or "0"))
             )
-            del proceeds
-            held_q = _global_sell_held_probability(
-                candidate,
-                getattr(global_actuation, "probability_witness", None),
-            )
-            probability_receipt = _global_sell_probability_receipt(
-                candidate=candidate,
-                witness=getattr(global_actuation, "probability_witness", None),
-                held_side_probability=held_q,
-            )
-            state_raw = getattr(position, "state", "")
-            position_state = str(getattr(state_raw, "value", state_raw) or "")
-            best_bid = float(current_candidate.executable_sell_curve.levels[0].price)
-            expected_growth = getattr(decision, "expected_growth", None)
-            expected_terminal = getattr(
-                decision,
-                "expected_terminal_wealth",
-                None,
-            )
-            if expected_growth is None:
-                raise ValueError("GLOBAL_SELL_EXPECTED_COMPARISON_MISSING")
-            if expected_growth.utility_basis != STRATEGY_LOG_UTILITY_BASIS:
-                raise ValueError("GLOBAL_SELL_UTILITY_BASIS_INVALID")
-            if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
-                if expected_terminal is None:
-                    raise ValueError("GLOBAL_SELL_EXPECTED_ECONOMICS_MISSING")
-                held_q = float(expected_terminal.held_probability_mean)
-                capital_economics = {
-                    "held_probability_mean": float(
-                        expected_terminal.held_probability_mean
-                    ),
-                    "favorable_sell_probability_mean": float(
-                        expected_terminal.favorable_sell_probability_mean
-                    ),
-                    "expected_sell_delta_log_wealth": float(
-                        expected_terminal.expected_delta_log_wealth
-                    ),
-                    "expected_sell_ev_usd": float(
-                        expected_terminal.expected_ev_usd
-                    ),
-                    "sell_ruin_probability_reduction": float(
-                        expected_terminal.ruin_probability_reduction
-                    ),
-                }
-            else:
-                capital_economics = {
-                    "sell_favorable_probability_lcb": float(
-                        getattr(decision.terminal_wealth, "win_probability_lcb")
-                    ),
-                    "robust_delta_log_wealth": float(
-                        getattr(decision, "robust_delta_log_wealth")
-                    ),
-                    "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
-                    "sell_ruin_probability_reduction": float(
-                        getattr(decision, "ruin_probability_reduction")
-                    ),
-                }
-            capital_economics.update(
-                {
-                    "expected_comparison_delta_log_wealth": float(
-                        expected_growth.expected_delta_log_wealth
-                    ),
-                    "expected_comparison_ev_usd": float(
-                        expected_growth.expected_ev_usd
-                    ),
-                    "expected_comparison_log_growth_per_hour": float(
-                        expected_growth.expected_log_growth_per_hour
-                    ),
-                    "expected_comparison_capital_efficiency": float(
-                        expected_growth.expected_capital_efficiency
-                    ),
-                    "expected_comparison_capital_lock_hours": float(
-                        expected_growth.capital_lock_hours
-                    ),
-                    "ruin_probability_reduction": float(
-                        expected_growth.ruin_probability_reduction
-                    ),
-                    "utility_basis": expected_growth.utility_basis,
-                }
-            )
-            probability_receipt["held_side_probability"] = held_q
-            correction = getattr(decision, "payoff_q_correction", None)
-            if correction is not None:
-                probability_receipt["payoff_q_correction"] = correction.as_cert_fields()
-            exit_context = ExitContext(
-                exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
-                fresh_prob=held_q,
-                fresh_prob_is_fresh=True,
-                current_market_price=float(current_vwap),
-                current_market_price_is_fresh=True,
-                best_bid=best_bid,
-                position_state=position_state,
-                probability_receipt=probability_receipt,
-            )
-            exit_intent = ExitIntent(
-                trade_id=str(getattr(position, "trade_id", "") or ""),
-                reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
-                token_id=str(getattr(candidate, "token_id", "") or ""),
-                shares=float(Decimal(str(getattr(decision, "shares", "0")))),
-                current_market_price=float(current_vwap),
-                best_bid=best_bid,
-                exact_limit_price=float(sell_limit_price),
-                submit_order_type=(
+        )
+        del proceeds
+        held_q = _global_sell_held_probability(
+            candidate,
+            getattr(global_actuation, "probability_witness", None),
+        )
+        probability_receipt = _global_sell_probability_receipt(
+            candidate=candidate,
+            witness=getattr(global_actuation, "probability_witness", None),
+            held_side_probability=held_q,
+        )
+        state_raw = getattr(position, "state", "")
+        position_state = str(getattr(state_raw, "value", state_raw) or "")
+        best_bid = float(current_candidate.executable_sell_curve.levels[0].price)
+        expected_growth = getattr(decision, "expected_growth", None)
+        expected_terminal = getattr(
+            decision,
+            "expected_terminal_wealth",
+            None,
+        )
+        if expected_growth is None:
+            raise ValueError("GLOBAL_SELL_EXPECTED_COMPARISON_MISSING")
+        if expected_growth.utility_basis != STRATEGY_LOG_UTILITY_BASIS:
+            raise ValueError("GLOBAL_SELL_UTILITY_BASIS_INVALID")
+        if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
+            if expected_terminal is None:
+                raise ValueError("GLOBAL_SELL_EXPECTED_ECONOMICS_MISSING")
+            held_q = float(expected_terminal.held_probability_mean)
+            capital_economics = {
+                "held_probability_mean": float(
+                    expected_terminal.held_probability_mean
+                ),
+                "favorable_sell_probability_mean": float(
+                    expected_terminal.favorable_sell_probability_mean
+                ),
+                "expected_sell_delta_log_wealth": float(
+                    expected_terminal.expected_delta_log_wealth
+                ),
+                "expected_sell_ev_usd": float(
+                    expected_terminal.expected_ev_usd
+                ),
+                "sell_ruin_probability_reduction": float(
+                    expected_terminal.ruin_probability_reduction
+                ),
+            }
+        else:
+            capital_economics = {
+                "sell_favorable_probability_lcb": float(
+                    getattr(decision.terminal_wealth, "win_probability_lcb")
+                ),
+                "robust_delta_log_wealth": float(
+                    getattr(decision, "robust_delta_log_wealth")
+                ),
+                "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
+                "sell_ruin_probability_reduction": float(
+                    getattr(decision, "ruin_probability_reduction")
+                ),
+            }
+        capital_economics.update(
+            {
+                "expected_comparison_delta_log_wealth": float(
+                    expected_growth.expected_delta_log_wealth
+                ),
+                "expected_comparison_ev_usd": float(
+                    expected_growth.expected_ev_usd
+                ),
+                "expected_comparison_log_growth_per_hour": float(
+                    expected_growth.expected_log_growth_per_hour
+                ),
+                "expected_comparison_capital_efficiency": float(
+                    expected_growth.expected_capital_efficiency
+                ),
+                "expected_comparison_capital_lock_hours": float(
+                    expected_growth.capital_lock_hours
+                ),
+                "ruin_probability_reduction": float(
+                    expected_growth.ruin_probability_reduction
+                ),
+                "utility_basis": expected_growth.utility_basis,
+            }
+        )
+        probability_receipt["held_side_probability"] = held_q
+        correction = getattr(decision, "payoff_q_correction", None)
+        if correction is not None:
+            probability_receipt["payoff_q_correction"] = correction.as_cert_fields()
+        exit_context = ExitContext(
+            exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+            fresh_prob=held_q,
+            fresh_prob_is_fresh=True,
+            current_market_price=float(current_vwap),
+            current_market_price_is_fresh=True,
+            best_bid=best_bid,
+            position_state=position_state,
+            probability_receipt=probability_receipt,
+        )
+        exit_intent = ExitIntent(
+            trade_id=str(getattr(position, "trade_id", "") or ""),
+            reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+            token_id=str(getattr(candidate, "token_id", "") or ""),
+            shares=float(Decimal(str(getattr(decision, "shares", "0")))),
+            current_market_price=float(current_vwap),
+            best_bid=best_bid,
+            exact_limit_price=float(sell_limit_price),
+            submit_order_type=(
+                "FAK"
+                if candidate.execution_mode == "TAKER_LIMIT"
+                else "GTC"
+            ),
+            close_position=(
+                Decimal(str(getattr(decision, "shares", "0") or "0"))
+                >= Decimal(str(getattr(position, "effective_shares", "0") or "0"))
+                - Decimal("1e-9")
+            ),
+            fresh_prob=held_q,
+            fresh_prob_is_fresh=True,
+            position_state=position_state,
+            probability_receipt=probability_receipt,
+            capital_certificate={
+                "action": "SELL",
+                "position_id": str(getattr(position, "trade_id", "") or ""),
+                "condition_id": str(
+                    getattr(candidate, "condition_id", "") or ""
+                ),
+                "token_id": str(getattr(candidate, "token_id", "") or ""),
+                "candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
+                "actuation_identity": str(
+                    getattr(global_actuation, "actuation_identity", "") or ""
+                ),
+                "economic_identity": str(
+                    getattr(global_actuation, "economic_identity", "") or ""
+                ),
+                "probability_witness_identity": str(
+                    getattr(candidate, "probability_witness_identity", "") or ""
+                ),
+                "probability_content_identity": probability_receipt[
+                    "probability_content_identity"
+                ],
+                "q_version": probability_receipt["q_version"],
+                "source_truth_identity": probability_receipt[
+                    "source_truth_identity"
+                ],
+                "sell_probability_functional": str(
+                    getattr(candidate, "probability_functional", "") or ""
+                ),
+                "sell_exit_authority_status": str(
+                    getattr(candidate, "exit_authority_status", "") or ""
+                ),
+                "sell_exit_authority_reason": str(
+                    getattr(candidate, "exit_authority_reason", "") or ""
+                ),
+                "sell_action_authority_identity": str(
+                    getattr(
+                        candidate,
+                        "sell_action_authority_identity",
+                        "",
+                    )
+                    or ""
+                ),
+                "selection_epoch_identity": str(
+                    getattr(global_actuation, "selection_epoch_identity", "") or ""
+                ),
+                "wealth_witness_identity": str(
+                    getattr(global_actuation, "wealth_witness_identity", "") or ""
+                ),
+                "execution_authority_identity": execution_authority.authority_identity,
+                "jit_book_hash": str(
+                    current_candidate.executable_sell_curve.book_hash
+                ),
+                "book_snapshot_id": str(
+                    current_candidate.book_snapshot_id
+                ),
+                "jit_curve_identity": str(
+                    current_candidate.execution_curve_identity
+                ),
+                "execution_mode": candidate.execution_mode,
+                "submit_order_type": (
                     "FAK"
                     if candidate.execution_mode == "TAKER_LIMIT"
                     else "GTC"
                 ),
-                close_position=(
-                    Decimal(str(getattr(decision, "shares", "0") or "0"))
-                    >= Decimal(str(getattr(position, "effective_shares", "0") or "0"))
-                    - Decimal("1e-9")
+                "fill_probability": float(candidate.fill_probability),
+                "fill_probability_source": str(
+                    candidate.fill_probability_source
                 ),
-                fresh_prob=held_q,
-                fresh_prob_is_fresh=True,
-                position_state=position_state,
-                probability_receipt=probability_receipt,
-                capital_certificate={
-                    "action": "SELL",
-                    "position_id": str(getattr(position, "trade_id", "") or ""),
-                    "condition_id": str(
-                        getattr(candidate, "condition_id", "") or ""
-                    ),
-                    "token_id": str(getattr(candidate, "token_id", "") or ""),
-                    "candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
-                    "actuation_identity": str(
-                        getattr(global_actuation, "actuation_identity", "") or ""
-                    ),
-                    "economic_identity": str(
-                        getattr(global_actuation, "economic_identity", "") or ""
-                    ),
-                    "probability_witness_identity": str(
-                        getattr(candidate, "probability_witness_identity", "") or ""
-                    ),
-                    "probability_content_identity": probability_receipt[
-                        "probability_content_identity"
-                    ],
-                    "q_version": probability_receipt["q_version"],
-                    "source_truth_identity": probability_receipt[
-                        "source_truth_identity"
-                    ],
-                    "sell_probability_functional": str(
-                        getattr(candidate, "probability_functional", "") or ""
-                    ),
-                    "sell_exit_authority_status": str(
-                        getattr(candidate, "exit_authority_status", "") or ""
-                    ),
-                    "sell_exit_authority_reason": str(
-                        getattr(candidate, "exit_authority_reason", "") or ""
-                    ),
-                    "sell_action_authority_identity": str(
-                        getattr(
-                            candidate,
-                            "sell_action_authority_identity",
-                            "",
+                **(
+                    {
+                        "rest_deadline_minutes": float(
+                            candidate.rest_deadline_minutes
                         )
-                        or ""
-                    ),
-                    "selection_epoch_identity": str(
-                        getattr(global_actuation, "selection_epoch_identity", "") or ""
-                    ),
-                    "wealth_witness_identity": str(
-                        getattr(global_actuation, "wealth_witness_identity", "") or ""
-                    ),
-                    "execution_authority_identity": execution_authority.authority_identity,
-                    "jit_book_hash": str(
-                        current_candidate.executable_sell_curve.book_hash
-                    ),
-                    "book_snapshot_id": str(
-                        current_candidate.book_snapshot_id
-                    ),
-                    "jit_curve_identity": str(
-                        current_candidate.execution_curve_identity
-                    ),
-                    "execution_mode": candidate.execution_mode,
-                    "submit_order_type": (
-                        "FAK"
-                        if candidate.execution_mode == "TAKER_LIMIT"
-                        else "GTC"
-                    ),
-                    "fill_probability": float(candidate.fill_probability),
-                    "fill_probability_source": str(
-                        candidate.fill_probability_source
-                    ),
-                    **(
-                        {
-                            "rest_deadline_minutes": float(
-                                candidate.rest_deadline_minutes
-                            )
-                        }
-                        if candidate.rest_deadline_minutes is not None
-                        else {}
-                    ),
-                    "held_probability_point": held_q,
-                    "sell_favorable_probability_functional": str(
-                        getattr(candidate, "probability_functional", "") or ""
-                    ),
-                    **capital_economics,
-                    "held_shares": str(getattr(position, "effective_shares", "")),
-                    "sellable_shares": str(getattr(candidate, "held_shares", "")),
-                    "selected_shares": str(getattr(decision, "shares", "")),
-                    "selected_cash_proceeds_usd": str(
-                        getattr(decision, "cash_proceeds_usd", "")
-                    ),
-                    "economic_limit_price": str(
-                        getattr(decision, "limit_price", "")
-                    ),
-                    "exact_limit_price": str(sell_limit_price),
-                    "partial_fill_certificate": (
-                        "marketable_limit_fill_all_prefixes_positive"
-                        if candidate.execution_mode == "TAKER_LIMIT"
-                        else "single_price_maker_fill_all_prefixes_positive"
-                    ),
-                    "global_auction_receipt": receipt_ref.as_payload(),
-                },
-                global_sell_receipt_closure=receipt_closure,
-            )
-            exit_evidence = ExitExecutionEvidence()
-            if (
-                final_authority_deadline is None
-                or hard_authority_cancelled is None
-            ):
-                return _global_sell_receipt(
-                    event,
-                    global_actuation=global_actuation,
-                    reason="GLOBAL_FINAL_ACTUATION_AUTHORITY_MISSING",
-                    proof_accepted=False,
-                )
-            final_block = _global_final_actuation_block_reason(
-                deadline=final_authority_deadline,
-                hard_authority_cancelled=hard_authority_cancelled,
-                deadline_expired_reason=final_deadline_expired_reason,
-            )
-            if final_block is not None:
-                return _global_sell_receipt(
-                    event,
-                    global_actuation=global_actuation,
-                    reason=final_block,
-                    proof_accepted=False,
-                )
-            _fence_global_target_claim_before_command(
-                global_claim_conn,
-                event,
-                claimed_at=global_claimed_at,
-                attempt_count=global_claim_attempt_count,
-            )
-            # The SELL command is owned by trade_conn, unlike the world-owned
-            # live-order aggregate used by the BUY path.  Persist the world claim
-            # fence before opening the independent trade write unit; a write
-            # transaction must never span the two canonical DBs.
-            global_claim_conn.commit()
-            final_block = _global_final_actuation_block_reason(
-                deadline=final_authority_deadline,
-                hard_authority_cancelled=hard_authority_cancelled,
-                deadline_expired_reason=final_deadline_expired_reason,
-            )
-            if final_block is not None:
-                return _global_sell_receipt(
-                    event,
-                    global_actuation=global_actuation,
-                    reason=final_block,
-                    proof_accepted=False,
-                )
-            outcome = execute_exit(
-                portfolio,
-                position,
-                exit_context,
-                clob=clob,
-                conn=trade_conn,
-                exit_intent=exit_intent,
-                execution_evidence=exit_evidence,
-                global_sell_authority=execution_authority,
-                global_sell_prefetched_orderbook=raw_book,
-                global_sell_required_snapshot_id=str(
-                    market_authority.snapshot.snapshot_id
+                    }
+                    if candidate.rest_deadline_minutes is not None
+                    else {}
                 ),
-                final_actuation_cancelled=hard_authority_cancelled,
+                "held_probability_point": held_q,
+                "sell_favorable_probability_functional": str(
+                    getattr(candidate, "probability_functional", "") or ""
+                ),
+                **capital_economics,
+                "held_shares": str(getattr(position, "effective_shares", "")),
+                "sellable_shares": str(getattr(candidate, "held_shares", "")),
+                "selected_shares": str(getattr(decision, "shares", "")),
+                "selected_cash_proceeds_usd": str(
+                    getattr(decision, "cash_proceeds_usd", "")
+                ),
+                "economic_limit_price": str(
+                    getattr(decision, "limit_price", "")
+                ),
+                "exact_limit_price": str(sell_limit_price),
+                "partial_fill_certificate": (
+                    "marketable_limit_fill_all_prefixes_positive"
+                    if candidate.execution_mode == "TAKER_LIMIT"
+                    else "single_price_maker_fill_all_prefixes_positive"
+                ),
+                "global_auction_receipt": receipt_ref.as_payload(),
+            },
+            global_sell_receipt_closure=receipt_closure,
+        )
+        exit_evidence = ExitExecutionEvidence()
+        if (
+            final_authority_deadline is None
+            or hard_authority_cancelled is None
+        ):
+            return _global_sell_receipt(
+                event,
+                global_actuation=global_actuation,
+                reason="GLOBAL_FINAL_ACTUATION_AUTHORITY_MISSING",
+                proof_accepted=False,
             )
+        final_block = _global_final_actuation_block_reason(
+            deadline=final_authority_deadline,
+            hard_authority_cancelled=hard_authority_cancelled,
+            deadline_expired_reason=final_deadline_expired_reason,
+        )
+        if final_block is not None:
+            return _global_sell_receipt(
+                event,
+                global_actuation=global_actuation,
+                reason=final_block,
+                proof_accepted=False,
+            )
+        _fence_global_target_claim_before_command(
+            global_claim_conn,
+            event,
+            claimed_at=global_claimed_at,
+            attempt_count=global_claim_attempt_count,
+        )
+        # The SELL command is owned by trade_conn, unlike the world-owned
+        # live-order aggregate used by the BUY path.  Persist the world claim
+        # fence before opening the independent trade write unit; a write
+        # transaction must never span the two canonical DBs.
+        global_claim_conn.commit()
+        final_block = _global_final_actuation_block_reason(
+            deadline=final_authority_deadline,
+            hard_authority_cancelled=hard_authority_cancelled,
+            deadline_expired_reason=final_deadline_expired_reason,
+        )
+        if final_block is not None:
+            return _global_sell_receipt(
+                event,
+                global_actuation=global_actuation,
+                reason=final_block,
+                proof_accepted=False,
+            )
+        outcome = execute_exit(
+            portfolio,
+            position,
+            exit_context,
+            clob=clob,
+            conn=trade_conn,
+            exit_intent=exit_intent,
+            execution_evidence=exit_evidence,
+            global_sell_authority=execution_authority,
+            global_sell_prefetched_orderbook=raw_book,
+            global_sell_required_snapshot_id=str(
+                market_authority.snapshot.snapshot_id
+            ),
+            final_actuation_cancelled=hard_authority_cancelled,
+        )
     except Exception as exc:  # noqa: BLE001 - exit safety remains fail closed
         if exit_evidence is not None and exit_evidence.venue_call_started:
             unknown_side_effect = (
@@ -16633,7 +16659,6 @@ def _global_preflight_entry_jit_receipt(
             )
             if jit is None:
                 raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
-            from src.data.polymarket_client import PolymarketClient
             from src.data.polymarket_request_governor import RequestPriority
 
             timeout = max(
@@ -16654,23 +16679,23 @@ def _global_preflight_entry_jit_receipt(
                     priority=RequestPriority.SUBMIT_JIT,
                 )
 
-            with PolymarketClient(
-                public_http_timeout=timeout,
-                public_request_priority=RequestPriority.SUBMIT_JIT,
-            ) as authority_clob:
-                market_authority = _current_global_market_authority(
-                    condition_id=str(
-                        getattr(candidate, "condition_id", "") or ""
-                    ),
-                    token_id=str(getattr(candidate, "token_id", "") or ""),
-                    side=str(getattr(candidate, "side", "") or ""),
-                    gamma_get=_entry_gamma_get,
-                    clob_market_get=authority_clob.get_clob_market_info,
-                    raw_book=raw_book,
-                    captured_at_utc=jit[3],
-                    timeout=timeout,
-                    trade_conn=trade_conn,
-                )
+            authority_clob = _global_preflight_clob_client(
+                priority=RequestPriority.SUBMIT_JIT,
+                timeout_seconds=timeout,
+            )
+            market_authority = _current_global_market_authority(
+                condition_id=str(
+                    getattr(candidate, "condition_id", "") or ""
+                ),
+                token_id=str(getattr(candidate, "token_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                gamma_get=_entry_gamma_get,
+                clob_market_get=authority_clob.get_clob_market_info,
+                raw_book=raw_book,
+                captured_at_utc=jit[3],
+                timeout=timeout,
+                trade_conn=trade_conn,
+            )
             current_candidate = _global_buy_candidate_from_raw_book(
                 candidate,
                 raw_book,
