@@ -6914,15 +6914,17 @@ def score_existing_buy_expected(
     reference ``T`` and the legal lot are the selector's own, at this limit.
 
     ``target_holding_shares`` is the holding the selector would size this
-    order to if it placed it fresh now: from the holding before the order's
-    own ``filled_shares``, inside the selector's spend envelope
-    (``buy_spend_limit_usd`` over ``capital_limit_usd``, ``spendable_cash_usd``
-    and the loss-branch wealth, plus the cash those fills already spent).
-    Filling at the limit moves holding, cash and the loss-branch wealth one
-    for one, so ``T``, the envelope and therefore the target are the same at
-    every fill. The lot floor applies to that fresh order, never to the
-    remainder. A remainder whose loss branch would leave no wealth has no
-    value. Horizon authority missing raises ``ValueError`` (lost authority).
+    order to if it placed it fresh now, every term at the state before the
+    order's own ``filled_shares``: from that prior holding, inside the
+    selector's spend envelope (``buy_spend_limit_usd``) over
+    ``spendable_cash_usd`` and the loss-branch wealth each with the cost those
+    fills spent added back, and ``capital_limit_usd``, which the caller states
+    at the pre-fill state too. Filling at the limit moves holding, cash and
+    loss-branch wealth one for one, so ``T``, the envelope and therefore the
+    target are the same at every fill. The lot floor applies to that fresh
+    order, never to the remainder. A remainder whose loss branch would leave
+    no wealth has no value. Horizon authority missing raises ``ValueError``
+    (lost authority).
     """
 
     mean_q = float(payoff_probability_mean)
@@ -6975,11 +6977,15 @@ def score_existing_buy_expected(
     if legal_lot is None:
         raise ValueError("existing BUY has no legal lot at its limit")
     prior = held - filled
+    # Every term at the state before this order's own fills: those fills
+    # spent ``filled * unit_cost`` of cash and loss-branch wealth, and the
+    # capital limit is the caller's pre-fill limit (see its docstring).
+    filled_cost = filled * unit_cost
     spend = buy_spend_limit_usd(
         capital_limit_usd=capital_limit_usd,
-        spendable_cash_usd=spendable_cash_usd,
-        wealth_floor_usd=wealth_floor_usd,
-    ) + filled * unit_cost
+        spendable_cash_usd=Decimal(spendable_cash_usd) + filled_cost,
+        wealth_floor_usd=Decimal(wealth_floor_usd) + filled_cost,
+    )
     max_order = (
         (spend / unit_cost / _SIZE_QUANTUM).to_integral_value(rounding=ROUND_FLOOR)
         * _SIZE_QUANTUM

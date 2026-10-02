@@ -799,10 +799,12 @@ def value_standing_entry(
     refutation (``buy_probability_rejection``), the remainder's expected
     growth on the common axis, then ``entry_rest_disposition`` against the
     holding the selector would size this order to if it placed it fresh now
-    (``fresh_buy_target_holding`` under ``capital_limit_usd``, the selector's
-    per-token capital limit including the single-position fraction, and the
-    spendable cash of ``wealth``, which credits the rest's own unfilled
-    reservation back). The lot floor sizes only that fresh order.
+    from the state before its own fills (``fresh_buy_target_holding`` under
+    ``capital_limit_usd``, the selector's per-token capital limit including
+    the single-position fraction and the allocator's headroom, both stated by
+    the caller at that pre-fill state, and the spendable cash of ``wealth``,
+    which credits the rest's own unfilled reservation back). The lot floor
+    sizes only that fresh order.
     """
     from src.engine.global_batch_runtime import _prepared_candidate_payoff_q_lcb_caps
     from src.engine.global_single_order_auction import (
@@ -1313,6 +1315,155 @@ def family_optimum_dominates(
     return _growth_key(released) > kept
 
 
+def _prefill_allocator_capacity_usd(
+    capital_authority: Any,
+    *,
+    market_id: str,
+    event_id: str,
+    correlation_key: str,
+    token_id: str,
+    own_filled_cost_usd: Decimal,
+) -> Decimal:
+    """The allocator's headroom for this order's market before its own fills.
+
+    ``auction_capacity`` is headroom, not an absolute cap: each scope's cap
+    minus the weighted exposure of the allocator's lots (governor.py
+    ``auction_capacity``, ``_remaining_capacity``), and an order's fills enter
+    those lots as soon as its position is current (``load_position_lots``).
+    The fresh order this rest is judged against would be placed from the
+    holding before those fills, so its headroom is the allocator's own
+    computation over its lots with this order's filled cost removed from the
+    lots it landed in (same token, same market): the order's fills first come
+    out of its optimistic lot, then its confirmed one. With no own fill, or
+    when the lots cannot be split (an allocator without them), this is the
+    allocator's own ``capacity_usd``. If another holding shares the token,
+    the removal is bounded by that token's lots, so the headroom is never
+    below the allocator's current one.
+    """
+    from decimal import ROUND_CEILING
+
+    from src.risk_allocator import AuctionCapitalAuthority
+
+    def capacity(authority: Any) -> Decimal:
+        return Decimal(
+            authority.capacity_usd(
+                market_id=market_id, event_id=event_id, correlation_key=correlation_key,
+            )
+        )
+
+    allocator = getattr(capital_authority, "allocator", None)
+    remaining = int((own_filled_cost_usd * _MICRO).to_integral_value(rounding=ROUND_CEILING))
+    if remaining <= 0 or allocator is None or not hasattr(allocator, "with_lots"):
+        return capacity(capital_authority)
+    lots = list(allocator.exposure_lots)
+    order = sorted(
+        (
+            i
+            for i, lot in enumerate(lots)
+            if lot.token_id == token_id
+            and lot.market_id == market_id
+            and lot.state in {"OPTIMISTIC_EXPOSURE", "CONFIRMED_EXPOSURE"}
+        ),
+        key=lambda i: lots[i].state != "OPTIMISTIC_EXPOSURE",
+    )
+    for i in order:
+        take = min(remaining, int(lots[i].exposure_micro))
+        lots[i] = replace(lots[i], exposure_micro=int(lots[i].exposure_micro) - take)
+        remaining -= take
+        if remaining <= 0:
+            break
+    return capacity(AuctionCapitalAuthority(allocator.with_lots(lots)))
+
+
+def _prefill_wealth(wealth: Any, *, token_id: str, filled_cost_usd: Decimal):
+    """``wealth`` as it stood before this order's own fills: their cost back
+    in spendable cash and the loss-branch floor, out of the token's
+    commitments. Only the capital terms read it (the selector's own
+    ``remaining_buy_capacity_usd`` and ``single_position_capital_limit``);
+    the capital basis, so the allocated equity, is the same in both states."""
+    from src.contracts.strategy_capital_allocation import StrategyCapitalAllocationWitness
+    from src.solve.solver import PortfolioWealthWitness, portfolio_wealth_identity
+
+    commitments = dict(wealth.native_commitments_micro)
+    fill_micro = int((filled_cost_usd * _MICRO).to_integral_value(rounding=ROUND_FLOOR))
+    moved_micro = min(fill_micro, commitments.get(token_id, 0))
+    if moved_micro <= 0:
+        return wealth
+    commitments[token_id] -= moved_micro
+    moved = Decimal(moved_micro) / _MICRO
+    allocation = wealth.strategy_capital_allocation
+    config: dict[str, object] = {"mode": allocation.mode}
+    if allocation.configured_value is not None:
+        config["value"] = allocation.configured_value
+    if allocation.configured_buy_commitment_limit_usd is not None:
+        config["buy_commitment_limit_usd"] = allocation.configured_buy_commitment_limit_usd
+    floor = wealth.wealth_floor_usd + moved
+    spendable = wealth.spendable_cash_usd + moved
+    committed = sum((Decimal(v) / _MICRO for v in commitments.values()), Decimal("0"))
+    rebuilt = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=floor + committed,
+        committed_capital_usd=committed,
+        venue_spendable_cash_usd=spendable,
+        allocation=config,
+    )
+    fields = dict(
+        ledger_snapshot_id=wealth.ledger_snapshot_id,
+        position_set_hash=hashlib.sha256(
+            json.dumps([wealth.position_set_hash, "prefill", token_id, str(moved)]).encode()
+        ).hexdigest(),
+        wealth_floor_usd=floor,
+        wealth_ceiling_usd=max(wealth.wealth_ceiling_usd, floor),
+        spendable_cash_usd=spendable,
+        reservations_usd=wealth.reservations_usd,
+        collateral_authority=wealth.collateral_authority,
+        captured_at_utc=wealth.captured_at_utc,
+    )
+    return PortfolioWealthWitness(
+        **fields,
+        strategy_capital_allocation=rebuilt,
+        max_age=wealth.max_age,
+        witness_identity=portfolio_wealth_identity(
+            **fields, strategy_capital_allocation_identity=rebuilt.witness_identity,
+        ),
+        native_holdings_micro=wealth.native_holdings_micro,
+        pending_entry_endowments_micro=wealth.pending_entry_endowments_micro,
+        native_commitments_micro=tuple(sorted((t, a) for t, a in commitments.items() if a)),
+    )
+
+
+def _prefill_capital_limit_usd(
+    capital_authority: Any,
+    own_wealth: Any,
+    *,
+    market_id: str,
+    event_id: str,
+    correlation_key: str,
+    token_id: str,
+    own_filled_cost_usd: Decimal,
+) -> Decimal:
+    """The selector's per-token capital limit for a fresh order placed from
+    the state before this order's own fills: the allocator's headroom
+    (``_prefill_allocator_capacity_usd``), the strategy's remaining BUY
+    capacity and the single-position fraction, each read by the selector's
+    own function on that pre-fill state. The verdict then never depends on how
+    much of the order has filled."""
+    from src.engine.global_single_order_auction import single_position_capital_limit
+
+    allocator_limit = _prefill_allocator_capacity_usd(
+        capital_authority,
+        market_id=market_id,
+        event_id=event_id,
+        correlation_key=correlation_key,
+        token_id=token_id,
+        own_filled_cost_usd=own_filled_cost_usd,
+    )
+    prefill = _prefill_wealth(own_wealth, token_id=token_id, filled_cost_usd=own_filled_cost_usd)
+    return min(
+        prefill.strategy_capital_allocation.remaining_buy_capacity_usd,
+        single_position_capital_limit(allocator_limit, token_id=token_id, wealth_witness=prefill),
+    )
+
+
 def _snapshot_row(trade_conn: sqlite3.Connection, snapshot_id: str) -> dict[str, Any] | None:
     cursor = trade_conn.execute(
         "SELECT * FROM executable_market_snapshots WHERE snapshot_id = ?",
@@ -1387,7 +1538,6 @@ def _capture_standing_entry_values(
     from src.engine import event_reactor_adapter as adapter
     from src.engine import global_auction_universe as universe
     from src.engine import global_batch_runtime as runtime
-    from src.engine.global_single_order_auction import single_position_capital_limit
     from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
     from src.state.portfolio import load_runtime_open_portfolio
     from src.state.venue_command_repo import get_command
@@ -1639,18 +1789,16 @@ def _capture_standing_entry_values(
                     portfolio_state=portfolio,
                     wealth_witness=own_wealth,
                 )[event.event_id]
-                allocator_limit = capital_authority.capacity_usd(
+                # The fresh order this rest is judged against starts before
+                # the rest's own fills: every limit is read at that state.
+                capital_limit = _prefill_capital_limit_usd(
+                    capital_authority,
+                    own_wealth,
                     market_id=str(snapshot.get("gamma_market_id") or ""),
                     event_id=str(snapshot.get("event_id") or ""),
                     correlation_key=prepared.probability_witness.family_key,
-                )
-                capital_limit = min(
-                    own_wealth.strategy_capital_allocation.remaining_buy_capacity_usd,
-                    single_position_capital_limit(
-                        allocator_limit,
-                        token_id=str(rest["token_id"]),
-                        wealth_witness=own_wealth,
-                    ),
+                    token_id=str(rest["token_id"]),
+                    own_filled_cost_usd=own.filled_shares * own.price,
                 )
                 valuation = value_standing_entry(
                     rest,

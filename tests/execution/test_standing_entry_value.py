@@ -1155,3 +1155,140 @@ class TestFreshEntryGateAndPassLocalEvidence:
         assert seen[0] is not seen[1]
         assert all(m is not adapter._DAY0_ASK_SELECTION_EVIDENCE for m in seen)
         assert adapter._DAY0_ASK_SELECTION_EVIDENCE == shared_before
+
+
+# ---------------------------------------------------------------------------
+# D1: the C3 keep target is invariant in how a fixed order is split between
+# filled h and remaining r, also when the allocator's headroom binds. The
+# allocator's capacity is HEADROOM (cap - weighted exposure of its own lots,
+# risk_allocator.governor auction_capacity / _remaining_capacity), and a
+# partly filled order's own fill is in those lots as soon as its position is
+# current (load_position_lots), so the pre-fill state adds that fill back to
+# the allocator's headroom, the cash and the loss-branch wealth alike.
+# ---------------------------------------------------------------------------
+
+
+def _split_capture(monkeypatch, *, size, filled, cap_usd, price, q, cash="400", lot_state="CONFIRMED_EXPOSURE"):
+    """One _capture_standing_entry_values pass on the production capital path:
+    real wealth witness over a current position carrying the order's own
+    fill (as live projects it at the first partial fill), a real
+    RiskAllocator whose lots carry that fill, and a per-market cap."""
+    from src.control.heartbeat_supervisor import HeartbeatHealth
+    from src.risk_allocator import (
+        CapPolicy,
+        ExposureLot,
+        GovernorState,
+        RiskAllocator,
+        configure_global_allocator,
+    )
+    from src.state import portfolio as portfolio_module
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table
+    from tests.execution.test_staleness_cancel import _seed_open_entry
+
+    _real_authority_harness(monkeypatch, q=q)
+    conn = _trade_db()
+    at = datetime.now(UTC)
+    p, n, h = D(price), D(size), D(filled)
+    _seed_open_entry(
+        conn, command_id="cmd", token_id=TOKEN, venue_order_id="venue-1", q_version="q-submitted",
+        created_at=at - timedelta(hours=3), fact_state="PARTIALLY_MATCHED" if h else "LIVE",
+        matched_size=str(h), remaining_size=str(n - h),
+    )
+    conn.execute(
+        "UPDATE venue_commands SET size=?, price=?, position_id='pos-cmd' WHERE command_id='cmd'",
+        (float(n), float(p)),
+    )
+    conn.execute(
+        "INSERT INTO collateral_reservations (command_id, reservation_type, amount, created_at) "
+        "VALUES ('cmd', 'PUSD_BUY', ?, ?)",
+        (int(n * p * 1_000_000), at.isoformat()),
+    )
+    ensure_table(conn)
+    open_entry_exposure_obligation(
+        conn, command_id="cmd", owner_domain="test", token_id=TOKEN, condition_id=f"cond-{TOKEN}",
+        shares=float(n), cost_basis_usd=float(n * p),
+    )
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots (pusd_balance_micro,pusd_allowance_micro,"
+        "usdc_e_legacy_balance_micro,ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,captured_at,authority_tier,"
+        "raw_balance_payload_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            int((D(cash) - h * p) * 1_000_000), 10**12, 0,
+            json.dumps({TOKEN: int(h * 1_000_000)} if h else {}), "{}",
+            int(n * p * 1_000_000), "{}", (at - timedelta(seconds=5)).isoformat(), "CHAIN", "h",
+        ),
+    )
+    conn.commit()
+    if h:
+        position = SimpleNamespace(
+            position_id="pos-cmd", trade_id="pos-cmd", direction="buy_yes", token_id=TOKEN,
+            no_token_id=f"{TOKEN}-no", condition_id=f"cond-{TOKEN}", shares=float(h),
+            cost_basis_usd=float(h * p), entry_price=float(p), chain_state="synced",
+            chain_shares=float(h), state="active", city=FAMILY[0], target_date=FAMILY[1],
+            temperature_metric=FAMILY[2], entry_method="", strategy_key="",
+        )
+        real_load = portfolio_module.load_runtime_open_portfolio
+
+        def with_own_fill(c):
+            from dataclasses import replace as dc_replace
+
+            return dc_replace(real_load(c), positions=[position])
+
+        monkeypatch.setattr(portfolio_module, "load_runtime_open_portfolio", with_own_fill)
+    # lot_state None: the fill is not in the allocator's lots yet (it was
+    # published before the fill), so its headroom does not move with fills.
+    lots = (
+        [ExposureLot(market_id="gamma", event_id="event", resolution_window="default", token_id=TOKEN,
+                     exposure_micro=int(h * p * 1_000_000), state=lot_state, correlation_key=FAMILY_KEY)]
+        if h and lot_state else []
+    )
+    configure_global_allocator(
+        RiskAllocator(CapPolicy(max_per_market_micro=int(D(cap_usd) * 1_000_000)), lots),
+        GovernorState(
+            current_drawdown_pct=0.0, heartbeat_health=HeartbeatHealth.HEALTHY, ws_gap_active=False,
+            ws_gap_seconds=0, unknown_side_effect_count=0, reconcile_finding_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        C, "_snapshot_row", lambda _c, _sid: {**_snapshot(), "condition_id": f"cond-{TOKEN}"},
+    )
+    _at, values = C._capture_standing_entry_values(
+        conn, sqlite3.connect(":memory:"), sqlite3.connect(":memory:"),
+        C.find_open_entry_rests(conn), families={"cmd": FAMILY}, clock=lambda: at,
+    )
+    return values[0]
+
+
+class TestFillSplitInvarianceUnderABindingCap:
+    SPLITS = ("0", "1", "3", "3.9", "5.2", "12.99")
+
+    @pytest.mark.parametrize("lot_state", [None, "CONFIRMED_EXPOSURE", "OPTIMISTIC_EXPOSURE"])
+    def test_reviewer_four_dollar_cap_on_a_thirteen_share_rest(self, monkeypatch, lot_state):
+        # Reviewer D1: a $4 per-market cap, 13 sh @ 0.50. At 2f3451ac3 the
+        # target rose 1:1 with fills: CANCEL at 0-3.9 filled, KEEP at >= 5.2.
+        verdicts = {}
+        for h in self.SPLITS:
+            v = _split_capture(
+                monkeypatch, size="13", filled=h, cap_usd="4", price="0.50", q=0.70, lot_state=lot_state,
+            )
+            verdicts[h] = (v.action, v.reason, D(v.evidence["target_holding_shares"]))
+        assert {a for a, _r, _t in verdicts.values()} == {"CANCEL"}, verdicts
+        assert {t for _a, _r, t in verdicts.values()} == {D("8")}, verdicts
+        assert {r for _a, r, _t in verdicts.values()} == {"CURRENT_FRACTIONAL_TARGET_REDUCED"}
+
+    @pytest.mark.parametrize("price,size", [("0.50", "13"), ("0.30", "20"), ("0.65", "9")])
+    @pytest.mark.parametrize("cap", ["3", "4", "6", "1000"])
+    @pytest.mark.parametrize("lot_state", [None, "CONFIRMED_EXPOSURE", "OPTIMISTIC_EXPOSURE"])
+    def test_decision_is_invariant_in_the_fill_split(self, monkeypatch, price, size, cap, lot_state):
+        splits = [h for h in self.SPLITS if D(h) < D(size)]
+        decisions = {
+            h: _split_capture(
+                monkeypatch, size=size, filled=h, cap_usd=cap, price=price, q=0.75, lot_state=lot_state,
+            )
+            for h in splits
+        }
+        verdicts = {(v.action, v.reason.split(":")[0]) for v in decisions.values()}
+        assert len(verdicts) == 1, {h: (v.action, v.reason, v.evidence.get("target_holding_shares"))
+                                    for h, v in decisions.items()}
