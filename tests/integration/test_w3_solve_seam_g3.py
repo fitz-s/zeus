@@ -52184,3 +52184,366 @@ def test_missing_station_ground_family_keeps_qualified_held_taker_and_resets_nor
         next(shanghai,None)
         healthy.conn.close()
         healthy.builtin.close()
+
+
+@pytest.fixture(params=("high", "low"))
+def _normal_hko_concentrated_sell(tmp_path, monkeypatch, request, _hko_clock_native_sources):
+    """Real source/certificate/adapter/batch; explicit private wealth and book.
+
+    These are current simulated opportunities, not reconstructed historical
+    liquidity or actual HK fills. Source fixtures retain their causal clocks.
+    """
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.engine.global_auction_universe import _rebind_probability_witness_tokens
+    from src.state.db import init_schema_trade_only
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+    metric = request.param
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric,
+        observed_extreme_native=32.9 if metric == "high" else 27.4)
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    init_schema_trade_only(trade)
+    actual_batch, hooks = global_batch_runtime.process_current_global_batch, []
+    at = fixture.cut
+    from src.data import replacement_forecast_bundle_reader as reader
+    class ClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, _dt.datetime)
+    class ConsumerClock(_dt.datetime, metaclass=ClockType):
+        @classmethod
+        def now(cls, tz=None):
+            return at.astimezone(tz) if tz else at.replace(tzinfo=None)
+    # Reproduce a fixed simulated current clock, never renew source timestamps.
+    monkeypatch.setattr(reader, "datetime", ConsumerClock)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
+    try:
+        observation = observation_instant_row_to_day0_observation(dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1"
+        ).fetchone()), metric=metric)
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city), decision_time=at,
+            received_at=at.isoformat())
+        with monkeypatch.context() as composition:
+            composition.setattr(global_batch_runtime, "process_current_global_batch",
+                lambda events, **kwargs: hooks.append(kwargs) or
+                    SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={}))
+            adapter = era.event_bound_live_adapter_from_trade_conn(trade,
+                get_current_level=lambda: era.RiskLevel.GREEN, forecast_conn=fixture.conn,
+                topology_conn=fixture.conn, calibration_conn=fixture.conn)
+            adapter.process_global_batch((event,), at)
+        callbacks = hooks[-1]
+        prepared = callbacks["prepare_held_event"](event, at)
+        assert prepared.prepared_global_family is not None, prepared.reason
+        producer = prepared.prepared_global_family.probability_witness
+        tokens = {b.condition_id: (b.yes_token_id, f"log-sell-no-{i}")
+            for i, b in enumerate(producer.bindings)}
+        required = frozenset(t for pair in tokens.values() for t in pair)
+        def rebind(witness):
+            return _rebind_probability_witness_tokens(witness,
+                token_map_by_condition=tokens, required_token_ids=required)
+        probability = rebind(producer)
+        choices = [(b, side, family_payoff_point_q(probability, bin_id=b.bin_id, side=side))
+            for b in probability.bindings for side in ("YES", "NO")]
+        choices = [choice for choice in choices if .31 < choice[2] < .80]
+        assert choices, probability.yes_point_q
+        binding, side, q = min(choices, key=lambda choice: abs(choice[2] - .46))
+        token = binding.yes_token_id if side == "YES" else binding.no_token_id
+        position = SimpleNamespace(trade_id="log-sell-held", position_id="log-sell-held",
+            condition_id=binding.condition_id, direction="buy_"+side.lower(),
+            token_id=binding.yes_token_id, no_token_id=binding.no_token_id,
+            shares=Decimal("5"), effective_shares=Decimal("5"), chain_shares=Decimal("5"),
+            cost_basis_usd=Decimal(".60"), city=fixture.city.name, target_date="2026-09-30",
+            temperature_metric=metric, bin_label=binding.bin_id)
+        trade.execute("""INSERT INTO position_current (
+            position_id,trade_id,market_id,phase,city,cluster,target_date,temperature_metric,
+            bin_label,direction,token_id,no_token_id,condition_id,shares,size_usd,cost_basis_usd,
+            entry_price,chain_shares,chain_avg_price,chain_cost_basis_usd,chain_seen_at,
+            chain_state,fill_authority,strategy_key,updated_at,unit)
+            VALUES ('log-sell-held','log-sell-held',?,'active','Hong Kong','Asia','2026-09-30',?,
+            ?,?,?,?,?,5,.6,.6,.12,5,.12,.6,?,'synced','venue_confirmed_full','forecast_qkernel_entry',?,'C')""",
+            (binding.condition_id,metric,binding.bin_id,position.direction,binding.yes_token_id,
+             binding.no_token_id,binding.condition_id,at.isoformat(),at.isoformat()))
+        trade.commit()
+        portfolio = PortfolioState(positions=[position], authority="canonical_db", authority_scope="runtime_exposure")
+        wealth = _test_wealth_witness(ledger_snapshot_id="log-sell-ledger", position_set_hash="log-sell-holding",
+            wealth_floor_usd=Decimal(".858079"), wealth_ceiling_usd=Decimal("5.858079"),
+            spendable_cash_usd=Decimal(".858079"), reservations_usd=Decimal("0"),
+            collateral_authority="CHAIN", captured_at_utc=at, max_age=_dt.timedelta(seconds=30),
+            native_holdings_micro=((token, 5_000_000),), native_commitments_micro=())
+        curve = ExecutableSellCurve(token_id=token, side=side, snapshot_id="log-sell-book",
+            book_hash="log-sell-book-hash", levels=(BidBookLevel(price=Decimal(".30"), size=Decimal("5")),),
+            fee_model=FeeModel(fee_rate=Decimal(".05")), min_tick=Decimal(".01"),
+            min_order_size=Decimal("1"), quote_ttl=_dt.timedelta(seconds=30))
+        states = tuple((probability.family_key, b.bin_id, b.condition_id, s, t, "NO_ASK",
+            curve.book_hash, event.event_id, f"gamma-{b.condition_id}", "False")
+            for b in probability.bindings for s, t in (("YES", b.yes_token_id), ("NO", b.no_token_id)))
+        book = CurrentGlobalBookEpoch(assets=(), sell_assets=(CurrentGlobalSellAsset(
+            family_key=probability.family_key, bin_id=binding.bin_id, condition_id=binding.condition_id,
+            gamma_market_id=f"gamma-{binding.condition_id}", market_event_id=event.event_id,
+            side=side, token_id=token, curve=curve, captured_at_utc=at, neg_risk=False),),
+            asset_states=states, captured_at_utc=at, max_age=_dt.timedelta(seconds=30),
+            witness_identity=current_global_book_epoch_identity(asset_states=states, captured_at_utc=at))
+        scope = current_global_auction_scope_from_events((event,), captured_at_utc=at)
+        selections, persisted_actuations = [], []
+        def private_preflight(event, actuation, cut, authority):
+            persisted_actuations.append(actuation)
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="BATCH_BLOCKED", reason="TEST_ONLY_CONTROLLED_EXECUTOR")
+        with monkeypatch.context() as inputs:
+            inputs.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
+            inputs.setattr(global_batch_runtime, "current_portfolio_wealth_witness", lambda *_a, **_kw: wealth)
+            inputs.setattr(global_batch_runtime, "current_venue_auction_identity", lambda *_a, **_kw: book.witness_identity)
+            batch = actual_batch((event,), decision_time=at, world_conn=fixture.conn,
+                forecast_conn=fixture.conn, trade_conn=trade, payload_reader=lambda e: json.loads(e.payload_json),
+                prepare_event=callbacks["prepare_event"], prepare_held_event=callbacks["prepare_held_event"],
+                actuate_winner=lambda *_: pytest.fail("fixture may not invoke live venue"),
+                stamp_receipt=lambda receipt: receipt, venue_submit_count=lambda: 0,
+                current_execution=lambda *_: None, current_time_provider=lambda: at,
+                portfolio_state_provider=lambda: portfolio,
+                current_book_epoch_provider=lambda probabilities, cut: (
+                    {key: rebind(witness) for key, witness in probabilities.items()}, book),
+                current_capital_limit_resolver=lambda *_: Decimal("100"),
+                preflight_winner=private_preflight,
+                actuate_preflighted_winner=lambda *_: pytest.fail("fixture preflight is deliberately paused"),
+                selection_telemetry_observer=lambda p, b, f, s, c: selections.append(s))
+        assert selections, {key: value.reason for key, value in batch.receipts.items()}
+        assert persisted_actuations, {key: value.reason for key, value in batch.receipts.items()}
+        ranked = replace(selections[-1], actuation=persisted_actuations[-1])
+        selected = ranked.decision.candidate
+        assert isinstance(selected, GlobalSingleOrderSellCandidate)
+        market = _jit_market_authority(selected, tick=".01", min_order_size="1")
+        def jit(bid=".30", *, captured_at=at):
+            current = replace(market, snapshot=replace(market.snapshot, captured_at=captured_at,
+                freshness_deadline=captured_at+_dt.timedelta(seconds=30)))
+            return era._global_sell_candidate_from_raw_book(selected,
+                {"asset_id": token, "tick_size": ".01", "min_order_size": "1",
+                 "bids": [{"price": bid, "size": "5"}], "asks": []},
+                captured_at_utc=captured_at, market_authority=current)
+        rebound = jit()
+        authority = GlobalSellExecutionAuthority.from_current(actuation=ranked.actuation, jit_candidate=rebound)
+        snapshot = replace(market.snapshot, raw_orderbook_hash=rebound.executable_sell_curve.book_hash,
+            captured_at=at, freshness_deadline=at+_dt.timedelta(seconds=30))
+        init_snapshot_schema(trade)
+        insert_snapshot(trade, snapshot)
+        yield SimpleNamespace(fixture=fixture, trade=trade, event=event, probability=ranked.actuation.probability_witness,
+            producer=producer, ranked=ranked, selected=selected, position=position, wealth=wealth,
+            q=q, curve=curve, snapshot=snapshot, jit=jit, rebound=rebound, authority=authority,
+            clock=ConsumerClock)
+    finally:
+        trade.close()
+        fixture.conn.close()
+
+
+def test_normal_hko_global_auction_selects_negative_cash_ev_positive_log_sell(_normal_hko_concentrated_sell):
+    case = _normal_hko_concentrated_sell
+    decision = case.ranked.decision
+    terminal = decision.expected_terminal_wealth
+    assert terminal.expected_ev_usd < 0
+    assert terminal.expected_delta_log_wealth > 0
+    assert 0 < decision.shares < Decimal("5")
+    proceeds = case.curve.proceeds_for_shares(decision.shares)[0]
+    cash, held = float(case.wealth.wealth_floor_usd), 5.0
+    independent_log = ((1-case.q)*math.log((cash+float(proceeds))/cash)
+        +case.q*math.log((cash+held-float(decision.shares)+float(proceeds))/(cash+held)))
+    assert terminal.expected_delta_log_wealth == pytest.approx(independent_log, abs=1e-12)
+    assert terminal.expected_ev_usd == pytest.approx(float(proceeds)-case.q*float(decision.shares), abs=1e-12)
+    assert case.authority.limit_price() <= Decimal(".30")
+    assert case.selected.probability_witness_identity == case.probability.witness_identity
+    np.testing.assert_array_equal(case.probability.yes_point_q, case.producer.yes_point_q)
+    assert case.ranked.actuation.auction_receipt_ref is not None
+
+
+@pytest.mark.parametrize("bid", (".04", ".96", ".29"))
+def test_negative_cash_ev_global_sell_rejects_unsafe_or_worse_jit_bid(_normal_hko_concentrated_sell, bid):
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+    case = _normal_hko_concentrated_sell
+    with pytest.raises(ValueError):
+        rebound = case.jit(bid)
+        GlobalSellExecutionAuthority.from_current(actuation=case.ranked.actuation, jit_candidate=rebound)
+
+
+def test_negative_cash_ev_global_sell_keeps_improved_jit_bid(_normal_hko_concentrated_sell):
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+    case = _normal_hko_concentrated_sell
+    rebound = case.jit(".31")
+    authority = GlobalSellExecutionAuthority.from_current(actuation=case.ranked.actuation, jit_candidate=rebound)
+    assert authority.actuation.decision.shares == case.ranked.decision.shares
+    assert authority.limit_price() == case.authority.limit_price()
+
+
+def _normal_hko_sell_intents(case):
+    """Audit projection of the actual selected/JIT objects, including negative EV."""
+    from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
+    from src.execution.exit_lifecycle import ExitIntent
+    from src.execution.executor import create_exit_order_intent, marketable_sell_certificate_identity
+    actuation, authority = case.ranked.actuation, case.authority
+    decision, candidate, jit = actuation.decision, actuation.decision.candidate, case.rebound
+    certificate = {"action": "SELL", "position_id": candidate.position_id,
+        "condition_id": candidate.condition_id, "token_id": candidate.token_id,
+        "candidate_id": candidate.candidate_id, "actuation_identity": actuation.actuation_identity,
+        "economic_identity": actuation.economic_identity,
+        "probability_witness_identity": candidate.probability_witness_identity,
+        "sell_probability_functional": candidate.probability_functional,
+        "sell_exit_authority_status": candidate.exit_authority_status,
+        "sell_exit_authority_reason": candidate.exit_authority_reason,
+        "sell_action_authority_identity": candidate.sell_action_authority_identity,
+        "selection_epoch_identity": actuation.selection_epoch_identity,
+        "wealth_witness_identity": actuation.wealth_witness_identity,
+        "execution_authority_identity": authority.authority_identity,
+        "jit_book_hash": jit.executable_sell_curve.book_hash, "book_snapshot_id": jit.book_snapshot_id,
+        "jit_curve_identity": jit.execution_curve_identity, "execution_mode": "TAKER_LIMIT",
+        "submit_order_type": "FAK", "fill_probability": candidate.fill_probability,
+        "fill_probability_source": candidate.fill_probability_source,
+        "expected_sell_delta_log_wealth": decision.expected_terminal_wealth.expected_delta_log_wealth,
+        "expected_sell_ev_usd": decision.expected_terminal_wealth.expected_ev_usd,
+        "expected_comparison_delta_log_wealth": decision.expected_growth.expected_delta_log_wealth,
+        "expected_comparison_ev_usd": decision.expected_growth.expected_ev_usd,
+        "held_shares": "5", "sellable_shares": "5", "selected_shares": str(decision.shares),
+        "selected_cash_proceeds_usd": str(decision.cash_proceeds_usd),
+        "economic_limit_price": str(decision.limit_price), "exact_limit_price": str(authority.limit_price()),
+        "global_auction_receipt": actuation.auction_receipt_ref.as_payload()}
+    closure = GlobalSellReceiptClosure(receipt_ref=actuation.auction_receipt_ref,
+        position_id=candidate.position_id, condition_id=candidate.condition_id, token_id=candidate.token_id,
+        action="SELL", execution_mode="TAKER_LIMIT", winner_event_id=actuation.winner_event_id,
+        winner_candidate_id=candidate.candidate_id, winner_actuation_identity=actuation.actuation_identity,
+        selection_epoch_identity=actuation.selection_epoch_identity)
+    exit_intent = ExitIntent(trade_id=candidate.position_id, reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=candidate.token_id, shares=float(decision.shares),
+        current_market_price=float(decision.expected_fill_price_before_fee), best_bid=.30,
+        exact_limit_price=float(authority.limit_price()), submit_order_type="FAK", close_position=False,
+        capital_certificate=certificate, global_sell_receipt_closure=closure)
+    executor_intent = create_exit_order_intent(trade_id=candidate.position_id, token_id=candidate.token_id,
+        shares=float(decision.shares), current_price=.30, best_bid=.30,
+        exact_limit_price=float(authority.limit_price()), submit_order_type="FAK",
+        executable_snapshot_id=case.snapshot.snapshot_id,
+        executable_snapshot_hash=case.snapshot.executable_snapshot_hash,
+        executable_snapshot_min_tick_size=Decimal(".01"), executable_snapshot_min_order_size=Decimal("1"),
+        executable_snapshot_neg_risk=False, marketable_sell_execution_authority=authority,
+        global_sell_execution_authority=authority, global_sell_receipt_closure=closure,
+        marketable_sell_certificate=certificate,
+        marketable_sell_certificate_identity=marketable_sell_certificate_identity(certificate))
+    return exit_intent, executor_intent
+
+
+def test_negative_cash_ev_sell_preserves_exact_capital_certificate_at_executor(_normal_hko_concentrated_sell):
+    from src.execution.exit_lifecycle import _global_sell_capital_certificate_error
+    from src.execution.executor import _marketable_sell_certificate_error
+    case = _normal_hko_concentrated_sell
+    exit_intent, executor_intent = _normal_hko_sell_intents(case)
+    assert _global_sell_capital_certificate_error(case.position, exit_intent, case.authority,
+        conn=case.trade, snapshot_context={"executable_snapshot_id": case.snapshot.snapshot_id,
+            "executable_snapshot_hash": case.snapshot.executable_snapshot_hash}, now=case.fixture.cut) is None
+    assert _marketable_sell_certificate_error(case.trade, executor_intent,
+        limit_price=float(case.authority.limit_price()), shares=float(case.ranked.decision.shares)) is None
+
+
+def test_negative_cash_ev_sell_rejects_capital_certificate_byte_drift(_normal_hko_concentrated_sell):
+    from src.execution.executor import _marketable_sell_certificate_error
+    case = _normal_hko_concentrated_sell
+    _, intent = _normal_hko_sell_intents(case)
+    modified = dict(intent.marketable_sell_certificate, expected_sell_ev_usd=0.01)
+    forged = replace(intent, marketable_sell_certificate=modified)
+    assert _marketable_sell_certificate_error(case.trade, forged,
+        limit_price=float(case.authority.limit_price()), shares=float(case.ranked.decision.shares)) == \
+        "marketable_sell_certificate_identity_mismatch"
+
+
+def test_negative_cash_ev_sell_persists_fake_sdk_fill_before_partial_reduction(
+    _normal_hko_concentrated_sell, monkeypatch, tmp_path, record_property,
+):
+    """Real executor/receipt/command/fact writes; controlled SDK and host posture."""
+    from src.execution import executor, exit_lifecycle
+    from src.state import collateral_ledger
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.fill_dedup import economic_exit_fills_for_position
+    from src.state.venue_command_repo import append_trade_fact
+    from src.state.db import init_schema_world_only
+    case = _normal_hko_concentrated_sell
+    exit_intent, intent = _normal_hko_sell_intents(case)
+    at = case.fixture.cut
+    monkeypatch.setattr(executor, "datetime", case.clock)
+    monkeypatch.setattr(collateral_ledger, "datetime", case.clock)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: at)
+    # Only environment posture/transport are doubles. Keep all economic,
+    # snapshot, envelope, receipt, command and fill validators real.
+    for name in ("_assert_cutover_allows_submit", "_assert_heartbeat_allows_submit",
+                 "_assert_ws_gap_allows_submit", "_assert_risk_allocator_allows_exit_submit"):
+        monkeypatch.setattr(executor, name, lambda *_a, **_kw: {"allowed": True, "component": "private_host"})
+    monkeypatch.setattr(executor, "_select_risk_allocator_order_type", lambda *_: "FAK")
+    monkeypatch.setattr(executor, "_refresh_exit_collateral_snapshot_for_submit",
+        lambda *_a, **_kw: {"allowed": True, "component": "private_chain_transport"})
+    init_collateral_schema(case.trade)
+    CollateralLedger(case.trade).set_snapshot(CollateralSnapshot(pusd_balance_micro=858079,
+        pusd_allowance_micro=858079, usdc_e_legacy_balance_micro=0,
+        ctf_token_balances={case.selected.token_id:5_000_000},
+        ctf_token_allowances={case.selected.token_id:5_000_000}, reserved_pusd_for_buys_micro=0,
+        reserved_tokens_for_sells={}, captured_at=at, authority_tier="CHAIN"))
+    audit_db = tmp_path / "fake-sdk-world.db"
+    conn = sqlite3.connect(audit_db)
+    init_schema_world_only(conn)
+    conn.close()
+    monkeypatch.setattr("src.state.db.get_world_connection", lambda **_: sqlite3.connect(audit_db))
+    calls = []
+    class FakeSdk:
+        def bind_submission_envelope(self, envelope):
+            self.envelope = envelope
+        def bind_signed_submission_identity_persister(self, persister):
+            self.persister = persister
+        def place_limit_order(self, **order):
+            persisted = case.trade.execute("SELECT state FROM venue_commands").fetchone()[0]
+            assert persisted == "SUBMITTING"
+            assert order["side"] == "SELL" and order["order_type"] == "FAK"
+            assert order["token_id"] == case.selected.token_id
+            calls.append(order)
+            response = {"orderID":"fake-log-sell", "status":"MATCHED"}
+            envelope = self.envelope.with_updates(order_id=response["orderID"],
+                raw_response_json=json.dumps(response,sort_keys=True,separators=(",",":")))
+            return {**response, "matchedSize":str(case.ranked.decision.shares), "avgPrice":".30",
+                "tradeIDs":["fake-log-trade"], "_venue_submission_envelope":envelope.to_dict()}
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeSdk)
+    case.trade.commit()
+    pending = load_runtime_open_portfolio(case.trade).positions[0]
+    assert exit_lifecycle._record_exit_intent_before_execution_gates(case.trade, pending, exit_intent)
+    result = executor.execute_exit_order(intent, conn=case.trade,
+        decision_id="global-sell:"+case.ranked.actuation.actuation_identity, q_version=case.probability.q_version)
+    assert result.status == "filled", result.reason
+    assert len(calls) == 1 and result.venue_call_started and result.venue_ack_received
+    facts = case.trade.execute("SELECT filled_size,fill_price FROM venue_trade_facts").fetchall()
+    assert len(facts) == 1
+    assert Decimal(str(facts[0]["filled_size"])) == case.ranked.decision.shares
+    assert case.trade.execute("SELECT phase,shares FROM position_current").fetchone()[0] == "pending_exit"
+    net = case.curve.proceeds_for_shares(case.ranked.decision.shares)[0]
+    fee_micro = int((case.ranked.decision.shares*Decimal(".30")-net)*1_000_000)
+    # MATCHED SDK acknowledgement and final venue confirmation are separate
+    # facts. Append an explicit controlled confirmation through the real repo.
+    append_trade_fact(case.trade, trade_id="fake-log-trade", venue_order_id=result.order_id,
+        command_id=result.command_id, state="CONFIRMED", filled_size=str(case.ranked.decision.shares),
+        fill_price=".30", fee_paid_micro=fee_micro, source="FAKE_VENUE", observed_at=at.isoformat(),
+        venue_timestamp=at.isoformat(), raw_payload_hash=hashlib.sha256(b"fake-log-confirmed").hexdigest(),
+        raw_payload_json={"status":"CONFIRMED", "test_only":True})
+    case.trade.commit()
+    confirmed = case.trade.execute("SELECT state,fee_paid_micro FROM venue_trade_facts ORDER BY local_sequence DESC LIMIT 1").fetchone()
+    assert tuple(confirmed) == ("CONFIRMED", fee_micro)
+    position = load_runtime_open_portfolio(case.trade).positions[0]
+    economic_fills = economic_exit_fills_for_position(case.trade,position_id=position.trade_id,
+        venue_order_id=result.order_id)
+    position.last_exit_order_id = result.order_id
+    applied = exit_lifecycle._complete_intentional_position_reduction(position,
+        intended_shares=case.ranked.decision.shares, confirmed_filled_shares=case.ranked.decision.shares,
+        fill_price=Decimal(".30"), order_id=result.order_id, status="MATCHED", conn=case.trade,
+        economic_fills=economic_fills, intent_holding_shares=Decimal("5"))
+    row = case.trade.execute("SELECT phase,shares,realized_pnl_usd FROM position_current").fetchone()
+    remaining = Decimal("5")-case.ranked.decision.shares
+    assert applied == case.ranked.decision.shares
+    assert row["phase"] == "active" and Decimal(str(row["shares"])) == remaining
+    assert case.trade.execute("SELECT COUNT(*) FROM position_events WHERE event_type='ECONOMIC_CLOSE'").fetchone()[0] == 0
+    assert net > Decimal(".60")  # Simulated cash recovery exceeds this entire entry cost.
+    record_property("simulated_sell_accounting",json.dumps({"q":case.q,"shares":str(case.ranked.decision.shares),
+        "net_proceeds":str(net),"cash_ev":case.ranked.decision.expected_terminal_wealth.expected_ev_usd,
+        "delta_log":case.ranked.decision.expected_terminal_wealth.expected_delta_log_wealth}))
