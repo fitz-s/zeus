@@ -29947,6 +29947,11 @@ def _review_required_confirmed_trade_recovery(
             fill_price=fill_price,
             observed_at=now,
         )
+    if cmd.intent_kind == IntentKind.ENTRY:
+        # SCOPE: only this recovered ENTRY command. DRAIN: recheck strict
+        # absorption after fill projection on the same caller transaction.
+        # RESET: RESOLVED removes its capital debt; incomplete proof stays OPEN.
+        reconcile_terminal_entry_exposure_obligations(conn, command_id=cmd.command_id)
     logger.info(
         "recovery: command %s REVIEW_REQUIRED %s -> FILLED "
         "(venue_order_id=%s trade_id=%s)",
@@ -32518,15 +32523,16 @@ def capital_blocking_command_scope(
         _table_exists(conn, table)
         for table in ("entry_exposure_obligations", "venue_commands")
     ):
-        # SCOPE: only OPEN entry obligations whose command already carries a
-        # terminal no-fill state. DRAIN: the DB-only terminal-obligation pass
-        # proves its no-fill event/facts and resolves the exact obligation.
+        # SCOPE: OPEN ENTRY obligations whose command is terminal no-fill or
+        # FILLED, each retaining its exact market identity. DRAIN: the existing
+        # live-tick strict terminal-obligation reducer proves exposure absence
+        # or canonical absorption before resolving only that command.
         # RESET: RESOLVED removes the row from this selector immediately.
         # Without this selector, the scheduler classified the command itself as
         # terminal, yielded forever to held monitoring, and left its cash bound
         # deducted from every subsequent global auction.
-        terminal_no_fill_states = tuple(
-            sorted(_TERMINAL_ENTRY_NO_FILL_COMMAND_STATES)
+        terminal_obligation_states = tuple(
+            sorted(_TERMINAL_ENTRY_NO_FILL_COMMAND_STATES | {CommandState.FILLED.value})
         )
         existing_command_ids = {
             str(row.get("command_id") or "").strip()
@@ -32543,11 +32549,11 @@ def capital_blocking_command_scope(
                  WHERE obligation.status = 'OPEN'
                    AND command.intent_kind = 'ENTRY'
                    AND command.state IN (
-                       {','.join('?' for _ in terminal_no_fill_states)}
+                       {','.join('?' for _ in terminal_obligation_states)}
                    )
                  ORDER BY obligation.created_at, obligation.command_id
                 """,
-                terminal_no_fill_states,
+                terminal_obligation_states,
             ).fetchall()
             if (
                 (row := _dict_row(raw))["command_id"]

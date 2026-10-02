@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-09-10; last_reused=2026-09-10
+# Lifecycle: created=2026-04-26; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-09-10
+# Last reused/audited: 2026-10-02
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -1879,6 +1879,226 @@ def test_restart_preflight_authenticated_fill_snapshot_monitor_preempt_defers(
     assert summary["monitor_preempted_at"] == "authenticated_entry_trade_fact"
     assert summary["db_lock_deferred"] is True
     assert summary["deferred_full_sweep"] is True
+
+
+def _seed_absorbed_filled_open_obligation(conn, *, metric="high", defect=None):
+    """Old complete fill remains current debt only while its obligation is OPEN."""
+    from src.state.db import log_execution_fact
+
+    command_id = "cmd-absorbed-open"
+    position_id = "pos-absorbed-open"
+    order_id = f"order-{command_id}"
+    _insert(conn, command_id=command_id, position_id=position_id,
+            market_id="mkt-absorbed-open")
+    _open_test_entry_obligation(conn, command_id)
+    if defect == "missing_fill_event":
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?", (command_id,))
+    else:
+        _append_test_entry_fill(conn, command_id, with_trade=defect != "missing_economics")
+    _seed_pending_entry_projection(conn, position_id=position_id,
+                                   command_id=command_id, order_id=order_id)
+    _append_test_filled_entry_projection(conn, position_id=position_id,
+                                        command_id="another-command" if defect == "wrong_order" else command_id,
+                                        order_id="another-order" if defect == "wrong_order" else order_id)
+    conn.execute("UPDATE position_current SET temperature_metric = ? WHERE position_id = ?",
+                 (metric, position_id))
+    if defect != "missing_economics":
+        log_execution_fact(conn, intent_id=f"{position_id}:entry", position_id=position_id,
+                           command_id=command_id, order_role="entry",
+                           filled_at="2026-07-14T08:00:02+00:00", fill_price=0.5,
+                           shares=10, venue_status="FILLED", terminal_exec_status="filled")
+    conn.commit()
+    return command_id
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_absorbed_filled_open_obligation_is_scoped_capital_until_strict_drain(conn, metric):
+    from src.execution import command_recovery as recovery
+
+    command_id = _seed_absorbed_filled_open_obligation(conn, metric=metric)
+    conn.execute("INSERT INTO collateral_ledger_snapshots (pusd_balance_micro, "
+                 "pusd_allowance_micro, usdc_e_legacy_balance_micro, "
+                 "ctf_token_balances_json, ctf_token_allowances_json, captured_at, authority_tier) "
+                 "VALUES (770939, 770939, 0, '{}', '{}', '2026-10-02T22:44:00Z', 'CHAIN')")
+    cash_before = [tuple(row) for row in conn.execute("SELECT * FROM collateral_ledger_snapshots")]
+    assert command_id in recovery._terminal_open_entry_obligation_command_ids(conn)
+    scope = recovery.capital_blocking_command_scope(conn)
+    assert (scope.total_count, scope.projection_count, scope.scoped_markets) == (
+        1, 0, ("mkt-absorbed-open",),
+    )
+    assert not scope.requires_global_handoff(systemic_market_count_limit=2)
+    summary = recovery._reconcile_terminal_entry_exposure_obligation_fast(
+        conn, command_id=command_id,
+    )
+    assert summary["terminal_entry_exposure_obligations"]["advanced"] == 1
+    assert recovery.capital_blocking_command_scope(conn).total_count == 0
+    assert recovery.reconcile_terminal_entry_exposure_obligations(
+        conn, command_id=command_id,
+    ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    assert [tuple(row) for row in conn.execute("SELECT * FROM collateral_ledger_snapshots")] == cash_before
+
+
+def test_absorbed_filled_obligation_normal_cadence_does_not_yield_to_monitor(conn, monkeypatch):
+    from threading import Event
+    from src import main
+    from src.execution import command_recovery as recovery, venue_cancel_journal
+    from src.state import db
+
+    command_id = _seed_absorbed_filled_open_obligation(conn)
+    class ReadConnection:
+        def __getattr__(self, attr):
+            return getattr(conn, attr)
+        def execute(self, *args):
+            return conn.execute(*args)
+        def set_progress_handler(self, *_args):
+            pass
+        def close(self):
+            pass
+
+    active = Event()
+    active.set()
+    monkeypatch.setattr(main, "_held_position_monitor_active", active)
+    monkeypatch.setattr(main, "_held_position_monitor_canonical_debt", Event())
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: True)
+    monkeypatch.setattr(main, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main, "get_mode", lambda: "live")
+    monkeypatch.setattr(main, "_settings_section", lambda *_args: {})
+    monkeypatch.setattr(main, "_venue_order_truth_adapter_ready", lambda: False)
+    monkeypatch.setattr(main, "_start_venue_order_truth_prewarm_async", lambda: "test-only")
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda **_kwargs: ReadConnection())
+    monkeypatch.setattr(venue_cancel_journal, "find_screen_redecision_cancel_obligations", lambda _conn: [])
+    monkeypatch.setattr(main, "_edli_command_recovery_full_bucket", lambda: 7)
+    monkeypatch.setattr(main, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 7)
+    monkeypatch.setattr(main, "_consume_edli_command_recovery_summary", lambda *_args, **_kwargs: True)
+    scopes = []
+    def recover(*, scope, deadline_monotonic):
+        scopes.append(scope)
+        assert deadline_monotonic > recovery.time.monotonic()
+        return recovery._reconcile_terminal_entry_exposure_obligation_fast(
+            conn, command_id=command_id,
+        )["terminal_entry_exposure_obligations"]
+    monkeypatch.setattr(recovery, "reconcile_unresolved_commands", recover)
+    main._edli_command_recovery_cycle.__wrapped__()
+    assert scopes == ["live_tick"]
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+                        (command_id,)).fetchone()[0] == "RESOLVED"
+    main._edli_command_recovery_cycle.__wrapped__()
+    assert scopes == ["live_tick"]  # RESOLVED restores ordinary monitor yield.
+
+
+@pytest.mark.parametrize("defect", ("missing_fill_event", "wrong_order", "missing_economics"))
+def test_filled_open_capital_classification_never_substitutes_for_proof(conn, defect):
+    from src.execution import command_recovery as recovery
+
+    command_id = _seed_absorbed_filled_open_obligation(conn, defect=defect)
+    assert recovery.capital_blocking_command_scope(conn).total_count >= 1
+    assert recovery.reconcile_terminal_entry_exposure_obligations(
+        conn, command_id=command_id,
+    )["advanced"] == 0
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+                        (command_id,)).fetchone()[0] == "OPEN"
+
+
+@pytest.mark.parametrize("rollback", (False, True))
+def test_confirmed_trade_handler_drains_only_same_connection_command_after_projection(
+    conn, mock_client, monkeypatch, rollback,
+):
+    from src.execution import command_recovery as recovery
+    from src.execution.command_bus import VenueCommand
+    from src.state.db import log_execution_fact
+    from src.state.venue_command_repo import append_event
+
+    command_id = "cmd-confirmed-drain"
+    position_id = "pos-confirmed-drain"
+    order_id = "ord-confirmed-drain"
+    _insert(conn, command_id=command_id, position_id=position_id, token_id="tok-confirmed-drain")
+    _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+    append_event(conn, command_id=command_id, event_type="REVIEW_REQUIRED",
+                 occurred_at="2026-04-26T00:01:00Z", payload={"reason": "recovery_no_venue_order_id"})
+    _seed_pending_entry_projection(conn, position_id=position_id, command_id=command_id,
+                                   order_id=order_id, token_id="tok-confirmed-drain")
+    _open_test_entry_obligation(conn, command_id)
+    other_id = _seed_absorbed_filled_open_obligation(conn)
+    mock_client.get_open_orders.return_value = []
+    mock_client.get_trades.return_value = [{"id": "trade-confirmed-drain", "status": "CONFIRMED",
+        "trader_side": "TAKER", "match_time": "2026-04-26T00:02:00Z",
+        "transaction_hash": "0xtx-confirmed-drain", "asset_id": "tok-confirmed-drain",
+        "taker_order_id": order_id, "side": "BUY", "price": "0.5", "size": "10"}]
+    projected = []
+    def project(connection, **kwargs):
+        assert connection is conn
+        assert kwargs["command"]["command_id"] == command_id
+        _append_test_filled_entry_projection(connection, position_id=position_id,
+                                            command_id=command_id, order_id=order_id)
+        log_execution_fact(connection, intent_id=f"{position_id}:entry", position_id=position_id,
+                           command_id=command_id, order_role="entry", filled_at=kwargs["observed_at"],
+                           fill_price=0.5, shares=10, venue_status="FILLED", terminal_exec_status="filled")
+        projected.append(command_id)
+    monkeypatch.setattr(recovery, "_append_matched_order_fill_projection", project)
+    original = recovery.reconcile_terminal_entry_exposure_obligations
+    calls = []
+    def drain(connection, *, command_id):
+        assert connection is conn
+        assert projected == [command_id]
+        calls.append(command_id)
+        return original(connection, command_id=command_id)
+    monkeypatch.setattr(recovery, "reconcile_terminal_entry_exposure_obligations", drain)
+    cmd = VenueCommand.from_row(dict(conn.execute("SELECT * FROM venue_commands WHERE command_id = ?",
+                                                 (command_id,)).fetchone()))
+    conn.execute("SAVEPOINT confirmed_fill_drain")
+    assert recovery._review_required_confirmed_trade_recovery(conn, cmd, mock_client) == "advanced"
+    assert calls == [command_id]
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+                        (command_id,)).fetchone()[0] == "RESOLVED"
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+                        (other_id,)).fetchone()[0] == "OPEN"
+    if rollback:
+        conn.execute("ROLLBACK TO SAVEPOINT confirmed_fill_drain")
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+        assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+                            (command_id,)).fetchone()[0] == "OPEN"
+        assert conn.execute("SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?",
+                            (command_id,)).fetchone()[0] == 0
+    conn.execute("RELEASE SAVEPOINT confirmed_fill_drain")
+
+
+def test_confirmed_trade_existing_projection_native_path_rechecks_obligation(conn, mock_client, monkeypatch):
+    """An already-projected native fill cannot skip the handler-owned drain."""
+    from src.execution import command_recovery as recovery
+    from src.execution.command_bus import VenueCommand
+    from src.state.venue_command_repo import append_event
+
+    command_id = _seed_absorbed_filled_open_obligation(conn)
+    append_event(conn, command_id=command_id, event_type="REVIEW_REQUIRED",
+                 occurred_at="2026-07-14T08:00:03Z", payload={"reason": "recovery_no_venue_order_id"})
+    row = dict(conn.execute("SELECT * FROM venue_commands WHERE command_id = ?", (command_id,)).fetchone())
+    mock_client.get_open_orders.return_value = []
+    mock_client.get_trades.return_value = [{"id": "trade-native-confirmed", "status": "CONFIRMED",
+        "trader_side": "TAKER", "match_time": "2026-07-14T08:00:04Z",
+        "asset_id": row["token_id"], "taker_order_id": row["venue_order_id"],
+        "side": "BUY", "price": "0.5", "size": "10"}]
+    projection = recovery._append_matched_order_fill_projection
+    reducer = recovery.reconcile_terminal_entry_exposure_obligations
+    inside_projection = False
+    calls = []
+    def project(connection, **kwargs):
+        nonlocal inside_projection
+        inside_projection = True
+        try:
+            return projection(connection, **kwargs)
+        finally:
+            inside_projection = False
+    def drain(connection, *, command_id=None):
+        assert connection is conn
+        calls.append((command_id, inside_projection))
+        return reducer(connection, command_id=command_id)
+    monkeypatch.setattr(recovery, "_append_matched_order_fill_projection", project)
+    monkeypatch.setattr(recovery, "reconcile_terminal_entry_exposure_obligations", drain)
+    assert recovery._review_required_confirmed_trade_recovery(conn, VenueCommand.from_row(row), mock_client) == "advanced"
+    assert calls[-1] == (command_id, False)
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+                        (command_id,)).fetchone()[0] == "RESOLVED"
 
 
 def test_restart_preflight_without_deadline_bounds_all_factories_and_apply(

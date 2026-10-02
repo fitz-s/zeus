@@ -10918,3 +10918,80 @@ Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 - RESET: a later monitor cut must independently satisfy all evidence; stale,
   shallow, single-quote, missing-depth, out-of-band, or terminal evidence fails
   closed without mutating lifecycle.
+
+### 2026-10-02 Filled-entry obligation current-capital drain
+
+Money-path seam: canonical execution/position absorption -> current wealth.
+Canonical read-only evidence found command `8382cc9581ed4faa` with an OPEN
+$1.24 entry obligation despite exact ENTRY_ORDER_FILLED, nonvoid 2-share
+execution at $0.62, active venue-confirmed position, synchronized chain holding,
+and PROVEN finalized principal/fee evidence. Cash snapshot 293259 carried
+$0.770939 pUSD and zero inflight collateral; its unchanged obligation deduction
+therefore produced -$0.469061 spendable cash. The existing terminal OPEN id
+selector included this command, but capital_blocking_command_scope returned
+zero total/projection debt and no markets: complete FILLED exposure was no
+longer classified as current capital, so normal recovery could yield before
+the existing strict obligation reducer. Confirmed-trade review recovery also
+projected its fill without invoking that reducer on the same connection.
+
+Implement only two existing seams in command_recovery.py: include terminal
+FILLED+OPEN ENTRY obligations in exact market-scoped capital classification;
+after confirmed-trade ENTRY fill projection, call the existing command-scoped
+strict reducer on the same caller-owned transaction. CommandState is not
+order/trade-state grammar. FILLED alone never releases an obligation. Preserve
+all event/economic/projection/aggregate proof predicates, cash snapshots,
+collateral gates, budgets, cadence, venue permissions, and transaction owners.
+
+SCOPE: one OPEN ENTRY command and its existing market identity. DRAIN: existing
+60-second live_tick exact-command recovery plus the same-transaction recovered
+fill writer. RESET: strict proof resolves that exact obligation, removing its
+classification immediately; absent/invalid proof remains OPEN. No new balance
+is inferred and no direct FILLED-only resolve is permitted.
+
+Allowed changes: src/execution/command_recovery.py, existing focused recovery
+tests, their existing source/test registry entries, and this plan. Acceptance:
+actual classifier/normal-cadence old-OPEN RED/GREEN; confirmed-trade writer
+same-connection scoped drain and rollback; strict negative proofs; idempotency;
+unchanged cash snapshot. Run focused checks and the execution module's required
+verification batches on final source, reporting exact baseline failures rather
+than repairing unrelated behavior. Do not push/load before integrator approval.
+
+Verification (checked=2026-W40; basis=actual-function tests and canonical
+read-only runtime evidence; until=recheck-on-use): source blob
+`9642d2778a8a475dbfa69e859fdaff7248e05f8e` changes only the two seams above.
+The final new antibodies are 9 GREEN; restoring the two upstream functions in
+memory gives 8 RED in `/tmp/zeus-filled-obligation-red-final-20261002.{xml,log}`
+and the native existing-projection ninth RED in
+`/tmp/zeus-filled-obligation-native-red-20261002.{xml,log}`. Focused existing plus
+new recovery checks: 48 GREEN in
+`/tmp/zeus-filled-obligation-focused-20261002.{xml,log}`. Independent bounded
+review: 13 cases GREEN and accepted. No savepoint/error protocol is added:
+review established that release failures already leave FILLED+OPEN debt on
+both upstream and new code; new classification gives that debt the same normal
+strict drain while unchanged cash gates remain closed.
+
+Execution module §20 batches were actually run, not claimed clean:
+A (`test_executor`, `test_execution_price`, `test_exit_authority`) 133 PASS /
+29 FAIL; B (`test_risk_allocator`, no cacheprovider) 43 PASS / 5 FAIL;
+C (`test_day0_exit_gate`, `test_entry_exit_symmetry`,
+`test_divergence_exit_counterfactual`) 16 PASS / 35 FAIL. All 69 failure node IDs
+and business messages match the same-node upstream two-function restoration:
+66 messages byte-exact; the other 3 differ only in assertion-repr memory
+addresses and one generated fixture trade_id. Comparison normalizes only those
+already-confirmed volatile fields, never order/hash/clock/model/cash identity.
+Required/baseline XML and logs are
+`/tmp/zeus-filled-obligation-{required,baseline}-{a,b,c}-20261002.{xml,log}`;
+the exact node/message comparison is
+`/tmp/zeus-filled-obligation-baseline-comparison-20261002.log`.
+Legacy missing test headers and obsolete API/exit expectations remain intact.
+
+All execution modules and the changed test compile; diff whitespace, both
+registry YAML parses, changed-test freshness, and source-rationale delta checks
+pass. Repo-wide source/docs registry drift is not a pass (459/59 issues);
+the changed source has one pre-existing downstream warning with unchanged
+downstream list, and the active plan has no scoped docs issue. Only the existing
+command recovery source/test entries were updated. Test-only ignored settings
+symlink reads live config SHA256
+`d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae`;
+pytest runs on isolated private temporary state with live DB isolation enabled.
+Remove that symlink at handoff; no live config/DB/venue writes were performed.
