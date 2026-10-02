@@ -65,7 +65,6 @@ from src.data.replacement_forecast_live_materialization_queue import (  # noqa: 
     FailureCategory,
     resolve_named_input,
 )
-from src.data.sqlite_read_witness import SQLiteReadRecorder, recordable  # noqa: E402
 from src.data.versioned_file_read import UnsafeFile, VersionedFileReader  # noqa: E402
 
 UTC = timezone.utc
@@ -1127,12 +1126,11 @@ def _materialize(
         # cannot freeze every city's materialization poll.
         stage_receipt.mark("open_read_snapshot")
         stage_receipt.require_budget()
-        with recordable():  # its reads can report to this invocation's recorder
-            owned_conn = (
-                connect_existing_forecasts_db_without_journal_bootstrap()
-                if commit
-                else get_forecasts_connection(write_class=None)
-            )
+        owned_conn = (
+            connect_existing_forecasts_db_without_journal_bootstrap()
+            if commit
+            else get_forecasts_connection(write_class=None)
+        )
         try:
             _attach_world_read_only(owned_conn)
             with stage_receipt.sqlite_deadline_guard(owned_conn):
@@ -1447,6 +1445,9 @@ def _materialize_request(
     response = {
         "status": result.status,
         "reason_codes": list(result.reason_codes),
+        # What decided a covered BLOCKED (src/data/materialization_block_evidence.py);
+        # absent for every other outcome, which therefore binds no fence.
+        **({"blocked_evidence": dict(result.evidence)} if result.evidence is not None else {}),
         "posterior_id": result.posterior_id,
         "anchor_id": result.anchor_id,
         "readiness_id": result.readiness_id,
@@ -1500,42 +1501,35 @@ def _run_one(
     stage_receipt = _StageReceipt(input_json, deadline_at)
     stage_receipt.mark("open_read_snapshot")
     consumed = _ConsumedInputs(stage_receipt.attempt_id)
-    # Every database read this invocation makes, on any connection it uses, so a
-    # computation verdict names the exact state (rows and empty selections) it judged.
-    database = SQLiteReadRecorder()
-
     def witnesses() -> dict[str, object]:
-        return {"consumed_inputs": consumed.witness(), "consumed_database": database.witness()}
+        return {"consumed_inputs": consumed.witness()}
 
     try:
-        with database:
-            if conn is not None:
-                database.watch(conn)
-            if conn is None:
+        if conn is None:
+            returncode, response = _materialize(
+                input_json,
+                commit=commit,
+                init_schema=init_schema,
+                conn=None,
+                publish_wake=publish_wake,
+                schema_ready=schema_ready,
+                writer_lock=writer_lock,
+                stage_receipt=stage_receipt,
+                consumed=consumed,
+            )
+        else:
+            with stage_receipt.sqlite_deadline_guard(conn):
                 returncode, response = _materialize(
                     input_json,
                     commit=commit,
                     init_schema=init_schema,
-                    conn=None,
+                    conn=conn,
                     publish_wake=publish_wake,
                     schema_ready=schema_ready,
                     writer_lock=writer_lock,
                     stage_receipt=stage_receipt,
                     consumed=consumed,
                 )
-            else:
-                with stage_receipt.sqlite_deadline_guard(conn):
-                    returncode, response = _materialize(
-                        input_json,
-                        commit=commit,
-                        init_schema=init_schema,
-                        conn=conn,
-                        publish_wake=publish_wake,
-                        schema_ready=schema_ready,
-                        writer_lock=writer_lock,
-                        stage_receipt=stage_receipt,
-                        consumed=consumed,
-                    )
         response = {**response, **witnesses()}
         encoded = json.dumps(response, sort_keys=True) + "\n"
         if returncode == 2:
@@ -1655,12 +1649,11 @@ def main(argv: list[str] | None = None) -> int:
             get_forecasts_connection,
         )
 
-        with recordable():  # each request's reads report to its own recorder
-            conn = (
-                connect_existing_forecasts_db_without_journal_bootstrap()
-                if args.commit
-                else get_forecasts_connection(write_class=None)
-            )
+        conn = (
+            connect_existing_forecasts_db_without_journal_bootstrap()
+            if args.commit
+            else get_forecasts_connection(write_class=None)
+        )
         try:
             _attach_world_read_only(conn)
             schema_ready = False
