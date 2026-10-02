@@ -9008,6 +9008,7 @@ def test_prepared_writer_never_revalidates_or_recomputes(
             replacement_q_mode="BLOCKED",
             capture_status="MISSING",
             fusion_decline_reason=None,
+            fusion_decline_evidence=None,
             predictive_sigma_c=None,
             q_lcb_map=None,
             q_ucb_map=None,
