@@ -25,6 +25,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.config import PROJECT_ROOT
+from src.data.sqlite_read_witness import database_reads_reproduce
 from src.data.versioned_file_read import UnsafeFile, VersionedFileReader
 from src.contracts.replacement_pipeline_files import (
     ContractViolation,
@@ -1148,6 +1149,7 @@ def failed_seed_identity_fenced(
                 # An older (metadata-keyed) identity is evidence, never a fence.
                 blocked.get("identity_version") == MATERIALIZATION_IDENTITY_VERSION
                 and isinstance(request, Mapping) and bool(recorded) and forecast_db is not None
+                and _database_witness_holds(blocked.get("database_reads"))
                 and _blocked_attempt_fingerprint(
                     input_json=seed_file.parent.parent / "requests" / seed_file.name,
                     forecast_db=forecast_db,
@@ -1203,6 +1205,7 @@ def _record_materialization_blocked_identity(
     request_payload: Mapping[str, object],
     attempt_fingerprint: str | None,
     dependencies: Sequence[Mapping[str, object]] | None = None,
+    database_reads: Mapping[str, object] | None = None,
 ) -> None:
     """Index a no-posterior request outcome under its seed for producer fences.
 
@@ -1221,6 +1224,7 @@ def _record_materialization_blocked_identity(
                 "attempt_fingerprint": attempt_fingerprint,
                 "identity_version": MATERIALIZATION_IDENTITY_VERSION,
                 **({"dependencies": list(dependencies)} if dependencies is not None else {}),
+                **({"database_reads": dict(database_reads)} if database_reads is not None else {}),
             },
         })
     except (OSError, ValueError):
@@ -3259,12 +3263,14 @@ _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
 # dependency record (every named input and the manifest's artifact, each by the
 # path one resolver chose and the sha256 of its bytes) and fences only a worker
 # outcome whose witness names this claim and judged exactly those bytes. Older
-# identities never match an m3 fingerprint and are never honored: unversioned
+# identities never match an m4 fingerprint and are never honored: unversioned
 # keyed files on (mtime, size); m2 omitted the manifest, its artifact and the
-# resolver's fallback paths.
-MATERIALIZATION_IDENTITY_VERSION = "m3"
+# resolver's fallback paths; m3 dropped the record whenever a configured source
+# was missing and bound a computation BLOCKED with no database witness. m4 always
+# hashes the record and binds a BLOCKED only to the worker's own database reads.
+MATERIALIZATION_IDENTITY_VERSION = "m4"
 # Revision of the worker's named-input validation; part of every witness.
-MATERIALIZATION_INPUT_VALIDATION_REVISION = "worker-named-inputs-r2"
+MATERIALIZATION_INPUT_VALIDATION_REVISION = "worker-named-inputs-r3"
 # The files a request names, by request field -> witness role. The worker reads
 # exactly these (and the manifest's artifact); the parent resolves the same set.
 MATERIALIZATION_NAMED_INPUTS = {
@@ -3829,11 +3835,11 @@ def _blocked_attempt_fingerprint(
         raise
     except Exception:  # noqa: BLE001 - unknown watermark must retry, never suppress work
         return None
-    dependencies = None
-    if not missing_sources:
-        dependencies = _materialization_dependency_record(payload, request_dir=input_json.parent)
-        if dependencies is None:
-            return None  # unknown read state never fences
+    # Always the full record: a configured source's absence is one more
+    # component, never a reason to stop seeing the files the worker reads.
+    dependencies = _materialization_dependency_record(payload, request_dir=input_json.parent)
+    if dependencies is None:
+        return None  # unknown read state never fences
     logic_revisions: dict[str, tuple[int, int] | None] = {}
     for path in (
         PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
@@ -3960,6 +3966,29 @@ def _claimed_request_sha256(
         return None
 
 
+def _subprocess_result_consumed_database(
+    completed: subprocess.CompletedProcess[str],
+) -> Mapping[str, object] | None:
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, Mapping) and payload.get("status") not in (None, ""):
+                witness = payload.get("consumed_database")
+                return witness if isinstance(witness, Mapping) else None
+    return None
+
+
+def _database_witness_holds(witness: object) -> bool:
+    """A stored database witness still reads what the worker read (see
+    ``sqlite_read_witness``); absent means the fence never depended on the DB."""
+    return witness is None or database_reads_reproduce(
+        witness if isinstance(witness, Mapping) else None
+    )
+
+
 def _consumed_inputs_unchanged(witness: Mapping[str, object] | None) -> bool:
     """Whether every file the worker consumed still holds the version and bytes it
     judged. Only then is the worker's verdict a verdict on the current inputs.
@@ -3996,22 +4025,33 @@ def _bound_verdict(
     *,
     item: "_PendingMaterialization",
     forecast_db: Path | str | None,
-) -> tuple[str, list[dict[str, object]]] | None:
-    """(fingerprint, dependency record) a worker verdict may fence, or None.
+) -> tuple[str, list[dict[str, object]], Mapping[str, object] | None] | None:
+    """(fingerprint, dependency record, database witness) a verdict may fence, or None.
 
     Binds only when (1) the witness names this claim and stays inside the record
     resolved from the claimed request, (2) every file the worker read still holds
-    the version and bytes it judged, and (3) the fingerprint (which hashes that
-    record) is the same after the worker as before it. The witness is re-read on
-    both sides of the recompute: versions only move forward, so this rejects
-    A->B->A, where the worker judged B.
+    the version and bytes it judged, (3) the fingerprint (which hashes that
+    record) is the same after the worker as before it, and (4) for a computation
+    BLOCKED, the worker's own database reads are complete and every one returns
+    now exactly the rows it returned then (a negative selection included).
+    Witnesses are re-read on both sides of the recompute: file versions only move
+    forward, and a database read that changed and changed back between the
+    worker's read and the first check is still the read the worker judged, so the
+    parent never infers the worker's state from its own two equal reads.
     """
     witness = _subprocess_result_consumed_inputs(completed)
+    database = (
+        _subprocess_result_consumed_database(completed)
+        if _subprocess_result_status(completed) == "BLOCKED"
+        else None
+    )
     payload = item.request_payload
     if (
         payload is None
         or item.attempt_fingerprint is None
         or not _consumed_inputs_unchanged(witness)
+        or (database is None and _subprocess_result_status(completed) == "BLOCKED")
+        or not _database_witness_holds(database)
     ):
         return None
     after = _blocked_attempt_fingerprint(
@@ -4026,9 +4066,10 @@ def _bound_verdict(
             claimed_request_sha256=item.claimed_request_sha256, record=record,
         )
         or not _consumed_inputs_unchanged(witness)
+        or not _database_witness_holds(database)
     ):
         return None
-    return after, record
+    return after, record, database
 
 
 def _blocked_attempt_marker_path(
@@ -4066,7 +4107,20 @@ def _blocked_attempt_state(
         return marker_path, fingerprint, False
     if not isinstance(marker, Mapping):
         return marker_path, fingerprint, False
-    return marker_path, fingerprint, marker.get("attempt_fingerprint") == fingerprint
+    return marker_path, fingerprint, (
+        marker.get("attempt_fingerprint") == fingerprint
+        and _database_witness_holds(marker.get("database_reads"))
+    )
+
+
+def _marker_database_reads(marker_path: Path | None) -> Mapping[str, object] | None:
+    """The database witness an unchanged marker was bound to, for its receipts."""
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8")) if marker_path else None
+    except (OSError, json.JSONDecodeError):
+        return None
+    reads = marker.get("database_reads") if isinstance(marker, Mapping) else None
+    return reads if isinstance(reads, Mapping) else None
 
 
 def _attach_world_read_only(conn: sqlite3.Connection) -> None:
@@ -4288,6 +4342,7 @@ def _write_blocked_attempt_marker(
     payload: Mapping[str, object],
     fingerprint: str | None,
     dependencies: Sequence[Mapping[str, object]] | None = None,
+    database_reads: Mapping[str, object] | None = None,
 ) -> None:
     if marker_path is None or fingerprint is None:
         return
@@ -4301,6 +4356,7 @@ def _write_blocked_attempt_marker(
                 "attempt_fingerprint": fingerprint,
                 "identity_version": MATERIALIZATION_IDENTITY_VERSION,
                 **({"dependencies": list(dependencies)} if dependencies is not None else {}),
+                **({"database_reads": dict(database_reads)} if database_reads is not None else {}),
                 "city": payload.get("city"),
                 "target_date": payload.get("target_date"),
                 "temperature_metric": payload.get("temperature_metric"),
@@ -6565,6 +6621,11 @@ def _prepare_seed_requests_with_connection(
                         "request": dict(result.request),
                         "attempt_fingerprint": _fingerprint,
                         "identity_version": MATERIALIZATION_IDENTITY_VERSION,
+                        **(
+                            {"database_reads": dict(reads)}
+                            if (reads := _marker_database_reads(marker_path)) is not None
+                            else {}
+                        ),
                     },
                 }
                 moved = _move_request(
@@ -7524,6 +7585,7 @@ def _process_claimed_materialization_batch(
             _record_materialization_blocked_identity(
                 input_json, seed_dir=seed_dir, request_payload=request_payload,
                 attempt_fingerprint=attempt_fingerprint,
+                database_reads=_marker_database_reads(marker_path),
             )
             receipt = _record_latest_terminal_request(
                 input_json,
@@ -7769,19 +7831,21 @@ def _process_claimed_materialization_batch(
             verdict_reasons = result_reason_codes or (
                 f"ERROR:{_subprocess_result_error_type(completed)}",
             )
-            bound_fingerprint, dependencies = bound
+            bound_fingerprint, dependencies, database_reads = bound
             try:
                 _write_blocked_attempt_marker(
                     marker_path=item.marker_path,
                     payload=item.request_payload,
                     fingerprint=bound_fingerprint,
                     dependencies=dependencies,
+                    database_reads=database_reads,
                 )
             except OSError:
                 pass
             _record_materialization_blocked_identity(
                 input_json, seed_dir=seed_dir, request_payload=item.request_payload,
                 attempt_fingerprint=bound_fingerprint, dependencies=dependencies,
+                database_reads=database_reads,
             )
             receipt = _record_latest_terminal_request(
                 input_json,
