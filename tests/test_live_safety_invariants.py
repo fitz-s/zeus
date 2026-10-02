@@ -10154,7 +10154,7 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
     monkeypatch.setattr(
         global_batch_runtime,
         "held_sell_reauction_coverage",
-        lambda **_kwargs: SimpleNamespace(),
+        lambda **_kwargs: SimpleNamespace(probability_content_identity=content_identity),
     )
     monkeypatch.setattr(
         global_batch_runtime,
@@ -10303,7 +10303,7 @@ def test_monitor_reuses_one_wealth_witness_across_held_sell_coverage(monkeypatch
     monkeypatch.setattr(
         global_batch_runtime,
         "held_sell_reauction_coverage",
-        lambda **_kwargs: SimpleNamespace(),
+        lambda **_kwargs: SimpleNamespace(probability_content_identity="q-epoch"),
     )
     monkeypatch.setattr(
         global_batch_runtime,
@@ -10341,6 +10341,117 @@ def test_monitor_reuses_one_wealth_witness_across_held_sell_coverage(monkeypatch
         )
 
     assert wealth_calls == [True]
+
+
+def test_monitor_handoff_keeps_cut_lineage_when_day0_q_moved(monkeypatch):
+    """A newer monitor q must not hide the committed cut that evaluated it.
+
+    Live 2026-10-02 (Madrid 0510d02d): every global cut EVALUATED the held
+    SELL, but Day0 q re-materialized on each monitor refresh, so the exact-q
+    lease lookup returned None, the monitor saw no lineage, re-requested
+    full-family preparation every cycle, and never armed a V4 SELL debt.
+    """
+    from src.engine import cycle_runtime, global_auction_universe, global_batch_runtime
+    from src.engine.global_single_order_auction import GlobalHoldingAuctionCoverage
+
+    at = datetime(2026, 10, 2, 15, 9, tzinfo=timezone.utc)
+
+    def row(status, **extra):
+        base = dict(
+            position_id="madrid-held",
+            family_key=global_batch_runtime.weather_family_id(
+                city="Madrid", target_date="2026-10-02", metric="high"
+            ),
+            bin_id="bin-25",
+            condition_id="cond-25",
+            side="NO",
+            token_id="madrid-no",
+            held_shares=Decimal("1.5"),
+            ledger_snapshot_id="ledger",
+            probability_witness_identity="q-witness-cut",
+            probability_content_identity="q-cut",
+            wealth_economic_identity="wealth",
+            selection_epoch_identity="epoch-cut",
+            book_epoch_identity="book-epoch",
+            selection_cut_at_utc=at,
+            decision_at_utc=at,
+            book_deadline_at_utc=at + timedelta(minutes=3),
+            status=status,
+        )
+        base.update(extra)
+        return GlobalHoldingAuctionCoverage(**base)
+
+    evaluated = row(
+        "EVALUATED",
+        candidate_id="sell-candidate",
+        sell_book_witness_identity="sell-book-cut",
+        book_state="EXECUTABLE",
+    )
+    lookups = []
+
+    def lease(**kwargs):
+        lookups.append(kwargs)
+        return evaluated
+
+    monkeypatch.setattr(global_batch_runtime, "held_sell_reauction_coverage", lease)
+    monkeypatch.setattr(
+        global_auction_universe,
+        "current_portfolio_wealth_witness",
+        lambda *_a, **_k: pytest.fail("a moved q must not rebuild witnesses"),
+    )
+    position = SimpleNamespace(
+        position_id="madrid-held",
+        trade_id="madrid-held",
+        direction="buy_no",
+        token_id="madrid-yes",
+        no_token_id="madrid-no",
+        city="Madrid",
+        target_date="2026-10-02",
+        temperature_metric="high",
+    )
+
+    result = cycle_runtime._current_monitor_global_holding_coverage(
+        conn=object(),
+        clob=object(),
+        portfolio=SimpleNamespace(positions=(position,)),
+        position=position,
+        probability_content_identity="q-monitor-newer",
+        checked_at_utc=at,
+    )
+
+    # Lookup is by position/token/family; the q comparison is explicit.
+    assert lookups and lookups[0]["probability_content_identity"] == ""
+    assert (
+        result.outcome
+        is global_batch_runtime.GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT
+    )
+    assert not result.covered
+    assert result.coverage is evaluated
+    assert result.coverage.selection_epoch_identity == "epoch-cut"
+    assert result.coverage.sell_book_witness_identity == "sell-book-cut"
+
+    excluded = row(
+        "EXCLUDED",
+        reason="GLOBAL_SELECTION_UNAVAILABLE:NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        probability_witness_identity=None,
+        probability_content_identity=None,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "held_sell_reauction_coverage",
+        lambda **_k: excluded,
+    )
+    result = cycle_runtime._current_monitor_global_holding_coverage(
+        conn=object(),
+        clob=object(),
+        portfolio=SimpleNamespace(positions=(position,)),
+        position=position,
+        probability_content_identity="q-monitor-newer",
+        checked_at_utc=at,
+    )
+    # An EXCLUDED row carries no SELL lineage; preparation stays the path.
+    assert result.coverage is None
+    assert not result.covered
 
 
 def test_monitor_handoff_skips_witness_io_without_published_coverage(monkeypatch):

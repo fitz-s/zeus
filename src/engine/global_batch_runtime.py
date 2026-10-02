@@ -1159,8 +1159,16 @@ def _complete_holding_coverage(
     unavailable_book_by_position: Mapping[str, str] | None = None,
     selection_no_trade_reason: str = "",
     unbindable_family_keys: frozenset[str] = frozenset(),
+    decision_scope_family_keys: frozenset[str] | None = None,
 ) -> tuple[GlobalHoldingAuctionCoverage, ...]:
-    """Build one typed row for every exact held obligation, never by id alone."""
+    """Build one typed row for every exact held obligation, never by id alone.
+
+    ``decision_scope_family_keys`` names the families this cut was allowed to
+    price. A restricted completion cut prices only its own families, so a held
+    position elsewhere is typed EXCLUDED as out of scope; EXCLUDED never grants
+    SELL/HOLD authority. A held family inside the scope with no row and no
+    reason is still a defect and fails the epoch closed.
+    """
 
     rows = tuple(coverage)
     by_position = {row.position_id: row for row in rows}
@@ -1196,6 +1204,12 @@ def _complete_holding_coverage(
                 # holdings/probability/book partition. RESET: any complete
                 # selection emits its own evaluated or typed-excluded row.
                 reason = f"GLOBAL_SELECTION_UNAVAILABLE:{selection_reason}"
+            if (
+                not reason
+                and decision_scope_family_keys is not None
+                and obligation.family_key not in decision_scope_family_keys
+            ):
+                reason = "GLOBAL_SELECTION_FAMILY_OUT_OF_CUT_SCOPE"
             if not reason:
                 _LOG.error(
                     "global holding coverage source missing: position_id=%s "
@@ -10250,6 +10264,9 @@ def process_current_global_batch(
                         ),
                         selection_no_trade_reason=str(
                             selected.decision.no_trade_reason or ""
+                        ),
+                        decision_scope_family_keys=frozenset(
+                            decision_scope.family_keys
                         ),
                         ledger_snapshot_id=selection_wealth.ledger_snapshot_id,
                         wealth_economic_identity=selection_wealth.economic_identity,

@@ -6752,18 +6752,33 @@ def _current_monitor_global_holding_coverage(
             str(getattr(position, "target_date", "") or ""),
             str(getattr(position, "temperature_metric", "") or "").lower(),
         )
-        # Absence of an exact published lease is cheap and authoritative.
-        # Witness I/O cannot create coverage and must not delay reservation of
-        # the V4 SELL obligation while an executable bid is disappearing.
-        if held_sell_reauction_coverage(
+        # Absence of a published lease for this position/token is cheap and
+        # authoritative. Witness I/O cannot create coverage and must not delay
+        # reservation of the V4 SELL obligation while an executable bid is
+        # disappearing.
+        published_row = held_sell_reauction_coverage(
             position_id=position_id,
-            probability_content_identity=probability_content_identity,
+            probability_content_identity="",
             token_id=token_id,
             family=family,
-        ) is None:
+        )
+        if published_row is None:
             return unavailable(
                 GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED,
                 "GLOBAL_HOLDING_COVERAGE_NOT_PUBLISHED",
+            )
+        if published_row.probability_content_identity != probability_content_identity:
+            # Day0 q is re-materialized on nearly every monitor refresh, so the
+            # committed cut almost never carries the monitor's exact q. A newer
+            # q withholds action authority but keeps the evaluated cut's
+            # lineage, exactly as current_global_holding_coverage does: the V4
+            # debt is born from it and its own cut rebinds current q/book.
+            return CurrentGlobalHoldingCoverage(
+                outcome=GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT,
+                reason="GLOBAL_HOLDING_COVERAGE_PROBABILITY_CONTENT_MISMATCH",
+                coverage=(
+                    published_row if published_row.status == "EVALUATED" else None
+                ),
             )
         wealth_max_age = timedelta(
             seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)

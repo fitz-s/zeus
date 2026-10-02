@@ -34370,6 +34370,62 @@ def test_complete_holding_coverage_isolates_missing_held_book_state():
         )
 
 
+def test_complete_holding_coverage_types_out_of_scope_holding_without_failing_epoch():
+    """A restricted completion cut must not die on a holding it never priced.
+
+    Live 2026-10-02: a family-scoped completion cut priced one family while
+    Tel Aviv 03329502 (another family) held a position with no row and no
+    reason; the whole epoch failed closed 11 times.
+    """
+
+    at = _dt.datetime(2026, 10, 2, 15, 12, tzinfo=_dt.timezone.utc)
+    obligation = global_batch_runtime._CurrentHeldObligation(
+        position_id="tel-aviv-held",
+        family_key="tel-aviv-family",
+        bin_label="30C",
+        condition_id="tel-aviv-condition",
+        side="NO",
+        token_id="tel-aviv-no",
+        held_shares=Decimal("2.61"),
+    )
+    common = dict(
+        obligations=(obligation,),
+        probability_witnesses={},
+        ineligible_by_family={},
+        unavailable_book_by_position={},
+        ledger_snapshot_id="ledger",
+        wealth_economic_identity="wealth",
+        selection_epoch_identity="selection",
+        book_epoch_identity="book",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        book_deadline_at_utc=at + _dt.timedelta(seconds=30),
+    )
+
+    coverage = global_batch_runtime._complete_holding_coverage(
+        (),
+        decision_scope_family_keys=frozenset({"other-family"}),
+        **common,
+    )
+    assert len(coverage) == 1
+    assert coverage[0].status == "EXCLUDED"
+    assert coverage[0].reason == "GLOBAL_SELECTION_FAMILY_OUT_OF_CUT_SCOPE"
+    assert coverage[0].probability_content_identity is None
+    assert coverage[0].sell_book_witness_identity is None
+
+    # Inside its own scope an unexplained holding is still a defect.
+    for scope in (frozenset({"tel-aviv-family"}), None):
+        with pytest.raises(
+            ValueError,
+            match="GLOBAL_HOLDING_COVERAGE_SCOPE_INCOMPLETE:tel-aviv-held",
+        ):
+            global_batch_runtime._complete_holding_coverage(
+                (),
+                decision_scope_family_keys=scope,
+                **common,
+            )
+
+
 def test_global_batch_cancelled_selection_skips_holding_coverage_and_receipt(
     monkeypatch,
 ):
