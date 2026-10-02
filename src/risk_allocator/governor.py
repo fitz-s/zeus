@@ -566,11 +566,16 @@ _GLOBAL_GOVERNOR: PortfolioGovernor | None = None
 _GLOBAL_ALLOCATOR: RiskAllocator | None = None
 _GLOBAL_GOVERNOR_STATE: GovernorState | None = None
 _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC: float | None = None
+# Set by the first complete publish of this process and never cleared: it
+# separates "authority not loaded yet" (boot) from "authority lost" (a later
+# clear or a stale pair), which must fail closed.
+_GLOBAL_ALLOCATOR_EVER_PUBLISHED = False
 _GLOBAL_ALLOCATION_LOCK = RLock()
 
 
 def configure_global_allocator(allocator: RiskAllocator | None, governor_state: GovernorState | None = None) -> None:
     global _GLOBAL_ALLOCATOR, _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC, _GLOBAL_GOVERNOR_STATE
+    global _GLOBAL_ALLOCATOR_EVER_PUBLISHED
     with _GLOBAL_ALLOCATION_LOCK:
         _GLOBAL_ALLOCATOR = allocator
         _GLOBAL_GOVERNOR_STATE = governor_state
@@ -579,6 +584,15 @@ def configure_global_allocator(allocator: RiskAllocator | None, governor_state: 
             if allocator is not None and governor_state is not None
             else None
         )
+        if _GLOBAL_ALLOCATOR_PUBLISHED_AT_MONOTONIC is not None:
+            _GLOBAL_ALLOCATOR_EVER_PUBLISHED = True
+
+
+def global_allocator_ever_published() -> bool:
+    """Whether this process has published a complete allocator/governor pair."""
+
+    with _GLOBAL_ALLOCATION_LOCK:
+        return _GLOBAL_ALLOCATOR_EVER_PUBLISHED
 
 
 @contextmanager

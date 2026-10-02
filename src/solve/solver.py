@@ -6808,6 +6808,128 @@ def _score_global_single_order_buy_expected(
     )
 
 
+@dataclass(frozen=True)
+class ExistingBuyValuation:
+    """An existing BUY remainder valued as the order it is.
+
+    ``decision`` scores exactly ``shares`` at the order's own limit on the
+    posterior-mean expected axis (no lot floor: the order already exists).
+    ``full_kelly_target_shares`` is the selector's Kelly reference holding
+    ``T`` at that limit, ``legal_lot_shares`` the selector's smallest legal
+    fresh order there; both size only a fresh order.
+    """
+
+    decision: GlobalSingleOrderDecision
+    full_kelly_target_shares: Decimal
+    fractional_kelly_target_shares: Decimal
+    legal_lot_shares: Decimal
+
+
+def score_existing_buy_expected(
+    candidate: GlobalSingleOrderCandidate,
+    *,
+    shares: Decimal,
+    payoff_probability_mean: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    fractional_kelly_multiplier: Decimal,
+    current_token_shares: Decimal,
+) -> ExistingBuyValuation:
+    """Score an already-resting BUY remainder of exactly ``shares``.
+
+    Same objective as ``_score_global_single_order_buy_expected``: the
+    posterior-mean expected log wealth (``_single_order_metrics`` at the mean
+    q) over the candidate's own economic curve and terminal branches. The lot
+    floor and the cash/allocator envelope size a fresh order and are not
+    re-applied: the remainder's reservation is already held. The Kelly
+    reference ``T`` and the legal lot are the selector's own, at this limit.
+    """
+
+    mean_q = float(payoff_probability_mean)
+    remainder = Decimal(shares)
+    held = Decimal(current_token_shares)
+    multiplier = Decimal(fractional_kelly_multiplier)
+    if (
+        not math.isfinite(mean_q)
+        or not 0.0 <= mean_q <= 1.0
+        or not remainder.is_finite()
+        or remainder <= 0
+        or not held.is_finite()
+        or held < 0
+        or not multiplier.is_finite()
+        or not Decimal("0") < multiplier <= Decimal("1")
+    ):
+        raise ValueError("existing BUY valuation inputs are invalid")
+    limit_price = candidate.economic_cost_curve.levels[-1].price
+    full_target = _global_buy_kelly_reference_target(
+        held_shares=held,
+        robust_q=mean_q,
+        wealth_floor_usd=wealth_floor_usd,
+        wealth_ceiling_usd=wealth_ceiling_usd,
+        risk_unit_cost=_global_buy_risk_reference_unit_cost(candidate, limit_price),
+    )
+    legal_lot = _single_order_legal_minimum_lot(candidate)
+    if legal_lot is None:
+        raise ValueError("existing BUY has no legal lot at its limit")
+    expected_du, expected_ev, efficiency, cost = _single_order_metrics(
+        candidate,
+        q_samples=np.full(1, mean_q, dtype=np.float64),
+        shares=remainder,
+        wealth_floor_usd=wealth_floor_usd,
+        wealth_ceiling_usd=wealth_ceiling_usd,
+        alpha=1.0,
+        robust_q=mean_q,
+        enforce_venue_minimum=False,
+    )
+    if not (math.isfinite(expected_du) and math.isfinite(expected_ev)):
+        raise ValueError("existing BUY remainder breaches the wealth domain")
+    terminal = _binary_terminal_wealth_certificate(
+        robust_q=mean_q,
+        shares=remainder,
+        cost_usd=cost,
+        wealth_floor_usd=wealth_floor_usd,
+        wealth_ceiling_usd=wealth_ceiling_usd,
+    )
+    limit, expected_fill_price, max_spend = _single_order_execution_boundary(
+        candidate, remainder, enforce_live_fill_band=False,
+    )
+    decision = GlobalSingleOrderDecision(
+        candidate=candidate,
+        shares=remainder,
+        cost_usd=cost,
+        robust_delta_log_wealth=0.0,
+        robust_ev_usd=0.0,
+        capital_efficiency=0.0,
+        no_trade_reason=None,
+        limit_price=limit,
+        expected_fill_price_before_fee=expected_fill_price,
+        max_spend_usd=max_spend,
+        current_token_shares=held,
+        full_kelly_target_shares=full_target,
+        fractional_kelly_target_shares=full_target * multiplier,
+        buy_sizing_mode="FRACTIONAL_TARGET",
+        expected_terminal_wealth=ExpectedBuyTerminalWealthCertificate(
+            probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+            win_probability_mean=mean_q,
+            loss_probability_mean=1.0 - mean_q,
+            loss_payoff_usd=terminal.loss_payoff_usd,
+            win_payoff_usd=terminal.win_payoff_usd,
+            wealth_after_loss_usd=terminal.wealth_after_loss_usd,
+            wealth_after_win_usd=terminal.wealth_after_win_usd,
+            expected_delta_log_wealth=expected_du,
+            expected_ev_usd=expected_ev,
+            ruin_probability_reduction=0.0,
+        ),
+    )
+    del efficiency
+    return ExistingBuyValuation(
+        decision=decision,
+        full_kelly_target_shares=full_target,
+        fractional_kelly_target_shares=full_target * multiplier,
+        legal_lot_shares=legal_lot,
+    )
+
+
 def _global_sell_fill_prefix_extended_objective(
     decision: GlobalSingleOrderDecision,
     *,

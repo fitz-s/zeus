@@ -321,6 +321,12 @@ class CanonicalCorpusCache:
             held = self._built.get(key, ())
         return held[0][1] if held else None
 
+    def has_installed_corpus(self) -> bool:
+        """Whether any builder-installed corpus exists; never loads."""
+
+        with self._lock:
+            return any(self._built.values())
+
     def get_or_load(
         self,
         key: ArtifactCacheKey,
@@ -3304,6 +3310,19 @@ class CanonicalCorpusBuilder:
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+
+
+def canonical_entry_fit_corpus_pending() -> bool:
+    """True only while the daemon's builder has not installed its first corpus.
+
+    That is "calibration authority not loaded yet": a decision that needs a
+    fit defers instead of reading the absence as a verdict. Without a builder
+    (tests, offline callers) nothing is pending; once any corpus is installed,
+    a later miss is a real unavailable fit and fails closed. Never loads.
+    """
+
+    cache = _SHARED_CANONICAL_CORPUS_CACHE
+    return cache.builder is not None and not cache.has_installed_corpus()
 
 
 def start_canonical_corpus_builder() -> CanonicalCorpusBuilder:
