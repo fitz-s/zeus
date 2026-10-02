@@ -1,5 +1,45 @@
 # finite_evidence_probability_symmetry -- Plan
 
+## 2026-10-02 exact zero-current-extras queue drain
+
+Verified defect: a completed current capture can legitimately select zero
+non-anchor instruments, but `ZERO_MULTI_MODEL_EXTRAS` carries no typed verdict,
+so the queue retains and repeats the same unchanged request. Preserve that
+probability refusal and record its exact current-serving/capture predicate.
+Extract the capture's finite-value, possession and model-selection predicate;
+reuse the materializer's physical eligibility and configured provider-collapse
+path in its negative proof and verifier. Bind city/date/metric, source/cut,
+served physical provenance, candidate universe and active scheme/coordinates.
+Unreadable, incomplete, corrupt or changed evidence binds nothing.
+
+SCOPE: one exact city/date/metric request and consumed input identity. DRAIN:
+the normal queue binds a verified unchanged zero-extras verdict rather than
+starting the same child again. RESET: a prospective cut admitting a qualified
+extra, repaired input/provenance, or changed configuration reopens. An extra
+arriving after the old cut does not rewrite the old negative verdict. No source
+count/cohort approximation, stderr classification, historical fallback,
+probability/risk/budget change, live DB write, venue action or load is allowed.
+
+Owned surfaces: `src/data/bayes_precision_fusion_capture.py`,
+`src/data/replacement_forecast_materializer.py`,
+`src/data/materialization_block_evidence.py`, existing queue/materializer tests,
+their affected registry rows and this plan. Acceptance: actual-function
+HIGH/LOW RED-to-GREEN producer/normal queue drain, prospective extra-arrival
+RESET, unchanged old-cut proof, missing/corrupt/read-error/configuration
+negatives and required affected checks. Local commit only; parent owns landing,
+loading, runtime acceptance and task worktree cleanup.
+
+Local ZERO-extras checkpoint: restoring the original real producer's
+proof-less refusal makes both HIGH/LOW actual worker/queue antibodies fail with
+missing `blocked_evidence` and actual `UNCLASSIFIED` retained-turn logs. The
+repair yields 52 passing focused cases (20 new zero-extras cases plus complete
+capture selection parity and existing typed/cohort/certificate drain/reset
+cases). `py_compile` and `git diff --check` pass. Test input is a temporary
+read-only symlink to live `config/settings.json`, SHA256
+`d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae`;
+test fixtures write only their private temporary forecast/state surfaces.
+This is local behavior evidence, not live loading or global probability proof.
+
 Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active

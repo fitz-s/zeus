@@ -3323,7 +3323,7 @@ def test_fingerprint_keeps_the_dependency_record_when_a_source_is_missing(tmp_pa
     assert before is not None and after is not None and before != after
 
 
-def _licensed_worker_queue(tmp_path, monkeypatch):
+def _licensed_worker_queue(tmp_path, monkeypatch, *, context_factory=None):
     """The licensed current fixture driven through the real worker and real parent:
     returns (conn, request, consume, fenced, worker) for one claimed request."""
     import dataclasses
@@ -3346,7 +3346,8 @@ def _licensed_worker_queue(tmp_path, monkeypatch):
             return [serial(v) for v in value]
         return value
 
-    gen = _licensed_current_context.__wrapped__(tmp_path, monkeypatch)
+    gen = (context_factory(tmp_path, monkeypatch) if context_factory is not None
+           else _licensed_current_context.__wrapped__(tmp_path, monkeypatch))
     conn, request, _provenance, _scope = next(gen)
     root = tmp_path / "queue"
     requests, seeds = root / "requests", root / "seeds"
@@ -3389,7 +3390,144 @@ def _licensed_worker_queue(tmp_path, monkeypatch):
     def fenced():
         return queue.failed_seed_identity_fenced(seeds / path.name, conn=conn, decision_at=request.computed_at)
 
+    worker.request = request
     return gen, conn, consume, fenced, worker, responses, queue
+
+
+def _zero_extras_context(tmp_path, monkeypatch, metric):
+    import src.data.replacement_forecast_materializer as mat
+    from tests.test_replacement_forecast_materializer import (
+        _hko_native_surfaces, _hko_source_surface, _shanghai_current_owner_request,
+        _hko_current_provider_inputs,
+    )
+    real = mat._replacement_bayes_precision_fusion_override
+    native = _hko_native_surfaces.__wrapped__(tmp_path, monkeypatch)
+    next(native)
+    source = _hko_source_surface.__wrapped__(tmp_path, monkeypatch, None)
+    next(source)
+    try:
+        conn, request = _shanghai_current_owner_request(tmp_path, monkeypatch, metric=metric,
+            computed_at=datetime(2026, 10, 1, 8, 15, tzinfo=timezone.utc))
+        monkeypatch.setattr(mat, "_replacement_bayes_precision_fusion_override", real)
+        body = json.loads(request.openmeteo_raw_payload_bytes)
+        _hko_current_provider_inputs(request, {"ecmwf_ifs": 27. if metric == "high" else 18.5},
+            conn=conn, selected_cells={"ecmwf_ifs": (body["latitude"], body["longitude"])})
+        conn.execute("DELETE FROM raw_model_forecasts WHERE model != 'ecmwf_ifs'")
+        conn.commit()
+        yield conn, request, None, None
+    finally:
+        next(source, None)
+        next(native, None)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_zero_extras_actual_worker_proves_and_drains_unchanged_inputs(tmp_path, monkeypatch, metric):
+    factory = lambda p, m: _zero_extras_context(p, m, metric)
+    gen, conn, consume, fenced, worker, responses, queue = _licensed_worker_queue(
+        tmp_path, monkeypatch, context_factory=factory)
+    try:
+        report = consume()
+        assert len(responses) == 1 and responses[0]["status"] == "BLOCKED"
+        assert responses[0]["blocked_evidence"]["reason"] == "ZERO_MULTI_MODEL_EXTRAS"
+        assert queue._UNCHANGED_BLOCKED_SKIP_REASON in report.reason_codes
+        assert fenced()
+        second = consume()
+        assert len(responses) == 1, "normal queue must not respawn the same proved zero-extras input"
+        assert queue._UNCHANGED_BLOCKED_SKIP_REASON in second.reason_codes
+        assert second.committed_posterior_count == second.reactor_wake_published_count == 0
+    finally:
+        next(gen, None)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_zero_extras_future_arrival_keeps_old_cut_and_reopens_new_cut(tmp_path, monkeypatch, metric):
+    from dataclasses import replace
+    from src.data.materialization_block_evidence import evidence_holds
+    from tests.test_replacement_forecast_materializer import _hko_current_provider_inputs
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
+    from src.config import runtime_cities_by_name
+
+    factory = lambda p, m: _zero_extras_context(p, m, metric)
+    gen, conn, consume, fenced, worker, responses, queue = _licensed_worker_queue(
+        tmp_path, monkeypatch, context_factory=factory)
+    try:
+        consume()
+        evidence = responses[0]["blocked_evidence"]
+        path = tmp_path / "queue/requests/Shanghai.current.json"
+        worker()  # Restore exactly the original request bytes for explicit cut checks.
+        payload = json.loads(path.read_text())
+        assert evidence_holds(conn, evidence, exact_request=payload)
+        # Build a real physical current input possessed at 09Z, after the old
+        # 08:15Z decision. The carrier itself stays at its old 00Z cycle.
+        request = worker.request
+        future = replace(request, source_cycle_time=datetime(2026, 10, 1, 6, tzinfo=timezone.utc),
+            openmeteo_source_available_at=datetime(2026, 10, 1, 9, tzinfo=timezone.utc),
+            computed_at=datetime(2026, 10, 1, 10, tzinfo=timezone.utc))
+        city = runtime_cities_by_name()[request.city]
+        _hko_current_provider_inputs(future, {"icon_global": 22.}, conn=conn,
+            selected_cells={"icon_global": _selected_test_cell("icon_global", city.lat, city.lon)})
+        assert evidence_holds(conn, evidence, exact_request=payload), "future arrival cannot rewrite the old cut"
+        assert evidence_holds(conn, evidence, payload)
+        prospective = {**payload, "computed_at": future.computed_at.isoformat()}
+        assert not evidence_holds(conn, evidence, prospective), "a now-possessed lawful extra resets the predicate"
+        path.write_text(json.dumps(prospective))
+        attempts = []
+        def reset_runner(argv):
+            import subprocess
+            attempts.append(argv)
+            return subprocess.CompletedProcess(argv, 1,
+                json.dumps({"status": "ERROR", "reason_codes": ["TEST_RESET_ATTEMPT"]}), "")
+        queue._process_claimed_materialization_batch(
+            request_path=path.parent, processed_path=tmp_path / "queue/processed",
+            failed_path=tmp_path / "queue/failed", forecast_db=conn.execute("PRAGMA database_list").fetchone()[2],
+            limit=1, runner=reset_runner,
+            marker_dir=tmp_path / "queue/blocked_attempts")
+        assert len(attempts) == 1
+        # RESET authorizes a fresh computation, never READY or a probability.
+        assert not queue._blocked_evidence_holds(evidence,
+            forecast_db=conn.execute("PRAGMA database_list").fetchone()[2], prospective=prospective)
+    finally:
+        next(gen, None)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("mutation", ("missing_item", "revision", "raw_id", "cut", "tau", "config", "empty_served", "read_error"))
+def test_zero_extras_unbound_proof_never_fences(tmp_path, monkeypatch, metric, mutation):
+    from src.data.materialization_block_evidence import evidence_holds
+    import src.data.replacement_forecast_materializer as mat
+
+    factory = lambda p, m: _zero_extras_context(p, m, metric)
+    gen, conn, consume, fenced, worker, responses, queue = _licensed_worker_queue(
+        tmp_path, monkeypatch, context_factory=factory)
+    try:
+        consume()
+        evidence = json.loads(json.dumps(responses[0]["blocked_evidence"]))
+        worker()
+        payload = json.loads((tmp_path / "queue/requests/Shanghai.current.json").read_text())
+        item = evidence["items"][-1]
+        if mutation == "missing_item":
+            evidence["items"].pop()
+        elif mutation == "revision":
+            item["selection_revision"] = "foreign"
+        elif mutation == "raw_id":
+            item["served"]["ecmwf_ifs"]["raw_model_forecast_id"] += 1
+        elif mutation == "cut":
+            item["decision_time_iso"] = "2026-10-01T08:16:00+00:00"
+        elif mutation == "tau":
+            item["day0_remaining_from_iso"] = "2026-10-01T08:00:00+00:00"
+        elif mutation == "config":
+            monkeypatch.setattr(mat, "_resolve_source_clock_scheme", lambda city, metric:
+                SimpleNamespace(weights={"ecmwf_ifs": 1.}))
+        elif mutation == "empty_served":
+            conn.execute("DELETE FROM raw_model_forecasts")
+            conn.commit()
+        else:
+            conn.set_authorizer(lambda action, *_: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ else sqlite3.SQLITE_OK)
+        assert not evidence_holds(conn, evidence, exact_request=payload)
+        assert not evidence_holds(conn, evidence, payload)
+    finally:
+        conn.set_authorizer(None)
+        next(gen, None)
 
 
 def _split_provider_cohort(conn, cycle):

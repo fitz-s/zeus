@@ -343,6 +343,35 @@ def _raw_instrument(model: str, raw_value: float, history: ModelHistory | None, 
     return float(raw_value), (history.n_train if history else 0)
 
 
+def select_current_extra_models(
+    *, values: Mapping[str, object], latitude: float, longitude: float,
+    lead_days: int, decision_utc: datetime | None,
+    model_available_at: Mapping[str, str | datetime | None],
+    configured: Sequence[str] = (),
+) -> tuple[dict[str, float], list[str], SelectedModelSet]:
+    """The current capture predicate, shared with its negative-input verifier."""
+    present: dict[str, float] = {}
+    dropped: list[str] = []
+    for model in (*GLOBAL_LIKELIHOOD_MODELS, *REGIONAL_MODELS):
+        try:
+            raw = values.get(model)
+            value = None if raw is None else float(raw)
+        except Exception:  # capture's existing fail-soft value conversion boundary
+            value = None
+        if value is None or not math.isfinite(value) or (
+            decision_utc is not None and _available_after_decision(
+                model_available_at.get(model), decision_utc, model_label=model,
+            )
+        ):
+            dropped.append(model)
+            continue
+        present[model] = value
+    return present, dropped, select_models(
+        present_models=present, lat=latitude, lon=longitude, lead_days=lead_days,
+        configured=configured,
+    )
+
+
 def capture_bayes_precision_instruments(
     *,
     city: str,
@@ -393,14 +422,13 @@ def capture_bayes_precision_instruments(
     candidate_models = list(GLOBAL_LIKELIHOOD_MODELS) + list(REGIONAL_MODELS)
 
     # ---- fail-soft per-model live capture ----
-    present_values: dict[str, float] = {}
-    dropped: list[str] = []
+    fetched_values: dict[str, object] = {}
     _missing_avail_count = 0  # compatibility field; missing availability is dropped, not admitted
     for model in candidate_models:
         # Fetch and validate the candidate value before touching availability. Domain/lead-ineligible
         # or unserved models have no candidate value and must not be blamed for missing provenance.
         try:
-            raw_value = fetch_fn(
+            fetched_values[model] = fetch_fn(
                 model=model,
                 latitude=latitude,
                 longitude=longitude,
@@ -410,49 +438,17 @@ def capture_bayes_precision_instruments(
                 metric=metric,
                 forecast_hours=forecast_hours,
             )
-            if raw_value is None:
-                dropped.append(model)
-                continue
-            value = float(raw_value)
         except Exception as exc:  # belt-and-braces: a buggy provider must not crash the cycle
             _LOG.warning(
                 "BAYES_PRECISION_FUSION capture dropped %s (provider/value invalid, fail-soft): %s",
                 model,
                 exc,
             )
-            dropped.append(model)
-            continue
-        if not math.isfinite(value):
-            _LOG.warning(
-                "BAYES_PRECISION_FUSION capture dropped %s (non-finite candidate value: %r)",
-                model,
-                raw_value,
-            )
-            dropped.append(model)
-            continue
-
-        # ARRIVAL GUARD: once a finite candidate exists, exclude an extra whose honest availability
-        # is after the decision instant (it was not possessed yet — fusing it would bias q early).
-        # Missing/malformed availability remains fail-closed; callers without decision_utc retain
-        # the historical no-arrival-guard behavior.
-        if decision_utc is not None:
-            _raw_avail = availability.get(model)
-            _avail_is_missing = (
-                _raw_avail is None
-                or (isinstance(_raw_avail, str) and not _raw_avail.strip())
-            )
-            if _available_after_decision(_raw_avail, decision_utc, model_label=model):
-                if not _avail_is_missing:
-                    _LOG.warning(
-                        "BAYES_PRECISION_FUSION arrival guard excluded %s: honest source_available_at %s "
-                        "is after decision %s (not yet possessed)",
-                        model, _raw_avail, decision_utc.isoformat(),
-                    )
-                dropped.append(model)
-                continue
-            if _avail_is_missing:
-                _missing_avail_count += 1
-        present_values[model] = value
+    present_values, dropped, selection = select_current_extra_models(
+        values=fetched_values, latitude=latitude, longitude=longitude,
+        lead_days=lead_days, decision_utc=decision_utc,
+        model_available_at=availability, configured=configured,
+    )
 
     # The anchor is always present (the materializer already has it); include it so selection +
     # parent-bias pooling see it.
@@ -478,12 +474,6 @@ def capture_bayes_precision_instruments(
         if h:
             pooled.extend(h.residuals)
     parent_bias = (sum(pooled) / len(pooled)) if pooled else 0.0
-
-    selection = select_models(
-        present_models=present_values,
-        lat=latitude, lon=longitude, lead_days=lead_days,
-        configured=configured,
-    )
 
     # ---- EB-correct + build instruments for the SELECTED set (globals then regionals) ----
     # BLOCKER 2: each instrument carries residuals_by_target_date so the fusion aligns the

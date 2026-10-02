@@ -4410,6 +4410,28 @@ def _freshest_declared_provider_representatives(
     return out
 
 
+def _read_current_capture_serving(
+    conn, *, city, metric, target_date, source_cycle_time_iso,
+    decision_time_iso, day0_remaining_from_iso, lat, lon, lead_days, configured,
+):
+    """The physical/current/provider filter used before the actual capture."""
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+    from src.forecast.model_selection import source_physically_eligible
+
+    served = read_current_instrument_values(
+        conn, city=city, metric=metric, target_date=target_date,
+        source_cycle_time_iso=source_cycle_time_iso,
+        decision_time_iso=decision_time_iso,
+        day0_remaining_from_iso=day0_remaining_from_iso,
+        include_station_sources=True,
+    )
+    return _freshest_declared_provider_representatives(
+        {model: value for model, value in served.items()
+         if source_physically_eligible(model, lat=lat, lon=lon, lead_days=lead_days)},
+        configured=configured,
+    )
+
+
 def _replacement_bayes_precision_fusion_override(
     request: "ReplacementForecastMaterializeRequest",
     *,
@@ -4493,7 +4515,6 @@ def _replacement_bayes_precision_fusion_override(
         # (value, rid) view for the fetch seam below.
         from src.data.replacement_current_value_serving import (  # noqa: PLC0415
             read_freshest_coherent_instrument_values,
-            read_current_instrument_values,
         )
         from src.forecast.model_selection import source_physically_eligible  # noqa: PLC0415
 
@@ -4507,25 +4528,12 @@ def _replacement_bayes_precision_fusion_override(
         served_current: dict[str, object] = {}
         persisted_current: dict[str, tuple[float, int]] = {}
         if conn is not None:
-            served_current = read_current_instrument_values(
+            served_current = _read_current_capture_serving(
                 conn, city=request.city, metric=metric, target_date=target_date,
                 source_cycle_time_iso=source_cycle_iso,
                 decision_time_iso=computed_at.isoformat(),
                 day0_remaining_from_iso=_day0_remaining_from_iso(request),
-                # ADD-DATA (operator "加数据"): include station-calibrated sources (cwa_*/hko_*) at
-                # their OWN provider cycle so they enter persisted_current -> the precision fusion
-                # weights them at initial precision (raw_second_moment_weights) and the frozen-scheme
-                # skip (_station_live_omitted below) serves that live fusion center.
-                include_station_sources=True,
-            )
-            served_current = {
-                model: value for model, value in served_current.items()
-                if source_physically_eligible(
-                    model, lat=lat, lon=lon, lead_days=lead_days
-                )
-            }
-            served_current = _freshest_declared_provider_representatives(
-                served_current, configured=_scheme_sources,
+                lat=lat, lon=lon, lead_days=lead_days, configured=_scheme_sources,
             )
             persisted_current = {
                 m: (s.value_c, s.raw_model_forecast_id) for m, s in served_current.items()
@@ -4608,7 +4616,25 @@ def _replacement_bayes_precision_fusion_override(
                 )
             except Exception:
                 pass
-            raise BayesPrecisionFusionDeclined("ZERO_MULTI_MODEL_EXTRAS")
+            from src.data.materialization_block_evidence import zero_extras_item
+
+            # SCOPE: this exact family/cut/configuration/current-serving selection.
+            # DRAIN: normal queue reuses only the verified unchanged negative.
+            # RESET: prospective current inputs admit an extra; unknown binds nothing.
+            evidence = None
+            if conn is not None and injected_live_fetch is None:
+                try:
+                    evidence = zero_extras_item(
+                        city=request.city, metric=metric, target_date=target_date,
+                        source_cycle_time_iso=source_cycle_iso,
+                        decision_time_iso=computed_at.isoformat(),
+                        day0_remaining_from_iso=_day0_remaining_from_iso(request),
+                        latitude=lat, longitude=lon, timezone_name=tz_name,
+                        lead_days=lead_days, scheme=_scheme, served=served_current,
+                    )
+                except (OSError, TypeError, ValueError, AttributeError):
+                    pass  # The completed refusal survives; unavailable proof binds nothing.
+            raise BayesPrecisionFusionDeclined("ZERO_MULTI_MODEL_EXTRAS", evidence)
 
         fused = fuse_bayes_precision_posterior(
             anchor_z=capture.anchor_z, anchor_tau0=capture.anchor_tau0,
@@ -9442,7 +9468,7 @@ def write_prepared_replacement_forecast_live(
         anchor_id = _insert_anchor(conn, request, metric=metric)
     if not posterior.live_eligible:
         from src.data.materialization_block_evidence import (  # noqa: PLC0415
-            NO_COHERENT_COHORT, blocked_evidence,
+            blocked_evidence,
         )
 
         return ReplacementForecastMaterializeResult(
@@ -9457,7 +9483,8 @@ def write_prepared_replacement_forecast_live(
             evidence=(
                 None if posterior.fusion_decline_evidence is None
                 else blocked_evidence(
-                    conn, request, NO_COHERENT_COHORT, [posterior.fusion_decline_evidence],
+                    conn, request, str(posterior.fusion_decline_evidence["kind"]),
+                    [posterior.fusion_decline_evidence],
                 )
             ),
         )

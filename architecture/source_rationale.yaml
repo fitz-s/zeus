@@ -1497,7 +1497,7 @@ files:
   src/data/materialization_block_evidence.py:
     zone: K2_runtime
     authority_role: materialization_block_evidence
-    why: "Typed evidence for a materialization BLOCKED: the code that decides a covered reason (stale anchor cycle; HIGH readiness-cert regression; no coherent current provider cohort) reports the database facts its verdict followed from, and the parent re-verifies them with indexed lookups on one read-only forecasts snapshot before a fence binds or is honored. Any other reason, and evidence that fails or cannot be read, binds nothing. Carries no authority of its own."
+    why: "Typed evidence for a materialization BLOCKED: covered stale-cycle, readiness-cert, no-coherent-cohort and zero-current-extra refusals report the facts actually judged. The zero-extra producer and verifier share physical/current serving, configured provider representatives, finite candidate values, real possession and model selection; proof binds exact serving provenance, configuration and cut. The normal queue drains only verified unchanged negatives and reopens when a prospective cut admits an extra. Empty serving, unreadable or changed facts, unsupported reasons and malformed evidence bind nothing. Carries no probability authority of its own."
     downstream:
     - src/data/replacement_forecast_materializer.py
     - src/data/replacement_forecast_live_materialization_queue.py

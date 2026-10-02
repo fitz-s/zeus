@@ -34,6 +34,8 @@ Covered reasons (``SUPPORTED``) and their exact, required items:
   cohort exists at the effective clock, over every model the family has rows for,
   station sources included; an empty superset cohort leaves every path's cohort
   empty, so the fusion's current shape cannot be built.
+- ZERO_EXTRAS: [CLOCK, ZERO_EXTRAS]. The completed physical/current serving
+  and capture selector admitted no non-anchor instrument, at the exact cut.
 """
 
 # Created: 2026-10-02
@@ -53,12 +55,15 @@ STALE_CYCLE = "OM9_SOURCE_CYCLE_TOO_STALE"
 CERT_REGRESSION = "READINESS_CERT_CYCLE_REGRESSION"
 CERT_SUPERSEDED = "READINESS_CERT_SUPERSEDED"
 NO_COHERENT_COHORT = "NO_COHERENT_CURRENT_PROVIDER_COHORT"
+ZERO_EXTRAS = "ZERO_MULTI_MODEL_EXTRAS"
+EXTRAS_SELECTION_REVISION = "current_capture_extra_selection_v1"
 # reason -> the item kinds it must carry, in order (CLOCK first, each exactly once).
 SUPPORTED: dict[str, tuple[str, ...]] = {
     STALE_CYCLE: (CLOCK,),
     CERT_REGRESSION: (CLOCK, CERT_REGRESSION),
     CERT_SUPERSEDED: (CLOCK, CERT_SUPERSEDED),
     NO_COHERENT_COHORT: (CLOCK, NO_COHERENT_COHORT),
+    ZERO_EXTRAS: (CLOCK, ZERO_EXTRAS),
 }
 # clock role -> (request field naming its run, request field of its fallback clock)
 _ROLES = {
@@ -196,6 +201,97 @@ def blocked_evidence(conn: sqlite3.Connection, request, reason: str, items=()) -
     }
 
 
+def zero_extras_item(
+    *, city, metric, target_date, source_cycle_time_iso, decision_time_iso,
+    day0_remaining_from_iso, latitude, longitude, timezone_name, lead_days,
+    scheme, served,
+) -> dict[str, object] | None:
+    """Record the actual current-capture predicate, never an empty-cohort proxy.
+
+    Empty serving has a different producer refusal. No usable schema/physical
+    serving record, injected fetch or interrupted read can prove this reason.
+    """
+    import hashlib
+    from dataclasses import asdict
+    from src.contracts.availability_time import proof_of_possession_available_at
+    from src.data.bayes_precision_fusion_capture import select_current_extra_models
+    from src.forecast.model_selection import GLOBAL_LIKELIHOOD_MODELS, REGIONAL_MODELS, POLYGON_CONFIG_PATH
+
+    if not served:
+        return None
+    configured = () if scheme is None else tuple(str(model) for model in scheme.weights)
+    availability = {}
+    for model, value in served.items():
+        if value.captured_at:
+            try:
+                availability[model] = proof_of_possession_available_at(value.captured_at)
+            except (TypeError, ValueError):
+                pass
+    present, dropped, selection = select_current_extra_models(
+        values={model: value.value_c for model, value in served.items()},
+        latitude=latitude, longitude=longitude, lead_days=lead_days,
+        decision_utc=_utc(decision_time_iso, "decision_time_iso"),
+        model_available_at=availability, configured=configured,
+    )
+    if selection.likelihood_globals or selection.regional_experts:
+        return None
+    item = json.loads(json.dumps({
+        "kind": ZERO_EXTRAS, "selection_revision": EXTRAS_SELECTION_REVISION,
+        "source_cycle_time_iso": source_cycle_time_iso,
+        "decision_time_iso": decision_time_iso,
+        "day0_remaining_from_iso": day0_remaining_from_iso,
+        "lead_days": lead_days,
+        "configuration": {
+            "latitude": latitude, "longitude": longitude, "timezone_name": timezone_name,
+            "scheme_weights": None if scheme is None else dict(scheme.weights),
+            "candidates": [*GLOBAL_LIKELIHOOD_MODELS, *REGIONAL_MODELS],
+            "polygon_sha256": hashlib.sha256(POLYGON_CONFIG_PATH.read_bytes()).hexdigest(),
+        },
+        "served": {model: value.as_provenance() for model, value in served.items()},
+        "present_values": present, "dropped_models": dropped,
+        "selection": asdict(selection),
+    }, allow_nan=False))
+    item["selection_identity_hash"] = hashlib.sha256(
+        json.dumps(item, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
+    return item
+
+
+def _current_zero_extras_item(conn, scope, *, source_cycle_time_iso, decision_time_iso,
+                             day0_remaining_from_iso):
+    from datetime import date
+    from src.config import runtime_cities_by_name
+    from src.data.replacement_forecast_materializer import (
+        _bayes_precision_fusion_city_local_lead_days, _read_current_capture_serving,
+        _resolve_source_clock_scheme,
+    )
+
+    city = runtime_cities_by_name().get(str(scope["city"]))
+    if city is None:
+        return None
+    metric = str(scope["temperature_metric"])
+    scheme = _resolve_source_clock_scheme(str(scope["city"]), metric)
+    configured = () if scheme is None else tuple(str(model) for model in scheme.weights)
+    tz_name = str(city.timezone)
+    lead_days = _bayes_precision_fusion_city_local_lead_days(
+        computed_at=_utc(decision_time_iso, "decision_time_iso"),
+        target_local_date=date.fromisoformat(str(scope["target_date"])), tz_name=tz_name,
+    )
+    served = _read_current_capture_serving(
+        conn, city=str(scope["city"]), metric=metric, target_date=str(scope["target_date"]),
+        source_cycle_time_iso=source_cycle_time_iso, decision_time_iso=decision_time_iso,
+        day0_remaining_from_iso=day0_remaining_from_iso, lat=float(city.lat),
+        lon=float(city.lon), lead_days=lead_days, configured=configured,
+    )
+    return zero_extras_item(
+        city=str(scope["city"]), metric=metric, target_date=str(scope["target_date"]),
+        source_cycle_time_iso=source_cycle_time_iso, decision_time_iso=decision_time_iso,
+        day0_remaining_from_iso=day0_remaining_from_iso, latitude=float(city.lat),
+        longitude=float(city.lon), timezone_name=tz_name, lead_days=lead_days,
+        scheme=scheme, served=served,
+    )
+
+
 # ------------------------------------------------------------- verification
 
 
@@ -329,6 +425,12 @@ def _recorded_facts_hold(conn, evidence: Mapping[str, object]) -> bool:
             conn, evidence["scope"], _utc(item["decision_time_iso"], "decision_time_iso"),
             item["window_hours"], item.get("day0_remaining_from_iso"),
         )
+    if evidence["reason"] == ZERO_EXTRAS:
+        return _current_zero_extras_item(
+            conn, evidence["scope"], source_cycle_time_iso=item["source_cycle_time_iso"],
+            decision_time_iso=item["decision_time_iso"],
+            day0_remaining_from_iso=item["day0_remaining_from_iso"],
+        ) == dict(item)
     return True  # STALE_CYCLE: a function of the request and the unchanged clock
 
 
@@ -348,6 +450,17 @@ def _prospective_blocks(conn, evidence: Mapping[str, object], payload: Mapping[s
         return incumbent is not None and _serving_key_strictly_newer(incumbent, prospective)
     from src.data.forecast_target_contract import day0_remaining_from_iso_of  # noqa: PLC0415
 
+    if evidence["reason"] == ZERO_EXTRAS:
+        # First bind the complete recorded predicate. A changed config/proof
+        # reopens even when the new predicate also happens to select zero extras.
+        if not _recorded_facts_hold(conn, evidence):
+            return False
+        current = _current_zero_extras_item(
+            conn, payload, source_cycle_time_iso=_utc(payload["source_cycle_time"], "source_cycle_time").isoformat(),
+            decision_time_iso=effective.isoformat(),
+            day0_remaining_from_iso=day0_remaining_from_iso_of(payload.get("day0_observed_extreme_observation_time")),
+        )
+        return current is not None and current["configuration"] == item["configuration"]
     return _cohort_empty(conn, payload, effective, item["window_hours"],
         day0_remaining_from_iso_of(payload.get("day0_observed_extreme_observation_time")))
 
@@ -380,9 +493,20 @@ def evidence_holds(
             incoming = tuple(_utc(value, "incoming_key") for value in evidence["items"][-1]["incoming_key"])
             return request_key == incoming and _recorded_facts_hold(conn, evidence)
         if prospective is None:
+            if evidence["reason"] == ZERO_EXTRAS:
+                if exact_request is None or not _well_formed(evidence, exact_request):
+                    return False
+                item = evidence["items"][-1]
+                from src.data.forecast_target_contract import day0_remaining_from_iso_of
+                if (
+                    _utc(exact_request["source_cycle_time"], "source_cycle_time").isoformat() != item["source_cycle_time_iso"]
+                    or effective_computed_at(conn, exact_request).isoformat() != item["decision_time_iso"]
+                    or day0_remaining_from_iso_of(exact_request.get("day0_observed_extreme_observation_time")) != item["day0_remaining_from_iso"]
+                ):
+                    return False
             return _recorded_facts_hold(conn, evidence)
         return _prospective_blocks(conn, evidence, prospective)
-    except (EvidenceUnavailable, sqlite3.Error, OSError, KeyError, TypeError, ValueError, AttributeError):
+    except (EvidenceUnavailable, sqlite3.Error, OSError, KeyError, TypeError, ValueError, AttributeError, RuntimeError):
         return False
     finally:
         if owns and conn.in_transaction:
