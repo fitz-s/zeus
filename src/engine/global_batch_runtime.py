@@ -7407,6 +7407,25 @@ def _market_anchored_correction_resolver(
         except Exception as exc:  # noqa: BLE001 - warming grants no fit authority
             _LOG.debug("CANONICAL_ENTRY_CORPUS_WARM_UNAVAILABLE:%s", type(exc).__name__)
 
+    # One scope answers identically for every leg of one cut: a scope has at most
+    # four values (metric x execution contract) while a cut has ~2,000 legs, and
+    # each provider call re-validated three borrowed handles and rescanned the
+    # corpus. Past the deadline every leg still asks the provider, which fails it
+    # closed exactly as before; an answer finished at the deadline is not kept.
+    scoped_answers: dict[tuple[str, object, datetime], object] = {}
+
+    def scoped_fit(kind: str, call, scope, now: datetime):
+        def current() -> bool:
+            return deadline_monotonic is None or time.monotonic() < deadline_monotonic
+
+        key = (kind, scope, now)
+        if key in scoped_answers and current():
+            return scoped_answers[key]
+        answer = call(scope=scope, now=now, deadline_monotonic=deadline_monotonic)
+        if current():
+            scoped_answers[key] = answer
+        return answer
+
     def resolve_current(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
         if str(getattr(candidate, "action", "BUY")) == "SELL":
             from src.calibration.market_anchored_live_fit import (
@@ -7525,18 +7544,13 @@ def _market_anchored_correction_resolver(
             record_unavailable(candidate, "FIT_SCOPE_UNAVAILABLE", scope)
             raise PayoffQCorrectionUnavailable("FIT_SCOPE_UNAVAILABLE")
         city, target_date = target_context
-        artifact = provider.artifact(
-            scope=scope, now=decision_at_utc, deadline_monotonic=deadline_monotonic
-        )
+        artifact = scoped_fit("artifact", provider.artifact, scope, decision_at_utc)
         record_artifact(scope, artifact)
         if artifact is None:
             support_check = getattr(provider, "insufficient_support", None)
             insufficient = bool(
                 callable(support_check)
-                and support_check(
-                    scope=scope, now=decision_at_utc,
-                    deadline_monotonic=deadline_monotonic,
-                )
+                and scoped_fit("insufficient", support_check, scope, decision_at_utc)
             )
             if insufficient:
                 prepared_witness = getattr(prepared, "probability_witness", None)

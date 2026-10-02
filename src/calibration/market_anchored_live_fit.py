@@ -4008,20 +4008,22 @@ def _load_held_entry_calibration_impl(
             baselines = audit.get("source_identity_baselines") if isinstance(audit, Mapping) else None
             if not isinstance(baselines, Mapping):
                 raise ValueError
+            # One cut's audit holds a baseline per leg; authenticate a scope only
+            # for entries already equal to this baseline (same conjunction).
+            expected_baseline = baseline.as_payload()
             matches = []
             for entry in baselines.values():
-                if not isinstance(entry, Mapping):
+                if (
+                    not isinstance(entry, Mapping)
+                    or entry.get("status") != "SOURCE_IDENTITY_BASELINE"
+                    or entry.get("baseline") != expected_baseline
+                ):
                     continue
-                scope_payload = entry.get("scope")
                 try:
-                    scope = CalibrationFitScope.from_payload(scope_payload)
+                    scope = CalibrationFitScope.from_payload(entry.get("scope"))
                 except (TypeError, ValueError):
                     continue
-                if (
-                    entry.get("status") == "SOURCE_IDENTITY_BASELINE"
-                    and entry.get("baseline") == baseline.as_payload()
-                    and scope.raw_probability_revision == baseline.raw_probability_revision
-                ):
+                if scope.raw_probability_revision == baseline.raw_probability_revision:
                     matches.append(entry)
             if len(matches) != 1:
                 raise ValueError

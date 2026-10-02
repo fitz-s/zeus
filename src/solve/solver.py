@@ -54,6 +54,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional, Sequence
@@ -832,6 +833,27 @@ def outcome_token_binding_identity(
     )
 
 
+def _frozen_copy(values: np.ndarray) -> np.ndarray:
+    """An array no caller reference can change after it was hashed.
+
+    A read-only float64 array that owns its data is one this function made (a
+    rebound witness passes its parent's), so it is shared, not copied; any
+    other input, including a read-only view of a writable base, is copied.
+    """
+
+    if (
+        isinstance(values, np.ndarray)
+        and values.dtype == np.float64
+        and values.flags.c_contiguous
+        and values.flags.owndata
+        and not values.flags.writeable
+    ):
+        return values
+    frozen = np.array(values, dtype=np.float64, order="C", copy=True)
+    frozen.flags.writeable = False
+    return frozen
+
+
 def probability_sample_matrix_identity(samples: np.ndarray) -> str:
     """Canonical identity of one ordered row-simplex probability draw matrix."""
 
@@ -1019,11 +1041,14 @@ class JointOutcomeProbabilityWitness:
             topology_identity=self.topology_identity,
         )
 
-    @property
+    # __post_init__ freezes private copies of both arrays, so each identity is a
+    # pure function of immutable fields: hash the family matrix once, not once
+    # per candidate leg that reads it.
+    @cached_property
     def sample_matrix_identity(self) -> str:
         return probability_sample_matrix_identity(self.yes_q_samples)
 
-    @property
+    @cached_property
     def probability_content_identity(self) -> str:
         return joint_probability_content_identity(
             family_key=self.family_key,
@@ -1130,8 +1155,8 @@ class JointOutcomeProbabilityWitness:
         )
         if self.witness_identity != expected:
             raise ValueError("probability witness identity does not bind its family simplex")
-        object.__setattr__(self, "yes_point_q", np.ascontiguousarray(point))
-        object.__setattr__(self, "yes_q_samples", np.ascontiguousarray(samples))
+        object.__setattr__(self, "yes_point_q", _frozen_copy(point))
+        object.__setattr__(self, "yes_q_samples", _frozen_copy(samples))
 
 
 def deterministic_bin_payoff_witness_identity(

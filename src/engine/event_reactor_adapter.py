@@ -7988,11 +7988,33 @@ def _prepared_global_probability_semantics_revision(
         ).fetchone()
     except sqlite3.Error:
         return None
-    shape = _current_evidence_shape(row[0]) if row is not None else None
+    if row is None:
+        return None
+    return _posterior_semantics_revision(row[0])
+
+
+# Keyed by the exact provenance bytes: every candidate leg of a family reads the
+# same ~200 KB row, and parsing it per leg was most of one cut's scoring time.
+# A rewritten row (e.g. retention eviction) has new bytes and so a new key.
+_POSTERIOR_REVISION_BY_DIGEST: dict[bytes, str | None] = {}
+_POSTERIOR_REVISION_MEMO_ENTRIES = 4096
+
+
+def _posterior_semantics_revision(provenance: object) -> str | None:
+    text = provenance if isinstance(provenance, str) else str(provenance or "")
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest()
+    try:
+        return _POSTERIOR_REVISION_BY_DIGEST[digest]
+    except KeyError:
+        pass
+    shape = _current_evidence_shape(provenance)
     revision = str(
         shape.get("semantics_revision") if shape is not None else ""
-    ).strip()
-    return revision or None
+    ).strip() or None
+    if len(_POSTERIOR_REVISION_BY_DIGEST) >= _POSTERIOR_REVISION_MEMO_ENTRIES:
+        _POSTERIOR_REVISION_BY_DIGEST.clear()
+    _POSTERIOR_REVISION_BY_DIGEST[digest] = revision
+    return revision
 
 
 def _global_entry_calibration_fit_scope(
