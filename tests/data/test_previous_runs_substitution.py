@@ -444,6 +444,15 @@ def test_request_skips_instrument_expansion_after_current_q_converges(
     assert receipt["result_evidence"]["subprocess_spawned"] is False
 
 
+def _consumed_witness(argv) -> dict:
+    """What a real worker reports having read: at least its request file."""
+    from scripts.materialize_replacement_forecast_live import _ConsumedInputs
+
+    consumed = _ConsumedInputs()
+    consumed.read(Path(argv[argv.index("--input-json") + 1]), role="request")
+    return consumed.witness()
+
+
 def test_queue_preserves_unchanged_blocked_seed_as_terminal_receipt(
     tmp_path, monkeypatch
 ) -> None:
@@ -502,6 +511,7 @@ def test_queue_preserves_unchanged_blocked_seed_as_terminal_receipt(
         # exact request's attempt fingerprint; no clock reopens it.
         "materialization_blocked": {
             "attempt_fingerprint": "same-fingerprint",
+            "identity_version": queue_mod.MATERIALIZATION_IDENTITY_VERSION,
             "request": {"city": "Beijing"},
         },
         "reason_codes": [queue_mod._UNCHANGED_BLOCKED_SEED_SKIP_REASON],
@@ -6411,6 +6421,7 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
                 {
                     "status": "BLOCKED",
                     "reason_codes": [blocked_reason],
+                    "consumed_inputs": _consumed_witness(argv),
                 }
             )
             + "\n",
@@ -6555,6 +6566,7 @@ def test_blocked_source_clock_request_retries_only_on_new_provider_family(
                     "reason_codes": [
                         "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
                     ],
+                    "consumed_inputs": _consumed_witness(argv),
                 }
             )
             + "\n",

@@ -1147,7 +1147,9 @@ def failed_seed_identity_fenced(
             recorded = blocked["attempt_fingerprint"]
             forecast_db = forecast_db_from_connection(conn)
             return (
-                isinstance(request, Mapping) and bool(recorded) and forecast_db is not None
+                # An older (metadata-keyed) identity is evidence, never a fence.
+                blocked.get("identity_version") == MATERIALIZATION_IDENTITY_VERSION
+                and isinstance(request, Mapping) and bool(recorded) and forecast_db is not None
                 and _blocked_attempt_fingerprint(
                     input_json=seed_file.parent.parent / "requests" / seed_file.name,
                     forecast_db=forecast_db,
@@ -1214,6 +1216,7 @@ def _record_materialization_blocked_identity(
             "materialization_blocked": {
                 "request": dict(request_payload),
                 "attempt_fingerprint": attempt_fingerprint,
+                "identity_version": MATERIALIZATION_IDENTITY_VERSION,
             },
         })
     except (OSError, ValueError):
@@ -3247,6 +3250,15 @@ _TRANSIENT_BLOCK_RETRY_REASONS = frozenset(
     }
 )
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
+# Version of the materialization attempt identity (blocked-attempt markers and
+# materialization-blocked receipts). m2 keys each named input file on the sha256
+# of its bytes and fences only a worker outcome whose consumed-input witness still
+# re-reads byte- and version-identical. Unversioned identities keyed files on
+# (mtime, size): they never match an m2 fingerprint, so they are never honored.
+MATERIALIZATION_IDENTITY_VERSION = "m2"
+# Revision of the worker's named-input validation; part of every witness.
+MATERIALIZATION_INPUT_VALIDATION_REVISION = "worker-named-inputs-r1"
+_UNBOUND_VERDICT_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_VERDICT_NOT_BOUND_TO_INPUTS"
 _ATTEMPT_INPUT_PATH_FIELDS = (
     "openmeteo_payload_json",
     "precision_metadata_json",
@@ -3733,7 +3745,7 @@ def _blocked_attempt_fingerprint(
         raise
     except Exception:  # noqa: BLE001 - unknown watermark must retry, never suppress work
         return None
-    file_revisions: dict[str, tuple[int, int] | None] = {}
+    file_revisions: dict[str, str] = {}
     if not missing_sources:
         for field in _ATTEMPT_INPUT_PATH_FIELDS:
             raw_path = payload.get(field)
@@ -3743,10 +3755,15 @@ def _blocked_attempt_fingerprint(
             if not path.is_absolute():
                 path = input_json.parent / path
             try:
-                stat = path.stat()
-                file_revisions[field] = (stat.st_mtime_ns, stat.st_size)
-            except OSError:
-                file_revisions[field] = None
+                read = _SEED_INPUT_READER.read(path)
+            except (FileNotFoundError, NotADirectoryError):
+                file_revisions[field] = "absent"
+                continue
+            except (OSError, UnsafeFile):
+                return None  # unknown read state never fences
+            if not read.settled:
+                return None
+            file_revisions[field] = read.sha256
     logic_revisions: dict[str, tuple[int, int] | None] = {}
     for path in _logic_revision_paths():
         try:
@@ -3759,6 +3776,7 @@ def _blocked_attempt_fingerprint(
     )
 
     identity = {
+            "identity_version": MATERIALIZATION_IDENTITY_VERSION,
             "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
             "request": {
                 key: value
@@ -3793,6 +3811,78 @@ def _blocked_attempt_fingerprint(
         default=str,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _subprocess_result_consumed_inputs(
+    completed: subprocess.CompletedProcess[str],
+) -> Mapping[str, object] | None:
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, Mapping) and payload.get("status") not in (None, ""):
+                witness = payload.get("consumed_inputs")
+                return witness if isinstance(witness, Mapping) else None
+    return None
+
+
+def _consumed_inputs_unchanged(witness: Mapping[str, object] | None) -> bool:
+    """Whether every file the worker consumed still holds the version and bytes it
+    judged. Only then is the worker's verdict a verdict on the current inputs.
+
+    SCOPE: one worker outcome. A missing, foreign-version or empty witness, an
+    unreadable file, or any file whose (dev, ino, size, mtime, ctime) or sha256
+    moved since the worker's read is unbound: never fenced, retained instead.
+    """
+    if (
+        not isinstance(witness, Mapping)
+        or witness.get("identity_version") != MATERIALIZATION_IDENTITY_VERSION
+        or witness.get("validation_revision") != MATERIALIZATION_INPUT_VALIDATION_REVISION
+    ):
+        return False
+    files = witness.get("files")
+    if not isinstance(files, (list, tuple)) or not files:
+        return False
+    for entry in files:
+        try:
+            read = _SEED_INPUT_READER.read(Path(str(entry["path"])))
+            if (
+                not read.settled
+                or list(read.version) != list(entry["version"])
+                or read.sha256 != entry["sha256"]
+            ):
+                return False
+        except (OSError, UnsafeFile, KeyError, TypeError):
+            return False
+    return True
+
+
+def _bound_verdict_fingerprint(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    input_json: Path,
+    payload: Mapping[str, object],
+    forecast_db: Path | str | None,
+    claimed: str | None,
+) -> str | None:
+    """The attempt identity a worker verdict may fence, or None when unbound.
+
+    ``claimed`` is the fingerprint taken before the worker ran. The verdict binds
+    only when (1) every file the worker consumed still holds the version and bytes
+    it judged, and (2) the fingerprint is the same after the worker as before it,
+    so no fingerprinted input (file bytes or DB frontier) moved across the run.
+    The witness is checked on both sides of the recompute: versions only move
+    forward, so this also rejects A->B->A, where the worker judged B.
+    """
+    witness = _subprocess_result_consumed_inputs(completed)
+    if claimed is None or not _consumed_inputs_unchanged(witness):
+        return None
+    after = _blocked_attempt_fingerprint(
+        input_json=input_json, forecast_db=forecast_db, payload=payload,
+    )
+    return claimed if after == claimed and _consumed_inputs_unchanged(witness) else None
 
 
 def _blocked_attempt_marker_path(
@@ -4062,6 +4152,7 @@ def _write_blocked_attempt_marker(
                 "status": "BLOCKED",
                 "reason_codes": [_UNCHANGED_BLOCKED_REASON],
                 "attempt_fingerprint": fingerprint,
+                "identity_version": MATERIALIZATION_IDENTITY_VERSION,
                 "city": payload.get("city"),
                 "target_date": payload.get("target_date"),
                 "temperature_metric": payload.get("temperature_metric"),
@@ -4133,13 +4224,16 @@ def _subprocess_result_failure_category(
 
 
 def _record_retained_turn(
-    path: Path, *, category: FailureCategory, error_type: str | None,
+    path: Path, *, category: FailureCategory, error_type: str | None, bound: bool = True,
 ) -> None:
     """Stamp a retained request's turn and failure beside it (non-authority)."""
     receipt = _read_stage_receipt(path) or {"stage": "unknown", "deadline_at": None}
     # A turn is an order key, never a wait: the request is claimable at once.
     receipt["retained_turn"] = time.time_ns()
-    receipt["last_failure"] = {"failure_category": category.value, "error_type": error_type}
+    receipt["last_failure"] = {
+        "failure_category": category.value, "error_type": error_type,
+        "verdict_bound_to_inputs": bound,
+    }
     _write_stage_receipt_payload(path, receipt)
 
 
@@ -6322,6 +6416,7 @@ def _prepare_seed_requests_with_connection(
                     "materialization_blocked": {
                         "request": dict(result.request),
                         "attempt_fingerprint": _fingerprint,
+                        "identity_version": MATERIALIZATION_IDENTITY_VERSION,
                     },
                 }
                 moved = _move_request(
@@ -7113,6 +7208,7 @@ def _process_claimed_materialization_batch(
     write_deferred: list[str] = []
     error_retained: list[str] = []
     unclassified_retained: list[str] = []
+    unbound_verdicts: list[str] = []
     timed_out_requests: list[str] = []
     timeout_stage_reasons: list[str] = []
     deadline_deferred_reasons: list[str] = []
@@ -7429,6 +7525,16 @@ def _process_claimed_materialization_batch(
                 for reason in result_reason_codes
             )
         )
+        # A worker verdict on its inputs (BLOCKED, or an emitted INPUT_VERDICT).
+        verdict = item.request_payload is not None and (
+            result_status == "BLOCKED"
+            or _UNCHANGED_BLOCKED_REASON in result_reason_codes
+            or (
+                result_status == "ERROR"
+                and _subprocess_result_failure_category(completed)
+                is FailureCategory.INPUT_VERDICT
+            )
+        )
         transient_block = any(
             reason in _TRANSIENT_BLOCK_RETRY_REASONS
             for reason in result_reason_codes
@@ -7500,18 +7606,17 @@ def _process_claimed_materialization_batch(
             processed.append(str(receipt))
             stale_day0_superseded.append(str(receipt))
         elif (
-            item.request_payload is not None
+            verdict
             and (
-                result_status == "BLOCKED"
-                or _UNCHANGED_BLOCKED_REASON in result_reason_codes
-                or (
-                    result_status == "ERROR"
-                    and _subprocess_result_failure_category(completed)
-                    is FailureCategory.INPUT_VERDICT
+                bound_fingerprint := _bound_verdict_fingerprint(
+                    completed, input_json=input_json,
+                    payload=item.request_payload, forecast_db=forecast_db,
+                    claimed=item.attempt_fingerprint,
                 )
-            )
+            ) is not None
         ):
-            # SCOPE: this request's exact attempt fingerprint. BLOCKED or an
+            # SCOPE: this request's exact attempt fingerprint, recomputed after
+            # the worker and bound to the bytes it consumed. BLOCKED or an
             # input-verdict ERROR re-fails identically on unchanged inputs.
             # DRAIN/RESET: any fingerprinted input change reopens it; no clock.
             verdict_reasons = result_reason_codes or (
@@ -7521,13 +7626,13 @@ def _process_claimed_materialization_batch(
                 _write_blocked_attempt_marker(
                     marker_path=item.marker_path,
                     payload=item.request_payload,
-                    fingerprint=item.attempt_fingerprint,
+                    fingerprint=bound_fingerprint,
                 )
             except OSError:
                 pass
             _record_materialization_blocked_identity(
                 input_json, seed_dir=seed_dir, request_payload=item.request_payload,
-                attempt_fingerprint=item.attempt_fingerprint,
+                attempt_fingerprint=bound_fingerprint,
             )
             receipt = _record_latest_terminal_request(
                 input_json,
@@ -7549,10 +7654,10 @@ def _process_claimed_materialization_batch(
                     request_path.name,
                 )
             write_deferred.append(str(restored))
-        elif item.request_payload is not None and result_status in ("ERROR", None):
-            # SCOPE: this one request. An ENVIRONMENT_RETRY or UNCLASSIFIED error
-            # is no verdict on its inputs, so it is neither fenced nor
-            # surrendered: the request stays the family's single owner, retried
+        elif item.request_payload is not None and (verdict or result_status in ("ERROR", None)):
+            # SCOPE: this one request. An ENVIRONMENT_RETRY or UNCLASSIFIED error,
+            # or a verdict not bound to the bytes it judged, is no verdict on the
+            # current inputs, so it is neither fenced nor surrendered: the request stays the family's single owner, retried
             # by this queue in its tier's turn, and producers that see it
             # (``consumed_seed_request_owned``) publish no fresh seed. RESET:
             # its own next outcome.
@@ -7566,8 +7671,15 @@ def _process_claimed_materialization_batch(
                 )
             category = _subprocess_result_failure_category(completed)
             error_type = _subprocess_result_error_type(completed)
+            bound = not verdict
+            if not bound:
+                # A verdict the worker could not bind to the current bytes: keep
+                # the worker's own diagnostic, record that it bound nothing.
+                unbound_verdicts.append(str(restored))
             try:
-                _record_retained_turn(restored, category=category, error_type=error_type)
+                _record_retained_turn(
+                    restored, category=category, error_type=error_type, bound=bound,
+                )
             except OSError:
                 pass  # no turn stamp: the request still retries, ordered as fresh
             _LOG.log(
@@ -7617,6 +7729,8 @@ def _process_claimed_materialization_batch(
         )
     if unclassified_retained:
         reasons.append(_UNCLASSIFIED_ERROR_REASON)
+    if unbound_verdicts:
+        reasons.append(_UNBOUND_VERDICT_REASON)
     if error_retained:
         reasons.append(_ERROR_RETAINED_REASON)
         _LOG.warning(
