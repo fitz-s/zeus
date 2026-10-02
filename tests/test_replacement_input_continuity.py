@@ -184,6 +184,16 @@ def test_input_continuity_unknown_original_clock_and_metric_fail_closed(monkeypa
         assert "unverifiable" in reason
     finally:conn.close()
 
+def test_input_continuity_coverage_clock_admits_a_later_posterior(monkeypatch):
+    """Coverage asks whether a posterior at/after the requested clock exists;
+    serving asks whether it was possessed at decision time."""
+    conn,context=_component(monkeypatch,scenario="none")
+    try:
+        context["decision_time"]=COMPUTED-timedelta(minutes=1)
+        assert H.replacement_input_refresh_reason(conn,**context) is None
+        assert "unverifiable" in H.replacement_live_input_lag_reason(conn,**context)
+    finally:conn.close()
+
 @pytest.mark.parametrize("direction",["buy_yes","buy_no"])
 def test_input_continuity_held_loader_serves_same_q_and_lag(_shanghai_reader_current_certificate,monkeypatch,direction):
     from src.engine.position_belief import load_replacement_belief

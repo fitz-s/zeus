@@ -2240,7 +2240,7 @@ def _replacement_live_input_lag_reason(
         return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
     posterior_computed = _parse_source_cycle_utc(posterior_computed_at)
     if (metric not in {"high", "low"} or decision_time.tzinfo is None or
-        posterior_computed is None or not posterior_cycle <= posterior_computed <= decision_time):
+        posterior_computed is None or not posterior_cycle <= posterior_computed):
         return "basis=posterior_scope_or_materialization_clock_unverifiable"
     provenance = posterior_provenance
     if provenance is None:
@@ -2402,7 +2402,34 @@ def replacement_live_input_lag_reason(
     Same policy for ENTRY, HELD and standing rests. This does not certify an
     arbitrary row: the bundle reader still requires its exact READY binding,
     live-grade semantics, original dependencies, scope and validity interval.
+    A posterior first computed after ``decision_time`` was not possessed then.
     """
+    computed = _parse_source_cycle_utc(posterior_computed_at)
+    if computed is not None and decision_time.tzinfo is not None and computed > decision_time:
+        return "basis=posterior_scope_or_materialization_clock_unverifiable"
+    return _input_hwm_reason(
+        conn, city=city, target_date=target_date, metric=metric,
+        decision_time=decision_time,
+        posterior_source_cycle_time=posterior_source_cycle_time,
+        posterior_computed_at=posterior_computed_at,
+        posterior_provenance=posterior_provenance,
+        held_redecision=held_redecision, input_witness_out=input_witness_out,
+    )
+
+
+def _input_hwm_reason(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    posterior_source_cycle_time: object,
+    posterior_computed_at: object | None = None,
+    posterior_provenance: Mapping[str, object] | None = None,
+    held_redecision: bool = False,
+    input_witness_out: dict[str, object] | None = None,
+) -> str | None:
     refresh: list[str] = []
     witness: dict[str, object] = {
         "revision": "validated_posterior_input_continuity_v1",
@@ -2435,9 +2462,13 @@ def replacement_live_input_lag_reason(
 
 
 def replacement_input_refresh_reason(conn: sqlite3.Connection, **kwargs: object) -> str | None:
-    """Coverage/queue projection: a usable old posterior does not cover new inputs."""
+    """Coverage/queue projection: a usable old posterior does not cover new inputs.
+
+    ``decision_time`` is the requested coverage clock; a posterior computed
+    after it is the coverage being asked about, not an unpossessed one.
+    """
     witness: dict[str, object] = {}
-    reason = replacement_live_input_lag_reason(conn, **kwargs, input_witness_out=witness)
+    reason = _input_hwm_reason(conn, **kwargs, input_witness_out=witness)
     refresh = witness.get("refresh_reasons", ())
     return reason or (refresh[0] if refresh else None)
 
