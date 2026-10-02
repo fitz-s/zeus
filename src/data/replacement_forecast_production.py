@@ -1633,7 +1633,12 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 decision_time=decision_time,
                 capture_rows=capture_rows,
                 held_priority=held_priority,
-                deadline_monotonic=deadline_monotonic,
+                # Judging debt shares the slice with paying it: an expired
+                # judgement returns what it found, and the download still runs.
+                deadline_monotonic=(
+                    None if deadline_monotonic is None
+                    else time.monotonic() + max(0.0, deadline_monotonic - time.monotonic()) / 2.0
+                ),
                 cohort_backtrack_candidates=cohort_backtrack_candidates,
                 physical_recovery_candidates=(physical_recovery_candidates
                     if frozen_source_runs is None and models is None else None),
@@ -1717,6 +1722,11 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             (row.city, row.target_date)
             for row in starved_rows
             if row.target_date == starvation_frontier
+        } | {
+            # A judged coherent-pair repair is one archive request away from a
+            # posterior; it leads the rotation so the slice spends on it first.
+            (city, target_date)
+            for city, _metric, target_date in cohort_backtrack_candidates
         }
         targets: list[BayesPrecisionFusionDownloadTarget] = []
         for row in admitted_rows:
@@ -1831,12 +1841,16 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                             archive_model, archive_cycle = candidate[:2]
                             capture_reason = candidate[2] if len(candidate) == 4 else None
                             from dataclasses import replace
+                            # A coherent-pair repair names one (model, run): every
+                            # target needing that same run rides the one location-
+                            # batched request, so a listing's families repair in one
+                            # slice. A physical capture debt stays its own group's.
                             archive_targets = tuple(
                                 replace(target, lead_days=max(0, (date.fromisoformat(target.target_date) - archive_cycle.date()).days))
                                 for target in rotated_targets
-                                if (target.city, target.target_date) == first_group
-                                and (
-                                    (physical_recovery_candidates.get((target.city, target.target_date, target.metric)) or ())[:3] == candidate[:3]
+                                if (
+                                    (target.city, target.target_date) == first_group
+                                    and (physical_recovery_candidates.get((target.city, target.target_date, target.metric)) or ())[:3] == candidate[:3]
                                     if capture_reason
                                     else cohort_backtrack_candidates.get((target.city, target.metric, target.target_date)) == candidate
                                 )
@@ -3717,8 +3731,26 @@ def _extras_coverage_missing(
             )
 
             have: set[tuple[str, str, str]] = set()
-            for city, metric, target_date in sorted(need):
-                _check_source_preflight_deadline(deadline_monotonic)
+            # A family with no live posterior yet (a new listing) and held
+            # exposure are judged first: an expired pass returns what it has
+            # judged, every unjudged scope stays missing (the None fallback's
+            # admission), and the newest debt is never the part that is cut.
+            try:
+                posterior_scopes = {
+                    (str(c), str(m), str(d)) for c, d, m in conn.execute(
+                        "SELECT DISTINCT city, target_date, temperature_metric"
+                        " FROM forecast_posteriors WHERE runtime_layer='live'"
+                        " AND target_date>=?", (min(scope[2] for scope in need),))
+                }
+            except sqlite3.OperationalError:
+                posterior_scopes = set()
+            judged = sorted(need, key=lambda scope: (
+                held_priority.get((scope[0], scope[2], scope[1]), 2),
+                scope in posterior_scopes, scope,
+            ))
+            for city, metric, target_date in judged:
+                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                    break
                 city_cfg = cities_by_name.get(city)
                 if city_cfg is None:
                     continue
@@ -3754,13 +3786,20 @@ def _extras_coverage_missing(
                 if len({provider_family_for_source(model) for model in expected}) < 2:
                     continue
                 preferred = set(scheme.weights) & expected.keys() if scheme is not None else set()
-                rows = _read_source_clock_rows(
-                    conn,
-                    city=city, metric=metric, target_date=target_date,
-                    decision_iso=now.isoformat(), schema=schema,
-                    max_substitution_age_hours=PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
-                    single_runs_only=True,
-                )
+                try:
+                    rows = _read_source_clock_rows(
+                        conn,
+                        city=city, metric=metric, target_date=target_date,
+                        decision_iso=now.isoformat(), schema=schema,
+                        max_substitution_age_hours=PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+                        single_runs_only=True,
+                    )
+                except sqlite3.OperationalError:
+                    # One scope's bounded proof scan expiring is that scope's
+                    # unknown, so it stays missing; it never discards the pass.
+                    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                        break
+                    continue
                 current_values: dict[str, float] = {}
                 current_cycles: dict[str, datetime] = {}
                 served_models: set[str] = set()
@@ -3825,14 +3864,45 @@ def _extras_coverage_missing(
                 }
                 if len(current_families) < 2:
                     continue
-                coherent = read_freshest_coherent_instrument_values(
-                    conn,
-                    city=city, metric=metric, target_date=target_date,
-                    decision_time_iso=now.isoformat(),
-                    models=tuple(model for model in expected if model in selected_models),
-                    cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
-                    single_runs_only=True,
+                # Necessary condition on the raw rows (a superset of what is
+                # served): some cycle holds every preferred source and two
+                # families within the cohort window. Without it no coherent
+                # cohort exists, so the second full proof read is skipped.
+                raw_cycles: dict[str, list[datetime]] = {}
+                for raw_model, raw_cycle in conn.execute(
+                    "SELECT DISTINCT model, source_cycle_time FROM raw_model_forecasts"
+                    " WHERE endpoint='single_runs' AND city=? AND target_date=?"
+                    " AND metric=? AND coverage_status='COVERED'",
+                    (city, target_date, metric),
+                ):
+                    if raw_model not in expected:
+                        continue
+                    try:
+                        raw_run = datetime.fromisoformat(str(raw_cycle).replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if raw_run.utcoffset() is not None:
+                        raw_cycles.setdefault(str(raw_model), []).append(raw_run)
+                window_s = BETWEEN_COHORT_WINDOW_HOURS * 3600.0
+                raw_coherent = any(
+                    preferred <= (members := {
+                        model for model, runs in raw_cycles.items()
+                        if any(0.0 <= (anchor - run).total_seconds() <= window_s for run in runs)
+                    })
+                    and len({provider_family_for_source(model) for model in members}) >= 2
+                    for anchor in {run for runs in raw_cycles.values() for run in runs}
                 )
+                try:
+                    coherent = {} if not raw_coherent else read_freshest_coherent_instrument_values(
+                        conn,
+                        city=city, metric=metric, target_date=target_date,
+                        decision_time_iso=now.isoformat(),
+                        models=tuple(model for model in expected if model in selected_models),
+                        cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                        single_runs_only=True,
+                    )
+                except sqlite3.OperationalError:
+                    coherent = {}  # unproved: the scope stays missing
                 if (
                     preferred <= coherent.keys()
                     and len({provider_family_for_source(model) for model in coherent}) >= 2

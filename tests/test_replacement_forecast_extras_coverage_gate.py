@@ -1,5 +1,5 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-09-25
+# Last reused or audited: 2026-10-02 (listing-first judge order, raw cohort pre-pass, partial verdict on deadline)
 # Lifecycle: created=2026-06-16; last_reviewed=2026-09-25; last_reused=2026-09-25
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md;
@@ -721,6 +721,113 @@ def test_current_source_clock_gate_rejects_unproved_inputs(
     assert _current_source_clock_missing(db, decision_time=decision) == {
         ("Denver", "high", "2026-09-25")
     }
+
+
+def _serve_rows_by_columns(monkeypatch) -> list[tuple[str, str, str]]:
+    """Admit each stripped-schema row as served and count the proof reads.
+
+    The stripped schema carries no product identity, so the production
+    authority rejects every row; these tests pin the pass's own ordering,
+    pre-pass and deadline behavior, not product authority.
+    """
+    from src.data import replacement_current_value_serving as serving
+
+    proof_reads: list[tuple[str, str, str]] = []
+    real_read = serving._read_source_clock_rows
+
+    def read(conn, **kwargs):
+        proof_reads.append((kwargs["city"], kwargs["metric"], kwargs["target_date"]))
+        return real_read(conn, **kwargs)
+
+    def served(row, **_kwargs):
+        return str(row[1]), serving.ServedInstrumentValue(
+            value_c=float(row[2]), raw_model_forecast_id=int(row[0]), served_via="single_runs",
+            served_cycle=str(row[4]), captured_at=str(row[6]), age_hours=0.0, lead_days=int(row[3]),
+        )
+
+    monkeypatch.setattr(serving, "_read_source_clock_rows", read)
+    monkeypatch.setattr(serving, "_served_source_clock_row", served)
+    return proof_reads
+
+
+def test_new_listing_is_judged_first_and_a_deadline_keeps_what_was_judged(
+    tmp_path, monkeypatch,
+) -> None:
+    """A family with no posterior is judged before refreshes; an expired pass
+    returns its partial verdict (unjudged scopes stay missing), never None."""
+    proof_reads = _serve_rows_by_columns(monkeypatch)
+    db = _current_source_clock_db(tmp_path)
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE forecast_posteriors (city TEXT, target_date TEXT,"
+                     " temperature_metric TEXT, runtime_layer TEXT)")
+        conn.execute("INSERT INTO forecast_posteriors VALUES ('Denver','2026-09-24','high','live')")
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    icon = old + timedelta(hours=6)
+    _current_source_clock_metadata(
+        monkeypatch, {"icon_global": icon, "ukmo_global_deterministic_10km": old},
+    )
+    for target_date in ("2026-09-24", "2026-09-25"):
+        _current_source_clock_row(db, "icon_global", icon, target_date=target_date)
+        _current_source_clock_row(db, "ukmo_global_deterministic_10km", old, target_date=target_date)
+    import time as real_time
+    from src.data import replacement_current_value_serving as serving
+
+    # The first family's proof read spends the whole budget.
+    deadline = real_time.monotonic() + 30.0
+    clock = [real_time.monotonic()]
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+    spend = serving._read_source_clock_rows
+
+    def read_then_expire(conn, **kwargs):
+        rows = spend(conn, **kwargs)
+        clock[0] = deadline
+        return rows
+
+    monkeypatch.setattr(serving, "_read_source_clock_rows", read_then_expire)
+    candidates: dict = {}
+    result = prod._extras_coverage_missing(
+        {"forecast_db": db}, old, decision_time=old + timedelta(hours=10),
+        capture_rows=(_PlanRow("Denver", "high", "2026-09-24"), _PlanRow("Denver", "high", "2026-09-25")),
+        held_priority={}, deadline_monotonic=deadline,
+        cohort_backtrack_candidates=candidates,
+    )
+
+    assert result is not None
+    assert proof_reads == [("Denver", "high", "2026-09-25")], "the unposteriored listing goes first"
+    assert result == ({("Denver", "high", "2026-09-24"), ("Denver", "high", "2026-09-25")}, 2)
+    assert candidates == {("Denver", "high", "2026-09-25"): ("icon_global", old)}
+
+
+def test_raw_rows_without_a_coherent_cycle_skip_the_cohort_proof_read(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import replacement_current_value_serving as serving
+
+    _serve_rows_by_columns(monkeypatch)
+    cohort_reads: list[object] = []
+    monkeypatch.setattr(serving, "read_freshest_coherent_instrument_values",
+                        lambda *_a, **_k: cohort_reads.append(1) or {})
+    db = _current_source_clock_db(tmp_path)
+    old = datetime(2026, 9, 23, 0, tzinfo=UTC)
+    icon = old + timedelta(hours=6)
+    _current_source_clock_metadata(
+        monkeypatch, {"icon_global": icon, "ukmo_global_deterministic_10km": old},
+    )
+    _current_source_clock_row(db, "icon_global", icon)
+    _current_source_clock_row(db, "ukmo_global_deterministic_10km", old)
+    candidates: dict = {}
+
+    assert _current_source_clock_missing(
+        db, decision_time=old + timedelta(hours=10), cohort_backtrack_candidates=candidates,
+    ) == {("Denver", "high", "2026-09-25")}
+    assert cohort_reads == []
+    assert candidates == {("Denver", "high", "2026-09-25"): ("icon_global", old)}
+
+    _current_source_clock_row(db, "icon_global", old)
+    assert _current_source_clock_missing(db, decision_time=old + timedelta(hours=10)) == {
+        ("Denver", "high", "2026-09-25")
+    }
+    assert cohort_reads == [1], "a coherent raw cycle still gets the full proof read"
 
 
 def test_source_cycle_local_decision_window_is_timezone_aware() -> None:
