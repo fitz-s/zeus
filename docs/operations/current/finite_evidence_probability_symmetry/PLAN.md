@@ -209,6 +209,27 @@ ordered source read, RESET is a new cut/evidence that re-runs winner qualificati
 Acceptance remains a complete fresh current global cut plus lawful admission
 or a precise economic rejection, not merely a microbenchmark or restart.
 
+Timeliness implementation checkpoint: only the current-serving path now proves
+potential winner candidates; the full proved-reader SQL/API remains unchanged.
+Nine counter/cutoff/twin tests plus real same-product latest-poison, repair and
+read-pass equivalence checks give 27 passing tests. The real poison antibody
+validates one winner out of seven clean candidates, but all seven reject after
+the exact body/cell obtains a newer UNKNOWN receipt. Independent static review
+finds no actionable cutoff/ordering/deadline/winner/frontier/sentinel/cohort defect.
+
+Performance evidence is a corrected live-statics read-only transaction at
+`2026-10-02T10:13:06.784480Z`, not a parent tree missing static evidence. Nonempty
+serving counts are 5/5/4/4/4/2 in LA HIGH/LOW, HK HIGH/LOW, Paris LOW and Beijing
+LOW. Three-run medians improve 3.91-5.50 times while complete dataclasses and
+canonical provenance JSON bytes match exactly. A preliminary parent-root probe
+with absent statics failed closed and is excluded from performance acceptance.
+Final parent checks repeat all 27 source antibodies plus 18 normal HKO money-path
+integrations. Data-required batch has 268 passes and four failures with identical
+baseline messages; existing engine-required failures remain recorded separately.
+No dropped cities, changed candidate order, new cache, enlarged deadline, altered
+source-clock probability or reduced physical/serving proof is used for this gain.
+The loaded whole global preparation and fresh-book epoch still require measurement.
+
 Latest complete live stored-row audit is loss's existing
 `/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
 SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.
