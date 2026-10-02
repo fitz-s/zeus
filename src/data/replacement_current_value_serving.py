@@ -257,7 +257,8 @@ _ARTIFACT_IDENTITY_JSON_SQL = """json_object('artifact_id',a.artifact_id,'source
 _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS = 2.0
 
 
-def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso: str | None = None) -> str:
+def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso: str | None = None,
+        day0_remaining_from_iso: str | None = None) -> str:
     fields = ", ".join(
         f"'{name}', {name if name in schema.product_identity_columns else 'NULL'}"
         for name in _PRODUCT_IDENTITY_COLUMNS
@@ -266,7 +267,12 @@ def _product_identity_select(schema: CurrentValueServingSchema, *, decision_iso:
     if schema.has_artifacts and "artifact_id" in schema.product_identity_columns:
         artifact = f"(SELECT {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE a.artifact_id=raw_model_forecasts.artifact_id)"
     cutoff = "NULL" if decision_iso is None else "'" + decision_iso.replace("'", "''") + "'"
-    return f"json_object({fields}, 'physical_proof_cutoff', {cutoff}, 'physical_artifact', json({artifact}))"
+    # The family's last authorized observation (Day0 tau) rides beside the cut,
+    # so every proof re-parse of this row reads one boundary. Without tau the
+    # identity text is exactly what it was.
+    tau = ("" if day0_remaining_from_iso is None
+           else ", 'day0_remaining_from', '" + str(day0_remaining_from_iso).replace("'", "''") + "'")
+    return f"json_object({fields}, 'physical_proof_cutoff', {cutoff}{tau}, 'physical_artifact', json({artifact}))"
 
 
 def _receipt_canonical_recorded_bound(artifact: Mapping[str,object]) -> datetime | None:
@@ -642,6 +648,7 @@ def _read_source_clock_rows(
     schema: CurrentValueServingSchema,
     max_substitution_age_hours: float,
     single_runs_only: bool = False,
+    day0_remaining_from_iso: str | None = None,
 ) -> list[sqlite3.Row]:
     """Read the complete production target-family candidate stream."""
 
@@ -654,6 +661,7 @@ def _read_source_clock_rows(
         schema=schema,
         max_substitution_age_hours=max_substitution_age_hours,
         single_runs_only=single_runs_only,
+        day0_remaining_from_iso=day0_remaining_from_iso,
     )
     try:
         return [(*row[:-1], _read_product_identity_at_cutoff(conn, row[-1], deadline_monotonic=deadline)) for row in rows]
@@ -672,6 +680,7 @@ def _read_source_clock_candidates(
     schema: CurrentValueServingSchema,
     max_substitution_age_hours: float,
     single_runs_only: bool = False,
+    day0_remaining_from_iso: str | None = None,
 ) -> tuple[list[sqlite3.Row], float]:
     """Read ordered, unproved candidates with their one family scan deadline."""
 
@@ -683,6 +692,7 @@ def _read_source_clock_candidates(
         schema=schema,
         max_substitution_age_hours=max_substitution_age_hours,
         single_runs_only=single_runs_only,
+        day0_remaining_from_iso=day0_remaining_from_iso,
     )
     try:
         deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
@@ -702,6 +712,7 @@ def _source_clock_rows_query(
     schema: CurrentValueServingSchema,
     max_substitution_age_hours: float,
     single_runs_only: bool = False,
+    day0_remaining_from_iso: str | None = None,
 ) -> tuple[str, tuple[object, ...]]:
     """Build the complete production ordering used only before the final lock."""
 
@@ -759,7 +770,8 @@ def _source_clock_rows_query(
     else:
         params.extend((SERVED_VIA_SINGLE_RUNS, SERVED_VIA_PREVIOUS_RUNS))
     # Missing physical proof remains NULL, including stripped/legacy schemas.
-    product_select = _product_identity_select(schema, decision_iso=decision_iso)
+    product_select = _product_identity_select(schema, decision_iso=decision_iso,
+        day0_remaining_from_iso=day0_remaining_from_iso)
     return (
         f"""
         SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
@@ -1100,6 +1112,37 @@ def _station_capture_view(row: Mapping[str, object]) -> dict[str, object] | None
         return None
 
 
+def _remaining_window_boundary(row: Mapping[str, object]) -> str:
+    """The causal boundary of a stored body's local-day coverage re-parse.
+
+    Day0 law: the remaining window is keyed on the LAST OBSERVATION, never the
+    decision clock. The decision cut stands in for it only while the decision is
+    inside the local day, where the two own the same suffix. Once the decision
+    passes local-day end, the family's last authorized observation tau, when it
+    lies inside the day and was possessed by the cut, is the boundary: the run
+    owns [tau, day end), which it could prove at tau. No tau, or tau at/after day
+    end, keeps the decision cut (whole-day law after day end).
+    """
+    cut = str(row.get("physical_proof_cutoff") or row["captured_at"])
+    tau_raw = row.get("day0_remaining_from")
+    if tau_raw is None:
+        return cut
+    try:
+        from datetime import date
+        from src.data.forecast_target_contract import compute_target_local_day_window_utc
+        decision = datetime.fromisoformat(cut.replace("Z", "+00:00"))
+        tau = datetime.fromisoformat(str(tau_raw).replace("Z", "+00:00"))
+        if decision.tzinfo is None or tau.tzinfo is None:
+            return cut
+        day = compute_target_local_day_window_utc(city_timezone=str(row["timezone_requested"]),
+            target_local_date=date.fromisoformat(str(row["target_date"])))
+        if decision < day.end_utc or not day.start_utc <= tau < day.end_utc or tau > decision:
+            return cut
+        return tau.isoformat()
+    except (KeyError, TypeError, ValueError):
+        return cut
+
+
 def _physical_response_has_authority(row: Mapping[str, object], *, _require_surface: bool = True) -> bool:
     """Verify actual single-model product and exact hourly/local-day value, not request intention."""
     try:
@@ -1192,7 +1235,7 @@ def _physical_response_has_authority(row: Mapping[str, object], *, _require_surf
                        "hourly_units": {**payload["hourly_units"], "temperature_2m": "°C"}}
         values = _parse_batched_single_runs_payload(payload, [model],
             datetime.fromisoformat(str(row["target_date"])).date(), str(row["timezone_requested"]),
-            decision_at=str(row.get("physical_proof_cutoff") or row["captured_at"]))
+            decision_at=_remaining_window_boundary(row))
         high_c, low_c = values[model]
         expected = high_c if row["metric"] == "high" else low_c if row["metric"] == "low" else None
         return (expected is not None and math.isclose(float(expected), float(row["forecast_value_c"]), abs_tol=1e-9)
@@ -1742,6 +1785,10 @@ def _current_model_surface_witness(row: Mapping[str, object], geometry: Mapping[
 def _physical_response_provenance(row: Mapping[str, object]) -> Mapping[str, object] | None:
     row = _physical_artifact_at_cutoff(row)
     original_identity = {key: row[key] for key in _PRODUCT_IDENTITY_COLUMNS}
+    if row.get("day0_remaining_from") is not None:
+        # The replay at the commit/held boundary re-proves the same body over the
+        # same remaining window; absent tau, the frozen identity is unchanged.
+        original_identity["day0_remaining_from"] = row["day0_remaining_from"]
     if not _is_station_model(str(row["model"])):
         row = _revalidated_legacy_product_row(row)
         if row is None:
@@ -2047,6 +2094,7 @@ def read_current_instrument_values(
     max_substitution_age_hours: float = PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
     include_station_sources: bool = False,
     decision_time_iso: str | None = None,
+    day0_remaining_from_iso: str | None = None,
 ) -> dict[str, ServedInstrumentValue]:
     """THE single authority: per-model served CURRENT value for one (scope, cycle).
 
@@ -2135,6 +2183,7 @@ def read_current_instrument_values(
             decision_iso=decision_iso,
             schema=schema,
             max_substitution_age_hours=max_substitution_age_hours,
+            day0_remaining_from_iso=day0_remaining_from_iso,
         )
         try:
             for row in rows:
@@ -2279,6 +2328,7 @@ def read_freshest_coherent_instrument_values(
     max_substitution_age_hours: float = PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
     include_station_sources: bool = False,
     single_runs_only: bool = False,
+    day0_remaining_from_iso: str | None = None,
 ) -> dict[str, ServedInstrumentValue]:
     """Return the newest causal multi-family provider cohort.
 
@@ -2329,6 +2379,7 @@ def read_freshest_coherent_instrument_values(
         schema=schema,
         max_substitution_age_hours=max_substitution_age_hours,
         single_runs_only=single_runs_only,
+        day0_remaining_from_iso=day0_remaining_from_iso,
     ):
         served = _served_source_clock_row(
             row,

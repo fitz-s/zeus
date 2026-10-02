@@ -2208,6 +2208,12 @@ def _day0_remaining_vector_witness(
         return None
 
 
+def _day0_remaining_from_iso(request: ReplacementForecastMaterializeRequest) -> str | None:
+    """The family's last authorized observation tau, as the request's conditioning carries it."""
+    observed = _day0_observed_extreme_time(request)
+    return None if observed is None else observed.isoformat()
+
+
 def _day0_observed_extreme_time(request: ReplacementForecastMaterializeRequest) -> datetime | None:
     value = request.day0_observed_extreme_observation_time
     if value is None:
@@ -4491,6 +4497,7 @@ def _replacement_bayes_precision_fusion_override(
                 conn, city=request.city, metric=metric, target_date=target_date,
                 source_cycle_time_iso=source_cycle_iso,
                 decision_time_iso=computed_at.isoformat(),
+                day0_remaining_from_iso=_day0_remaining_from_iso(request),
                 # ADD-DATA (operator "加数据"): include station-calibrated sources (cwa_*/hko_*) at
                 # their OWN provider cycle so they enter persisted_current -> the precision fusion
                 # weights them at initial precision (raw_second_moment_weights) and the frozen-scheme
@@ -4866,6 +4873,7 @@ def _replacement_bayes_precision_fusion_override(
                     decision_time_iso=computed_at.isoformat(),
                     models=_eligible_scheme_models,
                     cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                    day0_remaining_from_iso=_day0_remaining_from_iso(request),
                 )
             )
             _scheme_current_provider_cohort_count = (
@@ -5191,6 +5199,7 @@ def _replacement_bayes_precision_fusion_override(
                         models=_source_clock_used_models,
                         cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
                         include_station_sources=True,
+                        day0_remaining_from_iso=_day0_remaining_from_iso(request),
                     )
                 )
                 for _served in _fallback_coherent_current.values():
