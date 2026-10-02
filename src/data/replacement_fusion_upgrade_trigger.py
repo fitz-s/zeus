@@ -711,11 +711,14 @@ def scope_capture_offers_larger_provider_set(
     if source_cycle_iso is None and current_state is not None:
         # A first posterior has no incumbent cycle to reuse. Only the existing
         # family-scoped, causally eligible ENS carrier can supply that identity.
+        from src.data.forecast_target_contract import day0_remaining_from_iso_of
         from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
 
         carrier = latest_eligible_ensemble_input_cycle(
             conn, city=city, target_date=target_date, metric=metric,
             decision_time=decision_time,
+            # A first posterior's only Day0 clock is this current-state print.
+            day0_remaining_from_iso=day0_remaining_from_iso_of(current_state.get("observed_at_utc")),
         )
         if carrier is not None:
             source_cycle_iso = carrier.astimezone(UTC).isoformat()

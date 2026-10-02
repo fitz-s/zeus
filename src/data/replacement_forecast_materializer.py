@@ -66,10 +66,12 @@ from src.data.replacement_forecast_readiness import (
     ReplacementForecastDependency,
     build_replacement_forecast_readiness,
 )
+from src.data.forecast_target_contract import day0_remaining_from_iso_of
 from src.data.forecast_extrema_authority import (
     INTERVAL_CENSORED_ATTRIBUTION_STATUS,
     exact_ensemble_eligibility_sql,
     interval_ensemble_eligibility_sql,
+    remaining_window_after_day_end_sql,
     member_interval_bounds_from_row,
 )
 from src.data.replacement_input_hwm import (
@@ -2208,20 +2210,6 @@ def _day0_remaining_vector_witness(
         return None
 
 
-def day0_remaining_from_iso_of(observation_time: object) -> str | None:
-    """Day0 tau text from a request/payload's day0_observed_extreme_observation_time.
-
-    The one normalization every reader of the same family uses (prepare, writer
-    witness, queue fence), so their remaining-window boundaries cannot disagree.
-    """
-    if observation_time is None:
-        return None
-    try:
-        return _to_utc(observation_time, field_name="day0_observed_extreme_observation_time").isoformat()
-    except (TypeError, ValueError):
-        return None
-
-
 def _day0_remaining_from_iso(request: ReplacementForecastMaterializeRequest) -> str | None:
     """The family's last authorized observation tau, as the request's conditioning carries it."""
     return day0_remaining_from_iso_of(request.day0_observed_extreme_observation_time)
@@ -3950,7 +3938,20 @@ def _current_evidence_snapshot_row(
         ),
         params,
     ).fetchone()
-    candidates = [tuple(item) for item in (row, interval) if item is not None]
+    remaining = None
+    tau = _day0_remaining_from_iso(request)
+    if tau is not None:
+        # After local-day end the remaining-window row is the current ENS over the
+        # unobserved suffix [tau, day end); the predicate admits nothing otherwise.
+        remaining = conn.execute(
+            query.format(
+                city_predicate="city = ?",
+                select_sql=keyed_sql,
+                eligibility=remaining_window_after_day_end_sql(),
+            ),
+            (*params[:4], tau, tau, tau, decision_at, *params[4:]),
+        ).fetchone()
+    candidates = [tuple(item) for item in (row, interval, remaining) if item is not None]
     if not candidates:
         return None
     newest = max(candidates, key=lambda item: (str(item[0]), str(item[1]), int(item[2])))

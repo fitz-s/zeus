@@ -20,7 +20,7 @@ import scripts.materialize_replacement_forecast_live as cli
 from src.data import materialization_block_evidence as evidence
 from src.data import replacement_current_value_serving as serving
 from src.data import replacement_forecast_live_materialization_queue as queue
-from src.data.replacement_forecast_materializer import day0_remaining_from_iso_of
+from src.data.forecast_target_contract import day0_remaining_from_iso_of
 
 TAU = "2026-10-02T15:05:56+00:00"
 DECISION = "2026-10-02T16:30:00+00:00"
@@ -104,7 +104,7 @@ def test_writer_witness_reads_the_frontier_with_the_request_tau(monkeypatch):
 def test_every_served_set_comparison_names_the_same_tau():
     """No reader that is compared against prepare's served set is tau-blind."""
     queue_src = inspect.getsource(queue)
-    assert queue_src.count("day0_remaining_from_iso=day0_tau") == 2
+    assert queue_src.count("day0_remaining_from_iso=day0_tau") == 3
     assert 'day0_remaining_from_iso_of(payload.get("day0_observed_extreme_observation_time"))' in queue_src
     assert "day0_remaining_from_iso_of(\n                payload.get(\"day0_observed_extreme_observation_time\"))" in queue_src
     ev = inspect.getsource(evidence)

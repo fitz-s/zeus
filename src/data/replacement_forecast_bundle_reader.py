@@ -857,6 +857,27 @@ def _held_pinned_carrier_fields_reason(
     return None
 
 
+def _frozen_day0_remaining_from(provenance: Mapping[str, Any]) -> str | None:
+    """The Day0 tau this posterior's served instruments were proven under.
+
+    Read only from the row's frozen serving identities (never a clock or a
+    newer observation). One tau or none: absent or disagreeing is None.
+    """
+    from src.data.forecast_target_contract import day0_remaining_from_iso_of
+
+    fusion = provenance.get("bayes_precision_fusion")
+    serving = fusion.get("current_value_serving") if isinstance(fusion, Mapping) else None
+    if not isinstance(serving, Mapping) or not serving:
+        return None
+    taus = set()
+    for value in serving.values():
+        physical = value.get("physical_response") if isinstance(value, Mapping) else None
+        frozen = physical.get("frozen_product_identity") if isinstance(physical, Mapping) else None
+        if isinstance(frozen, Mapping):  # only providers that freeze their proven identity
+            taus.add(day0_remaining_from_iso_of(frozen.get("day0_remaining_from")))
+    return taus.pop() if len(taus) == 1 else None
+
+
 def _latest_complete_held_continuity(
     conn: sqlite3.Connection,
     *,
@@ -882,6 +903,7 @@ def _latest_complete_held_continuity(
         target_date=target_date,
         metric=metric,
         decision_time=decision_time,
+        day0_remaining_from_iso=_frozen_day0_remaining_from(provenance),
     )
     if raw_frontier is None or raw_frontier[0] is None:
         return _HeldContinuityStatus.BLOCKED, "REPLACEMENT_PINNED_RAW_FRONTIER_UNAVAILABLE"

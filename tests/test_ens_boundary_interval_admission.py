@@ -1151,3 +1151,166 @@ def test_only_the_day0_base_read_admits_current_evidence_rows() -> None:
     source = (ROOT / "src/engine/event_reactor_adapter.py").read_text()
     body = source.split("def _executable_forecast_reader_authority_block_reason", 1)[1].split("\ndef ", 1)[0]
     assert "point_extrema_required=not allow_latest" in body
+
+
+# --- after day end: a remaining-window row over [tau, day end) is current evidence --------
+# Shanghai 2026-06-07 local day is [06-06T16Z, 06-07T16Z). The 00Z selector row
+# sits in it; we type it REMAINING_WINDOW [06-07T00Z, day end) as the writer does
+# for a run issued after local midnight.
+
+REMAINING = authority.REMAINING_WINDOW_ATTRIBUTION_STATUS
+_DAY_START, _DAY_END = "2026-06-06T16:00:00+00:00", "2026-06-07T16:00:00+00:00"
+
+
+def _remaining_db(window_start: str = "2026-06-07T00:00:00+00:00"):
+    conn, request = _selector_db(status=REMAINING, provenance={}, members=[25.0] * 51)
+    conn.execute(
+        "UPDATE ensemble_snapshots SET local_day_start_utc=?, forecast_window_start_utc=?,"
+        " forecast_window_end_utc=? WHERE snapshot_id=101",
+        (_DAY_START, window_start, _DAY_END),
+    )
+    conn.execute(
+        "UPDATE ensemble_snapshots SET issue_time=?, source_cycle_time=? WHERE snapshot_id=101",
+        ("2026-06-07T00:00:00+00:00", "2026-06-07T00:00:00+00:00"),
+    )
+    conn.execute("UPDATE source_run SET source_cycle_time=? WHERE source_run_id='ens-run'",
+                 ("2026-06-07T00:00:00+00:00",))
+    # The run's coverage stays live through the post-day decisions under test.
+    conn.execute("UPDATE source_run_coverage SET expires_at='2026-06-08T00:00:00+00:00'")
+    return conn, request
+
+
+def _mark(conn, *, decision: str, tau: str | None):
+    from src.data.replacement_input_hwm import _latest_eligible_ensemble_input_mark
+
+    return _latest_eligible_ensemble_input_mark(
+        conn, city="Shanghai", target_date="2026-06-07", metric="high",
+        decision_time=datetime.fromisoformat(decision), day0_remaining_from_iso=tau,
+    )
+
+
+def test_hwm_without_tau_never_admits_a_remaining_window_row() -> None:
+    conn, _request = _remaining_db()
+    assert _mark(conn, decision="2026-06-07T16:30:00+00:00", tau=None) is None
+
+
+def test_hwm_with_in_day_tau_after_day_end_admits_the_remaining_row() -> None:
+    conn, _request = _remaining_db()
+    assert _mark(conn, decision="2026-06-07T16:30:00+00:00", tau="2026-06-07T15:05:00+00:00") == (
+        101, datetime(2026, 6, 7, 0, tzinfo=UTC))
+
+
+@pytest.mark.parametrize(("decision", "tau"), [
+    ("2026-06-07T15:30:00+00:00", "2026-06-07T15:05:00+00:00"),   # day still open
+    ("2026-06-07T16:30:00+00:00", "2026-06-07T16:00:00+00:00"),   # tau at day end
+    ("2026-06-07T16:30:00+00:00", "2026-06-06T23:00:00+00:00"),   # window starts after tau
+])
+def test_hwm_falls_through_to_the_old_rule(decision: str, tau: str) -> None:
+    conn, _request = _remaining_db()
+    assert _mark(conn, decision=decision, tau=tau) is None
+
+
+def test_hwm_tau_none_sql_is_byte_identical(monkeypatch) -> None:
+    """The no-tau statement and binds are exactly the pre-change ones."""
+    from src.data import replacement_input_hwm as hwm
+
+    conn, _request = _remaining_db()
+    seen: list[tuple[str, tuple]] = []
+
+    class Spy:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def execute(self, sql, params=()):
+            seen.append((sql, tuple(params)))
+            return self.inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    hwm._latest_eligible_ensemble_input_mark(
+        Spy(conn), city="Shanghai", target_date="2026-06-07", metric="high",
+        decision_time=datetime(2026, 6, 7, 16, 30, tzinfo=UTC))
+    final_sql, final_params = seen[-1]
+    assert f"{authority.current_evidence_ensemble_eligibility_sql()} AND" in final_sql
+    assert authority.remaining_window_after_day_end_sql() not in final_sql
+    assert "2026-06-07T15:05:00+00:00" not in final_params
+
+
+def test_materializer_selector_serves_the_remaining_row_with_request_tau() -> None:
+    from dataclasses import replace as dc_replace
+
+    conn, request = _remaining_db()
+    request = dc_replace(
+        request, source_cycle_time=datetime(2026, 6, 7, 0, tzinfo=UTC),
+        computed_at=datetime(2026, 6, 7, 16, 30, tzinfo=UTC),
+        day0_observed_extreme_observation_time="2026-06-07T15:05:00+00:00",
+    )
+    row = materializer._current_evidence_snapshot_row(conn, request, metric="high", select_sql="snapshot_id")
+    assert row is not None and row[0] == 101
+    blind = dc_replace(request, day0_observed_extreme_observation_time=None)
+    assert materializer._current_evidence_snapshot_row(conn, blind, metric="high", select_sql="snapshot_id") is None
+
+
+def test_cycle_advance_family_carrier_moves_to_the_remaining_row_only_with_tau() -> None:
+    from src.data import replacement_cycle_advance_trigger as trigger
+
+    conn, _request = _remaining_db()
+    decision = datetime(2026, 6, 7, 16, 30, tzinfo=UTC)
+
+    def latest(*_a, **_k):
+        return SimpleNamespace(source_cycle_time=datetime(2026, 6, 7, 0, tzinfo=UTC))
+
+    def expected(_metric):
+        return {"openmeteo_ifs9_anchor": SimpleNamespace(source_id="om", data_version="v")}
+
+    kwargs = dict(city="Shanghai", target_date="2026-06-07", metric="high", decision_time=decision,
+                  expected_identity=expected, latest_manifest=latest)
+    assert trigger.family_materializable_cycle(conn, (object(),), **kwargs) == (None, ())
+    assert trigger.family_materializable_cycle(
+        conn, (object(),), **kwargs, day0_remaining_from_iso="2026-06-07T15:05:00+00:00",
+    ) == (datetime(2026, 6, 7, 0, tzinfo=UTC), ())
+    assert trigger._day0_observation_reseed_cycle(
+        conn, city="Shanghai", target_date="2026-06-07", metric="high",
+        consumed_cycle=datetime(2026, 6, 6, 12, tzinfo=UTC),
+        family_cycle=datetime(2026, 6, 7, 0, tzinfo=UTC), decision_time=decision,
+        day0_remaining_from_iso="2026-06-07T15:05:00+00:00",
+    ) == datetime(2026, 6, 7, 0, tzinfo=UTC)
+
+
+def test_every_hwm_caller_threads_the_same_tau_parser() -> None:
+    import inspect
+    from src.data import replacement_cycle_advance_trigger as trigger
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data import replacement_forecast_seed_discovery as discovery
+    from src.data import replacement_fusion_upgrade_trigger as upgrade
+
+    trig = inspect.getsource(trigger)
+    assert trig.count("day0_remaining_from_iso=day0_remaining_from_iso_of(") == 6
+    assert trig.count("day0_remaining_from_iso=day0_remaining_from_iso,") == 3
+    q = inspect.getsource(queue)
+    assert "day0_remaining_from_iso=day0_tau,\n            )" in q
+    assert 'seed.get("day0_observed_extreme_observation_time")' in q
+    assert 'day0_seed_payload.get("day0_observed_extreme_observation_time")' in inspect.getsource(discovery)
+    assert "day0_remaining_from_iso_of(current_state.get(\"observed_at_utc\"))" in inspect.getsource(upgrade)
+    assert "day0_remaining_from_iso=_frozen_day0_remaining_from(provenance)" in inspect.getsource(reader)
+
+
+def test_held_continuity_tau_is_the_rows_frozen_tau_only() -> None:
+    from src.data.replacement_forecast_bundle_reader import _frozen_day0_remaining_from
+
+    def prov(*taus):
+        return {"bayes_precision_fusion": {"current_value_serving": {
+            f"m{i}": {"physical_response": {"frozen_product_identity": (
+                {} if tau is None else {"day0_remaining_from": tau})}} for i, tau in enumerate(taus)}}}
+
+    tau = "2026-06-07T15:05:00+00:00"
+    assert _frozen_day0_remaining_from(prov(tau)) == tau
+    assert _frozen_day0_remaining_from(prov(tau, "2026-06-07T23:05:00+08:00")) == tau
+    assert _frozen_day0_remaining_from(prov(tau, None)) is None
+    assert _frozen_day0_remaining_from(prov(tau, "2026-06-07T14:00:00+00:00")) is None
+    assert _frozen_day0_remaining_from(prov(None)) is None
+    assert _frozen_day0_remaining_from({}) is None
+    no_frozen = {"bayes_precision_fusion": {"current_value_serving": {"icon": {"physical_response": {}}}}}
+    assert _frozen_day0_remaining_from(no_frozen) is None

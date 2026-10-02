@@ -1233,12 +1233,17 @@ def discover_replacement_forecast_materialization_seeds(
                 latest_eligible_ensemble_input_cycle,
             )
 
+            from src.data.forecast_target_contract import day0_remaining_from_iso_of  # noqa: PLC0415
+
             carrier_cycle = latest_eligible_ensemble_input_cycle(
                 conn,
                 city=city,
                 target_date=target_date,
                 metric=metric,
                 decision_time=computed,
+                # The tau this seed will carry (day0_seed_payload); none for non-Day0.
+                day0_remaining_from_iso=day0_remaining_from_iso_of(
+                    day0_seed_payload.get("day0_observed_extreme_observation_time")),
             )
             if carrier_cycle is None:
                 failed.append(target_key)

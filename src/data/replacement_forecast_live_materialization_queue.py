@@ -36,6 +36,7 @@ from src.data.day0_fast_obs import (
     fast_extreme_supersedes_settlement,
     is_fast_residual_tail_source,
 )
+from src.data.forecast_target_contract import day0_remaining_from_iso_of
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_current_value_serving import (
     current_value_serving_schema,
@@ -2171,6 +2172,8 @@ def _seed_source_cycle_boundary(
                 target_date=str(seed.get("target_date")),
                 metric=str(seed.get("temperature_metric")),
                 decision_time=decision_time,
+                day0_remaining_from_iso=day0_remaining_from_iso_of(
+                    seed.get("day0_observed_extreme_observation_time")),
             )
             baseline_cycle = None
             retired_incumbent_migration = False
@@ -3433,9 +3436,6 @@ def _source_clock_missing_configured_sources(
         from src.data.replacement_current_value_serving import (  # noqa: PLC0415
             read_current_instrument_values,
         )
-        from src.data.replacement_forecast_materializer import (  # noqa: PLC0415
-            day0_remaining_from_iso_of,
-        )
         from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
             scheme_for_city,
         )
@@ -3793,8 +3793,6 @@ def _blocked_attempt_fingerprint(
 
             scheme = scheme_for_city(scope[0], metric=scope[2])
             configured_models = None if scheme is None else tuple(scheme.final_sources)
-            from src.data.replacement_forecast_materializer import day0_remaining_from_iso_of
-
             # The same tau the worker's prepare reads from this request.
             day0_tau = day0_remaining_from_iso_of(payload.get("day0_observed_extreme_observation_time"))
             source_clock_frontier = read_current_instrument_frontier_identity(
@@ -3854,6 +3852,7 @@ def _blocked_attempt_fingerprint(
                 target_date=scope[1],
                 metric=scope[2],
                 decision_time=computed_at,
+                day0_remaining_from_iso=day0_tau,
             )
             eligible_ensemble_input_mark = (
                 None

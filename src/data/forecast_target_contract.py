@@ -104,6 +104,23 @@ def compute_target_local_day_window_utc(
     )
 
 
+def day0_remaining_from_iso_of(observation_time: object) -> str | None:
+    """Day0 tau text from a request/payload/posterior's last-observation clock.
+
+    The one normalization every reader of the same family uses (prepare, writer
+    witness, queue fence, ENS input mark), so their remaining-window boundaries
+    cannot disagree. Absent, naive or unparseable is None (no tau).
+    """
+    if observation_time is None:
+        return None
+    try:
+        parsed = (observation_time if isinstance(observation_time, datetime)
+                  else datetime.fromisoformat(str(observation_time).replace("Z", "+00:00")))
+        return _to_utc(parsed, "day0_observed_extreme_observation_time").isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
 def owned_window_start_utc(
     *, day_start_utc: datetime, day_end_utc: datetime, remaining_from_utc: datetime | None,
 ) -> datetime:

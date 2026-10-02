@@ -61,6 +61,7 @@ from src.contracts.replacement_pipeline_files import (
 )
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
+from src.data.forecast_target_contract import day0_remaining_from_iso_of
 from src.data.replacement_forecast_readiness import SOURCE_ID
 from src.data.replacement_input_hwm import (
     retired_low_uncertified_incumbent_yields_to_current_ensemble,
@@ -245,6 +246,7 @@ def _day0_observation_reseed_cycle(
     consumed_cycle: datetime,
     family_cycle: datetime,
     decision_time: datetime,
+    day0_remaining_from_iso: str | None = None,
 ) -> datetime:
     """Choose the newest ENS-complete cycle that can carry a Day0 revision.
 
@@ -265,6 +267,7 @@ def _day0_observation_reseed_cycle(
         target_date=target_date,
         metric=metric,
         decision_time=decision_time,
+        day0_remaining_from_iso=day0_remaining_from_iso,
     )
     if eligible_cycle is None or eligible_cycle < consumed_cycle:
         return consumed_cycle
@@ -279,6 +282,7 @@ def _newer_eligible_ensemble_cycle(
     metric: str,
     family_cycle: datetime,
     decision_time: datetime,
+    day0_remaining_from_iso: str | None = None,
 ) -> datetime | None:
     """Return the ENS HWM that makes an older family anchor unmaterializable."""
 
@@ -292,6 +296,7 @@ def _newer_eligible_ensemble_cycle(
         target_date=target_date,
         metric=metric,
         decision_time=decision_time,
+        day0_remaining_from_iso=day0_remaining_from_iso,
     )
     if eligible_cycle is None or eligible_cycle <= family_cycle:
         return None
@@ -619,6 +624,7 @@ def family_materializable_cycle(
     city_timezone: str | None = None,
     expected_identity,
     latest_manifest,
+    day0_remaining_from_iso: str | None = None,
 ) -> tuple[datetime | None, tuple[tuple[str, str], ...]]:
     """FINDING 2 (external review 2026-06-12) — the materializable cycle AT FAMILY SCOPE.
 
@@ -662,6 +668,7 @@ def family_materializable_cycle(
         target_date=target_date,
         metric=metric,
         decision_time=decision_time,
+        day0_remaining_from_iso=day0_remaining_from_iso,
     )
     return carrier, ()
 
@@ -1429,6 +1436,8 @@ def _superseded_baseline_seed_file(
     metric: str,
     target_cycle_iso: str,
     required_baseline_source_run_id: str | None,
+    day0_remaining_from_iso: str | None = None,
+    decision_time: datetime | None = None,
 ) -> str | None:
     """Return the exact stale marker seed that a committed ENS run may replace.
 
@@ -1445,9 +1454,27 @@ def _superseded_baseline_seed_file(
         return None
     try:
         from src.data.forecast_extrema_authority import (  # noqa: PLC0415
+            REMAINING_WINDOW_COLUMNS,
             current_evidence_ensemble_eligibility_sql,
+            remaining_window_after_day_end_sql,
         )
 
+        # The same admission as the ENS input mark: with the family's Day0 tau, a
+        # remaining-window row over [tau, day end) is this run's family snapshot.
+        eligibility = current_evidence_ensemble_eligibility_sql("ens")
+        eligibility_params: tuple[object, ...] = ()
+        if (
+            day0_remaining_from_iso is not None
+            and decision_time is not None
+            and REMAINING_WINDOW_COLUMNS.issubset(
+                str(row[1]) for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")
+            )
+        ):
+            eligibility = f"({eligibility} OR {remaining_window_after_day_end_sql('ens')})"
+            eligibility_params = (
+                day0_remaining_from_iso, day0_remaining_from_iso, day0_remaining_from_iso,
+                decision_time.astimezone(UTC).isoformat(),
+            )
         run = conn.execute(
             f"""
             SELECT sr.source_cycle_time
@@ -1463,11 +1490,11 @@ def _superseded_baseline_seed_file(
                       AND ens.source_id = 'ecmwf_open_data'
                       AND ens.model_version = 'ecmwf_ens'
                       AND ens.authority = 'VERIFIED'
-                      AND {current_evidence_ensemble_eligibility_sql("ens")}
+                      AND {eligibility}
                )
              LIMIT 1
             """,
-            (required, city, target_date, metric),
+            (required, city, target_date, metric, *eligibility_params),
         ).fetchone()
         if run is None:
             raise RuntimeError(
@@ -2119,6 +2146,7 @@ def enqueue_cycle_advance_reseeds(
                     city_timezone=city_timezone,
                     expected_identity=expected_replacement_dependency_identity_by_role,
                     latest_manifest=_latest_manifest,
+                    day0_remaining_from_iso=day0_remaining_from_iso_of(day0_observation_time),
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 report["family_scope_check_failed"] = int(
@@ -2183,6 +2211,7 @@ def enqueue_cycle_advance_reseeds(
                     metric=metric,
                     family_cycle=family_cycle,
                     decision_time=now,
+                    day0_remaining_from_iso=day0_remaining_from_iso_of(day0_observation_time),
                 )
             except Exception as exc:  # noqa: BLE001 -- unreadable HWM cannot authorize old work.
                 report["family_scope_check_failed"] = int(
@@ -2280,6 +2309,8 @@ def enqueue_cycle_advance_reseeds(
                     metric=metric,
                     target_cycle_iso=target_cycle_iso,
                     required_baseline_source_run_id=causal_baseline_source_run_id,
+                    day0_remaining_from_iso=day0_remaining_from_iso_of(day0_observation_time),
+                    decision_time=now,
                 )
             except _CycleAdvanceRetryPending as exc:
                 report["retry_pending"] = int(report.get("retry_pending", 0)) + 1
@@ -2706,6 +2737,7 @@ def enqueue_single_family_cycle_advance_reseed(
             decision_time=now,
             expected_identity=lambda _metric: expected,
             latest_manifest=_latest_manifest,
+            day0_remaining_from_iso=day0_remaining_from_iso_of(day0_observed_extreme_observation_time),
         )
         if missing_legs:
             # Record a typed, idempotent gap row instead of a silent manifest_missing skip.
@@ -2764,6 +2796,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 metric=metric,
                 family_cycle=family_cycle,
                 decision_time=now,
+                day0_remaining_from_iso=day0_remaining_from_iso_of(day0_observed_extreme_observation_time),
             )
         except Exception as exc:  # noqa: BLE001 -- unreadable HWM cannot authorize old work.
             report["status"] = "CYCLE_ADVANCE_ENSEMBLE_HWM_UNREADABLE"
@@ -2818,6 +2851,8 @@ def enqueue_single_family_cycle_advance_reseed(
                         consumed_cycle=consumed_cycle,
                         family_cycle=family_cycle,
                         decision_time=now,
+                        day0_remaining_from_iso=day0_remaining_from_iso_of(
+                            day0_observed_extreme_observation_time),
                     )
                     target_cycle_iso = target_cycle.isoformat()
                     day0_manifests = _manifests_through_cycle(

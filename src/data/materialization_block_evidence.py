@@ -346,7 +346,7 @@ def _prospective_blocks(conn, evidence: Mapping[str, object], payload: Mapping[s
         incumbent = _incumbent_key(conn, item)
         prospective = (_utc(payload["source_cycle_time"], "source_cycle_time"), effective)
         return incumbent is not None and _serving_key_strictly_newer(incumbent, prospective)
-    from src.data.replacement_forecast_materializer import day0_remaining_from_iso_of  # noqa: PLC0415
+    from src.data.forecast_target_contract import day0_remaining_from_iso_of  # noqa: PLC0415
 
     return _cohort_empty(conn, payload, effective, item["window_hours"],
         day0_remaining_from_iso_of(payload.get("day0_observed_extreme_observation_time")))
