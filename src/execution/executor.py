@@ -4199,7 +4199,10 @@ def _entry_replacement_input_hwm_component(
     conn: sqlite3.Connection,
     intent: ExecutionIntent,
 ) -> dict:
-    """Revalidate consumed authority; successor input lag is witness data, not veto."""
+    """Revalidate consumed authority from source before persistence.
+
+    Successor input lag is witness data, not veto.
+    """
 
     context = getattr(intent, "decision_source_context", None)
     if context is None or (
@@ -4262,6 +4265,8 @@ def _entry_replacement_input_hwm_component(
             posterior_source_cycle_time=getattr(context, "forecast_issue_time", ""),
             posterior_computed_at=getattr(context, "forecast_fetch_time", ""),
             input_witness_out=input_witness,
+            successor_census=True,
+            use_memo=False,
         )
         details["input_hwm_witness"] = input_witness
     except Exception as exc:  # noqa: BLE001 - live submit must fail closed.

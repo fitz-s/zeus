@@ -11,14 +11,21 @@ No posterior clock, probability, or original submission witness is rewritten.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import marshal
+import os
+import re
 import sqlite3
+import sys
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -36,6 +43,326 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
 )
 
 UTC = timezone.utc
+
+# (channel: None for the caller's connection or the read-only database URI,
+#  statement, parameters, rows consumed, exhausted, sha256 of those rows)
+RecordedReads = tuple[tuple[tuple[object, ...], ...], tuple[tuple[str, object], ...]]
+
+# Valid consumed-proof verdicts and the current station ground they were
+# judged against, keyed on every non-clock input they read. Invalid or
+# unknown outcomes are never remembered; the LRU bound caps the process.
+_MEMO_LIMIT = 2048
+_VERDICT_MEMO: OrderedDict[tuple[object, ...], tuple[datetime, RecordedReads]] = OrderedDict()
+_MEMO_LOCK = threading.Lock()
+
+# A remembered verdict holds only while every read it made answers the same.
+# No table is assumed append-only (source_run is replaced in place, snapshots
+# can be overwritten), so the reads are recorded by construction, not listed:
+# every SQL read on the caller's connection and on each read-only connection
+# the verdict opens, with its parameters, the rows it consumed and a digest of
+# them; and every file or directory it opens. A hit replays each read and
+# re-stats each file; any difference, error or absence is a miss.
+_RECORDS: ContextVar[tuple["ReadRecord", ...]] = ContextVar("hwm_read_records", default=())
+_CODE_SUFFIXES = (".py", ".pyc", ".pyi", ".so", ".dylib")
+_READ_SQL = re.compile(
+    r"\s*(?:SELECT|WITH)\b"
+    r"|\s*PRAGMA\s+(?:\S+\.)?(?:table_x?info|index_list|index_x?info|database_list)\b",
+    re.IGNORECASE,
+)
+_PRAGMA_SQL = re.compile(r"\s*PRAGMA\b", re.IGNORECASE)
+
+
+@dataclass
+class ReadRecord:
+    files: set[str] = field(default_factory=set)
+    reads: list[list[object]] = field(default_factory=list)
+    replayable: bool = True
+
+    def statement(self, channel: str | None, sql: str, parameters: object) -> list[object] | None:
+        if _READ_SQL.match(sql):
+            params = (dict(parameters) if isinstance(parameters, Mapping)
+                      else tuple(parameters))
+            read = [channel, sys.intern(sql), params, 0, False, hashlib.sha256()]
+            self.reads.append(read)
+            return read
+        # A connection setting or PRAGMA data_version (the snapshot memo's own
+        # commit clock) decides nothing; any other statement is not a read.
+        if not _PRAGMA_SQL.match(sql):
+            self.replayable = False
+        return None
+
+    def frozen(self) -> RecordedReads:
+        return (
+            tuple((c, s, p, n, x, h.digest()) for c, s, p, n, x, h in self.reads),
+            file_fingerprints(self.files),
+        )
+
+
+def _row_digest(digest: hashlib._Hash, row: object) -> None:
+    # marshal v2 shares no references, so equal rows encode to equal bytes,
+    # and it keeps int/float/str/bytes/None and -0.0 apart.
+    digest.update(marshal.dumps(tuple(row), 2))
+
+
+class _RecordingCursor(sqlite3.Cursor):
+    """Digests each row it hands out, in order; a Row and a tuple agree."""
+
+    def __init__(self, connection: sqlite3.Connection, *, channel: str | None,
+                 records: tuple[ReadRecord, ...]) -> None:
+        super().__init__(connection)
+        self._channel, self._records, self._reads = channel, records, ()
+
+    def execute(self, sql: str, parameters: object = (), /) -> sqlite3.Cursor:
+        reads = (record.statement(self._channel, sql, parameters) for record in self._records)
+        self._reads = tuple(read for read in reads if read is not None)
+        return super().execute(sql, parameters)
+
+    def _seen(self, rows: list[object], *, exhausted: bool) -> list[object]:
+        for read in self._reads:
+            for row in rows:
+                _row_digest(read[5], row)
+            read[3] += len(rows)
+            read[4] = read[4] or exhausted
+        return rows
+
+    def fetchone(self) -> object:
+        row = super().fetchone()
+        self._seen([] if row is None else [row], exhausted=row is None)
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[object]:
+        size = self.arraysize if size is None else size
+        rows = super().fetchmany(size)
+        return self._seen(rows, exhausted=0 < size and len(rows) < size)
+
+    def fetchall(self) -> list[object]:
+        return self._seen(super().fetchall(), exhausted=True)
+
+    def __next__(self) -> object:
+        try:
+            row = super().__next__()
+        except StopIteration:
+            self._seen([], exhausted=True)
+            raise
+        return self._seen([row], exhausted=False)[0]
+
+
+class _RecordedReadOnlyConnection(sqlite3.Connection):
+    """A read-only connection opened inside a recorded verdict."""
+
+    def __init__(self, database: str, *args: object, records: tuple[ReadRecord, ...],
+                 **kwargs: object) -> None:
+        super().__init__(database, *args, **kwargs)
+        self._channel, self._records = str(database), records
+
+    def cursor(self, factory: object = None) -> sqlite3.Cursor:
+        return super().cursor(functools.partial(
+            _RecordingCursor, channel=self._channel, records=self._records))
+
+    def execute(self, sql: str, parameters: object = (), /) -> sqlite3.Cursor:
+        return self.cursor().execute(sql, parameters)
+
+
+class _RecordedConnectionView:
+    """The caller's connection as a recorded verdict sees it."""
+
+    def __init__(self, conn: sqlite3.Connection, records: tuple[ReadRecord, ...]) -> None:
+        self._conn, self._records = conn, records
+
+    def cursor(self) -> sqlite3.Cursor:
+        return self._conn.cursor(functools.partial(
+            _RecordingCursor, channel=None, records=self._records))
+
+    def execute(self, sql: str, parameters: object = (), /) -> sqlite3.Cursor:
+        return self.cursor().execute(sql, parameters)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._conn, name)
+
+
+def _record_file_read(event: str, args: tuple[object, ...]) -> None:
+    records = _RECORDS.get()
+    if not records or not args:
+        return
+    if event == "sqlite3.connect/handle":
+        # A connection not opened through the recording factory reads unseen.
+        if type(args[0]) is not _RecordedReadOnlyConnection:
+            for record in records:
+                record.replayable = False
+    elif event in ("open", "os.scandir", "os.listdir") and isinstance(
+        args[0], (str, bytes, os.PathLike)
+    ):
+        _note_file(args[0])
+
+
+sys.addaudithook(_record_file_read)
+
+
+def _note_file(path: str | bytes | os.PathLike) -> None:
+    """Add ``path`` to every active record; a stat-keyed cache answering
+    without opening its file names the file here."""
+    resolved = os.path.abspath(os.fsdecode(path))
+    if not resolved.endswith(_CODE_SUFFIXES):
+        for record in _RECORDS.get():
+            record.files.add(resolved)
+
+
+@contextmanager
+def recorded_reads(record: ReadRecord | None, conn: sqlite3.Connection | None = None):
+    """Record every read in the block into ``record``; yields ``conn`` as seen.
+
+    ``None`` records nothing and yields ``conn`` itself. Pass memos are
+    suspended inside, so no read is answered from outside the record.
+    """
+    if record is None:
+        yield conn
+        return
+    from src.data.openmeteo_model_surface import _SURFACE_READ_PASS
+    from src.data.replacement_current_value_serving import _PHYSICAL_READ_PASS
+    from src.state.db import READ_ONLY_CONNECTION_FACTORY
+
+    records = (*_RECORDS.get(), record)
+    tokens = (
+        (_RECORDS, _RECORDS.set(records)),
+        (READ_ONLY_CONNECTION_FACTORY, READ_ONLY_CONNECTION_FACTORY.set(
+            functools.partial(_RecordedReadOnlyConnection, records=records))),
+        (_PHYSICAL_READ_PASS, _PHYSICAL_READ_PASS.set(None)),
+        (_SURFACE_READ_PASS, _SURFACE_READ_PASS.set(None)),
+    )
+    try:
+        yield None if conn is None else _RecordedConnectionView(conn, records)
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
+
+
+def _answer(conn: sqlite3.Connection, sql: str, params: object, count: int) -> tuple[bytes, bool]:
+    """(sha256 of the first ``count`` rows, whether another row follows)."""
+    cursor = conn.execute(sql, params)
+    try:
+        rows = cursor.fetchmany(count) if count else []
+        seen = hashlib.sha256()
+        for row in rows:
+            _row_digest(seen, row)
+        return (seen.digest() if len(rows) == count else b""), cursor.fetchone() is not None
+    finally:
+        cursor.close()
+
+
+_SNAPSHOT_ANSWERS = threading.local()
+
+
+def _snapshot_answers(conn: sqlite3.Connection) -> dict[tuple[object, ...], tuple[bytes, bool]]:
+    """Replay answers for one never-written connection's visible snapshot.
+
+    The rule of replacement_current_value_serving._snapshot_memo: every
+    schema's data_version moves when another connection commits and holds
+    inside a read transaction, as the visible rows do; a connection that wrote
+    could roll its own rows back without moving it, so it shares nothing.
+    """
+    if conn.total_changes:
+        return {}
+    versions = tuple(
+        conn.execute(f'PRAGMA "{name.replace(chr(34), chr(34) * 2)}".data_version').fetchone()[0]
+        for _seq, name, *_rest in conn.execute("PRAGMA database_list").fetchall()
+    )
+    held = getattr(_SNAPSHOT_ANSWERS, "held", None)
+    if held is None or held[0] is not conn or held[1] != versions:
+        held = _SNAPSHOT_ANSWERS.held = (conn, versions, {})
+    return held[2]
+
+
+def reads_hold(recorded: RecordedReads, conn: sqlite3.Connection | None = None) -> bool:
+    """Whether every recorded file is unchanged and every read answers the same.
+
+    Reads on ``conn`` are answered once per visible snapshot: verdicts of one
+    cut share capture-group reads, and an unchanged snapshot answers them alike.
+    """
+    from src.state.db import _connect_read_only
+
+    reads, files = recorded
+    if file_fingerprints(path for path, _ in files) != files:
+        return False
+    opened: dict[str, sqlite3.Connection] = {}
+    try:
+        answers = _snapshot_answers(conn) if conn is not None else {}
+        for channel, sql, params, count, exhausted, digest in reads:
+            if channel is None:
+                if conn is None:
+                    return False
+                key = (sql, tuple((type(v), v) for v in (
+                    params.items() if isinstance(params, dict) else params)), count)
+                answer = answers.get(key)
+                if answer is None:
+                    answer = answers[key] = _answer(conn, sql, params, count)
+            else:
+                if channel not in opened:
+                    opened[channel] = _connect_read_only(
+                        Path(channel.removeprefix("file:").rsplit("?", 1)[0]))
+                answer = _answer(opened[channel], sql, params, count)
+            if answer[0] != digest or (exhausted and answer[1]):
+                return False
+        return True
+    except (sqlite3.Error, OSError, ValueError):
+        return False
+    finally:
+        for opened_conn in opened.values():
+            opened_conn.close()
+
+
+def file_fingerprints(paths: Iterable[str]) -> tuple[tuple[str, object], ...]:
+    """(path, identity) per path; a symlink, change or absence alters it."""
+    out = []
+    for path in sorted(paths):
+        try:
+            stat = os.lstat(path)
+            out.append((path, (stat.st_dev, stat.st_ino, stat.st_mode, stat.st_size,
+                               stat.st_mtime_ns, stat.st_ctime_ns)))
+        except OSError:
+            out.append((path, None))
+    return tuple(out)
+
+
+def _memo_get(memo: OrderedDict, key: tuple[object, ...]) -> object | None:
+    with _MEMO_LOCK:
+        value = memo.get(key)
+        if value is not None:
+            memo.move_to_end(key)
+        return value
+
+
+def _memo_put(memo: OrderedDict, key: tuple[object, ...], value: object) -> None:
+    with _MEMO_LOCK:
+        memo[key] = value
+        memo.move_to_end(key)
+        while len(memo) > _MEMO_LIMIT:
+            memo.popitem(last=False)
+
+
+def clear_consumed_proof_memo() -> None:
+    with _MEMO_LOCK:
+        _VERDICT_MEMO.clear()
+
+
+def authority_config_identity() -> tuple[str, float]:
+    """The configuration the consumed-proof and live-grade verdicts read.
+
+    City fields and station-coordinate/ground claims (one manifest), and the
+    source-cycle age horizon the certificate checks replay.
+    """
+    from src.config import runtime_coordinate_manifest_json
+    from src.data.replacement_forecast_cycle_policy import replacement_source_cycle_max_age_hours
+
+    return (
+        hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest(),
+        replacement_source_cycle_max_age_hours(),
+    )
+
+
+def provenance_identity(provenance: Mapping[str, object]) -> str:
+    return hashlib.sha256(json.dumps(
+        provenance, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode()).hexdigest()
 
 
 class ReplacementInputHwmReadUnavailable(sqlite3.OperationalError):
@@ -908,6 +1235,7 @@ def _cached_artifact_payload_covers_target_local_day(
     resolved = Path(payload_path)
     if not resolved.is_absolute():
         resolved = Path(artifact_path).parent / resolved
+    _note_file(resolved)
     try:
         stat = resolved.stat()
     except (OSError, ValueError):
@@ -1431,6 +1759,36 @@ def _provenance_has_current_value_serving(
     return isinstance(serving, dict) and bool(serving)
 
 
+def _current_station_ground_state(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    decision_time: datetime,
+) -> tuple[str, str, str] | None:
+    """(facts identity, coverage status, applicability) of the current ground.
+
+    Read on every call: it is an input of the remembered verdict, never part
+    of the remembered outcome. Unavailable ground is None.
+    """
+    from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
+    from src.data.station_ground_evidence import (
+        forecast_db_from_connection, read_current_station_ground_evidence,
+    )
+
+    db_path = forecast_db_from_connection(conn)
+    if db_path is None:
+        return None
+    current = read_current_station_ground_evidence(db_path, city=city, decision_at=decision_time)
+    if current is None:
+        return None
+    coverage = station_ground_target_coverage_for_city(
+        current, city=city, target_date=target_date, decision_at=decision_time,
+    )
+    return (str(current["facts_identity"]), str(coverage["status"]),
+            str(coverage["applicability_identity"]))
+
+
 def _exact_current_value_serving_lag(
     conn: sqlite3.Connection,
     *,
@@ -1443,6 +1801,7 @@ def _exact_current_value_serving_lag(
     held_complete_bundle_continuity: bool = False,
     refresh_reasons: list[str] | None = None,
     input_witness_out: dict[str, object] | None = None,
+    consumed_proof_verified: bool = False,
 ) -> tuple[bool, str | None, datetime | None]:
     """Validate consumed proof, then separately record each model's refresh debt.
 
@@ -1451,8 +1810,12 @@ def _exact_current_value_serving_lag(
     deterministic values, recorded in ``current_value_serving``.  Comparing
     those rows back to the carrier cycle makes a fully current posterior look
     stale forever.  Exact raw-row identities are the narrower authority.
+
+    The successor census (newer rows per consumed model) runs only when a
+    caller collects ``refresh_reasons`` or a witness: it never decides serving.
     """
 
+    census = refresh_reasons is not None or input_witness_out is not None
     refresh_reasons = [] if refresh_reasons is None else refresh_reasons
     fusion = provenance.get("bayes_precision_fusion")
     if not isinstance(fusion, Mapping):
@@ -1471,31 +1834,27 @@ def _exact_current_value_serving_lag(
         return True, window_reason, None
 
     shape = fusion.get("current_evidence_shape")
-    if isinstance(shape, Mapping) and isinstance(shape.get("provider_geometry_evidence"), Mapping):
-        from src.data.station_ground_evidence import (
-            forecast_db_from_connection, read_current_station_ground_evidence,
-            read_frozen_station_ground_evidence,
-        )
-        db_path = forecast_db_from_connection(conn)
+    if (not consumed_proof_verified and isinstance(shape, Mapping)
+            and isinstance(shape.get("provider_geometry_evidence"), Mapping)):
+        from src.data.station_ground_evidence import read_frozen_station_ground_evidence
         ground_audit = shape.get("provider_geometry_audit")
         frozen = None if posterior_computed_at is None else read_frozen_station_ground_evidence(
             ground_audit.get("anchor_station_ground") if isinstance(ground_audit, Mapping) else None,
             decision_at=posterior_computed_at,
         )
-        current_ground = None if db_path is None else read_current_station_ground_evidence(
-            db_path, city=city, decision_at=decision_time,
+        current_ground = _current_station_ground_state(
+            conn, city=city, target_date=target_date, decision_time=decision_time,
         )
         if frozen is None or current_ground is None:
             return True, "basis=station_ground_canonical_evidence_unavailable", None
-        if frozen["facts_identity"] != current_ground["facts_identity"]:
+        facts_identity, coverage_status, applicability = current_ground
+        if frozen["facts_identity"] != facts_identity:
             return True, "basis=station_ground_current_facts_changed", None
         from src.data.replacement_current_value_serving import station_ground_target_coverage_for_city
         prior_coverage = station_ground_target_coverage_for_city(frozen,city=city,target_date=target_date,
             decision_at=posterior_computed_at)
-        current_coverage = station_ground_target_coverage_for_city(current_ground,city=city,target_date=target_date,
-            decision_at=decision_time)
-        if (current_coverage["status"] != "VERIFIED"
-            or prior_coverage["applicability_identity"] != current_coverage["applicability_identity"]):
+        if (coverage_status != "VERIFIED"
+            or prior_coverage["applicability_identity"] != applicability):
             return True,"basis=station_ground_target_applicability_changed",None
         # Whole-page/manifest/possession changes with the exact same station
         # facts never invalidate a certificate or force a new probability shape.
@@ -1504,6 +1863,8 @@ def _exact_current_value_serving_lag(
     for model in sorted(used_models):
         item = serving.get(model)
         if model == "ecmwf_ifs" and item is None:
+            if consumed_proof_verified:
+                continue
             from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
             from src.data.station_ground_evidence import forecast_db_from_connection
             table = _authority_table_ref(conn, "forecast_posteriors")
@@ -1588,10 +1949,12 @@ def _exact_current_value_serving_lag(
             conn, city=city, metric=metric, target_date=str(target_date),
             consumed_models={item[0]: model for model, item in consumed.items()},
             materialized_at_iso=posterior_computed_at.isoformat(),
-        ) if consumed else {}
+        ) if consumed and not consumed_proof_verified else {}
     except sqlite3.OperationalError as exc:
         _raise_hwm_read_unavailable(exc, basis="consumed_physical_proof_read_unavailable")
     for model, (raw_id, cycle, captured) in consumed.items():
+        if consumed_proof_verified:
+            break
         old = frozen.get(raw_id)
         if old is None:
             return True, ("basis=current_value_serving_consumed_proof_unverifiable:"
@@ -1604,6 +1967,9 @@ def _exact_current_value_serving_lag(
         if claimed is None or claimed != physical_source_proof_dependency(old.physical_response):
             return True, ("basis=current_value_serving_consumed_physical_proof_invalid:"
                 f"model={model}:consumed_raw_id={raw_id}"), None
+    anchor = consumed.get("ecmwf_ifs")
+    if not census:
+        return True, None, anchor[1] if anchor is not None else None
 
     decision_iso = decision_time.astimezone(UTC).isoformat()
     from src.data.replacement_current_value_serving import (
@@ -1661,12 +2027,10 @@ def _exact_current_value_serving_lag(
         current_at = _parse_source_cycle_utc(current.captured_at)
         latest_id = int(current.raw_model_forecast_id)
         if current_cycle is None:
-            return (
-                True,
-                "basis=current_value_serving_raw_row_identity_mismatch:"
-                f"model={model}:consumed_raw_id={consumed_id}",
-                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
-            )
+            refresh_reasons.append(
+                "basis=current_value_serving_successor_identity_unverifiable:"
+                f"model={model}:consumed_raw_id={consumed_id}")
+            continue
         if (
             posterior_computed_at is not None
             and current_at is not None
@@ -1680,6 +2044,8 @@ def _exact_current_value_serving_lag(
                 f"posterior_computed_at={posterior_computed_at.isoformat()}")
             continue
         if latest_id == consumed_id:
+            # The exact consumed row already re-verified at its cutoff above;
+            # a census that sees it under other clocks is successor evidence.
             if (
                 current_cycle != consumed_cycle
                 or (
@@ -1687,12 +2053,9 @@ def _exact_current_value_serving_lag(
                     and current_at != consumed_at
                 )
             ):
-                return (
-                    True,
-                    "basis=current_value_serving_raw_row_identity_mismatch:"
-                    f"model={model}:consumed_raw_id={consumed_id}",
-                    consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
-                )
+                refresh_reasons.append(
+                    "basis=current_value_serving_successor_identity_unverifiable:"
+                    f"model={model}:consumed_raw_id={consumed_id}")
             continue
         if current_cycle > consumed_cycle:
             newer_cycle_changes.append(
@@ -1709,7 +2072,6 @@ def _exact_current_value_serving_lag(
             f"latest_raw_cycle={current_cycle.isoformat()}:"
             f"consumed_raw_cycle={consumed_cycle.isoformat()}")
 
-    anchor = consumed.get("ecmwf_ifs")
     return True, None, anchor[1] if anchor is not None else None
 
 
@@ -2231,7 +2593,15 @@ def _replacement_live_input_lag_reason(
     held_redecision: bool = False,
     refresh_reasons: list[str] | None = None,
     input_witness_out: dict[str, object] | None = None,
+    posterior_provenance_digest: str | None = None,
+    use_memo: bool = True,
 ) -> str | None:
+    """Intrinsic consumed-proof verdict, then (only if asked) successor debt.
+
+    The successor census never decides serving under the continuity law, so
+    it runs only for callers that collect ``refresh_reasons``.
+    """
+    census = refresh_reasons is not None
     refresh_reasons = [] if refresh_reasons is None else refresh_reasons
     if not isinstance(held_redecision, bool):
         raise TypeError("held_redecision must be bool")
@@ -2267,18 +2637,31 @@ def _replacement_live_input_lag_reason(
         if isinstance(shape, Mapping)
         else None
     )
+    if consumed_ensemble_cycle is None:
+        return "basis=current_ensemble_snapshot_provenance_unverifiable"
+    if provenance.get("openmeteo_anchor_artifact_id") is None:
+        return "basis=openmeteo_anchor_artifact_provenance_unverifiable"
+
+    reason, anchor_cycle = _consumed_proof_verdict(
+        conn, city=city, target_date=target_date, metric=metric,
+        decision_time=decision_time, posterior_computed=posterior_computed,
+        provenance=provenance,
+        provenance_digest=posterior_provenance_digest if posterior_provenance is not None else None,
+        use_memo=use_memo,
+    )
     if input_witness_out is not None:
         serving = fusion.get("current_value_serving") if isinstance(fusion, Mapping) else None
         input_witness_out.update(
             consumed_source_cycle_time=posterior_cycle.isoformat(),
-            consumed_ensemble_cycle_time=(consumed_ensemble_cycle.isoformat()
-                if consumed_ensemble_cycle else None),
-            posterior_computed_at=posterior_computed.isoformat() if posterior_computed else None,
+            consumed_ensemble_cycle_time=consumed_ensemble_cycle.isoformat(),
+            posterior_computed_at=posterior_computed.isoformat(),
             posterior_age_hours=(decision_time-posterior_computed).total_seconds()/3600.0,
             consumed_model_cycles={model: item.get("served_cycle")
                 for model, item in (serving or {}).items() if isinstance(item, Mapping)},
             source_cycle_age_hours=(decision_time-posterior_cycle).total_seconds()/3600.0,
         )
+    if reason is not None or not census:
+        return reason
     try:
         latest_ensemble_mark = _latest_eligible_ensemble_input_mark(
             conn,
@@ -2295,46 +2678,31 @@ def _replacement_live_input_lag_reason(
             latest_ensemble_mark[1].isoformat() if latest_ensemble_mark else None)
         input_witness_out["ensemble_cycle_lag_hours"] = (
             max(0.0,(latest_ensemble_mark[1]-consumed_ensemble_cycle).total_seconds()/3600.0)
-            if latest_ensemble_mark and consumed_ensemble_cycle else None)
-    if latest_ensemble_mark is not None:
+            if latest_ensemble_mark else None)
+    if latest_ensemble_mark is not None and latest_ensemble_mark[1] > consumed_ensemble_cycle:
         latest_snapshot_id, latest_ensemble_cycle = latest_ensemble_mark
-        if consumed_ensemble_cycle is None:
-            return "basis=current_ensemble_snapshot_provenance_unverifiable"
-        # New inputs create refresh debt, not retroactive invalidity. Continue
-        # checking consumed provenance: an advisory may not mask a later fault.
-        if latest_ensemble_cycle > consumed_ensemble_cycle:
-            lag_hours = (
-                latest_ensemble_cycle - consumed_ensemble_cycle
-            ).total_seconds() / 3600.0
-            refresh_reasons.append(
-                "basis=current_ensemble_snapshot_superseded:"
-                f"latest_snapshot_id={latest_snapshot_id}:"
-                f"latest_ensemble_cycle={latest_ensemble_cycle.isoformat()}:"
-                f"consumed_ensemble_cycle={consumed_ensemble_cycle.isoformat()}:"
-                f"lag_h={lag_hours:.2f}"
-            )
-        # ENTRY, HELD and resting-order management share the same input law.
-    rich_used_input_provenance = _provenance_has_current_value_serving(provenance)
-    exact_serving_checked = False
-    if rich_used_input_provenance:
-        (
-            exact_serving_checked,
-            exact_serving_lag,
-            _consumed_model_anchor_cycle,
-        ) = _exact_current_value_serving_lag(
-            conn,
-            city=city,
-            target_date=target_date,
-            metric=metric,
-            decision_time=decision_time,
-            posterior_computed_at=posterior_computed,
-            provenance=provenance,
-            refresh_reasons=refresh_reasons,
-            input_witness_out=input_witness_out,
+        lag_hours = (
+            latest_ensemble_cycle - consumed_ensemble_cycle
+        ).total_seconds() / 3600.0
+        refresh_reasons.append(
+            "basis=current_ensemble_snapshot_superseded:"
+            f"latest_snapshot_id={latest_snapshot_id}:"
+            f"latest_ensemble_cycle={latest_ensemble_cycle.isoformat()}:"
+            f"consumed_ensemble_cycle={consumed_ensemble_cycle.isoformat()}:"
+            f"lag_h={lag_hours:.2f}"
         )
-        if exact_serving_lag is not None:
-            return exact_serving_lag
-
+    _exact_current_value_serving_lag(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+        posterior_computed_at=posterior_computed,
+        provenance=provenance,
+        refresh_reasons=refresh_reasons,
+        input_witness_out=input_witness_out,
+        consumed_proof_verified=True,
+    )
     try:
         artifact_cycle = latest_raw_artifact_input_cycle(
             conn,
@@ -2346,31 +2714,8 @@ def _replacement_live_input_lag_reason(
     except sqlite3.OperationalError as exc:
         refresh_reasons.append("basis=successor_anchor_frontier_unavailable:" + type(exc).__name__)
         artifact_cycle = None
-    artifact_reference_cycle = posterior_cycle
-    declared_anchor_artifact = provenance.get("openmeteo_anchor_artifact_id")
-    if rich_used_input_provenance and (
-        artifact_cycle is not None or declared_anchor_artifact is not None
-    ):
-        artifact_identity_lag, exact_anchor_cycle = (
-            _exact_consumed_anchor_artifact_cycle(
-                conn,
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                decision_time=decision_time,
-                provenance=provenance,
-                posterior_computed_at=posterior_computed,
-            )
-        )
-        if artifact_identity_lag is not None:
-            return artifact_identity_lag
-        if exact_anchor_cycle is None:
-            return "basis=openmeteo_anchor_artifact_provenance_unverifiable"
-        artifact_reference_cycle = exact_anchor_cycle
-    if (
-        artifact_cycle is not None
-        and artifact_cycle > artifact_reference_cycle
-    ):
+    artifact_reference_cycle = anchor_cycle
+    if artifact_cycle is not None and artifact_cycle > artifact_reference_cycle:
         lag_hours = (
             artifact_cycle - artifact_reference_cycle
         ).total_seconds() / 3600.0
@@ -2381,7 +2726,77 @@ def _replacement_live_input_lag_reason(
             f"consumed_anchor_cycle={artifact_reference_cycle.isoformat()}:"
             f"lag_h={lag_hours:.2f}"
         )
-    return None if exact_serving_checked else "basis=current_value_serving_provenance_unverifiable"
+    return None
+
+
+def _consumed_proof_verdict(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    posterior_computed: datetime,
+    provenance: Mapping[str, object],
+    provenance_digest: str | None = None,
+    use_memo: bool = True,
+) -> tuple[str | None, datetime | None]:
+    """(blocking reason, consumed anchor cycle) from the posterior's own evidence.
+
+    Station ground is replayed at ``decision_time``; every other read is the
+    exact consumed evidence cut at ``posterior_computed``. No successor read.
+    A valid verdict is remembered under every input it read except clocks:
+    the posterior's provenance and materialization cut, its family, the
+    authority configuration and the current ground it was judged against are
+    the key; every SQL read and file it made are replayed on each hit (see
+    ``reads_hold``). Only the canonical store is remembered: a connection
+    wrapper or view is not, and ``use_memo=False`` revalidates from source.
+    """
+    from src.data.station_ground_evidence import forecast_db_from_connection
+
+    fusion = provenance.get("bayes_precision_fusion")
+    shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
+    ground: object = ()
+    if isinstance(shape, Mapping) and isinstance(shape.get("provider_geometry_evidence"), Mapping):
+        ground = _current_station_ground_state(
+            conn, city=city, target_date=target_date, decision_time=decision_time,
+        )
+    db_path = forecast_db_from_connection(conn)
+    canonical = use_memo and type(conn) is sqlite3.Connection
+    key = None if not canonical or db_path is None or ground is None else (
+        str(db_path), provenance_digest or provenance_identity(provenance),
+        posterior_computed.isoformat(), city, str(target_date), metric,
+        authority_config_identity(), ground,
+    )
+    if key is not None:
+        cached = _memo_get(_VERDICT_MEMO, key)
+        if cached is not None and reads_hold(cached[1], conn):
+            return None, cached[0]
+    record = ReadRecord() if key is not None else None
+    with recorded_reads(record, conn) as seen:
+        checked, reason, _anchor = _exact_current_value_serving_lag(
+            seen or conn, city=city, target_date=target_date, metric=metric,
+            decision_time=decision_time, posterior_computed_at=posterior_computed,
+            provenance=provenance,
+        )
+        if reason is not None:
+            return reason, None
+        if not checked:
+            return "basis=current_value_serving_provenance_unverifiable", None
+        # The consumed anchor was possessed when the posterior was computed;
+        # that cut, not the decision clock, is its causality bound.
+        reason, anchor_cycle = _exact_consumed_anchor_artifact_cycle(
+            seen or conn, city=city, target_date=target_date, metric=metric,
+            decision_time=posterior_computed, provenance=provenance,
+            posterior_computed_at=posterior_computed,
+        )
+    if reason is not None:
+        return reason, None
+    if anchor_cycle is None:
+        return "basis=openmeteo_anchor_artifact_provenance_unverifiable", None
+    if record is not None and record.replayable:
+        _memo_put(_VERDICT_MEMO, key, (anchor_cycle, record.frozen()))
+    return None, anchor_cycle
 
 
 def replacement_live_input_lag_reason(
@@ -2396,6 +2811,9 @@ def replacement_live_input_lag_reason(
     posterior_provenance: Mapping[str, object] | None = None,
     held_redecision: bool = False,
     input_witness_out: dict[str, object] | None = None,
+    successor_census: bool = False,
+    posterior_provenance_digest: str | None = None,
+    use_memo: bool = True,
 ) -> str | None:
     """Return intrinsic invalidity only; successor debt is independent evidence.
 
@@ -2403,6 +2821,11 @@ def replacement_live_input_lag_reason(
     arbitrary row: the bundle reader still requires its exact READY binding,
     live-grade semantics, original dependencies, scope and validity interval.
     A posterior first computed after ``decision_time`` was not possessed then.
+    ``successor_census`` adds refresh debt to the witness; it never changes
+    the returned reason, so only an actuation-time record asks for it.
+    ``posterior_provenance_digest`` names the exact text ``posterior_provenance``
+    was parsed from, so the verdict memo need not re-serialize it.
+    ``use_memo=False`` revalidates the consumed proof from source.
     """
     computed = _parse_source_cycle_utc(posterior_computed_at)
     if computed is not None and decision_time.tzinfo is not None and computed > decision_time:
@@ -2414,6 +2837,9 @@ def replacement_live_input_lag_reason(
         posterior_computed_at=posterior_computed_at,
         posterior_provenance=posterior_provenance,
         held_redecision=held_redecision, input_witness_out=input_witness_out,
+        successor_census=successor_census,
+        posterior_provenance_digest=posterior_provenance_digest,
+        use_memo=use_memo,
     )
 
 
@@ -2429,6 +2855,9 @@ def _input_hwm_reason(
     posterior_provenance: Mapping[str, object] | None = None,
     held_redecision: bool = False,
     input_witness_out: dict[str, object] | None = None,
+    successor_census: bool = True,
+    posterior_provenance_digest: str | None = None,
+    use_memo: bool = True,
 ) -> str | None:
     refresh: list[str] = []
     witness: dict[str, object] = {
@@ -2447,11 +2876,15 @@ def _input_hwm_reason(
             posterior_computed_at=posterior_computed_at,
             posterior_provenance=posterior_provenance,
             held_redecision=held_redecision,
-            refresh_reasons=refresh, input_witness_out=witness,
+            refresh_reasons=refresh if successor_census else None,
+            input_witness_out=witness,
+            posterior_provenance_digest=posterior_provenance_digest,
+            use_memo=use_memo,
         )
     except ReplacementInputHwmReadUnavailable as exc:
         reason = exc.blocker_reason()
-    witness["refresh_reasons"] = tuple(dict.fromkeys(refresh))
+    if successor_census:
+        witness["refresh_reasons"] = tuple(dict.fromkeys(refresh))
     witness["blocking_reason"] = reason
     # Diagnostic identity is deliberately not the posterior's content identity.
     witness["witness_identity"] = hashlib.sha256(json.dumps(

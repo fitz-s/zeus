@@ -79,13 +79,19 @@ def test_input_continuity_witness_preserves_consumed_clocks(monkeypatch):
     conn,context=_component(monkeypatch)
     try:
         out={}
-        assert H.replacement_live_input_lag_reason(conn,**context,input_witness_out=out) is None
+        assert H.replacement_live_input_lag_reason(conn,**context,input_witness_out=out,
+            successor_census=True) is None
         assert out["consumed_source_cycle_time"]==CYCLE.isoformat()
         assert out["posterior_computed_at"]==COMPUTED.isoformat()
         assert out["consumed_model_cycles"]=={"icon_global":CYCLE.isoformat()}
         assert out["ensemble_cycle_lag_hours"]==6
         assert out["source_cycle_age_hours"]==9
         assert out["blocking_reason"] is None and out["refresh_reasons"]
+        # Serving alone records the consumed clocks, never the successor census.
+        served={}
+        assert H.replacement_live_input_lag_reason(conn,**context,input_witness_out=served) is None
+        assert served["posterior_age_hours"]==1 and "refresh_reasons" not in served
+        assert "ensemble_cycle_lag_hours" not in served
     finally:conn.close()
 
 @pytest.mark.parametrize("purpose",tuple(B.ReplacementForecastAuthorityPurpose))
@@ -108,7 +114,12 @@ def test_input_continuity_blocked_optional_successor_retains_q(_shanghai_reader_
         assert out.bundle.posterior_identity_hash==before.bundle.posterior_identity_hash
         assert out.bundle.source_cycle_time==before.bundle.source_cycle_time
         assert out.bundle.computed_at==before.bundle.computed_at
-        assert out.bundle.input_hwm_witness["ensemble_cycle_lag_hours"]==6
+        assert out.bundle.input_hwm_witness["posterior_computed_at"]==before.bundle.input_hwm_witness["posterior_computed_at"]
+        # The successor stays owed to the builders.
+        assert "current_ensemble_snapshot_superseded" in H.replacement_input_refresh_reason(normal.conn,
+            city=normal.row["city"],target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],
+            decision_time=newer.cut,posterior_source_cycle_time=normal.row["source_cycle_time"],
+            posterior_computed_at=normal.row["computed_at"],posterior_provenance=json.loads(normal.row["provenance_json"]))
     finally:next(newer_context,None)
 
 def _c3_q(normal,cut):
@@ -208,7 +219,8 @@ def test_input_continuity_held_loader_serves_same_q_and_lag(_shanghai_reader_cur
         assert belief is not None and belief.fresh
         assert belief.q_yes_bin==pytest.approx(q[label])
         assert belief.posterior_id==str(normal.row["posterior_id"])
-        assert belief.input_hwm_witness["ensemble_cycle_lag_hours"]==6
+        assert belief.input_hwm_witness["blocking_reason"] is None
+        assert belief.input_hwm_witness["posterior_computed_at"]==datetime.fromisoformat(normal.row["computed_at"]).isoformat()
     finally:next(newer_context,None)
 
 def test_input_continuity_held_loader_unknown_hwm_is_not_fresh(_shanghai_reader_current_certificate,monkeypatch):
@@ -249,6 +261,7 @@ def test_input_continuity_held_belief_keeps_its_posterior_across_a_newer_icon_pr
     assert (after.posterior_id,after.q_yes_bin)==(before.posterior_id,before.q_yes_bin)
     def unknown(*a,**k):raise sqlite3.OperationalError("interrupted")
     monkeypatch.setattr(C,"read_consumed_instrument_values",unknown)
+    H.clear_consumed_proof_memo()
     blocked=belief()
     assert blocked is not None and not blocked.fresh
     assert blocked.raw_input_lag_reason.startswith("basis=consumed_physical_proof_read_unavailable")
@@ -339,7 +352,8 @@ def test_input_continuity_unknown_successor_does_not_revoke_proven_consumed_inpu
     monkeypatch.setattr(target,name,unavailable)
     try:
         out={}
-        assert H.replacement_live_input_lag_reason(conn,**context,input_witness_out=out) is None
+        assert H.replacement_live_input_lag_reason(conn,**context,input_witness_out=out,
+            successor_census=True) is None
         assert any("successor_" in r and "unavailable" in r for r in out["refresh_reasons"])
         assert H.replacement_input_refresh_reason(conn,**context)
     finally:conn.close()
@@ -351,3 +365,250 @@ def test_input_continuity_unknown_consumed_proof_always_fails_closed(monkeypatch
     try:
         assert "consumed_physical_proof_read_unavailable" in H.replacement_live_input_lag_reason(conn,**context)
     finally:conn.close()
+
+
+# ---- consumed-proof verdict memo: keyed on every non-clock input it reads ----
+
+def _memo_context(normal, **overrides):
+    return dict(city=normal.row["city"],target_date=normal.row["target_date"],
+        metric=normal.row["temperature_metric"],decision_time=normal.request.computed_at,
+        posterior_source_cycle_time=normal.row["source_cycle_time"],
+        posterior_computed_at=normal.row["computed_at"],
+        posterior_provenance=json.loads(normal.row["provenance_json"]),**overrides)
+
+def _count_consumed_reads(monkeypatch):
+    calls=[]
+    real=C.read_consumed_instrument_values
+    def counted(*a,**k):
+        calls.append(1)
+        return real(*a,**k)
+    monkeypatch.setattr(C,"read_consumed_instrument_values",counted)
+    return calls
+
+def test_verdict_memo_serves_the_same_posterior_without_rereading(_shanghai_reader_current_certificate,monkeypatch):
+    normal=_shanghai_reader_current_certificate
+    H.clear_consumed_proof_memo()
+    calls=_count_consumed_reads(monkeypatch)
+    context=_memo_context(normal)
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+    assert len(calls)==1
+    # A different posterior identity never reuses the verdict: its own
+    # provenance is proved from source (here it fails closed on its own).
+    other=json.loads(normal.row["provenance_json"]);other["memo_probe"]=1
+    proved=[]
+    real=H._exact_current_value_serving_lag
+    monkeypatch.setattr(H,"_exact_current_value_serving_lag",lambda *a,**k:proved.append(k["provenance"]) or real(*a,**k))
+    assert H.replacement_live_input_lag_reason(normal.conn,**{**context,"posterior_provenance":other}) is not None
+    assert proved==[other]
+    # Another family or metric for the same posterior text is its own key too.
+    assert H.replacement_live_input_lag_reason(normal.conn,**{**context,"metric":"low"}) is not None
+    assert len(proved)==2
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+    assert len(proved)==2 and len(H._VERDICT_MEMO)==1
+
+def test_verdict_memo_misses_when_station_ground_facts_change(_shanghai_reader_current_certificate,monkeypatch):
+    normal=_shanghai_reader_current_certificate
+    H.clear_consumed_proof_memo()
+    calls=_count_consumed_reads(monkeypatch)
+    context=_memo_context(normal)
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+    from src.data import station_ground_evidence as G
+    real=G.read_current_station_ground_evidence
+    def changed(*a,**k):
+        current=real(*a,**k)
+        return None if current is None else {**current,"facts_identity":"changed-ground"}
+    monkeypatch.setattr(G,"read_current_station_ground_evidence",changed)
+    reason=H.replacement_live_input_lag_reason(normal.conn,**context)
+    assert reason=="basis=station_ground_current_facts_changed"
+    monkeypatch.setattr(G,"read_current_station_ground_evidence",lambda *a,**k:None)
+    reason=H.replacement_live_input_lag_reason(normal.conn,**context)
+    assert reason=="basis=station_ground_canonical_evidence_unavailable"
+
+def test_verdict_memo_misses_when_a_read_file_changes(_shanghai_reader_current_certificate,monkeypatch):
+    normal=_shanghai_reader_current_certificate
+    H.clear_consumed_proof_memo()
+    context=_memo_context(normal)
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+    calls=_count_consumed_reads(monkeypatch)
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None and not calls
+    (_cycle,(_reads,files)),=H._VERDICT_MEMO.values()
+    body=next(Path(p) for p,_ in files if Path(p).is_file() and "raw_manifests" in p)
+    original=body.read_bytes()
+    try:
+        body.write_bytes(original+b" ")
+        H.replacement_live_input_lag_reason(normal.conn,**context)
+        assert len(calls)==1
+    finally:
+        body.write_bytes(original)
+
+def _consumed_raw_ids(normal):
+    serving=json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
+    return sorted(item["raw_model_forecast_id"] for item in serving.values())
+
+@pytest.mark.parametrize("table,column,where",[
+    ("raw_forecast_artifacts","sha256","artifact_id=(SELECT MIN(artifact_id) FROM raw_forecast_artifacts)"),
+    ("raw_model_forecasts","forecast_value_c","raw_model_forecast_id=?"),
+    ("source_run","manifest_hash","1"),
+    ("deterministic_forecast_anchors","artifact_id","1"),
+])
+def test_verdict_memo_misses_when_a_read_row_changes_in_place(_shanghai_reader_current_certificate,monkeypatch,table,column,where):
+    # No table is assumed append-only: an in-place UPDATE of any row the
+    # verdict read is seen on the next hit, never served from the memo.
+    normal=_shanghai_reader_current_certificate
+    H.clear_consumed_proof_memo()
+    context=_memo_context(normal)
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+    proved=[]
+    real=H._exact_current_value_serving_lag
+    monkeypatch.setattr(H,"_exact_current_value_serving_lag",lambda *a,**k:proved.append(1) or real(*a,**k))
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None and not proved
+    params=(_consumed_raw_ids(normal)[0],) if "?" in where else ()
+    # Committed, as a writer's would be: the verdict also reads on its own
+    # read-only connections, which see only committed rows.
+    assert normal.conn.execute(f"UPDATE {table} SET {column}=CASE WHEN typeof({column})='text' "
+        f"THEN {column}||'x' ELSE {column}+1 END WHERE {where}",params).rowcount
+    normal.conn.commit()
+    H.replacement_live_input_lag_reason(normal.conn,**context)
+    assert proved==[1]
+
+def _recorded(tmp_path,body):
+    path=tmp_path/f"reads{len(list(tmp_path.iterdir()))}.db"
+    conn=sqlite3.connect(path);conn.row_factory=sqlite3.Row
+    conn.execute("CREATE TABLE t(k INTEGER PRIMARY KEY, v TEXT)")
+    conn.executemany("INSERT INTO t VALUES (?,?)",[(1,"a"),(2,"b"),(3,"c")]);conn.commit()
+    record=H.ReadRecord()
+    with H.recorded_reads(record,conn) as seen:
+        body(seen,path)
+    return conn,record
+
+def test_recorded_read_sees_an_appended_row_only_where_it_read_to_the_end(tmp_path):
+    def body(seen,path):
+        assert [r["v"] for r in seen.execute("SELECT v FROM t WHERE k>=? ORDER BY k",(2,))]==["b","c"]
+        assert seen.execute("SELECT v FROM t ORDER BY k").fetchone()["v"]=="a"
+    conn,record=_recorded(tmp_path,body)
+    frozen=record.frozen()
+    assert record.replayable and H.reads_hold(frozen,conn)
+    conn.execute("INSERT INTO t VALUES (0,'z')");conn.commit()
+    assert not H.reads_hold(frozen,conn)  # the first-row read now answers 'z'
+    conn.execute("DELETE FROM t WHERE k=0");conn.execute("INSERT INTO t VALUES (4,'d')");conn.commit()
+    assert not H.reads_hold(frozen,conn)  # the exhausted range read gained a row
+
+def test_recorded_read_shares_answers_only_within_one_visible_snapshot(tmp_path):
+    # A cut's verdicts replay the same group reads on one read-only
+    # connection; a commit elsewhere is a new snapshot and is read again.
+    writer,record=_recorded(tmp_path,lambda seen,path:seen.execute("SELECT v FROM t WHERE k=?",(1,)).fetchall())
+    path=next(r[2] for r in writer.execute("PRAGMA database_list") if r[1]=="main")
+    reader=sqlite3.connect(f"file:{path}?mode=ro",uri=True)
+    frozen=record.frozen()
+    assert H.reads_hold(frozen,reader) and H.reads_hold(frozen,reader)
+    writer.execute("UPDATE t SET v='changed' WHERE k=1");writer.commit()
+    assert not H.reads_hold(frozen,reader)
+
+def test_recorded_read_refuses_a_statement_or_connection_it_cannot_replay(tmp_path):
+    _conn,record=_recorded(tmp_path,lambda seen,path:seen.execute("CREATE TEMP TABLE scratch(x)"))
+    assert not record.replayable
+    _conn,record=_recorded(tmp_path,lambda seen,path:sqlite3.connect(path).close())
+    assert not record.replayable
+    from src.state.db import _connect_read_only
+    def own(seen,path):
+        ro=_connect_read_only(path)
+        try:assert ro.execute("SELECT COUNT(*) FROM t").fetchone()[0]==3
+        finally:ro.close()
+    conn,record=_recorded(tmp_path,own)
+    assert record.replayable and H.reads_hold(record.frozen(),conn)
+    conn.execute("INSERT INTO t VALUES (9,'x')");conn.commit()
+    assert not H.reads_hold(record.frozen(),conn)
+
+def test_verdict_memo_replays_reads_on_its_own_read_only_connections(_shanghai_reader_current_certificate,monkeypatch):
+    normal=_shanghai_reader_current_certificate
+    H.clear_consumed_proof_memo()
+    assert H.replacement_live_input_lag_reason(normal.conn,**_memo_context(normal)) is None
+    (_cycle,(reads,_files)),=H._VERDICT_MEMO.values()
+    channels={read[0] for read in reads}
+    assert None in channels and any(isinstance(c,str) and "mode=ro" in c for c in channels)
+    assert all(read[3] or read[4] for read in reads)
+
+def test_live_grade_memo_misses_when_a_read_row_changes_in_place(_shanghai_reader_current_certificate,monkeypatch):
+    # The shape authority this memo remembers joins source_run, which its
+    # writer replaces in place; the replaced row is re-proved, not served.
+    from src.data import replacement_forecast_cycle_policy as P
+    normal=_shanghai_reader_current_certificate
+    B._LIVE_GRADE_MEMO.clear()
+    assert B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
+    calls=[]
+    real=P._current_evidence_shape_has_probability_authority
+    monkeypatch.setattr(P,"_current_evidence_shape_has_probability_authority",lambda *a,**k:calls.append(1) or real(*a,**k))
+    assert B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok and not calls
+    normal.conn.execute("UPDATE source_run SET manifest_hash=manifest_hash||'x'")
+    normal.conn.commit()
+    B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs)
+    assert calls
+
+def test_verdict_memo_misses_when_authority_config_changes(_shanghai_reader_current_certificate,monkeypatch):
+    normal=_shanghai_reader_current_certificate
+    H.clear_consumed_proof_memo()
+    context=_memo_context(normal)
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+    calls=_count_consumed_reads(monkeypatch)
+    monkeypatch.setenv("ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS","29")
+    H.replacement_live_input_lag_reason(normal.conn,**context)
+    assert len(calls)==1
+
+def test_verdict_memo_never_caches_unknown_or_invalid(_shanghai_reader_current_certificate,monkeypatch):
+    normal=_shanghai_reader_current_certificate
+    H.clear_consumed_proof_memo()
+    context=_memo_context(normal)
+    real=C.read_consumed_instrument_values
+    def unknown(*a,**k):raise sqlite3.OperationalError("interrupted")
+    monkeypatch.setattr(C,"read_consumed_instrument_values",unknown)
+    for _ in range(2):
+        assert "consumed_physical_proof_read_unavailable" in H.replacement_live_input_lag_reason(normal.conn,**context)
+    monkeypatch.setattr(C,"read_consumed_instrument_values",lambda *a,**k:{})
+    assert "consumed_proof_unverifiable" in H.replacement_live_input_lag_reason(normal.conn,**context)
+    assert not H._VERDICT_MEMO
+    # Once the proof verifies, the next unknown read is still not served stale
+    # to a caller that asks for source revalidation (the executor).
+    monkeypatch.setattr(C,"read_consumed_instrument_values",real)
+    assert H.replacement_live_input_lag_reason(normal.conn,**context) is None
+    monkeypatch.setattr(C,"read_consumed_instrument_values",unknown)
+    assert "consumed_physical_proof_read_unavailable" in H.replacement_live_input_lag_reason(
+        normal.conn,**context,use_memo=False)
+
+def test_verdict_memo_is_bounded(monkeypatch):
+    monkeypatch.setattr(H,"_MEMO_LIMIT",3)
+    H.clear_consumed_proof_memo()
+    for i in range(10):
+        H._memo_put(H._VERDICT_MEMO,(i,),(CYCLE,()))
+    assert list(H._VERDICT_MEMO)==[(7,),(8,),(9,)]
+
+@pytest.mark.parametrize("purpose",tuple(B.ReplacementForecastAuthorityPurpose))
+def test_readiness_revocation_and_expiry_are_read_every_time(_shanghai_reader_current_certificate,purpose):
+    normal=_shanghai_reader_current_certificate
+    kwargs={**normal.kwargs,"authority_purpose":purpose}
+    assert B.read_replacement_forecast_bundle(normal.conn,**kwargs).ok
+    revoked=B.read_replacement_forecast_bundle(normal.conn,**{**kwargs,"readiness":replace(normal.readiness,status="BLOCKED")})
+    assert revoked.reason_code=="REPLACEMENT_READINESS_NOT_READY"
+    expired=B.read_replacement_forecast_bundle(normal.conn,**{**kwargs,
+        "readiness":replace(normal.readiness,expires_at=normal.request.computed_at)})
+    assert expired.reason_code=="REPLACEMENT_LIVE_READINESS_EXPIRED"
+    assert B.read_replacement_forecast_bundle(normal.conn,**kwargs).ok
+
+def test_live_grade_memo_is_per_purpose_and_canonical_only(_shanghai_reader_current_certificate,monkeypatch):
+    normal=_shanghai_reader_current_certificate
+    B._LIVE_GRADE_MEMO.clear()
+    for purpose in B.ReplacementForecastAuthorityPurpose:
+        assert B.read_replacement_forecast_bundle(normal.conn,**{**normal.kwargs,"authority_purpose":purpose}).ok
+    assert {key[1] for key in B._LIVE_GRADE_MEMO}=={p.value for p in B.ReplacementForecastAuthorityPurpose}
+    from src.data import replacement_forecast_cycle_policy as P
+    calls=[]
+    real=P._current_evidence_shape_has_probability_authority
+    monkeypatch.setattr(P,"_current_evidence_shape_has_probability_authority",lambda *a,**k:calls.append(1) or real(*a,**k))
+    assert B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
+    assert not calls
+    # A non-canonical view (wrapper) always re-proves.
+    class View:
+        def __getattr__(self,name):return getattr(normal.conn,name)
+        def execute(self,*a):return normal.conn.execute(*a)
+    B.read_replacement_forecast_bundle(View(),**{**normal.kwargs,"raw_input_hwm_conn":normal.conn})
+    assert calls

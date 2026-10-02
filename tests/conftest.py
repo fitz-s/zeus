@@ -167,6 +167,23 @@ def _bucket_declaration_cache_test_isolation():
 
 
 @pytest.fixture(autouse=True)
+def _consumed_proof_memo_test_isolation():
+    """Isolate the process-lifetime consumed-proof and live-grade memos.
+
+    Each test builds its own forecast DB, often at a path an earlier test
+    used; a remembered valid verdict must not stand in for another fixture.
+    """
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data.replacement_input_hwm import clear_consumed_proof_memo
+
+    clear_consumed_proof_memo()
+    reader._LIVE_GRADE_MEMO.clear()
+    yield
+    clear_consumed_proof_memo()
+    reader._LIVE_GRADE_MEMO.clear()
+
+
+@pytest.fixture(autouse=True)
 def _single_runs_payload_cache_test_isolation():
     """Isolate the BPF single-runs payload cache (quota root-cause, round 3).
 

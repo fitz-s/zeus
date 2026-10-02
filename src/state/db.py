@@ -462,6 +462,14 @@ def connect_existing_forecasts_db_without_journal_bootstrap() -> sqlite3.Connect
     return _connect_existing_db_without_journal_bootstrap(ZEUS_FORECASTS_DB_PATH)
 
 
+# A remembered verdict (src.data.replacement_input_hwm.recorded_reads) opens
+# its read-only connections as a recording subclass so it can replay their
+# reads; None (every other caller) opens a plain sqlite3.Connection.
+READ_ONLY_CONNECTION_FACTORY: "contextvars.ContextVar[Any]" = contextvars.ContextVar(
+    "read_only_connection_factory", default=None
+)
+
+
 def _connect_read_only(
     db_path: Path,
     *,
@@ -475,6 +483,8 @@ def _connect_read_only(
     """
 
     timeout_ms = int(os.environ.get("ZEUS_DB_READ_BUSY_TIMEOUT_MS", "1000"))
+    factory = READ_ONLY_CONNECTION_FACTORY.get()
+    recorded = {} if factory is None else {"factory": factory}
 
     def remaining_timeout_ms() -> int:
         if deadline_monotonic is None:
@@ -490,6 +500,7 @@ def _connect_read_only(
             uri,
             uri=True,
             timeout=max(0.001, timeout_ms / 1000.0),
+            **recorded,
         )
     else:
         # sqlite3.connect(timeout=...) bounds SQLite's busy handler, not the
@@ -508,6 +519,7 @@ def _connect_read_only(
                     uri=True,
                     timeout=remaining_timeout_ms() / 1000.0,
                     check_same_thread=False,
+                    **recorded,
                 )
             except BaseException as exc:
                 if not abandoned.is_set():

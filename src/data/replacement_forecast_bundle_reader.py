@@ -6,11 +6,14 @@ import json
 import hashlib
 import math
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfoNotFoundError
 
@@ -51,8 +54,14 @@ from src.data.replacement_forecast_source_run_identity import (
     expected_replacement_dependency_identity_by_role,
 )
 from src.data.replacement_input_hwm import (
+    ReadRecord,
+    RecordedReads,
     ReplacementInputHwmReadUnavailable,
+    _MEMO_LIMIT,
     _authority_table_ref,
+    authority_config_identity,
+    reads_hold,
+    recorded_reads,
     ensemble_source_authority_predicate,
     latest_eligible_ensemble_input_cycle,
     latest_live_input_cycle,
@@ -1103,14 +1112,79 @@ def _parse_utc(value: str, *, field_name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+# Live-grade verdicts read no clock: the row's own text and clocks and the
+# configuration (the key), plus evidence reads that are replayed on every hit
+# (replacement_input_hwm.reads_hold). A True verdict is remembered; False is
+# recomputed.
+_LIVE_GRADE_MEMO: OrderedDict[tuple[object, ...], RecordedReads] = OrderedDict()
+_LIVE_GRADE_LOCK = threading.Lock()
+
+
+def _live_grade_memo_key(
+    row_map: Mapping[str, Any],
+    authority_purpose: "ReplacementForecastAuthorityPurpose",
+    forecast_db: object | None,
+) -> tuple[object, ...] | None:
+    text = row_map.get("provenance_json")
+    if not isinstance(text, str) or forecast_db is None:
+        return None
+    return (
+        str(forecast_db), authority_purpose.value,
+        tuple(str(row_map.get(name)) for name in (
+            "posterior_id", "posterior_identity_hash", "runtime_layer", "city", "target_date",
+            "temperature_metric", "computed_at", "openmeteo_anchor_id",
+        )),
+        bool(row_map.get("q_lcb_json")), bool(row_map.get("q_ucb_json")),
+        hashlib.sha256(text.encode()).hexdigest(), authority_config_identity(),
+    )
+
+
 def _live_grade_provenance(
     row_map: Mapping[str, Any],
     *,
     authority_purpose: ReplacementForecastAuthorityPurpose,
     parsed_provenance: Mapping[str, Any] | None = None,
     forecast_db: object | None = None,
+    cacheable: bool = False,
 ) -> Mapping[str, Any] | None:
-    """Return provenance only when it authorizes the named capital action."""
+    """Return provenance only when it authorizes the named capital action.
+
+    ``cacheable`` is set only by readers of the canonical store connection.
+    """
+    key = _live_grade_memo_key(row_map, authority_purpose, forecast_db) if cacheable else None
+    if key is not None:
+        with _LIVE_GRADE_LOCK:
+            hit = _LIVE_GRADE_MEMO.get(key)
+            if hit is not None:
+                _LIVE_GRADE_MEMO.move_to_end(key)
+        if hit is not None and reads_hold(hit):
+            return (
+                parsed_provenance
+                if parsed_provenance is not None
+                else _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
+            )
+    record = ReadRecord() if key is not None else None
+    with recorded_reads(record):
+        provenance = _live_grade_provenance_uncached(
+            row_map, authority_purpose=authority_purpose,
+            parsed_provenance=parsed_provenance, forecast_db=forecast_db,
+        )
+    if provenance is not None and record is not None and record.replayable:
+        with _LIVE_GRADE_LOCK:
+            _LIVE_GRADE_MEMO[key] = record.frozen()
+            _LIVE_GRADE_MEMO.move_to_end(key)
+            while len(_LIVE_GRADE_MEMO) > _MEMO_LIMIT:
+                _LIVE_GRADE_MEMO.popitem(last=False)
+    return provenance
+
+
+def _live_grade_provenance_uncached(
+    row_map: Mapping[str, Any],
+    *,
+    authority_purpose: ReplacementForecastAuthorityPurpose,
+    parsed_provenance: Mapping[str, Any] | None = None,
+    forecast_db: object | None = None,
+) -> Mapping[str, Any] | None:
     if str(row_map.get("runtime_layer") or "") != LIVE_RUNTIME_LAYER:
         return None
     if not row_map.get("q_lcb_json"):
@@ -1563,11 +1637,13 @@ def read_replacement_forecast_bundle(
     from src.data.station_ground_evidence import forecast_db_from_connection
 
     forecast_db = forecast_db_from_connection(conn)
+    canonical_store = type(conn) is sqlite3.Connection
     provenance = _live_grade_provenance(
         row_map,
         authority_purpose=authority_purpose,
         parsed_provenance=raw_provenance,
         forecast_db=forecast_db,
+        cacheable=canonical_store,
     )
     if provenance is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE")
@@ -1583,6 +1659,7 @@ def read_replacement_forecast_bundle(
             latest_row_map,
             authority_purpose=authority_purpose,
             forecast_db=forecast_db,
+            cacheable=canonical_store,
         )
         is None
     )
@@ -1748,6 +1825,9 @@ def read_replacement_forecast_bundle(
                         posterior_source_cycle_time=row_map["source_cycle_time"],
                         posterior_computed_at=row_map["computed_at"],
                         posterior_provenance=provenance,
+                        posterior_provenance_digest=hashlib.sha256(
+                            str(row_map["provenance_json"]).encode()
+                        ).hexdigest(),
                         input_witness_out=input_hwm_witness,
                         held_redecision=(
                             authority_purpose

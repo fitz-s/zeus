@@ -172,9 +172,36 @@ def _remaining_serving_certificate(tmp_path, monkeypatch, metric):
     provenance = {"day0_provisional_observation": {
         "active": True, "metric": metric, "source": "noaa_wrh_LFPG",
         "observation_time": tau, "observed_extreme_c": 20.0, "unit": "C",
-    }, "bayes_precision_fusion": {"used_models": ["icon_global"],
+    }, "openmeteo_anchor_artifact_id": _owned_anchor_artifact(conn, tmp_path, metric=metric,
+        day=day, cycle=cycle, captured="2026-10-02T20:00:00+00:00"),
+        "bayes_precision_fusion": {"used_models": ["icon_global"],
+        "current_evidence_shape": {"source_cycle_time": cycle},
         "current_value_serving": {"icon_global": consumed.as_provenance()}}}
     return conn, provenance, full, cycle, cut, tau, persist
+
+
+def _owned_anchor_artifact(conn, tmp_path, *, metric, day, cycle, captured):
+    """A real Open-Meteo IFS9 anchor body through the production manifest writer."""
+    from zoneinfo import ZoneInfo
+    from src.config import runtime_cities_by_name
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        OpenMeteoEcmwfIfs9AnchorRequest, build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
+    )
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+    city = runtime_cities_by_name()["Paris"]
+    target = datetime.fromisoformat(day)
+    payload = {"latitude": city.lat, "longitude": city.lon, "elevation": 45.0, "timezone": city.timezone,
+        "utc_offset_seconds": int(target.replace(tzinfo=ZoneInfo(city.timezone)).utcoffset().total_seconds()),
+        "hourly_units": {"temperature_2m": "°C"},
+        "hourly": {"time": [(target + timedelta(hours=i)).isoformat(timespec="minutes") for i in range(24)],
+                   "temperature_2m": [20.0] * 24}}
+    path = tmp_path / "anchor.json"
+    path.write_bytes((json.dumps(payload, indent=2) + "\n").encode())
+    manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(path,
+        request=OpenMeteoEcmwfIfs9AnchorRequest(city.lat, city.lon, datetime.fromisoformat(cycle), city.timezone),
+        metric=metric, source_available_at=captured, captured_at=captured,
+        product_metadata={"city": city.name, "target_date": day})
+    return write_manifest_to_db(conn, manifest)
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
@@ -250,6 +277,23 @@ def test_same_raw_real_body_change_is_refresh_debt_after_window_alignment(tmp_pa
             posterior_provenance=provenance, held_redecision=True)
         assert replacement_live_input_lag_reason(conn, **kwargs, use_memo=False) is None
         assert "physical_proof_dependency_changed" in replacement_input_refresh_reason(conn, **kwargs)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_certificate_fixture_anchor_is_checked_not_assumed(tmp_path, monkeypatch, metric):
+    """The fixture's anchor passes the real check, so a changed anchor body is refused."""
+    from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+    conn, provenance, _full, cycle, cut, _tau, _persist = _remaining_serving_certificate(tmp_path, monkeypatch, metric)
+    kwargs = dict(city="Paris", target_date="2026-10-02", metric=metric,
+        decision_time=datetime.fromisoformat("2026-10-02T22:30:00+00:00"),
+        posterior_source_cycle_time=cycle, posterior_computed_at=cut,
+        posterior_provenance=provenance, use_memo=False)
+    try:
+        assert replacement_live_input_lag_reason(conn, **kwargs) is None
+        (tmp_path / "anchor.json").write_bytes(b"{}\n")
+        assert "openmeteo_anchor_artifact_payload_identity_mismatch" in replacement_live_input_lag_reason(conn, **kwargs)
     finally:
         conn.close()
 
