@@ -712,6 +712,57 @@ class OpenMeteoResponseStore:
         )
 
 
+# Burn-rate spike: a job's metered units in one hour against that job's own median
+# over its active hours in the trailing week. Ledger 2026-09-26..10-02 (7-day window,
+# median floored at 10 units): normal days peaked at 7.4x (anchor run waves, previous-
+# runs lead roll) with no hour at >=10x; the 10-01 NBM refetch loop ran 30-57x for
+# five hours. k=10 clears every normal wave and still fires on the first loop hour.
+BURN_SPIKE_K = 10.0
+BURN_SPIKE_MEDIAN_FLOOR_UNITS = 10
+BURN_SPIKE_TRAILING_HOURS = 7 * 24
+
+
+def burn_spikes(path: Path | str, now: float | None = None) -> list[dict[str, object]]:
+    """Jobs whose current or last full hour exceeds ``BURN_SPIKE_K`` x their median.
+
+    Observability only: a read-only scan of ``unit_ledger`` that never gates a
+    fetch. Each hour is judged against the job's active hours strictly before
+    it, so a loop cannot raise its own baseline.
+    """
+
+    import statistics  # noqa: PLC0415
+
+    now = time.time() if now is None else now
+    trailing = BURN_SPIKE_TRAILING_HOURS * 3600.0
+    # (judged hour, first hour of its trailing window): the last full hour and this one.
+    judged = [(_hour_key(at), _hour_key(at - trailing)) for at in (now - 3600.0, now)]
+    conn = sqlite3.connect(f"file:{Path(path).resolve()}?mode=ro", uri=True, timeout=1.0)
+    try:
+        rows = conn.execute(
+            "SELECT job, hour, metered FROM unit_ledger WHERE hour >= ? AND metered > 0",
+            (judged[0][1],),
+        ).fetchall()
+    finally:
+        conn.close()
+    by_job: dict[str, dict[str, int]] = {}
+    for job, hour, metered in rows:
+        by_job.setdefault(str(job), {})[str(hour)] = int(metered)
+    spikes = []
+    for job, hours in by_job.items():
+        for hour, window_start in judged:
+            units = hours.get(hour, 0)
+            prior = [value for key, value in hours.items() if window_start <= key < hour]
+            median = max(
+                statistics.median(prior) if prior else 0.0, BURN_SPIKE_MEDIAN_FLOOR_UNITS,
+            )
+            if units > BURN_SPIKE_K * median:
+                spikes.append({
+                    "job": job, "hour": hour, "units": units,
+                    "trailing_median": median, "ratio": round(units / median, 1),
+                })
+    return sorted(spikes, key=lambda spike: (-float(spike["ratio"]), str(spike["job"])))
+
+
 def runtime_response_store() -> OpenMeteoResponseStore | None:
     """The shared store under state/, or None inside a test process."""
 

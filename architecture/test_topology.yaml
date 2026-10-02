@@ -96,6 +96,8 @@ test_trust_policy:
     tests/engine/test_monitor_cut_independence.py: {created: "2026-09-30", last_used: "2026-09-30", note: "The held-position monitor and the global auction cut never cancel each other: the monitor runs within cadence while a cut holds the reactor lock, a claiming monitor raises no cut-cancel signal, exact held-SELL debt still preempts, and the cut-cancel label set is structurally pinned to facts/exact debt/latch (no monitor label)."}
     tests/engine/test_day0_preemption_scope.py: {created: "2026-09-25", last_used: "2026-09-25", note: "A committed Day0 fact cancels a global cut only when its family is in the cut's published scope (scanned families plus holdings, then the frozen winner plus holdings); unknown scope or a family-less wake keeps the hard veto, and a widened scope re-judges queued Day0 wakes."}
     tests/test_settlement_skill_attribution.py: {created: "2026-05-04", last_used: "2026-07-23", note: "Settlement skill attribution requires an exact decision-certificate lineage and refuses ambiguous ENTRY hashes or legacy fallback scoring."}
+    tests/test_bpf_possessed_response_memo.py: {created: "2026-10-01", last_used: "2026-10-01", note: "Possessed-response law: unparseable bytes for one (run marker, Day0 window, parser revision) identity are bought once; new run/modification/parser/window refetch; unpinned runs and transport errors stay retryable."}
+    tests/test_openmeteo_burn_spike_alarm.py: {created: "2026-10-01", last_used: "2026-10-01", note: "Per-job Open-Meteo burn alarm at k x own trailing median; forecast_pipeline signal; observability only."}
     tests/test_bayes_precision_fusion_download.py: {created: "2026-06-08", last_used: "2026-08-21", note: "BPF raw capture batching, current-target metric-scoped convergence without absent-sibling refetch loops, Day0 elapsed-prefix versus unresolved-suffix coverage, injected pre-request quota authority, exact committed-family reporting and attempted-group receipts, deadline-bound persistence, LIVE writer priority, and chunk durability."}
     tests/test_bayes_precision_fusion_no_leak_history_join.py: {created: "2026-06-08", last_used: "2026-08-08", note: "Walk-forward history JOIN preserves no-leak and settlement-unit semantics while forcing the selective history index and deterministic duplicate-date ordering."}
     tests/test_replacement_forecast_extras_coverage_gate.py: {created: "2026-06-16", last_used: "2026-08-19", note: "BPF source-clock capture coverage, durable rotation ownership, typed HTTP outcomes, fixpoint, quota cooldown, current-Day0 remaining-window admission, held-only target-universe retention, and cross-source held-family-first ordering with held-capital critical quota admission isolated from dynamic source-city artifacts."}
@@ -1208,6 +1210,8 @@ categories:
     - tests/engine/test_monitor_held_belief_readthrough.py
 
   useful_regression:
+    - tests/test_bpf_possessed_response_memo.py
+    - tests/test_openmeteo_burn_spike_alarm.py
     - tests/test_station_forecast_live_ingest_wiring.py
     - tests/test_day0_observation_reader.py
     - tests/test_observation_prints_ledger.py

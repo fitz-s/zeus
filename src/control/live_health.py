@@ -686,6 +686,39 @@ def _forecast_pipeline_surface(scheduler_health: Optional[dict]) -> dict:
     return {"ok": True, "issue": None, "checked_jobs": checked}
 
 
+def _openmeteo_burn_spike_surface(state_dir: Path, now: datetime) -> dict:
+    """Open-Meteo job spending at k x its own trailing median (observability only).
+
+    Incident 2026-10-01: one job re-bought the same unparseable runs every tick at
+    30-57x its normal hourly units until the daily quota cap aborted source-clock
+    capture. The fetch path keeps its own memo law; this only makes such a loop
+    visible within its first hour.
+    """
+    from src.data.openmeteo_response_store import BURN_SPIKE_K, burn_spikes
+
+    path = state_dir / "openmeteo_response_store.db"
+    if not path.exists():
+        return {"ok": True, "issue": None, "evaluated": False}
+    try:
+        spikes = burn_spikes(path, now=now.timestamp())
+    except Exception as exc:  # noqa: BLE001 - an unreadable ledger is not a spike
+        return {"ok": True, "issue": None, "evaluated": False,
+                "skip_reason": f"{type(exc).__name__}:{exc}"}
+    if not spikes:
+        return {"ok": True, "issue": None, "evaluated": True, "k": BURN_SPIKE_K}
+    top = spikes[0]
+    return {
+        "ok": False,
+        "issue": (
+            f"OPENMETEO_BURN_SPIKE[{top['job']}]: {top['units']} units in "
+            f"{top['hour']}Z = {top['ratio']}x trailing median {top['trailing_median']}"
+        ),
+        "evaluated": True,
+        "k": BURN_SPIKE_K,
+        "spikes": spikes[:5],
+    }
+
+
 def _current_scheduler_health_entries(scheduler_health: dict) -> list[tuple[str, dict]]:
     """Return health rows for scheduler jobs registered by the live topology."""
 
@@ -7744,6 +7777,10 @@ def compute_composite_live_health(
 
     # ------------------------------------------------------------------ #
     forecast_surface = _forecast_pipeline_surface(sj_data)
+    burn_surface = _openmeteo_burn_spike_surface(sd, now)
+    forecast_surface["openmeteo_burn"] = burn_surface
+    if forecast_surface["ok"] and not burn_surface["ok"]:
+        forecast_surface = {**forecast_surface, "ok": False, "issue": burn_surface["issue"]}
     surfaces["forecast_pipeline"] = forecast_surface
     if not forecast_surface["ok"]:
         failing.append("forecast_pipeline")

@@ -40,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import fcntl
+import functools
 import hashlib
 import json
 import logging
@@ -442,6 +443,9 @@ class _SourceClockSingleRunsRequest:
     source_available_at: str | None
     availability_from_successful_possession: bool = False
     data_end_time: datetime | None = None
+    # The provider's last_run_modification_time for this run: the marker that
+    # its bytes can change. None when no matching metadata pins it.
+    modification_time: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -460,6 +464,12 @@ class _DerivedOffGridSingleRunsRun:
 # Metadata update_interval is not necessarily the archive cadence (some feeds
 # publish rolling updates that Single Runs does not serve).
 _TARGET_BACKTRACK_MODELS = frozenset({"icon_eu", "ukmo_global_deterministic_10km"})
+
+
+def _utc_or_none(value: object) -> datetime | None:
+    if not isinstance(value, datetime) or value.utcoffset() is None:
+        return None
+    return value.astimezone(UTC)
 
 
 def _metadata_data_end_time(
@@ -585,20 +595,22 @@ def _read_source_clock_single_runs_requests(
                 run=run,
                 source_available_at=update.last_run_availability_time.astimezone(UTC).isoformat(),
                 data_end_time=_metadata_data_end_time(update.raw, run),
+                modification_time=_utc_or_none(update.last_run_modification_time),
             )
         except Exception:
             continue
     return out
 
 
-def _read_matching_frozen_data_ends(
+def _read_matching_frozen_metadata(
     requests: Mapping[str, _SourceClockSingleRunsRequest],
-) -> dict[str, datetime]:
+) -> tuple[dict[str, datetime], dict[str, datetime]]:
     """Supplement a frozen tuple only with unambiguous matching current metadata.
 
     The event's (model, initialisation, availability) remains authoritative.
     Metadata for another trigger, a malformed raw identity, or conflicting
     duplicate horizons cannot grant archived target selection.
+    Returns (data_end_time, last_run_modification_time) by model.
     """
     try:
         from src.data.source_clock_update_probe import DEFAULT_MODEL_UPDATES_JSONL  # noqa: PLC0415
@@ -606,8 +618,9 @@ def _read_matching_frozen_data_ends(
 
         updates = read_model_updates_jsonl(DEFAULT_MODEL_UPDATES_JSONL)
     except Exception:
-        return {}
+        return {}, {}
     ends: dict[str, set[datetime | None]] = {}
+    modifications: dict[str, set[datetime | None]] = {}
     for update in updates:
         model = str(update.model)
         request = requests.get(model)
@@ -625,21 +638,29 @@ def _read_matching_frozen_data_ends(
             published = update.last_run_availability_time
             if init.utcoffset() is None or published.utcoffset() is None:
                 continue
-            if (
-                init.astimezone(UTC) != request.run
-                or published.astimezone(UTC) != available.astimezone(UTC)
-            ):
+            if init.astimezone(UTC) != request.run:
+                continue
+            # Run identity is (model, initialisation): replicas disagree on
+            # availability, so the bytes marker matches on the run alone.
+            modifications.setdefault(model, set()).add(
+                _utc_or_none(update.last_run_modification_time)
+            )
+            if published.astimezone(UTC) != available.astimezone(UTC):
                 continue
             ends.setdefault(model, set()).add(
                 _metadata_data_end_time(update.raw, request.run)
             )
         except (ValueError, TypeError, AttributeError):
             continue
-    return {
-        model: next(iter(candidates))
-        for model, candidates in ends.items()
-        if len(candidates) == 1 and None not in candidates
-    }
+
+    def _unique(found: dict[str, set[datetime | None]]) -> dict[str, datetime]:
+        return {
+            model: next(iter(candidates))
+            for model, candidates in found.items()
+            if len(candidates) == 1 and None not in candidates
+        }
+
+    return _unique(ends), _unique(modifications)
 
 # Open-Meteo PREVIOUS-RUNS model ids keyed by the STORED model identity. The previous-runs API
 # model id can differ from both the stored identity AND the single-runs id: the anchor is stored
@@ -722,11 +743,18 @@ _BATCH_EXACT_RUN_UNMATERIALIZABLE_KEY = (
 )
 _SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
 
-# Exact matching metadata proves structural horizon exclusion for the latest run.
-# A run strictly older than the model's current source-clock run is superseded:
-# the provider moved on, so its archived bytes are final and a horizon-shaped
-# parser gap on it is permanent (0 of 201 such scopes ever filled, 2026-09-21..24).
+# LAW: response bytes already possessed for one input identity, which failed to
+# parse, are not requested again until an input changes. The parse is a pure
+# function of (response bytes, decision window, parser code). The bytes of one
+# (model, run) are pinned by the provider's run marker: "superseded" once a newer
+# run exists (the archive is final), else the run's last_run_modification_time.
+# A run with no marker ("unpinned") may still change under us, so only reasons
+# that are final by themselves (matching metadata) are memoized for it.
+# Live 2026-10-01: an unpinned-in-law latest NBM run failed every parse and
+# re-bought the metered standard endpoint every tick (3,624 reissued units).
 _SUPERSEDED_RUN_GAP_PREFIX = "superseded_run:"
+_POSSESSED_RESPONSE_GAP_PREFIX = "possessed_response:"
+_UNPINNED_RUN_MARKER = "unpinned"
 _HORIZON_PARSER_GAP_REASONS = (
     "ValueError:partial local-day coverage",
     "ValueError:insufficient Open-Meteo hourly samples inside target local day",
@@ -734,6 +762,13 @@ _HORIZON_PARSER_GAP_REASONS = (
 _EXACT_RUN_IMMUTABLE_GAP_REASONS = (
     "metadata:data_end_time_before_target_end",
     _SUPERSEDED_RUN_GAP_PREFIX,
+    _POSSESSED_RESPONSE_GAP_PREFIX,
+)
+# Source files whose code decides a single-runs parse; any edit is a new parser.
+_PARSER_SOURCE_MODULES = (
+    "src.data.bayes_precision_fusion_download",
+    "src.data.openmeteo_ecmwf_ifs9_anchor",
+    "src.data.forecast_target_contract",
 )
 
 
@@ -742,8 +777,47 @@ def exact_run_gap_is_final(reason: object) -> bool:
     return str(reason or "").startswith(_EXACT_RUN_IMMUTABLE_GAP_REASONS)
 
 
-# (model, city, target_date, run_iso) -> structurally proven metadata reason.
-_EXACT_RUN_UNMATERIALIZABLE_MEMO: dict[tuple[str, str, str, str], str] = {}
+@functools.cache
+def _parser_revision() -> str:
+    """Content hash of the code that turns response bytes into a local-day value."""
+    import importlib  # noqa: PLC0415
+
+    digest = hashlib.sha256()
+    for name in _PARSER_SOURCE_MODULES:
+        digest.update(Path(importlib.import_module(name).__file__).read_bytes())
+    return digest.hexdigest()[:16]
+
+
+def _decision_window(target_date: str, timezone_name: str, decision_time: datetime) -> str:
+    """The parse's causal-boundary input: whole day, or the UTC hour owning Day0.
+
+    Before the local day starts, and after it ends, the full-day law applies. While
+    it is in progress the parser owns the hourly slot at or before the boundary
+    through day end. Run-pinned hourly instants lie on the UTC hourly grid (a
+    :30 zone gets local xx:30 samples), so the owned slots change only when the
+    boundary crosses a UTC hour.
+    """
+    from src.data.forecast_target_contract import (  # noqa: PLC0415
+        compute_target_local_day_window_utc,
+    )
+
+    day = compute_target_local_day_window_utc(
+        city_timezone=timezone_name, target_local_date=date.fromisoformat(target_date),
+    )
+    at = decision_time.astimezone(UTC)
+    return at.strftime("%Y-%m-%dT%HZ") if day.start_utc <= at < day.end_utc else "whole_day"
+
+
+def _possessed_input_identity(
+    *, run_marker: str, target_date: str, timezone_name: str, decision_time: datetime,
+) -> str:
+    """Every input of one single-runs parse except the (model, city, date, run) scope."""
+    window = _decision_window(target_date, timezone_name, decision_time)
+    return f"bytes={run_marker};window={window};parser={_parser_revision()}"
+
+
+# (model, city, target_date, run_iso, input_identity) -> final reason.
+_EXACT_RUN_UNMATERIALIZABLE_MEMO: dict[tuple[str, str, str, str, str], str] = {}
 _EXACT_RUN_MEMO_RETENTION_DAYS = 3
 
 # 2026-09-05 (quota root-cause, round 2): this memo was in-process-memory ONLY — every
@@ -756,7 +830,9 @@ _EXACT_RUN_MEMO_RETENTION_DAYS = 3
 # exact pattern already used by state/openmeteo_quota.json — makes a proven gap durable
 # and cross-process. Schema v2 intentionally discards v1 partial-payload reasons:
 # transport, malformed responses and a presently incomplete horizon remain retryable.
-_EXACT_RUN_GAP_MEMO_SCHEMA_VERSION = 2
+# Schema v3 keys each gap on its full input identity (run marker, decision window,
+# parser revision); v2 4-part keys cannot say which inputs they were decided under.
+_EXACT_RUN_GAP_MEMO_SCHEMA_VERSION = 3
 _EXACT_RUN_GAP_MEMO_LOAD_INTERVAL_SECONDS = 30.0
 _exact_run_gap_memo_state_path: Path | None = None
 _exact_run_gap_memo_last_loaded_monotonic: float = 0.0
@@ -785,7 +861,7 @@ def _exact_run_gap_memo_path() -> Path:
     return _exact_run_gap_memo_state_path
 
 
-def _exact_run_gap_scope_key(scope: tuple[str, str, str, str]) -> str:
+def _exact_run_gap_scope_key(scope: tuple[str, str, str, str, str]) -> str:
     return "|".join(scope)
 
 
@@ -809,7 +885,7 @@ def _load_persisted_exact_run_memo(*, force: bool = False) -> None:
     except (OSError, json.JSONDecodeError):
         return
     if not isinstance(payload, dict) or payload.get("schema_version") != _EXACT_RUN_GAP_MEMO_SCHEMA_VERSION:
-        return  # v1 permanently classified retryable partial payloads; discard it.
+        return  # Older schemas lack the input identity; discard them.
     entries = payload.get("entries") if isinstance(payload, dict) else None
     if not isinstance(entries, dict):
         return
@@ -817,16 +893,16 @@ def _load_persisted_exact_run_memo(*, force: bool = False) -> None:
         if not isinstance(entry, dict):
             continue
         parts = str(key).split("|")
-        if len(parts) != 4:
+        if len(parts) != 5:
             continue
         reason = entry.get("reason")
         if not isinstance(reason, str) or not exact_run_gap_is_final(reason):
             continue
-        scope = (parts[0], parts[1], parts[2], parts[3])
+        scope = (parts[0], parts[1], parts[2], parts[3], parts[4])
         _EXACT_RUN_UNMATERIALIZABLE_MEMO.setdefault(scope, reason)
 
 
-def _persist_exact_run_gap(scope: tuple[str, str, str, str], reason: str) -> None:
+def _persist_exact_run_gap(scope: tuple[str, str, str, str, str], reason: str) -> None:
     """Durably record one proven-immutable gap so any process/restart can see it."""
     if not _exact_run_gap_memo_persistence_enabled():
         return
@@ -855,10 +931,19 @@ def _persist_exact_run_gap(scope: tuple[str, str, str, str], reason: str) -> Non
                 if not isinstance(entries, dict):
                     entries = {}
                     payload["entries"] = entries
+                now = datetime.now(UTC)
                 entries[_exact_run_gap_scope_key(scope)] = {
                     "reason": reason,
-                    "recorded_at": datetime.now(UTC).isoformat(),
+                    "recorded_at": now.isoformat(),
                 }
+                # The in-process retention floor, applied on disk too: a gap keyed
+                # per decision window must not accrete one entry per hour forever.
+                floor = now - timedelta(days=_EXACT_RUN_MEMO_RETENTION_DAYS)
+                for key in list(entries):
+                    parts = str(key).split("|")
+                    run_utc = _exact_run_memo_run_utc(parts[3]) if len(parts) == 5 else None
+                    if run_utc is None or run_utc < floor:
+                        del entries[key]
                 temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
                 try:
                     temp.write_text(
@@ -878,7 +963,7 @@ def _persist_exact_run_gap(scope: tuple[str, str, str, str], reason: str) -> Non
 
 
 def _memoize_exact_run_gap(
-    scope: tuple[str, str, str, str],
+    scope: tuple[str, str, str, str, str],
     reason: str,
 ) -> None:
     """Record a RUN-immutable parser gap. Transport-shaped reasons are never memoized."""
@@ -3656,13 +3741,16 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid frozen source run for {model!r}") from exc
         if not _use_legacy_per_model:
-            matched_ends = _read_matching_frozen_data_ends(source_clock_single_runs)
+            matched_ends, matched_modifications = _read_matching_frozen_metadata(
+                source_clock_single_runs
+            )
             source_clock_single_runs = {
                 model: _SourceClockSingleRunsRequest(
                     run=request.run,
                     source_available_at=request.source_available_at,
                     availability_from_successful_possession=request.availability_from_successful_possession,
                     data_end_time=matched_ends.get(model),
+                    modification_time=matched_modifications.get(model),
                 )
                 for model, request in source_clock_single_runs.items()
             }
@@ -3855,28 +3943,50 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             model, city, target_date, metric, source_cycle_time, endpoint
         ) in persisted_cycle_keys
 
+    def _run_marker(model: str, run: datetime) -> str:
+        """What pins the provider's bytes for (model, run); see the LAW above."""
+        latest = source_clock_single_runs.get(model)
+        if latest is None:
+            return _UNPINNED_RUN_MARKER
+        if run < latest.run:
+            return "superseded"
+        if run == latest.run and latest.modification_time is not None:
+            return f"modified={latest.modification_time.isoformat()}"
+        return _UNPINNED_RUN_MARKER
+
+    def _memo_scope(
+        model: str, city: str, target_date: str, run: datetime, timezone_name: str,
+        run_marker: str | None = None,
+    ) -> tuple[str, str, str, str, str]:
+        return (model, city, target_date, run.isoformat(), _possessed_input_identity(
+            run_marker=run_marker or _run_marker(model, run), target_date=target_date,
+            timezone_name=timezone_name, decision_time=captured_at,
+        ))
+
     def _memoized_unmaterializable(
         *,
         model: str,
         city: str,
         target_date: str,
-        source_cycle_time: str,
+        run: datetime,
+        timezone_name: str,
     ) -> bool:
-        """A prior pass proved this (model, city, target_date) unmaterializable from THIS run.
+        """A prior pass proved this scope unmaterializable under the same inputs.
 
         The scope still enters the report, but no exact request is issued. The
-        proof is final for this run, so it never makes the pass retryable; a new
-        run is a new cursor value and gets a fresh decision.
+        proof is final for these inputs, so it never makes the pass retryable; a
+        new run, run modification, decision window or parser gets a fresh decision.
         """
-        scope = (model, city, target_date, source_cycle_time)
+        scope = _memo_scope(model, city, target_date, run, timezone_name)
+        source_cycle_time = run.isoformat()
         reason = _EXACT_RUN_UNMATERIALIZABLE_MEMO.get(scope)
         if reason is None:
             return False
         if not exact_run_gap_is_final(reason):
             del _EXACT_RUN_UNMATERIALIZABLE_MEMO[scope]
             return False
-        if scope not in exact_run_unmaterializable_scopes:
-            exact_run_unmaterializable_scopes.add(scope)
+        if scope[:4] not in exact_run_unmaterializable_scopes:
+            exact_run_unmaterializable_scopes.add(scope[:4])
             exact_run_unmaterializable.append(
                 {
                     "model": model,
@@ -3981,7 +4091,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     model=model,
                     city=city,
                     target_date=target_date,
-                    source_cycle_time=request_cycle_iso,
+                    run=request.run,
+                    timezone_name=ref.timezone_name,
                 ):
                     if persisted_metric_count:
                         single_success_models.add(model)
@@ -4197,7 +4308,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         model=model,
                         city=city,
                         target_date=target_date,
-                        source_cycle_time=request_cycle_iso,
+                        run=request.run,
+                        timezone_name=ref.timezone_name,
                     ):
                         if len(metrics_needed) < len(required_metrics):
                             single_success_models.add(model)
@@ -4260,13 +4372,23 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             continue
                         scope = (model, city, target_date, single_run.isoformat())
                         reason = str(raw_reason)[:220]
-                        latest = source_clock_single_runs.get(model)
-                        if (
-                            latest is not None
-                            and single_run < latest.run
-                            and reason.startswith(_HORIZON_PARSER_GAP_REASONS)
+                        marker = _run_marker(model, single_run)
+                        stamp = single_transport_provenance.get(model)
+                        if isinstance(stamp, _StandardMetaStampedTransport) and (
+                            marker != f"modified={stamp.modification_time.isoformat()}"
                         ):
-                            reason = f"{_SUPERSEDED_RUN_GAP_PREFIX}{reason}"
+                            # The bytes came from another modification than the
+                            # one planned; they pin nothing the next pass can check.
+                            marker = _UNPINNED_RUN_MARKER
+                        if marker != _UNPINNED_RUN_MARKER and not exact_run_gap_is_final(reason):
+                            prefix = (
+                                _SUPERSEDED_RUN_GAP_PREFIX if marker == "superseded"
+                                else _POSSESSED_RESPONSE_GAP_PREFIX
+                            )
+                            reason = f"{prefix}{reason}"
+                        memo_scope = _memo_scope(
+                            model, city, target_date, single_run, ref.timezone_name, marker,
+                        )
                         exact_run_unmaterializable.append(
                             {
                                 "model": model,
@@ -4278,7 +4400,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         )
                         if exact_run_gap_is_final(reason):
                             exact_run_unmaterializable_scopes.add(scope)
-                            _memoize_exact_run_gap(scope, reason)
+                            _memoize_exact_run_gap(memo_scope, reason)
                         else:
                             retryable_single_run_gap_scopes.add(scope)
                 if single_transport_error is not None:

@@ -2509,7 +2509,7 @@ def test_memoized_exact_run_gap_is_scoped_to_the_run_not_the_target(
         )
 
     assert calls == [[(date_a, date_b)], [(date_a, date_b)]]
-    assert set(dl._EXACT_RUN_UNMATERIALIZABLE_MEMO) == {
+    assert {scope[:4] for scope in dl._EXACT_RUN_UNMATERIALIZABLE_MEMO} == {
         ("icon_eu", "Paris", date_b.isoformat(), "2026-09-03T18:00:00+00:00"),
         ("icon_eu", "Paris", date_b.isoformat(), "2026-09-04T00:00:00+00:00"),
     }
@@ -2586,7 +2586,12 @@ def test_memoized_exact_run_gap_survives_process_restart(tmp_path, monkeypatch) 
     monkeypatch.setattr(dl, "_exact_run_gap_memo_path", lambda: memo_path)
     dl._EXACT_RUN_UNMATERIALIZABLE_MEMO.clear()
 
-    scope = ("icon_eu", "Paris", "2026-09-07", "2026-09-03T18:00:00+00:00")
+    # The durable file keeps the in-process retention floor, so the run is current.
+    run = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    scope = (
+        "icon_eu", "Paris", "2026-09-07", run.isoformat(),
+        "bytes=superseded;window=whole_day;parser=abc",
+    )
     dl._memoize_exact_run_gap(scope, _MEMO_GAP_REASON)
 
     assert memo_path.exists(), "a memoized immutable gap must be written durably"
@@ -4372,9 +4377,9 @@ def test_frozen_metadata_mismatch_or_conflicting_horizon_keeps_exact_run(
          )],
     ):
         model_updates.write_model_updates_jsonl(updates_path, updates)
-        assert dl._read_matching_frozen_data_ends({
+        assert dl._read_matching_frozen_metadata({
             "icon_eu": dl._SourceClockSingleRunsRequest(latest, available.isoformat()),
-        }) == {}
+        })[0] == {}
         seen.clear()
         report = dl.download_bayes_precision_fusion_extra_raw_inputs(
             forecast_db=db, cycle=latest, targets=[target], models=("icon_eu",),
@@ -4485,9 +4490,11 @@ def test_target_aware_superseded_partial_is_final_without_fallback(
     # horizon-shaped gap on it is proof, not a transient (0 of 201 live scopes
     # ever filled, 2026-09-21..24). Only the latest run's partial stays retryable.
     scope = ("icon_eu", "Amsterdam", "2026-09-25", old.isoformat())
-    assert dl._EXACT_RUN_UNMATERIALIZABLE_MEMO[scope].startswith(
-        dl._SUPERSEDED_RUN_GAP_PREFIX
-    )
+    [reason] = [
+        reason for key, reason in dl._EXACT_RUN_UNMATERIALIZABLE_MEMO.items()
+        if key[:4] == scope
+    ]
+    assert reason.startswith(dl._SUPERSEDED_RUN_GAP_PREFIX)
     complete = True
     second = dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
     assert second["written_row_count"] == _count(db) == 0
