@@ -355,7 +355,12 @@ def write_manifest(manifest: RawForecastArtifactManifest, target_path: Path | st
 
 
 def read_manifest(path: Path | str) -> RawForecastArtifactManifest:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    return parse_manifest(Path(path).read_bytes())
+
+
+def parse_manifest(body: bytes) -> RawForecastArtifactManifest:
+    """The manifest these exact bytes encode (a caller that hashed them parses them)."""
+    raw = json.loads(body.decode("utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("raw forecast artifact manifest must decode to an object")
     known = {item.name for item in fields(RawForecastArtifactManifest)}
