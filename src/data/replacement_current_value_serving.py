@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-01  (typed SQLite read-unavailable hotfix)
+# Last reused or audited: 2026-10-02 (qualified-current candidate proof boundary)
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — generalize the gem_global
 #   previous_runs exception (edc598b440 / K2 2026-06-09) into the operator law 没有新的就用老的
 #   applied to fusion membership: a provider absent from single_runs at the selected cycle serves
@@ -620,6 +620,36 @@ def _read_source_clock_rows(
 ) -> list[sqlite3.Row]:
     """Read the complete production target-family candidate stream."""
 
+    rows, deadline = _read_source_clock_candidates(
+        conn,
+        city=city,
+        metric=metric,
+        target_date=target_date,
+        decision_iso=decision_iso,
+        schema=schema,
+        max_substitution_age_hours=max_substitution_age_hours,
+        single_runs_only=single_runs_only,
+    )
+    try:
+        return [(*row[:-1], _read_product_identity_at_cutoff(conn, row[-1], deadline_monotonic=deadline)) for row in rows]
+    except sqlite3.OperationalError as exc:
+        _raise_typed_read_unavailable(exc)
+        raise AssertionError("unreachable")
+
+
+def _read_source_clock_candidates(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    metric: str,
+    target_date: str,
+    decision_iso: str,
+    schema: CurrentValueServingSchema,
+    max_substitution_age_hours: float,
+    single_runs_only: bool = False,
+) -> tuple[list[sqlite3.Row], float]:
+    """Read ordered, unproved candidates with their one family scan deadline."""
+
     sql, params = _source_clock_rows_query(
         city=city,
         metric=metric,
@@ -632,7 +662,7 @@ def _read_source_clock_rows(
     try:
         deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
         rows = conn.execute(sql, params).fetchall()
-        return [(*row[:-1], _read_product_identity_at_cutoff(conn, row[-1], deadline_monotonic=deadline)) for row in rows]
+        return rows, deadline
     except sqlite3.OperationalError as exc:
         _raise_typed_read_unavailable(exc)
         raise AssertionError("unreachable")
@@ -2072,7 +2102,7 @@ def read_current_instrument_values(
             )
         if possession_predicate is None:
             return {}
-        rows = _read_source_clock_rows(
+        rows, deadline = _read_source_clock_candidates(
             conn,
             city=city,
             metric=metric,
@@ -2081,23 +2111,31 @@ def read_current_instrument_values(
             schema=schema,
             max_substitution_age_hours=max_substitution_age_hours,
         )
-        for row in rows:
-            served = _served_source_clock_row(
-                row,
-                schema=schema,
-                max_substitution_age_hours=max_substitution_age_hours,
-            )
-            if served is None:
-                continue
-            model, value = served
-            if model in out:
-                continue
-            if _is_station_model(model) and (
-                not include_station_sources
-                or not _station_model_has_entry_authority(model)
-            ):
-                continue
-            out[model] = value
+        try:
+            for row in rows:
+                if str(row[1]) in out:
+                    continue
+                # A winner has passed the full current-cut physical receipt and
+                # serving rules. Invalid candidates never suppress later rows.
+                proved = (*row[:-1], _read_product_identity_at_cutoff(
+                    conn, row[-1], deadline_monotonic=deadline,
+                ))
+                served = _served_source_clock_row(
+                    proved,
+                    schema=schema,
+                    max_substitution_age_hours=max_substitution_age_hours,
+                )
+                if served is None:
+                    continue
+                model, value = served
+                if _is_station_model(model) and (
+                    not include_station_sources
+                    or not _station_model_has_entry_authority(model)
+                ):
+                    continue
+                out[model] = value
+        except sqlite3.OperationalError as exc:
+            _raise_typed_read_unavailable(exc)
         return out
 
     def _serve(endpoint: str, *, exact_cycle: bool) -> None:

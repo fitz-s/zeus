@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-09-03
+# Last reused or audited: 2026-10-02
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -87,6 +87,106 @@ def _read(conn):
         conn, city="Beijing", metric="high", target_date="2026-06-12",
         source_cycle_time_iso=CYCLE,
     )
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("invalid_ids", ((), (6, 5), (1, 2, 3, 4, 5, 6)))
+def test_current_source_clock_only_proves_unselected_provider_rows(monkeypatch, metric, invalid_ids):
+    """A qualified winner makes older candidates irrelevant, not newer invalid rows."""
+    from src.data import replacement_current_value_serving as serving
+
+    conn = _conn()
+    for rid in range(1, 7):
+        _insert(conn, rid, "icon_global", 20.0 + rid, "single_runs")
+    conn.execute("UPDATE raw_model_forecasts SET metric=?", (metric,))
+    reads, validations = [], []
+    original = serving._read_product_identity_at_cutoff
+
+    def read(conn, raw, **kwargs):
+        reads.append(json.loads(raw)["raw_model_forecast_id"])
+        return original(conn, raw, **kwargs)
+
+    def qualified(raw, *, lead_days):
+        rid = json.loads(raw)["raw_model_forecast_id"]
+        validations.append(rid)
+        return rid not in invalid_ids
+
+    monkeypatch.setattr(serving, "_read_product_identity_at_cutoff", read)
+    monkeypatch.setattr(serving, "_source_clock_product_has_authority", qualified)
+    try:
+        out = serving.read_current_instrument_values(conn, city="Beijing", metric=metric,
+            target_date="2026-06-12", source_cycle_time_iso=CYCLE,
+            decision_time_iso="2026-06-11T15:00:00+00:00")
+        winner = next((rid for rid in range(6, 0, -1) if rid not in invalid_ids), None)
+        assert set(out) == (set() if winner is None else {"icon_global"})
+        if winner is not None:
+            assert out["icon_global"].raw_model_forecast_id == winner
+            assert out["icon_global"].value_c == 20.0 + winner
+        necessary = list(range(6, (winner or 1) - 1, -1))
+        assert reads == necessary
+        assert validations == necessary
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_current_source_clock_rechecks_late_capture_at_each_cut(monkeypatch, metric):
+    from src.data import replacement_current_value_serving as serving
+
+    conn = _conn()
+    _insert(conn, 1, "icon_global", 21.0, "single_runs", captured="2026-06-11T07:00:00+00:00")
+    _insert(conn, 2, "icon_global", 22.0, "single_runs", captured="2026-06-11T09:00:00+00:00")
+    _insert(conn, 3, "icon_global", 23.0, "single_runs", cycle="2026-06-11T12:00:00+00:00",
+        captured="2026-06-11T13:00:00+00:00")
+    conn.execute("UPDATE raw_model_forecasts SET metric=?", (metric,))
+    proved = []
+    original = serving._read_product_identity_at_cutoff
+
+    def read(conn, raw, **kwargs):
+        row = json.loads(raw)
+        proved.append((row["raw_model_forecast_id"], row["physical_proof_cutoff"]))
+        return original(conn, raw, **kwargs)
+
+    monkeypatch.setattr(serving, "_read_product_identity_at_cutoff", read)
+    monkeypatch.setattr(serving, "_source_clock_product_has_authority", lambda *a, **k: True)
+    try:
+        for cut, expected in (("2026-06-11T08:00:00+00:00", 1), ("2026-06-11T10:00:00+00:00", 2),
+            ("2026-06-11T14:00:00+00:00", 3)):
+            out = serving.read_current_instrument_values(conn, city="Beijing", metric=metric,
+                target_date="2026-06-12", source_cycle_time_iso=CYCLE, decision_time_iso=cut)
+            assert out["icon_global"].raw_model_forecast_id == expected
+        assert proved == [(1, "2026-06-11T08:00:00+00:00"), (2, "2026-06-11T10:00:00+00:00"),
+            (3, "2026-06-11T14:00:00+00:00")]
+    finally:
+        conn.close()
+
+
+def test_current_source_clock_optimization_preserves_full_frontier_and_cohort(monkeypatch):
+    from src.data import replacement_current_value_serving as serving
+
+    conn = _conn()
+    _insert(conn, 10, "icon_global", 33.0, "single_runs", cycle=OTHER_CYCLE,
+        captured="2026-06-11T02:00:00+00:00")
+    _insert(conn, 11, "ncep_nbm_conus", 33.2, "single_runs", cycle="2026-06-11T03:00:00+00:00",
+        captured="2026-06-11T03:30:00+00:00")
+    _insert(conn, 12, "ncep_nbm_conus", 33.4, "single_runs", cycle="2026-06-11T04:00:00+00:00",
+        captured="2026-06-11T04:30:00+00:00")
+    monkeypatch.setattr(serving, "_source_clock_product_has_authority", lambda *a, **k: True)
+    kwargs = dict(city="Beijing", metric="high", target_date="2026-06-12",
+        decision_time_iso="2026-06-11T05:00:00+00:00")
+    try:
+        schema = serving.current_value_serving_schema(conn)
+        assert serving.read_current_instrument_frontier_identity(conn, schema=schema,
+            models=("icon_global", "ncep_nbm_conus"), **kwargs) == (
+            ("icon_global", 10), ("ncep_nbm_conus", 12))
+        assert serving.read_current_instrument_frontier_sentinel_ids(conn, schema=schema, **kwargs) == (
+            ("icon_global", 10), ("ncep_nbm_conus", 12))
+        cohort = serving.read_freshest_coherent_instrument_values(conn,
+            models=("icon_global", "ncep_nbm_conus"), cohort_window_hours=3.0, **kwargs)
+        assert {model: value.raw_model_forecast_id for model, value in cohort.items()} == {
+            "icon_global": 10, "ncep_nbm_conus": 11}
+    finally:
+        conn.close()
 
 
 # -------------------------------------------------------------------------------------

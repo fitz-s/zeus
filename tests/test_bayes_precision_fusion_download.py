@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-10-02; last_reused=2026-10-02 (physical read pass equivalence)
+# Lifecycle: created=2026-06-08; last_reviewed=2026-10-02; last_reused=2026-10-02 (physical read pass equivalence and current-serving poison negatives)
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -5275,6 +5275,60 @@ def _served_in_world(conn, world, target, cut=None):
     return read_current_instrument_values(conn, city=target.city, metric=target.metric,
         target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
         decision_time_iso=(cut or world.clock[0]).isoformat())
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("poison", (False, True))
+def test_current_serving_qualified_winner_skips_history_without_escaping_real_poison(tmp_path, monkeypatch, metric, poison):
+    """Real receipt proofs stay authoritative even with many ordered candidates."""
+    from src.data import replacement_current_value_serving as serving
+
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    reads = []
+    original = serving._read_product_identity_at_cutoff
+
+    def counted(conn, raw, **kwargs):
+        row = json.loads(raw)
+        if row["model"] == "icon_global":
+            reads.append(row["raw_model_forecast_id"])
+        return original(conn, raw, **kwargs)
+
+    monkeypatch.setattr(serving, "_read_product_identity_at_cutoff", counted)
+    with world.open_forecast(world.db) as conn:
+        # A private candidate stream permits correction-history duplicates;
+        # all physical artifacts, bytes and classifiers remain the real ones.
+        conn.execute("CREATE TEMP TABLE raw_model_forecasts AS SELECT * FROM main.raw_model_forecasts")
+        row = conn.execute("SELECT * FROM raw_model_forecasts WHERE model='icon_global'"
+            " AND city=? AND target_date=? AND metric=?", (target.city, target.target_date, metric)).fetchone()
+        columns = [item[1] for item in conn.execute("PRAGMA table_info(raw_model_forecasts)")]
+        rid_index = columns.index("raw_model_forecast_id")
+        base_id = int(row[rid_index])
+        for offset in range(1, 7):
+            correction = list(row)
+            correction[rid_index] = base_id + 1000 + offset
+            conn.execute("INSERT INTO raw_model_forecasts VALUES (" + ",".join("?" for _ in columns) + ")", correction)
+        before = _served_in_world(conn, world, target)
+        assert before["icon_global"].raw_model_forecast_id == base_id + 1006
+        assert reads == [base_id + 1006]
+        reads.clear()
+        if poison:
+            conn.execute("""INSERT INTO raw_forecast_artifacts
+                (source_id,product_id,data_version,source_cycle_time,source_available_at,captured_at,artifact_path,
+                 sha256,byte_size,request_url,request_params_json,artifact_metadata_json,recorded_at,training_allowed)
+                SELECT source_id,product_id,data_version,source_cycle_time,'unknown','unknown',artifact_path,
+                    ?,byte_size,request_url,request_params_json,artifact_metadata_json,'unknown',0
+                FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'
+                AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?
+                ORDER BY artifact_id DESC LIMIT 1""", ("f" * 64, row[columns.index("artifact_id")]))
+            assert conn.execute("SELECT changes()").fetchone()[0] == 1
+        after = _served_in_world(conn, world, target)
+        if poison:
+            assert "icon_global" not in after
+            assert len(reads) == 7, "no invalid candidate may hide an older unverified candidate"
+        else:
+            assert after == before
+            assert reads == [base_id + 1006]
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
