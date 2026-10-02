@@ -1750,9 +1750,13 @@ def test_live_override_keeps_every_scheme_weighted_source(monkeypatch) -> None:
     request = _la_current_physical_request(conn,metric="high",
         cycle=datetime(2026,9,30,tzinfo=UTC),decision=datetime(2026,9,30,11,23,tzinfo=UTC))
 
-    materializer_mod._replacement_bayes_precision_fusion_override(
-        request, metric="high", anchor_value_corrected_c=27.0, conn=conn,
-    )
+    # The fixture captures no current rows; the override names that decline after
+    # the scheme collapse this test observes has already run.
+    with pytest.raises(materializer_mod.BayesPrecisionFusionDeclined,
+                       match="PERSISTED_CURRENT_CAPTURE_MISSING"):
+        materializer_mod._replacement_bayes_precision_fusion_override(
+            request, metric="high", anchor_value_corrected_c=27.0, conn=conn,
+        )
 
     assert seen and set(seen[0]) == set(scheme.weights)
 
@@ -9003,6 +9007,7 @@ def test_prepared_writer_never_revalidates_or_recomputes(
             live_eligible=False,
             replacement_q_mode="BLOCKED",
             capture_status="MISSING",
+            fusion_decline_reason=None,
             predictive_sigma_c=None,
             q_lcb_map=None,
             q_ucb_map=None,
