@@ -1470,6 +1470,14 @@ def _exact_current_value_serving_lag(
     if not isinstance(serving, Mapping) or not used_models:
         return True, "basis=current_value_serving_provenance_unverifiable", None
 
+    from src.data.replacement_current_value_serving import day0_remaining_from_provenance
+    day0_tau, window_reason = day0_remaining_from_provenance(
+        provenance, city=city, target_date=target_date, metric=metric,
+        posterior_computed_at=posterior_computed_at,
+    )
+    if window_reason is not None:
+        return True, window_reason, None
+
     shape = fusion.get("current_evidence_shape")
     if isinstance(shape, Mapping) and isinstance(shape.get("provider_geometry_evidence"), Mapping):
         from src.data.station_ground_evidence import (
@@ -1592,6 +1600,7 @@ def _exact_current_value_serving_lag(
             ).isoformat(),
             include_station_sources=True,
             decision_time_iso=decision_iso,
+            day0_remaining_from_iso=day0_tau,
         )
     except sqlite3.OperationalError as exc:
         _raise_hwm_read_unavailable(

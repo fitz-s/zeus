@@ -1357,23 +1357,30 @@ def test_every_hwm_caller_threads_the_same_tau_parser() -> None:
     assert 'seed.get("day0_observed_extreme_observation_time")' in q
     assert 'day0_seed_payload.get("day0_observed_extreme_observation_time")' in inspect.getsource(discovery)
     assert "day0_remaining_from_iso_of(current_state.get(\"observed_at_utc\"))" in inspect.getsource(upgrade)
-    assert "day0_remaining_from_iso=_frozen_day0_remaining_from(provenance)" in inspect.getsource(reader)
+    held_source = inspect.getsource(reader._latest_complete_held_continuity)
+    assert "day0_remaining_from_provenance(" in held_source
+    assert "day0_remaining_from_iso=day0_tau" in held_source
 
 
-def test_held_continuity_tau_is_the_rows_frozen_tau_only() -> None:
-    from src.data.replacement_forecast_bundle_reader import _frozen_day0_remaining_from
-
-    def prov(*taus):
-        return {"bayes_precision_fusion": {"current_value_serving": {
-            f"m{i}": {"physical_response": {"frozen_product_identity": (
-                {} if tau is None else {"day0_remaining_from": tau})}} for i, tau in enumerate(taus)}}}
+def test_held_continuity_tau_is_immutable_context_consistent_with_frozen_ifs() -> None:
+    from src.data.replacement_current_value_serving import day0_remaining_from_provenance
 
     tau = "2026-06-07T15:05:00+00:00"
-    assert _frozen_day0_remaining_from(prov(tau)) == tau
-    assert _frozen_day0_remaining_from(prov(tau, "2026-06-07T23:05:00+08:00")) == tau
-    assert _frozen_day0_remaining_from(prov(tau, None)) is None
-    assert _frozen_day0_remaining_from(prov(tau, "2026-06-07T14:00:00+00:00")) is None
-    assert _frozen_day0_remaining_from(prov(None)) is None
-    assert _frozen_day0_remaining_from({}) is None
-    no_frozen = {"bayes_precision_fusion": {"current_value_serving": {"icon": {"physical_response": {}}}}}
-    assert _frozen_day0_remaining_from(no_frozen) is None
+    def prov(frozen):
+        return {"bayes_precision_fusion": {"current_value_serving": {
+            "ecmwf_ifs": {"physical_response": {"frozen_product_identity": frozen}}}},
+            "day0_conditioning": {"active": True, "metric": "high", "observation_time": tau}}
+
+    def decode(provenance):
+        return day0_remaining_from_provenance(provenance, city="Shanghai", target_date="2026-06-07",
+            metric="high", posterior_computed_at="2026-06-07T16:30:00+00:00")
+    assert decode(prov({"day0_remaining_from": tau})) == (tau, None)
+    assert decode(prov({"day0_remaining_from": "2026-06-07T23:05:00+08:00"})) == (tau, None)
+    invalid = (None, "basis=current_value_serving_day0_window_unverifiable")
+    assert decode(prov({})) == invalid
+    assert decode(prov({"day0_remaining_from": None})) == invalid
+    assert decode(prov({"day0_remaining_from": "2026-06-07T14:00:00+00:00"})) == invalid
+    assert decode({}) == (None, None)
+    non_ifs = prov({})
+    non_ifs["bayes_precision_fusion"]["current_value_serving"] = {"icon": {"physical_response": {}}}
+    assert decode(non_ifs) == (tau, None)

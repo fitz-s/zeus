@@ -1,5 +1,67 @@
 # finite_evidence_probability_symmetry -- Plan
 
+## 2026-10-02 immutable Day0 serving-window parity
+
+Verified source-to-q-consumer defect: the materializer passes the request's
+last authorized observation tau into current-serving physical replay; exact
+ordinary/held lag checks omit it. After local-day end that omission switches
+from the proven remaining-window single-run to a different fulltarget body.
+Actual Paris HIGH and Madrid LOW complete lag predicates reject newly
+successful certificates; injecting only the already-persisted producer tau
+returns no lag and matches consumed raw/body/proof identities. Paris's tau is
+`day0_provisional_observation.observation_time` (21:32:17 UTC), Madrid's is
+21:34:14 UTC and agrees with its frozen IFS serving identity.
+
+Implement one pure immutable-provenance tau decoder, reusing the existing UTC
+normalizer. Conditioning/provisional context must match the independent metric;
+IFS frozen tau is consistency evidence, not the sole source for non-IFS rows.
+Absent/non-Day0 tau keeps fulltarget; malformed/conflicting evidence produces
+a typed family-local refusal, never a guessed current observation or clock.
+Thread the same result through exact lag and held-continuity reads. Preserve
+all real body/receipt/hash/geometry/source-clock checks and fulltarget-only ENS
+quantity admission; no probability regime, freshness, source role or budget
+change. Other agents are read-only on this slice; preserve all unrelated work.
+
+SCOPE: the exact certificate's city/date/metric source-serving window. DRAIN:
+normal current-serving selection reproduces its frozen quantity window while
+still observing current causally possessed inputs. RESET: a new lawful
+certificate repairs missing/invalid/conflicting provenance; genuine changed
+body/geometry/clock remains independently blocking until normal recomputation.
+Acceptance: actual HIGH/LOW ordinary and held lag RED/GREEN, absent/fulltarget,
+malformed/conflicting tau and changed-body negatives, existing reader/continuity
+antibodies and required ten data suites with exact baseline comparison. Local
+commit only; parent retains landing/loading authority. No live writes or load.
+
+Local evidence: four real transport/body-binding/persistence/native-surface
+HIGH/LOW ordinary/held public-lag cases are RED on the original consumer, then
+GREEN. Final focused selection has 52 passes, including typed malformed and
+conflicting tau, wrong calendar/immutable cut, fulltarget absence, actual held
+continuity refusal before fallback, genuine same-raw new-body rejection, and
+partial-ENS negatives. One pre-existing producer-wiring assertion still counted
+three direct reads after the earlier ZERO slice extracted one shared capture
+read; it now proves two direct reads plus the actual shared helper's exact
+tau/cut arguments. Two prior frozen-only helper antibodies now test the shared
+typed immutable-context contract instead of retaining a second decoder.
+The required ten data suites give 268 pass / four failures whose exact
+node/messages match the accepted `ead0f99ba` baseline XML. Logs/XML are under
+`/tmp/zeus-day0-window-parity-{red,focused,required}-20261002`.
+
+Independent bounded review accepts the source and negative contracts (30 narrow
+passes). Independent read-only source replay at 22:33:11 UTC reproduces Paris
+HIGH 728052's tau 21:32:17 from its immutable provisional context: original
+complete public lag rejects AROME 2629582, new source returns no lag, with both
+ICON-D2 2631114 and AROME 2629582 physical dependencies matching the certificate.
+Madrid LOW 727841 at 22:33:12 similarly restores tau 21:34:14; IFS 2628909 and
+UKMO 2631277 exact dependencies match. Only the new source functions were loaded
+in memory; no other gate or live DB was replaced or written. This is read-time
+quantity parity evidence, not loading or global executable-money readiness.
+Temporary bootstrap settings are the read-only live settings symlink (SHA256
+`d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae`);
+fixtures own private temporary state. Remove it before parent handoff.
+YAML, compile, diff, scoped freshness/map and changed-doc checks pass. The three
+source paths retain only pre-existing downstream-map warnings; unrelated
+repository-wide registry drift is not repaired or presented as clean.
+
 ## 2026-10-02 Day0 current-state keeper urgency
 
 Confirmed defect: latest HKO current-temperature revision correctly supersedes

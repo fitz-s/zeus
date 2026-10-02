@@ -4,6 +4,7 @@
 #   remaining-window read is keyed on the LAST OBSERVATION, never the decision clock
 #   (day0 causal cut replay 2026-09-06). Live 2026-10-02: held Chongqing 10-02 lost every
 #   post-midnight run at 16:00Z (local day end) while its last observation was 15:05Z.
+#   Current slice also defends immutable source-window parity at ordinary/held q reads.
 """A stored body's local-day coverage proof is re-parsed at the family's last observation."""
 
 from __future__ import annotations
@@ -103,12 +104,212 @@ def test_frozen_identity_carries_tau_only_when_supplied():
     assert 'if row.get("day0_remaining_from") is not None' in source
 
 
-def test_every_bpf_current_read_in_the_materializer_names_the_family_tau():
+def test_every_bpf_current_read_in_the_materializer_names_the_family_tau(monkeypatch):
     import inspect
     from src.data import replacement_forecast_materializer as m
     source = inspect.getsource(m._replacement_bayes_precision_fusion_override)
     import re
     reads = re.findall(r"read_(?:current_instrument_values|freshest_coherent_instrument_values)\((.*?)\n\s*\)",
                        source, flags=re.S)
-    assert len(reads) == 3
+    assert len(reads) == 2
     assert all("day0_remaining_from_iso=_day0_remaining_from_iso(request)" in call for call in reads)
+    shared_call = re.search(r"_read_current_capture_serving\((.*?)\n\s*\)", source, flags=re.S)
+    assert shared_call is not None
+    assert "day0_remaining_from_iso=_day0_remaining_from_iso(request)" in shared_call.group(1)
+    seen = []
+    def read_current(_conn, **kwargs):
+        seen.append((kwargs["day0_remaining_from_iso"], kwargs["decision_time_iso"]))
+        return {}
+    monkeypatch.setattr(serving, "read_current_instrument_values", read_current)
+    from types import SimpleNamespace
+    producer_tau = m._day0_remaining_from_iso(SimpleNamespace(day0_observed_extreme_observation_time=TAU))
+    assert m._read_current_capture_serving(None, city="Shanghai", metric="high",
+        target_date=DAY.isoformat(), source_cycle_time_iso="2026-10-02T12:00:00+00:00",
+        decision_time_iso="2026-10-02T16:30:00+00:00", day0_remaining_from_iso=producer_tau,
+        lat=31.2, lon=121.5, lead_days=0, configured=()) == {}
+    assert seen == [(TAU, "2026-10-02T16:30:00+00:00")]
+
+
+def _remaining_serving_certificate(tmp_path, monkeypatch, metric):
+    """Inert transport; real body binding, persistence, surface and serving replay."""
+    import sqlite3
+    from src.data import bayes_precision_fusion_download as dl
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import (
+        _controlled_model_static_transport, _persist_exact_provider_body,
+    )
+    _controlled_model_static_transport.__wrapped__(tmp_path, monkeypatch)
+    conn = sqlite3.connect(":memory:")
+    ensure_replacement_forecast_live_schema(conn)
+    day = "2026-10-02"
+    cycle = "2026-10-02T12:00:00+00:00"
+    cut = "2026-10-02T22:18:20+00:00"
+    tau = "2026-10-02T21:32:17+00:00"
+    original_bind = dl._bind_physical_response
+
+    def bind_partial(payload, **kwargs):
+        payload = {**payload, "hourly": {key: values[14:] for key, values in payload["hourly"].items()}}
+        body = json.dumps(payload).encode()
+        stamp = kwargs["captures"][-1][1]
+        kwargs.update(captures=[(body, stamp)], network_captures=[(body, stamp, {"content-type": "application/json"})])
+        return original_bind(payload, **kwargs)
+
+    persist = lambda run, stamp, **kwargs: _persist_exact_provider_body(
+        conn, tmp_path, city="Paris", metric=metric, target_date=day,
+        model="icon_global", cycle=run, captured=stamp, value=20.0, network=True, **kwargs,
+    )
+    persist("2026-10-02T00:00:00+00:00", "2026-10-02T10:00:00+00:00")
+    monkeypatch.setattr(dl, "_bind_physical_response", bind_partial)
+    persist(cycle, "2026-10-02T20:00:00+00:00")
+
+    def read(tau_value):
+        return serving.read_current_instrument_values(conn, city="Paris", metric=metric,
+            target_date=day, source_cycle_time_iso=cycle, decision_time_iso=cut,
+            day0_remaining_from_iso=tau_value)["icon_global"]
+
+    consumed, full = read(tau), read(None)
+    assert consumed.raw_model_forecast_id != full.raw_model_forecast_id
+    provenance = {"day0_provisional_observation": {
+        "active": True, "metric": metric, "source": "noaa_wrh_LFPG",
+        "observation_time": tau, "observed_extreme_c": 20.0, "unit": "C",
+    }, "bayes_precision_fusion": {"used_models": ["icon_global"],
+        "current_value_serving": {"icon_global": consumed.as_provenance()}}}
+    return conn, provenance, full, cycle, cut, tau, persist
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("held", (False, True))
+def test_actual_ordinary_and_held_lag_replays_immutable_day0_window(
+    tmp_path, monkeypatch, metric, held
+):
+    from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+    conn, provenance, _full, cycle, cut, _tau, _persist = _remaining_serving_certificate(tmp_path, monkeypatch, metric)
+    try:
+        assert replacement_live_input_lag_reason(conn, city="Paris", target_date="2026-10-02",
+            metric=metric, decision_time=datetime.fromisoformat("2026-10-02T22:30:00+00:00"),
+            posterior_source_cycle_time=cycle, posterior_computed_at=cut,
+            posterior_provenance=provenance, held_redecision=held) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_actual_lag_without_day0_witness_preserves_fulltarget(tmp_path, monkeypatch, metric):
+    from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+    conn, provenance, full, cycle, cut, _tau, _persist = _remaining_serving_certificate(tmp_path, monkeypatch, metric)
+    provenance.pop("day0_provisional_observation")
+    provenance["bayes_precision_fusion"]["current_value_serving"]["icon_global"] = full.as_provenance()
+    try:
+        assert replacement_live_input_lag_reason(conn, city="Paris", target_date="2026-10-02",
+            metric=metric, decision_time=datetime.fromisoformat("2026-10-02T22:30:00+00:00"),
+            posterior_source_cycle_time=cycle, posterior_computed_at=cut,
+            posterior_provenance=provenance) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_same_raw_real_body_change_still_blocks_after_window_alignment(tmp_path, monkeypatch, metric):
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+    conn, provenance, _full, cycle, cut, _tau, persist = _remaining_serving_certificate(tmp_path, monkeypatch, metric)
+    old_bind = dl._bind_physical_response
+    def changed_body(payload, **kwargs):
+        return old_bind({**payload, "generationtime_ms": 1.0}, **kwargs)
+    monkeypatch.setattr(dl, "_bind_physical_response", changed_body)
+    persist(cycle, "2026-10-02T22:20:00+00:00", expected_written=0)
+    try:
+        reason = replacement_live_input_lag_reason(conn, city="Paris", target_date="2026-10-02",
+            metric=metric, decision_time=datetime.fromisoformat("2026-10-02T22:30:00+00:00"),
+            posterior_source_cycle_time=cycle, posterior_computed_at=cut,
+            posterior_provenance=provenance, held_redecision=True)
+        assert "physical_proof_dependency_changed" in reason
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("context_key", ("day0_conditioning", "day0_provisional_observation"))
+@pytest.mark.parametrize("ifs_frozen", (False, True))
+def test_shared_window_decoder_uses_context_and_checks_frozen_ifs(context_key, ifs_frozen):
+    tau = "2026-10-02T21:32:17+00:00"
+    provenance = {context_key: {"active": True, "metric": "high", "observation_time": tau}}
+    if ifs_frozen:
+        provenance["bayes_precision_fusion"] = {"current_value_serving": {"ecmwf_ifs": {
+            "physical_response": {"frozen_product_identity": {"day0_remaining_from": tau}},
+        }}}
+    assert serving.day0_remaining_from_provenance(provenance, city="Paris", target_date="2026-10-02",
+        metric="high", posterior_computed_at="2026-10-02T22:18:20+00:00") == (tau, None)
+
+
+@pytest.mark.parametrize("invalid", (
+    "missing_time", "naive", "malformed", "context_not_mapping", "wrong_metric",
+    "wrong_day", "day_end", "after_cert_cut", "contexts_conflict", "frozen_none",
+    "frozen_missing", "frozen_conflict", "inactive_with_time",
+))
+def test_declared_invalid_window_never_silently_becomes_fulltarget(invalid):
+    tau = "2026-10-02T21:32:17+00:00"
+    context = {"active": True, "metric": "high", "observation_time": tau}
+    provenance = {"day0_provisional_observation": context}
+    cut = "2026-10-02T22:18:20+00:00"
+    replacements = {
+        "missing_time": None, "naive": "2026-10-02T21:32:17", "malformed": "unknown",
+        "wrong_day": "2026-10-01T20:00:00+00:00", "day_end": "2026-10-02T22:00:00+00:00",
+    }
+    if invalid in replacements:
+        context["observation_time"] = replacements[invalid]
+    elif invalid == "context_not_mapping":
+        provenance["day0_provisional_observation"] = None
+    elif invalid == "wrong_metric":
+        context["metric"] = "low"
+    elif invalid == "after_cert_cut":
+        cut = "2026-10-02T21:20:00+00:00"
+    elif invalid == "contexts_conflict":
+        provenance["day0_conditioning"] = {**context, "observation_time": "2026-10-02T21:30:00+00:00"}
+    elif invalid == "inactive_with_time":
+        context["active"] = False
+    else:
+        frozen = {} if invalid == "frozen_missing" else {"day0_remaining_from":
+            None if invalid == "frozen_none" else "2026-10-02T21:30:00+00:00"}
+        provenance["bayes_precision_fusion"] = {"current_value_serving": {"ecmwf_ifs": {
+            "physical_response": {"frozen_product_identity": frozen},
+        }}}
+    assert serving.day0_remaining_from_provenance(provenance, city="Paris", target_date="2026-10-02",
+        metric="high", posterior_computed_at=cut) == (
+            None, "basis=current_value_serving_day0_window_unverifiable",
+        )
+
+
+def test_no_day0_or_inactive_without_window_keeps_fulltarget():
+    for provenance in ({}, {"day0_conditioning": {"active": False}}):
+        assert serving.day0_remaining_from_provenance(provenance, city="Paris", target_date="2026-10-03",
+            metric="low", posterior_computed_at=None) == (None, None)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_actual_invalid_tau_blocks_lag_and_held_continuity_before_any_fallback(
+    tmp_path, monkeypatch, metric
+):
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+    conn, provenance, full, cycle, cut, _tau, _persist = _remaining_serving_certificate(tmp_path, monkeypatch, metric)
+    # Fulltarget would otherwise look valid: prove an invalid declared window
+    # cannot fall through and promote this different, physically legal product.
+    provenance["bayes_precision_fusion"]["current_value_serving"]["icon_global"] = full.as_provenance()
+    provenance["day0_provisional_observation"]["observation_time"] = "2026-10-02T21:32:17"
+    def no_fallback(*_args, **_kwargs):
+        pytest.fail("invalid source-window witness cannot fall back to a selector")
+    monkeypatch.setattr(serving, "read_current_instrument_values", no_fallback)
+    try:
+        reason = replacement_live_input_lag_reason(conn, city="Paris", target_date="2026-10-02",
+            metric=metric, decision_time=datetime.fromisoformat("2026-10-02T22:30:00+00:00"),
+            posterior_source_cycle_time=cycle, posterior_computed_at=cut,
+            posterior_provenance=provenance, held_redecision=True)
+        assert reason == "basis=current_value_serving_day0_window_unverifiable"
+        status, held_reason = reader._latest_complete_held_continuity(conn,
+            row={"computed_at": cut, "source_cycle_time": cycle}, provenance=provenance,
+            city="Paris", target_date="2026-10-02", metric=metric,
+            decision_time=datetime.fromisoformat("2026-10-02T22:30:00+00:00"))
+        assert status is reader._HeldContinuityStatus.BLOCKED
+        assert held_reason == f"REPLACEMENT_PINNED_RAW_INPUT_HWM:{reason}"
+    finally:
+        conn.close()

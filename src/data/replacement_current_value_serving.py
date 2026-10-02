@@ -1727,6 +1727,69 @@ def _physical_capture_debt_reason(
         return None
 
 
+def day0_remaining_from_provenance(
+    provenance: Mapping[str, object], *, city: str, target_date: object,
+    metric: str, posterior_computed_at: object,
+) -> tuple[str | None, str | None]:
+    """Recover the exact source window; absent and malformed are distinct.
+
+    SCOPE: one immutable family/certificate. DRAIN: normal recomputation records
+    valid conditioning geometry. RESET: a replacement valid certificate, never
+    a requirement that frozen provenance equal an always-newest observation.
+    """
+    from datetime import date
+    from src.data.forecast_target_contract import (
+        compute_target_local_day_window_utc, day0_remaining_from_iso_of,
+    )
+
+    invalid = (None, "basis=current_value_serving_day0_window_unverifiable")
+    taus: list[str] = []
+    for key in ("day0_conditioning", "day0_provisional_observation"):
+        if key not in provenance:
+            continue
+        context = provenance[key]
+        if (isinstance(context, Mapping) and context.get("active") is False
+                and context.get("observation_time") is None):
+            continue  # No remaining-window declaration on an inactive proposal.
+        if (not isinstance(context, Mapping) or context.get("active") is not True
+                or context.get("metric") != metric):
+            return invalid
+        tau = day0_remaining_from_iso_of(context.get("observation_time"))
+        if tau is None:
+            return invalid
+        taus.append(tau)
+    fusion = provenance.get("bayes_precision_fusion")
+    serving = fusion.get("current_value_serving") if isinstance(fusion, Mapping) else None
+    if isinstance(serving, Mapping):
+        ifs = serving.get("ecmwf_ifs")
+        physical = ifs.get("physical_response") if isinstance(ifs, Mapping) else None
+        frozen = physical.get("frozen_product_identity") if isinstance(physical, Mapping) else None
+        if isinstance(frozen, Mapping) and (taus or "day0_remaining_from" in frozen):
+            frozen_tau = day0_remaining_from_iso_of(frozen.get("day0_remaining_from"))
+            if frozen_tau is None or not taus:
+                return invalid
+            taus.append(frozen_tau)
+    if not taus:
+        return None, None  # Ordinary fulltarget semantics stay unchanged.
+    if len(set(taus)) != 1:
+        return invalid
+    try:
+        from src.config import runtime_cities_by_name
+        city_config = runtime_cities_by_name().get(city)
+        cut = day0_remaining_from_iso_of(posterior_computed_at)
+        if city_config is None or cut is None or metric not in ("high", "low"):
+            return invalid
+        window = compute_target_local_day_window_utc(
+            city_timezone=city_config.timezone, target_local_date=date.fromisoformat(str(target_date)),
+        )
+        tau_time = datetime.fromisoformat(taus[0])
+        if not window.start_utc <= tau_time < window.end_utc or tau_time > datetime.fromisoformat(cut):
+            return invalid
+    except (KeyError, TypeError, ValueError):
+        return invalid
+    return taus[0], None
+
+
 def physical_source_proof_dependency(proof: object) -> Mapping[str, object] | None:
     """Immutable possession dependencies, separate from stable physical geometry."""
     if not isinstance(proof, Mapping):
