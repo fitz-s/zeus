@@ -177,3 +177,38 @@ def test_fingerprint_changes_when_day0_hourly_carrier_arrives(tmp_path: Path) ->
     )
     assert fp2 is not None
     assert fp2 != fp1
+
+
+def test_fence_reopens_on_every_logic_file_the_seed_identity_names(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Seoul 2026-10-02: the sea-cell fix lived in the bucket transport, which the
+    attempt fingerprint did not hash, so a fenced family could never reopen.
+    Both fences hash one revision set; a revision of any of its files reopens."""
+    import os
+    import sys
+
+    # A registered city: the fingerprint reads its station-ground applicability.
+    monkeypatch.setattr(sys.modules[__name__], "_CITY", "London")
+    db_path = _make_forecast_db(tmp_path)
+    input_json = tmp_path / "request.json"
+    input_json.write_text("{}")
+    payload = _payload(_OWN_CYCLE)
+    _insert_raw(db_path, source_cycle_time=_OWN_CYCLE)
+    logic = []
+    for name in ("openmeteo_ecmwf_ifs9_bucket_transport.py", "settings.json"):
+        path = tmp_path / name
+        path.write_text("v1")
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+        logic.append(path)
+    monkeypatch.setattr(queue_mod, "_logic_revision_paths", lambda: tuple(logic))
+
+    def fingerprint() -> str | None:
+        return queue_mod._blocked_attempt_fingerprint(
+            input_json=input_json, forecast_db=db_path, payload=payload
+        )
+
+    before = fingerprint()
+    assert before is not None and fingerprint() == before
+    os.utime(logic[0], ns=(2_000_000_000, 2_000_000_000))
+    assert fingerprint() != before

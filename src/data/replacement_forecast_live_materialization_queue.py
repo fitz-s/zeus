@@ -843,6 +843,23 @@ class _UnknownSeedInput(Exception):
     """A dependency's state could not be read (permission, I/O)."""
 
 
+def _logic_revision_paths() -> tuple[Path, ...]:
+    """The one code/config set whose revision reopens a seed or attempt fence."""
+    from src.config import CONFIG_DIR  # noqa: PLC0415
+
+    return (
+        CONFIG_DIR / "cities.json",
+        CONFIG_DIR / "settings.json",
+        PROJECT_ROOT / "src/data/replacement_forecast_materialization_request_builder.py",
+        PROJECT_ROOT / "src/data/openmeteo_ecmwf_ifs9_precision_guard.py",
+        PROJECT_ROOT / "src/data/raw_forecast_artifact_manifest.py",
+        PROJECT_ROOT / "src/data/openmeteo_ecmwf_ifs9_bucket_transport.py",
+        PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
+        PROJECT_ROOT / "src/data/replacement_current_value_serving.py",
+        PROJECT_ROOT / "src/data/forecast_source_registry.py",
+    )
+
+
 def seed_build_dependencies(
     seed: Mapping[str, object],
     *,
@@ -871,7 +888,7 @@ def seed_build_dependencies(
         target_date = str(seed["target_date"]).strip()
         metric = str(seed["temperature_metric"]).strip()
         from src.config import (  # noqa: PLC0415
-            CONFIG_DIR, runtime_cities_by_name, runtime_station_geometry_for_city,
+            runtime_cities_by_name, runtime_station_geometry_for_city,
         )
         from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
             HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID as OM9,
@@ -958,15 +975,7 @@ def seed_build_dependencies(
         # every fence through the hash, never through the possession clock.
         logic = {
             path.name: revision(path, possessed=False)
-            for path in (
-                CONFIG_DIR / "cities.json",
-                CONFIG_DIR / "settings.json",
-                PROJECT_ROOT / "src/data/replacement_forecast_materialization_request_builder.py",
-                PROJECT_ROOT / "src/data/openmeteo_ecmwf_ifs9_precision_guard.py",
-                PROJECT_ROOT / "src/data/raw_forecast_artifact_manifest.py",
-                PROJECT_ROOT / "src/data/openmeteo_ecmwf_ifs9_bucket_transport.py",
-                PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
-            )
+            for path in _logic_revision_paths()
         }
     except _ClaimReadDeadlineExceeded:
         raise
@@ -3692,12 +3701,7 @@ def _blocked_attempt_fingerprint(
             except OSError:
                 file_revisions[field] = None
     logic_revisions: dict[str, tuple[int, int] | None] = {}
-    for path in (
-        PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
-        PROJECT_ROOT / "src/data/replacement_current_value_serving.py",
-        PROJECT_ROOT / "src/data/forecast_source_registry.py",
-        PROJECT_ROOT / "config/settings.json",
-    ):
+    for path in _logic_revision_paths():
         try:
             stat = path.stat()
             logic_revisions[path.name] = (stat.st_mtime_ns, stat.st_size)
