@@ -7338,10 +7338,14 @@ def _compute_posterior_payload(
                 if _current_shape is not None
                 else "fused_center_residual_std"
             )
+            # The WU fast-tail residual models settlement-minus-METAR at the
+            # observed extreme; it stays real after local midnight, so the
+            # carrier it composes with must exist on both sides of day end.
+            # After midnight the same builder prices only the unobserved tail
+            # from the last current-state print to day end.
             _wu_fast_residual_source = (
                 str(request.day0_observed_extreme_source or "").strip().lower()
                 == DAY0_WU_FAST_RESIDUAL_SOURCE
-                and _target_local_day_is_open(request)
             )
             if (
                 _provisional_extreme_c is not None
@@ -8011,11 +8015,8 @@ def _compute_posterior_payload(
         and (
             _is_noaa_preliminary_source(request.day0_observed_extreme_source)
             or _is_hko_provisional_source(request.day0_observed_extreme_source)
-            or (
-                str(request.day0_observed_extreme_source or "").strip().lower()
-                == DAY0_WU_FAST_RESIDUAL_SOURCE
-                and _target_local_day_is_open(request)
-            )
+            or str(request.day0_observed_extreme_source or "").strip().lower()
+            == DAY0_WU_FAST_RESIDUAL_SOURCE
         )
         and bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None

@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-10-01
-# Lifecycle: created=2026-06-06; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Last reused/audited: 2026-10-02
+# Lifecycle: created=2026-06-06; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -5128,18 +5128,14 @@ def test_legacy_wu_fast_posterior_without_current_carrier_cannot_replay() -> Non
             "metric": "low", "unit": "C",
         },
     })
-    with pytest.raises(ValueError, match="GLOBAL_DAY0_WU_CURRENT_CARRIER_MISSING"):
-        era._day0_replacement_conditioning(
-            bundle, provisional=True, metric="low", unit="C",
-            decision_time=datetime(2026, 6, 7, 6, tzinfo=UTC),
-            entry_authority=False,
-        )
-    closed = era._day0_replacement_conditioning(
-        bundle, provisional=True, metric="low", unit="C",
-        decision_time=datetime(2026, 6, 8, 18, tzinfo=UTC),
-        entry_authority=False,
-    )
-    assert closed["source"] == "wu_api+same_station_fast_tail"
+    # The residual is settlement-minus-METAR at the observed extreme and stays
+    # real after local midnight, so a closed day still requires its carrier.
+    for decision_time in (datetime(2026, 6, 7, 6, tzinfo=UTC), datetime(2026, 6, 8, 18, tzinfo=UTC)):
+        with pytest.raises(ValueError, match="GLOBAL_DAY0_WU_CURRENT_CARRIER_MISSING"):
+            era._day0_replacement_conditioning(
+                bundle, provisional=True, metric="low", unit="C",
+                decision_time=decision_time, entry_authority=False,
+            )
     request = _request(
         computed_at=datetime(2026, 6, 8, 18, tzinfo=UTC),
         day0_observed_extreme_c=26.0,
@@ -5911,6 +5907,139 @@ def test_wu_composite_low_rebuilds_current_path_before_one_residual_update(
         "day0_remaining_carrier_content_identity"
     ]
     assert q_revised != q_first
+
+
+def _wu_fast_post_day_request(tmp_path, monkeypatch, *, future_members):
+    """Shanghai HIGH WU fast tail, decided after the target local day ended."""
+    from src.data.day0_fast_obs import (
+        FAST_RESIDUAL_LIKELIHOOD_REVISION, FastStationResidualLikelihood,
+    )
+    from src.data.day0_hourly_vectors import Day0CurrentTemperatureState
+
+    # Same owner-fixture geometry as the post-local-day prior test: Shanghai
+    # 2026-10-02 closes at 16:00Z.
+    conn, basis = _shanghai_current_owner_request(tmp_path, monkeypatch,
+        source_cycle_time=datetime(2026, 10, 1, 12, tzinfo=UTC),
+        computed_at=datetime(2026, 10, 2, 15, 5, tzinfo=UTC), record_observed_prints=False)
+    observed = datetime(2026, 10, 2, 15, 55, tzinfo=UTC)
+    request = replace(basis,
+        day0_observed_extreme_c=26.0,
+        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_observation_time=observed.isoformat(),
+        day0_observed_extreme_sample_count=10,
+        bins=(
+            _TemperatureBin("cool", upper_c=25.0, center_c=24.0),
+            _TemperatureBin("mid", lower_c=26.0, upper_c=27.0, center_c=26.5),
+            _TemperatureBin("hot", lower_c=28.0, center_c=29.0),
+        ),
+    )
+    residual_identity = {
+        "semantics_revision": FAST_RESIDUAL_LIKELIHOOD_REVISION,
+        "station_id": "ZSPD", "settlement_channel": "noaa_wrh_zspd",
+        "fast_channel": "aviationweather_metar", "unit": "C",
+        "as_of": observed.isoformat(),
+        "window_start": (observed - timedelta(days=7)).isoformat(),
+        "matched_pairs": 30, "residual_weights_c": ((0.0, 0.8),),
+        "unknown_weight": 0.2, "settlement_extreme_c": None,
+    }
+    residual = FastStationResidualLikelihood(
+        **residual_identity, identity_hash=hashlib.sha256(json.dumps(
+            residual_identity, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+        lambda *_args, **_kwargs: residual,
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_day0_current_temperature_state",
+        lambda **_kwargs: Day0CurrentTemperatureState(
+            value_native=26.0, observed_at=observed, source="aviationweather_metar",
+        ),
+    )
+    post_day = datetime(2026, 10, 2, 16, 5, tzinfo=UTC)  # 00:05 Oct 3 Asia/Shanghai
+    calls = []
+
+    def future(_conn, req, **_kwargs):
+        calls.append(req.computed_at)
+        if future_members is None:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING")
+        return tuple(future_members), 0.0, req.computed_at.isoformat(), (), None
+
+    monkeypatch.setattr(materializer_mod, "_day0_noaa_carrier_future_members", future)
+    monkeypatch.setattr(
+        materializer_mod, "_day0_remaining_vector_witness",
+        lambda *_args, **_kwargs: _wu_current_carrier_test_witness(
+            city="Shanghai", target_date="2026-10-02", metric="high", at=post_day,
+        ),
+    )
+    request = _refresh_shanghai_owner_request(
+        conn, monkeypatch, replace(request, computed_at=post_day), record_observed_prints=False,
+    )
+    assert materializer_mod._target_local_day_is_open(request) is False
+    return conn, request, post_day, calls
+
+
+@pytest.mark.usefixtures("_historical_shanghai_component_surface")
+def test_wu_fast_post_day_row_carries_complete_carrier_every_validator_reproduces(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After local midnight the residual composes with the observed-extreme carrier."""
+    from src.data.replacement_forecast_bundle_reader import _day0_carrier_identity_reason
+    from src.data.replacement_forecast_cycle_policy import fast_residual_carrier_authority_reason
+    import src.engine.event_reactor_adapter as era
+
+    conn, request, post_day, calls = _wu_fast_post_day_request(
+        tmp_path, monkeypatch, future_members=(26.0, 26.0),
+    )
+    result = materialize_replacement_forecast_live(conn, request)
+    assert result.ok is True, result.reason_codes
+    assert calls == [post_day]
+    provenance = json.loads(conn.execute(
+        "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()["provenance_json"])
+    assert provenance["q_shape"] == "fused_day0_fast_residual_likelihood"
+    assert provenance["day0_remaining_center_policy"] == "unshifted_live_v1"
+    assert provenance["day0_remaining_center_bias_c"] == 0.0
+    assert provenance["day0_probability_mixture_policy"] == "unmixed_live_v1"
+    assert provenance["day0_remaining_carrier_future_extremes_c"] == [26.0, 26.0]
+    assert provenance["day0_remaining_carrier_content_identity"]
+    assert _day0_carrier_identity_reason(provenance) is None
+    assert fast_residual_carrier_authority_reason(
+        provenance, city="Shanghai", target_date="2026-10-02", metric="high",
+        materialized_at=post_day,
+    ) is None
+    # Held pinned reader: the exact carrier reproduces at the post-day cut.
+    _assert_wu_fast_pinned_contract(
+        provenance, city="Shanghai", target_date="2026-10-02",
+        metric="high", decision_time=post_day,
+    )
+    conditioning = era._day0_replacement_conditioning(
+        SimpleNamespace(city="Shanghai", target_date="2026-10-02", provenance_json=provenance),
+        provisional=True, metric="high", unit="C",
+        decision_time=post_day + timedelta(minutes=30), entry_authority=False,
+    )
+    assert conditioning["source"] == "wu_api+same_station_fast_tail"
+    assert conditioning["day0_remaining_carrier_content_identity"] == provenance[
+        "day0_remaining_carrier_content_identity"
+    ]
+
+
+@pytest.mark.usefixtures("_historical_shanghai_component_surface")
+def test_wu_fast_post_day_without_current_state_writes_no_row(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No causal current state after midnight is a blocked family, not a carrier-less row."""
+    conn, request, post_day, calls = _wu_fast_post_day_request(
+        tmp_path, monkeypatch, future_members=None,
+    )
+    before = conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0]
+    result = materialize_replacement_forecast_live(conn, request)
+    assert result.ok is False
+    assert any("CURRENT_TEMPERATURE_STATE_MISSING" in code for code in result.reason_codes), result
+    assert calls == [post_day]
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == before
 
 
 def test_wu_and_raw_noaa_fast_are_provisional_until_wrh_authority() -> None:

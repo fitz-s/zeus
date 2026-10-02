@@ -37535,29 +37535,19 @@ def _day0_replacement_conditioning(
         str(conditioning.get("source") or "").strip().lower()
         == DAY0_WU_FAST_RESIDUAL_SOURCE
     )
-    wu_open_day = False
-    if wu_source:
-        try:
-            from zoneinfo import ZoneInfo
-
-            bundle_city = runtime_cities_by_name()[str(replacement_bundle.city)]
-            target = date.fromisoformat(str(replacement_bundle.target_date)[:10])
-            wu_open_day = decision_time.astimezone(ZoneInfo(bundle_city.timezone)).date() == target
-        except (AttributeError, KeyError, TypeError, ValueError):
-            # Unknown scope cannot prove an old WU certificate safe for a
-            # different local date; fail closed until its owner is identified.
-            wu_open_day = True
     if (
-        wu_open_day
+        wu_source
         and (
             not provenance.get("day0_remaining_carrier_content_identity")
             or not isinstance(provenance.get("day0_current_temperature_state"), Mapping)
         )
     ):
+        # The fast residual composes with a carrier on both sides of local
+        # midnight; a closed day has no carrier-free fast-residual law.
         # SCOPE: this legacy Day0 city/date/metric certificate only. DRAIN:
         # fusion-upgrade catch-up reseeds the existing writer from a current
-        # observation and complete hourly bundle. RESET: the new certificate
-        # carries a reproducible conditional path and its current-state identity.
+        # observation. RESET: the new certificate carries a reproducible
+        # carrier and its current-state identity.
         raise ValueError("GLOBAL_DAY0_WU_CURRENT_CARRIER_MISSING")
     expected_metric = str(metric or "").strip().lower()
     expected_unit = str(unit or "").strip().upper()
