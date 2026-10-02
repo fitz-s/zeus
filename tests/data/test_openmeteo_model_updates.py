@@ -1,5 +1,5 @@
 # Created: 2026-06-25
-# Last reused/audited: 2026-08-06
+# Last reused/audited: 2026-10-02 (listing frontier joins the source route identity)
 
 import json
 from datetime import UTC, datetime
@@ -794,3 +794,116 @@ def test_source_clock_cursor_ignores_availability_only_replica_skew(
     assert reverted.updated_sources == (), (
         "a stale replica's older run must never re-trigger after a newer run was accepted"
     )
+
+
+def _list_markets(path, rows) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS market_events"
+        " (city TEXT, target_date TEXT, temperature_metric TEXT)"
+    )
+    conn.executemany("INSERT INTO market_events VALUES (?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def _one_run(updates_path, models) -> None:
+    write_model_updates_jsonl(
+        updates_path,
+        [
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=datetime(2000, 1, 1, 18, 0, tzinfo=UTC),
+                last_run_availability_time=datetime(2000, 1, 2, 0, 17, tzinfo=UTC),
+            )
+            for model in models
+        ],
+    )
+
+
+def test_new_listing_recaptures_the_already_resolved_run_in_the_same_pass(
+    tmp_path, monkeypatch
+) -> None:
+    """A listing is an acquisition event: the run already captured for the old
+    targets re-fires for the sources serving the newly listed city, with no new run."""
+    import src.data.source_clock_update_probe as probe
+
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    market_db = tmp_path / "forecasts.db"
+    monkeypatch.setattr(
+        probe, "all_configured_source_ids", lambda: ("ecmwf_ifs", "icon_global")
+    )
+    monkeypatch.setattr(
+        probe,
+        "affected_cities_for_source_updates",
+        lambda sources: ("Paris", "Tokyo") if "ecmwf_ifs" in sources else ("Lagos",),
+    )
+    _one_run(updates_path, ("ecmwf_ifs", "icon_global"))
+    _list_markets(market_db, [("Paris", "2000-01-03", "high"), ("Tokyo", "2000-01-03", "low")])
+
+    def probe_once():
+        return probe_openmeteo_source_clock_updates(
+            model_updates_path=updates_path,
+            cursor_path=cursor_path,
+            use_network=False,
+            market_db=market_db,
+        )
+
+    assert probe_once().updated_sources == ("ecmwf_ifs", "icon_global")
+    assert probe_once().updated_sources == ()
+
+    _list_markets(market_db, [("Tokyo", "2000-01-04", "low")])
+    listed = probe_once()
+    assert listed.updated_sources == ("ecmwf_ifs",)
+    assert listed.affected_cities == ("Paris", "Tokyo")
+    assert {source: run for source, run, _at, _n in listed.source_runs} == {
+        "ecmwf_ifs": "2000-01-01T18:00:00+00:00"
+    }
+    assert probe_once().updated_sources == ()
+
+
+def test_unreadable_listing_frontier_never_reads_as_a_listing(tmp_path, monkeypatch) -> None:
+    import src.data.source_clock_update_probe as probe
+
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    market_db = tmp_path / "forecasts.db"
+    monkeypatch.setattr(probe, "all_configured_source_ids", lambda: ("ecmwf_ifs",))
+    monkeypatch.setattr(probe, "affected_cities_for_source_updates", lambda _s: ("Paris",))
+    _one_run(updates_path, ("ecmwf_ifs",))
+    _list_markets(market_db, [("Paris", "2000-01-03", "high")])
+
+    def probe_once():
+        return probe_openmeteo_source_clock_updates(
+            model_updates_path=updates_path,
+            cursor_path=cursor_path,
+            use_network=False,
+            market_db=market_db,
+        )
+
+    assert probe_once().updated_sources == ("ecmwf_ifs",)
+    market_db.write_bytes(b"not a database, " * 64)
+    assert probe_once().updated_sources == ()
+
+
+def test_unlisted_route_keeps_its_pre_frontier_cursor(tmp_path, monkeypatch) -> None:
+    """A deploy must not re-fire every source: a city with no listing hashes as before."""
+    import src.data.source_clock_update_probe as probe
+
+    monkeypatch.setattr(probe, "affected_cities_for_source_updates", lambda _s: ("Paris",))
+    update = OpenMeteoModelUpdate(
+        model="ecmwf_ifs",
+        last_run_initialisation_time=datetime(2000, 1, 1, 18, 0, tzinfo=UTC),
+        last_run_availability_time=datetime(2000, 1, 2, 0, 17, tzinfo=UTC),
+    )
+    import hashlib
+
+    legacy = f"v4:{update.last_run_initialisation_time.isoformat()}:" + hashlib.sha256(
+        b"Paris"
+    ).hexdigest()
+    assert probe._cursor_for_updates((update,), old={}, market_db=None) == {
+        "ecmwf_ifs": legacy
+    }

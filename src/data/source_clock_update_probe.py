@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import tempfile
 import time
 from contextlib import contextmanager
@@ -37,6 +38,7 @@ from src.strategy.live_inference.source_clock_vnext import source_publicly_usabl
 
 DEFAULT_MODEL_UPDATES_JSONL = STATE_DIR / "source_updates" / "open_meteo_model_updates.jsonl"
 DEFAULT_CURSOR_JSON = STATE_DIR / "source_updates" / "open_meteo_model_updates_cursor.json"
+DEFAULT_MARKET_DB = STATE_DIR / "zeus-forecasts.db"
 _CURSOR_V3_RE = re.compile(
     r"^v3:"
     r"(?P<initialisation>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})):"
@@ -289,20 +291,80 @@ def _cursor_transition_is_regression(proposed: str, current: str | None) -> bool
     return proposed_init < current_init
 
 
-def _source_route_identity(model: str) -> str:
-    cities = affected_cities_for_source_updates((model,))
-    payload = "\0".join(cities).encode("utf-8")
+ListingFrontier = Mapping[tuple[str, str], str]
+
+
+def _listing_frontier(market_db: Path | None, cities: set[str]) -> ListingFrontier | None:
+    """Newest listed target_date per (city, metric); ``None`` when unreadable.
+
+    A source run serves every target its horizon covers, but it is captured only
+    for the targets listed when it arrived. A listing is therefore an acquisition
+    event: the route identity carries this frontier, so a new listing changes the
+    cursor of every source serving that city and the same-run route-change path
+    captures the new families from the already-resolved current run.
+    """
+    if market_db is None or not market_db.exists():
+        return {}
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+
+    try:
+        conn = _connect_read_only(market_db)
+        try:
+            return {
+                (city, metric): str(row[0])
+                for city in sorted(cities)
+                for metric in ("high", "low")
+                if (row := conn.execute(
+                    "SELECT MAX(target_date) FROM market_events"
+                    " WHERE city = ? AND temperature_metric = ?",
+                    (city, metric),
+                ).fetchone()) is not None and row[0] is not None
+            }
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
+def _source_route_identity(cities: tuple[str, ...], frontier: ListingFrontier) -> str:
+    # A city with no listing hashes as before, so an unlisted route keeps its cursor.
+    payload = "\0".join(
+        city
+        if (listed := (frontier.get((city, "high")), frontier.get((city, "low")))) == (None, None)
+        else f"{city}\x1f{listed[0] or ''}\x1f{listed[1] or ''}"
+        for city in cities
+    ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
-def _cursor_for_updates(updates: tuple[OpenMeteoModelUpdate, ...]) -> dict[str, str]:
-    return {
-        update.model: (
-            f"v4:{update.last_run_initialisation_time.isoformat()}:"
-            f"{_source_route_identity(update.model)}"
-        )
+def _cursor_for_updates(
+    updates: tuple[OpenMeteoModelUpdate, ...],
+    *,
+    old: Mapping[str, str],
+    market_db: Path | None,
+) -> dict[str, str]:
+    cities_by_model = {
+        update.model: affected_cities_for_source_updates((update.model,))
         for update in updates
     }
+    frontier = _listing_frontier(
+        market_db, {city for cities in cities_by_model.values() for city in cities}
+    )
+    cursor: dict[str, str] = {}
+    for update in updates:
+        run = update.last_run_initialisation_time.isoformat()
+        previous = old.get(update.model)
+        if (
+            frontier is None
+            and previous is not None
+            and _cursor_initialisation_time(previous) == update.last_run_initialisation_time
+        ):
+            # An unreadable frontier is no listing evidence: the same run keeps its route.
+            cursor[update.model] = previous
+            continue
+        route = _source_route_identity(cities_by_model[update.model], frontier or {})
+        cursor[update.model] = f"v4:{run}:{route}"
+    return cursor
 
 
 def probe_openmeteo_source_clock_updates(
@@ -315,6 +377,7 @@ def probe_openmeteo_source_clock_updates(
     event_writer: EventWriter | None = None,
     decision_time: datetime | None = None,
     now_monotonic: float | None = None,
+    market_db: str | Path | None = DEFAULT_MARKET_DB,
 ) -> SourceClockUpdateProbeReport:
     models = tuple(all_configured_source_ids())
     updates_path = Path(model_updates_path)
@@ -378,7 +441,9 @@ def probe_openmeteo_source_clock_updates(
             )
         updates = cached
     old = _read_cursor(cursor)
-    new = _cursor_for_updates(updates)
+    new = _cursor_for_updates(
+        updates, old=old, market_db=None if market_db is None else Path(market_db)
+    )
     # QUOTA (round 3): a differing cursor string is only a genuine run change if the
     # new value's run_initialisation_time is strictly newer than the persisted one (or
     # there was no persisted cursor for this model yet). A stale meta.json replica
