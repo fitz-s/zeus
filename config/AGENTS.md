@@ -38,6 +38,9 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | `noaa_homr_zgsz_station.json` | Original official NOAA HOMR ZGSZ station-reference GROUND entity; explicit ICAO/NCDC/content binding, not temperature DCP, sensor AGL, forecast-query or historical possession |
 | `noaa_homr_nzwn_station.json` | Original official NOAA HOMR NZWN station-reference GROUND entity; explicit ICAO/NCDC/content binding, not temperature DCP, sensor AGL, forecast-query or historical possession |
 | `noaa_homr_zhcc_station.json` | Original official NOAA HOMR ZHCC station-reference GROUND entity; explicit ICAO/NCDC/content binding, not temperature DCP, sensor AGL, forecast-query or historical possession |
+| `synoptic_wrh_{llbg,zbaa,zhhh,rcss,uuww,kbkf}_station.json` | Original Synoptic station-metadata bodies behind the weather.gov/wrh settlement page; ground only with an agreeing NOAA bridge, whole-ft elevation, settlement-page station reference, not sensor AGL |
+| `ncei_isd_{llbg,zbaa,zhhh,rcss,uuww}_station.csv` | Original NCEI ISD global-hourly rows (final ISD window 2025-08-24) naming the same site; independent cross-check bridge only, never ground on its own |
+| `nws_api_kbkf_station.json` | Original api.weather.gov KBKF station feature; independent cross-check bridge for Denver's Synoptic record only |
 | `awc_stationinfo_53_station.json` | Original official AWC current station-list entity shared by WMD proofs; exact ICAO/WMO/METAR identity bridge only, never ground authority from its generic elevation |
 | `wmo_wmd_eham_station.xml` | Original official WMDR EHAM fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |
 | `wmo_wmd_cyyz_station.xml` | Original official WMDR CYYZ fixed-land facility-ground entity; exact AWC/WMO binding and version intervals, not sensor-position/AGL authority |

@@ -9,7 +9,9 @@ Missing keys raise KeyError immediately at startup, not at trade time.
 # Authority basis: Phase 10 DT-close B001 — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B001_config_contract.md
 
 import copy
+import csv
 import functools
+import io
 import json
 import hashlib
 import logging
@@ -542,11 +544,33 @@ HOMR_INTERNATIONAL_GROUND_SOURCE_KIND = "noaa_homr_international_station_ground_
 OSCAR_WMD_SOURCE_KIND = "wmo_wmd_awc_station_snapshot_v1"
 OSCAR_WMD_SOURCE_URL = "https://oscar.wmo.int/surface/rest/api/wmd/download/"
 AWC_STATION_IDENTITY_SOURCE_URL = "https://aviationweather.gov/api/data/stationinfo"
+SYNOPTIC_WRH_SOURCE_KIND = "synoptic_wrh_station_metadata_v1"
+SYNOPTIC_WRH_METADATA_URL = "https://api.synopticdata.com/v2/stations/metadata"
+NCEI_ISD_BRIDGE_KIND = "ncei_isd_global_hourly_station_v1"
+NCEI_ISD_ACCESS_URL = "https://www.ncei.noaa.gov/access/services/data/v1"
+NWS_STATION_BRIDGE_KIND = "nws_api_observation_station_v1"
+NWS_STATION_API_URL = "https://api.weather.gov/stations/"
+# The settlement page's own station record (weather.gov/wrh -> Synoptic) is
+# ground only when an independent NOAA record of the same site agrees within
+# both displays' rounding: the final NCEI ISD global-hourly rows (ISD froze on
+# 2025-08-24) for international sites, the NWS station API for KBKF.
+_SYNOPTIC_WRH_BRIDGES = {
+    "LLBG": (NCEI_ISD_BRIDGE_KIND, "40180099999"), "ZBAA": (NCEI_ISD_BRIDGE_KIND, "54511099999"),
+    "ZHHH": (NCEI_ISD_BRIDGE_KIND, "57494099999"), "RCSS": (NCEI_ISD_BRIDGE_KIND, "46696099999"),
+    "UUWW": (NCEI_ISD_BRIDGE_KIND, "27518599999"), "KBKF": (NWS_STATION_BRIDGE_KIND, "KBKF"),
+}
+_SYNOPTIC_WRH_STATIONS = frozenset(_SYNOPTIC_WRH_BRIDGES)
+_ISD_BRIDGE_WINDOW = ("2025-08-24T00:00:00", "2025-08-24T00:59:59")
+_ISD_BRIDGE_HEADER = ["STATION", "NAME", "LATITUDE", "LONGITUDE", "ELEVATION", "DATE",
+    "SOURCE", "REPORT_TYPE", "CALL_SIGN", "QUALITY_CONTROL", "TMP"]
 STATION_GROUND_SOURCE_ARTIFACTS = {
     "hko_station_table_v1": "config/hko_station_metadata.html",
     "noaa_homr_primary_dcp_snapshot_v1": "config/noaa_homr_kord_station.json",
 }
-_STATION_GROUND_SOURCE_KINDS = frozenset({*STATION_GROUND_SOURCE_ARTIFACTS, OSCAR_WMD_SOURCE_KIND, HOMR_INTERNATIONAL_GROUND_SOURCE_KIND})
+_STATION_GROUND_SOURCE_KINDS = frozenset({*STATION_GROUND_SOURCE_ARTIFACTS, OSCAR_WMD_SOURCE_KIND,
+    HOMR_INTERNATIONAL_GROUND_SOURCE_KIND, SYNOPTIC_WRH_SOURCE_KIND})
+# Kinds whose ground fact exists only as the agreement of two whole entities.
+DUAL_BODY_GROUND_SOURCE_KINDS = frozenset({OSCAR_WMD_SOURCE_KIND, SYNOPTIC_WRH_SOURCE_KIND})
 _HOMR_INTERNATIONAL_GROUND_NCDC = {
     "ZSPD": "30137822", "EGLC": "30146303",
     "NZAA": "30151541", "RKPK": "20029737", "ZUUU": "30137836",
@@ -576,13 +600,34 @@ def station_ground_source_artifact_ref(*, source_kind: str, station_id: str) -> 
         return f"config/noaa_homr_{station_id.lower()}_station.json"
     if source_kind == OSCAR_WMD_SOURCE_KIND and station_id in _OSCAR_WMD_STATIONS:
         return f"config/wmo_wmd_{station_id.lower()}_station.xml"
+    if source_kind == SYNOPTIC_WRH_SOURCE_KIND and station_id in _SYNOPTIC_WRH_STATIONS:
+        return f"config/synoptic_wrh_{station_id.lower()}_station.json"
+    return None
+
+
+def synoptic_wrh_source_url(station_id: str) -> str:
+    """Recorded request identity; the page's rotating token is never recorded."""
+    return f"{SYNOPTIC_WRH_METADATA_URL}?STID={station_id}&complete=1"
+
+
+def station_ground_identity_bridge(*, source_kind: str, station_id: str) -> tuple[str, str, str] | None:
+    """The approved independent entity: (bridge kind, config artifact, source URL)."""
+    if source_kind == OSCAR_WMD_SOURCE_KIND and station_id in _OSCAR_WMD_STATIONS:
+        return "awc_stationinfo_v1", "config/awc_stationinfo_53_station.json", AWC_STATION_IDENTITY_SOURCE_URL
+    if source_kind == SYNOPTIC_WRH_SOURCE_KIND and station_id in _SYNOPTIC_WRH_STATIONS:
+        kind, ident = _SYNOPTIC_WRH_BRIDGES[station_id]
+        if kind == NCEI_ISD_BRIDGE_KIND:
+            start, end = _ISD_BRIDGE_WINDOW
+            return kind, f"config/ncei_isd_{station_id.lower()}_station.csv", (
+                f"{NCEI_ISD_ACCESS_URL}?dataset=global-hourly&stations={ident}&startDate={start}"
+                f"&endDate={end}&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1")
+        return kind, f"config/nws_api_{station_id.lower()}_station.json", NWS_STATION_API_URL + ident
     return None
 
 
 def station_ground_identity_bridge_artifact_ref(*, source_kind: str, station_id: str) -> str | None:
-    if source_kind == OSCAR_WMD_SOURCE_KIND and station_id in _OSCAR_WMD_STATIONS:
-        return "config/awc_stationinfo_53_station.json"
-    return None
+    bridge = station_ground_identity_bridge(source_kind=source_kind, station_id=station_id)
+    return None if bridge is None else bridge[1]
 
 
 class _HkoStationTable(HTMLParser):
@@ -1021,6 +1066,107 @@ def _oscar_wmd_ground_facts(
     }
 
 
+def _displayed_interval(text: object, scale: Decimal = Decimal(1)) -> tuple[Decimal, Decimal]:
+    """The set a published decimal can stand for, scaled into the caller's unit.
+
+    Trailing zeros are display padding (Synoptic prints 32.0114 as "32.01140"),
+    so the last significant digit sets the half-unit. Booleans are not numbers.
+    """
+    if isinstance(text, bool):
+        raise ValueError("boolean is not a physical measurement")
+    value = Decimal(str(text))
+    if not value.is_finite():
+        raise ValueError("non-finite physical measurement")
+    half = Decimal("0.5").scaleb(min(value.normalize().as_tuple().exponent, 0))
+    return (value - half) * scale, (value + half) * scale
+
+
+def _intervals_meet(a: tuple[Decimal, Decimal], b: tuple[Decimal, Decimal]) -> bool:
+    return max(a[0], b[0]) <= min(a[1], b[1])
+
+
+def _isd_bridge_site(raw: bytes, ident: str) -> tuple[str, str, str]:
+    """One NCEI ISD global-hourly station location across every row of the window."""
+    rows = list(csv.reader(io.StringIO(raw.decode("utf-8"), newline="")))
+    if not rows or rows[0] != _ISD_BRIDGE_HEADER or len(rows) < 2:
+        raise ValueError("ISD bridge is not the requested station-location product")
+    start, end = (datetime.fromisoformat(value) for value in _ISD_BRIDGE_WINDOW)
+    sites = set()
+    for row in rows[1:]:
+        if len(row) != len(_ISD_BRIDGE_HEADER) or row[0] != ident:
+            raise ValueError("ISD bridge row belongs to another station")
+        if not start <= datetime.fromisoformat(row[5]) <= end:
+            raise ValueError("ISD bridge row is outside the requested window")
+        sites.add((row[2], row[3], row[4]))
+    if len(sites) != 1:
+        raise ValueError("ISD bridge station location ambiguous")
+    return sites.pop()
+
+
+def _nws_bridge_site(raw: bytes, station_id: str) -> tuple[Decimal, Decimal, Decimal]:
+    feature = json.loads(raw, parse_float=Decimal)
+    properties, geometry = feature["properties"], feature["geometry"]
+    if (feature.get("type") != "Feature" or properties.get("stationIdentifier") != station_id
+            or feature.get("id") != NWS_STATION_API_URL + station_id
+            or geometry.get("type") != "Point" or len(geometry["coordinates"]) != 2
+            or properties["elevation"].get("unitCode") != "wmoUnit:m"):
+        raise ValueError("NWS bridge is not this station's site")
+    lon, lat = geometry["coordinates"]
+    return lat, lon, properties["elevation"]["value"]
+
+
+def _synoptic_wrh_ground_facts(raw: bytes, station_id: str, bridge_raw: bytes) -> dict[str, object]:
+    """Settlement page's own station record, admitted only with an independent NOAA site.
+
+    SCOPE: this ICAO's OM9 precision ground. DRAIN: a fresh capture of both
+    bodies. RESET: both bodies name one station whose coordinates and height
+    meet within their displayed rounding; any disagreement leaves UNPROVEN.
+    """
+    if station_id not in _SYNOPTIC_WRH_STATIONS:
+        raise ValueError("unsupported Synoptic settlement station")
+    payload = json.loads(raw)
+    summary, stations = payload["SUMMARY"], payload["STATION"]
+    if summary.get("RESPONSE_CODE") != 1 or not isinstance(stations, list) or len(stations) != 1:
+        raise ValueError("Synoptic response is not one station")
+    station = stations[0]
+    if station.get("STID") != station_id:
+        raise ValueError("Synoptic station differs from settlement station")
+    if station.get("STATUS") != "ACTIVE":
+        raise ValueError("Synoptic station is not active")
+    if station.get("UNITS", {}).get("elevation") != "ft":
+        raise ValueError("Synoptic elevation unit is not feet")
+    feet = Decimal(str(station["ELEVATION"]))
+    if not feet.is_finite() or feet != feet.to_integral_value():
+        raise ValueError("Synoptic elevation is not whole feet")
+    texts = {"lat": station["LATITUDE"], "lon": station["LONGITUDE"]}
+    if not all(isinstance(value, str) for value in texts.values()):
+        raise ValueError("Synoptic coordinates are not published decimals")
+    lat, lon = float(texts["lat"]), float(texts["lon"])
+    if not (math.isfinite(lat) and math.isfinite(lon) and abs(lat) <= 90 and abs(lon) <= 180):
+        raise ValueError("Synoptic coordinate invalid")
+    height = _displayed_interval(feet, Decimal("0.3048"))
+    kind, ident = _SYNOPTIC_WRH_BRIDGES[station_id]
+    if kind == NCEI_ISD_BRIDGE_KIND:
+        other = _isd_bridge_site(bridge_raw, ident)
+    else:
+        other = _nws_bridge_site(bridge_raw, station_id)
+    if not (_intervals_meet(_displayed_interval(texts["lat"]), _displayed_interval(other[0]))
+            and _intervals_meet(_displayed_interval(texts["lon"]), _displayed_interval(other[1]))
+            and _intervals_meet(height, _displayed_interval(other[2]))):
+        raise ValueError("independent NOAA site disagrees with the settlement station record")
+    bridge_url = station_ground_identity_bridge(source_kind=SYNOPTIC_WRH_SOURCE_KIND, station_id=station_id)[2]
+    return {
+        "revision": STATION_GROUND_PROOF_REVISION, "source_kind": SYNOPTIC_WRH_SOURCE_KIND,
+        "station_id": station_id, "source_station_id": str(station["ID"]),
+        "height_role": "ground_msl", "quantity": "STATION.ELEVATION.whole_ft",
+        "elevation_m": float(feet * Decimal("0.3048")), "site_lat": lat, "site_lon": lon,
+        "location_role": "settlement_page_station_reference",
+        "source_url": synoptic_wrh_source_url(station_id),
+        "identity_bridge_kind": kind, "identity_bridge_station_id": ident,
+        "identity_bridge_source_url": bridge_url,
+    }
+
+
 def station_ground_facts_from_bytes(
     *, source_kind: str, station_id: str, raw_body: bytes,
     identity_bridge_bytes: bytes | None = None, effective_at: datetime | None = None,
@@ -1045,8 +1191,13 @@ def station_ground_facts_from_bytes(
                     or not isinstance(effective_at, datetime)):
                 return None
             return _oscar_wmd_ground_facts(raw_body, station_id, identity_bridge_bytes, effective_at)
+        if source_kind == SYNOPTIC_WRH_SOURCE_KIND:
+            if not isinstance(identity_bridge_bytes, bytes) or len(identity_bridge_bytes) > 256 * 1024:
+                return None
+            return _synoptic_wrh_ground_facts(raw_body, station_id, identity_bridge_bytes)
         return _homr_ground_facts(raw_body, station_id)
-    except (ValueError, TypeError, KeyError, IndexError, AttributeError, UnicodeError, ArithmeticError, ET.ParseError):
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError, UnicodeError, ArithmeticError,
+            ET.ParseError, csv.Error):
         return None
 
 
@@ -1099,15 +1250,13 @@ def _station_ground_for_entry(
             raise ValueError("ground source body identity mismatch")
         bridge_raw = None
         bridge_audit = None
-        if kind == OSCAR_WMD_SOURCE_KIND:
+        if kind in DUAL_BODY_GROUND_SOURCE_KINDS:
             bridge = claim.get("bridge")
-            bridge_ref = station_ground_identity_bridge_artifact_ref(source_kind=kind, station_id=station_id)
-            if (not isinstance(bridge, dict) or bridge_ref is None
-                    or bridge.get("source_kind") != "awc_stationinfo_v1"
-                    or bridge.get("source_url") != AWC_STATION_IDENTITY_SOURCE_URL
-                    or bridge.get("artifact_ref") != bridge_ref):
+            approved = station_ground_identity_bridge(source_kind=kind, station_id=station_id)
+            if (not isinstance(bridge, dict) or approved is None
+                    or (bridge.get("source_kind"), bridge.get("artifact_ref"), bridge.get("source_url")) != approved):
                 raise ValueError("station ground lacks its approved identity bridge")
-            bridge_asset = CONFIG_DIR / Path(bridge_ref).name
+            bridge_asset = CONFIG_DIR / Path(approved[1]).name
             if (bridge_asset.is_symlink() or not bridge_asset.is_file()
                     or bridge_asset.stat().st_size > 256 * 1024):
                 raise ValueError("identity bridge must be the bounded regular config entity")
@@ -1127,7 +1276,7 @@ def _station_ground_for_entry(
         if facts is None:
             raise ValueError("official ground source facts unavailable")
         audit_keys = ["artifact_ref", "body_sha256", "checked_at"]
-        if kind == OSCAR_WMD_SOURCE_KIND:
+        if kind in DUAL_BODY_GROUND_SOURCE_KINDS:
             audit_keys.append("source_checked_at")
         if kind in {"noaa_homr_primary_dcp_snapshot_v1", HOMR_INTERNATIONAL_GROUND_SOURCE_KIND}:
             query_date = date.fromisoformat(claim["query_date"])

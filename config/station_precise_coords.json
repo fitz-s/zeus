@@ -159,7 +159,34 @@
   "lat": "40.077349",
   "lon": "116.596702",
   "source": "OurAirports",
-  "station": "ZBAA"
+  "station": "ZBAA",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "synoptic_wrh_station_metadata_v1",
+   "station_id": "ZBAA",
+   "source_station_id": "75069",
+   "height_role": "ground_msl",
+   "quantity": "STATION.ELEVATION.whole_ft",
+   "elevation_m": 35.3568,
+   "site_lat": 40.0801,
+   "site_lon": 116.585,
+   "location_role": "settlement_page_station_reference",
+   "source_url": "https://api.synopticdata.com/v2/stations/metadata?STID=ZBAA&complete=1",
+   "identity_bridge_kind": "ncei_isd_global_hourly_station_v1",
+   "identity_bridge_station_id": "54511099999",
+   "identity_bridge_source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=54511099999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1",
+   "artifact_ref": "config/synoptic_wrh_zbaa_station.json",
+   "body_sha256": "93491a5b6db3e283adbc93d2dbfe8eaebb9946aa4263c4b522e04ad272408470",
+   "source_checked_at": "2026-10-01T23:58:37.939839+00:00",
+   "checked_at": "2026-10-01T23:58:37.939839+00:00",
+   "bridge": {
+    "source_kind": "ncei_isd_global_hourly_station_v1",
+    "artifact_ref": "config/ncei_isd_zbaa_station.csv",
+    "body_sha256": "a17ae1eb954cb9dd87288b81603848364cedfcb07346c8c5479143a71df9319f",
+    "checked_at": "2026-10-01T23:58:34.472915+00:00",
+    "source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=54511099999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1"
+   }
+  }
  },
  "Buenos Aires": {
   "distance_from_citiesjson_m": 29,
@@ -373,7 +400,34 @@
   "lat": "39.701698",
   "lon": "-104.751999",
   "source": "OurAirports",
-  "station": "KBKF"
+  "station": "KBKF",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "synoptic_wrh_station_metadata_v1",
+   "station_id": "KBKF",
+   "source_station_id": "109",
+   "height_role": "ground_msl",
+   "quantity": "STATION.ELEVATION.whole_ft",
+   "elevation_m": 1699.8696,
+   "site_lat": 39.71331,
+   "site_lon": -104.75806,
+   "location_role": "settlement_page_station_reference",
+   "source_url": "https://api.synopticdata.com/v2/stations/metadata?STID=KBKF&complete=1",
+   "identity_bridge_kind": "nws_api_observation_station_v1",
+   "identity_bridge_station_id": "KBKF",
+   "identity_bridge_source_url": "https://api.weather.gov/stations/KBKF",
+   "artifact_ref": "config/synoptic_wrh_kbkf_station.json",
+   "body_sha256": "c8640f2c3b39ba320b4ce4953f2376f8f0054cc11d9936965ae46e378ea9d6ac",
+   "source_checked_at": "2026-10-01T23:58:21.681867+00:00",
+   "checked_at": "2026-10-01T23:58:21.681867+00:00",
+   "bridge": {
+    "source_kind": "nws_api_observation_station_v1",
+    "artifact_ref": "config/nws_api_kbkf_station.json",
+    "body_sha256": "eee88561dfa14380fb394f24fcab58e4b4b3a954b216f4cfd965026e4a376552",
+    "checked_at": "2026-10-01T23:58:18.150725+00:00",
+    "source_url": "https://api.weather.gov/stations/KBKF"
+   }
+  }
  },
  "Guangzhou": {
   "distance_from_citiesjson_m": 817,
@@ -949,7 +1003,34 @@
   "lat": "55.591499",
   "lon": "37.261501",
   "source": "OurAirports",
-  "station": "UUWW"
+  "station": "UUWW",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "synoptic_wrh_station_metadata_v1",
+   "station_id": "UUWW",
+   "source_station_id": "74770",
+   "height_role": "ground_msl",
+   "quantity": "STATION.ELEVATION.whole_ft",
+   "elevation_m": 208.788,
+   "site_lat": 55.5915,
+   "site_lon": 37.2615,
+   "location_role": "settlement_page_station_reference",
+   "source_url": "https://api.synopticdata.com/v2/stations/metadata?STID=UUWW&complete=1",
+   "identity_bridge_kind": "ncei_isd_global_hourly_station_v1",
+   "identity_bridge_station_id": "27518599999",
+   "identity_bridge_source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=27518599999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1",
+   "artifact_ref": "config/synoptic_wrh_uuww_station.json",
+   "body_sha256": "efca61ff98cd9a11a7183a109615804596ffb53d6a0393d687c137b082871263",
+   "source_checked_at": "2026-10-01T23:58:34.265116+00:00",
+   "checked_at": "2026-10-01T23:58:34.265116+00:00",
+   "bridge": {
+    "source_kind": "ncei_isd_global_hourly_station_v1",
+    "artifact_ref": "config/ncei_isd_uuww_station.csv",
+    "body_sha256": "2e8b10b57ce1a7bb94b38b89808b2ae6d7079e2fcc09dc6ca8816b9474b9e6a4",
+    "checked_at": "2026-10-01T23:58:30.811855+00:00",
+    "source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=27518599999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1"
+   }
+  }
  },
  "Munich": {
   "distance_from_citiesjson_m": 2090,
@@ -1261,7 +1342,34 @@
   "lat": "25.067244",
   "lon": "121.552822",
   "source": "OurAirports",
-  "station": "RCSS"
+  "station": "RCSS",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "synoptic_wrh_station_metadata_v1",
+   "station_id": "RCSS",
+   "source_station_id": "74217",
+   "height_role": "ground_msl",
+   "quantity": "STATION.ELEVATION.whole_ft",
+   "elevation_m": 5.4864,
+   "site_lat": 25.0694,
+   "site_lon": 121.552,
+   "location_role": "settlement_page_station_reference",
+   "source_url": "https://api.synopticdata.com/v2/stations/metadata?STID=RCSS&complete=1",
+   "identity_bridge_kind": "ncei_isd_global_hourly_station_v1",
+   "identity_bridge_station_id": "46696099999",
+   "identity_bridge_source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=46696099999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1",
+   "artifact_ref": "config/synoptic_wrh_rcss_station.json",
+   "body_sha256": "f371a7a9d5b9ccd165ce76e6263bf5f6a020f0af85626a35861c5bd788e92a5d",
+   "source_checked_at": "2026-10-01T23:58:30.396497+00:00",
+   "checked_at": "2026-10-01T23:58:30.396497+00:00",
+   "bridge": {
+    "source_kind": "ncei_isd_global_hourly_station_v1",
+    "artifact_ref": "config/ncei_isd_rcss_station.csv",
+    "body_sha256": "83dbd09e7d70d8b3bdbb8d4ba565fd3add10974e86a82edb347306e758d2a655",
+    "checked_at": "2026-10-01T23:58:26.595985+00:00",
+    "source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=46696099999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1"
+   }
+  }
  },
  "Tel Aviv": {
   "distance_from_citiesjson_m": 53,
@@ -1269,7 +1377,34 @@
   "lat": "32.011398",
   "lon": "34.8867",
   "source": "OurAirports",
-  "station": "LLBG"
+  "station": "LLBG",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "synoptic_wrh_station_metadata_v1",
+   "station_id": "LLBG",
+   "source_station_id": "73881",
+   "height_role": "ground_msl",
+   "quantity": "STATION.ELEVATION.whole_ft",
+   "elevation_m": 41.148,
+   "site_lat": 32.0114,
+   "site_lon": 34.8867,
+   "location_role": "settlement_page_station_reference",
+   "source_url": "https://api.synopticdata.com/v2/stations/metadata?STID=LLBG&complete=1",
+   "identity_bridge_kind": "ncei_isd_global_hourly_station_v1",
+   "identity_bridge_station_id": "40180099999",
+   "identity_bridge_source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=40180099999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1",
+   "artifact_ref": "config/synoptic_wrh_llbg_station.json",
+   "body_sha256": "0a05435d2d82e0fd84adda449b72864e75d629f9366e3dbdd999ad9117df1942",
+   "source_checked_at": "2026-10-01T23:58:26.345040+00:00",
+   "checked_at": "2026-10-01T23:58:26.345040+00:00",
+   "bridge": {
+    "source_kind": "ncei_isd_global_hourly_station_v1",
+    "artifact_ref": "config/ncei_isd_llbg_station.csv",
+    "body_sha256": "9e4099c854dfb580cab968e626624e97f830df04ef93f6f165ab4afda361c1c4",
+    "checked_at": "2026-10-01T23:58:22.004665+00:00",
+    "source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=40180099999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1"
+   }
+  }
  },
  "Tokyo": {
   "distance_from_citiesjson_m": 653,
@@ -1405,7 +1540,34 @@
   "lat": "30.774798",
   "lon": "114.213723",
   "source": "OurAirports",
-  "station": "ZHHH"
+  "station": "ZHHH",
+  "station_ground_proof": {
+   "revision": "station_ground_roles_v1",
+   "source_kind": "synoptic_wrh_station_metadata_v1",
+   "station_id": "ZHHH",
+   "source_station_id": "75080",
+   "height_role": "ground_msl",
+   "quantity": "STATION.ELEVATION.whole_ft",
+   "elevation_m": 34.4424,
+   "site_lat": 30.7838,
+   "site_lon": 114.208,
+   "location_role": "settlement_page_station_reference",
+   "source_url": "https://api.synopticdata.com/v2/stations/metadata?STID=ZHHH&complete=1",
+   "identity_bridge_kind": "ncei_isd_global_hourly_station_v1",
+   "identity_bridge_station_id": "57494099999",
+   "identity_bridge_source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=57494099999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1",
+   "artifact_ref": "config/synoptic_wrh_zhhh_station.json",
+   "body_sha256": "451efdb42f3ec9815e6ed6d2e0805ead31d0c76a7e5fe6d6d8b93efd815ae7be",
+   "source_checked_at": "2026-10-01T23:58:43.372656+00:00",
+   "checked_at": "2026-10-01T23:58:43.372656+00:00",
+   "bridge": {
+    "source_kind": "ncei_isd_global_hourly_station_v1",
+    "artifact_ref": "config/ncei_isd_zhhh_station.csv",
+    "body_sha256": "9aed92b7a1963f36e57b4c87be4d6d05f881df11424781a4ef6527b84fb3fcde",
+    "checked_at": "2026-10-01T23:58:39.828890+00:00",
+    "source_url": "https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations=57494099999&startDate=2025-08-24T00:00:00&endDate=2025-08-24T00:59:59&format=csv&dataTypes=TMP&includeStationName=true&includeStationLocation=1"
+   }
+  }
  },
  "Zhengzhou": {
   "distance_from_citiesjson_m": 1076,

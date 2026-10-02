@@ -302,14 +302,16 @@ def _archive_entity(conn, prepared, forecast_db, deadline):
 
 def _prepare_wmd(name, facts, audit, decision):
     """Snapshot both approved config bodies; neither is the other's metadata."""
-    from src.config import CONFIG_DIR, station_ground_source_artifact_ref, station_ground_identity_bridge_artifact_ref, station_ground_facts_from_bytes
+    from src.config import CONFIG_DIR, station_ground_source_artifact_ref, station_ground_identity_bridge, station_ground_facts_from_bytes
     station, kind = str(facts["station_id"]), str(facts["source_kind"])
+    bridge_kind, bridge_ref, bridge_url = station_ground_identity_bridge(source_kind=kind, station_id=station)
+    if facts["identity_bridge_source_url"] != bridge_url:
+        raise ValueError("WMD bridge URL is not the approved entity")
     inputs = {}
     for role, ref, receipt, url, source_kind, capture in (
         ("ground", station_ground_source_artifact_ref(source_kind=kind, station_id=station),
          audit, facts["source_url"], kind, audit["source_checked_at"]),
-        ("identity_bridge", station_ground_identity_bridge_artifact_ref(source_kind=kind, station_id=station),
-         audit["bridge"], facts["identity_bridge_source_url"], "awc_stationinfo_v1", audit["bridge"]["checked_at"]),
+        ("identity_bridge", bridge_ref, audit["bridge"], bridge_url, bridge_kind, audit["bridge"]["checked_at"]),
     ):
         if ref is None or receipt["artifact_ref"] != ref:
             raise ValueError("WMD input is not the approved station entity")
@@ -473,8 +475,8 @@ def archive_station_ground_evidence(
         if station.get("ground_status") != "VERIFIED" or not isinstance(facts, Mapping) or not isinstance(audit, Mapping):
             continue
         source_kind, station_id = str(facts["source_kind"]), str(facts["station_id"])
-        from src.config import OSCAR_WMD_SOURCE_KIND
-        if source_kind == OSCAR_WMD_SOURCE_KIND:
+        from src.config import DUAL_BODY_GROUND_SOURCE_KINDS
+        if source_kind in DUAL_BODY_GROUND_SOURCE_KINDS:
             try:
                 prepared.append(_prepare_wmd(name, facts, audit, decision))
             except (KeyError, TypeError, ValueError, OSError) as exc:
@@ -592,17 +594,19 @@ def read_frozen_station_ground_evidence(evidence: object, *, decision_at: object
 
 
 def _read_wmd_facts(evidence, *, conn, decision, effective_at):
-    from src.config import OSCAR_WMD_SOURCE_KIND, AWC_STATION_IDENTITY_SOURCE_URL, station_ground_identity_bridge_artifact_ref, station_ground_facts_from_bytes
+    from src.config import DUAL_BODY_GROUND_SOURCE_KINDS, station_ground_identity_bridge, station_ground_facts_from_bytes
     bodies = evidence["input_bodies"]
     if set(bodies) != {"ground", "identity_bridge"}:
         raise ValueError("WMD manifest must bind exactly two source entities")
-    station, audit = evidence["station_id"], evidence["source_audit"]
+    station, audit, primary_kind = evidence["station_id"], evidence["source_audit"], evidence["source_kind"]
+    if primary_kind not in DUAL_BODY_GROUND_SOURCE_KINDS:
+        raise ValueError("WMD manifest kind is not a dual-entity ground kind")
+    bridge_kind, bridge_ref, bridge_url = station_ground_identity_bridge(source_kind=primary_kind, station_id=station)
     capture_clocks = {}
     raw = {}
     for role, kind, ref, url, receipt, capture_key in (
-        ("ground", OSCAR_WMD_SOURCE_KIND, evidence["approved_artifact_ref"], evidence["source_url"], audit, "source_checked_at"),
-        ("identity_bridge", "awc_stationinfo_v1", station_ground_identity_bridge_artifact_ref(source_kind=OSCAR_WMD_SOURCE_KIND, station_id=station),
-         AWC_STATION_IDENTITY_SOURCE_URL, audit["bridge"], "checked_at"),
+        ("ground", primary_kind, evidence["approved_artifact_ref"], evidence["source_url"], audit, "source_checked_at"),
+        ("identity_bridge", bridge_kind, bridge_ref, bridge_url, audit["bridge"], "checked_at"),
     ):
         dependency = bodies[role]
         source, product = _wmd_input_identity(station, role, kind)
@@ -635,13 +639,13 @@ def _read_wmd_facts(evidence, *, conn, decision, effective_at):
         or bodies["ground"]["byte_size"] != evidence["byte_size"]
         or bodies["ground"]["artifact_path"] != evidence["body_path"]):
         raise ValueError("WMD combined possession differs from its input entities")
-    facts = station_ground_facts_from_bytes(source_kind=OSCAR_WMD_SOURCE_KIND,
+    facts = station_ground_facts_from_bytes(source_kind=primary_kind,
         station_id=station, raw_body=raw["ground"], identity_bridge_bytes=raw["identity_bridge"], effective_at=effective_at)
     # A mutually consistent manifest/DB URL is still only a claim. Bind the
     # primary product to the official identity independently derived from both
     # whole source bodies by the owning parser, as for the single-body reader.
     if facts is not None and (
-        facts["source_kind"] != OSCAR_WMD_SOURCE_KIND
+        facts["source_kind"] != primary_kind
         or facts["station_id"] != station
         or facts["source_url"] != evidence["source_url"]
         or facts["source_url"] != bodies["ground"]["request_url"]
@@ -701,7 +705,7 @@ def _read_wmd_manifest(evidence, *, conn, decision, deadline):
 
 
 def _read_manifest_evidence(evidence, *, decision_at, deadline_monotonic=None):
-    from src.config import OSCAR_WMD_SOURCE_KIND, station_ground_facts_from_bytes, station_ground_source_artifact_ref
+    from src.config import DUAL_BODY_GROUND_SOURCE_KINDS, station_ground_facts_from_bytes, station_ground_source_artifact_ref
     from src.state.db import _connect_read_only
     deadline = _deadline(deadline_monotonic)
     decision = _stamp(decision_at)
@@ -713,7 +717,7 @@ def _read_manifest_evidence(evidence, *, decision_at, deadline_monotonic=None):
         return None
     payload = json.loads(manifest)
     excluded = {"artifact_id", "manifest_path", "manifest_sha256"}
-    if evidence["source_kind"] == OSCAR_WMD_SOURCE_KIND:
+    if evidence["source_kind"] in DUAL_BODY_GROUND_SOURCE_KINDS:
         excluded.add("recorded_at")  # Own actual INSERT is sealed by its DB tuple.
     if payload != {key:value for key,value in evidence.items() if key not in excluded}:
         return None
@@ -740,8 +744,7 @@ def _read_manifest_evidence(evidence, *, decision_at, deadline_monotonic=None):
             json.dumps({"source_kind": evidence["source_kind"], "station_id": evidence["station_id"]}, sort_keys=True), 0)
         if row is None or tuple(row)[:-1] != expected or json.loads(str(row[-1])) != {"station_ground_evidence": dict(evidence)}:
             return None
-        from src.config import OSCAR_WMD_SOURCE_KIND
-        if evidence["source_kind"] == OSCAR_WMD_SOURCE_KIND:
+        if evidence["source_kind"] in DUAL_BODY_GROUND_SOURCE_KINDS:
             return _read_wmd_manifest(evidence, conn=conn, decision=decision, deadline=deadline)
         bodies = evidence["input_bodies"]
         if set(bodies) != {"ground"}:
@@ -823,8 +826,8 @@ def read_current_station_ground_evidence(forecast_db: Path, *, city: str, decisi
     frozen = read_frozen_station_ground_evidence(evidence, decision_at=decision_at, deadline_monotonic=deadline)
     if frozen is None:
         return None
-    from src.config import OSCAR_WMD_SOURCE_KIND
-    if frozen["source_kind"] == OSCAR_WMD_SOURCE_KIND:
+    from src.config import DUAL_BODY_GROUND_SOURCE_KINDS
+    if frozen["source_kind"] in DUAL_BODY_GROUND_SOURCE_KINDS:
         # Frozen A replays at its own analysis cut. A fresh decision must not
         # keep A's facts after a known interval ends; normal archive/seed is the
         # writer of the new effective-period manifest, never this pure reader.
