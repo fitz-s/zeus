@@ -2245,7 +2245,7 @@ def _covering_posterior_input_lag_reason(
     readiness_posterior_id: int | None = None,
     readiness_posterior_id_resolved: bool = False,
 ) -> str | None:
-    """Use the live read gate's HWM rule to invalidate stale plan coverage."""
+    """Refresh coverage follows input debt even while a validated posterior serves."""
 
     columns = (
         posterior_columns
@@ -2329,9 +2329,9 @@ def _covering_posterior_input_lag_reason(
             city=city,target_date=target_date,metric=temperature_metric,anchor_id=row["openmeteo_anchor_id"],
             forecast_db=forecast_db_from_connection(conn)):
             return "basis=current_evidence_probability_authority_invalid"
-    from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+    from src.data.replacement_input_hwm import replacement_input_refresh_reason
 
-    raw_lag = replacement_live_input_lag_reason(
+    raw_lag = replacement_input_refresh_reason(
         conn,
         city=city,
         target_date=target_date,

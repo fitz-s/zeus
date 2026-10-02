@@ -1,5 +1,5 @@
 # Created: 2026-09-27
-# Last reused or audited: 2026-09-27
+# Last reused or audited: 2026-10-01
 # Authority basis: official FMI WFS station/metadata response and EFHK Day0 current-state defect.
 """FMI EFHK current-state causality and authority antibodies."""
 
@@ -303,7 +303,7 @@ def test_same_cycle_queue_coverage_waits_for_consumed_current_state(monkeypatch,
                           {"role": "openmeteo_ifs9_anchor", "source_run_id": "anchor"},
                       ]})))
     monkeypatch.setattr(queue, "tradeable_grade_coverage_sql", lambda **_: "AND 1=1")
-    monkeypatch.setattr(queue, "replacement_live_input_lag_reason", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(queue, "replacement_input_refresh_reason", lambda *_args, **_kwargs: None)
     assert queue._seed_already_covered(forecast_db=forecast_db, seed=seed) is False
     assert queue._seed_already_covered(
         forecast_db=forecast_db,

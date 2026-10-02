@@ -584,8 +584,8 @@ def read_current_family_q_versions(
                 posterior_source_cycle_time=row[1],
                 posterior_computed_at=row[2],
             )
-        except Exception:  # noqa: BLE001 — classification must stay conservative
-            lag_reason = None
+        except Exception as exc:  # UNKNOWN consumed authority is protective, not fresh.
+            lag_reason = "basis=replacement_input_hwm_read_unavailable:" + type(exc).__name__
         if lag_reason:
             out[family] = f"{_Q_AUTHORITY_BLOCKED_PREFIX}{q_version}:{lag_reason}"
         else:

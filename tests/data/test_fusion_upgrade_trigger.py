@@ -1788,7 +1788,7 @@ def test_fmi_current_state_revision_publishes_exact_existing_fusion_seed(
         assert "day0_current_temperature_state" in marker
         assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues WHERE city='Helsinki'").fetchone()[0] == 1
     monkeypatch.setattr(queue, "tradeable_grade_coverage_sql", lambda **_: "AND 1=1")
-    monkeypatch.setattr(queue, "replacement_live_input_lag_reason", lambda *_a, **_k: None)
+    monkeypatch.setattr(queue, "replacement_input_refresh_reason", lambda *_a, **_k: None)
     assert queue._seed_already_covered(forecast_db=db, seed=seed) is False
     built_request = requests.build_replacement_forecast_materialization_request(
         seed, base_dir=tmp_path,
@@ -3181,7 +3181,7 @@ def test_non_helsinki_queue_requires_actual_current_path_consumption(
                           {"role": "openmeteo_ifs9_anchor", "source_run_id": "anchor"},
                       ]})))
     monkeypatch.setattr(queue, "tradeable_grade_coverage_sql", lambda **_: "AND 1=1")
-    monkeypatch.setattr(queue, "replacement_live_input_lag_reason", lambda *_a, **_k: None)
+    monkeypatch.setattr(queue, "replacement_input_refresh_reason", lambda *_a, **_k: None)
 
     def update(state, *, carrier=True, clock="12:26:00"):
         provenance = {"day0_current_temperature_state": state}

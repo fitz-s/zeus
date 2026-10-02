@@ -225,6 +225,7 @@ class ReplacementForecastPosteriorBundle:
     posterior_identity_hash: str
     dependency_hash: str
     posterior_config_hash: str
+    input_hwm_witness: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         for field_name, value in (("source_id", self.source_id), ("product_id", self.product_id), ("data_version", self.data_version)):
@@ -867,7 +868,7 @@ def _latest_complete_held_continuity(
     metric: str,
     decision_time: datetime,
 ) -> tuple[_HeldContinuityStatus, str | None]:
-    """Prove raw frontier lag while the eligible ENS/HWM cycle is unchanged."""
+    """Retain the whole certified carrier while its successor is being prepared."""
     from src.data.replacement_current_value_serving import day0_remaining_from_provenance
     day0_tau, window_reason = day0_remaining_from_provenance(
         provenance, city=city, target_date=target_date, metric=metric,
@@ -904,8 +905,8 @@ def _latest_complete_held_continuity(
     )
     if eligible_cycle is None or consumed_cycle is None:
         return _HeldContinuityStatus.BLOCKED, "REPLACEMENT_PINNED_ELIGIBLE_ENS_HWM_UNAVAILABLE"
-    if eligible_cycle != consumed_cycle:
-        return _HeldContinuityStatus.RESET, "REPLACEMENT_PINNED_NEW_ELIGIBLE_ENS_RESET"
+    # A new ENS frontier requests a successor; only consumed-proof invalidity
+    # below can remove the whole last-complete carrier from serving.
     lag_reason = replacement_live_input_lag_reason(
         conn,
         city=city,
@@ -1435,11 +1436,10 @@ def read_replacement_forecast_bundle(
 ) -> ReplacementForecastBundleReadResult:
     """Read a derived replacement posterior only after B0 executable proof exists.
 
-    ``enforce_raw_input_hwm`` (W0.1, 2026-07-02, default False = every existing caller
-    byte-identical): when True, after the bundle is otherwise ready, reject it if a raw
-    model/artifact input newer than the served posterior's ``source_cycle_time`` already
-    exists (src.data.replacement_input_hwm.replacement_live_input_lag_reason) — fail
-    closed on a read-time-stale posterior instead of serving it.
+    ``enforce_raw_input_hwm`` revalidates the consumed physical proof and reports
+    newer inputs separately. Pending or blocked successors do not replace this
+    exact READY-bound row. Its source clocks and q content remain unchanged;
+    ``input_hwm_witness`` carries lag without becoming a new posterior identity.
     """
 
     if not isinstance(authority_purpose, ReplacementForecastAuthorityPurpose):
@@ -1702,6 +1702,7 @@ def read_replacement_forecast_bundle(
                 "reason": "newer_row_not_live_grade_served_older_live_bounds",
             },
         }
+    input_hwm_witness: dict[str, object] = {}
     if enforce_raw_input_hwm:
         hwm_conn = raw_input_hwm_conn or conn
         hwm_deadline = raw_input_hwm_deadline_monotonic
@@ -1747,6 +1748,7 @@ def read_replacement_forecast_bundle(
                         posterior_source_cycle_time=row_map["source_cycle_time"],
                         posterior_computed_at=row_map["computed_at"],
                         posterior_provenance=provenance,
+                        input_witness_out=input_hwm_witness,
                         held_redecision=(
                             authority_purpose
                             is ReplacementForecastAuthorityPurpose.HELD_REDECISION
@@ -1791,6 +1793,7 @@ def read_replacement_forecast_bundle(
         posterior_identity_hash=str(row_map["posterior_identity_hash"]),
         dependency_hash=str(row_map["dependency_hash"]),
         posterior_config_hash=str(row_map["posterior_config_hash"]),
+        input_hwm_witness=input_hwm_witness or None,
     )
     from src.runtime.observation_reaction_trace import emit_q_served
     emit_q_served(bundle)

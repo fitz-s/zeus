@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Lifecycle: created=2026-06-08; last_reviewed=2026-10-01; last_reused=2026-10-01
 # Purpose: BLOCKER 4 — cell_selection and elevation/downscaling are first-class product identity and must be persisted alongside every raw_model_forecasts row.
 # Reuse: Run with pytest; update if product-identity columns or cell_selection/elevation handling in the BAYES_PRECISION_FUSION downloader changes.
 # Created: 2026-06-08
-# Last reused or audited: 2026-09-30
+# Last reused or audited: 2026-10-01
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 + Fitz Constraint #4. Open-Meteo's cell_selection
 #   (nearest vs land vs sea) and elevation/downscaling materially change the returned 2m
 #   temperature: the SAME lat/lon with cell_selection=land vs nearest can pick a DIFFERENT
@@ -2105,9 +2105,14 @@ def test_real_http_a_b_a_receipts_reset_without_renewing_immutable_raw_or_body(t
     assert current(9)["icon_global"].physical_response == original.physical_response
     provenance = {"bayes_precision_fusion": {"used_models": ["icon_global"],
         "current_value_serving": {"icon_global": original.as_provenance()}}}
+    debt = []
     lag = _exact_current_value_serving_lag(conn, city=target.city, target_date=target.target_date,
-        metric=metric, decision_time=cycle.replace(hour=13), posterior_computed_at=cycle.replace(hour=9), provenance=provenance)
-    assert lag[0] and "physical_proof_dependency_changed" in lag[1]
+        metric=metric, decision_time=cycle.replace(hour=13), posterior_computed_at=cycle.replace(hour=9), provenance=provenance,
+        refresh_reasons=debt)
+    # The original receipt still verifies at its cutoff: it serves, and the
+    # restored receipt is successor debt for the builder.
+    assert lag[0] and lag[1] is None
+    assert any("physical_proof_dependency_changed" in reason for reason in debt)
     provenance["bayes_precision_fusion"]["current_value_serving"]["icon_global"] = restored.as_provenance()
     reset_lag = _exact_current_value_serving_lag(conn, city=target.city, target_date=target.target_date,
         metric=metric, decision_time=cycle.replace(hour=13), posterior_computed_at=cycle.replace(hour=13), provenance=provenance)
@@ -2589,10 +2594,15 @@ def test_normal_modern_held_proof_debt_insert_zero_progress_changes_only_new_cut
         assert current.physical_response["capture_receipt_artifact_id"]!=original.physical_response["capture_receipt_artifact_id"]
         assert "icon_global" not in read_current_instrument_values(conn,**scope,decision_time_iso="2026-09-29T22:45:00Z")
         assert read_current_instrument_values(conn,**scope,decision_time_iso=old_cut.isoformat())["icon_global"].physical_response==original.physical_response
+        debt=[]
         lag=_exact_current_value_serving_lag(conn,city=target.city,target_date=target.target_date,metric=metric,
             decision_time=world.clock[0],posterior_computed_at=old_cut,
-            provenance={"bayes_precision_fusion":{"used_models":["icon_global"],"current_value_serving":{"icon_global":original.as_provenance()}}})
-        assert lag[0] and "physical_proof_dependency_changed" in lag[1]
+            provenance={"bayes_precision_fusion":{"used_models":["icon_global"],"current_value_serving":{"icon_global":original.as_provenance()}}},
+            refresh_reasons=debt)
+        # The original receipt verifies at old_cut, so it keeps serving; the
+        # recovered receipt is successor debt for the builder.
+        assert lag[0] and lag[1] is None
+        assert any("physical_proof_dependency_changed" in reason for reason in debt)
     assert fingerprint(old_cut)==old_fp
     healed_fp=fingerprint(world.clock[0])
     assert healed_fp is not None and healed_fp!=rejected_fp

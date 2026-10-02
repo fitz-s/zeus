@@ -9636,6 +9636,13 @@ def write_prepared_replacement_forecast_live(
                 exact_supersession=(metric == "low"),
             ),
         )
+    if readiness.status != "READY":
+        # Candidate/attempt failure is not revocation of the active posterior.
+        # Keep the old certificate; this unbound row is never serving authority.
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED", reason_codes=readiness.reason_codes,
+            posterior_id=posterior_id, anchor_id=anchor_id, readiness_id=None,
+        )
     expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
     write_readiness_state(
         conn,

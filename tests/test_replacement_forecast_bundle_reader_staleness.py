@@ -1,5 +1,5 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-09-30
+# Last reused/audited: 2026-10-01
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md
 """H3 antibody — readiness expiry / source-cycle age must be a HARD gate.
 
@@ -111,10 +111,11 @@ def test_raw_hwm_equal_value_new_cycle_requires_current_cohort_redecision(tmp_pa
                 provider_weights={model: 1/len(source_values) for model in source_values},
                 center_c=center, provider_cycles={model: value.served_cycle for model, value in serving.items()})
 
-        def lag(serving, computed_at):
+        def lag(serving, computed_at, debt=None):
             return _exact_current_value_serving_lag(conn, city=target.city, target_date=target.target_date,
                 metric=metric, decision_time=world.clock[0], posterior_computed_at=computed_at,
-                provenance=_hwm_consumed_context({model: value.as_provenance() for model, value in serving.items()}))[1]
+                provenance=_hwm_consumed_context({model: value.as_provenance() for model, value in serving.items()}),
+                refresh_reasons=debt)[1]
 
         old_cut = world.clock[0]
         old_shape = shape(consumed)
@@ -145,11 +146,12 @@ def test_raw_hwm_equal_value_new_cycle_requires_current_cohort_redecision(tmp_pa
             new_below = bin_probability_settlement(center, current_shape.predictive_sigma_c, None, boundary - 1,
                 rounding_rule="oracle_truncate")
             assert old_above > new_above and old_below < new_below
-        # The parent's already-correct physical dependency gate fires before
-        # the removed numeric alias. This test is baseline GREEN, not the
-        # separately retained exact-df legacy RED counter.
-        reason = lag(consumed, old_cut)
-        assert reason is not None and "physical_proof_dependency_changed" in reason
+        # The consumed cohort still verifies, so it keeps serving; the newer
+        # equal-value cycle is owed to the builder as a current-cohort
+        # redecision (refresh debt), never as an exclusion of the incumbent.
+        debt = []
+        assert lag(consumed, old_cut, debt) is None
+        assert any("physical_proof_dependency_changed" in reason for reason in debt)
         if change == "cohort_loss":
             assert capture(("icon_global",), newer_cycle)["written_row_count"] == 1
         selected = current()
@@ -212,7 +214,9 @@ def test_raw_hwm_real_same_value_receipt_progress_and_zero_cost_repeat(tmp_path,
         current = _served_in_world(conn, world, target)["icon_global"]
         assert current.value_c == original.value_c and current.raw_model_forecast_id == original.raw_model_forecast_id
         assert current.physical_response["capture_receipt_artifact_id"] != original_receipt
-        assert "physical_proof_dependency_changed" in lag(original_provenance, old_cut)
+        # The consumed receipt file is gone: its proof cannot be reproduced at
+        # the original cutoff, which is intrinsic invalidity, not refresh debt.
+        assert "current_value_serving_consumed_proof_unverifiable" in lag(original_provenance, old_cut)
         assert lag(original_provenance, old_cut, old_cut) is not None
         rebound = _hwm_consumed_context({"icon_global": current.as_provenance()})
         assert lag(rebound, world.clock[0]) is None

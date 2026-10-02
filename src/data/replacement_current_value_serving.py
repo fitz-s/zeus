@@ -2155,6 +2155,57 @@ def _age_hours_or_none(captured_at: str | None, source_cycle_time_iso: str) -> f
         return None
 
 
+def read_consumed_instrument_values(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    metric: str,
+    target_date: str,
+    consumed_models: Mapping[int, str],
+    materialized_at_iso: str,
+) -> dict[int, ServedInstrumentValue]:
+    """Revalidate exact consumed rows, never substitute a newer row for an old proof.
+
+    The same product, body, receipt and surface validator used by the producer
+    runs at its original possession cutoff. The family/metric/id predicates
+    are bound parameters. New inputs cannot change which rows are checked.
+    """
+    consumed_ids = tuple(consumed_models)
+    if not consumed_ids or any(type(i) is not int or i <= 0 or not consumed_models[i] for i in consumed_ids):
+        raise ValueError("consumed raw identities must be positive integers")
+    cutoff = datetime.fromisoformat(materialized_at_iso.replace("Z", "+00:00"))
+    if cutoff.tzinfo is None:
+        raise ValueError("consumed proof cutoff must be timezone-aware")
+    schema = current_value_serving_schema(conn)
+    sql, params = _source_clock_rows_query(
+        city=city, metric=metric, target_date=target_date,
+        decision_iso=cutoff.isoformat(), schema=schema,
+        max_substitution_age_hours=PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+    )
+    marker = "ORDER BY model,"
+    if sql.count(marker) != 1:
+        raise ValueError("consumed source query ordering changed")
+    sql = sql.replace(marker, "AND raw_model_forecast_id IN (" +
+        ",".join("?" for _ in consumed_ids) + ") " + marker)
+    try:
+        rows = conn.execute(sql, (*params, *consumed_ids)).fetchall()
+        deadline = time.monotonic() + _PHYSICAL_CAPTURE_SCAN_BUDGET_SECONDS
+        out = {}
+        for row in rows:
+            enriched = (*row[:-1], _read_product_identity_at_cutoff(
+                conn, row[-1], deadline_monotonic=deadline))
+            parsed = _served_source_clock_row(enriched, schema=schema,
+                max_substitution_age_hours=PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS)
+            if parsed is not None:
+                model, value = parsed
+                if model == consumed_models.get(value.raw_model_forecast_id):
+                    out[value.raw_model_forecast_id] = value
+        return out
+    except sqlite3.OperationalError as exc:
+        _raise_typed_read_unavailable(exc)
+        raise AssertionError("unreachable")
+
+
 def read_current_instrument_values(
     conn: sqlite3.Connection,
     *,

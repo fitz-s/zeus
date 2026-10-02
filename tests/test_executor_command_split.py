@@ -2754,7 +2754,7 @@ class TestLiveOrderCommandSplit:
         assert command_count == 0
         mock_inst.place_limit_order.assert_not_called()
 
-    def test_entry_rejects_replacement_hwm_lag_before_command_persistence(
+    def test_entry_rejects_consumed_proof_invalidity_before_command_persistence(
         self,
         mem_conn,
         monkeypatch,
@@ -2801,9 +2801,7 @@ class TestLiveOrderCommandSplit:
         monkeypatch.setattr(
             "src.data.replacement_input_hwm.replacement_live_input_lag_reason",
             lambda *_args, **_kwargs: (
-                "basis=source_cycle_time_used_raw_model_forecasts_lag:"
-                "latest_raw_cycle=2026-07-08T09:11:26+00:00:"
-                "posterior_cycle=2026-07-08T00:00:00+00:00:lag_h=9.19"
+                "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global"
             ),
         )
         monkeypatch.setattr(
@@ -2858,8 +2856,8 @@ class TestLiveOrderCommandSplit:
         command_count = mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
         assert result.status == "rejected"
         assert result.reason is not None
-        assert result.reason.startswith("replacement_input_hwm:live_input_lag:")
-        assert "lag_h=9.19" in result.reason
+        assert result.reason.startswith("replacement_input_hwm:consumed_probability_authority_invalid:")
+        assert "consumed_proof_unverifiable" in result.reason
         assert command_count == 0
         mock_inst.place_limit_order.assert_not_called()
 

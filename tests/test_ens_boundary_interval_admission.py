@@ -1245,8 +1245,11 @@ def test_partial_newer_row_never_resets_legal_full_target_held_continuity(tmp_pa
         trigger._superseded_baseline_seed_file(conn, **seed_scope)
     conn.execute("UPDATE ensemble_snapshots SET forecast_window_attribution_status='FULLY_INSIDE_TARGET_LOCAL_DAY',contributes_to_target_extrema=1")
     assert hwm._latest_eligible_ensemble_input_mark(conn, **scope, day0_remaining_from_iso=tau) == (101, new)
+    # A newer full-target ENS is refresh debt, never a reset of the validated
+    # carrier (validated-input continuity): only its consumed proof decides it.
     assert reader._latest_complete_held_continuity(conn, row={"source_cycle_time": old.isoformat()},
-        provenance=provenance, **scope) == (reader._HeldContinuityStatus.RESET, "REPLACEMENT_PINNED_NEW_ELIGIBLE_ENS_RESET")
+        provenance=provenance, **scope) == (reader._HeldContinuityStatus.BLOCKED,
+        "REPLACEMENT_PINNED_RAW_INPUT_HWM:TEST_EXISTING_BODY_PROOF_CHANGED")
     trigger._ensure_day0_conditioning_identity_column(conn)
     assert trigger._superseded_baseline_seed_file(conn, **seed_scope) is None
     conn.close()

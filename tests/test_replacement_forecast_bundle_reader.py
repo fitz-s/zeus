@@ -2400,7 +2400,7 @@ def _reader_next_native_cycle(normal,monkeypatch):
         builtin.close()
 
 
-def test_live_input_hwm_blocks_posterior_when_newer_ensemble_cycle_is_available(
+def test_live_input_hwm_newer_ensemble_keeps_certified_posterior(
     monkeypatch, _shanghai_reader_current_certificate,
 ) -> None:
     normal = _shanghai_reader_current_certificate
@@ -2412,12 +2412,19 @@ def test_live_input_hwm_blocks_posterior_when_newer_ensemble_cycle_is_available(
             posterior_source_cycle_time=normal.request.source_cycle_time,
             posterior_computed_at=normal.request.computed_at,
             posterior_provenance=json.loads(normal.row["provenance_json"]))
+        assert reason is None
+        reason = input_hwm.replacement_input_refresh_reason(normal.conn,city=normal.row["city"],
+            target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],decision_time=newer.cut,
+            posterior_source_cycle_time=normal.request.source_cycle_time,
+            posterior_computed_at=normal.request.computed_at,
+            posterior_provenance=json.loads(normal.row["provenance_json"]))
         assert reason == ("basis=current_ensemble_snapshot_superseded:"
             f"latest_snapshot_id={newer.snapshot['snapshot_id']}:latest_ensemble_cycle={newer.cycle.isoformat()}:"
             f"consumed_ensemble_cycle={normal.request.source_cycle_time.isoformat()}:lag_h=6.00")
         held = read_replacement_forecast_bundle(normal.conn,**newer.kwargs)
-        assert held.ok is False
-        assert reason in held.reason_code
+        assert held.ok is True
+        assert reason in held.bundle.input_hwm_witness["refresh_reasons"]
+        assert held.bundle.posterior_identity_hash == normal.row["posterior_identity_hash"]
     finally:
         next(world,None)
 
@@ -2467,11 +2474,11 @@ def test_live_input_hwm_considers_only_newer_current_covered_ensemble(
             posterior_source_cycle_time=normal.request.source_cycle_time,
             posterior_computed_at=normal.request.computed_at,
             posterior_provenance=json.loads(normal.row["provenance_json"]))
-        assert (reason is not None and "basis=current_ensemble_snapshot_superseded" in reason) is (newer_evidence=="current")
+        assert reason is None
         held = read_replacement_forecast_bundle(active,**{**newer.kwargs,"raw_input_hwm_conn":active})
-        assert held.ok is (newer_evidence != "current")
+        assert held.ok
         if newer_evidence=="current":
-            assert "basis=current_ensemble_snapshot_superseded" in held.reason_code
+            assert any("basis=current_ensemble_snapshot_superseded" in r for r in held.bundle.input_hwm_witness["refresh_reasons"])
         else:
             assert reason is None
             assert calls and set(calls)=={newer_evidence}
@@ -3084,11 +3091,10 @@ def test_replacement_bundle_reader_blocks_missing_or_late_posterior(
     assert computed_late.reason_code == "REPLACEMENT_POSTERIOR_COMPUTED_AFTER_DECISION_TIME"
 
 
-def test_replacement_bundle_reader_enforce_raw_input_hwm_blocks_stale_serve(
+def test_replacement_bundle_reader_hwm_preserves_valid_whole_posterior(
     _shanghai_reader_current_certificate,
 ) -> None:
-    """W0.1: when opted in, a raw input newer than the served posterior's source_cycle_time
-    must block the read instead of serving the stale posterior."""
+    """A valid consumed proof survives an optional successor publication."""
     normal = _shanghai_reader_current_certificate
     assert read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
     cycle,captured,_served = _reader_new_icon_cycle(normal)
@@ -3101,11 +3107,10 @@ def test_replacement_bundle_reader_enforce_raw_input_hwm_blocks_stale_serve(
     assert captured == cycle+timedelta(hours=1)
     result = read_replacement_forecast_bundle(normal.conn,**normal.kwargs)
 
-    assert result.ok is False
-    assert result.reason_code.startswith("REPLACEMENT_RAW_INPUT_HWM:")
-    # The new real response changes immutable physical dependencies before the
-    # coarse cycle lag check; do not hide that primary rejection for old labels.
-    assert "basis=current_value_serving_physical_proof_dependency_changed:model=icon_global" in result.reason_code
+    assert result.ok
+    assert result.bundle.posterior_id == normal.row["posterior_id"]
+    assert any("current_value_serving_physical_proof_dependency_changed:model=icon_global" in r
+        for r in result.bundle.input_hwm_witness["refresh_reasons"])
 
 
 def test_replacement_bundle_reader_raw_input_hwm_default_is_byte_identical(
@@ -3662,7 +3667,7 @@ def test_hwm_helpers_do_not_retype_schema_errors(helper: str, needle: str) -> No
     assert str(raised.value) == "no such column: broken_hwm_column"
 
 
-def test_raw_hwm_does_not_label_current_value_read_failure_as_raw_unavailable(
+def test_raw_hwm_successor_read_failure_is_not_consumed_authority_failure(
     monkeypatch, _shanghai_reader_current_certificate,
 ) -> None:
     normal = _shanghai_reader_current_certificate
@@ -3676,27 +3681,25 @@ def test_raw_hwm_does_not_label_current_value_read_failure_as_raw_unavailable(
         raise CurrentValueServingReadUnavailable(str(cause)) from cause
 
     monkeypatch.setattr(serving, "read_current_instrument_values", fail_read)
-    with pytest.raises(ReplacementInputHwmReadUnavailable) as blocked:
-        _exact_current_value_serving_lag(
-            normal.conn, city=row["city"], target_date=row["target_date"],
-            metric=row["temperature_metric"], decision_time=normal.request.computed_at,
-            posterior_computed_at=normal.request.computed_at, provenance=provenance,
-        )
-    assert isinstance(blocked.value.__cause__, CurrentValueServingReadUnavailable)
-    assert isinstance(blocked.value.__cause__.__cause__, sqlite3.OperationalError)
-    assert str(blocked.value) == "interrupted"
-
+    debt = []
+    checked, reason, _cycle = _exact_current_value_serving_lag(
+        normal.conn, city=row["city"], target_date=row["target_date"],
+        metric=row["temperature_metric"], decision_time=normal.request.computed_at,
+        posterior_computed_at=normal.request.computed_at, provenance=provenance,
+        refresh_reasons=debt,
+    )
+    assert checked and reason is None
+    assert any("successor_current_value_read_unavailable" in item for item in debt)
+    # Unknown old-proof authority remains a hard failure on that distinct path.
+    monkeypatch.setattr(serving, "read_consumed_instrument_values", fail_read)
     reason = replacement_live_input_lag_reason(
         normal.conn, city=row["city"], target_date=row["target_date"],
         metric=row["temperature_metric"], decision_time=normal.request.computed_at,
         posterior_source_cycle_time=normal.request.source_cycle_time,
         posterior_computed_at=normal.request.computed_at, posterior_provenance=provenance,
     )
+    assert reason == "basis=consumed_physical_proof_read_unavailable:sqlite_error=interrupted"
 
-    assert reason == (
-        "basis=current_value_serving_read_unavailable:sqlite_error=interrupted"
-    )
-    assert "raw_hwm_unavailable" not in reason
 
 
 def test_raw_hwm_successful_empty_selection_still_reports_raw_unavailable(
@@ -3734,7 +3737,7 @@ def test_raw_hwm_successful_empty_selection_still_reports_raw_unavailable(
     )
 
     assert reason is not None
-    assert reason.startswith("basis=current_value_serving_raw_hwm_unavailable:")
+    assert reason.startswith("basis=current_value_serving_consumed_proof_unverifiable:")
 
 
 def test_raw_hwm_uses_exact_anchor_artifact_not_model_serving_clock(
@@ -3785,7 +3788,7 @@ def test_raw_hwm_fails_closed_when_available_anchor_has_no_consumed_id(
     assert result.reason_code=="REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_raw_hwm_blocks_newer_anchor_than_exact_consumed_artifact(
+def test_raw_hwm_newer_anchor_keeps_exact_consumed_artifact(
     _shanghai_reader_current_certificate,
 ) -> None:
     normal = _shanghai_reader_current_certificate
@@ -3799,11 +3802,11 @@ def test_raw_hwm_blocks_newer_anchor_than_exact_consumed_artifact(
         target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],
         decision_time=normal.request.computed_at)==cycle
     result = read_replacement_forecast_bundle(normal.conn,**normal.kwargs)
-    assert result.ok is False
-    assert "source_cycle_time_raw_forecast_artifacts_lag" in result.reason_code
-    assert f"consumed_anchor_cycle={normal.request.source_cycle_time.isoformat()}" in result.reason_code
-    # Coarse anchor-clock lag is not a changed used-provider receipt. Keep the
-    # current lawful held continuity boundary separate from that stronger gate.
+    assert result.ok
+    reason = next(r for r in result.bundle.input_hwm_witness["refresh_reasons"]
+        if "source_cycle_time_raw_forecast_artifacts_lag" in r)
+    assert f"consumed_anchor_cycle={normal.request.source_cycle_time.isoformat()}" in reason
+    # ENTRY and HELD share the same whole-posterior continuity law.
     held = read_replacement_forecast_bundle(normal.conn,**normal.kwargs,
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION)
     assert held.ok is True
@@ -4050,7 +4053,7 @@ def test_raw_hwm_accepts_exact_authoritative_previous_run_substitution(tmp_path,
         next(world,None)
 
 
-def test_raw_hwm_blocks_when_exact_consumed_model_is_superseded(
+def test_raw_hwm_new_provider_proof_does_not_invalidate_consumed_proof(
     _shanghai_reader_current_certificate,
 ) -> None:
     normal = _shanghai_reader_current_certificate
@@ -4067,12 +4070,11 @@ def test_raw_hwm_blocks_when_exact_consumed_model_is_superseded(
     assert consumed["raw_model_forecast_id"]!=served.raw_model_forecast_id
     for purpose in ReplacementForecastAuthorityPurpose:
         result = read_replacement_forecast_bundle(normal.conn,**normal.kwargs,authority_purpose=purpose)
-        assert result.ok is False
-        # A changed actual receipt/native proof precedes the coarse-cycle
-        # diagnostic; held continuity cannot bypass this physical dependency.
-        assert result.reason_code==("REPLACEMENT_RAW_INPUT_HWM:"
-            "basis=current_value_serving_physical_proof_dependency_changed:"
+        assert result.ok
+        assert result.bundle.posterior_id == normal.row["posterior_id"]
+        assert any(r.startswith("basis=current_value_serving_physical_proof_dependency_changed:"
             f"model=icon_global:consumed_raw_id={consumed['raw_model_forecast_id']}")
+            for r in result.bundle.input_hwm_witness["refresh_reasons"])
 
 
 def test_held_redecision_blocks_same_cycle_late_input(_shanghai_reader_current_certificate) -> None:
@@ -4093,9 +4095,8 @@ def test_held_redecision_blocks_same_cycle_late_input(_shanghai_reader_current_c
         city=normal.row["city"],target_date=normal.row["target_date"],metric="high",
         decision_time=normal.request.computed_at,posterior_computed_at=hypothetical_prior,provenance=component)
     assert checked
-    assert reason == ("basis=used_raw_model_forecasts_same_cycle_late_input:model=icon_global:"
-        f"latest_raw_id={consumed['raw_model_forecast_id']}:latest_raw_input_at={actual.isoformat()}:"
-        f"posterior_computed_at={hypothetical_prior.isoformat()}")
+    assert reason == ("basis=current_value_serving_consumed_proof_unverifiable:"
+        f"model=icon_global:consumed_raw_id={consumed['raw_model_forecast_id']}")
     view = _reader_with_posterior_fault(normal,provenance_json=json.dumps(provenance))
     held = read_replacement_forecast_bundle(view,**{**normal.kwargs,"raw_input_hwm_conn":view},
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION)
@@ -4127,9 +4128,9 @@ def test_raw_hwm_marks_isolated_used_provider_revision_unconsumed(
         if model!="icon_global":
             assert normal.conn.execute("SELECT MAX(raw_model_forecast_id) FROM raw_model_forecasts WHERE model=?",
                 (model,)).fetchone()[0]==raw_id
-    reason = replacement_live_input_lag_reason(normal.conn,**context,
+    reason = input_hwm.replacement_input_refresh_reason(normal.conn,**context,
         posterior_computed_at=normal.request.computed_at,posterior_provenance=provenance)
-    assert reason==("basis=current_value_serving_physical_proof_dependency_changed:"
+    assert reason.startswith("basis=current_value_serving_physical_proof_dependency_changed:"
         f"model=icon_global:consumed_raw_id={old_ids['icon_global']}")
     assert served.raw_model_forecast_id!=old_ids["icon_global"]
 
@@ -4169,6 +4170,10 @@ def _hourly_relabel_reason(
         posterior_computed_at=normal.request.computed_at,posterior_provenance=proof)
     public = read_replacement_forecast_bundle(conn,**{**normal.kwargs,"raw_input_hwm_conn":conn},
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION)
+    if consumed_row_present:
+        assert reason is None and public.ok
+        return next(r for r in public.bundle.input_hwm_witness["refresh_reasons"]
+            if "current_value_serving_physical_proof_dependency_changed" in r)
     assert not public.ok and public.reason_code == "REPLACEMENT_RAW_INPUT_HWM:"+reason
     return reason
 
@@ -4197,7 +4202,7 @@ def test_raw_hwm_hourly_cycle_relabel_of_consumed_evidence_stays_current(
     assert tuple(tuple(row) for row in normal.conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id")) == original_raw
     assert read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
     reason = _hourly_relabel_reason(normal,newer_value_c=value)
-    assert reason == f"basis=current_value_serving_physical_proof_dependency_changed:model={model}:consumed_raw_id={serving['raw_model_forecast_id']}"
+    assert reason.startswith(f"basis=current_value_serving_physical_proof_dependency_changed:model={model}:consumed_raw_id={serving['raw_model_forecast_id']}")
     # Existing normal producer consumes the genuinely new physical dependency;
     # the old certificate is never relabeled or given a renewed source clock.
     new_cut = normal.request.computed_at+timedelta(minutes=1)
@@ -4237,7 +4242,7 @@ def test_raw_hwm_hourly_cycle_with_changed_value_or_lead_supersedes(
     expected = f"basis=current_value_serving_physical_proof_dependency_changed:model=icon_global:consumed_raw_id={serving['raw_model_forecast_id']}"
     # Each fault has its own healthy normal world. A different logical lead
     # claim is negative new input, not a licensed new forecast.
-    assert _hourly_relabel_reason(normal,newer_value_c=newer_value_c,newer_lead_days=newer_lead_days) == expected
+    assert _hourly_relabel_reason(normal,newer_value_c=newer_value_c,newer_lead_days=newer_lead_days).startswith(expected)
 
 
 def test_raw_hwm_unreadable_consumed_evidence_stays_superseded(_shanghai_reader_current_certificate) -> None:
@@ -4245,7 +4250,7 @@ def test_raw_hwm_unreadable_consumed_evidence_stays_superseded(_shanghai_reader_
     normal = _shanghai_reader_current_certificate
     serving = json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]["icon_global"]
     assert _hourly_relabel_reason(normal,consumed_row_present=False) == (
-        "basis=current_value_serving_raw_hwm_unavailable:model=icon_global:"
+        "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:"
         f"consumed_raw_id={serving['raw_model_forecast_id']}")
 
 

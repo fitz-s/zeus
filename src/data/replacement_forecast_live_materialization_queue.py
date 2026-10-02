@@ -43,7 +43,7 @@ from src.data.replacement_current_value_serving import (
     current_value_serving_schema,
     read_current_instrument_frontier_identity,
 )
-from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+from src.data.replacement_input_hwm import replacement_input_refresh_reason
 from src.data.replacement_forecast_materialization_request_builder import (
     build_replacement_forecast_materialization_request,
 )
@@ -1965,7 +1965,7 @@ def _seed_already_covered(
                 or posterior_computed_at < required_computed_at
             ):
                 return False
-        if replacement_live_input_lag_reason(
+        if replacement_input_refresh_reason(
             conn,
             city=city,
             target_date=target_date,

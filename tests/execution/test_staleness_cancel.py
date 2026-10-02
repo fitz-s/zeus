@@ -442,9 +442,10 @@ def _seed_posterior(
             snapshot_id, city, target_date, temperature_metric, physical_quantity,
             observation_field, available_at, fetch_time, lead_hours, members_json,
             model_version, dataset_id, source_id, authority, causality_status,
-            boundary_ambiguous, source_run_id
+            boundary_ambiguous, source_run_id, forecast_window_attribution_status,
+            contributes_to_target_extrema
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, '[]', 'fixture', ?,
-                  'ecmwf_open_data', 'VERIFIED', 'OK', 0, ?)
+                  'ecmwf_open_data', 'VERIFIED', 'OK', 0, ?, 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1)
         """,
         (
             snapshot_id,
@@ -877,11 +878,17 @@ class TestReadCurrentFamilyQVersions:
 
         current = read_current_family_q_versions(conn, [family], now=NOW)
 
-        assert current[family] == "q-certified-12z"
-        assert classify_cancel_set(
+        # The certified 12Z identity is selected over the retained 18Z row. Its
+        # consumed inputs are unnamed (no current_value_serving), so consumed
+        # authority is unknown and the rest is cancelled protectively.
+        assert current[family] == (
+            "__Q_AUTHORITY_BLOCKED__:q-certified-12z:"
+            "basis=current_value_serving_provenance_unverifiable"
+        )
+        assert [row["command_id"] for row in classify_cancel_set(
             [_entry("rest", q_version="q-certified-12z", age_minutes=5)],
             {"rest": family}, current, now=NOW, deadline_minutes=DEADLINE_MIN,
-        ) == []
+        )] == ["rest"]
 
     def test_missing_or_invalid_certificate_never_uses_uncertified_row(self):
         conn = _forecasts_db()
@@ -930,7 +937,9 @@ class TestReadCurrentFamilyQVersions:
         )
 
 
-    def test_posterior_carrying_its_current_evidence_shape_is_servable(self):
+    def test_bound_shape_without_named_consumed_inputs_is_not_servable(self):
+        # The shape binding passes; serving still needs the exact consumed
+        # inputs to re-verify, and a posterior that names none cannot.
         conn = _forecasts_db()
         _seed_posterior(
             conn, family=FAMILY, posterior_identity_hash="q-shaped",
@@ -938,7 +947,9 @@ class TestReadCurrentFamilyQVersions:
         )
         _certify_latest_posterior(conn, FAMILY)
 
-        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] == "q-shaped"
+        assert read_current_family_q_versions(conn, [FAMILY], now=NOW)[FAMILY] == (
+            "__Q_AUTHORITY_BLOCKED__:q-shaped:basis=current_value_serving_provenance_unverifiable"
+        )
 
     @pytest.mark.parametrize(
         "provenance_json, reason",
@@ -975,14 +986,20 @@ class TestReadCurrentFamilyQVersions:
 
         result = read_current_family_q_versions(conn, [FAMILY], now=NOW)
 
-        assert result[FAMILY] == "q-new"
+        # The certified freshest identity is the one judged (and blocked here,
+        # since its consumed inputs are unnamed); the older row is never served.
+        assert result[FAMILY] == (
+            "__Q_AUTHORITY_BLOCKED__:q-new:basis=current_value_serving_provenance_unverifiable"
+        )
 
     def test_family_with_no_posterior_is_none(self):
         conn = _forecasts_db()
         result = read_current_family_q_versions(conn, [FAMILY])
         assert result[FAMILY] is None
 
-    def test_hwm_stale_posterior_returns_blocked_q_sentinel(self):
+    def test_newer_raw_cycle_is_never_the_blocking_reason(self):
+        # A newer raw cycle is successor debt, not revocation; this posterior
+        # blocks only because its consumed inputs are unnamed.
         conn = _forecasts_db()
         _seed_posterior(
             conn,
@@ -1007,8 +1024,9 @@ class TestReadCurrentFamilyQVersions:
             now=datetime(2026, 7, 3, 8, 0, tzinfo=UTC),
         )
 
-        assert result[FAMILY].startswith("__Q_AUTHORITY_BLOCKED__:q-old:")
-        assert "latest_raw_cycle=2026-07-03T06:00:00+00:00" in result[FAMILY]
+        assert result[FAMILY] == (
+            "__Q_AUTHORITY_BLOCKED__:q-old:basis=current_value_serving_provenance_unverifiable"
+        )
 
     def test_old_intrinsic_ensemble_carrier_returns_blocked_q_sentinel(self):
         conn = _forecasts_db()

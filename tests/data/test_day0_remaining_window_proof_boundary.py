@@ -208,22 +208,76 @@ def test_actual_lag_without_day0_witness_preserves_fulltarget(tmp_path, monkeypa
         conn.close()
 
 
+def _consumed_body(conn, provenance):
+    """The consumed icon row's body artifact as the posterior recorded it, and on disk."""
+    proof = provenance["bayes_precision_fusion"]["current_value_serving"]["icon_global"]["physical_response"]
+    artifact_id = int(proof["artifact_id"])
+    path, sha = conn.execute(
+        "SELECT artifact_path, sha256 FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,),
+    ).fetchone()
+    return artifact_id, path, sha, proof
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
-def test_same_raw_real_body_change_still_blocks_after_window_alignment(tmp_path, monkeypatch, metric):
+def test_same_raw_real_body_change_is_refresh_debt_after_window_alignment(tmp_path, monkeypatch, metric):
+    """A newer body BESIDE the consumed one never revokes the proof it was served on.
+
+    The second capture binds a different body for the same raw row (no new raw
+    row is written); the consumed body artifact, its sha and its receipt stay as
+    the posterior recorded them, so the consumed proof re-verifies.
+    """
+    import hashlib
     from src.data import bayes_precision_fusion_download as dl
-    from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+    from src.data.replacement_input_hwm import (
+        replacement_input_refresh_reason, replacement_live_input_lag_reason,
+    )
     conn, provenance, _full, cycle, cut, _tau, persist = _remaining_serving_certificate(tmp_path, monkeypatch, metric)
+    artifact_id, path, sha, proof = _consumed_body(conn, provenance)
     old_bind = dl._bind_physical_response
     def changed_body(payload, **kwargs):
         return old_bind({**payload, "generationtime_ms": 1.0}, **kwargs)
     monkeypatch.setattr(dl, "_bind_physical_response", changed_body)
     persist(cycle, "2026-10-02T22:20:00+00:00", expected_written=0)
     try:
-        reason = replacement_live_input_lag_reason(conn, city="Paris", target_date="2026-10-02",
+        # Beside, not over: the consumed artifact still names the same bytes.
+        assert _consumed_body(conn, provenance)[1:3] == (path, sha)
+        assert hashlib.sha256(open(path, "rb").read()).hexdigest() == sha == proof["entity_body_sha256"]
+        assert conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE artifact_id > ?",
+            (artifact_id,)).fetchone()[0] > 0
+        kwargs = dict(city="Paris", target_date="2026-10-02",
             metric=metric, decision_time=datetime.fromisoformat("2026-10-02T22:30:00+00:00"),
             posterior_source_cycle_time=cycle, posterior_computed_at=cut,
             posterior_provenance=provenance, held_redecision=True)
-        assert "physical_proof_dependency_changed" in reason
+        assert replacement_live_input_lag_reason(conn, **kwargs, use_memo=False) is None
+        assert "physical_proof_dependency_changed" in replacement_input_refresh_reason(conn, **kwargs)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("damage", ("bytes_changed_in_place", "artifact_removed"))
+def test_consumed_body_damaged_blocks_on_both_projections(tmp_path, monkeypatch, metric, damage):
+    """The consumed body itself changed or gone is intrinsic invalidity: BLOCKED everywhere."""
+    from src.data.replacement_input_hwm import (
+        replacement_input_refresh_reason, replacement_live_input_lag_reason,
+    )
+    conn, provenance, _full, cycle, cut, _tau, _persist = _remaining_serving_certificate(tmp_path, monkeypatch, metric)
+    artifact_id, path, _sha, _proof = _consumed_body(conn, provenance)
+    if damage == "bytes_changed_in_place":
+        body = bytearray(open(path, "rb").read())
+        body[-2] = ord(" ") if body[-2] != ord(" ") else ord("\t")
+        open(path, "wb").write(bytes(body))
+    else:
+        conn.execute("DELETE FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,))
+    try:
+        kwargs = dict(city="Paris", target_date="2026-10-02",
+            metric=metric, decision_time=datetime.fromisoformat("2026-10-02T22:30:00+00:00"),
+            posterior_source_cycle_time=cycle, posterior_computed_at=cut,
+            posterior_provenance=provenance, held_redecision=True)
+        serving = replacement_live_input_lag_reason(conn, **kwargs, use_memo=False)
+        refresh = replacement_input_refresh_reason(conn, **kwargs)
+        assert serving is not None and "current_value_serving_consumed" in serving, serving
+        assert refresh == serving
     finally:
         conn.close()
 

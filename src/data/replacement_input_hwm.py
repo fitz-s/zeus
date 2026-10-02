@@ -2,22 +2,11 @@
 # Last reused/audited: 2026-08-23
 # Authority basis: architecture/invariants.yaml
 #   section 1 row "q_version + input HWMs (A1)".
-"""Shared read-time raw-input high-water-mark (HWM) lag check.
+"""Shared consumed-proof validation and separate successor refresh debt.
 
-Moved out of ``src/engine/event_reactor_adapter.py`` (W0.1, 2026-07-02) so read
-paths other than the no-submit-cert path can enforce the SAME fail-closed
-raw-input tripwire without a private cross-module import. Compares the latest
-materializable ``raw_model_forecasts`` cycle and anchor
-``raw_forecast_artifacts`` cycle available by ``decision_time`` against a
-served posterior's ``source_cycle_time``; a newer qualified input cycle means
-the posterior is stale and must not be served for a live trade decision. For
-used-model rows from the same cycle, a raw capture/available timestamp newer
-than the posterior ``computed_at`` is also stale: the posterior did not see the
-latest executable row for its own model family.
-
-``event_reactor_adapter.py`` keeps thin delegating wrappers with identical
-names and signatures (``family=...``) so its existing call sites and tests
-(``tests/test_live_safety_invariants.py:4356,:4417``) stay byte-identical.
+A new raw/model/ensemble cycle does not invalidate a certified whole posterior.
+Readers consume intrinsic invalidity; builders additionally consume refresh debt.
+No posterior clock, probability, or original submission witness is rewritten.
 """
 
 from __future__ import annotations
@@ -1452,8 +1441,10 @@ def _exact_current_value_serving_lag(
     posterior_computed_at: datetime | None,
     provenance: Mapping[str, object],
     held_complete_bundle_continuity: bool = False,
+    refresh_reasons: list[str] | None = None,
+    input_witness_out: dict[str, object] | None = None,
 ) -> tuple[bool, str | None, datetime | None]:
-    """Check rich current-value provenance against each model's latest row.
+    """Validate consumed proof, then separately record each model's refresh debt.
 
     ``forecast_posteriors.source_cycle_time`` is the carrier/shape cycle.  A
     source-clock posterior may intentionally consume newer, model-specific
@@ -1462,6 +1453,7 @@ def _exact_current_value_serving_lag(
     stale forever.  Exact raw-row identities are the narrower authority.
     """
 
+    refresh_reasons = [] if refresh_reasons is None else refresh_reasons
     fusion = provenance.get("bayes_precision_fusion")
     if not isinstance(fusion, Mapping):
         return False, None, None
@@ -1509,7 +1501,7 @@ def _exact_current_value_serving_lag(
         # facts never invalidate a certificate or force a new probability shape.
 
     consumed: dict[str, tuple[int, datetime, datetime | None]] = {}
-    for model in used_models:
+    for model in sorted(used_models):
         item = serving.get(model)
         if model == "ecmwf_ifs" and item is None:
             from src.data.replacement_forecast_cycle_policy import current_evidence_shape_has_held_authority
@@ -1576,13 +1568,42 @@ def _exact_current_value_serving_lag(
         ):
             return (
                 True,
-                "basis=used_raw_model_forecasts_same_cycle_late_input:"
+                "basis=current_value_serving_consumed_input_after_posterior:"
                 f"model={model}:"
                 f"consumed_raw_id={raw_id}:"
                 f"latest_raw_input_at={consumed[model][2].isoformat()}:"
                 f"posterior_computed_at={posterior_computed_at.isoformat()}",
                 consumed.get("ecmwf_ifs", (0, served_cycle, None))[1],
             )
+
+    # Validate every consumed identity before inspecting successors. A newer
+    # model/body/receipt is not evidence that the consumed one was invalid.
+    if posterior_computed_at is None:
+        return True, "basis=posterior_computed_at_unverifiable", None
+    from src.data.replacement_current_value_serving import (
+        read_consumed_instrument_values, physical_source_proof_dependency,
+    )
+    try:
+        frozen = read_consumed_instrument_values(
+            conn, city=city, metric=metric, target_date=str(target_date),
+            consumed_models={item[0]: model for model, item in consumed.items()},
+            materialized_at_iso=posterior_computed_at.isoformat(),
+        ) if consumed else {}
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(exc, basis="consumed_physical_proof_read_unavailable")
+    for model, (raw_id, cycle, captured) in consumed.items():
+        old = frozen.get(raw_id)
+        if old is None:
+            return True, ("basis=current_value_serving_consumed_proof_unverifiable:"
+                f"model={model}:consumed_raw_id={raw_id}"), None
+        if (_parse_source_cycle_utc(old.served_cycle) != cycle
+            or captured is None or _parse_source_cycle_utc(old.captured_at) != captured):
+            return True, ("basis=current_value_serving_raw_row_identity_mismatch:"
+                f"model={model}:consumed_raw_id={raw_id}"), None
+        claimed = physical_source_proof_dependency(serving[model].get("physical_response"))
+        if claimed is None or claimed != physical_source_proof_dependency(old.physical_response):
+            return True, ("basis=current_value_serving_consumed_physical_proof_invalid:"
+                f"model={model}:consumed_raw_id={raw_id}"), None
 
     decision_iso = decision_time.astimezone(UTC).isoformat()
     from src.data.replacement_current_value_serving import (
@@ -1603,33 +1624,40 @@ def _exact_current_value_serving_lag(
             day0_remaining_from_iso=day0_tau,
         )
     except sqlite3.OperationalError as exc:
-        _raise_hwm_read_unavailable(
-            exc,
-            basis="current_value_serving_read_unavailable",
-        )
+        # The exact consumed proof was checked above. An unavailable successor
+        # census is UNKNOWN refresh debt, not UNKNOWN consumed authority.
+        refresh_reasons.append("basis=successor_current_value_read_unavailable:"
+                               + type(exc).__name__)
+        selected = {}
     newer_cycle_changes: list[
         tuple[str, int, int, datetime, datetime]
     ] = []
     if "ecmwf_ifs" in used_models and "ecmwf_ifs" not in serving and "ecmwf_ifs" in selected:
-        return True,"basis=anchor_only_ifs9_raw_instrument_became_available",None
+        refresh_reasons.append("basis=anchor_only_ifs9_raw_instrument_became_available")
     for model, (consumed_id, consumed_cycle, consumed_at) in consumed.items():
         current = selected.get(model)
+        if input_witness_out is not None:
+            current_cycle = _parse_source_cycle_utc(current.served_cycle) if current else None
+            current_at = _parse_source_cycle_utc(current.captured_at) if current else None
+            input_witness_out.setdefault("used_model_frontier", {})[model] = {
+                "consumed_raw_id": consumed_id, "consumed_cycle": consumed_cycle.isoformat(),
+                "latest_raw_id": current.raw_model_forecast_id if current else None,
+                "latest_cycle": current_cycle.isoformat() if current_cycle else None,
+                "cycle_lag_hours": max(0.0,(current_cycle-consumed_cycle).total_seconds()/3600.0) if current_cycle else None,
+                "same_cycle_receipt_lag_seconds": max(0.0,(current_at-posterior_computed_at).total_seconds()) if current_at else None,
+            }
         if current is None:
-            return (
-                True,
-                "basis=current_value_serving_raw_hwm_unavailable:"
-                f"model={model}:consumed_raw_id={consumed_id}",
-                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
-            )
+            refresh_reasons.append(
+                "basis=current_value_serving_successor_unavailable:"
+                f"model={model}:consumed_raw_id={consumed_id}")
+            continue
         current_cycle = _parse_source_cycle_utc(current.served_cycle)
         from src.data.replacement_current_value_serving import physical_source_proof_dependency
         consumed_proof = serving[model].get("physical_response")
         if physical_source_proof_dependency(consumed_proof) != physical_source_proof_dependency(current.physical_response):
-            return (
-                True,
-                f"basis=current_value_serving_physical_proof_dependency_changed:model={model}:consumed_raw_id={consumed_id}",
-                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
-            )
+            refresh_reasons.append(
+                f"basis=current_value_serving_physical_proof_dependency_changed:model={model}:"
+                f"consumed_raw_id={consumed_id}:latest_raw_id={current.raw_model_forecast_id}")
         current_at = _parse_source_cycle_utc(current.captured_at)
         latest_id = int(current.raw_model_forecast_id)
         if current_cycle is None:
@@ -1645,15 +1673,12 @@ def _exact_current_value_serving_lag(
             and current_at > posterior_computed_at
             and current_cycle == consumed_cycle
         ):
-            return (
-                True,
+            refresh_reasons.append(
                 "basis=used_raw_model_forecasts_same_cycle_late_input:"
-                f"model={model}:"
-                f"latest_raw_id={latest_id}:"
+                f"model={model}:latest_raw_id={latest_id}:"
                 f"latest_raw_input_at={current_at.isoformat()}:"
-                f"posterior_computed_at={posterior_computed_at.isoformat()}",
-                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
-            )
+                f"posterior_computed_at={posterior_computed_at.isoformat()}")
+            continue
         if latest_id == consumed_id:
             if (
                 current_cycle != consumed_cycle
@@ -1674,45 +1699,15 @@ def _exact_current_value_serving_lag(
                 (model, latest_id, consumed_id, current_cycle, consumed_cycle)
             )
             continue
-        return (
-            True,
-            "basis=used_raw_model_forecasts_superseded:"
-            f"model={model}:"
-            f"latest_raw_id={latest_id}:"
-            f"consumed_raw_id={consumed_id}:"
-            f"latest_raw_cycle={current_cycle.isoformat()}:"
-            f"consumed_raw_cycle={consumed_cycle.isoformat()}",
-            consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
-        )
+        newer_cycle_changes.append(
+            (model, latest_id, consumed_id, current_cycle, consumed_cycle))
 
-    if newer_cycle_changes:
-        if held_complete_bundle_continuity:
-            # HELD CONTINUITY CONTRACT
-            # SCOPE: this family's reduce-only held redecision; ENTRY remains
-            # strict on every newer deterministic row.
-            # DRAIN: the normal materializer consumes the newer raw cohort only
-            # after its same-cycle eligible ENS shape becomes available.
-            # RESET: a newer eligible ENS cycle ends continuity and makes the
-            # previous complete bundle stale for held redecision too.
-            anchor = consumed.get("ecmwf_ifs")
-            return True, None, anchor[1] if anchor is not None else None
-        # ENTRY freshness asks whether the posterior consumed every current
-        # input it claims to use, not whether enough peers have arrived to
-        # materialize a replacement yet.  The held-only branch above is the
-        # narrow capital-release exception while the ENS frontier is unchanged.
-        model, latest_id, consumed_id, current_cycle, consumed_cycle = (
-            newer_cycle_changes[0]
-        )
-        return (
-            True,
+    for model, latest_id, consumed_id, current_cycle, consumed_cycle in newer_cycle_changes:
+        refresh_reasons.append(
             "basis=used_raw_model_forecasts_superseded:"
-            f"model={model}:"
-            f"latest_raw_id={latest_id}:"
-            f"consumed_raw_id={consumed_id}:"
+            f"model={model}:latest_raw_id={latest_id}:consumed_raw_id={consumed_id}:"
             f"latest_raw_cycle={current_cycle.isoformat()}:"
-            f"consumed_raw_cycle={consumed_cycle.isoformat()}",
-            consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
-        )
+            f"consumed_raw_cycle={consumed_cycle.isoformat()}")
 
     anchor = consumed.get("ecmwf_ifs")
     return True, None, anchor[1] if anchor is not None else None
@@ -2234,13 +2229,19 @@ def _replacement_live_input_lag_reason(
     posterior_computed_at: object | None = None,
     posterior_provenance: Mapping[str, object] | None = None,
     held_redecision: bool = False,
+    refresh_reasons: list[str] | None = None,
+    input_witness_out: dict[str, object] | None = None,
 ) -> str | None:
+    refresh_reasons = [] if refresh_reasons is None else refresh_reasons
     if not isinstance(held_redecision, bool):
         raise TypeError("held_redecision must be bool")
     posterior_cycle = _parse_source_cycle_utc(posterior_source_cycle_time)
     if posterior_cycle is None:
         return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
     posterior_computed = _parse_source_cycle_utc(posterior_computed_at)
+    if (metric not in {"high", "low"} or decision_time.tzinfo is None or
+        posterior_computed is None or not posterior_cycle <= posterior_computed <= decision_time):
+        return "basis=posterior_scope_or_materialization_clock_unverifiable"
     provenance = posterior_provenance
     if provenance is None:
         provenance = _posterior_provenance_for_cycle(
@@ -2253,6 +2254,8 @@ def _replacement_live_input_lag_reason(
         )
         if provenance is None:
             return "basis=posterior_provenance_unverifiable"
+    if not isinstance(provenance, Mapping) or not _provenance_has_current_value_serving(provenance):
+        return "basis=current_value_serving_provenance_unverifiable"
     fusion = provenance.get("bayes_precision_fusion")
     shape = (
         fusion.get("current_evidence_shape")
@@ -2264,38 +2267,53 @@ def _replacement_live_input_lag_reason(
         if isinstance(shape, Mapping)
         else None
     )
-    latest_ensemble_mark = _latest_eligible_ensemble_input_mark(
-        conn,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        decision_time=decision_time,
-    )
-    held_complete_bundle_continuity = False
+    if input_witness_out is not None:
+        serving = fusion.get("current_value_serving") if isinstance(fusion, Mapping) else None
+        input_witness_out.update(
+            consumed_source_cycle_time=posterior_cycle.isoformat(),
+            consumed_ensemble_cycle_time=(consumed_ensemble_cycle.isoformat()
+                if consumed_ensemble_cycle else None),
+            posterior_computed_at=posterior_computed.isoformat() if posterior_computed else None,
+            posterior_age_hours=(decision_time-posterior_computed).total_seconds()/3600.0,
+            consumed_model_cycles={model: item.get("served_cycle")
+                for model, item in (serving or {}).items() if isinstance(item, Mapping)},
+            source_cycle_age_hours=(decision_time-posterior_cycle).total_seconds()/3600.0,
+        )
+    try:
+        latest_ensemble_mark = _latest_eligible_ensemble_input_mark(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+        )
+    except sqlite3.OperationalError as exc:
+        refresh_reasons.append("basis=successor_ensemble_frontier_unavailable:" + type(exc).__name__)
+        latest_ensemble_mark = None
+    if input_witness_out is not None:
+        input_witness_out["latest_eligible_ensemble_cycle_time"] = (
+            latest_ensemble_mark[1].isoformat() if latest_ensemble_mark else None)
+        input_witness_out["ensemble_cycle_lag_hours"] = (
+            max(0.0,(latest_ensemble_mark[1]-consumed_ensemble_cycle).total_seconds()/3600.0)
+            if latest_ensemble_mark and consumed_ensemble_cycle else None)
     if latest_ensemble_mark is not None:
         latest_snapshot_id, latest_ensemble_cycle = latest_ensemble_mark
         if consumed_ensemble_cycle is None:
             return "basis=current_ensemble_snapshot_provenance_unverifiable"
-        # FAIL-CLOSED GATE CONTRACT
-        # SCOPE: probability authority for this one city/date/metric family.
-        # DRAIN: the normal materializer consumes the newest eligible ENS cycle.
-        # RESET: the consumed shape cycle catches up to the latest available cycle.
+        # New inputs create refresh debt, not retroactive invalidity. Continue
+        # checking consumed provenance: an advisory may not mask a later fault.
         if latest_ensemble_cycle > consumed_ensemble_cycle:
             lag_hours = (
                 latest_ensemble_cycle - consumed_ensemble_cycle
             ).total_seconds() / 3600.0
-            return (
+            refresh_reasons.append(
                 "basis=current_ensemble_snapshot_superseded:"
                 f"latest_snapshot_id={latest_snapshot_id}:"
                 f"latest_ensemble_cycle={latest_ensemble_cycle.isoformat()}:"
                 f"consumed_ensemble_cycle={consumed_ensemble_cycle.isoformat()}:"
                 f"lag_h={lag_hours:.2f}"
             )
-        held_complete_bundle_continuity = bool(
-            held_redecision
-            and latest_ensemble_cycle == consumed_ensemble_cycle
-            and _provenance_has_current_value_serving(provenance)
-        )
+        # ENTRY, HELD and resting-order management share the same input law.
     rich_used_input_provenance = _provenance_has_current_value_serving(provenance)
     exact_serving_checked = False
     if rich_used_input_provenance:
@@ -2311,18 +2329,23 @@ def _replacement_live_input_lag_reason(
             decision_time=decision_time,
             posterior_computed_at=posterior_computed,
             provenance=provenance,
-            held_complete_bundle_continuity=held_complete_bundle_continuity,
+            refresh_reasons=refresh_reasons,
+            input_witness_out=input_witness_out,
         )
         if exact_serving_lag is not None:
             return exact_serving_lag
 
-    artifact_cycle = latest_raw_artifact_input_cycle(
-        conn,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        decision_time=decision_time,
-    )
+    try:
+        artifact_cycle = latest_raw_artifact_input_cycle(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+        )
+    except sqlite3.OperationalError as exc:
+        refresh_reasons.append("basis=successor_anchor_frontier_unavailable:" + type(exc).__name__)
+        artifact_cycle = None
     artifact_reference_cycle = posterior_cycle
     declared_anchor_artifact = provenance.get("openmeteo_anchor_artifact_id")
     if rich_used_input_provenance and (
@@ -2347,97 +2370,18 @@ def _replacement_live_input_lag_reason(
     if (
         artifact_cycle is not None
         and artifact_cycle > artifact_reference_cycle
-        and not held_complete_bundle_continuity
     ):
         lag_hours = (
             artifact_cycle - artifact_reference_cycle
         ).total_seconds() / 3600.0
-        return (
+        refresh_reasons.append(
             "basis=source_cycle_time_raw_forecast_artifacts_lag:"
             f"latest_raw_cycle={artifact_cycle.isoformat()}:"
             f"posterior_cycle={posterior_cycle.isoformat()}:"
             f"consumed_anchor_cycle={artifact_reference_cycle.isoformat()}:"
             f"lag_h={lag_hours:.2f}"
         )
-    if exact_serving_checked:
-        return None
-
-    used_raw_mark = latest_used_raw_model_input_mark(
-        conn,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        decision_time=decision_time,
-        posterior_source_cycle_time=posterior_source_cycle_time,
-        posterior_provenance=provenance,
-    )
-    if (
-        rich_used_input_provenance
-        and used_raw_mark is not None
-        and used_raw_mark[0] == posterior_cycle
-        and posterior_computed is not None
-        and used_raw_mark[1] is not None
-        and used_raw_mark[1] > posterior_computed
-    ):
-        lag_seconds = (used_raw_mark[1] - posterior_computed).total_seconds()
-        return (
-            "basis=used_raw_model_forecasts_same_cycle_late_input:"
-            f"latest_raw_cycle={used_raw_mark[0].isoformat()}:"
-            f"posterior_cycle={posterior_cycle.isoformat()}:"
-            f"latest_raw_input_at={used_raw_mark[1].isoformat()}:"
-            f"posterior_computed_at={posterior_computed.isoformat()}:"
-            f"lag_s={lag_seconds:.0f}"
-        )
-    candidates = [
-        (
-            latest_raw_model_input_cycle(
-                conn,
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                decision_time=decision_time,
-            ),
-            "source_cycle_time_raw_model_forecasts_lag",
-        ),
-    ]
-    if not rich_used_input_provenance:
-        candidates.extend(
-            (
-                (
-                    used_raw_mark[0] if used_raw_mark is not None else None,
-                    "source_cycle_time_used_raw_model_forecasts_lag",
-                ),
-            )
-        )
-    candidates = [(cycle, basis) for cycle, basis in candidates if cycle is not None]
-    if not candidates:
-        return None
-    latest_raw_cycle, basis = max(candidates, key=lambda item: item[0])
-    if latest_raw_cycle is None or latest_raw_cycle <= posterior_cycle:
-        if (
-            used_raw_mark is not None
-            and posterior_computed is not None
-            and used_raw_mark[0] == posterior_cycle
-            and used_raw_mark[1] is not None
-            and used_raw_mark[1] > posterior_computed
-        ):
-            lag_seconds = (used_raw_mark[1] - posterior_computed).total_seconds()
-            return (
-                "basis=used_raw_model_forecasts_same_cycle_late_input:"
-                f"latest_raw_cycle={used_raw_mark[0].isoformat()}:"
-                f"posterior_cycle={posterior_cycle.isoformat()}:"
-                f"latest_raw_input_at={used_raw_mark[1].isoformat()}:"
-                f"posterior_computed_at={posterior_computed.isoformat()}:"
-                f"lag_s={lag_seconds:.0f}"
-            )
-        return None
-    lag_hours = (latest_raw_cycle - posterior_cycle).total_seconds() / 3600.0
-    return (
-        f"basis={basis or 'source_cycle_time_live_input_lag'}:"
-        f"latest_raw_cycle={latest_raw_cycle.isoformat()}:"
-        f"posterior_cycle={posterior_cycle.isoformat()}:"
-        f"lag_h={lag_hours:.2f}"
-    )
+    return None if exact_serving_checked else "basis=current_value_serving_provenance_unverifiable"
 
 
 def replacement_live_input_lag_reason(
@@ -2451,16 +2395,22 @@ def replacement_live_input_lag_reason(
     posterior_computed_at: object | None = None,
     posterior_provenance: Mapping[str, object] | None = None,
     held_redecision: bool = False,
+    input_witness_out: dict[str, object] | None = None,
 ) -> str | None:
-    """Return lag/absence state, or a dedicated blocker for transient read loss.
+    """Return intrinsic invalidity only; successor debt is independent evidence.
 
-    ``held_redecision`` permits only last-complete-bundle continuity while the
-    eligible ENS frontier is unchanged.  It does not weaken ENTRY or any other
-    identity, causality, same-cycle-late-input, read-loss, or age check.
+    Same policy for ENTRY, HELD and standing rests. This does not certify an
+    arbitrary row: the bundle reader still requires its exact READY binding,
+    live-grade semantics, original dependencies, scope and validity interval.
     """
-
+    refresh: list[str] = []
+    witness: dict[str, object] = {
+        "revision": "validated_posterior_input_continuity_v1",
+        "city": city, "target_date": str(target_date), "metric": metric,
+        "checked_at": decision_time.isoformat(),
+    }
     try:
-        return _replacement_live_input_lag_reason(
+        reason = _replacement_live_input_lag_reason(
             conn,
             city=city,
             target_date=target_date,
@@ -2470,11 +2420,27 @@ def replacement_live_input_lag_reason(
             posterior_computed_at=posterior_computed_at,
             posterior_provenance=posterior_provenance,
             held_redecision=held_redecision,
+            refresh_reasons=refresh, input_witness_out=witness,
         )
     except ReplacementInputHwmReadUnavailable as exc:
-        # A retryable SQLite failure is UNKNOWN authority, never honest absence.
-        # Consumers treat every non-None reason as fail-closed stale evidence.
-        return exc.blocker_reason()
+        reason = exc.blocker_reason()
+    witness["refresh_reasons"] = tuple(dict.fromkeys(refresh))
+    witness["blocking_reason"] = reason
+    # Diagnostic identity is deliberately not the posterior's content identity.
+    witness["witness_identity"] = hashlib.sha256(json.dumps(
+        witness, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    if input_witness_out is not None:
+        input_witness_out.update(witness)
+    return reason
+
+
+def replacement_input_refresh_reason(conn: sqlite3.Connection, **kwargs: object) -> str | None:
+    """Coverage/queue projection: a usable old posterior does not cover new inputs."""
+    witness: dict[str, object] = {}
+    reason = replacement_live_input_lag_reason(conn, **kwargs, input_witness_out=witness)
+    refresh = witness.get("refresh_reasons", ())
+    return reason or (refresh[0] if refresh else None)
+
 
 
 def retired_low_uncertified_incumbent_yields_to_current_ensemble(

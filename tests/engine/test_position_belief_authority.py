@@ -1574,10 +1574,8 @@ class TestLoadReplacementBelief:
             assert belief.raw_input_lag_reason is None
             assert belief.freshness_basis == "source_cycle_time"
 
-    def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
-        """Anchor artifacts are upstream live inputs; monitor freshness cannot
-        stay green just because BAYES_PRECISION_FUSION raw rows have not caught
-        up to the same cycle yet."""
+    def test_uncertified_posterior_is_not_licensed_by_raw_clock_telemetry(self, forecasts_db):
+        """A bare old q row is not the last validated active posterior."""
         _insert(
             forecasts_db,
             posterior_id="p1",
@@ -1594,11 +1592,10 @@ class TestLoadReplacementBelief:
 
         belief = _load(forecasts_db)
 
-        assert belief is not None
-        assert belief.fresh is False
-        assert belief.freshness_basis == "source_cycle_time_raw_forecast_artifacts_lag"
-        assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
-        assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
+        # This stripped fixture has no valid physical carrier. New inputs
+        # cannot license it. The real-writer continuity positives live in
+        # test_replacement_input_continuity.py.
+        assert belief is None
 
     def test_raw_artifact_cycle_is_family_scoped(self, forecasts_db):
         _insert(

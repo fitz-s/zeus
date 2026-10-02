@@ -173,6 +173,7 @@ class ReplacementBelief:
     raw_cycle_lag_hours: float | None = None
     raw_input_lag_reason: str | None = None
     probability_semantics_revision: str | None = None
+    input_hwm_witness: Mapping[str, object] | None = None
 
     def freshness_validation(self) -> str:
         state = "fresh" if self.fresh else "stale"
@@ -855,6 +856,7 @@ def load_replacement_belief(
     latest_raw_cycle_time: datetime | None = None
     latest_raw_cycle_basis: str | None = None
     raw_input_lag_reason: str | None = None
+    input_hwm_witness: dict[str, object] = {}
     try:
         timeout = _remaining_read_timeout(deadline_monotonic)
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout)
@@ -971,18 +973,12 @@ def load_replacement_belief(
                     decision_time=now_dt,
                     posterior_source_cycle_time=row["source_cycle_time"],
                     posterior_computed_at=row["computed_at"],
-                    # This loader serves HELD bins only (every caller is the
-                    # held-position monitor). The held-continuity exemption
-                    # (97db58d8a) permits last-complete-bundle serving while
-                    # the eligible ENS frontier is unchanged; without it, a
-                    # merely-REGISTERED newer anchor artifact (downloaded, not
-                    # yet materialized into a model run) blinded the exit
-                    # organ on live positions for tens of minutes
-                    # (BELIEF_AUTHORITY_FAULT, 2026-08-27). ENTRY paths never
-                    # read through here and stay strict.
+                    # Whole validated bundles serve the same q to entry and held paths.
+                    input_witness_out=input_hwm_witness,
                     held_redecision=True,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # UNKNOWN is not honest absence.
+                raw_input_lag_reason = "basis=replacement_input_hwm_read_unavailable:" + type(exc).__name__
                 logger.warning(
                     "position_belief: raw-input HWM check failed for %s/%s/%s: %s",
                     city,
@@ -1227,6 +1223,7 @@ def load_replacement_belief(
         ),
         raw_cycle_lag_hours=raw_cycle_lag_hours,
         raw_input_lag_reason=raw_input_lag_reason,
+        input_hwm_witness=input_hwm_witness or None,
     )
 
 

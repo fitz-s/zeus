@@ -28630,6 +28630,7 @@ def _replacement_live_input_lag_reason(
     decision_time: datetime,
     posterior_source_cycle_time: object,
     posterior_computed_at: object | None = None,
+    input_witness_out: dict[str, object] | None = None,
 ) -> str | None:
     return _replacement_input_hwm.replacement_live_input_lag_reason(
         conn,
@@ -28639,6 +28640,7 @@ def _replacement_live_input_lag_reason(
         decision_time=decision_time,
         posterior_source_cycle_time=posterior_source_cycle_time,
         posterior_computed_at=posterior_computed_at,
+        input_witness_out=input_witness_out,
     )
 
 
@@ -28773,12 +28775,14 @@ def _forecast_authority_payload_from_posterior(
     if current_snapshot_reason is not None:
         _fail(current_snapshot_reason)
         return None
+    input_hwm_witness: dict[str, object] = {}
     raw_lag_reason = _replacement_live_input_lag_reason(
         conn,
         family=family,
         decision_time=decision_time,
         posterior_source_cycle_time=p_source_cycle_time,
         posterior_computed_at=p_computed_at,
+        input_witness_out=input_hwm_witness,
     )
     if raw_lag_reason is not None:
         raise ValueError(f"REPLACEMENT_LIVE_INPUT_LAG:{raw_lag_reason}")
@@ -28925,6 +28929,7 @@ def _forecast_authority_payload_from_posterior(
         "identity": snapshot_id,
         "snapshot_id": snapshot_id,
         "reader_authority": "forecast_posteriors.replacement_0_1",
+        "input_hwm_witness": input_hwm_witness,
         "reader_status": FORECAST_LIVE_ELIGIBLE_STATUS,
         "reader_reason_code": None,
         "city": family.city,

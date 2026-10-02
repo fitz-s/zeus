@@ -12566,7 +12566,7 @@ def test_monitor_entry_selection_guard_requires_exact_entry_aggregate_identity()
     assert cycle_runtime._entry_qkernel_selection_guard_verdict(conn, pos) is None
 
 
-def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_posterior():
+def test_entry_replacement_without_consumed_clock_is_not_authority():
     """Entry must not trade a stale posterior after anchor-qualified raw inputs advance."""
     from src.engine import event_reactor_adapter as adapter
 
@@ -12616,10 +12616,11 @@ def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_poste
         posterior_source_cycle_time="2026-06-29T06:00:00+00:00",
     )
 
+    # A frontier timestamp or used-model name alone is not a validated q_k.
+    # Positive continuity cases use the real physical-writer fixtures in
+    # test_replacement_input_continuity.py instead of granting this stub authority.
     assert reason is not None
-    assert "source_cycle_time_raw_model_forecasts_lag" in reason
-    assert "latest_raw_cycle=2026-06-29T12:00:00+00:00" in reason
-    assert "posterior_cycle=2026-06-29T06:00:00+00:00" in reason
+    assert "unverifiable" in reason
 
 
 def test_entry_posterior_lookup_is_live_only_and_uses_live_family_index(monkeypatch):
@@ -13725,7 +13726,7 @@ def test_global_gamma_reads_use_persistent_request_governor(monkeypatch):
     }
 
 
-def test_entry_replacement_ignores_partial_non_anchor_raw_cycle_newer_than_posterior():
+def test_entry_replacement_partial_frontier_cannot_certify_unknown_posterior():
     """Partial regional/model rows cannot stale replacement authority by themselves.
 
     Live June-30 shape: DMI/ICON rows for 12Z arrived before any replacement
@@ -13780,10 +13781,14 @@ def test_entry_replacement_ignores_partial_non_anchor_raw_cycle_newer_than_poste
         posterior_source_cycle_time="2026-06-30T06:00:00+00:00",
     )
 
-    assert reason is None
+    # A frontier timestamp or used-model name alone is not a validated q_k.
+    # Positive continuity cases use the real physical-writer fixtures in
+    # test_replacement_input_continuity.py instead of granting this stub authority.
+    assert reason is not None
+    assert "unverifiable" in reason
 
 
-def test_entry_replacement_blocks_when_used_model_raw_cycle_newer_than_posterior():
+def test_entry_replacement_used_model_names_are_not_consumed_proof():
     """A posterior is stale when one of its own used models has a newer raw cycle."""
     from src.engine import event_reactor_adapter as adapter
 
@@ -13865,13 +13870,14 @@ def test_entry_replacement_blocks_when_used_model_raw_cycle_newer_than_posterior
         posterior_source_cycle_time="2026-07-08T00:00:00+00:00",
     )
 
+    # A frontier timestamp or used-model name alone is not a validated q_k.
+    # Positive continuity cases use the real physical-writer fixtures in
+    # test_replacement_input_continuity.py instead of granting this stub authority.
     assert reason is not None
-    assert "source_cycle_time_used_raw_model_forecasts_lag" in reason
-    assert "latest_raw_cycle=2026-07-08T06:00:00+00:00" in reason
-    assert "posterior_cycle=2026-07-08T00:00:00+00:00" in reason
+    assert "unverifiable" in reason
 
 
-def test_entry_replacement_blocks_when_used_model_same_cycle_arrives_after_posterior():
+def test_entry_replacement_declared_cycle_without_consumed_proof_is_unknown():
     """A same-cycle used-model row captured after computed_at invalidates the posterior."""
     from src.engine import event_reactor_adapter as adapter
 
@@ -13948,11 +13954,11 @@ def test_entry_replacement_blocks_when_used_model_same_cycle_arrives_after_poste
         posterior_computed_at="2026-07-08T08:00:00+00:00",
     )
 
+    # A frontier timestamp or used-model name alone is not a validated q_k.
+    # Positive continuity cases use the real physical-writer fixtures in
+    # test_replacement_input_continuity.py instead of granting this stub authority.
     assert reason is not None
-    assert "used_raw_model_forecasts_same_cycle_late_input" in reason
-    assert "latest_raw_cycle=2026-07-08T06:00:00+00:00" in reason
-    assert "latest_raw_input_at=2026-07-08T09:30:00+00:00" in reason
-    assert "posterior_computed_at=2026-07-08T08:00:00+00:00" in reason
+    assert "unverifiable" in reason
 
 
 def test_replacement_forecast_authority_missing_posterior_does_not_fallback(monkeypatch):

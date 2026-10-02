@@ -4199,7 +4199,7 @@ def _entry_replacement_input_hwm_component(
     conn: sqlite3.Connection,
     intent: ExecutionIntent,
 ) -> dict:
-    """Reject replacement entries when live inputs have outrun the posterior."""
+    """Revalidate consumed authority; successor input lag is witness data, not veto."""
 
     context = getattr(intent, "decision_source_context", None)
     if context is None or (
@@ -4252,6 +4252,7 @@ def _entry_replacement_input_hwm_component(
 
     forecasts_conn = get_forecasts_connection_read_only()
     try:
+        input_witness: dict[str, object] = {}
         lag_reason = replacement_input_hwm.replacement_live_input_lag_reason(
             forecasts_conn,
             city=city,
@@ -4260,7 +4261,9 @@ def _entry_replacement_input_hwm_component(
             decision_time=decision_time,
             posterior_source_cycle_time=getattr(context, "forecast_issue_time", ""),
             posterior_computed_at=getattr(context, "forecast_fetch_time", ""),
+            input_witness_out=input_witness,
         )
+        details["input_hwm_witness"] = input_witness
     except Exception as exc:  # noqa: BLE001 - live submit must fail closed.
         return _capability_component(
             "replacement_input_hwm",
@@ -4274,7 +4277,7 @@ def _entry_replacement_input_hwm_component(
         return _capability_component(
             "replacement_input_hwm",
             allowed=False,
-            reason="live_input_lag",
+            reason="consumed_probability_authority_invalid",
             **{**details, "lag_reason": lag_reason},
         )
     return _capability_component(
