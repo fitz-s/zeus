@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-30
+# Last reused or audited: 2026-10-02 (typed preflight expiry)
 # Lifecycle: created=2026-06-09; last_reviewed=2026-08-30; last_reused=2026-08-30
 # Purpose: Prove current-target anchor cycle currency and scoped quota authority.
 # Reuse: Run for replacement current-target download, source-clock, or quota-lane changes.
@@ -2689,6 +2689,51 @@ def test_ready_plan_with_stale_artifacts_still_downloads_new_cycle(tmp_path, mon
     assert len(calls) == 1
     assert calls[0]["cycle"] == AVAILABLE_CYCLE
     assert calls[0]["fetch_workers"] == 6
+
+
+@pytest.mark.parametrize("expiry", ("preflight", "in_download"))
+def test_expiry_before_the_downloader_is_typed_as_writing_nothing(
+    tmp_path, monkeypatch, expiry,
+) -> None:
+    """An anchor slice that expired before its downloader started wrote nothing,
+    so its receipt must not hold the ecmwf_ifs cursor (10-02: 33 of 55 polls).
+    An expiry inside the downloader may follow a committed family and stays a
+    plain timeout."""
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.replacement_forecast_production as production
+    import src.ingest_main as ingest_main
+
+    db = _make_db(tmp_path, {
+        "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+        "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+    })
+    _wire(monkeypatch, plan=_PlanStub(ready=True), calls=[])
+    if expiry == "preflight":
+        monkeypatch.setattr(production, "_max_downloaded_current_target_cycle",
+            lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("current-target cycle read deadline expired")))
+    else:
+        monkeypatch.setattr(dl, "download_current_target_openmeteo_inputs",
+            lambda **_k: (_ for _ in ()).throw(TimeoutError("current-target download deadline expired")))
+
+    with pytest.raises(TimeoutError) as raised:
+        _download_replacement_forecast_current_targets_if_needed(_cfg(db, tmp_path))
+
+    status = ingest_main._current_target_timeout_status(raised.value)
+    if expiry == "preflight":
+        assert isinstance(raised.value, production.CurrentTargetPreflightExpired)
+        assert status == "CURRENT_TARGET_PREFLIGHT_EXPIRED"
+        assert status in ingest_main._BROAD_RESEED_NO_WRITE_STATUSES
+        assert ingest_main._broad_reseed_raw_sources(
+            {"status": "SOURCE_CLOCK_SCOPED_DOWNLOAD_SKIPPED",
+             "source_clock_anchor_download": {"status": status}}, ("ecmwf_ifs",),
+        ) == ()
+    else:
+        assert not isinstance(raised.value, production.CurrentTargetPreflightExpired)
+        assert status == "CURRENT_TARGET_DOWNLOAD_TIMEOUT"
+        assert ingest_main._broad_reseed_raw_sources(
+            {"status": "SOURCE_CLOCK_SCOPED_DOWNLOAD_SKIPPED",
+             "source_clock_anchor_download": {"status": status}}, ("ecmwf_ifs",),
+        ) == ("ecmwf_ifs",)
 
 
 def test_scoped_source_commit_is_not_truncated_by_maintenance_limit(

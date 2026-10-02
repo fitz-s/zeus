@@ -910,6 +910,15 @@ def _committed_current_target_anchor_scopes(
     return tuple(sorted(committed))
 
 
+class CurrentTargetPreflightExpired(TimeoutError):
+    """The anchor slice's deadline expired before its downloader started.
+
+    Nothing was fetched or written: probe, key, cycle and coverage reads only.
+    A TimeoutError raised from inside the downloader stays a plain TimeoutError,
+    because a family committed before it may already be on disk.
+    """
+
+
 @_single_current_target_download
 def _download_replacement_forecast_current_targets_if_needed(
     cfg: dict[str, object],
@@ -918,6 +927,28 @@ def _download_replacement_forecast_current_targets_if_needed(
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
     quota_critical: bool = False,
     quota_priority: bool = False,
+) -> dict[str, object] | None:
+    downloading = [False]
+    try:
+        return _download_replacement_forecast_current_targets_slice(
+            cfg, max_wall_clock_seconds=max_wall_clock_seconds,
+            required_scopes=required_scopes, quota_critical=quota_critical,
+            quota_priority=quota_priority, downloading=downloading,
+        )
+    except TimeoutError as exc:
+        if downloading[0] or isinstance(exc, CurrentTargetPreflightExpired):
+            raise
+        raise CurrentTargetPreflightExpired(str(exc)) from exc
+
+
+def _download_replacement_forecast_current_targets_slice(
+    cfg: dict[str, object],
+    *,
+    max_wall_clock_seconds: float | None,
+    required_scopes: Sequence[tuple[str, str, str]] | None,
+    quota_critical: bool,
+    quota_priority: bool,
+    downloading: list[bool],
 ) -> dict[str, object] | None:
     # SCOPE: this anchor slice, including probe and plan. DRAIN: retry in the
     # next maintenance tick with a fresh lane budget. RESET: each invocation
@@ -1175,6 +1206,8 @@ def _download_replacement_forecast_current_targets_if_needed(
             # re-counts residual scopes. RESET: context exit or zero residual gaps.
             quota_context = quota_tracker.priority_lane()
         with quota_context:
+            # From here a family may commit: an expiry is no longer preflight.
+            downloading[0] = True
             result = download_current_target_openmeteo_inputs(
                 forecast_db=Path(str(forecast_db)),
                 output_dir=Path(str(output_dir)),

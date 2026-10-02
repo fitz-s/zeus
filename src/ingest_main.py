@@ -133,6 +133,8 @@ _BROAD_RESEED_NO_WRITE_STATUSES = frozenset({
     "SOURCE_CLOCK_BPF_SCOPED_CYCLE_UNRESOLVED_SKIP",
     "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS",
     "CURRENT_TARGET_DOWNLOAD_INFLIGHT_SKIP",
+    # Expired before its downloader started: nothing fetched or written.
+    "CURRENT_TARGET_PREFLIGHT_EXPIRED",
     "CYCLE_PROBE_UNRESOLVED_SKIP",
     "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
     "CURRENT_TARGET_CRITICAL_SCOPES_NOT_FETCHABLE",
@@ -3171,6 +3173,7 @@ _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_RETRYABLE_STATUSES = frozenset(
         "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
         "CURRENT_TARGET_DOWNLOAD_INFLIGHT_SKIP",
         "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+        "CURRENT_TARGET_PREFLIGHT_EXPIRED",
         "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
         "CURRENT_TARGET_RAW_INPUTS_TRANSPORT_RETRYABLE",
         "CYCLE_PROBE_UNRESOLVED_SKIP",
@@ -3196,6 +3199,19 @@ _REPLACEMENT_RESEED_SUCCESS_STATUS = {
     "fusion_upgrade": "FUSION_UPGRADE_TRIGGER",
     "cycle_advance": "CYCLE_ADVANCE_TRIGGER",
 }
+
+
+def _current_target_timeout_status(exc: BaseException) -> str:
+    """A slice that expired before downloading wrote nothing; any later expiry may have."""
+    from src.data.replacement_forecast_production import (  # noqa: PLC0415
+        CurrentTargetPreflightExpired,
+    )
+
+    return (
+        "CURRENT_TARGET_PREFLIGHT_EXPIRED"
+        if isinstance(exc, CurrentTargetPreflightExpired)
+        else "CURRENT_TARGET_DOWNLOAD_TIMEOUT"
+    )
 
 
 def _replacement_maintenance_lane_error(
@@ -3498,7 +3514,7 @@ def _replacement_maintenance_tick():
                 )
             except TimeoutError as exc:
                 partition_report = {
-                    "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                    "status": _current_target_timeout_status(exc),
                     "timeout_seconds": timeout_s,
                     "error": str(exc)[:240],
                 }
@@ -3607,7 +3623,7 @@ def _replacement_maintenance_tick():
             )
         except TimeoutError as exc:
             download_report = {
-                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                "status": _current_target_timeout_status(exc),
                 "timeout_seconds": timeout_s,
                 "error": str(exc)[:240],
             }
@@ -4556,7 +4572,7 @@ def _replacement_availability_poll_tick():
             )
         except TimeoutError as exc:
             report = {
-                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                "status": _current_target_timeout_status(exc),
                 "timeout_seconds": current_target_timeout,
                 "error": str(exc)[:240],
             }
