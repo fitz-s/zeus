@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-10-02 (rolling capture aged at window close; CURRENT_REUSABLE)
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector option from the day0 first-principles
 #   review §6.1/§6.3). INV-37: all writes go to zeus-forecasts.db under
@@ -3584,6 +3584,30 @@ def day0_ensemble_run_refusal(
     return None
 
 
+def _rolling_capture_age_at_window_close(
+    captured: datetime, moment: datetime, *, vector: "Day0HourlyVector", target_date: str,
+) -> float:
+    """Hours from capture to the close of the window the capture forecasts.
+
+    The rolling bound keeps a forecast of still-future hours the latest one
+    available. Once the target local day has ended, no newer forecast of its
+    hours can be issued: the last capture before day end is final evidence, so
+    its age is judged at day end, min(decision, day_end) - captured_at. A
+    capture already stale at day end stays stale; an open day is unchanged.
+    """
+    close = moment
+    try:
+        day_end = datetime.combine(
+            date.fromisoformat(str(target_date)) + timedelta(days=1), datetime_time.min,
+            tzinfo=ZoneInfo(str(vector.timezone_name)),
+        ).astimezone(UTC)
+    except (TypeError, ValueError, KeyError, ZoneInfoNotFoundError):
+        day_end = None
+    if day_end is not None and day_end < close:
+        close = day_end
+    return (close - captured).total_seconds() / 3600.0
+
+
 def select_ready_day0_hourly_vectors(
     vectors: Iterable[Day0HourlyVector],
     *,
@@ -3649,7 +3673,9 @@ def select_ready_day0_hourly_vectors(
                 run_refusals[run] = day0_ensemble_run_refusal(run, decision_time=moment)
             if run_refusals[run] is not None:
                 continue
-        elif age_hours > float(max_age_hours):
+        elif _rolling_capture_age_at_window_close(
+            captured, moment, vector=vector, target_date=target_date,
+        ) > float(max_age_hours):
             continue
         if require_complete_remaining_window:
             try:
@@ -3773,7 +3799,22 @@ def read_freshest_day0_hourly_vectors(
 
         conn = get_forecasts_connection_read_only()
     moment = (now or datetime.now(UTC)).astimezone(UTC)
-    oldest_capture = moment - timedelta(hours=float(max_age_hours))
+    # SQL candidate floor only; select_ready_day0_hourly_vectors ages each row
+    # exactly at the close of its window (min(decision, local-day end)).
+    capture_close = moment
+    try:
+        from src.config import runtime_cities_by_name
+
+        city_obj = runtime_cities_by_name().get(str(city))
+        if city_obj is not None:
+            day_end = datetime.combine(
+                date.fromisoformat(str(target_date)) + timedelta(days=1), datetime_time.min,
+                tzinfo=ZoneInfo(str(city_obj.timezone)),
+            ).astimezone(UTC)
+            capture_close = min(moment, day_end)
+    except (TypeError, ValueError, KeyError, ZoneInfoNotFoundError):
+        capture_close = moment
+    oldest_capture = capture_close - timedelta(hours=float(max_age_hours))
     from src.data.replacement_forecast_cycle_policy import (
         replacement_source_cycle_max_age_hours,
     )
