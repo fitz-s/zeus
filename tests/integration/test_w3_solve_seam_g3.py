@@ -27637,7 +27637,8 @@ def test_current_global_book_epoch_rejects_parallel_chunk_error():
         )
 
 
-def test_current_gamma_identity_fills_missing_no_without_changing_q():
+@pytest.mark.parametrize("invalidated_held_side", ("YES", "NO"))
+def test_current_gamma_identity_fills_missing_no_without_changing_q(invalidated_held_side):
     family, proofs, payload = _corpus()[0]
     proofs = tuple(
         replace(
@@ -28074,6 +28075,110 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert held_metadata[(held_binding.condition_id, held_token)][
         "_global_current_clob"
     ] is True
+
+    invalidated_token = (
+        held_binding.yes_token_id
+        if invalidated_held_side == "YES"
+        else held_binding.no_token_id
+    )
+    invalidated_local = _global_book_metadata_conn(
+        original,
+        captured_at="2026-07-10T07:59:00+00:00",
+        freshness_deadline="2026-07-10T08:00:30+00:00",
+    )
+    invalidated_local.executescript(
+        """
+        CREATE TABLE executable_market_snapshot_invalidations (
+            invalidation_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            token_id TEXT,
+            reason TEXT NOT NULL,
+            invalidated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    invalidated_local.execute(
+        "INSERT INTO executable_market_snapshot_invalidations VALUES (?, ?, ?, ?, ?, ?)",
+        ("held-due", held_binding.condition_id, invalidated_token,
+         "held_snapshot_due", "2026-07-10T07:59:30+00:00", "2026-07-10T07:59:30+00:00"),
+    )
+    fresh_clob_market = {
+        "condition_id": held_binding.condition_id,
+        "active": True, "closed": False, "archived": False,
+        "accepting_orders": True, "enable_order_book": True,
+        "minimum_tick_size": "0.01", "minimum_order_size": "5",
+        "tokens": [
+            {"token_id": held_binding.yes_token_id, "outcome": "Yes"},
+            {"token_id": held_binding.no_token_id, "outcome": "No"},
+        ],
+    }
+    invalidated_rows = universe._global_book_snapshot_rows(
+        invalidated_local, condition_ids=(held_binding.condition_id,), checked_at_utc=at,
+    )
+    assert invalidated_rows and all(row["snapshot_invalidated"] for row in invalidated_rows)
+    for fault in ("none", "missing", "closed", "token_mismatch"):
+        fresh_market = copy.deepcopy(fresh_clob_market)
+        if fault == "missing":
+            fresh_market = None
+        elif fault == "closed":
+            fresh_market["closed"] = True
+        elif fault == "token_mismatch":
+            fresh_market["tokens"][0]["token_id"] = "different-yes-token"
+        calls = []
+        refreshed_metadata = {}
+        refreshed = bind_current_global_probability_tokens(
+            forecast,
+            probability_witnesses={original.family_key: original},
+            get_gamma_event=lambda _slug: pytest.fail("held refresh must use current CLOB"),
+            get_gamma_markets=lambda _conditions: pytest.fail("held refresh must use current CLOB"),
+            get_clob_market=lambda condition_id: calls.append(condition_id) or fresh_market,
+            trade_conn=invalidated_local,
+            checked_at_utc=at,
+            metadata_sink=refreshed_metadata,
+            required_token_ids=frozenset({invalidated_token}),
+        )
+        assert calls == [held_binding.condition_id]
+        if fault in {"missing", "token_mismatch"}:
+            assert refreshed == {} and refreshed_metadata == {}
+            continue
+        refreshed_witness = refreshed[original.family_key]
+        assert refreshed_witness.bindings == original.bindings
+        assert refreshed_witness.witness_identity == original.witness_identity
+        assert refreshed_witness.sample_matrix_identity == original.sample_matrix_identity
+        assert set(refreshed_metadata) == {(held_binding.condition_id, invalidated_token)}
+        metadata = refreshed_metadata[(held_binding.condition_id, invalidated_token)]
+        assert metadata["_global_current_clob"] is True
+        assert metadata["snapshot_invalidated"] is False
+        assert metadata["captured_at"] == at.isoformat()
+        assert universe._global_book_metadata_is_executable(
+            metadata, checked_at_utc=at,
+        ) is (fault == "none")
+        book_calls = []
+        capture_times = iter((at, at + _dt.timedelta(seconds=1)))
+        refreshed_epoch = capture_current_global_book_epoch(
+            invalidated_local,
+            probability_witnesses=refreshed,
+            get_books=lambda tokens: book_calls.append(tuple(tokens)) or {
+                invalidated_token: {
+                    "asset_id": invalidated_token, "hash": "current-held-book",
+                    "tick_size": "0.01", "min_order_size": "5",
+                    "bids": [{"price": "0.47", "size": "20"}],
+                    "asks": [{"price": "0.81", "size": "20"}],
+                }
+            },
+            clock=lambda: next(capture_times),
+            max_age=_dt.timedelta(seconds=30),
+            metadata_overrides=refreshed_metadata,
+            required_token_ids=frozenset({invalidated_token}),
+        )
+        if fault == "none":
+            assert book_calls == [(invalidated_token,)]
+            assert {asset.token_id for asset in refreshed_epoch.sell_assets} == {invalidated_token}
+        else:
+            assert book_calls == []
+            assert refreshed_epoch.assets == () and refreshed_epoch.sell_assets == ()
+            assert {state[5] for state in refreshed_epoch.asset_states} == {"VENUE_NOT_EXECUTABLE"}
 
     unavailable_metadata = {}
     unavailable = bind_current_global_probability_tokens(

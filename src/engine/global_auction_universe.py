@@ -2050,8 +2050,6 @@ def bind_current_global_probability_tokens(
             condition_ids=condition_ids,
             checked_at_utc=checked_at_utc,
         ):
-            if bool(row.get("snapshot_invalidated")):
-                continue
             condition_id = str(row.get("condition_id") or "").strip()
             yes = str(row.get("yes_token_id") or "").strip()
             no = str(row.get("no_token_id") or "").strip()
