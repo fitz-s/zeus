@@ -149,6 +149,31 @@ timeout cause. The external restart controller's hard-coded old-SHA success chec
 also remains an operational interference; stopping that other task's controller
 requires the operator decision already requested, not a covert process kill.
 
+Follow-up implementation checkpoint: the invalidated-held query dead-end is
+repaired with two production-line deletions, retaining the local invalidation
+gate and exact current CLOB token-pair law. YES/NO RED cases become GREEN;
+eight focused instances cover unavailable, closed and mismatched responses,
+unchanged probability identity and independent current book capture. Independent
+review also traced inherited fees through actual SELL JIT: current Gamma fee
+read, fee-drift rejection and invalidation-aware durable fallback remain intact.
+Timeout-stage and bounded unknown-scope diagnostics are now preserved through
+maintenance; they are not acquisition, qualification or order permission.
+
+Combined follow-up checks: 55 money-path tests and 31 source/maintenance tests
+pass. The mandatory sixteen-file batch is repeated on this integrated slice:
+316 passed / 43 failed / 4 skipped, with the same 43 failed nodes and identical
+messages as the fixed upstream baseline after address normalization. Final batch
+evidence is `/tmp/zeus-hk-final-required-20261002.log` and its sibling XML. Two
+existing NumPy scalar-subtraction warnings are not suppressed. Changed-surface
+registry/freshness checks have no scoped errors; the two downstream-map warnings
+and 459 repo-wide topology issues are separate existing drift, not a global pass.
+
+Next acceptance is normal landing/loading followed by actual current CLOB
+requests, held-family inclusion, signed-EV/log SELL admission or its precise
+lawful rejection, and the newly visible maintenance stage/unknown/attempt fields.
+No BUY/SELL is forced to satisfy acceptance. Zero available bids remain a legal
+barrier, and no synthetic or historical counterfactual is realized-profit proof.
+
 Latest complete live stored-row audit is loss's existing
 `/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
 SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.
