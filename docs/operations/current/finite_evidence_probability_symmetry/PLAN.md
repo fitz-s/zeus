@@ -81,6 +81,36 @@ writers own disjoint source/test slices in temporary task child worktrees;
 read-only lanes provide current facts and mathematical diagnosis. No manual
 venue action or canonical DB repair is part of this implementation.
 
+Implementation checkpoint (2026-10-02, not runtime completion): all three bounded
+repairs and the non-budget SQLite diagnostic correction are integrated. The
+source/materializer/public-reader -> ENTRY/HELD callbacks -> real global auction
+and persisted receipt -> typed JIT -> executor/fact writer -> confirmed partial
+reduction antibody adds 16 passing cases. HTTP inputs, book/wealth/host posture,
+SDK and venue confirmation are controlled test inputs. The paused batch preflight
+hands the same stored receipt to JIT explicitly; the complete scheduler and
+`_submit_current_global_sell` wrapper are not claimed as end-to-end tested.
+Live money, historical fills and realized profitability are not inferred.
+
+Required data/engine batch at task SHA `359768d51677fe98b5a427dc995e992b657b1aac`:
+316 passed, 43 failed, 4 skipped. All 43 failed nodes reproduce on upstream
+`2693d1d739f3d0d9c41681bf29ecd8fe7a651e4a` with identical failure messages after
+only normalizing memory addresses; no new failure delta is established. The
+skips have no settlement/event rows in isolated test DBs, not live proof. Existing
+source full-file 14 failures and solver full-file one joint-BUY failure were also
+baseline-reproduced; they are not a clean all-suite pass. Required logs remain at
+`/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/zeus-required-checks.Mt8Vgk/`
+and `zeus-required-baseline.d79zme/` in the same parent temp directory.
+
+Independent final production-delta inspection covers SELL signed-EV/log/ruin and
+BUY parity, bounded physical unknown/capture budget, owner-locked cursor progress,
+and maker sample/mode symmetry. No actionable finding in that bounded review;
+this is static coverage, not runtime convergence. Changed source/test registry
+rows are aligned; repo-wide existing topology drift is separate from this scope.
+Final rebased affected checks, normal fast-forward landing/loading and actual
+source-to-current-held-redecision evidence remain the acceptance gate. In
+particular a new source cycle committed before its held posterior advances must
+not be reported as latest merely because the old shape has zero relative lag.
+
 Latest complete live stored-row audit is loss's existing
 `/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
 SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.
