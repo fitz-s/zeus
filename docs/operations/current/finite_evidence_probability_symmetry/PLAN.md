@@ -174,6 +174,41 @@ lawful rejection, and the newly visible maintenance stage/unknown/attempt fields
 No BUY/SELL is forced to satisfy acceptance. Zero available bids remain a legal
 barrier, and no synthetic or historical counterfactual is realized-profit proof.
 
+Post-load `72059fe4a` truth: normal loader exits zero; live/loaded/remote SHA,
+main/forecast/ingest identity, canonical DB handles and unchanged config agree.
+No global entry gate remains. Normal BPF cursor advances across current 00Z
+London/Paris/San Francisco/Buenos Aires and records one actual target attempt;
+TIMEBOXED with zero rows is not capture SUCCESS or READY. Hong Kong LOW closes
+three shares at 0.79 with CONFIRMED venue fact, zero chain exposure and +1.26
+canonical realized P&L. Its cut 13720 predates this second load and has positive
+cash EV; it is not proof of the new negative-EV SELL law or a profit attribution.
+
+Verified remaining timeliness defect: preparing 32 families consumes 37-41
+seconds before fresh books, leaving only 2-6 seconds of the normal 45-second
+epoch. Current source-clock instrument serving eagerly proves every historical
+candidate, then repeats serving validation before checking whether that model
+already has its exact qualified current winner. Bounded same-RO-transaction A/B
+shows identical complete ServedInstrumentValue records in six scopes while
+necessary proof counts drop from 82 to 10 (LA HIGH), 92 to 4 (HK HIGH), and
+74 to 28 (Paris LOW); individual measurements are noisy, not an overall-runtime
+claim. Two measured callbacks spend 80-89 percent in current instrument serving.
+
+Bounded repair: extract the unchanged ordered unproved-candidate SQL/deadline
+reader, preserve the existing full proved reader for frontier/sentinel/cohort,
+and only in current serving skip older candidates after that model has a fully
+qualified winner. All candidates that could win still undergo the original
+physical identity and serving checks. No SQL LIMIT, first-row-only assumption,
+cache service, city-universe reduction or deadline increase. Invalid first
+candidates continue the existing legal search; the shared exact-product latest
+poison classifier must still exclude every contaminated candidate. HIGH/LOW,
+future/advanced cutoff, absent winner, real receipt poison and untouched
+frontier/sentinel/cohort antibodies precede loading. Source and tests are owned
+by one writer; main owns registry alignment and final integration. INV-47 scope
+is discarded candidates of a model with a qualified winner, DRAIN is the normal
+ordered source read, RESET is a new cut/evidence that re-runs winner qualification.
+Acceptance remains a complete fresh current global cut plus lawful admission
+or a precise economic rejection, not merely a microbenchmark or restart.
+
 Latest complete live stored-row audit is loss's existing
 `/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
 SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.
