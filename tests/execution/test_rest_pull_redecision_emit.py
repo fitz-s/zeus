@@ -5,12 +5,13 @@
 #   redecision event type as price and terminal-no-fill management. The caller
 #   half harvests confirmed-cancelled rests, recovers each family from venue
 #   truth, and emits one EDLI_REDECISION_PENDING per family.
-"""Caller-side tests for the escalation re-decision emit.
+"""Caller-side tests for the cancelled-rest re-decision emit.
 
-Covers the two helpers added in src/main.py:
+Covers src/main.py:
   - _escalation_families_from_cancelled: the venue-truth family recovery.
-  - _emit_rest_pull_redecisions: routes the recovered families through the
-    standard live redecision lane with redecision_origin='rest_pull'.
+  - _emit_live_redecision_events_for_families as the C3 confirmed-cancel
+    emit: the standard live redecision lane with the C3 cancel origin and a
+    phase exemption for the families that just lost their rest.
 """
 from __future__ import annotations
 
@@ -267,11 +268,12 @@ def test_redecision_screen_manages_open_rests_outside_entry_fair_batch():
 
 
 def test_emit_routes_through_standard_live_redecision(monkeypatch):
-    """The emit must build FSR-shaped payloads as standard live redecisions:
+    """The C3 confirmed-cancel emit builds FSR-shaped standard redecisions:
       - event_type='EDLI_REDECISION_PENDING'
       - source uses the normal cycle-* redecision source
-      - restrict_to_families == the recovered set
-      - payload origin is rest_pull, not a source-prefix scheduling authority.
+      - restrict_to_families == the confirmed families
+      - those families are phase-exempt (a Day0 family still re-decides)
+      - payload origin is the C3 cancel origin the reactor's grace protects.
     """
     import src.main as m
     from src.events.opportunity_event import make_opportunity_event
@@ -358,22 +360,26 @@ def test_emit_routes_through_standard_live_redecision(monkeypatch):
 
     m._set_edli_redecision_boot_token("TOK")
     m._reset_edli_redecision_cycle_index()
+    from src.execution.staleness_cancel import C3_CANCEL_REDECISION_ORIGIN
+
     families = {("Moscow", "2026-06-17", "high")}
     now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
-    n = m._emit_rest_pull_redecisions(
-        families, decision_time=now, received_at=now.isoformat()
+    n = m._emit_live_redecision_events_for_families(
+        families, decision_time=now, received_at=now.isoformat(),
+        origin=C3_CANCEL_REDECISION_ORIGIN, phase_filter_exempt_families=set(families),
     )
     assert n == 1
     assert captured["event_type"] == "EDLI_REDECISION_PENDING"
     assert captured["source"].startswith("cycle-TOK-")
     assert captured["restrict_to_families"] == families
+    assert captured["phase_filter_exempt_families"] == families
     assert written_payloads == [
         {
             "city": "Moscow",
             "target_date": "2026-06-17",
             "metric": "high",
             "snapshot_id": "snap-1",
-            "redecision_origin": "rest_pull",
+            "redecision_origin": C3_CANCEL_REDECISION_ORIGIN,
         }
     ]
 
@@ -382,8 +388,34 @@ def test_emit_noop_on_empty_families(monkeypatch):
     import src.main as m
     from datetime import datetime, timezone
 
+    from src.execution.staleness_cancel import C3_CANCEL_REDECISION_ORIGIN
+
     now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
     # Must short-circuit BEFORE touching any DB/mutex.
-    assert m._emit_rest_pull_redecisions(
-        set(), decision_time=now, received_at=now.isoformat()
+    assert m._emit_live_redecision_events_for_families(
+        set(), decision_time=now, received_at=now.isoformat(),
+        origin=C3_CANCEL_REDECISION_ORIGIN,
     ) == 0
+
+
+def test_reactor_keeps_a_c3_cancel_redecision_through_its_grace():
+    """A generic no-edge screen cannot expire the family's continuity row."""
+
+    from datetime import datetime, timedelta, timezone
+
+    from src.events import reactor
+    from src.execution.staleness_cancel import C3_CANCEL_REDECISION_ORIGIN
+
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    payload = {"redecision_origin": C3_CANCEL_REDECISION_ORIGIN}
+    young = (now - timedelta(minutes=5)).isoformat()
+    old = (now - timedelta(minutes=25)).isoformat()
+    assert reactor._preserve_recent_c3_cancel_redecision(
+        payload, event_created_at=young, decision_dt=now,
+    )
+    assert not reactor._preserve_recent_c3_cancel_redecision(
+        payload, event_created_at=old, decision_dt=now,
+    )
+    assert not reactor._preserve_recent_c3_cancel_redecision(
+        {"redecision_origin": "screen"}, event_created_at=young, decision_dt=now,
+    )

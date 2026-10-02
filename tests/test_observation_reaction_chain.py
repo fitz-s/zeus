@@ -182,7 +182,7 @@ def _cancel_prior_rest(trade, forecasts, world, *, bundle, at):
         def try_acquire(self,_request_class):
             return SimpleNamespace(granted=self.allowed,decision=SimpleNamespace(value='DENIED'))
     venue=Venue();budget=Budget();started=time.monotonic_ns()
-    denied=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,world_conn_ro=world,now=at,rate_budget=budget)
+    denied=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,world_conn_ro=world,clock=lambda: at,rate_budget=budget)
     assert denied['cancel_set_size']==1,denied
     # This harness has no complete current global scope for the prior rest's
     # family, so C3 cancels it protectively (unavailable authority), never on
@@ -193,12 +193,12 @@ def _cancel_prior_rest(trade, forecasts, world, *, bundle, at):
     assert not denied['confirmed_families'] and not venue.calls
     assert trade.execute('SELECT COUNT(*) FROM venue_commands').fetchone()[0]==1
     budget.allowed=True
-    confirmed=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,world_conn_ro=world,now=at,rate_budget=budget)
+    confirmed=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,world_conn_ro=world,clock=lambda: at,rate_budget=budget)
     assert confirmed['confirmed_families']=={family},confirmed
     assert trade.execute("SELECT state FROM venue_commands WHERE command_id='prior-rest'").fetchone()[0]=='CANCELLED'
     trade.commit()
     assert venue.calls==[['prior-venue']]
-    replay=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,world_conn_ro=world,now=at,rate_budget=budget)
+    replay=run_c3_staleness_cancel_cycle(trade,trade,forecasts,venue,world_conn_ro=world,clock=lambda: at,rate_budget=budget)
     assert replay['cancel_set_size']==0 and len(venue.calls)==1
     return (time.monotonic_ns()-started)/1e6
 
