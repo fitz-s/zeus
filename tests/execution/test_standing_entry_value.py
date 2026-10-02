@@ -1,5 +1,5 @@
 # Created: 2026-10-01
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-02
 # Authority basis: standing ENTRY keep-by-value law (operator, 2026-09-30): an open ENTRY
 #   rest keeps working toward its current fractional-Kelly target R* (the selector's own
 #   mean-q sizer at the rest's limit); a posterior identity change only triggers
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from types import SimpleNamespace
@@ -361,9 +362,9 @@ class TestDisposition:
         assert value.evidence["authority_valid"] is True
         assert value.evidence["expected_growth"]["capital_lock_hours"] == pytest.approx(36.0)
 
-    def test_order_more_than_a_lot_above_target_cancels(self):
+    def test_order_above_the_selectors_fresh_target_cancels(self):
         value = _value(q=0.75, size="60")
-        assert D("60") - D(value.evidence["fractional_kelly_target_shares"]) >= D("5")
+        assert D("60") > D(value.evidence["target_holding_shares"])
         assert value.action == "CANCEL"
         assert value.reason == "CURRENT_FRACTIONAL_TARGET_REDUCED"
 
@@ -395,13 +396,12 @@ class TestDisposition:
         assert value.reason.startswith("CURRENT_MEAN_VALUE_NON_POSITIVE")
 
     def test_own_reservation_funds_its_rest_without_free_cash(self):
-        # $5 free cash plus the rest's own $5: a fresh order's cash envelope
-        # (maker capacity of free cash) would cap it, the existing order is
-        # valued as it is and kept inside full Kelly.
-        assert _value(cash="5", size="10").action == "KEEP"
-        # With no wealth beyond its own reservation the same order would be
-        # the whole bankroll: beyond full Kelly, so cancelled.
-        assert _value(cash="0", size="10").action == "CANCEL"
+        # $5 free cash plus the rest's own $2.50: the selector would post
+        # this one lot fresh, so the existing order is kept.
+        assert _value(cash="5", size="5").action == "KEEP"
+        # With no wealth beyond its own reservation a fresh lot would exceed
+        # full Kelly: the selector posts nothing, so the rest is cancelled.
+        assert _value(cash="0", size="5").action == "CANCEL"
 
     def test_selector_small_capital_rule_keeps_a_one_lot_rest(self):
         # q=0.52: 1/8-Kelly (~1 share) is below one lot but full Kelly (~8)
@@ -409,12 +409,57 @@ class TestDisposition:
         value = _value(q=0.52, size="5")
         assert D(value.evidence["fractional_kelly_target_shares"]) < D("5")
         assert D(value.evidence["full_kelly_target_shares"]) >= D("5")
+        assert D(value.evidence["target_holding_shares"]) == D("5")
         assert value.action == "KEEP"
 
-    def test_capital_envelope_still_binds_the_existing_order(self):
+    def test_small_capital_keeps_one_lot_never_up_to_full_kelly(self):
+        # Reviewer C3 probe: q 0.55 at 0.50, kT ~2.75 < lot 5 < T ~22. The
+        # selector would post exactly one lot, so a 20-share rest sized when
+        # q was higher is cancelled; the one-lot rest is kept.
+        big = _value(q=0.55, size="20")
+        assert D(big.evidence["fractional_kelly_target_shares"]) < D("5")
+        assert D(big.evidence["full_kelly_target_shares"]) >= D("20")
+        assert D(big.evidence["target_holding_shares"]) == D("5")
+        assert (big.action, big.reason) == ("CANCEL", "CURRENT_FRACTIONAL_TARGET_REDUCED")
+        assert _value(q=0.55, size="5").action == "KEEP"
+
+    def test_capital_limit_bounds_the_target_like_a_fresh_order(self):
+        # A $4 capital limit lets the selector post 8 shares at 0.50.
         value = _value(q=0.75, capital_limit="4")
-        assert value.action == "CANCEL"
-        assert value.reason == "CURRENT_CAPITAL_LIMIT_EXCEEDED"
+        assert D(value.evidence["target_holding_shares"]) == D("8")
+        assert (value.action, value.reason) == ("CANCEL", "CURRENT_FRACTIONAL_TARGET_REDUCED")
+        assert _value(q=0.75, size="8", capital_limit="4").action == "KEEP"
+
+    @pytest.mark.parametrize("q", [0.52, 0.55, 0.6, 0.65, 0.75, 0.9])
+    @pytest.mark.parametrize("cash", ["5", "20", "100", "1000"])
+    @pytest.mark.parametrize("capital_limit", ["4", "1000"])
+    def test_target_is_what_the_selectors_own_sizer_posts(self, q, cash, capital_limit):
+        # The fresh order _score_global_single_order_buy_expected sizes at
+        # the rest's limit, on the same wealth and capital limit, never ends
+        # above the target, and reaches it whenever it places an order.
+        value = _value(q=q, cash=cash, capital_limit=capital_limit, size="5")
+        witness = _witness(q=q)
+        rows = [_obligation_row(shares="5", cost="2.5")]
+        own = C._own_reservation_wealth(
+            _wealth(cash=cash, reservation="2.5", rows=rows),
+            _own(size="5", price="0.50", at_risk_micro=2_500_000),
+            obligation_rows=rows, positions=(), native_holdings_micro={},
+        )
+        deep = C._rest_candidate(
+            _rest(size="5"), snapshot=_snapshot(), binding=witness.bindings[0], side="YES",
+            probability_witness=witness, capacity=D("100000"),
+            ledger_snapshot_id=own.ledger_snapshot_id, now=NOW,
+        )
+        liquid = own.strategy_capital_allocation.utility_liquid_cash_usd
+        fresh = S._score_global_single_order_buy_expected(
+            deep, payoff_probability_mean=value.evidence["acting_q"], sample_count=1, band_alpha=1.0,
+            wealth_floor_usd=liquid, wealth_ceiling_usd=liquid,
+            spendable_cash_usd=own.spendable_cash_usd, capital_limit_usd=D(capital_limit),
+            fractional_kelly_multiplier=D("0.125"), current_token_shares=D("0"),
+        )
+        target = D(value.evidence["target_holding_shares"])
+        assert fresh.shares <= target
+        assert fresh.shares == 0 and target == 0 or target - fresh.shares < D("0.02")
 
     def test_posterior_identity_alone_never_changes_the_disposition(self):
         before = _value(q=0.75, posterior="posterior-a")
@@ -856,6 +901,7 @@ class TestRealAllocatorLifecycle:
         result = C.run_c3_staleness_cancel_cycle(
             conn, conn, sqlite3.connect(":memory:"), venue,
             world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+            authority_pending_until_monotonic=time.monotonic() + 60,
         )
 
         valuation = result["valuations"][0]
@@ -928,6 +974,7 @@ class TestRealAllocatorLifecycle:
         result = C.run_c3_staleness_cancel_cycle(
             conn, conn, sqlite3.connect(":memory:"), venue,
             world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+            authority_pending_until_monotonic=time.monotonic() + 60,
         )
 
         valuation = result["valuations"][0]
@@ -935,10 +982,64 @@ class TestRealAllocatorLifecycle:
         assert valuation.reason == "ENTRY_REST_AUTHORITY_PENDING:fit_corpus_not_installed"
         assert venue.calls == [] and loads == []
 
+    @pytest.mark.parametrize("bound", [None, -1.0])
+    def test_not_loaded_authority_past_its_bound_cancels(self, monkeypatch, bound):
+        # C2: "not loaded yet" defers only through the bootstrap delay plus
+        # one C3 tick; past it (or with no bound) unknown authority fails
+        # closed, whatever the rest's economics.
+        import src.calibration.market_anchored_live_fit as fit
+
+        conn = _trade_db()
+        _seed_early_rest(conn)
+        _real_authority_harness(monkeypatch)
+        _publish_real_allocator(conn)
+        at = datetime.now(UTC)
+        _seed_real_wealth(conn, captured_at=at - timedelta(seconds=5))
+        cache = fit.CanonicalCorpusCache()
+        cache.builder = SimpleNamespace(served=lambda *_a, **_k: None)
+        monkeypatch.setattr(fit, "_SHARED_CANONICAL_CORPUS_CACHE", cache)
+        venue = _NoCancelVenue()
+
+        result = C.run_c3_staleness_cancel_cycle(
+            conn, conn, sqlite3.connect(":memory:"), venue,
+            world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+            authority_pending_until_monotonic=None if bound is None else time.monotonic() + bound,
+        )
+
+        valuation = result["valuations"][0]
+        assert valuation.action == "CANCEL"
+        assert valuation.reason == "ENTRY_REST_AUTHORITY_NOT_LOADED_TIMEOUT:fit_corpus_not_installed"
+        assert valuation.evidence["authority_valid"] is False
+        assert venue.calls == [["venue-1"]]
+
+    def test_unpublished_allocator_past_its_bound_cancels(self, monkeypatch):
+        import src.risk_allocator.governor as governor
+        from src.risk_allocator import clear_global_allocator
+
+        conn = _trade_db()
+        _seed_early_rest(conn)
+        _real_authority_harness(monkeypatch)
+        at = datetime.now(UTC)
+        _seed_real_wealth(conn, captured_at=at - timedelta(seconds=5))
+        clear_global_allocator()
+        monkeypatch.setattr(governor, "_GLOBAL_ALLOCATOR_EVER_PUBLISHED", False)
+
+        result = C.run_c3_staleness_cancel_cycle(
+            conn, conn, sqlite3.connect(":memory:"), _NoCancelVenue(),
+            world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+            authority_pending_until_monotonic=time.monotonic() - 1,
+        )
+
+        valuation = result["valuations"][0]
+        assert (valuation.action, valuation.reason) == (
+            "CANCEL", "ENTRY_REST_AUTHORITY_NOT_LOADED_TIMEOUT:allocator_not_published"
+        )
+
 
 class TestFamilyOptimumDominance:
-    """F4: the rest is cancelled only when the family's own fresh optimum
-    beats it on the selector's ordering key (ruin reduction, then growth)."""
+    """C1: the rest is dominated only when cancelling it changes what the
+    selector funds by more than the rest is worth: released optimum >
+    held optimum + the rest, on the selector's ordering key."""
 
     def _optimum(self, *, du, ruin=0.0):
         return C.FamilyOptimum(
@@ -947,19 +1048,110 @@ class TestFamilyOptimumDominance:
             expected_delta_log_wealth=du, fill_probability=0.4,
         )
 
-    def test_strictly_better_fresh_growth_dominates(self):
+    def test_the_same_optimum_either_way_never_dominates(self):
+        # The reviewer's e2e case: the fresh optimum is the same order with
+        # or without the rest's cash; cancelling buys nothing.
         keep = _value(q=0.75)
         rest_du = keep.evidence["expected_growth"]["expected_delta_log_wealth"]
-        assert C.family_optimum_dominates(keep, self._optimum(du=rest_du * 1.5))
+        same = self._optimum(du=rest_du * 10)
+        assert not C.family_optimum_dominates(keep, held=same, released=same)
 
-    def test_equal_or_lower_fresh_growth_never_dominates(self):
+    def test_a_worse_sibling_never_dominates_a_partly_filled_rest(self):
+        # A small remainder against a full-size worse sibling: the old
+        # remainder-vs-fresh comparison cancelled here and stranded dust.
+        partial = _value(q=0.75, size="5", matched="4")
+        rest_du = partial.evidence["expected_growth"]["expected_delta_log_wealth"]
+        sibling = self._optimum(du=rest_du * 3)
+        assert not C.family_optimum_dominates(partial, held=sibling, released=sibling)
+
+    def test_dominates_only_when_releasing_the_rest_funds_more_than_it_is_worth(self):
         keep = _value(q=0.75)
         rest_du = keep.evidence["expected_growth"]["expected_delta_log_wealth"]
-        assert not C.family_optimum_dominates(keep, self._optimum(du=rest_du))
-        assert not C.family_optimum_dominates(keep, self._optimum(du=rest_du * 0.5))
+        held = self._optimum(du=0.01)
+        assert C.family_optimum_dominates(
+            keep, held=held, released=self._optimum(du=0.01 + rest_du * 1.01)
+        )
+        assert not C.family_optimum_dominates(
+            keep, held=held, released=self._optimum(du=0.01 + rest_du)
+        )
+        # Cash binds: with the rest held no fresh order fits at all.
+        assert C.family_optimum_dominates(keep, held=None, released=self._optimum(du=rest_du * 2))
+        assert not C.family_optimum_dominates(keep, held=None, released=self._optimum(du=rest_du / 2))
 
     def test_no_fresh_optimum_or_a_non_keep_never_dominates(self):
         keep = _value(q=0.75)
-        assert not C.family_optimum_dominates(keep, None)
+        assert not C.family_optimum_dominates(keep, held=None, released=None)
         cancel = _value(q=0.30)
-        assert not C.family_optimum_dominates(cancel, self._optimum(du=1.0))
+        assert not C.family_optimum_dominates(cancel, held=None, released=self._optimum(du=1.0))
+
+    def test_ruin_reduction_ranks_first(self):
+        keep = _value(q=0.75)
+        assert C.family_optimum_dominates(
+            keep, held=None, released=self._optimum(du=0.0, ruin=0.01)
+        )
+
+
+class TestFreshEntryGateAndPassLocalEvidence:
+    """The fresh side passes the live selector's suppression and family-block
+    gates, and each pass owns its Day0 ask-repricing evidence."""
+
+    def _cut(self, *, gate, occupied=frozenset()):
+        cut = C.FamilyOptimumCut.__new__(C.FamilyOptimumCut)
+        cut.trade_conn = _trade_db()
+        cut.gate = gate
+        cut.occupied_tokens = occupied
+        cut.day0_ask_evidence = {}
+        cut.event_type = "FORECAST_SNAPSHOT_READY"
+        cut.metric = "high"
+        cut.truth_by_bin_side = {}
+        cut.revision = None
+        cut.epoch = object()
+        return cut
+
+    def _candidate(self, token="yes-other", family_key=FAMILY_KEY):
+        return SimpleNamespace(
+            action="BUY", token_id=token, condition_id="cond-other", side="YES",
+            bin_id="bin-other", family_key=family_key, book_captured_at_utc=NOW,
+        )
+
+    def test_a_global_suppression_refuses_every_fresh_buy(self):
+        cut = self._cut(gate=C.FreshEntryGate(global_reason="RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE:x",
+                                              family_reasons={}))
+        assert cut.candidate_policy(self._candidate()) == "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE:x"
+        assert cut.optimum(
+            portfolio=None, wealth=None, fractional_kelly_multiplier=D("0.125"),
+            capital_authority=None, payoff_q_correction_resolver=None,
+        ) is None
+
+    def test_a_family_block_refuses_that_familys_fresh_buys_only(self):
+        cut = self._cut(gate=C.FreshEntryGate(global_reason=None,
+                                              family_reasons={FAMILY_KEY: "EDLI_STAGE_LIVE_CAP_RESERVED"}))
+        assert cut.candidate_policy(self._candidate()) == (
+            "LIVE_ENTRY_BLOCKED:entry_readiness_family:EDLI_STAGE_LIVE_CAP_RESERVED"
+        )
+
+    def test_the_rests_own_token_is_never_a_fresh_alternative(self):
+        cut = self._cut(gate=C.FRESH_ENTRY_GATE_OPEN, occupied=frozenset({TOKEN}))
+        assert cut.candidate_policy(self._candidate(token=TOKEN)) == "STANDING_ENTRY_TOKEN_HAS_OPEN_REST"
+
+    def test_day0_ask_evidence_is_owned_by_the_pass(self, monkeypatch):
+        from src.engine import event_reactor_adapter as adapter
+
+        seen = []
+
+        def record(candidate, *, event_type, trade_conn, counts):
+            seen.append(counts)
+            counts[("tok", NOW)] = 1
+            return "STOP"
+
+        monkeypatch.setattr(adapter, "_day0_candidate_ask_repricing_rejection_reason", record)
+        monkeypatch.setattr(adapter, "_global_active_entry_duplicate_reason", lambda *_a, **_k: None)
+        shared_before = dict(adapter._DAY0_ASK_SELECTION_EVIDENCE)
+        first, second = self._cut(gate=C.FRESH_ENTRY_GATE_OPEN), self._cut(gate=C.FRESH_ENTRY_GATE_OPEN)
+        first.candidate_policy(self._candidate())
+        second.candidate_policy(self._candidate())
+
+        assert seen[0] is first.day0_ask_evidence and seen[1] is second.day0_ask_evidence
+        assert seen[0] is not seen[1]
+        assert all(m is not adapter._DAY0_ASK_SELECTION_EVIDENCE for m in seen)
+        assert adapter._DAY0_ASK_SELECTION_EVIDENCE == shared_before

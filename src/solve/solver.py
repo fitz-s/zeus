@@ -3149,6 +3149,55 @@ def small_capital_minimum_lot_admits(
     )
 
 
+def fresh_buy_target_holding(
+    *,
+    prior_token_shares: Decimal,
+    full_kelly_target_shares: Decimal,
+    fractional_kelly_target_shares: Decimal,
+    legal_lot_shares: Decimal,
+    max_order_shares: Decimal,
+) -> Decimal:
+    """The most a fresh BUY from ``prior_token_shares`` brings the holding to.
+
+    The selector's own sizing law (``_score_global_single_order``): an order
+    of at least one legal lot, at most ``max_order_shares`` (its cash and
+    capital envelope at the limit), whose final holding stays within ``κT``;
+    or, where ``small_capital_minimum_lot_admits`` admits it, exactly one lot.
+    When neither fits the selector places nothing and the holding stays
+    ``prior_token_shares``.
+    """
+
+    prior = Decimal(prior_token_shares)
+    lot = Decimal(legal_lot_shares)
+    cap = Decimal(max_order_shares)
+    if cap < lot:
+        return prior
+    if small_capital_minimum_lot_admits(
+        current_token_shares=prior,
+        full_kelly_target_shares=full_kelly_target_shares,
+        fractional_kelly_target_shares=fractional_kelly_target_shares,
+        minimum_lot_shares=lot,
+    ):
+        return prior + lot
+    order = min(Decimal(fractional_kelly_target_shares) - prior, cap)
+    return prior + order if order >= lot else prior
+
+
+def buy_spend_limit_usd(
+    *,
+    capital_limit_usd: Decimal,
+    spendable_cash_usd: Decimal,
+    wealth_floor_usd: Decimal,
+) -> Decimal:
+    """The most one BUY may spend: capital limit, spendable cash, loss-branch wealth."""
+
+    return min(
+        Decimal(capital_limit_usd),
+        Decimal(spendable_cash_usd),
+        Decimal(wealth_floor_usd) * (Decimal("1") - Decimal(str(_WEALTH_MARGIN))),
+    )
+
+
 @dataclass(frozen=True)
 class GlobalBuyMinimumMarketableRepair:
     """Legacy receipt shape for the retired minimum-lot BUY exception."""
@@ -6271,11 +6320,11 @@ def _score_global_single_order(
         raise ValueError("fractional Kelly multiplier must be finite and in (0, 1]")
     if not held_shares.is_finite() or held_shares < 0:
         raise ValueError("current token shares must be finite and non-negative")
-    affordability_limit = min(
-        Decimal(spendable_cash_usd),
-        Decimal(wealth_floor_usd) * (Decimal("1") - Decimal(str(_WEALTH_MARGIN))),
+    spend_limit = buy_spend_limit_usd(
+        capital_limit_usd=capital_limit_usd,
+        spendable_cash_usd=spendable_cash_usd,
+        wealth_floor_usd=wealth_floor_usd,
     )
-    spend_limit = min(Decimal(capital_limit_usd), affordability_limit)
     capacity_max_shares = _single_order_max_shares(
         candidate.economic_cost_curve,
         spend_limit_usd=spend_limit,
@@ -6816,9 +6865,13 @@ class ExistingBuyValuation:
     ``no_value_reason`` when it is not positive by the selector's own law,
     ``_positive_common_expected_growth``). ``full_kelly_target_shares`` is the
     selector's Kelly reference holding ``T`` at the order's limit and
-    ``legal_lot_shares`` its smallest legal fresh order there; both size only
-    a fresh order. No ``GlobalSingleOrderDecision`` is built: that type
-    certifies a fresh order's sizing, which an existing order need not meet.
+    ``legal_lot_shares`` its smallest legal fresh order there.
+    ``target_holding_shares`` is the most a fresh order placed now, from
+    ``prior_token_shares`` (the holding before this order's own fills),
+    would bring the holding to (``fresh_buy_target_holding`` under the
+    selector's cash and capital envelope). No ``GlobalSingleOrderDecision``
+    is built: that type certifies a fresh order's sizing, which an existing
+    order need not meet.
     """
 
     shares: Decimal
@@ -6829,6 +6882,9 @@ class ExistingBuyValuation:
     full_kelly_target_shares: Decimal
     fractional_kelly_target_shares: Decimal
     legal_lot_shares: Decimal
+    prior_token_shares: Decimal
+    max_order_shares: Decimal
+    target_holding_shares: Decimal
 
 
 def score_existing_buy_expected(
@@ -6840,6 +6896,9 @@ def score_existing_buy_expected(
     wealth_ceiling_usd: Decimal,
     fractional_kelly_multiplier: Decimal,
     current_token_shares: Decimal,
+    filled_shares: Decimal,
+    capital_limit_usd: Decimal,
+    spendable_cash_usd: Decimal,
     probability_witness: FamilyPayoffWitness,
     resolution_at: datetime | None,
     decision_at_utc: datetime,
@@ -6851,17 +6910,25 @@ def score_existing_buy_expected(
     posterior-mean expected log wealth (``_single_order_metrics`` at the mean
     q) over the candidate's own curve and terminal branches, its common-axis
     growth (``_expected_growth_of_action`` over ``capital_lock_hours_until``)
-    and the positivity law (``_positive_common_expected_growth``). The lot
-    floor and the cash/allocator envelope size a fresh order and are not
-    re-applied: the remainder's reservation is already held. The Kelly
+    and the positivity law (``_positive_common_expected_growth``). The Kelly
     reference ``T`` and the legal lot are the selector's own, at this limit.
-    A remainder whose loss branch would leave no wealth has no value.
-    Horizon authority missing raises ``ValueError`` (lost authority).
+
+    ``target_holding_shares`` is the holding the selector would size this
+    order to if it placed it fresh now: from the holding before the order's
+    own ``filled_shares``, inside the selector's spend envelope
+    (``buy_spend_limit_usd`` over ``capital_limit_usd``, ``spendable_cash_usd``
+    and the loss-branch wealth, plus the cash those fills already spent).
+    Filling at the limit moves holding, cash and the loss-branch wealth one
+    for one, so ``T``, the envelope and therefore the target are the same at
+    every fill. The lot floor applies to that fresh order, never to the
+    remainder. A remainder whose loss branch would leave no wealth has no
+    value. Horizon authority missing raises ``ValueError`` (lost authority).
     """
 
     mean_q = float(payoff_probability_mean)
     remainder = Decimal(shares)
     held = Decimal(current_token_shares)
+    filled = Decimal(filled_shares)
     multiplier = Decimal(fractional_kelly_multiplier)
     if (
         not math.isfinite(mean_q)
@@ -6869,12 +6936,15 @@ def score_existing_buy_expected(
         or not remainder.is_finite()
         or remainder <= 0
         or not held.is_finite()
-        or held < 0
+        or not filled.is_finite()
+        or filled < 0
+        or held < filled
         or not multiplier.is_finite()
         or not Decimal("0") < multiplier <= Decimal("1")
     ):
         raise ValueError("existing BUY valuation inputs are invalid")
     limit_price = candidate.economic_cost_curve.levels[-1].price
+    unit_cost = candidate.economic_cost_curve.fee_model.all_in_price(limit_price)
     full_target = _global_buy_kelly_reference_target(
         held_shares=held,
         robust_q=mean_q,
@@ -6904,6 +6974,25 @@ def score_existing_buy_expected(
     )
     if legal_lot is None:
         raise ValueError("existing BUY has no legal lot at its limit")
+    prior = held - filled
+    spend = buy_spend_limit_usd(
+        capital_limit_usd=capital_limit_usd,
+        spendable_cash_usd=spendable_cash_usd,
+        wealth_floor_usd=wealth_floor_usd,
+    ) + filled * unit_cost
+    max_order = (
+        (spend / unit_cost / _SIZE_QUANTUM).to_integral_value(rounding=ROUND_FLOOR)
+        * _SIZE_QUANTUM
+        if spend > 0
+        else Decimal("0")
+    )
+    target_holding = fresh_buy_target_holding(
+        prior_token_shares=prior,
+        full_kelly_target_shares=full_target,
+        fractional_kelly_target_shares=full_target * multiplier,
+        legal_lot_shares=legal_lot,
+        max_order_shares=max_order,
+    )
     capital_lock_hours, horizon_reason = capital_lock_hours_until(
         resolution_at, decision_at_utc=decision_at_utc, action_mode=action_mode,
     )
@@ -6934,6 +7023,9 @@ def score_existing_buy_expected(
             full_kelly_target_shares=full_target,
             fractional_kelly_target_shares=full_target * multiplier,
             legal_lot_shares=legal_lot,
+            prior_token_shares=prior,
+            max_order_shares=max_order,
+            target_holding_shares=target_holding,
         )
 
     if not (math.isfinite(expected_du) and math.isfinite(expected_ev)):

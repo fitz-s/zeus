@@ -177,6 +177,9 @@ _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
 _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = _HELD_POSITION_MONITOR_DEFER_JOBS
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
+_PROCESS_STARTED_MONOTONIC = time.monotonic()
+_C3_STALENESS_CANCEL_FIRST_DELAY_SECONDS = OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0
+_C3_STALENESS_CANCEL_INTERVAL_SECONDS = 300.0
 _EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS = 60.0
 _EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS = 43.0
 _EDLI_COMMAND_RECOVERY_FULL_CADENCE_SECONDS = 300.0
@@ -4870,6 +4873,30 @@ def _consume_live_control_commands() -> str | None:
         return "control_plane_command_drain_failed"
 
 
+def _live_entry_block_scope() -> tuple[str | None, dict[str, str], str | None]:
+    """This cycle's BUY block from entry readiness and held-monitor truth.
+
+    Returns ``(global_reason, family_reasons, canonical_monitor_block)``:
+    the readiness block, narrowed by canonical monitor cadence debt to its
+    exact families (or widened to every family when that scope is
+    unreadable), and the monitor bootstrap. Reads only; the caller owns the
+    monitor-debt event.
+    """
+    global_reason, family_reasons = _edli_live_entry_readiness_block(
+        _settings_section("edli", {})
+    )
+    canonical = _held_position_monitor_entry_block_reason()
+    monitor_block = None
+    if canonical is not None:
+        monitor_block, monitor_family_blocks = _canonical_monitor_entry_block_scope(canonical)
+        family_reasons.update(monitor_family_blocks)
+    if monitor_block is None and not _held_position_monitor_bootstrap_complete.is_set():
+        monitor_block = "held_position_monitor_bootstrap_incomplete"
+    if global_reason is None and monitor_block is not None:
+        global_reason = monitor_block
+    return global_reason, family_reasons, canonical
+
+
 @_scheduler_job("edli_event_reactor")
 def _edli_event_reactor_cycle(
     *,
@@ -4898,26 +4925,13 @@ def _edli_event_reactor_cycle(
     from src.events.reactor import run_edli_event_reactor_cycle
 
     _start_edli_reactor_wake_listener()
-    _global_block_reason, _family_block_reasons = _edli_live_entry_readiness_block(
-        _settings_section("edli", {})
+    _global_block_reason, _family_block_reasons, canonical_monitor_entry_block = (
+        _live_entry_block_scope()
     )
-    canonical_monitor_entry_block = _held_position_monitor_entry_block_reason()
     if canonical_monitor_entry_block is None:
         _held_position_monitor_canonical_debt.clear()
-        monitor_entry_block = None
     else:
         _held_position_monitor_canonical_debt.set()
-        monitor_entry_block, monitor_family_blocks = (
-            _canonical_monitor_entry_block_scope(canonical_monitor_entry_block)
-        )
-        _family_block_reasons.update(monitor_family_blocks)
-    if (
-        monitor_entry_block is None
-        and not _held_position_monitor_bootstrap_complete.is_set()
-    ):
-        monitor_entry_block = "held_position_monitor_bootstrap_incomplete"
-    if _global_block_reason is None and monitor_entry_block is not None:
-        _global_block_reason = monitor_entry_block
     if allow_paused_forecast_snapshot_completion:
         # SCOPE: this already-selected targeted forecast cycle only; freeze its
         # BUY/submit lane as no-submit even if the durable pause is cleared
@@ -9013,6 +9027,35 @@ _STANDING_ENTRY_VALUATION_WAKE_REASONS = frozenset(
 )
 
 
+def _standing_entry_fresh_entry_gate(trade_conn) -> Any:
+    """What the live selector would refuse a fresh BUY on right now.
+
+    The reactor's own composition: the allocator's global submit
+    suppression, the entry readiness and held-monitor blocks (global and
+    per family), venue access, and the durable entries pause. Read only. An
+    unreadable gate refuses every fresh BUY, so no rest is cancelled for a
+    fresh order the selector might not place.
+    """
+    from src.control import venue_access
+    from src.engine import event_reactor_adapter as adapter
+    from src.execution.staleness_cancel import FreshEntryGate
+
+    try:
+        readiness, family_reasons, _canonical = _live_entry_block_scope()
+        reason = (
+            adapter._entry_global_submit_suppression_reason()
+            or readiness
+            or venue_access.entry_block_reason()
+            or adapter._entry_pause_blocks_live_submit(trade_conn)
+        )
+        return FreshEntryGate(global_reason=reason, family_reasons=family_reasons)
+    except Exception as exc:  # noqa: BLE001 - an unreadable gate places no fresh order
+        return FreshEntryGate(
+            global_reason=f"fresh_entry_gate_unavailable:{type(exc).__name__}",
+            family_reasons={},
+        )
+
+
 def _run_standing_entry_valuation(
     *,
     families: frozenset[tuple[str, str, str]] | None,
@@ -9045,6 +9088,14 @@ def _run_standing_entry_valuation(
             world_conn_ro=world_ro,
             rate_budget=_get_c3_staleness_rate_budget(),
             families=families,
+            fresh_entry_gate=_standing_entry_fresh_entry_gate(trade_ro),
+            # Authority not loaded yet may defer through the C3 bootstrap
+            # delay plus one tick; after that it fails closed.
+            authority_pending_until_monotonic=(
+                _PROCESS_STARTED_MONOTONIC
+                + _C3_STALENESS_CANCEL_FIRST_DELAY_SECONDS
+                + _C3_STALENESS_CANCEL_INTERVAL_SECONDS
+            ),
         )
     finally:
         for c in (trade_ro, trade_rw, forecasts_ro, world_ro):
@@ -11180,9 +11231,9 @@ def main():
         scheduler.add_job(
             _c3_staleness_cancel_cycle,
             "interval",
-            minutes=5,
+            seconds=_C3_STALENESS_CANCEL_INTERVAL_SECONDS,
             id="c3_staleness_cancel",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
+            next_run_time=_utc_run_time_after(_C3_STALENESS_CANCEL_FIRST_DELAY_SECONDS),
             max_instances=1,
             coalesce=True,
         )

@@ -1,7 +1,8 @@
 # Created: 2026-07-02
-# Last reused or audited: 2026-10-01
+# Last reused or audited: 2026-10-02
 # Purpose: Truth-table antibodies for the SCH-W1.2-ORDER-STATE derived predicates
-#          (is_delayed, entry_rest_disposition).
+#          (is_delayed, entry_rest_disposition) and the selector's fresh BUY
+#          target holding (fresh_buy_target_holding).
 # Reuse: Run when changing src/state/order_state_predicates.py or the C3 standing
 #        ENTRY valuation that consumes entry_rest_disposition.
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md;
@@ -56,16 +57,15 @@ class TestIsDelayed:
 
 # ---------------------------------------------------------------------------
 # entry_rest_disposition — the one keep/cancel rule for an open ENTRY rest,
-# valued as the order it is (held h, remainder r, Kelly T / kT, lot L).
+# valued as the order it is (held h, remainder r, the selector's fresh target
+# holding H* from the holding before the order's own fills).
 # ---------------------------------------------------------------------------
 
-def _dispose(held, remaining, *, full="20", fractional="10", lot="5", gain=0.01):
+def _dispose(held, remaining, *, target="10", gain=0.01):
     return entry_rest_disposition(
         held_shares=D(held),
         open_remaining=D(remaining),
-        full_kelly_target_shares=D(full),
-        fractional_kelly_target_shares=D(fractional),
-        legal_lot_shares=D(lot),
+        target_holding_shares=D(target),
         remainder_gain=gain,
     )
 
@@ -74,30 +74,22 @@ class TestEntryRestDisposition:
     @pytest.mark.parametrize(
         "held,remaining,expected",
         [
-            ("0", "10", "KEEP"),      # at the fractional target
-            ("0", "6", "KEEP"),       # below target: keep working toward it
-            ("0", "14.99", "KEEP"),   # overshoot 4.99 < one lot: no partial cut exists
-            ("0", "15", "CANCEL"),    # overshoot of one lot: cancel, fresh redecision
-            ("4", "11", "CANCEL"),    # same full order size, partly filled: same verdict
-            ("4", "10.99", "KEEP"),
+            ("0", "10", "KEEP"),       # exactly the selector's fresh target
+            ("0", "6", "KEEP"),        # below target: keep working toward it
+            ("0", "10.01", "CANCEL"),  # above what the selector would post
+            ("4", "6", "KEEP"),        # the same 10-share order, 4 filled
+            ("4", "6.01", "CANCEL"),
         ],
     )
-    def test_lot_boundaries(self, held, remaining, expected):
+    def test_target_boundary(self, held, remaining, expected):
         assert _dispose(held, remaining)[0] == expected
 
     def test_lot_floor_applies_only_to_a_new_order(self):
         # A 1-share remainder is below a fresh lot but is an order that exists.
         assert _dispose("4", "1") == ("KEEP", "CURRENT_ENTRY_REST_VALUE_POSITIVE")
 
-    def test_reduction_of_one_lot_cancels_under_its_own_reason(self):
-        assert _dispose("0", "15") == ("CANCEL", "CURRENT_FRACTIONAL_TARGET_REDUCED")
-
-    def test_small_capital_rule_keeps_up_to_full_kelly(self):
-        # kT < L: the selector admits one lot inside full Kelly T.
-        assert _dispose("2", "3", full="8", fractional="1")[0] == "KEEP"
-        assert _dispose("2", "6.01", full="8", fractional="1") == (
-            "CANCEL", "CURRENT_FULL_KELLY_TARGET_EXCEEDED"
-        )
+    def test_above_the_selectors_target_cancels_under_its_own_reason(self):
+        assert _dispose("0", "20", target="5") == ("CANCEL", "CURRENT_FRACTIONAL_TARGET_REDUCED")
 
     def test_there_is_no_resize_action(self):
         actions = {
@@ -113,32 +105,32 @@ class TestEntryRestDisposition:
         assert _dispose("0", "10", gain=gain) == ("CANCEL", "CURRENT_MEAN_VALUE_NON_POSITIVE")
 
     @pytest.mark.parametrize("size", ["5", "10", "15", "21"])
-    @pytest.mark.parametrize("fractional", ["1", "4.9", "10", "18"])
-    def test_disposition_is_monotone_in_filled_size(self, size, fractional):
-        # The same order, filled 0..size-0.01: the verdict never flips with fills.
+    @pytest.mark.parametrize("target", ["0", "4.9", "10", "18"])
+    def test_disposition_is_monotone_in_filled_size(self, size, target):
+        # The same order, filled 0..size-0.01, against the same fresh target
+        # (computed from the holding before the order's fills): one verdict.
         size_d = D(size)
         steps = [size_d * D(i) / D(20) for i in range(20)]
         verdicts = {
-            _dispose(str(h), str(size_d - h), fractional=fractional)[0] for h in steps
+            _dispose(str(h), str(size_d - h), target=target)[0] for h in steps
         }
-        assert len(verdicts) == 1, (size, fractional, verdicts)
+        assert len(verdicts) == 1, (size, target, verdicts)
 
     @pytest.mark.parametrize(
         "kwargs",
         [
-            dict(held_shares=D("0"), open_remaining=D("0"), full_kelly_target_shares=D("20"),
-                 fractional_kelly_target_shares=D("10"), legal_lot_shares=D("5"), remainder_gain=0.1),
-            dict(held_shares=D("-1"), open_remaining=D("5"), full_kelly_target_shares=D("20"),
-                 fractional_kelly_target_shares=D("10"), legal_lot_shares=D("5"), remainder_gain=0.1),
-            dict(held_shares=D("0"), open_remaining=D("5"), full_kelly_target_shares=D("20"),
-                 fractional_kelly_target_shares=D("10"), legal_lot_shares=D("0"), remainder_gain=0.1),
-            dict(held_shares=D("0"), open_remaining=D("NaN"), full_kelly_target_shares=D("20"),
-                 fractional_kelly_target_shares=D("10"), legal_lot_shares=D("5"), remainder_gain=0.1),
-            dict(held_shares=D("0"), open_remaining=D("5"), full_kelly_target_shares=D("20"),
-                 fractional_kelly_target_shares=D("10"), legal_lot_shares=D("5"),
+            dict(held_shares=D("0"), open_remaining=D("0"), target_holding_shares=D("10"),
+                 remainder_gain=0.1),
+            dict(held_shares=D("-1"), open_remaining=D("5"), target_holding_shares=D("10"),
+                 remainder_gain=0.1),
+            dict(held_shares=D("0"), open_remaining=D("5"), target_holding_shares=D("-1"),
+                 remainder_gain=0.1),
+            dict(held_shares=D("0"), open_remaining=D("NaN"), target_holding_shares=D("10"),
+                 remainder_gain=0.1),
+            dict(held_shares=D("0"), open_remaining=D("5"), target_holding_shares=D("10"),
                  remainder_gain=float("nan")),
-            dict(held_shares=0, open_remaining=D("5"), full_kelly_target_shares=D("20"),
-                 fractional_kelly_target_shares=D("10"), legal_lot_shares=D("5"), remainder_gain=0.1),
+            dict(held_shares=0, open_remaining=D("5"), target_holding_shares=D("10"),
+                 remainder_gain=0.1),
         ],
     )
     def test_invalid_inputs_raise(self, kwargs):
@@ -149,10 +141,7 @@ class TestEntryRestDisposition:
         import inspect
 
         params = set(inspect.signature(entry_rest_disposition).parameters)
-        assert params == {
-            "held_shares", "open_remaining", "full_kelly_target_shares",
-            "fractional_kelly_target_shares", "legal_lot_shares", "remainder_gain",
-        }
+        assert params == {"held_shares", "open_remaining", "target_holding_shares", "remainder_gain"}
 
     def test_age_and_identity_predicates_are_deleted(self):
         for name in (
@@ -161,3 +150,40 @@ class TestEntryRestDisposition:
             "bootstrap_rest_deadline_minutes",
         ):
             assert not hasattr(predicates, name), name
+
+
+# ---------------------------------------------------------------------------
+# fresh_buy_target_holding — the holding the selector sizes a fresh BUY to.
+# Pinned against the selector's own sizer: from any prior holding, the order
+# _score_global_single_order_buy_expected chooses never takes the holding
+# above it, and whenever it places one the bound is reached up to one quantum.
+# ---------------------------------------------------------------------------
+
+
+class TestFreshBuyTargetHolding:
+    def _target(self, prior, full, frac, lot="5", cap="1000"):
+        from src.solve.solver import fresh_buy_target_holding
+
+        return fresh_buy_target_holding(
+            prior_token_shares=D(prior), full_kelly_target_shares=D(full),
+            fractional_kelly_target_shares=D(frac), legal_lot_shares=D(lot),
+            max_order_shares=D(cap),
+        )
+
+    def test_fractional_target_when_it_admits_a_lot(self):
+        assert self._target("0", "80", "10") == D("10")
+        assert self._target("4", "80", "10") == D("10")
+
+    def test_small_capital_rule_is_exactly_one_lot(self):
+        # The reviewer's band: kT 2.75 < L 5, T 22 -> one lot, never up to T.
+        assert self._target("0", "22", "2.75") == D("5")
+        assert self._target("1", "22", "2.75") == D("6")
+
+    def test_no_legal_fresh_order_keeps_the_prior_holding(self):
+        assert self._target("8", "80", "10") == D("8")      # kT - h < L, kT >= L
+        assert self._target("3", "7", "2") == D("3")        # h + L > T: no small-capital lot
+        assert self._target("0", "80", "10", cap="4") == D("0")  # envelope below a lot
+
+    def test_capital_envelope_bounds_the_order(self):
+        assert self._target("0", "80", "10", cap="7") == D("7")
+        assert self._target("0", "22", "2.75", cap="4.99") == D("0")
