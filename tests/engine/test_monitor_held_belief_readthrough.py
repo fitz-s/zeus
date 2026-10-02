@@ -3622,17 +3622,89 @@ def test_day0_snapshot_tokens_use_closed_independent_trade_reader(monkeypatch):
         ('condition-1', 'yes-1', 'no-1', '2026-07-30T00:00:00+00:00', 'snapshot-1')
         """
     )
-    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: snapshot)
+    opened_with = []
+
+    def open_snapshot(*, deadline_monotonic=None):
+        opened_with.append(deadline_monotonic)
+        return snapshot
+
+    monkeypatch.setattr(db, "get_trade_connection_read_only", open_snapshot)
+    deadline = time.monotonic() + 1.0
 
     rows = mr._read_current_global_day0_snapshot_tokens(
         trade_conn=shared,
         condition_ids=("condition-1",),
-        deadline_monotonic=time.monotonic() + 1.0,
+        deadline_monotonic=deadline,
     )
 
     shared.close()
     assert rows[0]["yes_token_id"] == "yes-1"
     assert snapshot.closed is True
+    assert opened_with == [deadline]
+
+
+def _stall_read_only_file_open(monkeypatch, tmp_path, db_name):
+    """Make the real read-only opener's file open block until released."""
+    import src.state.db as db
+
+    path = tmp_path / db_name
+    sqlite3.connect(path).close()
+    release = threading.Event()
+    real_connect = sqlite3.connect
+
+    def stalled_connect(target, *args, **kwargs):
+        if str(target).startswith(f"file:{path.resolve()}"):
+            release.wait(10.0)
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(db.sqlite3, "connect", stalled_connect)
+    return path, release
+
+
+def test_day0_token_bind_open_fails_fast_on_monitor_deadline(monkeypatch, tmp_path):
+    """A stalled trades open must raise the typed deadline, not hold the pass."""
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    path, release = _stall_read_only_file_open(monkeypatch, tmp_path, "zeus_trades.db")
+    monkeypatch.setattr(db, "_zeus_trade_db_path", lambda: path)
+    started = time.monotonic()
+    try:
+        with pytest.raises(mr._Day0SnapshotReadDeadlineExceeded):
+            mr._read_current_global_day0_snapshot_tokens(
+                trade_conn=sqlite3.connect(":memory:"),
+                condition_ids=("condition-1",),
+                deadline_monotonic=started + 0.3,
+            )
+        assert time.monotonic() - started < 1.5
+    finally:
+        release.set()
+
+
+def test_day0_prepare_open_fails_fast_on_monitor_deadline(monkeypatch, tmp_path):
+    """A stalled forecasts+world open must raise the typed deadline in budget."""
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    path, release = _stall_read_only_file_open(
+        monkeypatch, tmp_path, "zeus-forecasts.db"
+    )
+    monkeypatch.setattr(db, "ZEUS_FORECASTS_DB_PATH", path)
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "0x" + "1" * 64)
+    started = time.monotonic()
+    try:
+        with pytest.raises(mr._Day0SnapshotReadDeadlineExceeded):
+            mr._build_current_global_day0_family_snapshot(
+                _pos(),
+                trade_conn=sqlite3.connect(":memory:"),
+                decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+                cached_snapshots=(),
+                deadline_monotonic=started + 0.3,
+                hwm_deadline_monotonic=started + 0.3,
+            )
+        assert time.monotonic() - started < 1.5
+    finally:
+        release.set()
 
 
 def test_freshest_seed_skips_payload_without_target_local_day(tmp_path, monkeypatch):

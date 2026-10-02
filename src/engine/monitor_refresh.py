@@ -466,7 +466,13 @@ def _read_current_global_day0_snapshot_tokens(
 
     from src.state.db import get_trade_connection_read_only
 
-    token_conn = get_trade_connection_read_only()
+    try:
+        token_conn = get_trade_connection_read_only(
+            deadline_monotonic=deadline_monotonic,
+        )
+    except sqlite3.OperationalError:
+        _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+        raise
     try:
         with _day0_snapshot_sqlite_read_deadline(token_conn, deadline_monotonic):
             return token_conn.execute(query, condition_ids).fetchall()
@@ -4022,9 +4028,15 @@ def _build_current_global_day0_family_snapshot(
         hwm_deadline: list[float | None] = [None]
         hwm_handoff_started = [False]
         with ExitStack() as prepare_sqlite:
-            forecasts_seed = prepare_sqlite.enter_context(
-                get_forecasts_connection_with_world_read_only()
-            )
+            try:
+                forecasts_seed = prepare_sqlite.enter_context(
+                    get_forecasts_connection_with_world_read_only(
+                        deadline_monotonic=prepare_deadline,
+                    )
+                )
+            except sqlite3.OperationalError:
+                _raise_if_day0_snapshot_read_deadline_elapsed(prepare_deadline)
+                raise
             forecasts = prepare_sqlite.enter_context(
                 _day0_snapshot_sqlite_read_deadline(
                     forecasts_seed,
