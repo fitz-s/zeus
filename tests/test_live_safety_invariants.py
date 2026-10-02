@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Lifecycle: created=2026-03-31; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-09-30
+# Last reused/audited: 2026-10-02
 # Authority basis: held-monitor canonical append liveness and atomicity incidents
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -7696,6 +7696,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     outcome,
     malformed_request,
     posterior_support_zero,
+    hold_case=None,
 ):
     """Statistical SELL is global-only; missing authority holds while RED acts."""
     old_panic_retry = outcome == "old_panic_retry"
@@ -7713,38 +7714,49 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     conn = get_connection(tmp_path / "global-auction-owns-monitor-sell.db")
     init_schema(conn)
     small_protective = outcome.startswith("direct_")
+    fixture_shares = (
+        0.0 if hold_case and hold_case[2] == "no_holding"
+        else 5.0 if hold_case
+        else 2.0 if small_protective
+        else 3.0 if outcome == "dust"
+        else 0.002221 if outcome == "sub_precision"
+        else 500.0
+    )
+    hold_fill_economics = (
+        {
+            "entry_economics_authority": ENTRY_ECONOMICS_AVG_FILL_PRICE,
+            "entry_price": 0.12,
+            "entry_price_avg_fill": 0.12,
+            "filled_cost_basis_usd": 0.0 if hold_case[2] == "no_holding" else 0.60,
+            "cost_basis_usd": 0.0 if hold_case[2] == "no_holding" else 0.60,
+            "size_usd": 0.0 if hold_case[2] == "no_holding" else 0.60,
+        }
+        if hold_case else {}
+    )
     pos = _make_position(
         trade_id="global-auction-owned-sell",
         state="holding",
         city="Paris",
         target_date="2026-07-14",
-        direction="buy_no",
+        direction=hold_case[0] if hold_case else "buy_no",
+        temperature_metric=hold_case[1] if hold_case else "high",
         strategy_key="center_buy",
         order_status="filled",
         entered_at="2026-07-14T17:00:00+00:00",
         order_posted_at="2026-07-14T16:59:00+00:00",
-        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-        shares=(
-            2.0 if small_protective else 3.0
-            if outcome == "dust"
-            else 0.002221
-            if outcome == "sub_precision"
-            else 500.0
+        fill_authority=(
+            FILL_AUTHORITY_NONE
+            if hold_case and hold_case[2] == "unproved_holding"
+            else FILL_AUTHORITY_VENUE_CONFIRMED_FULL
         ),
-        shares_filled=(
-            2.0 if small_protective else 3.0
-            if outcome == "dust"
-            else 0.002221
-            if outcome == "sub_precision"
-            else 500.0
-        ),
-        chain_state="synced",
-        chain_shares=(
-            2.0 if small_protective else 3.0 if outcome == "dust" else 0.002221 if outcome == "sub_precision" else 500.0
-        ),
+        shares=fixture_shares,
+        shares_filled=fixture_shares,
+        chain_state="unknown" if hold_case and hold_case[2] == "unproved_holding" else "synced",
+        chain_shares=fixture_shares,
         token_id="paris-yes",
         no_token_id="paris-no",
         condition_id="0x" + "5a" * 32,
+        **hold_fill_economics,
     )
     events, projection = build_entry_canonical_write(
         pos,
@@ -7776,6 +7788,30 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         if outcome == "direct_dust_cooldown":
             monkeypatch.setattr(exit_lifecycle, "is_exit_cooldown_active", lambda *_: True)
     portfolio = _make_portfolio(pos)
+    if hold_case:
+        from src.control import cutover_guard
+
+        portfolio.authority = "canonical_db"
+        fault = hold_case[2]
+        monkeypatch.setattr(
+            cutover_guard,
+            "gate_for_intent",
+            lambda _intent: SimpleNamespace(allowed_submit=fault != "read_only"),
+        )
+        if fault == "portfolio_unverified":
+            portfolio.authority = "unverified"
+        if fault == "portfolio_degraded":
+            portfolio.portfolio_loader_degraded = True
+        if fault == "static_inactive":
+            pos.child_active = False
+        if fault in {"closed", "depth_missing"}:
+            pos._zeus_held_monitor_full_depth_action_authority = True
+        monkeypatch.setattr(
+            cycle_runtime,
+            "_prefetch_held_replacement_artifact_hwm",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(cycle_runtime, "_day0_hard_fact_position_eligible", lambda _pos: False)
     if outcome == "lineage_upgrade":
         pos._held_sell_reauction_obligation = {
             "schema_version": 4,
@@ -7801,7 +7837,9 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     def fake_refresh(_conn, _clob, position, **_kwargs):
         monitor_prob = (
-            0.0
+            0.401365782
+            if hold_case
+            else 0.0
             if posterior_support_zero
             else 0.273075
             if trigger == "FLASH_CRASH_PANIC"
@@ -7825,11 +7863,33 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             if posterior_support_zero
             else "2026-07-14T18:00:00+00:00"
         )
+        if hold_case:
+            position.last_monitor_market_price = 0.19
+            position.last_monitor_best_bid = 0.19
+            position.last_monitor_best_ask = 0.20
+            position.last_monitor_edge = monitor_prob - 0.19
+            position.last_monitor_bid_size = position.effective_shares
+            position.last_monitor_bid_ladder = ((0.19, position.effective_shares),)
+            if fault == "q_missing":
+                position.last_monitor_prob = None
+                position.last_monitor_prob_is_fresh = False
+            elif fault == "q_stale":
+                position.last_monitor_prob_is_fresh = False
+            elif fault == "quote_stale":
+                position.last_monitor_market_price_is_fresh = False
+            elif fault == "bid_missing":
+                position.last_monitor_best_bid = None
+            elif fault == "bid_below_band":
+                position.last_monitor_best_bid = 0.04
+            elif fault == "bid_above_band":
+                position.last_monitor_best_bid = 0.96
         setattr(
             position,
             monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
             True,
         )
+        if hold_case and fault == "depth_missing":
+            setattr(position, monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR, False)
         setattr(
             position,
             monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
@@ -7839,7 +7899,9 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             position,
             monitor_refresh._GLOBAL_MONITOR_SAMPLES_ATTR,
             (
-                np.array([0.0, 0.0])
+                np.array([0.301365782, 0.501365782])
+                if hold_case
+                else np.array([0.0, 0.0])
                 if posterior_support_zero
                 else np.array([0.05, 0.15])
             ),
@@ -7878,17 +7940,22 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 "_day0_monitor_probability_receipt",
                 probability_receipt,
             )
-            if posterior_support_zero:
+            if hold_case:
+                setattr(position, "_monitor_probability_receipt", monitor_refresh._compact_monitor_probability_receipt(probability_receipt))
+            elif posterior_support_zero:
                 setattr(position, "_monitor_probability_receipt", probability_receipt)
+        if hold_case and fault == "q_receipt_missing":
+            delattr(position, "_day0_monitor_probability_receipt")
+            delattr(position, "_monitor_probability_receipt")
         return EdgeContext(
             p_raw=np.array([]),
             p_cal=np.array([]),
-            p_market=np.array([0.50]),
+            p_market=np.array([0.19 if hold_case else 0.50]),
             p_posterior=monitor_prob,
             forward_edge=-0.50 if posterior_support_zero else -0.40,
             alpha=0.1,
-            confidence_band_upper=-0.35,
-            confidence_band_lower=-0.45,
+            confidence_band_upper=0.311365782 if hold_case else -0.35,
+            confidence_band_lower=0.111365782 if hold_case else -0.45,
             entry_provenance=EntryMethod.QKERNEL_SPINE,
             decision_snapshot_id="global-monitor-sell-snapshot",
             n_edges_found=1,
@@ -7896,22 +7963,32 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         )
 
     monkeypatch.setattr(monitor_refresh, "refresh_position", fake_refresh)
-    monkeypatch.setattr(
-        Position,
-        "evaluate_exit",
-        lambda self, context: ExitDecision(
-            True,
-            trigger,
-            trigger=trigger,
-            selected_method=self.selected_method or self.entry_method,
-            applied_validations=["local_monitor_sell_signal"],
-        ),
-    )
-    monkeypatch.setattr(
-        cycle_runtime,
-        "_closed_non_accepting_market_info",
-        lambda *args, **kwargs: None,
-    )
+    if not hold_case:
+        monkeypatch.setattr(
+            Position,
+            "evaluate_exit",
+            lambda self, context: ExitDecision(
+                True,
+                trigger,
+                trigger=trigger,
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=["local_monitor_sell_signal"],
+            ),
+        )
+    clob = object()
+    closed_metadata_calls = []
+    if hold_case and fault == "closed":
+        def closed_market_metadata(condition_id, **_kwargs):
+            closed_metadata_calls.append(condition_id)
+            return {"closed": True, "accepting_orders": False}
+
+        clob = SimpleNamespace(get_held_clob_market_info=closed_market_metadata)
+    else:
+        monkeypatch.setattr(
+            cycle_runtime,
+            "_closed_non_accepting_market_info",
+            lambda *args, **kwargs: None,
+        )
     monkeypatch.setattr(
         cycle_runtime,
         "_entry_selection_guard_exit_decision",
@@ -7940,9 +8017,70 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     )
 
     coverage_checks = []
+    if hold_case:
+        monkeypatch.setattr(global_batch_runtime, "_GLOBAL_HOLDING_COVERAGE_BY_POSITION", {})
+        monkeypatch.setattr(global_batch_runtime, "_GLOBAL_HOLDING_COVERAGE_WEALTH_IDENTITY", None)
 
     def current_monitor_coverage(**kwargs):
         coverage_checks.append(kwargs["position"].trade_id)
+        if hold_case and has_position_coverage:
+            from src.engine.global_single_order_auction import GlobalHoldingAuctionCoverage
+            from src.events.candidate_binding import weather_family_id
+
+            family_key = weather_family_id(city=pos.city, target_date=pos.target_date, metric=pos.temperature_metric)
+            side = "YES" if pos.direction == "buy_yes" else "NO"
+            token_id = pos.token_id if side == "YES" else pos.no_token_id
+            checked = kwargs["checked_at_utc"]
+            # A previous full-wealth cut with unchanged economics covers a new
+            # MONITOR_REFRESHED timestamp; that timestamp is not a reset latch.
+            cut_at = checked - timedelta(seconds=1)
+            coverage = GlobalHoldingAuctionCoverage(
+                position_id=pos.trade_id, family_key=family_key,
+                bin_id="canonical-bin-current", bin_label=pos.bin_label,
+                canonical_bin_identity=f"condition:{pos.condition_id}",
+                condition_id=pos.condition_id, side=side, token_id=token_id,
+                held_shares=Decimal("5"), ledger_snapshot_id="ledger-current",
+                probability_witness_identity="probability-current",
+                probability_content_identity="probability-content-current",
+                wealth_economic_identity="wealth-current",
+                selection_epoch_identity="epoch-current", book_epoch_identity="book-epoch-current",
+                selection_cut_at_utc=cut_at, decision_at_utc=cut_at,
+                book_deadline_at_utc=cut_at + timedelta(seconds=30),
+                status="EVALUATED", candidate_id="sell-current",
+                sell_book_witness_identity="book-current", book_state="EXECUTABLE",
+            )
+            global_batch_runtime._publish_global_holding_coverage(
+                (coverage,),
+                expected_obligations=(global_batch_runtime._CurrentHeldObligation(
+                    position_id=pos.trade_id, family_key=family_key, bin_label=pos.bin_label,
+                    condition_id=pos.condition_id, side=side, token_id=token_id,
+                    held_shares=Decimal("5"),
+                ),),
+                probability_witnesses={family_key: SimpleNamespace(
+                    witness_identity="probability-current",
+                    probability_content_identity="probability-content-current",
+                    bindings=(SimpleNamespace(bin_id="canonical-bin-current", condition_id=pos.condition_id,
+                                              yes_token_id=pos.token_id, no_token_id=pos.no_token_id),),
+                )},
+                decision_log_id=77,
+            )
+            result = global_batch_runtime.current_global_holding_coverage(
+                position_id=pos.trade_id,
+                probability_content_identity=kwargs["probability_content_identity"],
+                checked_at_utc=checked, family_key=family_key, bin_label=pos.bin_label,
+                condition_id=pos.condition_id, side=side, token_id=token_id,
+                held_shares=Decimal("5"), current_ledger_snapshot_id="ledger-current",
+                current_wealth_economic_identity="wealth-current",
+                current_sell_book_witness_resolver=lambda _row: "book-current",
+                current_probability_content_identity_resolver=lambda _row: "probability-content-current",
+                current_holding_witness_resolver=lambda _row: global_batch_runtime._CurrentHoldingWitness(
+                    ledger_snapshot_id="ledger-current", wealth_economic_identity="wealth-current",
+                    held_shares=Decimal("5"),
+                ),
+                current_time_provider=lambda: checked,
+            )
+            assert result.covered
+            return result
         return (
             global_batch_runtime.CurrentGlobalHoldingCoverage(
                 outcome=global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED,
@@ -7994,6 +8132,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     )
 
     def emit_monitor_refreshed_then_mark(*args, **kwargs):
+        if hold_case and fault == "canonical_write_failed":
+            return False
         result = real_emit_monitor_refreshed(*args, **kwargs)
         if result:
             event_order.append("canonical_monitor_refreshed")
@@ -8021,6 +8161,9 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         )
 
     def request_global_completion(**kwargs):
+        if hold_case:
+            assert event_order == ["canonical_monitor_refreshed"]
+            assert not conn.in_transaction
         auction_completion_requests.append(kwargs)
         if "held_token_id" not in kwargs:
             # Missing full-q or coverage lineage can only request the generic
@@ -8118,15 +8261,17 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
             ),
             "logger": logging.getLogger("test_global_auction_owned_monitor_sell"),
-            "cities_by_name": {},
+            "cities_by_name": {"Paris": SimpleNamespace(timezone="Europe/Paris")} if hold_case else {},
             "_utcnow": staticmethod(monitor_now),
         },
     )
     summary = {"monitors": 0, "exits": 0}
+    if hold_case:
+        summary["risk_level"] = "YELLOW"
 
     cycle_runtime.execute_monitoring_phase(
         conn,
-        object(),
+        clob,
         portfolio,
         artifact,
         type("Tracker", (), {"record_exit": lambda self, position: None})(),
@@ -8134,6 +8279,41 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         deps=deps,
         run_exit_preflight=old_panic_retry,
     )
+
+    if hold_case:
+        should_request = fault in {"none", "static_inactive"} and not has_position_coverage
+        assert len(auction_completion_requests) == int(should_request), summary
+        if should_request:
+            request = auction_completion_requests[0]
+            assert request["family"] == (pos.city, pos.target_date, hold_case[1])
+            assert "held_token_id" not in request
+            assert "probability_content_identity" not in request
+            assert event_order == ["canonical_monitor_refreshed"]
+            assert not conn.in_transaction
+        if fault == "closed":
+            assert closed_metadata_calls == [pos.condition_id]
+            assert summary["monitor_skipped_closed_market_pending_settlement"] == 1
+        if fault == "depth_missing":
+            assert pos._zeus_held_monitor_full_depth_action_authority is False
+        if results:
+            assert results[-1].should_exit is False
+            if fault in {"none", "static_inactive", "read_only", "portfolio_unverified", "portfolio_degraded", "q_receipt_missing", "depth_missing", "bid_missing", "bid_below_band"}:
+                assert results[-1].exit_reason == "HOLD"
+        if fault in {"none", "static_inactive"}:
+            assert len(results) == 1
+            assert coverage_checks == [pos.trade_id]
+            assert len(event_order) == 1
+        if fault == "canonical_write_failed":
+            assert event_order == []
+        assert execute_calls == published_requests == reserved_requests == []
+        assert not hasattr(pos, "_held_sell_reauction_obligation")
+        assert str(getattr(pos.state, "value", pos.state)) != "pending_exit"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'EXIT_INTENT'",
+            (pos.trade_id,),
+        ).fetchone()[0] == 0
+        conn.close()
+        return
 
     if old_panic_retry:
         if not results:
@@ -8325,6 +8505,36 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     assert same_turn_reauction_drain_attempts == []
     assert invalidations == (["venue_side_effect"] if outcome in {"direct", "direct_small", "direct_dust"} else [])
     conn.close()
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_current_monitor_cash_ev_hold_requests_full_wealth_redecision(
+    tmp_path, monkeypatch, direction, metric,
+):
+    """Typed q/book IO is synthetic; the monitor and local HOLD law are real."""
+    test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
+        tmp_path, monkeypatch, "SELL_REVERSAL", False, True, "blocked", False, False,
+        hold_case=(direction, metric, "none"),
+    )
+
+
+@pytest.mark.parametrize("fault,has_position_coverage", (
+    ("q_missing", False), ("q_stale", False), ("q_receipt_missing", False),
+    ("quote_stale", False), ("bid_missing", False),
+    ("bid_below_band", False), ("bid_above_band", False),
+    ("depth_missing", False), ("no_holding", False), ("unproved_holding", False),
+    ("closed", False), ("read_only", False),
+    ("portfolio_unverified", False), ("portfolio_degraded", False),
+    ("canonical_write_failed", False), ("static_inactive", False), ("none", True),
+))
+def test_current_monitor_hold_redecision_preserves_degraded_and_current_coverage(
+    tmp_path, monkeypatch, fault, has_position_coverage,
+):
+    test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
+        tmp_path, monkeypatch, "SELL_REVERSAL", has_position_coverage, True, "blocked", False, False,
+        hold_case=("buy_yes", "high", fault),
+    )
 
 
 def test_non_day0_scalar_monitor_requests_full_family_reauction_without_fake_q_identity():

@@ -9237,7 +9237,7 @@ def process_current_global_batch(
             )
             decision_family_keys = (
                 current_restricted_family_keys
-                if not buy_candidates_enabled and not proof_buy_candidates_enabled
+                if not buy_candidates_enabled
                 else current_restricted_family_keys.union(held_family_keys)
             )
             decision_scope = current_global_auction_scope_from_events(
@@ -9444,7 +9444,24 @@ def process_current_global_batch(
             if superseded(f"prepare_family:{family_key}"):
                 return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
             owner = claimed_by_family.get(family_key, scope_event)
-            prepared_receipt = prepare_event(scope_event, scope_at)
+            prepare_started = time.monotonic()
+            prepare_returned = False
+            _LOG.info(
+                "global family prepare started: lane=ENTRY family=%s event=%s "
+                "cut=%s deadline=%s",
+                family_key, scope_event.event_id, scope_at.isoformat(),
+                work_context.deadline_monotonic if work_context else None,
+            )
+            try:
+                prepared_receipt = prepare_event(scope_event, scope_at)
+                prepare_returned = True
+            finally:
+                _LOG.info(
+                    "global family prepare completed: lane=ENTRY family=%s event=%s "
+                    "cut=%s elapsed_s=%.3f returned=%s",
+                    family_key, scope_event.event_id, scope_at.isoformat(),
+                    time.monotonic() - prepare_started, prepare_returned,
+                )
             prepared = prepared_receipt.prepared_global_family
             failure_receipt = prepared_receipt
             held_prepare_attempted = bool(
@@ -9455,7 +9472,24 @@ def process_current_global_batch(
                 )
             )
             if held_prepare_attempted:
-                held_receipt = prepare_held_event(scope_event, scope_at)
+                prepare_started = time.monotonic()
+                prepare_returned = False
+                _LOG.info(
+                    "global family prepare started: lane=HELD family=%s event=%s "
+                    "cut=%s deadline=%s",
+                    family_key, scope_event.event_id, scope_at.isoformat(),
+                    work_context.deadline_monotonic if work_context else None,
+                )
+                try:
+                    held_receipt = prepare_held_event(scope_event, scope_at)
+                    prepare_returned = True
+                finally:
+                    _LOG.info(
+                        "global family prepare completed: lane=HELD family=%s event=%s "
+                        "cut=%s elapsed_s=%.3f returned=%s",
+                        family_key, scope_event.event_id, scope_at.isoformat(),
+                        time.monotonic() - prepare_started, prepare_returned,
+                    )
                 held_prepared = held_receipt.prepared_global_family
                 if held_prepared is None:
                     prepared = None

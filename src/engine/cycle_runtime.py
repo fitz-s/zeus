@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-09-08
+# Last reused/audited: 2026-10-02
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -6618,6 +6618,51 @@ def _request_current_global_family_preparation(
     )
 
 
+def _held_monitor_hold_needs_global_coverage(pos, exit_context, portfolio) -> bool:
+    """Qualify current held evidence for work, without authorizing a SELL."""
+
+    from src.control.cutover_guard import IntentKind, gate_for_intent
+    from src.execution.exit_lifecycle import _CHAIN_BALANCE_DUST_SHARES
+    from src.state.portfolio import (
+        EFFECTIVE_EXPOSURE_SOURCE_VENUE_POSITION_OBSERVED,
+        EFFECTIVE_EXPOSURE_SOURCE_VENUE_TRADE_FILL,
+    )
+
+    receipt = getattr(exit_context, "probability_receipt", None)
+    bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
+    if (
+        getattr(portfolio, "authority", "") != "canonical_db"
+        or bool(getattr(portfolio, "portfolio_loader_degraded", False))
+        or exit_context.missing_authority_fields()
+        or not isinstance(receipt, Mapping)
+        or not str(receipt.get("probability_authority") or "").strip()
+        or bid is None
+        or not _live_order_quote_is_executable(bid)
+        or not bool(
+            getattr(pos, "_zeus_held_monitor_full_depth_action_authority", False)
+        )
+        or not _position_held_token_id(pos)
+    ):
+        return False
+    try:
+        exposure = pos.effective_exposure()
+        shares = _finite_float_or_none(exposure.shares)
+        if (
+            shares is None
+            or shares < float(_CHAIN_BALANCE_DUST_SHARES)
+            or exposure.source_authority not in {
+                EFFECTIVE_EXPOSURE_SOURCE_VENUE_TRADE_FILL,
+                EFFECTIVE_EXPOSURE_SOURCE_VENUE_POSITION_OBSERVED,
+            }
+        ):
+            return False
+        # Authority loss keeps monitoring read-only. This is the existing EXIT
+        # capability, independent of the RiskGuard level or BUY admission.
+        return bool(gate_for_intent(IntentKind.EXIT).allowed_submit)
+    except Exception:  # noqa: BLE001 - unavailable authority cannot publish work.
+        return False
+
+
 def _current_monitor_global_holding_coverage(
     *,
     conn,
@@ -10083,6 +10128,13 @@ def execute_monitoring_phase(
                     exit_reason,
                 )
             )
+            held_hold_requires_global = (
+                not should_exit
+                and str(getattr(exit_decision, "trigger", "") or "") == "HOLD"
+                and _held_monitor_hold_needs_global_coverage(
+                    pos, exit_context, portfolio
+                )
+            )
             protective_fak_redecision = should_exit and local_exit_trigger in {
                 "RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD",
             }
@@ -10273,7 +10325,7 @@ def execute_monitoring_phase(
                 ),
             )
             if (
-                statistical_sell_requires_global
+                (statistical_sell_requires_global or held_hold_requires_global)
                 and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
             ):
                 if probability_content_identity:
@@ -10377,6 +10429,17 @@ def execute_monitoring_phase(
                 and (
                     not probability_content_identity
                     or not coverage_lineage_complete
+                )
+            )
+            # SCOPE: this qualified held family's current full-wealth decision.
+            # DRAIN: the existing bounded generic completion and per-family ack.
+            # RESET: exact current holding coverage, not a newest timestamp latch.
+            # A local cash-EV HOLD is not the global expected-log verdict. Keep
+            # it intact while arranging work; no EXIT_INTENT or SELL debt is born.
+            hold_full_family_preparation_pending = (
+                held_hold_requires_global
+                and not (
+                    global_holding_coverage.covered and coverage_lineage_complete
                 )
             )
             if needs_full_family_preparation:
@@ -10814,6 +10877,15 @@ def execute_monitoring_phase(
                         "held_monitor_positions_deferred_for_writer_lock", 0
                     ) + 1
                     continue
+
+            if monitor_canonical_written and hold_full_family_preparation_pending:
+                requested = _request_current_global_family_preparation(pos)
+                key = (
+                    "monitor_hold_full_family_preparation_requested"
+                    if requested
+                    else "monitor_hold_full_family_preparation_failed"
+                )
+                summary[key] = summary.get(key, 0) + 1
 
             if (
                 monitor_canonical_written

@@ -230,6 +230,158 @@ No dropped cities, changed candidate order, new cache, enlarged deadline, altere
 source-clock probability or reduced physical/serving proof is used for this gain.
 The loaded whole global preparation and fresh-book epoch still require measurement.
 
+Post-load `8534852f6` acceptance is mixed, not a global pass. The normal loader
+exits zero. Cut 13769 / receipt 890342 prepares its 16-family scope in 7.683
+seconds and completes the auction in 9.254 seconds; exact current books and
+candidate/held typed partitions pass. Its Jeddah HIGH NO SELL command
+`128176fecc1447a3` receives CONFIRMED three shares at 0.79, event 1020 reaches
+economically_closed, chain exposure is zero and canonical realized P&L is +1.14.
+That proposal has positive cash EV, so it is not evidence of a live negative-EV
+SELL or profit attribution to that repair.
+
+The success does not establish full held-family redecision. The receipt includes
+23 holdings but evaluates only two; all 21 excluded holdings carry
+`PROBABILITY_AUTHORITY_UNAVAILABLE:GLOBAL_CURRENT_BOOK_FAMILY_UNAVAILABLE`
+with UNKNOWN books, not settled or zero-band dispositions. A one-family
+reduce-only book-cache capture is not full-city current-book convergence. Cut
+13768 spends 45.147 seconds in preparation, and subsequent checkpoints again
+reach 45.589 and 45.149 seconds on the same loaded code. This refutes treating
+the timeout as solely first-start initialization or calling the 7.683-second
+cut a same-scope cold/warm comparison.
+
+Continue two bounded diagnostic lanes before another implementation: map a
+current preparation timeout to its actual blocking call/family (a next-family
+checkpoint is not attribution), and trace the 21 missing held-family books
+through query identity, current metadata and exact fresh capture. Preserve the
+45-second epoch, full configured universe, source/settlement geometry and all
+execution proof. Fix only a reproduced defect with HIGH/LOW and YES/NO antibody
+coverage; retain missing evidence as unavailable rather than manufacturing
+permission. Current all-city public probability consumption is checked separately
+from stored-row status. The earlier external retry-controller PID is now absent;
+no process was killed to achieve this loading result.
+
+A separate RO source-consumption cut at 10:40:28.896 UTC observes 267
+current/future public market-root keys: 254 latest stored v6 certificates have
+neutral historical-fit fields, six still have old v5 certificates, and seven
+have no posterior. These are stored candidates, not 254 qualified public
+consumers or a renewed exhaustive physical audit. Qingdao's old v5 public-reader
+sample rejects as not live-grade; current Seoul/Wuhan receipts lack a Day0
+carrier and London October 4 receipts lack current multi-model extras. Eight
+exceptional roots still lack a proved current first-blocking reason. Do not
+reclassify old evidence or missing certificates as current authority.
+
+Hong Kong HIGH posterior 724974 reflects the 10:30 observation and commits at
+10:39:56; LOW posterior 724868 still reflects the 10:10 current trajectory.
+Qualified 10:30 current 27.0 C does not lower the existing running minimum,
+but its current-state/vector reseeds at 10:33:30 and 10:38:09.809 remain pending.
+Pinned READY establishes immutable snapshot legality, not latest trajectory
+convergence; current-consumer use is a separate proof obligation. Preserve this
+latency gap while diagnosing current normal preparation/queue throughput.
+
+Verified follow-up defect: the native adapter always supplies its proof-candidate
+policy resolver. In a restricted reduce-only completion, that resolver makes the
+batch prepare unrelated held families, whereas its fresh-book collector still
+honors the restriction. The existing generic-completion test passes without that
+native dependency; injecting the actual resolver makes its expected `[A]`
+preparation become `[A, B]` and fails in the real batch callback. This verifies
+the function defect, not every historical excluded leg (13769's request bindings
+were not persisted in its summary).
+
+The minimal repair keeps restricted action/q/book scope consistent by retaining
+`current_restricted_family_keys` regardless of that resolver when BUY is disabled.
+Complete portfolio wealth and held obligations remain, and unrestricted normal
+cuts continue preparing all their held families. SCOPE is only restricted
+reduce-only completion; DRAIN is its normal current-q/book redecision; RESET is
+the subsequent unrestricted full-held cut. Existing unrelated completion debt is
+not cleared by a partial success. One writer owns batch runtime and the existing
+completion-test area; main owns this plan and registry alignment. Test resolver
+on/off, exact/generic restriction and unrestricted coverage before landing;
+actual unrestricted fresh-book convergence remains a runtime acceptance gate.
+
+The separate 10:46:17.292 RO aggregate profile uses today's 218 candidate scopes,
+not a reconstruction of historical 13768 or restricted 13769. It spends 40.102
+seconds/18.663 CPU seconds in public callbacks; no individual callback approaches
+45 seconds. HWM and live-grade provenance account for 20.234 and 17.446 seconds
+at their respective call levels, with ground/shape/serving subcalls nested.
+49,256 SQLite executes consume 22.952 seconds. This establishes cumulative cost,
+not a database-lock diagnosis or permission to reuse authority across changing
+cuts. Measure exact duplicate proof identities before a cut-local optimization;
+do not shrink the universe, extend the epoch or cache stale authority.
+
+Restricted-scope repair checkpoint: the single production condition and 24-case
+HIGH/LOW x YES/NO x generic/exact/unrestricted x resolver-on/off matrix pass;
+eight additional queue/metadata negatives pass. Main independently runs 31
+affected instances. The required six engine files yield 48 pass/39 fail/4 skip;
+all 39 failed nodes and normalized failure attributes match the existing fixed
+baseline, with no new failure delta. Evidence is
+`/tmp/zeus-hk-restricted-engine-20261002.xml`; two existing NumPy warnings remain.
+
+Do not implement whole-ground-proof memoization: the current helpers use distinct
+RO connections and matching evidence/cut does not establish one visible snapshot.
+Independent review rejects that shortcut. Pure parse-only reuse retains every
+original file-version/hash and DB check but saves just 0.00655 seconds in three
+scope callbacks; no cache implementation is justified or added. The normal
+historical failed cuts lack exact scope/per-family timings, so a minimal existing
+runtime-log trace of actual ENTRY/HELD callback start/elapsed/family/cut is the
+next authorized diagnostic step. It must survive deadline/typed exceptions without
+new DB fields or changing order, coverage or deadlines. Ship with the proved
+scope correction, then diagnose an actual normal full-held cut; logging by itself
+is not incident completion. The former scope writer has stopped; the latency
+writer owns only the small observation diff and its existing integration test.
+
+Trace checkpoint: ENTRY/HELD inline start/finally-completion logs retain actual
+callback family/cut/elapsed/return status through exceptions and deadlines without
+resetting the outer stage timer. Eight new tests plus six neighboring corpus and
+deadline tests pass; main independently runs the combined scope/trace/metadata
+selection: 39 pass, with the same two existing warnings. No cache was added.
+
+An additional verified caller defect blocks the restored SELL law: monitor
+`statistical_sell_requires_global` depends on local `should_exit`, and both
+current holding-coverage inspection and exact/generic completion wakes depend on
+that flag. With no existing SELL debt, a local cash-EV HOLD therefore never asks
+the full-wealth action law to decide. Four actual monitoring-phase RED cases
+(YES/NO x HIGH/LOW, fresh q=.401365782 and bid=.19, confirmed five shares) produce
+HOLD, zero coverage checks, zero completion wakes and zero venue calls. These
+controlled typed-q/book inputs verify the caller defect, not live source physics
+or a historical profitable fill.
+
+Repair in the existing monitor and safety-test surfaces: separate qualified
+current held-family redecision from local SELL intention. Fresh qualified q,
+normalized legal current native full-depth book, confirmed inventory and allowed
+monitor write authority may request the existing bounded generic family wake
+when exact current global coverage is missing, even after local HOLD. Keep HOLD,
+ExitIntent, lifecycle and armed SELL obligations unchanged; global action law may
+choose HOLD and acknowledge that family. Missing/stale q or book, invalid bid,
+closed market, absent inventory and read-only authority cannot gain permission.
+Do not add a GREEN-only gate to existing reduce-only behavior. INV-47 SCOPE is
+the qualified held family, DRAIN its existing fair completion/redecision,
+RESET a reproduced current full-family coverage receipt. Reuse existing
+coalescing and preserve other family debt. The trace writer has stopped; one
+monitor writer owns cycle runtime and its existing live-safety tests. Main owns
+plan/registries, affected checks and subsequent normal landing/loading.
+
+Integrated pre-load checkpoint: final legal monitor fixtures use the real compact
+receipt transfer, fill-grade economics and a valid settlement clock, not the
+earlier incomplete forced-exit harness. In-memory loading of original `8534852`
+again produces four actual-monitor RED twins; current targeted checks give 56
+passes, including the original SELL/RED actuator, degraded and true closed-book
+negatives, stale depth reset, read-only and failed canonical-write rejection,
+real published matching coverage across different monitor timestamps and partial
+ack retention. Main's combined monitor/scope/trace/metadata run gives 89 passes
+(`/tmp/zeus-hk-wake-scope-integrated-20261002.xml`). Typed q/book IO is controlled;
+this is not proof of physical source inputs or a real profitable fill.
+
+The complete mandatory sixteen-file batch is repeated on the integrated code:
+316 pass/43 fail/4 skip (`/tmp/zeus-hk-wake-required-20261002.xml`). Failed nodes
+and normalized failure attributes exactly equal the fixed prior baseline.
+Registry YAML parses, changed-surface checks have no errors and only the same
+two downstream-map warnings; repo-wide 459 issues remain separate pre-existing
+drift. No all-suite or full-city readiness claim. Normal FF landing/loading and
+current HOLD-to-generic-wake-to-fresh-book/current-receipt evidence remain the
+acceptance gate. Actual normal full-scope timeliness still requires the new
+trace; known source-missing roots and old dead Hong Kong exposure are not
+reclassified or recovered by this patch.
+
 Latest complete live stored-row audit is loss's existing
 `/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
 SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.

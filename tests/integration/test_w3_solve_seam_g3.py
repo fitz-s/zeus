@@ -33089,35 +33089,53 @@ def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
     ]
 
 
+@pytest.mark.parametrize("proof_enabled", (False, True))
+@pytest.mark.parametrize("scope_kind", ("generic", "exact", "unrestricted"))
+@pytest.mark.parametrize("metric,side", (("high", "YES"), ("high", "NO"), ("low", "YES"), ("low", "NO")))
 def test_generic_completion_restricts_action_family_but_retains_full_held_wealth(
-    monkeypatch,
+    monkeypatch, proof_enabled, scope_kind, metric, side,
 ):
-    """A generic A completion may act on A while B remains in held economics."""
+    """Proof BUY evaluation cannot widen a restricted completion's action/books."""
     import src.data.replacement_input_hwm as replacement_hwm
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
 
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
-    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
-    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+
+    def event_for_metric(city, run):
+        base = _global_scope_event(city=city, source_run_id=run)
+        payload = json.loads(base.payload_json)
+        payload["metric"] = metric
+        return make_opportunity_event(
+            event_type=base.event_type, entity_key=f"{city}|2026-07-11|{metric}",
+            source=base.source, observed_at=base.observed_at, available_at=base.available_at,
+            received_at=base.received_at, payload=payload, causal_snapshot_id=base.causal_snapshot_id,
+        )
+
+    event_a = event_for_metric("Alpha", "run-a")
+    event_b = event_for_metric("Beta", "run-b")
     full_scope = current_global_auction_scope_from_events(
         (event_a, event_b),
         captured_at_utc=decision_at,
     )
-    family_a, family_b = full_scope.family_keys
+    family_a = era.weather_family_id(city="Alpha", target_date="2026-07-11", metric=metric)
+    family_b = era.weather_family_id(city="Beta", target_date="2026-07-11", metric=metric)
+    expected_families = {family_a, family_b} if scope_kind == "unrestricted" else {family_a}
+    held_tokens = {city: f"{side.lower()}-{suffix}" for city, suffix in (("Alpha", "a"), ("Beta", "b"))}
     wealth = _WealthNamespace(
         spendable_cash_usd=Decimal("100"),
         witness_identity="wealth-a-plus-b",
         economic_identity="wealth-a-plus-b-economics",
         ledger_snapshot_id="ledger-a-plus-b",
-        native_holdings_micro=(("yes-a", 5_000_000), ("yes-b", 7_000_000)),
+        native_holdings_micro=((held_tokens["Alpha"], 5_000_000), (held_tokens["Beta"], 7_000_000)),
     )
     positions = (
         SimpleNamespace(
             position_id="position-a",
             trade_id="position-a",
-            direction="buy_yes",
+            direction="buy_" + side.lower(),
             token_id="yes-a",
-            no_token_id="",
-            temperature_metric="high",
+            no_token_id="no-a",
+            temperature_metric=metric,
             city="Alpha",
             target_date="2026-07-11",
             bin_label="A-bin",
@@ -33126,10 +33144,10 @@ def test_generic_completion_restricts_action_family_but_retains_full_held_wealth
         SimpleNamespace(
             position_id="position-b",
             trade_id="position-b",
-            direction="buy_yes",
+            direction="buy_" + side.lower(),
             token_id="yes-b",
-            no_token_id="",
-            temperature_metric="high",
+            no_token_id="no-b",
+            temperature_metric=metric,
             city="Beta",
             target_date="2026-07-11",
             bin_label="B-bin",
@@ -33139,13 +33157,14 @@ def test_generic_completion_restricts_action_family_but_retains_full_held_wealth
     selected_actions = []
     stored = {}
     prepared_events = []
+    book_families = []
 
     monkeypatch.setattr(
         global_batch_runtime,
         "_current_held_weather_families",
         lambda _conn: (
-            ("Alpha", "2026-07-11", "high"),
-            ("Beta", "2026-07-11", "high"),
+            ("Alpha", "2026-07-11", metric),
+            ("Beta", "2026-07-11", metric),
         ),
     )
     monkeypatch.setattr(
@@ -33176,7 +33195,7 @@ def test_generic_completion_restricts_action_family_but_retains_full_held_wealth
                 for prepared_family in prepared.values()
             }
         )
-        assert kwargs["current_scope"].family_keys == (family_a,)
+        assert set(kwargs["current_scope"].family_keys) == expected_families
         assert kwargs["wealth_witness"] is wealth
         return PreparedGlobalAuctionResult(
             decision=GlobalSingleOrderDecision(
@@ -33208,29 +33227,34 @@ def test_generic_completion_restricts_action_family_but_retains_full_held_wealth
 
     def prepare(event, _at):
         prepared_events.append(event.event_id)
-        assert event.event_id == event_a.event_id
+        assert event.event_id in (
+            {event_a.event_id, event_b.event_id}
+            if scope_kind == "unrestricted" else {event_a.event_id}
+        )
+        selected_family = family_a if event.event_id == event_a.event_id else family_b
+        suffix = "a" if selected_family == family_a else "b"
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
             prepared_global_family=bridge.PreparedGlobalFamily(
-                decision_id="decision-a",
+                decision_id="decision-" + suffix,
                 probability_witness=SimpleNamespace(
-                    family_key=family_a,
+                    family_key=selected_family,
                     captured_at_utc=decision_at,
-                    posterior_identity_hash="run-a",
-                    witness_identity="q-a",
-                    q_version="q-a",
-                    family_binding_identity="binding-a",
-                    sample_matrix_identity="samples-a",
+                    posterior_identity_hash="run-" + suffix,
+                    witness_identity="q-" + suffix,
+                    q_version="q-" + suffix,
+                    family_binding_identity="binding-" + suffix,
+                    sample_matrix_identity="samples-" + suffix,
                     band_alpha=0.05,
                     band_basis="lower-tail",
                     bindings=(
                         SimpleNamespace(
-                            bin_id="bin-a",
-                            condition_id="condition-a",
-                            yes_token_id="yes-a",
-                            no_token_id="",
+                            bin_id="bin-" + suffix,
+                            condition_id="condition-" + suffix,
+                            yes_token_id="yes-" + suffix,
+                            no_token_id="no-" + suffix,
                         ),
                     ),
                 ),
@@ -33238,6 +33262,22 @@ def test_generic_completion_restricts_action_family_but_retains_full_held_wealth
             ),
         )
 
+    def provide_books(probabilities, _at):
+        book_families.append(set(probabilities))
+        assert set(probabilities) == expected_families
+        return probabilities, None
+
+    exact_requests = (
+        (make_held_sell_reauction_request(
+            position_id="position-a", family=("Alpha", "2026-07-11", metric),
+            probability_content_identity="content-a", held_token_id=held_tokens["Alpha"],
+            held_best_bid=0.47, bid_observed_at=decision_at.isoformat(), schema_version=4,
+            probability_observed_at=decision_at.isoformat(),
+            completion_deadline_at=(decision_at + _dt.timedelta(seconds=30)).isoformat(),
+            selection_epoch_identity="monitor-cut-a", sell_book_witness_identity="book-a",
+            monitor_event_id="monitor-a", debt_event_id="monitor-a",
+        ),) if scope_kind == "exact" else ()
+    )
     result = global_batch_runtime.process_current_global_batch(
         (event_a, event_b),
         decision_time=decision_at,
@@ -33252,13 +33292,17 @@ def test_generic_completion_restricts_action_family_but_retains_full_held_wealth
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
         portfolio_state_provider=lambda: SimpleNamespace(positions=positions),
-        current_book_epoch_provider=lambda probabilities, _at: (probabilities, None),
+        current_book_epoch_provider=provide_books,
         buy_candidates_enabled=False,
-        restrict_to_family_keys=frozenset({family_a}),
+        restrict_to_family_keys=(None if scope_kind == "unrestricted" else frozenset({family_a})),
+        required_held_family_keys=(frozenset({family_a}) if scope_kind == "generic" else frozenset()),
+        held_sell_reauction_requests=exact_requests,
+        proof_candidate_policy_rejection_resolver=((lambda candidate: None) if proof_enabled else None),
     )
 
-    assert prepared_events == [event_a.event_id]
-    assert selected_actions == [{family_a}]
+    assert set(prepared_events) == ({event_a.event_id, event_b.event_id} if scope_kind == "unrestricted" else {event_a.event_id})
+    assert selected_actions and all(families == expected_families for families in selected_actions)
+    assert book_families == [expected_families]
     assert stored["wealth_witness"] is wealth
     assert {
         obligation.position_id for obligation in stored["expected_holding_obligations"]
@@ -33266,15 +33310,16 @@ def test_generic_completion_restricts_action_family_but_retains_full_held_wealth
     assert {
         row.position_id for row in stored["selected"].holding_coverage
     } == {"position-a", "position-b"}
-    assert set(stored["holding_probability_witnesses"]) == {family_a}
-    assert family_b not in stored["holding_probability_witnesses"]
+    assert set(stored["holding_probability_witnesses"]) == expected_families
+    assert result.held_sell_completion_cut.request_bindings == exact_requests
     assert result.winner_event_id is None
     assert result.venue_submit_count == 0
 
 
 @pytest.mark.parametrize("missing", ("q", "book"))
+@pytest.mark.parametrize("proof_enabled", (False, True))
 def test_generic_completion_queue_preserves_failed_scope_and_acks_real_hold(
-    monkeypatch, tmp_path, missing,
+    monkeypatch, tmp_path, missing, proof_enabled,
 ):
     """A generic A completion may act on A while B remains in held economics."""
     import src.data.replacement_input_hwm as replacement_hwm
@@ -33448,6 +33493,7 @@ def test_generic_completion_queue_preserves_failed_scope_and_acks_real_hold(
             buy_candidates_enabled=False,
             restrict_to_family_keys=frozenset({family}),
             required_held_family_keys=frozenset({family}),
+            proof_candidate_policy_rejection_resolver=((lambda candidate: None) if proof_enabled else None),
         )
 
     wake_path = tmp_path / "wake.json"
@@ -49406,18 +49452,20 @@ def _unreceipted_batch_harness(monkeypatch, select):
     monkeypatch.setattr(global_batch_runtime, "current_venue_auction_identity", lambda *_, **__: identity)
     monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", lambda *a, **k: select())
 
-    def run():
+    def run(**prepare_options):
         return global_batch_runtime.process_current_global_batch(
             (event,), decision_time=decision_at, world_conn=object(),
             forecast_conn=object(), trade_conn=trade_conn,
             payload_reader=lambda item: json.loads(item.payload_json),
-            prepare_event=lambda item, _at: EventSubmissionReceipt(
+            prepare_event=prepare_options.get("prepare_event", lambda item, _at: EventSubmissionReceipt(
                 False, item.event_id, item.causal_snapshot_id,
                 prepared_global_family=bridge.PreparedGlobalFamily(
                     decision_id=f"decision-{family_key}",
                     probability_witness=witness, candidate_seeds=(),
                 ),
-            ),
+            )),
+            prepare_held_event=prepare_options.get("prepare_held_event"),
+            work_context=prepare_options.get("work_context"),
             actuate_winner=lambda *_: pytest.fail("must not actuate"),
             stamp_receipt=lambda receipt: receipt,
             venue_submit_count=lambda: 0,
@@ -49428,6 +49476,134 @@ def _unreceipted_batch_harness(monkeypatch, select):
         )
 
     return trade_conn, event, run
+
+
+@pytest.mark.parametrize("lane", ("ENTRY", "HELD"))
+@pytest.mark.parametrize("failure", (None, "exception", "deadline"))
+def test_global_family_prepare_trace_survives_callback_outcome(monkeypatch, caplog, lane, failure):
+    import src.engine.global_single_order_auction as gsoa
+    from src.engine import tier0_auction_corpus as corpus
+
+    class StopAfterPrepare(BaseException):
+        pass
+
+    trade_conn, event, run = _unreceipted_batch_harness(
+        monkeypatch, lambda: gsoa._no_trade("GLOBAL_BOOK_EPOCH_EXPIRED")
+    )
+    key = global_batch_runtime._decision_log_connection_key(trade_conn)
+    payload = json.loads(event.payload_json)
+    family = (payload["city"], payload["target_date"], payload["metric"])
+    family_key = global_batch_runtime.weather_family_id(
+        city=family[0], target_date=family[1], metric=family[2]
+    )
+    clock = [0.0]
+    monkeypatch.setattr(global_batch_runtime.time, "monotonic", lambda: clock[0])
+    if lane == "HELD":
+        monkeypatch.setattr(global_batch_runtime, "_current_held_weather_families", lambda *_: (family,))
+        monkeypatch.setattr(global_batch_runtime, "_current_held_obligations",
+            lambda *_: (SimpleNamespace(family_key=family_key),))
+        monkeypatch.setattr(global_batch_runtime, "_probability_content_identity", lambda *_: "same-q")
+        monkeypatch.setattr(global_batch_runtime, "_probability_action_content_mismatches", lambda *_: ())
+
+    def stop(*_args, **_kwargs):
+        raise StopAfterPrepare()
+
+    monkeypatch.setattr(global_batch_runtime, "_forecast_carrier_matches", stop)
+    seen = []
+
+    def callback(item, at):
+        seen.append((item.event_id, at))
+        clock[0] += 2.75
+        if failure == "exception":
+            raise RuntimeError("original prepare error")
+        if failure == "deadline":
+            raise universe.WorkDeferred(universe.WorkDeferredCode.DEADLINE,
+                stage="reader:hwm", remaining_s=0.0)
+        return EventSubmissionReceipt(False, item.event_id, item.causal_snapshot_id,
+            prepared_global_family=bridge.PreparedGlobalFamily(
+                decision_id="trace-decision", probability_witness=SimpleNamespace(family_key=family_key),
+                candidate_seeds=()))
+
+    options = {"prepare_event" if lane == "ENTRY" else "prepare_held_event": callback}
+    try:
+        with caplog.at_level("INFO", logger="src.engine.global_batch_runtime"):
+            if failure == "deadline":
+                result = run(**options)
+                assert result.receipts[event.event_id].reason == "DEFERRED_DEADLINE"
+            elif failure == "exception":
+                result = run(**options)
+                assert result.receipts[event.event_id].reason == (
+                    "GLOBAL_AUCTION_FAILED:RuntimeError:original prepare error"
+                )
+            else:
+                with pytest.raises(StopAfterPrepare):
+                    run(**options)
+        started = [r.getMessage() for r in caplog.records
+            if "global family prepare started:" in r.getMessage() and f"lane={lane}" in r.getMessage()]
+        completed = [r.getMessage() for r in caplog.records
+            if "global family prepare completed:" in r.getMessage() and f"lane={lane}" in r.getMessage()]
+        assert len(seen) == len(started) == len(completed) == 1
+        for message in (*started, *completed):
+            assert f"family={family_key}" in message and f"event={event.event_id}" in message
+            assert f"cut={seen[0][1].isoformat()}" in message
+        assert "deadline=None" in started[0]
+        assert "elapsed_s=2.750" in completed[0]
+        assert f"returned={failure is None}" in completed[0]
+    finally:
+        corpus._PENDING.pop(key, None)
+        trade_conn.close()
+
+
+@pytest.mark.parametrize("unbounded", (False, True))
+def test_global_family_prepare_trace_identifies_last_real_callback_before_deadline(monkeypatch, caplog, unbounded):
+    import src.engine.global_single_order_auction as gsoa
+    from src.engine import tier0_auction_corpus as corpus
+
+    trade_conn, event, run = _unreceipted_batch_harness(
+        monkeypatch, lambda: gsoa._no_trade("GLOBAL_BOOK_EPOCH_EXPIRED")
+    )
+    key = global_batch_runtime._decision_log_connection_key(trade_conn)
+    at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    second = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events((event, second), captured_at_utc=at)
+    first_key, first_event = scope.events_by_family[0]
+    second_key, _ = scope.events_by_family[1]
+    clock = [0.0]
+    monkeypatch.setattr(global_batch_runtime.time, "monotonic", lambda: clock[0])
+    work = universe.WorkContext(deadline_monotonic=None if unbounded else 45.0,
+        monotonic=lambda: clock[0])
+    monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
+    monkeypatch.setattr(global_batch_runtime, "_forecast_carrier_matches", lambda *_: True)
+    seen = []
+
+    def callback(item, cut):
+        seen.append(item.event_id)
+        clock[0] = 50.0
+        if unbounded:
+            raise RuntimeError("unbounded callback stop")
+        return EventSubmissionReceipt(False, item.event_id, item.causal_snapshot_id,
+            prepared_global_family=bridge.PreparedGlobalFamily(decision_id="trace-deadline",
+                probability_witness=SimpleNamespace(family_key=first_key), candidate_seeds=()))
+
+    try:
+        with caplog.at_level("INFO", logger="src.engine.global_batch_runtime"):
+            if unbounded:
+                result = run(prepare_event=callback, work_context=work)
+                assert result.receipts[event.event_id].reason == (
+                    "GLOBAL_AUCTION_FAILED:RuntimeError:unbounded callback stop"
+                )
+            else:
+                result = run(prepare_event=callback, work_context=work)
+                assert result.receipts[event.event_id].reason == "DEFERRED_DEADLINE"
+                assert f"prepare_family:{second_key}" in caplog.text
+        traces = [r.getMessage() for r in caplog.records if "global family prepare " in r.getMessage()]
+        assert seen == [first_event.event_id]
+        assert len(traces) == 2 and all(f"family={first_key}" in message for message in traces)
+        assert "elapsed_s=50.000" in traces[1]
+        assert f"returned={not unbounded}" in traces[1]
+    finally:
+        corpus._PENDING.pop(key, None)
+        trade_conn.close()
 
 
 def test_global_batch_returns_its_result_when_the_corpus_flush_raises(monkeypatch):
