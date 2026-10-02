@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused/audited: 2026-08-31
+# Last reused/audited: 2026-10-02
 # Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
 #   forecast PRODUCTION (raw-input download + live materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
@@ -1462,11 +1462,14 @@ def _drain_newest_covering_anchor_local_proofs_if_needed(
 def _held_legacy_physical_proof_recovery_candidates(
     forecast_db: Path, held_priority: Mapping[tuple[str, str, str], int], *,
     decision_time: datetime, deadline_monotonic: float | None,
+    cycle: datetime | None = None, rotation_state_path: Path | None = None,
+    scan_report: dict[str, object] | None = None,
 ) -> dict[tuple[str, str, str], tuple[str, datetime, str, int]]:
     """One exact, typed HTTP-repair debt per missing held source family.
 
     SCOPE: eligible immutable single-runs rows in that held family. DRAIN:
-    ordinary producer captures the same issued archive under its quota/deadline.
+    ordinary producer captures the same issued archive under its quota/deadline;
+    bounded judgement resumes at the existing capture rotation frontier.
     RESET: exact body/value revalidation, never a rewritten raw row or new expiry.
     """
     from src.config import cities_by_name
@@ -1476,18 +1479,29 @@ def _held_legacy_physical_proof_recovery_candidates(
     )
 
     candidates: dict[tuple[str, str, str], tuple[str, datetime, str, int]] = {}
-    conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
+    scopes = sorted(scope for scope, priority in held_priority.items() if priority < 2)
+    if scopes and cycle is not None:
+        keys = tuple(dict.fromkeys((city, target_date) for city, target_date, _metric in scopes))
+        start, _status = _bpf_extra_rotation_start(
+            state_path=rotation_state_path, cycle_key=cycle.astimezone(timezone.utc).isoformat(), keys=keys,
+        )
+        ordered = keys[start:] + keys[:start]
+        scopes.sort(key=lambda scope: (ordered.index(scope[:2]), scope[2]))
+    unknown = set(scopes)
+    report = scan_report if scan_report is not None else {}
+    report.update(status="COMPLETE", scope_count=len(scopes), attempted_scope_count=0)
+    conn = None
     try:
+        conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
         conn.row_factory = sqlite3.Row
         if deadline_monotonic is not None:
             conn.set_progress_handler(lambda: int(time.monotonic() >= deadline_monotonic), 1000)
         schema = current_value_serving_schema(conn)
         if not schema.has_artifacts or not set(("artifact_id", "model_domain_hash", "recorded_at")).issubset(schema.product_identity_columns):
             return candidates
-        for scope, priority in sorted(held_priority.items()):
-            _check_source_preflight_deadline(deadline_monotonic)
-            if priority >= 2:
-                continue
+        for index, scope in enumerate(scopes):
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                break
             city, target_date, metric = scope
             city_cfg = cities_by_name.get(city)
             if city_cfg is None:
@@ -1495,25 +1509,80 @@ def _held_legacy_physical_proof_recovery_candidates(
             # An old certificate may still replay at its own cutoff while a
             # later matching receipt is invalid. Cost eligibility comes solely
             # from the shared exact-row classifier, not historical q authority.
-            cursor = conn.execute(
-                "SELECT raw_model_forecast_id,model,source_cycle_time FROM raw_model_forecasts"
-                " WHERE city=? AND target_date=? AND metric=? AND endpoint='single_runs'"
-                " AND endpoint_mode='single_runs' ORDER BY source_cycle_time DESC,model,raw_model_forecast_id DESC", scope)
-            while scope not in candidates:
-                _check_source_preflight_deadline(deadline_monotonic)
-                rows = cursor.fetchmany(32)
-                if not rows:
-                    break
-                for raw_id, model, raw_cycle in rows:
-                    reason = physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
-                        decision_time_iso=decision_time.isoformat(), deadline_monotonic=deadline_monotonic)
-                    if reason is not None:
-                        cycle = datetime.fromisoformat(str(raw_cycle).replace("Z", "+00:00"))
-                        candidates[scope] = (str(model), cycle, reason, int(raw_id))
-                        break
+            report["attempted_scope_count"] = int(report["attempted_scope_count"]) + 1
+            report["last_attempted_group"] = (city, target_date)
+            # The durable cursor rotates city-days. Share this group's remaining
+            # allowance across its metrics so a dense HIGH cannot starve LOW.
+            scope_deadline = deadline_monotonic
+            if deadline_monotonic is not None:
+                siblings = sum(other[:2] == scope[:2] for other in scopes[index:])
+                scope_deadline = time.monotonic() + max(0.0, deadline_monotonic - time.monotonic()) / siblings
+                conn.set_progress_handler(lambda: int(time.monotonic() >= scope_deadline), 1000)
+            try:
+                cursor = conn.execute(
+                    "SELECT raw_model_forecast_id,model,source_cycle_time FROM raw_model_forecasts"
+                    " WHERE city=? AND target_date=? AND metric=? AND endpoint='single_runs'"
+                    " AND endpoint_mode='single_runs' ORDER BY source_cycle_time DESC,model,raw_model_forecast_id DESC", scope)
+                try:
+                    while scope not in candidates:
+                        _check_source_preflight_deadline(scope_deadline)
+                        rows = cursor.fetchmany(32)
+                        if not rows:
+                            break
+                        for raw_id, model, raw_cycle in rows:
+                            reason = physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
+                                decision_time_iso=decision_time.isoformat(), deadline_monotonic=scope_deadline)
+                            if reason is not None:
+                                raw_run = datetime.fromisoformat(str(raw_cycle).replace("Z", "+00:00"))
+                                candidates[scope] = (str(model), raw_run, reason, int(raw_id))
+                                break
+                finally:
+                    cursor.close()
+                unknown.discard(scope)
+            except (TimeoutError, sqlite3.OperationalError):
+                # Complete exact-row classification alone grants repair cost.
+                # A partial family remains unknown; earlier debt survives.
+                continue
+        return candidates
+    except (TimeoutError, sqlite3.OperationalError):
         return candidates
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        report["candidate_count"] = len(candidates)
+        report["unknown_scopes"] = tuple(sorted(unknown))
+        if unknown:
+            report["status"] = (
+                "TIMEBOXED_INCOMPLETE"
+                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
+                else "PARTIAL_UNKNOWN"
+            )
+
+
+def _advance_bpf_physical_debt_judgment_rotation(
+    scan_report: dict[str, object], *, cycle: datetime, state_path: Path | None,
+) -> dict[str, object]:
+    """Owner-held fallback progress when capture has no attempted prefix.
+
+    This cursor moves after a judgement attempt, including an unknown result;
+    it grants neither a capture receipt nor physical source authority.
+    """
+    last_group = scan_report.get("last_attempted_group")
+    if not isinstance(last_group, tuple) or len(last_group) != 2:
+        return {"status": "NO_PROGRESS"}
+    scan_report["rotation_progress_basis"] = "PHYSICAL_DEBT_JUDGMENT"
+    status = "UNCONFIGURED"
+    if state_path is not None:
+        try:
+            with _BPF_EXTRA_ROTATION_LOCK:
+                _atomic_write_bpf_extra_rotation(state_path,
+                    cycle_key=cycle.astimezone(timezone.utc).isoformat(), last_attempted_group=last_group)
+            status = "PERSISTED"
+        except OSError as exc:
+            status = "WRITE_FAILED"
+            scan_report["rotation_cursor_error"] = str(exc)[:220]
+    scan_report["rotation_cursor_write_status"] = status
+    return {"status": status, "last_attempted_group": last_group}
 
 
 def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
@@ -1625,9 +1694,18 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             raise
         except Exception:
             held_priority = {}
+        judgment_deadline = (
+            None if deadline_monotonic is None
+            else time.monotonic() + max(0.0, deadline_monotonic - time.monotonic()) / 2.0
+        )
+        physical_scan_report: dict[str, object] = {}
         physical_recovery_candidates = (
             _held_legacy_physical_proof_recovery_candidates(Path(str(forecast_db)), held_priority,
-                decision_time=decision_time, deadline_monotonic=deadline_monotonic)
+                decision_time=decision_time,
+                deadline_monotonic=(None if judgment_deadline is None
+                    else time.monotonic() + max(0.0, judgment_deadline - time.monotonic()) / 2.0),
+                cycle=cycle, rotation_state_path=_bpf_extra_rotation_state_path(cfg),
+                scan_report=physical_scan_report)
             if held_priority and not capture_when_covered and frozen_source_runs is None and models is None
             else {}
         )
@@ -1657,26 +1735,28 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         cohort_backtrack_candidates: dict[
             tuple[str, str, str], tuple[str, datetime]
         ] = {}
-        coverage = (
-            None
-            if capture_when_covered
-            else _extras_coverage_missing(
-                cfg,
-                cycle,
-                decision_time=decision_time,
-                capture_rows=capture_rows,
-                held_priority=held_priority,
-                # Judging debt shares the slice with paying it: an expired
-                # judgement returns what it found, and the download still runs.
-                deadline_monotonic=(
-                    None if deadline_monotonic is None
-                    else time.monotonic() + max(0.0, deadline_monotonic - time.monotonic()) / 2.0
-                ),
-                cohort_backtrack_candidates=cohort_backtrack_candidates,
-                physical_recovery_candidates=(physical_recovery_candidates
-                    if frozen_source_runs is None and models is None else None),
+        try:
+            coverage = (
+                None
+                if capture_when_covered
+                else _extras_coverage_missing(
+                    cfg,
+                    cycle,
+                    decision_time=decision_time,
+                    capture_rows=capture_rows,
+                    held_priority=held_priority,
+                    # Judging debt shares the slice with paying it: an expired
+                    # judgement returns what it found, and the download still runs.
+                    deadline_monotonic=judgment_deadline,
+                    cohort_backtrack_candidates=cohort_backtrack_candidates,
+                    physical_recovery_candidates=(physical_recovery_candidates
+                        if frozen_source_runs is None and models is None else None),
+                )
             )
-        )
+        except TimeoutError:
+            # Unknown coverage admits acquisition, never source authority.
+            # The downloader still owns the reserved half of this slice.
+            coverage = None
         missing_scopes = None if coverage is None else coverage[0]
         _check_source_preflight_deadline(deadline_monotonic)
         planned_scopes = {
@@ -1775,13 +1855,16 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 lead_days=lead_days, latitude=float(city_cfg.lat), longitude=float(city_cfg.lon),
                 timezone_name=str(city_cfg.timezone),
             ))
-        if not targets:
-            return {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
         rotation_state_path = (
             _bpf_candidate_accrual_rotation_state_path(cfg)
             if capture_when_covered
             else _bpf_extra_rotation_state_path(cfg)
         )
+        if not targets and not physical_scan_report.get("last_attempted_group"):
+            result = {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
+            if physical_scan_report:
+                result["physical_capture_debt_scan"] = physical_scan_report
+            return result
         owner_status, owner_fd, owner_error = (
             _try_acquire_bpf_extra_rotation_owner(rotation_state_path)
         )
@@ -1797,9 +1880,19 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             }
             if owner_error is not None:
                 result["error"] = owner_error
+            if physical_scan_report:
+                result["physical_capture_debt_scan"] = physical_scan_report
             return result
 
         try:
+            if not targets:
+                rotation_write = _advance_bpf_physical_debt_judgment_rotation(
+                    physical_scan_report, cycle=cycle, state_path=rotation_state_path,
+                )
+                return {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
+                        "physical_capture_debt_scan": physical_scan_report,
+                        "target_rotation_attempted_group_count": 0,
+                        "target_rotation_cursor_write_status": rotation_write["status"]}
             _check_source_preflight_deadline(deadline_monotonic)
             (
                 rotated_targets,
@@ -2026,6 +2119,12 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 attempted_group_count=attempted,
                 state_path=rotation_state_path,
             )
+            if attempted == 0:
+                rotation_write = _advance_bpf_physical_debt_judgment_rotation(
+                    physical_scan_report, cycle=cycle, state_path=rotation_state_path,
+                )
+            if physical_scan_report:
+                result["physical_capture_debt_scan"] = physical_scan_report
             result["target_rotation_owner_status"] = owner_status
             result["target_rotation_start"] = rotation_start
             result["target_rotation_group_count"] = rotation_group_count

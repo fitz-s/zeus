@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-10-02 (listing-first judge order, raw cohort pre-pass, partial verdict on deadline)
-# Lifecycle: created=2026-06-16; last_reviewed=2026-09-25; last_reused=2026-09-25
+# Last reused or audited: 2026-10-02 (held physical-debt budget, partial unknowns, zero-capture fair progress)
+# Lifecycle: created=2026-06-16; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md;
 #   8979df299 (proven-final exact-run gaps remain incomplete when the model has any real miss).
@@ -828,6 +828,212 @@ def test_raw_rows_without_a_coherent_cycle_skip_the_cohort_proof_read(
         ("Denver", "high", "2026-09-25")
     }
     assert cohort_reads == [1], "a coherent raw cycle still gets the full proof read"
+
+
+def _held_physical_scan_db(tmp_path: Path) -> Path:
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+
+    db = tmp_path / "held-physical.db"
+    with sqlite3.connect(db) as conn:
+        ensure_replacement_forecast_live_schema(conn)
+    for hours_ago in range(1, 41):
+        _current_source_clock_row(db, "icon_global", _CYCLE - timedelta(hours=hours_ago),
+                                  city="Chicago", target_date="2026-06-17")
+    for city in ("Chicago", "Denver", "Paris"):
+        _current_source_clock_row(db, "icon_global", _CYCLE, city=city,
+                                  target_date="2026-06-17")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_model_forecasts SET endpoint_mode='single_runs'")
+    return db
+
+
+def test_held_physical_debt_deadline_keeps_an_already_proven_candidate(
+    tmp_path, monkeypatch,
+) -> None:
+    from src.data import replacement_current_value_serving as serving
+
+    db = _held_physical_scan_db(tmp_path)
+    clock = [time.monotonic()]
+    deadline = clock[0] + 2.0
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+
+    def classify(conn, *, raw_model_forecast_id, deadline_monotonic, **_kwargs):
+        city = conn.execute("SELECT city FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+                            (raw_model_forecast_id,)).fetchone()[0]
+        if city == "Chicago":
+            return "HTTP_CAPTURE_RECEIPT_MISSING"
+        clock[0] = deadline_monotonic
+        raise serving.CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
+
+    monkeypatch.setattr(serving, "physical_capture_debt_reason", classify)
+    result = prod._held_legacy_physical_proof_recovery_candidates(
+        db, {(city, "2026-06-17", "high"): 0 for city in ("Chicago", "Denver", "Paris")},
+        decision_time=_CYCLE + timedelta(hours=10), deadline_monotonic=deadline,
+    )
+    assert set(result) == {("Chicago", "2026-06-17", "high")}
+    assert result[("Chicago", "2026-06-17", "high")][2] == "HTTP_CAPTURE_RECEIPT_MISSING"
+
+
+@pytest.mark.parametrize("coverage_complete,coverage_times_out", ((False, False), (True, False), (False, True)))
+def test_normal_held_physical_scan_reserves_capture_and_advances_with_zero_capture_attempts(
+    tmp_path, monkeypatch, coverage_complete, coverage_times_out,
+) -> None:
+    """A dense first family cannot erase debt or freeze later families even
+    when current capture returns a genuine zero-attempt receipt."""
+    from src.data import bayes_precision_fusion_download as downloader
+    from src.data import replacement_current_value_serving as serving
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    db = _held_physical_scan_db(tmp_path)
+    scopes = tuple((city, "2026-06-17", "high") for city in ("Chicago", "Denver", "Paris"))
+    clock = [time.monotonic()]
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_kwargs: dict.fromkeys(scopes, 0))
+    monkeypatch.setattr(downloader, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    _current_source_clock_metadata(monkeypatch, {})
+    if coverage_complete:
+        monkeypatch.setattr(prod, "_extras_coverage_missing", lambda *_args, **_kwargs: (set(), len(scopes)))
+    elif coverage_times_out:
+        def expire_coverage(*_args, deadline_monotonic, **_kwargs):
+            clock[0] = deadline_monotonic
+            raise TimeoutError("BPF coverage read deadline expired")
+        monkeypatch.setattr(prod, "_extras_coverage_missing", expire_coverage)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (_CYCLE + timedelta(hours=10)).astimezone(tz or UTC)
+
+    monkeypatch.setattr(prod, "datetime", Clock)
+    scanned: list[str] = []
+
+    def classify(conn, *, raw_model_forecast_id, deadline_monotonic, **_kwargs):
+        city = conn.execute("SELECT city FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+                            (raw_model_forecast_id,)).fetchone()[0]
+        scanned.append(city)
+        if city == "Chicago":
+            clock[0] = deadline_monotonic
+            raise serving.CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
+        return "HTTP_CAPTURE_RECEIPT_MISSING" if city == "Denver" else None
+
+    monkeypatch.setattr(serving, "physical_capture_debt_reason", classify)
+    normal: list[dict] = []
+    archives: list[dict] = []
+
+    def capture(**kwargs):
+        (archives if kwargs.get("network_capture_reason") else normal).append(kwargs)
+        assert kwargs["max_wall_clock_seconds"] > 0, "debt judgement must reserve download time"
+        return {"status": "BAYES_PRECISION_FUSION_EXTRA_DOWNLOADED", "written_row_count": 0,
+                "attempted_target_group_count": 0}
+
+    monkeypatch.setattr(downloader, "download_bayes_precision_fusion_extra_raw_inputs", capture)
+    cfg = {"forecast_db": db, "bpf_extra_rotation_state_path": tmp_path / "rotation.json"}
+    first = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg, max_wall_clock_seconds=8.0, planning_cycle=_CYCLE, capture_target_scopes=scopes,
+    )
+    assert len(normal) == int(not coverage_complete) and not archives
+    scan = first["physical_capture_debt_scan"]
+    assert scan["status"] == "TIMEBOXED_INCOMPLETE"
+    assert set(map(tuple, scan["unknown_scopes"])) == set(scopes)
+    assert scan["rotation_progress_basis"] == "PHYSICAL_DEBT_JUDGMENT"
+    assert first["target_rotation_attempted_group_count"] == 0
+
+    second = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg, max_wall_clock_seconds=8.0, planning_cycle=_CYCLE, capture_target_scopes=scopes,
+    )
+    assert scanned == ["Chicago", "Denver", "Paris", "Chicago"]
+    assert len(normal) == 1 + int(not coverage_complete) and len(archives) == 1
+    assert archives[0]["network_capture_reason"] == "HTTP_CAPTURE_RECEIPT_MISSING"
+    assert {target.city for target in archives[0]["targets"]} == {"Denver"}
+    assert second["physical_capture_debt_scan"]["candidate_count"] == 1
+    assert second["physical_capture_debt_scan"]["unknown_scopes"] == (("Chicago", "2026-06-17", "high"),)
+    assert second["target_rotation_attempted_group_count"] == 0
+
+
+@pytest.mark.parametrize("dense_metric", ("high", "low"))
+def test_held_physical_judgment_reserves_time_for_the_metric_twin(
+    tmp_path, monkeypatch, dense_metric,
+) -> None:
+    from src.data import replacement_current_value_serving as serving
+
+    db = _held_physical_scan_db(tmp_path)
+    _current_source_clock_row(db, "icon_global", _CYCLE, city="Chicago",
+                              target_date="2026-06-17", metric="low")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE raw_model_forecasts SET endpoint_mode='single_runs'")
+    clock = [time.monotonic()]
+    monkeypatch.setattr(prod.time, "monotonic", lambda: clock[0])
+    report: dict = {}
+    visited: list[str] = []
+
+    def classify(conn, *, raw_model_forecast_id, deadline_monotonic, **_kwargs):
+        metric = conn.execute("SELECT metric FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+                              (raw_model_forecast_id,)).fetchone()[0]
+        visited.append(metric)
+        if metric == dense_metric:
+            clock[0] = deadline_monotonic
+            raise serving.CurrentValueServingReadUnavailable("physical_capture_scan_budget_exceeded")
+        return "HTTP_CAPTURE_RECEIPT_MISSING"
+
+    monkeypatch.setattr(serving, "physical_capture_debt_reason", classify)
+    result = prod._held_legacy_physical_proof_recovery_candidates(
+        db, {("Chicago", "2026-06-17", metric): 0 for metric in ("high", "low")},
+        decision_time=_CYCLE + timedelta(hours=10), deadline_monotonic=clock[0] + 2.0,
+        scan_report=report,
+    )
+    assert visited == ["high", "low"]
+    twin = "low" if dense_metric == "high" else "high"
+    assert set(result) == {("Chicago", "2026-06-17", twin)}
+    assert report["unknown_scopes"] == (("Chicago", "2026-06-17", dense_metric),)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("broken_clock", ("captured_at", "source_available_at", "recorded_at"))
+def test_held_physical_unknown_never_exposes_an_old_body_over_the_latest_poison(
+    tmp_path, monkeypatch, metric, broken_clock,
+) -> None:
+    from src.data import replacement_current_value_serving as serving
+    from tests.test_bayes_precision_fusion_download import _real_capture_world
+
+    # Actual native/ground proof, entity capture and canonical writer; HTTP and
+    # SQL now are private deterministic fixture surfaces.
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
+    target = world.targets[0]
+    world.clock[0] = datetime(2026, 9, 29, 23, 30, tzinfo=UTC)
+    with world.open_forecast(world.db) as conn:
+        def current():
+            return serving.read_current_instrument_values(
+                conn, city=target.city, metric=metric, target_date=target.target_date,
+                source_cycle_time_iso=world.run.isoformat(), decision_time_iso=world.clock[0].isoformat(),
+            )
+
+        assert "icon_global" in current()
+        columns = [field[1] for field in conn.execute("PRAGMA table_info(raw_forecast_artifacts)")
+                   if field[1] != "artifact_id"]
+        # Clone the exact held target's receipt identity, never a foreign family.
+        body_id = conn.execute("SELECT artifact_id FROM raw_model_forecasts WHERE city=? AND metric=?",
+                               (target.city, metric)).fetchone()[0]
+        receipt = conn.execute(
+            "SELECT " + ",".join(columns) + " FROM raw_forecast_artifacts"
+            " WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'"
+            " AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=?",
+            (body_id,),
+        ).fetchone()
+        poison = {**dict(zip(columns, receipt, strict=True)),
+                  "captured_at": world.clock[0].isoformat(), "source_available_at": world.clock[0].isoformat(),
+                  "recorded_at": world.clock[0].isoformat(), broken_clock: "broken-latest-clock", "sha256": "f" * 64}
+        conn.execute("INSERT INTO raw_forecast_artifacts (" + ",".join(columns) + ") VALUES ("
+                     + ",".join("?" for _ in columns) + ")", tuple(poison[column] for column in columns))
+        conn.commit()
+        assert "icon_global" not in current()
+        scope = (target.city, target.target_date, metric)
+        report: dict = {}
+        assert prod._held_legacy_physical_proof_recovery_candidates(
+            world.db, {scope: 0}, decision_time=world.clock[0],
+            deadline_monotonic=time.monotonic(), scan_report=report,
+        ) == {}
+        assert report["unknown_scopes"] == (scope,)
+        assert "icon_global" not in current(), "unknown debt cannot restore an older valid body"
 
 
 def test_source_cycle_local_decision_window_is_timezone_aware() -> None:
