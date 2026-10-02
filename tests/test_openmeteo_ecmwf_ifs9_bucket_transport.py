@@ -254,14 +254,42 @@ def test_frozen_o1280_dateline_selected_coordinate_wrap_twin(tmp_path,monkeypatc
     assert transport.validate_source_cell_geometry_proof(proof,**args,decision_at="2026-09-30T12:01:00Z") is None
 
 
-def test_frozen_o1280_sea_fallback_is_diagnostic_not_land_authority(tmp_path,monkeypatch):
+def test_frozen_o1280_all_sea_neighbourhood_admits_the_providers_only_cell(tmp_path,monkeypatch):
+    from copy import deepcopy
     transport,_,data,write,_,kwargs=_actual_o1280_static_fixture(tmp_path,monkeypatch)
     data[:]=-999
     write()
     proof=transport.capture_source_cell_geometry_proof(**kwargs)
-    assert proof["cell_is_sea"] is True
+    assert (proof["cell_is_sea"],proof["cell_is_center"],proof["all_sea_neighbourhood"])==(True,True,True)
+    args={key:value for key,value in kwargs.items() if key!="local_cache"}
+    assert transport.validate_source_cell_geometry_proof(proof,**args,decision_at="2026-09-30T12:01:00Z") is None
+    dropped=deepcopy(proof)
+    dropped.pop("all_sea_neighbourhood")
+    assert transport.validate_source_cell_geometry_proof(dropped,**args,decision_at="2026-09-30T12:01:00Z") is not None
+
+
+def test_frozen_o1280_sea_cell_beside_land_is_not_the_providers_selection(tmp_path,monkeypatch):
+    transport,_,data,write,_,kwargs=_actual_o1280_static_fixture(tmp_path,monkeypatch)
+    points,_,center=transport.om_get_surrounding_gridpoints(kwargs["requested_latitude"],kwargs["requested_longitude"])
+    data[0,list(points)]=-999
+    # One land neighbour too high for the terrain search: the centre fallback is sea
+    # although land exists, a selection the provider's cell_selection=land never serves.
+    data[0,points[(center+1)%len(points)]]=5000
+    write()
+    proof=transport.capture_source_cell_geometry_proof(**kwargs)
+    assert proof["cell_is_sea"] is True and "all_sea_neighbourhood" not in proof
     args={key:value for key,value in kwargs.items() if key!="local_cache"}
     assert transport.validate_source_cell_geometry_proof(proof,**args,decision_at="2026-09-30T12:01:00Z") is not None
+    assert not transport.o1280_selected_cell_admissible({**proof,"all_sea_neighbourhood":True,"cell_is_center":False})
+
+
+def test_land_cell_proof_bytes_carry_no_sea_neighbourhood_key(tmp_path,monkeypatch):
+    transport,_,_,_,_,kwargs=_actual_o1280_static_fixture(tmp_path,monkeypatch)
+    proof=transport.capture_source_cell_geometry_proof(**kwargs)
+    assert proof["cell_is_sea"] is False and "all_sea_neighbourhood" not in proof
+    forged={**proof,"all_sea_neighbourhood":True}
+    args={key:value for key,value in kwargs.items() if key!="local_cache"}
+    assert transport.validate_source_cell_geometry_proof(forged,**args,decision_at="2026-09-30T12:01:00Z") is not None
 
 
 def test_bucket_point_reader_pool_reuses_valid_time_reader_and_closes() -> None:

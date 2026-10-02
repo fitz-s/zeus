@@ -1603,9 +1603,11 @@ def _current_model_surface_witness(row: Mapping[str, object], geometry: Mapping[
         # Preserve the existing exact O1280 witness; no other provider may
         # borrow its surface or grid identity.
         proof = geometry.get("source_cell_geometry_proof")
-        if not isinstance(proof, Mapping) or proof.get("revision") != "openmeteo_ifs9_o1280_source_cell_v1" or proof.get("cell_is_sea") is not False:
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+            o1280_selected_cell_admissible, validate_source_cell_geometry_proof,
+        )
+        if not isinstance(proof, Mapping) or proof.get("revision") != "openmeteo_ifs9_o1280_source_cell_v1" or not o1280_selected_cell_admissible(proof):
             return None
-        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import validate_source_cell_geometry_proof
         try:
             if row.get("physical_proof_cutoff") is None or validate_source_cell_geometry_proof(proof,
                 latitude=float(geometry["selected_latitude"]), longitude=float(geometry["selected_longitude"]),
@@ -1614,7 +1616,8 @@ def _current_model_surface_witness(row: Mapping[str, object], geometry: Mapping[
                 decision_at=row["physical_proof_cutoff"]) is not None:
                 return None
             return {"revision": "openmeteo_ifs9_o1280_source_cell_v1", "status": "VERIFIED",
-                "geometry":{**proof,"native_surface":"LAND","native_grid_elevation_m":proof["raw_grid_elevation_m"]}}
+                "geometry":{**proof,"native_surface":"SEA" if proof["cell_is_sea"] else "LAND",
+                    "native_grid_elevation_m":proof["raw_grid_elevation_m"]}}
         except (OSError, ValueError, TypeError):
             return None
     cutoff = row.get("physical_proof_cutoff")

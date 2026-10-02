@@ -526,7 +526,7 @@ class TestPollFetchDecision:
         assert [(leg, row["cycle"].isoformat()) for leg, row in fetched] == [
             ("anchor", "2026-06-10T06:00:00+00:00")
         ]
-        assert fetched[0][1]["quota_priority"] is True
+        assert "quota_priority" not in fetched[0][1]  # the downloader owns the anchor lane
         assert report["status"] == "AVAILABILITY_POLL"
 
     def test_noop_when_holdings_match_publication(self, monkeypatch, tmp_path):
@@ -566,7 +566,7 @@ class TestPollFetchDecision:
         assert len(fetched) == 1
         assert fetched[0][1]["include_covered"] is False
         assert fetched[0][1]["missing_manifests_only"] is True
-        assert fetched[0][1]["quota_priority"] is True
+        assert "quota_priority" not in fetched[0][1]  # the downloader owns the anchor lane
         assert report["anchor_missing_scope_count_after_fetch"] == 205
         assert report["bayes_precision_fusion_extras_status"] == (
             "EXTRAS_DEFERRED_UNTIL_ANCHOR_MANIFESTS_COMPLETE"

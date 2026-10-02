@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import fcntl
 import hashlib
 import json
@@ -88,6 +87,12 @@ _ANCHOR_WAVE_MAX_INFLIGHT = 8
 _ANCHOR_WAVE_LOCK = Lock()
 _ANCHOR_WAVE_EXECUTOR: ThreadPoolExecutor | None = None
 _ANCHOR_WAVE_INFLIGHT: dict[tuple[str, str, str], Future] = {}
+
+
+def _anchor_quota_lane(quota_critical: bool):
+    """Held Day0/exit scopes stay critical; every other OM9 anchor fetch spends
+    the anchor tranche, which no lower-priority producer can consume."""
+    return quota_tracker.critical_lane() if quota_critical else quota_tracker.anchor_lane()
 
 
 def _rotation_state_lock_path(state_path: Path) -> Path:
@@ -225,20 +230,13 @@ def _current_target_family_key(row: object) -> tuple[str, str, str]:
     )
 
 
-def _current_target_rotation_state_path(
-    output_dir: Path,
-    rows: Sequence[object],
-    *,
-    scoped: bool,
-) -> Path:
+def _current_target_rotation_state_path(output_dir: Path, *, scoped: bool) -> Path:
     if not scoped:
         return output_dir / ".current_target_rotation.json"
-    scope_identity = json.dumps(
-        sorted(_current_target_family_key(row) for row in rows),
-        separators=(",", ":"),
-    )
-    scope_hash = hashlib.sha256(scope_identity.encode("utf-8")).hexdigest()[:16]
-    return output_dir / f".current_target_rotation.scoped-{scope_hash}.json"
+    # One durable scoped cursor keyed by family, not one file per scope set: held
+    # membership changes nearly every tick, and a fresh per-set file restarted at
+    # the head each time (165 such files in one day, 139 never advanced).
+    return output_dir / ".current_target_rotation.scoped.json"
 
 
 def _ordered_current_target_rows(
@@ -635,6 +633,18 @@ def _publish_source_geometry_faults(
         opened=failed,
         closed=certified_cities - failed.keys(),
     )
+
+
+def _station_ground_prerequisite_reason(city_config: object) -> str | None:
+    """The precision guard's station-ground law, checked before any provider request."""
+    from src.config import runtime_station_geometry_for_city
+
+    station = runtime_station_geometry_for_city(city_config, effective_at=datetime.now(tz=UTC))
+    if station["validity_reason"] is not None:
+        return f"OM9_STATION_SOURCE_INVALID:{station['validity_reason']}"
+    if station["ground_status"] != "VERIFIED":
+        return f"OM9_STATION_GROUND_PROOF_UNPROVEN:{station['ground_reason']}"
+    return None
 
 
 def _current_target_source_geometry_check(
@@ -1722,7 +1732,6 @@ def _fetch_meta_stamped_anchor_wave(
     bucket_fallback_reserve_seconds: float = _MAX_BUCKET_FALLBACK_RESERVE_SECONDS,
     client: httpx.Client,
     quota_critical: bool = False,
-    quota_priority: bool = False,
 ) -> tuple[
     dict[tuple[str, str], tuple[dict, dict[str, object], datetime]],
     dict[tuple[str, str], Exception],
@@ -1736,13 +1745,7 @@ def _fetch_meta_stamped_anchor_wave(
         default=30.0,
         bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
     )
-    quota_context = (
-        quota_tracker.critical_lane()
-        if quota_critical
-        else quota_tracker.priority_lane()
-        if quota_priority
-        else contextlib.nullcontext()
-    )
+    quota_context = _anchor_quota_lane(quota_critical)
     with quota_context:
         meta_before = fetch_openmeteo_ifs9_model_meta(
             timeout=timeout,
@@ -1763,13 +1766,7 @@ def _fetch_meta_stamped_anchor_wave(
         # Unattempted targets remain absent and are reconsidered next slice.
         wave_requests = dict(list(requests.items())[:workers])
     def _fetch_payload(request):
-        quota_context = (
-            quota_tracker.critical_lane()
-            if quota_critical
-            else quota_tracker.priority_lane()
-            if quota_priority
-            else contextlib.nullcontext()
-        )
+        quota_context = _anchor_quota_lane(quota_critical)
         with quota_context:
             return fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped(
                 request,
@@ -1830,13 +1827,7 @@ def _fetch_meta_stamped_anchor_wave(
     if not payloads:
         return {}, failures
 
-    quota_context = (
-        quota_tracker.critical_lane()
-        if quota_critical
-        else quota_tracker.priority_lane()
-        if quota_priority
-        else contextlib.nullcontext()
-    )
+    quota_context = _anchor_quota_lane(quota_critical)
     with quota_context:
         meta_after = fetch_openmeteo_ifs9_model_meta(
             timeout=_deadline_timeout_preserving_bucket_fallback(
@@ -1871,20 +1862,13 @@ def _fetch_run_pinned_anchor_wave(
     bucket_fallback_reserve_seconds: float = _MAX_BUCKET_FALLBACK_RESERVE_SECONDS,
     client: httpx.Client,
     quota_critical: bool = False,
-    quota_priority: bool = False,
 ) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
     """Fetch every city/date anchor in one run-pinned multi-location call."""
 
     items = tuple(requests.items())
     if not items:
         return {}
-    quota_context = (
-        quota_tracker.critical_lane()
-        if quota_critical
-        else quota_tracker.priority_lane()
-        if quota_priority
-        else contextlib.nullcontext()
-    )
+    quota_context = _anchor_quota_lane(quota_critical)
     with quota_context:
         payloads = fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
             tuple(request for _, request in items),
@@ -2053,7 +2037,6 @@ def download_current_target_raw_inputs(
     fetch_workers: int = 4,
     bucket_reader_pool=None,
     quota_critical: bool = False,
-    quota_priority: bool = False,
 ) -> dict[str, object]:
     # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
     # alphabetical slots are visible.  The per-cycle cap is applied AFTER filtering
@@ -2121,17 +2104,24 @@ def download_current_target_raw_inputs(
     # Pin existing exposure only when the configured slice can still carry at
     # least one ordinary family.  A smaller slice keeps the old full-universe
     # rotation so priority cannot turn into permanent background starvation.
+    # A slice that is ALL held (the held maintenance lanes) has no ordinary lane
+    # to protect; pinning it froze its order, so every timeboxed tick re-tried the
+    # same head families and the tail never reached the provider (10-01: held
+    # lanes left 15-19 of 21 targets unattempted for hours). It rotates instead.
     priority_row_count = (
         held_priority_row_count
-        if limit is None or held_priority_row_count < int(limit)
+        if (limit is None or held_priority_row_count < int(limit))
+        and held_priority_row_count < len(_rows)
         else 0
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    rotation_scoped = required_scopes is not None and scoped_rotation
     rotation_state_path = _current_target_rotation_state_path(
-        output_dir,
-        _rows,
-        scoped=required_scopes is not None and scoped_rotation,
+        output_dir, scoped=rotation_scoped,
     )
+    # The shared scoped cursor resumes by family, so scope sets that differ tick
+    # to tick still advance one ring instead of each restarting at its head.
+    stable_rotation_key = stable_rotation_key or rotation_scoped
     (
         rotated_rows,
         rotation_start,
@@ -2216,6 +2206,9 @@ def download_current_target_raw_inputs(
             last_processed_rotating_family = family
 
     timeboxed_incomplete = False
+    # Every target this pass did not finish, with why: a family that never reached
+    # the provider must be nameable, never silent (10-01 00Z/06Z misses were not).
+    unattempted: list[tuple[object, str]] = []
     bucket_manifests: dict | None = None
 
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
@@ -2245,6 +2238,13 @@ def download_current_target_raw_inputs(
             continue
         if static_block is not None:
             source_local_blocks[_current_target_family_key(target)] = static_block
+            continue
+        ground_block = _station_ground_prerequisite_reason(city_config)
+        if ground_block is not None:
+            # No fetch can certify a city without proved station ground, and an
+            # uncertified body is never written, so fetching it re-pays every tick
+            # (10-01: 796 of 918 repeat anchor fetches were three such cities).
+            source_local_blocks[_current_target_family_key(target)] = ground_block
             continue
         target_key = (target.city, target.target_date)
         if target_key in resolved_payloads:
@@ -2284,13 +2284,7 @@ def download_current_target_raw_inputs(
         and _single_runs_public_for_request(first_request)
     )
     single_runs_wave_failure: Exception | None = None
-    metered_quota_context = (
-        quota_tracker.critical_lane()
-        if quota_critical
-        else quota_tracker.priority_lane()
-        if quota_priority
-        else contextlib.nullcontext()
-    )
+    metered_quota_context = _anchor_quota_lane(quota_critical)
     with metered_quota_context:
         metered_anchor_quota_available = (
             not pending_requests or quota_tracker.can_call()
@@ -2317,7 +2311,6 @@ def download_current_target_raw_inputs(
                 bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
                 client=openmeteo_client,
                 quota_critical=quota_critical,
-                quota_priority=quota_priority,
             )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
@@ -2355,7 +2348,6 @@ def download_current_target_raw_inputs(
                 bucket_fallback_reserve_seconds=bucket_fallback_reserve_seconds,
                 client=openmeteo_client,
                 quota_critical=quota_critical,
-                quota_priority=quota_priority,
             )
             downloaded["openmeteo_model_meta_fetch_count"] = 2
         except Exception as exc:
@@ -2459,6 +2451,7 @@ def download_current_target_raw_inputs(
                             and time.monotonic() >= deadline_monotonic
                         ):
                             timeboxed_incomplete = True
+                            unattempted.append((target, "TIMEBOX_EXPIRED_BEFORE_TRANSPORT"))
                             continue
                         payload, anchor_transport_provenance = _resolve_anchor_payload(
                             request=request,
@@ -2497,8 +2490,13 @@ def download_current_target_raw_inputs(
                     )
                     mark_processed(target)
                     continue
-                except TimeoutError:
+                except TimeoutError as timeout_exc:
+                    # It reached transport, so the cursor moves past it: kept at the
+                    # head it consumed every later slice and starved the families
+                    # behind it. Decoded bucket points stay in the per-cycle pool.
                     timeboxed_incomplete = True
+                    unattempted.append((target, f"TIMEBOX_EXPIRED_IN_TRANSPORT:{str(timeout_exc)[:120]}"))
+                    mark_processed(target)
                     continue
                 if not str(anchor_transport_provenance.get("run_authority", "")).startswith(
                     "bucket_partial_run"
@@ -2691,6 +2689,12 @@ def download_current_target_raw_inputs(
             },
         )
 
+    for row in skipped_cities:
+        _LOG.warning("OM9 CURRENT-TARGET SKIPPED city=%s target_date=%s metric=%s cycle=%s reason=%s",
+            row["city"], row["target_date"], row["metric"], cycle.isoformat(), row["reason"])
+    for target, reason in unattempted:
+        _LOG.warning("OM9 CURRENT-TARGET UNATTEMPTED city=%s target_date=%s metric=%s cycle=%s reason=%s",
+            target.city, target.target_date, target.temperature_metric, cycle.isoformat(), reason)
     total_row_count = priority_row_count + rotation_row_count
     unscheduled_target_count = max(0, total_row_count - len(targets))
     incomplete_target_set = (
@@ -2740,6 +2744,11 @@ def download_current_target_raw_inputs(
         "skipped_cities": skipped_cities,
         "timeboxed_incomplete": timeboxed_incomplete,
         "unattempted_target_count": len(targets) - processed_target_count,
+        "unattempted_targets": [
+            {"city": target.city, "target_date": target.target_date,
+             "metric": target.temperature_metric, "reason": reason}
+            for target, reason in unattempted
+        ],
         "unscheduled_target_count": unscheduled_target_count,
         "target_rotation_start": rotation_start,
         "target_rotation_next_start": rotation_next_start,
@@ -2772,7 +2781,6 @@ def download_current_target_openmeteo_inputs(
     fetch_workers: int = 4,
     bucket_reader_pool=None,
     quota_critical: bool = False,
-    quota_priority: bool = False,
 ) -> dict[str, object]:
     """Live replacement-chain downloader for Open-Meteo current-target inputs."""
 
@@ -2795,7 +2803,6 @@ def download_current_target_openmeteo_inputs(
         fetch_workers=fetch_workers,
         bucket_reader_pool=bucket_reader_pool,
         quota_critical=quota_critical,
-        quota_priority=quota_priority,
     )
 
 

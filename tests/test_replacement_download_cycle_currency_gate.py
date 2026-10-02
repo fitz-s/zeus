@@ -1061,26 +1061,34 @@ def test_scoped_rotation_cursor_isolated_from_ordinary_universe(
 ) -> None:
     import scripts.download_replacement_forecast_current_targets as dl
 
-    rows = [_TargetRow("Dallas", "2026-06-10", "high", False, True)]
-    ordinary = dl._current_target_rotation_state_path(
-        tmp_path,
-        rows,
-        scoped=False,
-    )
-    scoped = dl._current_target_rotation_state_path(
-        tmp_path,
-        rows,
-        scoped=True,
-    )
-    different_scope = dl._current_target_rotation_state_path(
-        tmp_path,
-        [_TargetRow("NYC", "2026-06-10", "low", False, True)],
-        scoped=True,
-    )
+    ordinary = dl._current_target_rotation_state_path(tmp_path, scoped=False)
+    scoped = dl._current_target_rotation_state_path(tmp_path, scoped=True)
 
     assert ordinary.name == ".current_target_rotation.json"
     assert scoped != ordinary
-    assert different_scope != scoped
+
+
+def test_changing_held_scope_sets_share_one_advancing_cursor(tmp_path: Path) -> None:
+    """10-01: each new held scope set got a fresh cursor and restarted at its head."""
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    path = dl._current_target_rotation_state_path(tmp_path, scoped=True)
+
+    def rows(*cities):
+        return tuple(_TargetRow(city, "2026-09-25", "high", False, True) for city in cities)
+
+    heads = []
+    for current in (rows("Ankara", "Denver", "Tel Aviv"),
+                    rows("Ankara", "Denver", "Paris", "Tel Aviv"),  # membership changed
+                    rows("Ankara", "Denver", "Paris", "Tel Aviv")):
+        rotated, _, count, generation, token = dl._rotate_current_target_rows(
+            current, cycle=AVAILABLE_CYCLE, state_path=path, stable_rotation_key=True)
+        heads.append(rotated[0].city)
+        dl._advance_current_target_rotation(
+            cycle=AVAILABLE_CYCLE, row_count=count, attempted_count=1, incomplete=True,
+            state_path=path, expected_generation=generation, expected_state_token=token,
+            stable_rotation_key=True, last_attempted_family=(rotated[0].city, "2026-09-25", "high"))
+    assert heads == ["Ankara", "Denver", "Paris"]
 
 
 def test_legacy_rotation_cursor_is_read_then_upgraded(
@@ -2517,12 +2525,7 @@ def test_broad_missing_scope_rotation_retries_failed_head_after_other_cities(
             for city in cities
         )
 
-    path = downloader._current_target_rotation_state_path(
-        tmp_path, rows("Amsterdam", "Dallas", "London"), scoped=False
-    )
-    assert path == downloader._current_target_rotation_state_path(
-        tmp_path, rows("Amsterdam", "London"), scoped=False
-    )
+    path = downloader._current_target_rotation_state_path(tmp_path, scoped=False)
     cycle = AVAILABLE_CYCLE
     membership = (
         rows("Amsterdam", "Dallas", "London"),
@@ -3170,7 +3173,7 @@ def test_current_target_quota_lanes_are_mutually_exclusive(tmp_path) -> None:
         )
 
 
-def test_priority_quota_context_propagates_into_anchor_worker(
+def test_anchor_quota_context_propagates_into_anchor_worker(
     monkeypatch,
 ) -> None:
     import scripts.download_replacement_forecast_current_targets as dl
@@ -3181,15 +3184,15 @@ def test_priority_quota_context_propagates_into_anchor_worker(
             self.local = threading.local()
 
         @contextmanager
-        def priority_lane(self):
-            self.local.priority = True
+        def anchor_lane(self):
+            self.local.anchor = True
             try:
                 yield
             finally:
-                self.local.priority = False
+                self.local.anchor = False
 
-        def is_priority(self) -> bool:
-            return bool(getattr(self.local, "priority", False))
+        def is_anchor(self) -> bool:
+            return bool(getattr(self.local, "anchor", False))
 
     tracker = _Tracker()
     observed: list[bool] = []
@@ -3200,7 +3203,7 @@ def test_priority_quota_context_propagates_into_anchor_worker(
         dl,
         "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
         lambda *_args, **_kwargs: (
-            observed.append(tracker.is_priority())
+            observed.append(tracker.is_anchor())
             or _anchor_payload("2026-08-21")
         ),
     )
@@ -3211,17 +3214,33 @@ def test_priority_quota_context_propagates_into_anchor_worker(
         timezone_name="America/Chicago",
     )
 
-    payloads, failures = dl._fetch_meta_stamped_anchor_wave(
+    dl._fetch_meta_stamped_anchor_wave(
         {("Dallas", "2026-08-21"): request},
         max_workers=1,
         deadline_monotonic=None,
         client=object(),
-        quota_priority=True,
     )
 
-    assert failures == {}
-    assert tuple(payloads) == (("Dallas", "2026-08-21"),)
+    # The pool worker thread fetched inside the anchor lane, without any caller flag.
     assert observed == [True]
+
+
+def test_anchor_tranche_outlives_a_spent_priority_lane(tmp_path) -> None:
+    """The 10-01 failure: priority work spent the day before the 12Z anchor existed."""
+    from src.data import openmeteo_quota as q
+
+    tracker = q.OpenMeteoQuotaTracker()
+    tracker._count = q.PRIORITY_DAILY_LIMIT
+    with tracker.priority_lane():
+        assert tracker.can_call() is False
+    with tracker.anchor_lane():
+        assert tracker.can_call() is True
+    tracker._count = q.ANCHOR_DAILY_LIMIT
+    with tracker.anchor_lane():
+        assert tracker.can_call() is False  # the held-capital tranche stays untouched
+    with tracker.critical_lane():
+        assert tracker.can_call() is True
+    assert q.ANCHOR_DAILY_LIMIT - q.PRIORITY_DAILY_LIMIT == 4 * q.ANCHOR_RUN_LOCATIONS
 
 
 def test_current_target_budget_includes_probe_and_plan(tmp_path, monkeypatch) -> None:
@@ -4016,7 +4035,6 @@ def test_exhausted_metered_quota_goes_directly_to_bucket_rung(
         include_covered=True,
         precomputed_plan=plan,
         max_wall_clock_seconds=5.0,
-        quota_priority=True,
     )
 
     assert report["downloaded"]["openmeteo_metered_quota_available"] is False
@@ -4379,3 +4397,77 @@ def test_concurrent_payload_publishers_use_distinct_temp_files(
 
     assert json.loads(target.read_text(encoding="utf-8")) in payloads
     assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_all_held_slice_rotates_so_every_family_reaches_the_provider(
+    tmp_path, monkeypatch,
+) -> None:
+    """10-01: held lanes pinned their own order and left 15-19 of 21 families unattempted."""
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cities = ("Ankara", "Denver", "Tel Aviv")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {(city, "2026-06-10", "high"): 1 for city in cities},
+    )
+    monkeypatch.setattr(dl, "_station_ground_prerequisite_reason", lambda _city: None)
+    monkeypatch.setattr(dl.quota_tracker, "can_call", lambda: False)
+    clock = [0.0]
+    monkeypatch.setattr(dl.time, "monotonic", lambda: clock[0])
+    attempted: list[str] = []
+
+    def _one_then_expire(**kwargs):
+        attempted.append(kwargs["city"])
+        clock[0] = 100.0
+        raise TimeoutError("slice spent")
+
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", _one_then_expire)
+    reports = []
+    for _ in cities:
+        clock[0] = 0.0
+        reports.append(dl.download_current_target_raw_inputs(
+            forecast_db=tmp_path / "forecasts.db", output_dir=tmp_path / "raw",
+            cycle=AVAILABLE_CYCLE, limit=None, write_db=False, release_lag_hours=14.0,
+            anchor_sigma_c=3.0, required_scopes=tuple((c, "2026-06-10", "high") for c in cities),
+            expand_metric_siblings=False, max_wall_clock_seconds=5.0,
+        ))
+
+    assert sorted(attempted) == sorted(cities)
+    assert all(
+        {row["reason"].split(":")[0] for row in report["unattempted_targets"]}
+        <= {"TIMEBOX_EXPIRED_BEFORE_TRANSPORT", "TIMEBOX_EXPIRED_IN_TRANSPORT"}
+        for report in reports
+    )
+
+
+def test_unproven_station_ground_skips_the_provider_and_names_the_reason(
+    tmp_path, monkeypatch,
+) -> None:
+    """10-01: Tel Aviv and Wuhan anchors were fetched ~100x per run and never certifiable."""
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketTransportNotAdmissible
+
+    rows = (_TargetRow("Tel Aviv", "2026-06-10", "high", False, True),
+            _TargetRow("London", "2026-06-10", "high", False, True))
+    reason = "OM9_STATION_GROUND_PROOF_UNPROVEN:STATION_GROUND_PROOF_MISSING"
+    monkeypatch.setattr(dl, "_station_ground_prerequisite_reason",
+        lambda city: reason if city.name == "Tel Aviv" else None)
+    monkeypatch.setattr(dl.quota_tracker, "can_call", lambda: True)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+    requested: list[tuple[str, str]] = []
+    monkeypatch.setattr(dl, "_fetch_run_pinned_anchor_wave",
+        lambda requests, **_kwargs: requested.extend(requests) or {})
+    monkeypatch.setattr(dl, "_resolve_anchor_payload",
+        lambda **kwargs: requested.append((kwargs["city"], kwargs["target_date"])) or
+        (_ for _ in ()).throw(BucketTransportNotAdmissible("no rung")))
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db", output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE, limit=None, write_db=False, release_lag_hours=14.0,
+        anchor_sigma_c=3.0, include_covered=True,
+        precomputed_plan=_PlanStub(ready=False, rows=rows), max_wall_clock_seconds=5.0,
+    )
+
+    assert requested == [("London", "2026-06-10")]
+    assert {"city": "Tel Aviv", "target_date": "2026-06-10", "metric": "high",
+            "reason": f"OM9_SOURCE_GEOMETRY_LOCAL_BLOCK:{reason}"} in report["skipped_cities"]

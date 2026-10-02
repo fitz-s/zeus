@@ -1033,15 +1033,37 @@ def _o1280_snapshot_cell(body: bytes, *, latitude: float, longitude: float,
             if raw_elevation>=9999:
                 raise ValueError("O1280 source native elevation unavailable")
             nearby, _, _ = om_get_surrounding_gridpoints(latitude, longitude)
-            return {"revision":"openmeteo_ifs9_o1280_source_cell_v1",
+            nearby_sea = [elevation(index)<=SEA_SENTINEL_M for index in nearby]
+            facts = {"revision":"openmeteo_ifs9_o1280_source_cell_v1",
                 "selected_flat_index":cell.flat_index, "selected_grid_lat":cell.grid_latitude,
                 "selected_grid_lon":cell.grid_longitude_east,
                 "raw_grid_elevation_m":raw_elevation,
                 "effective_grid_elevation_m":cell.model_elevation_m,
                 "target_dem_elevation_m":target_elevation_m, "cell_is_sea":cell.is_sea,
-                "cell_is_center":cell.is_center, "nearby_sea":any(elevation(index)<=SEA_SENTINEL_M for index in nearby)}
+                "cell_is_center":cell.is_center, "nearby_sea":any(nearby_sea)}
+            # Present only when true, so every land-cell proof keeps its frozen bytes.
+            if all(nearby_sea):
+                facts["all_sea_neighbourhood"] = True
+            return facts
     finally:
         memory.rm_file(name)
+
+
+def o1280_selected_cell_admissible(cell: Mapping[str, object]) -> bool:
+    """A land cell, or the provider's only possible cell when its whole 3x3 is sea.
+
+    findPointTerrainOptimised searches the 3x3 for land and falls back to the
+    centre only when none exists, so an all-sea neighbourhood leaves the provider
+    one selectable cell: the one it serves. Measured at Seoul RKSI (424 settled
+    days), that served sea cell is the most faithful OM9 value (LOW MAE 0.65C,
+    HIGH error SD 1.19C vs 1.66C for the nearest land cell 17.6 km away). A sea
+    cell chosen while any neighbour is land is a selection we did not reproduce.
+    ``cell`` must be facts decoded from the frozen static, never a claim.
+    """
+    if cell.get("cell_is_sea") is False:
+        return True
+    return (cell.get("cell_is_sea") is True and cell.get("all_sea_neighbourhood") is True
+        and cell.get("cell_is_center") is True)
 
 
 def _o1280_snapshot_now() -> datetime:
@@ -1210,7 +1232,9 @@ def validate_source_cell_geometry_proof(proof: Mapping[str,object], *, latitude:
                     return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
             elif claimed!=value:
                 return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
-        if actual["cell_is_sea"] or not same_grid_cell(float(actual["selected_grid_lat"]),
+        if proof.get("all_sea_neighbourhood", False) is not actual.get("all_sea_neighbourhood", False):
+            return "OM9_FROZEN_SOURCE_CELL_MISMATCH"
+        if not o1280_selected_cell_admissible(actual) or not same_grid_cell(float(actual["selected_grid_lat"]),
                 float(actual["selected_grid_lon"]), latitude, longitude):
             return "OM9_FROZEN_SOURCE_SELECTED_CELL_MISMATCH"
         return None

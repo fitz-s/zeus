@@ -47,9 +47,25 @@ CRITICAL_MINUTE_RESERVE = 60
 HELD_DAILY_RESERVE_FLOOR = CRITICAL_DAILY_RESERVE // 2
 HELD_HOURLY_RESERVE_FLOOR = CRITICAL_HOURLY_RESERVE // 2
 HELD_MINUTE_RESERVE_FLOOR = CRITICAL_MINUTE_RESERVE // 2
-PRIORITY_DAILY_LIMIT = DAILY_HARD_CAP - CRITICAL_DAILY_RESERVE
-PRIORITY_HOURLY_LIMIT = HOURLY_HARD_CAP - CRITICAL_HOURLY_RESERVE
-PRIORITY_MINUTE_LIMIT = MINUTE_HARD_CAP - CRITICAL_MINUTE_RESERVE
+# The OM9 anchor is the one input every posterior needs for every city, and each
+# provider run must be captured within the 30h cycle bound. Its demand is measured,
+# not chosen: one run-pinned location costs one unit (1 variable, 144h < 14 days),
+# and the most distinct anchor locations fetched for one run was 47 (logs 09-30T18Z
+# to 10-01T12Z: 47/45/46/14). Four runs a day need 4*47; one hour may hold a late
+# run and the next run's wave (measured peak first-fetch hour 89 <= 2*47); one
+# batched wave lands within one minute (measured peak 40 <= 47). On 10-01 the
+# priority lane hit its day cap at 15:48Z before the 12Z anchor was public, so 12Z
+# reached 14 cities; this tranche is what other lanes can no longer spend.
+ANCHOR_RUN_LOCATIONS = 47
+ANCHOR_DAILY_RESERVE = 4 * ANCHOR_RUN_LOCATIONS
+ANCHOR_HOURLY_RESERVE = 2 * ANCHOR_RUN_LOCATIONS
+ANCHOR_MINUTE_RESERVE = ANCHOR_RUN_LOCATIONS
+ANCHOR_DAILY_LIMIT = DAILY_HARD_CAP - CRITICAL_DAILY_RESERVE
+ANCHOR_HOURLY_LIMIT = HOURLY_HARD_CAP - CRITICAL_HOURLY_RESERVE
+ANCHOR_MINUTE_LIMIT = MINUTE_HARD_CAP - CRITICAL_MINUTE_RESERVE
+PRIORITY_DAILY_LIMIT = ANCHOR_DAILY_LIMIT - ANCHOR_DAILY_RESERVE
+PRIORITY_HOURLY_LIMIT = ANCHOR_HOURLY_LIMIT - ANCHOR_HOURLY_RESERVE
+PRIORITY_MINUTE_LIMIT = ANCHOR_MINUTE_LIMIT - ANCHOR_MINUTE_RESERVE
 MAINTENANCE_DAILY_LIMIT = PRIORITY_DAILY_LIMIT - SOURCE_CLOCK_DAILY_RESERVE
 MAINTENANCE_HOURLY_LIMIT = PRIORITY_HOURLY_LIMIT - SOURCE_CLOCK_HOURLY_RESERVE
 MAINTENANCE_MINUTE_LIMIT = PRIORITY_MINUTE_LIMIT - SOURCE_CLOCK_MINUTE_RESERVE
@@ -78,6 +94,7 @@ class OpenMeteoQuotaTracker:
         self._priority = threading.local()
         self._critical = threading.local()
         self._recovery = threading.local()
+        self._anchor = threading.local()
         self._state_path = Path(state_path) if state_path is not None else None
 
     @staticmethod
@@ -98,6 +115,9 @@ class OpenMeteoQuotaTracker:
 
     def _is_recovery(self) -> bool:
         return bool(getattr(self._recovery, "depth", 0))
+
+    def _is_anchor(self) -> bool:
+        return bool(getattr(self._anchor, "depth", 0))
 
     @contextlib.contextmanager
     def priority_lane(self):
@@ -126,6 +146,17 @@ class OpenMeteoQuotaTracker:
             yield
         finally:
             self._critical.depth = depth
+
+    @contextlib.contextmanager
+    def anchor_lane(self):
+        """Capture the OM9 anchor of a published run from its reserved tranche."""
+
+        depth = int(getattr(self._anchor, "depth", 0))
+        self._anchor.depth = depth + 1
+        try:
+            yield
+        finally:
+            self._anchor.depth = depth
 
     @contextlib.contextmanager
     def recovery_lane(self):
@@ -194,11 +225,15 @@ class OpenMeteoQuotaTracker:
         return changed
 
     @staticmethod
-    def _request_priority(priority: bool, critical: bool, recovery: bool = False) -> str:
+    def _request_priority(
+        priority: bool, critical: bool, recovery: bool = False, anchor: bool = False,
+    ) -> str:
         if critical:
             return "critical"
         if recovery:
             return "recovery"
+        if anchor:
+            return "anchor"
         if priority:
             return "priority"
         return "maintenance"
@@ -497,11 +532,14 @@ class OpenMeteoQuotaTracker:
         priority: bool,
         critical: bool = False,
         recovery: bool = False,
+        anchor: bool = False,
     ) -> tuple[int, int, int]:
         if critical:
             return DAILY_HARD_CAP, HOURLY_HARD_CAP, MINUTE_HARD_CAP
         if recovery:
             return RECOVERY_DAILY_LIMIT, RECOVERY_HOURLY_LIMIT, RECOVERY_MINUTE_LIMIT
+        if anchor:
+            return ANCHOR_DAILY_LIMIT, ANCHOR_HOURLY_LIMIT, ANCHOR_MINUTE_LIMIT
         if priority:
             return PRIORITY_DAILY_LIMIT, PRIORITY_HOURLY_LIMIT, PRIORITY_MINUTE_LIMIT
         return (
@@ -519,6 +557,7 @@ class OpenMeteoQuotaTracker:
         priority: bool,
         critical: bool = False,
         recovery: bool = False,
+        anchor: bool = False,
         quota_cost: int = 1,
         endpoint: str = "",
     ) -> tuple[bool, str | None]:
@@ -532,7 +571,7 @@ class OpenMeteoQuotaTracker:
         # local count cap.  A provider cooldown still blocks the critical lane.
         if critical:
             return True, None
-        limits = cls._limits(priority, critical, recovery)
+        limits = cls._limits(priority, critical, recovery, anchor)
         counts = (
             int(state.get("day_count") or 0),
             int(state.get("hour_count") or 0),
@@ -551,6 +590,7 @@ class OpenMeteoQuotaTracker:
         priority: bool,
         critical: bool = False,
         recovery: bool = False,
+        anchor: bool = False,
         quota_cost: int = 1,
         endpoint: str = "",
     ) -> tuple[bool, str | None]:
@@ -559,7 +599,7 @@ class OpenMeteoQuotaTracker:
             return False, f"cooldown_until={blocked_until.isoformat()}"
         if critical:
             return True, None
-        limits = self._limits(priority, critical, recovery)
+        limits = self._limits(priority, critical, recovery, anchor)
         counts = (self._count, self._hour_count, self._minute_count)
         labels = ("day", "hour", "minute")
         for label, count, limit in zip(labels, counts, limits, strict=True):
@@ -571,6 +611,7 @@ class OpenMeteoQuotaTracker:
         priority = self._is_priority()
         critical = self._is_critical()
         recovery = self._is_recovery()
+        anchor = self._is_anchor()
         if self._shared_enabled():
             try:
                 allowed, reason = self._shared(
@@ -581,6 +622,7 @@ class OpenMeteoQuotaTracker:
                             priority=priority,
                             critical=critical,
                             recovery=recovery,
+                            anchor=anchor,
                         ),
                         False,
                     )
@@ -596,6 +638,7 @@ class OpenMeteoQuotaTracker:
                     priority=priority,
                     critical=critical,
                     recovery=recovery,
+                    anchor=anchor,
                 )
         if not allowed:
             logger.warning(
@@ -634,6 +677,7 @@ class OpenMeteoQuotaTracker:
         priority = self._is_priority()
         critical = self._is_critical()
         recovery = self._is_recovery()
+        anchor = self._is_anchor()
 
         def acquire(
             state: dict[str, object], now: datetime
@@ -644,6 +688,7 @@ class OpenMeteoQuotaTracker:
                 priority=priority,
                 critical=critical,
                 recovery=recovery,
+                anchor=anchor,
             )
             if not allowed:
                 return (False, reason, int(state.get("day_count") or 0)), False
@@ -667,6 +712,7 @@ class OpenMeteoQuotaTracker:
                     priority=priority,
                     critical=critical,
                     recovery=recovery,
+                    anchor=anchor,
                 )
                 if allowed:
                     self._count += 1
@@ -708,7 +754,8 @@ class OpenMeteoQuotaTracker:
         priority = self._is_priority()
         critical = self._is_critical()
         recovery = self._is_recovery()
-        priority_name = self._request_priority(priority, critical, recovery)
+        anchor = self._is_anchor()
+        priority_name = self._request_priority(priority, critical, recovery, anchor)
         lease_id = secrets.token_hex(16)
         lease_seconds = max(1.0, min(float(lease_seconds), REQUEST_RETRY_MAX_SECONDS))
 
@@ -759,6 +806,7 @@ class OpenMeteoQuotaTracker:
                     priority=priority,
                     critical=critical,
                     recovery=recovery,
+                    anchor=anchor,
                     quota_cost=metered_cost,
                     endpoint=endpoint,
                 )
@@ -841,6 +889,7 @@ class OpenMeteoQuotaTracker:
                             priority=priority,
                             critical=critical,
                             recovery=recovery,
+                            anchor=anchor,
                             quota_cost=metered_cost,
                             endpoint=endpoint,
                         )
@@ -917,7 +966,8 @@ class OpenMeteoQuotaTracker:
         """Record a fresh response and clear only this request's retry embargo."""
 
         priority = self._request_priority(
-            self._is_priority(), self._is_critical(), self._is_recovery()
+            self._is_priority(), self._is_critical(), self._is_recovery(),
+            self._is_anchor(),
         )
 
         def record(state: dict[str, object], now: datetime) -> tuple[bool, bool]:
@@ -971,7 +1021,8 @@ class OpenMeteoQuotaTracker:
         """Persist a bounded full-jitter embargo after a failed request."""
 
         priority = self._request_priority(
-            self._is_priority(), self._is_critical(), self._is_recovery()
+            self._is_priority(), self._is_critical(), self._is_recovery(),
+            self._is_anchor(),
         )
 
         def record(state: dict[str, object], now: datetime) -> tuple[int, bool]:
@@ -1025,7 +1076,8 @@ class OpenMeteoQuotaTracker:
         """
 
         priority = self._request_priority(
-            self._is_priority(), self._is_critical(), self._is_recovery()
+            self._is_priority(), self._is_critical(), self._is_recovery(),
+            self._is_anchor(),
         )
 
         def record(state: dict[str, object], now: datetime) -> tuple[bool, bool]:
@@ -1088,13 +1140,14 @@ class OpenMeteoQuotaTracker:
         priority: bool,
         critical: bool,
         recovery: bool = False,
+        anchor: bool = False,
     ) -> int:
         waits: list[float] = []
         if blocked_until is not None and blocked_until > now:
             waits.append((blocked_until - now).total_seconds())
         if critical:
             return max(0, int(max(waits, default=0.0)) + (1 if waits else 0))
-        limits = cls._limits(priority, critical, recovery)
+        limits = cls._limits(priority, critical, recovery, anchor)
         if counts[0] >= limits[0]:
             next_day = datetime.combine(
                 now.date() + timedelta(days=1),
@@ -1123,6 +1176,7 @@ class OpenMeteoQuotaTracker:
         priority = self._is_priority()
         critical = self._is_critical()
         recovery = self._is_recovery()
+        anchor = self._is_anchor()
         if self._shared_enabled():
             try:
                 return self._shared(
@@ -1138,6 +1192,7 @@ class OpenMeteoQuotaTracker:
                             priority=priority,
                             critical=critical,
                             recovery=recovery,
+                            anchor=anchor,
                         ),
                         False,
                     )
@@ -1154,6 +1209,7 @@ class OpenMeteoQuotaTracker:
                 priority=priority,
                 critical=critical,
                 recovery=recovery,
+                anchor=anchor,
             )
 
     def note_rate_limited(

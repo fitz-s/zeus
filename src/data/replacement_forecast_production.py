@@ -1201,7 +1201,6 @@ def _download_replacement_forecast_current_targets_if_needed(
                 fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
                 bucket_reader_pool=bucket_pool,
                 quota_critical=quota_critical,
-                quota_priority=quota_priority,
                 **download_kwargs,
             )
     except Exception:
@@ -4698,7 +4697,6 @@ def _replacement_cycle_availability_poll_if_needed(
                 include_covered=anchor_cycle_advanced,
                 missing_manifests_only=not anchor_cycle_advanced,
                 fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
-                quota_priority=True,
             )
             report["legs_fetched"].append({"leg": leg, "cycle": cycle.isoformat()})  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001 — anchor fail-soft; next tick retries
