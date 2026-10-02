@@ -13,6 +13,7 @@ import json
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from decimal import Decimal as D
 from types import SimpleNamespace
 
@@ -1292,3 +1293,76 @@ class TestFillSplitInvarianceUnderABindingCap:
         verdicts = {(v.action, v.reason.split(":")[0]) for v in decisions.values()}
         assert len(verdicts) == 1, {h: (v.action, v.reason, v.evidence.get("target_holding_shares"))
                                     for h, v in decisions.items()}
+
+
+class TestSharedTokenRestorationNeverOverRestores:
+    """E1: the allocator's lots carry no position identity, so another current
+    position on the rest's token is indistinguishable from the rest's own
+    fill. Restored headroom must never exceed the true pre-fill value (the
+    lots with only the own fill removed): any error leans toward CANCEL."""
+
+    CAP = D("10")
+
+    def _authority(self, lots):
+        from src.risk_allocator import AuctionCapitalAuthority, CapPolicy, ExposureLot, RiskAllocator
+
+        return AuctionCapitalAuthority(
+            RiskAllocator(
+                CapPolicy(max_per_market_micro=int(self.CAP * 1_000_000)),
+                [
+                    ExposureLot(market_id="gamma", event_id="event", resolution_window="default",
+                                token_id=TOKEN, exposure_micro=int(D(usd) * 1_000_000), state=state,
+                                correlation_key=FAMILY_KEY)
+                    for usd, state in lots
+                ],
+            )
+        )
+
+    def _headroom(self, lots, *, own_fill, other):
+        return C._prefill_allocator_capacity_usd(
+            self._authority(lots), market_id="gamma", event_id="event", correlation_key=FAMILY_KEY,
+            token_id=TOKEN, own_filled_cost_usd=D(own_fill), other_token_exposure_usd=D(other),
+        )
+
+    def _truth(self, other_lots):
+        return Decimal(self._authority(other_lots).capacity_usd(
+            market_id="gamma", event_id="event", correlation_key=FAMILY_KEY,
+        ))
+
+    @pytest.mark.parametrize(
+        "own_lots,other_lots,own_fill,other",
+        [
+            # Reviewer probe 1: own fill unpublished, other holding $3 CONFIRMED.
+            ([], [("3", "CONFIRMED_EXPOSURE")], "2.6", "3"),
+            # Reviewer probe 2: own fill partly published OPTIMISTIC, other $3 CONFIRMED.
+            ([("1.3", "OPTIMISTIC_EXPOSURE")], [("3", "CONFIRMED_EXPOSURE")], "2.6", "3"),
+            # Reviewer probe 3: own fill CONFIRMED, other $2.60 OPTIMISTIC.
+            ([("2.6", "CONFIRMED_EXPOSURE")], [("2.6", "OPTIMISTIC_EXPOSURE")], "2.6", "2.6"),
+        ],
+        ids=["own_unpublished", "own_partly_optimistic", "other_optimistic"],
+    )
+    def test_reviewer_probes_never_exceed_the_true_prefill_headroom(
+        self, own_lots, other_lots, own_fill, other,
+    ):
+        headroom = self._headroom([*own_lots, *other_lots], own_fill=own_fill, other=other)
+        current = self._truth([*own_lots, *other_lots])
+        truth = self._truth(other_lots)
+        assert current <= headroom <= truth, (current, headroom, truth)
+
+    def test_without_another_holding_the_own_fill_is_restored_exactly(self):
+        for state in ("CONFIRMED_EXPOSURE", "OPTIMISTIC_EXPOSURE"):
+            assert self._headroom([("2.6", state)], own_fill="2.6", other="0") == self.CAP
+
+    def test_other_holdings_exposure_is_valued_as_the_allocator_values_a_position(self):
+        other = SimpleNamespace(position_id="pos-other", trade_id="pos-other", direction="buy_yes",
+                                token_id=TOKEN, no_token_id="no", shares=4.0, chain_shares=5.0,
+                                cost_basis_usd=1.0, chain_cost_basis_usd=1.5, entry_price=0.6)
+        own = SimpleNamespace(position_id="pos-cmd", trade_id="pos-cmd", direction="buy_yes",
+                              token_id=TOKEN, no_token_id="no", shares=9.0, chain_shares=9.0,
+                              cost_basis_usd=4.5, chain_cost_basis_usd=4.5, entry_price=0.5)
+        unrelated = SimpleNamespace(position_id="pos-x", trade_id="pos-x", direction="buy_no",
+                                    token_id=TOKEN, no_token_id="other-no", shares=9.0, chain_shares=0.0,
+                                    cost_basis_usd=9.0, chain_cost_basis_usd=0.0, entry_price=1.0)
+        assert C._other_token_exposure_usd(
+            [other, own, unrelated], token_id=TOKEN, own_position_id="pos-cmd",
+        ) == D("3.0")

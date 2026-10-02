@@ -1323,6 +1323,7 @@ def _prefill_allocator_capacity_usd(
     correlation_key: str,
     token_id: str,
     own_filled_cost_usd: Decimal,
+    other_token_exposure_usd: Decimal = Decimal("0"),
 ) -> Decimal:
     """The allocator's headroom for this order's market before its own fills.
 
@@ -1336,9 +1337,14 @@ def _prefill_allocator_capacity_usd(
     lots it landed in (same token, same market): the order's fills first come
     out of its optimistic lot, then its confirmed one. With no own fill, or
     when the lots cannot be split (an allocator without them), this is the
-    allocator's own ``capacity_usd``. If another holding shares the token,
-    the removal is bounded by that token's lots, so the headroom is never
-    below the allocator's current one.
+    allocator's own ``capacity_usd``.
+
+    The lots carry no position identity, so another holding of the same
+    token is indistinguishable from the order's own fill.
+    ``other_token_exposure_usd`` is that holding's exposure (upper bound):
+    removal stops at the token's lot total minus it, so what is removed is
+    provably the order's own fill. Any error leaves the headroom below the
+    true pre-fill value (toward CANCEL), never above it.
     """
     from decimal import ROUND_CEILING
 
@@ -1356,6 +1362,17 @@ def _prefill_allocator_capacity_usd(
     if remaining <= 0 or allocator is None or not hasattr(allocator, "with_lots"):
         return capacity(capital_authority)
     lots = list(allocator.exposure_lots)
+    token_total = sum(
+        int(lot.exposure_micro)
+        for lot in lots
+        if lot.token_id == token_id
+        and lot.market_id == market_id
+        and lot.state in {"OPTIMISTIC_EXPOSURE", "CONFIRMED_EXPOSURE"}
+    )
+    other_micro = int((other_token_exposure_usd * _MICRO).to_integral_value(rounding=ROUND_CEILING))
+    remaining = min(remaining, max(0, token_total - other_micro))
+    if remaining <= 0:
+        return capacity(capital_authority)
     order = sorted(
         (
             i
@@ -1431,6 +1448,37 @@ def _prefill_wealth(wealth: Any, *, token_id: str, filled_cost_usd: Decimal):
     )
 
 
+def _other_token_exposure_usd(
+    positions: Iterable[Any], *, token_id: str, own_position_id: str,
+) -> Decimal:
+    """Exposure of every current position holding ``token_id`` other than the
+    order's own, as the allocator values a position (governor.py
+    ``_current_position_exposure_lots``): max(cost, chain cost, max(shares,
+    chain shares) x entry price). An upper bound on what those positions put
+    in the token's lots, so the own-fill removal never takes from them."""
+    from src.engine.global_auction_universe import _position_token
+
+    total = Decimal("0")
+    for position in positions:
+        position_id = str(getattr(position, "position_id", "") or getattr(position, "trade_id", "") or "")
+        if (own_position_id and position_id == own_position_id) or _position_token(position) != token_id:
+            continue
+
+        def amount(name: str) -> Decimal:
+            try:
+                value = Decimal(str(getattr(position, name, 0) or 0))
+            except ArithmeticError:
+                return Decimal("0")
+            return value if value.is_finite() else Decimal("0")
+
+        total += max(
+            amount("cost_basis_usd"),
+            amount("chain_cost_basis_usd"),
+            max(amount("shares"), amount("chain_shares")) * amount("entry_price"),
+        )
+    return total
+
+
 def _prefill_capital_limit_usd(
     capital_authority: Any,
     own_wealth: Any,
@@ -1440,6 +1488,7 @@ def _prefill_capital_limit_usd(
     correlation_key: str,
     token_id: str,
     own_filled_cost_usd: Decimal,
+    other_token_exposure_usd: Decimal = Decimal("0"),
 ) -> Decimal:
     """The selector's per-token capital limit for a fresh order placed from
     the state before this order's own fills: the allocator's headroom
@@ -1456,6 +1505,7 @@ def _prefill_capital_limit_usd(
         correlation_key=correlation_key,
         token_id=token_id,
         own_filled_cost_usd=own_filled_cost_usd,
+        other_token_exposure_usd=other_token_exposure_usd,
     )
     prefill = _prefill_wealth(own_wealth, token_id=token_id, filled_cost_usd=own_filled_cost_usd)
     return min(
@@ -1799,6 +1849,11 @@ def _capture_standing_entry_values(
                     correlation_key=prepared.probability_witness.family_key,
                     token_id=str(rest["token_id"]),
                     own_filled_cost_usd=own.filled_shares * own.price,
+                    other_token_exposure_usd=_other_token_exposure_usd(
+                        positions,
+                        token_id=str(rest["token_id"]),
+                        own_position_id=str(rest.get("position_id") or ""),
+                    ),
                 )
                 valuation = value_standing_entry(
                     rest,
