@@ -6967,7 +6967,7 @@ def score_existing_buy_expected(
         capital_lock_hours=capital_lock_hours,
     )
     if not _positive_common_expected_growth(
-        growth, capital_lock_hours=growth.capital_lock_hours,
+        growth, capital_lock_hours=growth.capital_lock_hours, action="BUY",
     ):
         return valuation(terminal, growth, _NON_POSITIVE_EXPECTED_GROWTH)
     return valuation(terminal, growth, None)
