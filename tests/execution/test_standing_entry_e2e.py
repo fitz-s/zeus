@@ -264,3 +264,117 @@ def test_c3_keeps_a_validated_rest_then_cancels_it_on_intrinsic_invalidity(
     finally:
         fx.conn.close()
         fx.builtin.close()
+
+
+def _seed_fresh_books(conn, *, at, asks_by_token):
+    """One fresh executable snapshot per token, each its own selected outcome."""
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
+    from src.state.snapshot_repo import insert_snapshot
+
+    for index in (0, 1, 2):
+        condition = "0x" + f"{101 + index:064x}"
+        yes, no = f"kord-yes-{index}", f"kord-no-{index}"
+        for token, label in ((yes, "YES"), (no, "NO")):
+            ask = asks_by_token.get(token, "0.99")
+            insert_snapshot(
+                conn,
+                ExecutableMarketSnapshot(
+                    snapshot_id=f"book-{token}", gamma_market_id=f"gamma-kord-{index}",
+                    event_id="event-kord", event_slug="kord", condition_id=condition,
+                    question_id=f"q-kord-{index}", yes_token_id=yes, no_token_id=no,
+                    selected_outcome_token_id=token, outcome_label=label,
+                    enable_orderbook=True, active=True, closed=False, accepting_orders=True,
+                    market_start_at=None, market_end_at=None, market_close_at=None,
+                    sports_start_at=None, min_tick_size=D("0.01"), min_order_size=D("5"),
+                    fee_details={"bps": 0, "builder_fee_bps": 0},
+                    token_map_raw={"YES": yes, "NO": no}, rfqe=None, neg_risk=False,
+                    orderbook_top_bid=D(ask) - D("0.01"), orderbook_top_ask=D(ask),
+                    orderbook_depth_jsonb=json.dumps({
+                        "asset_id": token,
+                        "asks": [{"price": ask, "size": "500"}],
+                        "bids": [{"price": str(D(ask) - D("0.01")), "size": "500"}],
+                    }),
+                    raw_gamma_payload_hash="a" * 64, raw_clob_market_info_hash="b" * 64,
+                    raw_orderbook_hash="c" * 64, authority_tier="CLOB",
+                    captured_at=at - timedelta(seconds=30),
+                    freshness_deadline=at + timedelta(minutes=5),
+                ),
+            )
+    conn.commit()
+
+
+def _family_optimum_cycle(tmp_path, monkeypatch, *, asks_by_token):
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine import global_batch_runtime as runtime
+    from src.execution import day0_hard_fact_exit
+
+    fx = _kord_normal_prior_fixture(tmp_path, monkeypatch, target_date=date(2026, 10, 2))
+    at = fx.cut + timedelta(hours=1)
+    _pin_reader_clock(monkeypatch, at)
+    monkeypatch.setattr(adapter, "_runtime_kelly_multiplier", lambda: 0.125)
+    monkeypatch.setattr(
+        "src.runtime.bankroll_provider.current_zeus_capital_allocation_setting",
+        lambda: {"mode": "wallet_total"},
+    )
+    monkeypatch.setattr(
+        runtime, "_market_anchored_correction_resolver", lambda *_a, **_k: (lambda *_c: None),
+    )
+    monkeypatch.setattr(
+        day0_hard_fact_exit, "classify_day0_dead_bin_entry_cancels", lambda *_a, **_k: [],
+    )
+    # Strategy/day0 feasibility are the adapter's own laws; this seed carries no
+    # strategy registry, so admit by the same predicate's "no rejection" branch.
+    monkeypatch.setattr(
+        adapter, "_global_current_entry_feasibility_rejection_reason", lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(adapter, "_event_bound_strategy_key", lambda **_k: "forecast_qkernel_entry")
+    trade = _trade_db()
+    _seed_rest_ledger(trade, at=at)
+    _seed_fresh_books(trade, at=at, asks_by_token=asks_by_token)
+    _publish_allocator(trade)
+    venue = _Venue()
+    result = C.run_c3_staleness_cancel_cycle(
+        trade, trade, fx.conn, venue, world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+    )
+    return fx, trade, venue, result
+
+
+def test_family_optimum_that_dominates_the_rest_cancels_it(tmp_path, monkeypatch, _noaa_native_sources):  # noqa: F811
+    # q=1 on the third bin: its NO legs on the other bins pay with certainty.
+    # A fresh NO on the first bin at 0.05 earns far more growth per dollar than
+    # the 0.50 YES rest, which ties up the reservation the fresh order needs.
+    fx, trade, venue, result = _family_optimum_cycle(
+        tmp_path, monkeypatch, asks_by_token={"kord-no-0": "0.06", TOKEN: "0.56"},
+    )
+    try:
+        valuation = result["valuations"][0]
+        optimum = valuation.evidence["family_optimum"]
+        assert optimum is not None
+        assert optimum["token_id"] != TOKEN  # the rest's own token never competes
+        assert valuation.action == "CANCEL"
+        assert valuation.reason == "FAMILY_OPTIMUM_DOMINATES"
+        assert optimum["expected_delta_log_wealth"] > valuation.evidence["expected_growth"][
+            "expected_delta_log_wealth"
+        ]
+        assert venue.calls == [["venue-1"]]
+    finally:
+        fx.conn.close()
+        fx.builtin.close()
+
+
+def test_rest_beating_every_fresh_proposal_is_kept(tmp_path, monkeypatch, _noaa_native_sources):  # noqa: F811
+    # Every other leg is priced at 0.99: no fresh proposal beats the rest.
+    fx, trade, venue, result = _family_optimum_cycle(
+        tmp_path, monkeypatch, asks_by_token={TOKEN: "0.56"},
+    )
+    try:
+        valuation = result["valuations"][0]
+        assert valuation.action == "KEEP", valuation.reason
+        optimum = valuation.evidence["family_optimum"]
+        assert optimum is None or optimum["expected_delta_log_wealth"] <= valuation.evidence[
+            "expected_growth"
+        ]["expected_delta_log_wealth"]
+        assert venue.calls == []
+    finally:
+        fx.conn.close()
+        fx.builtin.close()

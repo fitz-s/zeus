@@ -35,7 +35,7 @@ import json
 import logging
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any, Callable, Iterable, Mapping
@@ -977,6 +977,239 @@ def value_standing_entry(
     )
 
 
+@dataclass(frozen=True)
+class FamilyOptimum:
+    """The selector's own best fresh BUY for one family on the common axis."""
+
+    candidate_id: str
+    token_id: str
+    execution_mode: str
+    shares: Decimal
+    limit_price: Decimal
+    ruin_probability_reduction: float
+    expected_delta_log_wealth: float
+    fill_probability: float
+
+
+def family_optimum_fresh_buy(
+    trade_conn: sqlite3.Connection,
+    forecasts_conn: sqlite3.Connection,
+    *,
+    event: Any,
+    prepared: Any,
+    portfolio: Any,
+    wealth: Any,
+    fractional_kelly_multiplier: Decimal,
+    capital_authority: Any,
+    payoff_q_correction_resolver: Any,
+    now: datetime,
+) -> FamilyOptimum | None:
+    """Run the selector itself on this one family and return its best BUY.
+
+    ``select_prepared_global_auction`` on a one-family cut: the family's
+    current book epoch from persisted projections only (no venue call), the
+    selector's maker-fill witnesses, the same capital resolver, correction
+    resolver, Kelly multiplier and wealth (the rest's own reservation already
+    credited back), and the adapter's own module-level candidate laws: the
+    active-order duplicate lock (so the rest's own token, which live cannot
+    re-post while the rest is open, never competes), live strategy and Day0
+    feasibility, and the same-token re-post law. Every SCORED/SELECTED BUY is
+    on the selector's common growth axis; the best is returned by the
+    selector's own ordering key. None when the cut cannot be built: no
+    dominance is then proven, which never cancels a rest.
+    """
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine import global_auction_universe as universe
+    from src.engine import global_batch_runtime as runtime
+    from src.engine.global_single_order_auction import select_prepared_global_auction
+    from src.config import tier0_research_mode_enabled
+
+    if tier0_research_mode_enabled():
+        # Tier-0 actuates a flat one-lot stake through an adapter-local
+        # capital closure; its fresh order is not this valuation's to rebuild.
+        return None
+    witness = prepared.probability_witness
+    family_key = witness.family_key
+    tokens = tuple(
+        token
+        for binding in witness.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+        if token
+    )
+    projected = adapter._projected_global_books(
+        trade_conn, tokens, checked_at=now, max_age=FRESHNESS_WINDOW_DEFAULT,
+    )
+    if projected is None:
+        return None
+    books, books_at = projected
+
+    def _no_network(*_a, **_k):
+        raise RuntimeError("STANDING_ENTRY_FAMILY_OPTIMUM_NO_VENUE_READ")
+
+    try:
+        epoch = universe.capture_current_global_book_epoch(
+            trade_conn,
+            probability_witnesses={family_key: witness},
+            get_books=_no_network,
+            clock=lambda: now,
+            max_age=FRESHNESS_WINDOW_DEFAULT,
+            prefetched_books=books,
+            prefetched_at_utc=min(books_at, now),
+        )
+    except Exception:  # noqa: BLE001 - an unbuildable cut proves no dominance
+        return None
+    bound_family = runtime._bind_selection_holdings(
+        {event.event_id: prepared}, portfolio_state=portfolio, wealth_witness=wealth,
+    )
+    bound_family, epoch = runtime._bind_current_maker_fill_witnesses(
+        bound_family,
+        book_epoch=epoch,
+        wealth_witness=wealth,
+        samples=runtime._load_current_maker_fill_samples(trade_conn, selection_cut_at_utc=now),
+        issued_at_utc=now,
+    )
+    payload = adapter._payload(event)
+    event_type = str(payload.get("event_type") or getattr(event, "event_type", "") or "").strip()
+    metric = str(payload.get("metric") or payload.get("temperature_metric") or "").strip()
+    truth_by_bin_side = {
+        (str(bin_id), str(side).upper()): str(truth)
+        for bin_id, side, truth in tuple(getattr(prepared, "day0_payoff_truth_by_bin_side", ()) or ())
+    }
+    revision = adapter._prepared_global_probability_semantics_revision(prepared, forecasts_conn)
+
+    def candidate_policy(candidate: Any) -> str | None:
+        if str(getattr(candidate, "action", "BUY") or "BUY").upper() == "SELL":
+            # A held position's SELL/HOLD is the monitor's decision, not the
+            # fresh BUY this comparison asks for.
+            return "STANDING_ENTRY_FRESH_BUY_ONLY"
+        duplicate = adapter._global_active_entry_duplicate_reason(
+            candidate, trade_conn=trade_conn, live_cap_conn=trade_conn,
+        )
+        if duplicate is not None:
+            return duplicate
+        side = str(getattr(candidate, "side", "") or "").upper()
+        bin_id = str(getattr(candidate, "bin_id", "") or "")
+        day0_truth = truth_by_bin_side.get((bin_id, side))
+        day0_reason = adapter._day0_unresolved_entry_probability_rejection_reason(
+            day0_payoff_truth=day0_truth, probability_semantics_revision=revision,
+        )
+        if day0_reason is not None:
+            return day0_reason
+        repricing = adapter._day0_candidate_ask_repricing_rejection_reason(
+            candidate, event_type=event_type, trade_conn=trade_conn,
+            counts=adapter._DAY0_ASK_SELECTION_EVIDENCE,
+        )
+        if repricing is not None:
+            return repricing
+        try:
+            strategy_key = adapter._event_bound_strategy_key(
+                event_type=event_type, direction=f"buy_{side.lower()}", metric=metric,
+                day0_payoff_truth=day0_truth, require_metric_live=True,
+            )
+        except ValueError as exc:
+            return str(exc)
+        return adapter._global_current_entry_feasibility_rejection_reason(
+            candidate,
+            strategy_key=strategy_key,
+            probability_semantics_revision=revision,
+            strategy_policy_conn=trade_conn,
+            temperature_metric=metric,
+        )
+
+    def capital_limit(candidate: Any, gamma_market_id: str, market_event_id: str, _owner: str) -> Decimal:
+        return Decimal(
+            capital_authority.capacity_usd(
+                market_id=str(gamma_market_id),
+                event_id=str(market_event_id),
+                resolution_window="default",
+                correlation_key=family_key,
+            )
+        )
+
+    scope = universe.current_global_auction_scope_from_events((event,), captured_at_utc=now)
+    authorities = runtime._current_probability_authorities({family_key: witness})
+    selected = select_prepared_global_auction(
+        bound_family,
+        selection_epoch_identity=f"standing_entry_family_optimum:{family_key}:{now.isoformat()}",
+        selection_cut_at_utc=now,
+        current_scope=scope,
+        current_scope_identity_resolver=lambda: scope.scope_identity,
+        venue_universe_identity=epoch.witness_identity,
+        current_venue_universe_identity_resolver=lambda: epoch.witness_identity,
+        universe_max_age=epoch.max_age,
+        current_probability_resolver=authorities.get,
+        current_execution_resolver=lambda c: epoch.execution_authority(c, checked_at_utc=now),
+        current_wealth_identity_resolver=lambda: wealth.economic_identity,
+        wealth_witness=wealth,
+        capital_limit_usd=wealth.strategy_capital_allocation.remaining_buy_capacity_usd,
+        fractional_kelly_multiplier=fractional_kelly_multiplier,
+        decision_at_utc=now,
+        book_epoch=epoch,
+        family_joint_plan_cache={},
+        current_capital_limit_resolver=capital_limit,
+        candidate_policy_rejection_resolver=candidate_policy,
+        selected_order_rejection_resolver=lambda s, at: adapter.global_selected_order_same_token_rejection(
+            s, at, trade_conn=trade_conn,
+        ),
+        payoff_q_lcb_by_candidate=runtime._prepared_candidate_payoff_q_lcb_caps(bound_family),
+        payoff_q_correction_resolver=payoff_q_correction_resolver,
+    )
+    scored = [
+        row
+        for row in tuple(getattr(selected.decision, "candidate_evaluations", ()) or ())
+        if row.action == "BUY"
+        and row.status in {"SCORED", "SELECTED"}
+        and row.expected_growth is not None
+    ]
+    if not scored:
+        return None
+    best = min(
+        scored,
+        key=lambda row: (
+            -float(row.expected_growth.ruin_probability_reduction),
+            -float(row.expected_growth.expected_delta_log_wealth),
+            -float(row.expected_growth.expected_capital_efficiency),
+            row.cost_usd,
+            row.candidate_id,
+        ),
+    )
+    return FamilyOptimum(
+        candidate_id=best.candidate_id,
+        token_id=best.token_id,
+        execution_mode=best.execution_mode,
+        shares=best.shares,
+        limit_price=best.limit_price,
+        ruin_probability_reduction=float(best.expected_growth.ruin_probability_reduction),
+        expected_delta_log_wealth=float(best.expected_growth.expected_delta_log_wealth),
+        fill_probability=float(best.fill_probability),
+    )
+
+
+def family_optimum_dominates(
+    rest: StandingEntryValuation, optimum: FamilyOptimum | None,
+) -> bool:
+    """Whether the family's fresh optimum beats keeping the rest.
+
+    Same lexicographic key the selector ranks proposals by (ruin reduction,
+    then expected growth). Both values sit on the common axis, and both are
+    net of their own cost: the fresh proposal's growth already prices its
+    fill probability through its maker witness (a taker fills by
+    construction), while the rest's is conditional on fill, an upper bound on
+    its realized value; cancelling the rest costs no fee. So a fresh optimum
+    strictly above the rest's fill-conditional growth dominates it.
+    """
+    growth = rest.evidence.get("expected_growth") or {}
+    if optimum is None or rest.action != "KEEP" or not growth:
+        return False
+    rest_key = (
+        float(growth.get("ruin_probability_reduction") or 0.0),
+        float(growth["expected_delta_log_wealth"]),
+    )
+    fresh_key = (optimum.ruin_probability_reduction, optimum.expected_delta_log_wealth)
+    return fresh_key > rest_key
+
+
 def _snapshot_row(trade_conn: sqlite3.Connection, snapshot_id: str) -> dict[str, Any] | None:
     cursor = trade_conn.execute(
         "SELECT * FROM executable_market_snapshots WHERE snapshot_id = ?",
@@ -1251,7 +1484,7 @@ def _capture_standing_entry_values(
                         wealth_witness=own_wealth,
                     ),
                 )
-                values[command_id] = value_standing_entry(
+                valuation = value_standing_entry(
                     rest,
                     family=family,
                     snapshot=snapshot,
@@ -1264,6 +1497,54 @@ def _capture_standing_entry_values(
                     resolution_at=resolution_at_by_key.get(prepared.probability_witness.family_key),
                     now=now,
                 )
+                if valuation.action == "KEEP":
+                    # Not dominated by the family's own fresh optimum, with
+                    # the rest's reservation credited back as if cancelled.
+                    try:
+                        optimum = family_optimum_fresh_buy(
+                            trade_conn,
+                            forecasts_conn,
+                            event=event,
+                            prepared=prepared,
+                            portfolio=portfolio,
+                            wealth=own_wealth,
+                            fractional_kelly_multiplier=multiplier,
+                            capital_authority=capital_authority,
+                            payoff_q_correction_resolver=correction,
+                            now=now,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - no fresh cut proves no dominance
+                        logger.warning(
+                            "standing ENTRY family optimum unavailable command=%s: %s: %s",
+                            command_id, type(exc).__name__, exc,
+                        )
+                        optimum = None
+                    evidence = {
+                        **dict(valuation.evidence),
+                        "family_optimum": None
+                        if optimum is None
+                        else {
+                            "candidate_id": optimum.candidate_id,
+                            "token_id": optimum.token_id,
+                            "execution_mode": optimum.execution_mode,
+                            "shares": str(optimum.shares),
+                            "limit_price": str(optimum.limit_price),
+                            "ruin_probability_reduction": optimum.ruin_probability_reduction,
+                            "expected_delta_log_wealth": optimum.expected_delta_log_wealth,
+                            "fill_probability": optimum.fill_probability,
+                        },
+                    }
+                    valuation = replace(
+                        valuation,
+                        action="CANCEL" if family_optimum_dominates(valuation, optimum) else "KEEP",
+                        reason=(
+                            "FAMILY_OPTIMUM_DOMINATES"
+                            if family_optimum_dominates(valuation, optimum)
+                            else valuation.reason
+                        ),
+                        evidence=evidence,
+                    )
+                values[command_id] = valuation
             except Exception as exc:  # noqa: BLE001 - an unprovable valuation cancels protectively
                 values[command_id] = _protective(
                     rest,

@@ -934,3 +934,32 @@ class TestRealAllocatorLifecycle:
         assert valuation.action == "DEFER"
         assert valuation.reason == "ENTRY_REST_AUTHORITY_PENDING:fit_corpus_not_installed"
         assert venue.calls == [] and loads == []
+
+
+class TestFamilyOptimumDominance:
+    """F4: the rest is cancelled only when the family's own fresh optimum
+    beats it on the selector's ordering key (ruin reduction, then growth)."""
+
+    def _optimum(self, *, du, ruin=0.0):
+        return C.FamilyOptimum(
+            candidate_id="fresh", token_id="other", execution_mode="MAKER_REST",
+            shares=D("5"), limit_price=D("0.3"), ruin_probability_reduction=ruin,
+            expected_delta_log_wealth=du, fill_probability=0.4,
+        )
+
+    def test_strictly_better_fresh_growth_dominates(self):
+        keep = _value(q=0.75)
+        rest_du = keep.evidence["expected_growth"]["expected_delta_log_wealth"]
+        assert C.family_optimum_dominates(keep, self._optimum(du=rest_du * 1.5))
+
+    def test_equal_or_lower_fresh_growth_never_dominates(self):
+        keep = _value(q=0.75)
+        rest_du = keep.evidence["expected_growth"]["expected_delta_log_wealth"]
+        assert not C.family_optimum_dominates(keep, self._optimum(du=rest_du))
+        assert not C.family_optimum_dominates(keep, self._optimum(du=rest_du * 0.5))
+
+    def test_no_fresh_optimum_or_a_non_keep_never_dominates(self):
+        keep = _value(q=0.75)
+        assert not C.family_optimum_dominates(keep, None)
+        cancel = _value(q=0.30)
+        assert not C.family_optimum_dominates(cancel, self._optimum(du=1.0))
