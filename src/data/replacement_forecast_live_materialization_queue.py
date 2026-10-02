@@ -1153,6 +1153,10 @@ def failed_seed_identity_fenced(
             request = blocked["request"]
             recorded = blocked["attempt_fingerprint"]
             forecast_db = forecast_db_from_connection(conn)
+            prospective = (
+                {**request, "computed_at": decision_at.isoformat()}
+                if isinstance(request, Mapping) else None
+            )
             return (
                 # An older (metadata-keyed) identity is evidence, never a fence.
                 blocked.get("identity_version") == MATERIALIZATION_IDENTITY_VERSION
@@ -1160,11 +1164,13 @@ def failed_seed_identity_fenced(
                 and _blocked_attempt_fingerprint(
                     input_json=seed_file.parent.parent / "requests" / seed_file.name,
                     forecast_db=forecast_db,
-                    payload={**request, "computed_at": decision_at.isoformat()},
+                    payload=prospective,
                 ) == recorded
-                # Only once the cheap fingerprint matches: its typed evidence.
+                # Only once the cheap fingerprint matches: the recorded reason,
+                # re-decided for this prospective request at its own clock.
                 and _blocked_evidence_holds(
                     blocked.get("blocked_evidence"), forecast_db=forecast_db,
+                    prospective=prospective,
                 )
             )
         if not receipt.get("blocked_seed_identity"):
@@ -3992,11 +3998,17 @@ def _subprocess_result_blocked_evidence(
 
 
 def _blocked_evidence_holds(
-    evidence: object, *, forecast_db: Path | str | None,
+    evidence: object,
+    *,
+    forecast_db: Path | str | None,
+    prospective: Mapping[str, object] | None = None,
 ) -> bool:
     """Absent: the fence never depended on the database (a named-input verdict).
-    Present: every typed fact re-verifies on one read-only snapshot of the
-    forecasts DB (``materialization_block_evidence``); unreadable never holds."""
+    Present: with ``prospective`` (the request the caller would build now), the
+    recorded reason is re-decided for it at its effective materialization clock;
+    without, the facts the worker judged for its own request must still hold.
+    One read-only snapshot of the forecasts DB (``materialization_block_evidence``);
+    malformed, unsupported or unreadable evidence never holds."""
     if evidence is None:
         return True
     if forecast_db is None or not isinstance(evidence, Mapping):
@@ -4008,7 +4020,7 @@ def _blocked_evidence_holds(
     except (sqlite3.Error, OSError):
         return False
     try:
-        return evidence_holds(conn, evidence)
+        return evidence_holds(conn, evidence, prospective)
     finally:
         conn.close()
 
@@ -4071,6 +4083,7 @@ def _bound_verdict(
         or item.attempt_fingerprint is None
         or not _consumed_inputs_unchanged(witness)
         or (blocked and evidence is None)
+        # The worker judged exactly the claimed request: its facts must still hold.
         or not _blocked_evidence_holds(evidence, forecast_db=forecast_db)
     ):
         return None
@@ -4128,7 +4141,9 @@ def _blocked_attempt_state(
         return marker_path, fingerprint, False
     return marker_path, fingerprint, (
         marker.get("attempt_fingerprint") == fingerprint
-        and _blocked_evidence_holds(marker.get("blocked_evidence"), forecast_db=forecast_db)
+        and _blocked_evidence_holds(
+            marker.get("blocked_evidence"), forecast_db=forecast_db, prospective=payload,
+        )
     )
 
 

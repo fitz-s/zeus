@@ -5054,7 +5054,6 @@ def _replacement_bayes_precision_fusion_override(
                         from src.data.materialization_block_evidence import no_cohort_item  # noqa: PLC0415
 
                         _shape_cohort_evidence = no_cohort_item(
-                            city=request.city, metric=metric, target_date=target_date,
                             decision_time_iso=computed_at.isoformat(),
                             window_hours=BETWEEN_COHORT_WINDOW_HOURS,
                         )
@@ -5203,7 +5202,6 @@ def _replacement_bayes_precision_fusion_override(
                     from src.data.materialization_block_evidence import no_cohort_item  # noqa: PLC0415
 
                     _shape_cohort_evidence = no_cohort_item(
-                        city=request.city, metric=metric, target_date=target_date,
                         decision_time_iso=computed_at.isoformat(),
                         window_hours=BETWEEN_COHORT_WINDOW_HOURS,
                     )
