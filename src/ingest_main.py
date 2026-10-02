@@ -31,6 +31,7 @@ from __future__ import annotations
 import functools
 import itertools
 from copy import deepcopy
+import faulthandler
 import json
 import logging
 import os
@@ -46,6 +47,17 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger("zeus.ingest")
+
+# Ingest-hang telemetry, mirroring src/main.py: SIGUSR1 dumps ALL thread stacks
+# to stderr (logs/zeus-ingest.err) so a slow or stuck broad reseed batch can be
+# pinned WITHOUT root-level py-spy. The diagnostic must remain stack-only:
+# chaining SIGUSR1 to its default handler terminates the process after it
+# writes the dump. faulthandler.enable() also dumps on fatal signals. Additive.
+faulthandler.enable()
+try:
+    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+except (AttributeError, ValueError, OSError):
+    pass
 
 # ---------------------------------------------------------------------------
 # Module-level scheduler reference for SIGTERM handler

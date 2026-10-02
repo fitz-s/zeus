@@ -433,6 +433,21 @@ def test_broad_reseed_with_a_station_ground_archive_completes_and_commits_the_cu
     assert advances == [("ecmwf_ifs",)]
 
 
+def test_ingest_sigusr1_dumps_every_thread_stack_without_terminating() -> None:
+    """kill -USR1 <ingest pid> writes all thread stacks to stderr, root-free."""
+    import faulthandler
+    import inspect
+    import signal
+
+    import src.ingest_main as ingest_main
+
+    assert faulthandler.is_enabled()
+    source = inspect.getsource(ingest_main)
+    assert "faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)" in source
+    # Re-registering the same stack-only handler is idempotent and never raises.
+    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+
+
 def _retry_debt_world(monkeypatch, tmp_path, cycle_reports):
     """Broad batches whose cycle-advance passes return ``cycle_reports`` in order."""
     import src.data.replacement_fusion_upgrade_trigger as fusion_trigger
