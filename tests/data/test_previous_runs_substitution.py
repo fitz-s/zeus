@@ -445,20 +445,22 @@ def test_request_skips_instrument_expansion_after_current_q_converges(
 
 
 
-def _database_witness(db) -> dict:
-    """What a real worker reports for a computation verdict: its own DB reads,
-    recorded (one read here) by the same recorder the worker runs under."""
+def _blocked_evidence(db, argv) -> dict:
+    """What a real worker reports for an evidenced computation BLOCKED: typed facts
+    (here the materialization clock: the request's two source_run possession rows)
+    that the parent re-verifies on the queue's forecasts DB."""
     import sqlite3 as _sqlite3
+    from types import SimpleNamespace
 
-    from src.data.sqlite_read_witness import SQLiteReadRecorder, recordable
+    from src.data.materialization_block_evidence import blocked_evidence
 
-    with recordable():
-        conn = _sqlite3.connect(str(db))
+    request = json.loads(Path(argv[argv.index("--input-json") + 1]).read_text())
+    conn = _sqlite3.connect(str(db))  # the queue's forecasts DB (created if absent)
     try:
-        recorder = SQLiteReadRecorder()
-        with recorder:
-            conn.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
-        return recorder.witness()
+        return blocked_evidence(conn, SimpleNamespace(
+            baseline_source_run_id=request.get("baseline_source_run_id"),
+            openmeteo_source_run_id=request.get("openmeteo_source_run_id"),
+        ), "TEST_EVIDENCED_BLOCK")
     finally:
         conn.close()
 
@@ -6418,6 +6420,8 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
         "precision_metadata_json": "precision.json",
         "bins": [{"bin_id": "30C"}],
     }
+    # The fence's typed evidence is re-verified on the queue's forecasts DB.
+    sqlite3.connect(tmp_path / "forecasts.db").close()
     watermark = {"value": (3, 99, "2026-07-16T12:15:00+00:00", "")}
     original_fingerprint = queue_mod._blocked_attempt_fingerprint
 
@@ -6442,7 +6446,7 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
                     "status": "BLOCKED",
                     "reason_codes": [blocked_reason],
                     "consumed_inputs": _consumed_witness(argv),
-                    "consumed_database": _database_witness(tmp_path / "witness.db"),
+                    "blocked_evidence": _blocked_evidence(tmp_path / "forecasts.db", argv),
                 }
             )
             + "\n",
@@ -6588,7 +6592,7 @@ def test_blocked_source_clock_request_retries_only_on_new_provider_family(
                         "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
                     ],
                     "consumed_inputs": _consumed_witness(argv),
-                    "consumed_database": _database_witness(db_path),
+                    "blocked_evidence": _blocked_evidence(db_path, argv),
                 }
             )
             + "\n",

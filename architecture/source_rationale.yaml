@@ -1494,12 +1494,12 @@ files:
     - src/data/bayes_precision_fusion_download.py
     - src/data/replacement_current_value_serving.py
     - src/data/replacement_forecast_materializer.py
-  src/data/sqlite_read_witness.py:
+  src/data/materialization_block_evidence.py:
     zone: K2_runtime
-    authority_role: sqlite_read_witness
-    why: "Digests the rows a worker's own cursors yield (no second execution) into a database read witness: databases, SQL, parameters, rows consumed, exhaustion, sha256. The parent re-executes those reads read-only to prove a computation BLOCKED judged the current state, empty selections included; a memory/temp database, a nondeterministic statement or an untraced connection makes the witness incomplete, which binds nothing. Carries no authority of its own."
+    authority_role: materialization_block_evidence
+    why: "Typed evidence for a materialization BLOCKED: the code that decides a covered reason (stale anchor cycle; HIGH readiness-cert regression; no coherent current provider cohort) reports the database facts its verdict followed from, and the parent re-verifies them with indexed lookups on one read-only forecasts snapshot before a fence binds or is honored. Any other reason, and evidence that fails or cannot be read, binds nothing. Carries no authority of its own."
     downstream:
-    - scripts/materialize_replacement_forecast_live.py
+    - src/data/replacement_forecast_materializer.py
     - src/data/replacement_forecast_live_materialization_queue.py
   src/data/versioned_file_read.py:
     zone: K2_runtime
