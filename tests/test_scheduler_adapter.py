@@ -2,7 +2,7 @@
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-09-30
+# Last reused or audited: 2026-10-02 (station-ground archive vs broad reseed)
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -379,6 +379,58 @@ def test_broad_reseed_coalesces_only_non_authorizing_pending_retries(
     # eligible receipt re-measured the source, so its published scan proves it;
     # an earlier retry must not veto that proof (the 2026-09-23 livelock).
     assert advances == ([] if batch_fails else [("icon_global",)])
+
+
+def test_broad_reseed_with_a_station_ground_archive_completes_and_commits_the_cursor(
+    monkeypatch, broad_reseed_join, tmp_path,
+) -> None:
+    """The station-ground store under raw_manifests/ must not veto the broad scan.
+
+    Live 09-30..10-02: every broad batch failed on its manifests' foreign schema,
+    so no proof ever existed and the source-clock cursor never committed.
+    """
+    import json
+
+    import src.data.replacement_fusion_upgrade_trigger as fusion_trigger
+    import src.data.replacement_cycle_advance_trigger as cycle_trigger
+    import src.data.station_ground_evidence as ground
+    import src.ingest_main as ingest_main
+
+    raw_dir = tmp_path / "raw_manifests"
+    station_ground = raw_dir / "station_ground"
+    station_ground.mkdir(parents=True)
+    (station_ground / f"LLBG.{'0' * 64}.manifest.json").write_text(json.dumps({
+        "station_id": "LLBG", "manifest_role": "station_ground", "body_path": "x.body",
+    }), encoding="utf-8")
+    monkeypatch.setattr(ground, "_store_root", lambda: station_ground.resolve())
+    loaded: list[object] = []
+
+    def fusion(**kwargs):
+        loaded.append(kwargs["manifests"])
+        return {"status": "FUSION_UPGRADE_TRIGGER"}
+
+    monkeypatch.setattr(fusion_trigger, "enqueue_fusion_upgrade_reseeds", fusion)
+    monkeypatch.setattr(cycle_trigger, "enqueue_cycle_advance_reseeds",
+                        lambda **_k: {"status": "CYCLE_ADVANCE_TRIGGER"})
+    advances: list[object] = []
+    monkeypatch.setattr("src.data.source_clock_update_probe.advance_source_clock_cursor",
+                        lambda _p, *, sources: advances.append(sources) or sources)
+
+    ingest_main._enqueue_broad_reseed_batch(
+        {"forecast_db": tmp_path / "f.db", "seed_dir": tmp_path / "seeds",
+         "raw_manifest_dir": raw_dir},
+        include_cycle_advance=True,
+        source_clock_payload={
+            "cursor_path": "/tmp/station-ground-veto", "updated_sources": ["ecmwf_ifs"],
+            "cursor_values": {"ecmwf_ifs": "v1"}, "cursor_preimage": {"ecmwf_ifs": None},
+        },
+        cursor_sources=("ecmwf_ifs",),
+        download_report={"status": "downloaded"},
+    )
+    broad_reseed_join()
+
+    assert loaded == [()]
+    assert advances == [("ecmwf_ifs",)]
 
 
 @pytest.mark.parametrize("change", [

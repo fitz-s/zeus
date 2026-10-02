@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-23
+# Last reused/audited: 2026-10-02 (station-ground archive excluded from the inventory)
 # Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
@@ -528,6 +528,42 @@ def test_load_manifests_skips_retired_product_without_vetoing_current_inputs(
 
     assert len(loaded) == 1
     assert loaded[0].data_version == OPENMETEO_HIGH_DATA_VERSION
+
+
+def test_station_ground_archive_never_vetoes_the_raw_manifest_inventory() -> None:
+    """The station-ground store sits under raw_manifests/ with its own schema.
+
+    Before 10-02 its manifests raised UnsupportedRawForecastArtifactManifestFields
+    inside every broad scan, so no broad reseed completed and no source-clock
+    cursor ever committed.
+    """
+    import src.data.replacement_forecast_seed_discovery as discovery
+    from src.data.station_ground_evidence import _store_root
+
+    station_ground = _store_root()
+    raw_dir = station_ground.parent
+    _write_manifest(
+        raw_dir,
+        name="current-ground-veto",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        metadata={},
+    )
+    station_ground.mkdir(parents=True, exist_ok=True)
+    (station_ground / f"LLBG.{'0' * 64}.manifest.json").write_text(json.dumps({
+        "station_id": "LLBG", "manifest_role": "station_ground", "body_path": "x.body",
+        "body_sha256": "0" * 64, "facts": {}, "facts_identity": "0" * 64,
+        "revision": "station_ground_v1", "source_kind": "official", "source_url": "https://example.invalid",
+    }), encoding="utf-8")
+    root = raw_dir.resolve()
+    discovery._MANIFEST_CACHE.pop(root, None)
+    discovery._MANIFEST_INVALID_SIGNATURES.pop(root, None)
+    discovery._MANIFEST_CACHE_VERSIONS.pop(root, None)
+
+    loaded = _load_manifests(raw_dir, computed_at=datetime(2026, 6, 7, tzinfo=timezone.utc))
+
+    assert [manifest.data_version for manifest in loaded] == [OPENMETEO_HIGH_DATA_VERSION]
 
 
 def test_load_manifests_isolates_one_truncated_file_and_retries_after_repair(

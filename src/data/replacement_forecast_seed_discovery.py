@@ -419,7 +419,16 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
     ] = {}
     succeeded = False
     try:
-        paths = tuple(sorted(root.rglob("*.manifest.json")))
+        # The station-ground archive lives under this tree but is not a raw
+        # forecast inventory: its manifests carry another schema and vetoed
+        # every broad scan (2,233 unsupported-fields failures by 10-02).
+        from src.data.station_ground_evidence import _store_root  # noqa: PLC0415
+
+        station_ground = _store_root()
+        paths = tuple(sorted(
+            path for path in root.rglob("*.manifest.json")
+            if not path.is_relative_to(station_ground)
+        ))
         for path in paths:
             stat = path.stat()
             signature = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
