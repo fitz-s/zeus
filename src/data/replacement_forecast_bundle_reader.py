@@ -57,6 +57,7 @@ from src.data.replacement_input_hwm import (
     ReadRecord,
     RecordedReads,
     ReplacementInputHwmReadUnavailable,
+    _FRESH_SOURCE,
     _MEMO_LIMIT,
     _authority_table_ref,
     authority_config_identity,
@@ -1637,7 +1638,7 @@ def read_replacement_forecast_bundle(
     from src.data.station_ground_evidence import forecast_db_from_connection
 
     forecast_db = forecast_db_from_connection(conn)
-    canonical_store = type(conn) is sqlite3.Connection
+    canonical_store = type(conn) is sqlite3.Connection and not _FRESH_SOURCE.get()
     provenance = _live_grade_provenance(
         row_map,
         authority_purpose=authority_purpose,

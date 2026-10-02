@@ -14795,6 +14795,131 @@ def test_refresh_debt_basis_is_never_a_superseded_posterior_verdict(basis):
     ) is False
 
 
+def _typed_day0_buy_and_sell_candidates(at):
+    buy = _global_test_buy_candidate(
+        family_key="Alpha|2026-07-14|high", probability_witness_identity="selected",
+        book_identity="selected-book", price="0.40", captured_at=at, condition_id="c0",
+    )
+    sell = _adapter_sell_actuation(
+        _global_scope_event(city="Alpha", source_run_id="hwm-fresh"),
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    ).decision.candidate
+    return buy, sell
+
+
+def test_actuation_revalidation_never_rests_on_a_remembered_verdict(monkeypatch):
+    """Day0 ENTRY and SELL actuation re-prepares with every HWM and live-grade
+    verdict proved from source; outside it a warm memo may answer."""
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+
+    seen = []
+
+    def prepare(*_args, **kwargs):
+        seen.append((hwm._FRESH_SOURCE.get(), kwargs["probability_use"]))
+        raise ValueError("GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+                         "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global")
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+    monkeypatch.setattr(era, "_rehydrate_held_pinned_bundle_for_actuation", lambda *_a, **_k: None)
+    conn = sqlite3.connect(":memory:")
+    at = _dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc)
+    selected = SimpleNamespace(captured_at_utc=at)
+    for candidate in _typed_day0_buy_and_sell_candidates(at):
+        with pytest.raises(ValueError, match="consumed_proof_unverifiable"):
+            era._current_global_actuation_prepared_family(
+                SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+                global_actuation=SimpleNamespace(
+                    probability_witness=selected,
+                    decision=SimpleNamespace(candidate=candidate),
+                ),
+                forecast_conn=conn, topology_conn=conn, observation_conn=conn,
+                decision_time=at,
+            )
+    assert [fresh for fresh, _use in seen] == [True, True]
+    assert hwm._FRESH_SOURCE.get() is False
+    # Inside the scope neither memo is consulted: canonical serving bypasses both.
+    with hwm.fresh_source():
+        assert reader._FRESH_SOURCE.get() is True
+    conn.close()
+
+
+def test_day0_entry_and_sell_issue_no_command_when_consumed_proof_is_gone(
+    monkeypatch,
+):
+    """A warm READY memo cannot carry a Day0 ENTRY or a SELL to the venue
+    after its consumed row is deleted: actuation re-proves from source."""
+    from datetime import timedelta
+    from tests.test_replacement_forecast_bundle_reader import _shanghai_reader_certificate
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    import json as _json
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp())
+    world = _shanghai_reader_certificate(
+        root, monkeypatch, expires_at=_dt.datetime(2026, 10, 1, 16, 15, tzinfo=_dt.timezone.utc)
+    )
+    normal = next(world)
+    try:
+        hwm.clear_consumed_proof_memo()
+        reader._LIVE_GRADE_MEMO.clear()
+        assert reader.read_replacement_forecast_bundle(normal.conn, **normal.kwargs).ok
+        serving = _json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
+        raw_id = sorted(item["raw_model_forecast_id"] for item in serving.values())[0]
+        normal.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?", (raw_id,))
+        normal.conn.commit()
+        with hwm.fresh_source():
+            fresh = reader.read_replacement_forecast_bundle(normal.conn, **normal.kwargs)
+        assert not fresh.ok and "consumed_proof_unverifiable" in fresh.reason_code
+        commands = []
+
+        def prepare(*_args, **_kwargs):
+            result = reader.read_replacement_forecast_bundle(normal.conn, **normal.kwargs)
+            if not result.ok:
+                raise ValueError("GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:" + result.reason_code)
+            commands.append("would-actuate")
+
+        monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+        monkeypatch.setattr(era, "_rehydrate_held_pinned_bundle_for_actuation", lambda *_a, **_k: None)
+        selected = SimpleNamespace(captured_at_utc=normal.request.computed_at)
+        sell_event = _global_scope_event(city="Alpha", source_run_id="hwm-sell")
+        sell_actuation = _adapter_sell_actuation(
+            sell_event, probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+            exit_authority_status="mature", exit_authority_reason="day0_high_extreme_mature",
+        )
+        sell_actuation = SimpleNamespace(
+            probability_witness=selected,
+            decision=sell_actuation.decision,
+            winner_event_id=sell_event.event_id,
+        )
+        receipt = era._submit_current_global_sell(
+            sell_event, decision_time=normal.request.computed_at,
+            global_actuation=sell_actuation,
+            trade_conn=sqlite3.connect(":memory:"), global_claim_conn=sqlite3.connect(":memory:"),
+            forecast_conn=normal.conn, topology_conn=normal.conn, calibration_conn=normal.conn,
+            preflight_only=True, preflight_receipt=None,
+        )
+        assert receipt.submitted is False and receipt.proof_accepted is False
+        assert receipt.reason.startswith("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:")
+        assert "consumed_proof_unverifiable" in receipt.reason
+        with pytest.raises(ValueError, match="consumed_proof_unverifiable"):
+            era._current_global_actuation_prepared_family(
+                SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+                global_actuation=SimpleNamespace(
+                    probability_witness=selected,
+                    decision=SimpleNamespace(
+                        candidate=_typed_day0_buy_and_sell_candidates(normal.request.computed_at)[0]),
+                ),
+                forecast_conn=normal.conn, topology_conn=normal.conn, observation_conn=normal.conn,
+                decision_time=normal.request.computed_at + timedelta(seconds=1),
+            )
+        assert commands == []
+    finally:
+        next(world, None)
+
+
 @pytest.mark.parametrize(
     "reason",
     [

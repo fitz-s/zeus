@@ -19130,6 +19130,7 @@ def _rehydrate_held_pinned_bundle_for_actuation(
     return None
 
 
+@_replacement_input_hwm.fresh_source()
 def _current_global_actuation_prepared_family(
     event: OpportunityEvent,
     *,

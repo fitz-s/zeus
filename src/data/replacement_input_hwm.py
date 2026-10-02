@@ -63,6 +63,8 @@ _MEMO_LOCK = threading.Lock()
 # them; and every file or directory it opens. A hit replays each read and
 # re-stats each file; any difference, error or absence is a miss.
 _RECORDS: ContextVar[tuple["ReadRecord", ...]] = ContextVar("hwm_read_records", default=())
+# Inside fresh_source() no remembered verdict is served (see fresh_source).
+_FRESH_SOURCE: ContextVar[bool] = ContextVar("hwm_fresh_source", default=False)
 _CODE_SUFFIXES = (".py", ".pyc", ".pyi", ".so", ".dylib")
 _READ_SQL = re.compile(
     r"\s*(?:SELECT|WITH)\b"
@@ -221,6 +223,22 @@ def _note_file(path: str | bytes | os.PathLike) -> None:
     for record in _RECORDS.get():
         if resolved not in record.files:
             record.files[resolved] = _file_identity(resolved)
+
+
+@contextmanager
+def fresh_source():
+    """Prove every consumed-proof and live-grade verdict from source inside.
+
+    Actuation revalidation runs here: for a Day0 ENTRY or a SELL it is the
+    last consumed-authority check before the venue (the executor's own check
+    covers only non-Day0 ENTRY), so it never rests on a remembered verdict.
+    Usable as a decorator.
+    """
+    token = _FRESH_SOURCE.set(True)
+    try:
+        yield
+    finally:
+        _FRESH_SOURCE.reset(token)
 
 
 @contextmanager
@@ -2799,7 +2817,7 @@ def _consumed_proof_verdict(
             conn, city=city, target_date=target_date, decision_time=decision_time,
         )
     db_path = forecast_db_from_connection(conn)
-    canonical = use_memo and type(conn) is sqlite3.Connection
+    canonical = use_memo and not _FRESH_SOURCE.get() and type(conn) is sqlite3.Connection
     key = None if not canonical or db_path is None or ground is None else (
         str(db_path), provenance_digest or provenance_identity(provenance),
         posterior_computed.isoformat(), city, str(target_date), metric,
