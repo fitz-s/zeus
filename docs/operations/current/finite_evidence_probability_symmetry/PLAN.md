@@ -111,6 +111,44 @@ source-to-current-held-redecision evidence remain the acceptance gate. In
 particular a new source cycle committed before its held posterior advances must
 not be reported as latest merely because the old shape has zero relative lag.
 
+Runtime follow-up at successor `4678e5d43` (contains the landed repair): cuts
+13683/13684 exclude all 24 held positions. Hong Kong LOW's full family is marked
+`GLOBAL_CURRENT_BOOK_FAMILY_UNAVAILABLE` although its venue condition is open.
+Verified root cause in `global_auction_universe`: invalidated local snapshots are
+discarded before immutable native token identities are collected, yet the
+reduce-only fresh-CLOB refresh needs those identities to issue its request.
+Single-variable RO reproduction against the real Hong Kong row gives zero CLOB
+requests and no family with invalidation true, versus one exact-condition fresh
+request and a retained family when false. Repair only that query dead-end: retain
+static token identity as a query/response binding, never retain invalidated local
+metadata as current authority. Keep exact remote condition/YES-NO-pair checks,
+fresh captured quote, current tradeability, fee/size/tick, probability/wealth and
+JIT laws. INV-47 SCOPE is the held family/token refresh; DRAIN is its existing
+current CLOB refresh; RESET is an exact qualified fresh remote response, never
+an invalidation flag edit. YES/NO invalidated-held positive twins and absent,
+closed or mismatched remote negative twins must disprove stale authorization.
+This is not a claim that the entire wrapper/venue or fee refresh policy changed.
+
+The Day0 remaining-ENS hypothesis is refuted in the current Hong Kong V3 receipts:
+they consume new 00Z ECMWF/ICON/UKMO remaining paths plus current HKO observations
+and the final-station forecast. The full-day 12Z ENS and its same-clock V3 carrier
+are a separate physical quantity; adding a remaining-window label to the full-day
+filter would violate elapsed-day geometry. No probability/source-law relaxation.
+
+BPF normal cursor now advances to 00Z/Busan/October 2; the earlier September 30
+cut is not current. Controlled RO preflight reaches the producer-owner boundary
+in 4.053 seconds under an eight-second allowance, with explicit unknown scopes
+and half the time still reserved. No new internal budget defect is proved by a
+zero-row maintenance report. A remaining observability defect is that timeout
+returns lose stage/scan evidence and maintenance drops all but status/rows; retain
+bounded diagnostics without changing retries, quota, deadlines or source authority.
+Timeout antibodies must keep the same fail-closed status and never manufacture
+capture, READY or order permission. Scheduler missed-cadence evidence is separate
+from this invocation, and shared-worker redesign is not authorized by an unproved
+timeout cause. The external restart controller's hard-coded old-SHA success check
+also remains an operational interference; stopping that other task's controller
+requires the operator decision already requested, not a covert process kill.
+
 Latest complete live stored-row audit is loss's existing
 `/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
 SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.
