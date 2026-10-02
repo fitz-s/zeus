@@ -492,7 +492,7 @@ from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore, GLOBAL_WINNER_SUBMIT_FENCED
 from src.events.family_book_telemetry_writer import enqueue_family_book_observation
-from src.events.forecast_completeness import ForecastCompletenessStatus
+from src.events.forecast_completeness import ForecastCompletenessStatus, spine_member_floor
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
 from src.events.opportunity_book import OpportunityBook, build_family_opportunity_book
@@ -28769,7 +28769,9 @@ def _forecast_authority_payload_from_posterior(
         return None
     if members_native is None:
         return None
-    if not source_clock_present and len(members_native) < 3:
+    if not source_clock_present and len(members_native) < spine_member_floor(
+        p_provenance.get("bayes_precision_fusion")
+    ):
         _fail("member_count_insufficient")
         return None
     member_count = len(members_native)
@@ -28964,7 +28966,7 @@ def _posterior_bound_multimodel_members(
         _fail("source_clock_certificate_missing")
         return None
     if (
-        (not source_clock_present and len(models) < 3)
+        (not source_clock_present and len(models) < spine_member_floor(fusion))
         or any(not model for model in models)
         or len(set(models)) != len(models)
     ):

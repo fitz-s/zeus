@@ -7561,6 +7561,115 @@ def test_day0_current_authority_pre_submit_rejects_replacement_parent_mutations(
         _run_replacement_pre_submit_builder(fixture, proof=proof)
 
 
+_CERTIFIED_TWO = {
+    "decorrelated_providers_complete": True,
+    "decorrelated_providers_served": 2,
+    "decorrelated_providers_expected": 2,
+    "raw_model_forecast_ids": [1, 2],
+}
+_UNCERTIFIED_TWO = {
+    "decorrelated_providers_complete": False,
+    "decorrelated_providers_served": 2,
+    "decorrelated_providers_expected": 3,
+    "raw_model_forecast_ids": [1, 2],
+}
+
+
+@pytest.mark.parametrize(
+    "fusion,admitted",
+    [(_CERTIFIED_TWO, True), (_UNCERTIFIED_TWO, False), ({}, False)],
+    ids=["certified-2-of-2", "2-of-3", "no-certificate"],
+)
+def test_posterior_bound_members_floor_is_the_certified_carrier_count(monkeypatch, fusion, admitted):
+    """Non-source-clock posterior: a certified carrier set sets its own floor."""
+    from src.data import replacement_current_value_serving as serving_module
+
+    served = {
+        model: serving_module.ServedInstrumentValue(
+            value_c=value, raw_model_forecast_id=raw_id, served_via="single_runs",
+            served_cycle="2026-07-13T00:00:00+00:00", captured_at="2026-07-13T01:00:00+00:00",
+            age_hours=1.0, lead_days=0,
+        )
+        for model, raw_id, value in (("a", 1, 33.0), ("b", 2, 34.0))
+    }
+    monkeypatch.setattr(serving_module, "read_current_instrument_values", lambda *_a, **_k: served)
+    monkeypatch.setattr(
+        era, "runtime_cities_by_name",
+        lambda: {"Hong Kong": SimpleNamespace(timezone="Asia/Hong_Kong", settlement_unit="C")},
+    )
+    provenance = {"bayes_precision_fusion": {
+        **fusion,
+        "used_models": ["a", "b"],
+        "current_value_serving": {
+            model: {"raw_model_forecast_id": value.raw_model_forecast_id, "served_via": "single_runs",
+                    "served_cycle": value.served_cycle}
+            for model, value in served.items()
+        },
+    }}
+    reason: dict[str, str] = {}
+    members = era._posterior_bound_multimodel_members(
+        sqlite3.connect(":memory:"),
+        family=SimpleNamespace(city="Hong Kong", target_date="2026-07-13", metric="high"),
+        decision_time=datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc),
+        source_cycle_time="2026-07-13T00:00:00+00:00",
+        provenance=provenance,
+        reason_out=reason,
+    )
+    if admitted:
+        assert members == (33.0, 34.0), reason
+    else:
+        assert members is None and reason == {"reason": "model_count_insufficient"}
+
+
+@pytest.mark.parametrize(
+    "fusion,admitted",
+    [(_CERTIFIED_TWO, True), (_UNCERTIFIED_TWO, False)],
+    ids=["certified-2-of-2", "2-of-3"],
+)
+def test_forecast_authority_payload_floor_is_the_certified_carrier_count(monkeypatch, fusion, admitted):
+    """Legacy-member carrier path: two members pass only with a certified carrier set."""
+    from src.data import replacement_forecast_bundle_reader as reader
+
+    monkeypatch.setattr(
+        era, "_spine_multimodel_members_for_event",
+        lambda *_a, geometry_out, **_k: ([20.0, 22.0], "2026-09-28", []),
+    )
+    monkeypatch.setattr(
+        era, "runtime_cities_by_name",
+        lambda: {"Tokyo": SimpleNamespace(settlement_unit="C", timezone="Asia/Tokyo")},
+    )
+    monkeypatch.setattr(era, "_authority_table_ref", lambda *_a: "forecast_posteriors")
+    monkeypatch.setattr(reader, "_current_ensemble_snapshot_identity_reason", lambda *_a, **_k: None)
+    monkeypatch.setattr(era, "_replacement_live_input_lag_reason", lambda *_a, **_k: None)
+    monkeypatch.setattr(era, "current_evidence_shape_semantics_mismatch", lambda *_a: False)
+    monkeypatch.setattr(era, "replacement_probability_bundle_hash", lambda **_k: "test-lawful-bundle-hash")
+    monkeypatch.setattr(era, "_source_clock_model_count_certificate", lambda *_a, **_k: (False, None))
+    bins = [{"bin_id": "test-bin"}]
+    provenance = {"bin_topology": bins, "q_lcb_bootstrap_draws": 10, "bayes_precision_fusion": dict(fusion)}
+    prow = ("openmeteo", "2026-09-28T00:00:00+00:00", "2026-09-28T01:00:00+00:00", "2026-09-28T02:00:00+00:00",
+            "posterior-test-hash", "test-version", 1, "test-family", era.stable_hash(bins), '{"test-bin":0.5}',
+            '{"test-bin":0.4}', '{"test-bin":0.6}', json.dumps(provenance), "{}")
+
+    class Conn:
+        def execute(self, sql, params):
+            return SimpleNamespace(fetchone=lambda: prow if "FROM forecast_posteriors" in sql else None)
+
+    reason: dict[str, str] = {}
+    out = era._forecast_authority_payload_from_posterior(
+        Conn(),
+        event=SimpleNamespace(event_type=next(iter(era._FORECAST_DECISION_EVENT_TYPES)),
+                              causal_snapshot_id="rmf-Tokyo|2026-09-30|HIGH|2026-09-28"),
+        family=SimpleNamespace(city="Tokyo", target_date="2026-09-30", metric="high"),
+        payload={},
+        decision_time=datetime(2026, 9, 29, tzinfo=timezone.utc),
+        reason_out=reason,
+    )
+    if admitted:
+        assert out is not None and out[0]["observed_members"] == 2, reason
+    else:
+        assert out is None and reason == {"reason": "member_count_insufficient"}
+
+
 def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
     """Posterior members come from its recorded current inputs, not carrier shape."""
 
@@ -7740,8 +7849,20 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
     ] = "UNKNOWN"
     assert era._source_clock_model_count_certificate(unknown_status) == (True, None)
 
+    # Without a source clock, a certified complete 2-of-2 carrier set sets its
+    # own floor; an uncertified two-model posterior keeps the legacy three.
     legacy_two = json.loads(json.dumps(source_clock))
     legacy_two["bayes_precision_fusion"].pop("source_clock_one_scheme")
+    assert era._posterior_bound_multimodel_members(
+        conn,
+        family=family,
+        decision_time=decision_time,
+        source_cycle_time="2026-07-13T06:00:00+00:00",
+        provenance=legacy_two,
+    ) == (33.0, 34.0)
+    legacy_two["bayes_precision_fusion"].update(
+        decorrelated_providers_complete=False, decorrelated_providers_expected=3,
+    )
     assert era._posterior_bound_multimodel_members(
         conn,
         family=family,

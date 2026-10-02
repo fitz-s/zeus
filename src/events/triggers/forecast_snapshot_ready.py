@@ -20,6 +20,7 @@ from src.data.replacement_forecast_source_run_identity import (
     expected_replacement_dependency_identity_by_role,
 )
 from src.events.event_writer import EventWriter, EventWriteResult
+from src.events.forecast_completeness import certified_carrier_ids, spine_member_floor
 from src.events.opportunity_event import (
     ForecastSnapshotReadyPayload,
     OpportunityEvent,
@@ -42,9 +43,6 @@ REPLACEMENT_0_1_TRACK_LABEL = "replacement_0_1_openmeteo_bayes_fusion"
 # that exact row and dependency identity. The legacy ensemble path is untouched for flag-OFF.
 POSTERIOR_BACKED_DATA_VERSION = "forecast_posteriors.replacement_0_1_neutral_carrier"
 _POSTERIOR_SNAPSHOT_ID_PREFIX = "rmf-"
-# Same-cycle raw models a posterior needs unless its provenance certifies a complete
-# carrier set: the adapter's non-source-clock ``len(models) < 3`` spine floor.
-_LEGACY_SPINE_MIN_MODELS = 3
 _POSTERIOR_RAW_MODEL_REQUIRED_COLUMNS = {
     "model",
     "city",
@@ -1557,6 +1555,35 @@ def _raw_model_member_counts_for_posterior_rows(
     return out
 
 
+def _posterior_carrier_fusion(row: dict[str, Any]) -> object:
+    """The row's ``bayes_precision_fusion`` carrier fields, projected or parsed."""
+
+    projected_ids = row.get("carrier_raw_model_forecast_ids_json")
+    if projected_ids is not None:
+        try:
+            raw_ids = (
+                json.loads(projected_ids)
+                if isinstance(projected_ids, str)
+                else projected_ids
+            )
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return {
+            "raw_model_forecast_ids": raw_ids,
+            "decorrelated_providers_complete": row.get("carrier_complete"),
+            "decorrelated_providers_served": row.get("carrier_served"),
+            "decorrelated_providers_expected": row.get("carrier_expected"),
+        }
+    raw = row.get("provenance_json")
+    if not raw:
+        return None
+    try:
+        provenance = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return provenance.get("bayes_precision_fusion") if isinstance(provenance, dict) else None
+
+
 def _posterior_provenance_raw_member_ids(row: dict[str, Any]) -> tuple[str, ...]:
     """Read the exact materialized carrier IDs from posterior provenance.
 
@@ -1569,63 +1596,7 @@ def _posterior_provenance_raw_member_ids(row: dict[str, Any]) -> tuple[str, ...]
     the fusion provenance says the decorrelated provider set was complete.
     """
 
-    raw = row.get("provenance_json")
-    fusion: dict[str, Any]
-    projected_ids = row.get("carrier_raw_model_forecast_ids_json")
-    if projected_ids is not None:
-        try:
-            raw_ids = (
-                json.loads(projected_ids)
-                if isinstance(projected_ids, str)
-                else projected_ids
-            )
-        except (TypeError, json.JSONDecodeError):
-            return ()
-        fusion = {
-            "raw_model_forecast_ids": raw_ids,
-            "decorrelated_providers_complete": row.get("carrier_complete"),
-            "decorrelated_providers_served": row.get("carrier_served"),
-            "decorrelated_providers_expected": row.get("carrier_expected"),
-        }
-    else:
-        if not raw:
-            return ()
-        try:
-            provenance = json.loads(raw) if isinstance(raw, str) else raw
-        except (TypeError, json.JSONDecodeError):
-            return ()
-        if not isinstance(provenance, dict):
-            return ()
-        value = provenance.get("bayes_precision_fusion")
-        if not isinstance(value, dict):
-            return ()
-        fusion = value
-
-    complete = fusion.get("decorrelated_providers_complete") in (True, 1)
-    if not complete:
-        try:
-            served = int(fusion.get("decorrelated_providers_served") or 0)
-            expected = int(fusion.get("decorrelated_providers_expected") or 0)
-        except (TypeError, ValueError):
-            served = expected = 0
-        complete = expected > 0 and served >= expected
-    if not complete:
-        return ()
-    raw_ids = fusion.get("raw_model_forecast_ids")
-    if isinstance(raw_ids, list):
-        unique_ids = {str(value) for value in raw_ids if value not in (None, "")}
-        if unique_ids:
-            return tuple(sorted(unique_ids))
-    serving = fusion.get("current_value_serving")
-    if isinstance(serving, dict):
-        unique_ids = {
-            str(details.get("raw_model_forecast_id"))
-            for details in serving.values()
-            if isinstance(details, dict) and details.get("raw_model_forecast_id") not in (None, "")
-        }
-        if unique_ids:
-            return tuple(sorted(unique_ids))
-    return ()
+    return certified_carrier_ids(_posterior_carrier_fusion(row))
 
 
 def _posterior_provenance_raw_member_count(row: dict[str, Any]) -> int:
@@ -1654,8 +1625,7 @@ def _with_posterior_raw_member_counts(
     )
     out: list[dict[str, Any]] = []
     for row, count in zip(rows, counts):
-        certified = len(_posterior_provenance_raw_member_ids(row))
-        if count < min(_LEGACY_SPINE_MIN_MODELS, certified or _LEGACY_SPINE_MIN_MODELS):
+        if count < spine_member_floor(_posterior_carrier_fusion(row)):
             continue
         enriched = dict(row)
         for key in (

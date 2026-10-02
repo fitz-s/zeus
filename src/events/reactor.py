@@ -10346,12 +10346,14 @@ def _edli_expire_unready_forecast_snapshot_pending(
 
     Pending FSR rows are admission work, not durable facts. Under the replacement lane an
     ``rmf-...`` event is consumable only when the family's latest posterior still matches that
-    neutral id and has at least three same-cycle raw_model_forecasts members. If the latest
+    neutral id and has its spine floor of same-cycle raw_model_forecasts members (three, or
+    the posterior's own certified carrier count). If the latest
     posterior has advanced to a cycle without raw-model members, keeping the old pending row
     alive only burns reactor budget and produces MU_SIGMA_NOT_STASHED no-trades.
     """
 
     try:
+        from src.events.forecast_completeness import posterior_admits_spine_members
         from src.events.triggers.forecast_snapshot_ready import REPLACEMENT_0_1_PRODUCT_ID
     except Exception:  # noqa: BLE001
         return 0
@@ -10393,6 +10395,7 @@ def _edli_expire_unready_forecast_snapshot_pending(
 
     family_keys = sorted({(city, target_date, metric) for _, _, city, target_date, metric in candidates})
     latest_cycle_by_family: dict[tuple[str, str, str], str] = {}
+    latest_posterior_by_family: dict[tuple[str, str, str], object] = {}
     _FORECAST_FAMILY_CHUNK = 250
     for start in range(0, len(family_keys), _FORECAST_FAMILY_CHUNK):
         chunk = family_keys[start : start + _FORECAST_FAMILY_CHUNK]
@@ -10410,8 +10413,14 @@ def _edli_expire_unready_forecast_snapshot_pending(
                 SELECT family.city,
                        family.target_date,
                        family.metric,
-                       (
-                           SELECT posterior.source_cycle_time
+                       latest.source_cycle_time,
+                       latest.posterior_id
+                  FROM families AS family
+                  -- Families stay outermost: one indexed latest-posterior probe
+                  -- per family, then a primary-key point read of that row.
+                  CROSS JOIN forecast_posteriors AS latest
+                    ON latest.posterior_id = (
+                           SELECT posterior.posterior_id
                              FROM forecast_posteriors AS posterior
                             WHERE posterior.product_id = ?
                               AND posterior.runtime_layer = 'live'
@@ -10430,8 +10439,7 @@ def _edli_expire_unready_forecast_snapshot_pending(
                                      posterior.computed_at DESC,
                                      posterior.posterior_id DESC
                             LIMIT 1
-                       ) AS source_cycle_time
-                  FROM families AS family
+                       )
                 """,
                 tuple(params),
             ).fetchall()
@@ -10441,6 +10449,7 @@ def _edli_expire_unready_forecast_snapshot_pending(
             key = (str(latest[0] or ""), str(latest[1] or ""), str(latest[2] or ""))
             if key not in latest_cycle_by_family and latest[3] is not None:
                 latest_cycle_by_family[key] = str(latest[3] or "")
+                latest_posterior_by_family[key] = latest[4]
 
     member_count_by_family_cycle: dict[tuple[str, str, str, str], int] = {}
     families_by_cycle_date: dict[str, list[tuple[str, str, str]]] = {}
@@ -10509,7 +10518,11 @@ def _edli_expire_unready_forecast_snapshot_pending(
             expire_ids.append(event_id)
             continue
         member_count = member_count_by_family_cycle.get((city, target_date, metric, cycle_date), 0)
-        if member_count < 3:
+        if not posterior_admits_spine_members(
+            forecasts_conn,
+            posterior_id=latest_posterior_by_family.get((city, target_date, metric)),
+            member_count=member_count,
+        ):
             expire_ids.append(event_id)
     if not expire_ids:
         return 0

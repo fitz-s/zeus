@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
@@ -10,6 +13,87 @@ from src.data.forecast_target_contract import OPENDATA_MAX_STEP_HOURS
 
 
 ForecastCompletenessStatus = Literal["COMPLETE", "PARTIAL_ALLOWED", "PARTIAL_BLOCKED"]
+
+# Spine members a posterior needs unless its provenance certifies a complete
+# carrier set: the adapter's non-source-clock ``len(models) < 3`` floor.
+LEGACY_SPINE_MIN_MODELS = 3
+
+
+def certified_carrier_ids(fusion: object) -> tuple[str, ...]:
+    """Carrier ids a ``bayes_precision_fusion`` provenance certifies complete.
+
+    Certified means decorrelated_providers_complete, or served >= expected > 0,
+    with the carriers named (raw_model_forecast_ids, else the current_value_serving
+    ids). Anything else, including unreadable fields, certifies nothing.
+    """
+
+    if not isinstance(fusion, Mapping):
+        return ()
+    complete = fusion.get("decorrelated_providers_complete") in (True, 1)
+    if not complete:
+        try:
+            served = int(fusion.get("decorrelated_providers_served") or 0)
+            expected = int(fusion.get("decorrelated_providers_expected") or 0)
+        except (TypeError, ValueError):
+            served = expected = 0
+        complete = expected > 0 and served >= expected
+    if not complete:
+        return ()
+    raw_ids = fusion.get("raw_model_forecast_ids")
+    if isinstance(raw_ids, list):
+        unique_ids = {str(value) for value in raw_ids if value not in (None, "")}
+        if unique_ids:
+            return tuple(sorted(unique_ids))
+    serving = fusion.get("current_value_serving")
+    if isinstance(serving, Mapping):
+        unique_ids = {
+            str(details.get("raw_model_forecast_id"))
+            for details in serving.values()
+            if isinstance(details, Mapping) and details.get("raw_model_forecast_id") not in (None, "")
+        }
+        if unique_ids:
+            return tuple(sorted(unique_ids))
+    return ()
+
+
+def spine_member_floor(fusion: object) -> int:
+    """A certified carrier set sets its own floor; anything else keeps the legacy one.
+
+    The certificate only lowers the floor, so it never rejects a posterior the
+    legacy floor admitted.
+    """
+
+    certified = len(certified_carrier_ids(fusion))
+    return min(LEGACY_SPINE_MIN_MODELS, certified) if certified else LEGACY_SPINE_MIN_MODELS
+
+
+def posterior_admits_spine_members(
+    conn: sqlite3.Connection,
+    *,
+    posterior_id: object,
+    member_count: int,
+) -> bool:
+    """Whether ``member_count`` meets the floor of the posterior ``posterior_id``.
+
+    The posterior's provenance is read only below the legacy floor, where its
+    certificate can matter. An absent or unreadable certificate keeps the
+    legacy floor (unknown authority fails closed).
+    """
+
+    if member_count >= LEGACY_SPINE_MIN_MODELS:
+        return True
+    if member_count <= 0 or posterior_id is None:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT json_extract(provenance_json, '$.bayes_precision_fusion')"
+            " FROM forecast_posteriors WHERE posterior_id = ?",
+            (posterior_id,),
+        ).fetchone()
+        fusion = json.loads(row[0]) if row is not None and row[0] else None
+    except (sqlite3.Error, TypeError, ValueError):
+        fusion = None
+    return member_count >= spine_member_floor(fusion)
 
 
 @dataclass(frozen=True)

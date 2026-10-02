@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-09-21
+# Last reused/audited: 2026-10-02
 # Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md;
 # 2026-09-21 rest-management priority repair.
 #   Proves the continuous re-decision emit: scan_committed_snapshots(source=<per-cycle>) re-emits a
@@ -3297,6 +3297,54 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
         "expired",
         "FORECAST_ADMISSION_EXPIRED:latest_posterior_spine_unavailable",
     )
+
+
+@pytest.mark.parametrize(
+    "fusion,expired",
+    [
+        ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
+          "decorrelated_providers_expected": 2, "raw_model_forecast_ids": [1, 2]}, 0),
+        ({"decorrelated_providers_complete": False, "decorrelated_providers_served": 2,
+          "decorrelated_providers_expected": 3, "raw_model_forecast_ids": [1, 2]}, 1),
+        (None, 1),
+    ],
+    ids=["certified-2-of-2", "2-of-3", "no-provenance"],
+)
+def test_unready_replacement_sweep_floor_is_the_posteriors_certified_carrier_count(fusion, expired):
+    """Two same-cycle carriers keep a certified 2-of-2 FSR pending; uncertified keeps three."""
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    snapshot_id = "rmf-Tokyo|2026-06-19|high|2026-06-18"
+    store.insert_or_ignore(
+        make_opportunity_event(
+            event_type="FORECAST_SNAPSHOT_READY",
+            entity_key=f"Tokyo|2026-06-19|high|{snapshot_id}",
+            source="cycle-test",
+            observed_at="2026-06-18T07:58:00+00:00",
+            available_at="2026-06-18T07:58:00+00:00",
+            received_at="2026-06-18T07:58:00+00:00",
+            causal_snapshot_id=snapshot_id,
+            payload={"city": "Tokyo", "target_date": "2026-06-19", "metric": "high", "snapshot_id": snapshot_id},
+            priority=50,
+        )
+    )
+    forecasts = _replacement_spine_test_conn()
+    forecasts.execute("ALTER TABLE forecast_posteriors ADD COLUMN provenance_json TEXT")
+    forecasts.execute(
+        "INSERT INTO forecast_posteriors VALUES (1, ?, 'Tokyo', '2026-06-19', 'high',"
+        " '2026-06-18T00:00:00+00:00', '2026-06-18T06:39:00+00:00', '2026-06-18T07:58:00+00:00', 'live', ?)",
+        (REPLACEMENT_0_1_PRODUCT_ID, json.dumps({} if fusion is None else {"bayes_precision_fusion": fusion})),
+    )
+    forecasts.executemany(
+        "INSERT INTO raw_model_forecasts VALUES ('single_runs', ?, 'Tokyo', '2026-06-19', 'high',"
+        " '2026-06-18T00:00:00+00:00', '2026-06-18T07:00:00+00:00', ?)",
+        [("icon", 20.0), ("ukmo", 21.0)],
+    )
+
+    assert reactor._edli_expire_unready_forecast_snapshot_pending(
+        world, forecasts, decision_time="2026-06-18T08:00:00+00:00",
+    ) == expired
 
 
 def test_unready_replacement_sweep_keeps_251_ready_families_pending():

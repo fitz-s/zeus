@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-07-10
+# Last reused/audited: 2026-10-02
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, critic-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). RED-first relationship tests for the
 #   continuous re-decision contract. These pin the cache (P1) + cheap-screen/enqueue (P2) API BEFORE
@@ -826,6 +826,58 @@ def test_entry_redecision_requires_spine_members_on_latest_posterior_cycle():
         beliefs=beliefs,
         decision_time="2026-05-31T08:00:00+00:00",
     ) == redecisions
+
+
+@pytest.mark.parametrize(
+    "fusion,admitted",
+    [
+        ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
+          "decorrelated_providers_expected": 2, "raw_model_forecast_ids": [1, 2]}, True),
+        ({"decorrelated_providers_complete": False, "decorrelated_providers_served": 2,
+          "decorrelated_providers_expected": 3, "raw_model_forecast_ids": [1, 2]}, False),
+        ({"decorrelated_providers_complete": True, "raw_model_forecast_ids": "garbage"}, False),
+        (None, False),
+    ],
+    ids=["certified-2-of-2", "2-of-3", "unreadable-ids", "no-provenance"],
+)
+def test_entry_redecision_spine_floor_is_the_posteriors_certified_carrier_count(fusion, admitted):
+    """A certified 2-of-2 posterior needs its two carriers; anything else keeps three."""
+    import json
+
+    conn = _mem_world()
+    _cache_yes_belief(conn, p_posterior_yes=0.99, recorded_at="2026-05-31T00:00:00+00:00")
+    beliefs = cr._all_latest_beliefs(conn)
+    redecisions = [
+        cr.EnqueuedRedecision(family_id="Wuhan|2026-06-01|high", bin_label="b30", direction="buy_yes", edge=0.20)
+    ]
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        "CREATE TABLE forecast_posteriors (posterior_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,"
+        " temperature_metric TEXT, source_cycle_time TEXT, source_available_at TEXT, computed_at TEXT,"
+        " runtime_layer TEXT, provenance_json TEXT)"
+    )
+    forecasts.execute(
+        "CREATE TABLE raw_model_forecasts (model TEXT, city TEXT, target_date TEXT, metric TEXT,"
+        " source_cycle_time TEXT, source_available_at TEXT, forecast_value_c REAL)"
+    )
+    forecasts.execute(
+        "INSERT INTO forecast_posteriors VALUES (1, 'Wuhan', '2026-06-01', 'high', '2026-05-31T06:00:00+00:00',"
+        " '2026-05-31T07:00:00+00:00', '2026-05-31T07:05:00+00:00', 'live', ?)",
+        (json.dumps({} if fusion is None else {"bayes_precision_fusion": fusion}),),
+    )
+    forecasts.executemany(
+        "INSERT INTO raw_model_forecasts VALUES (?, 'Wuhan', '2026-06-01', 'high', ?, ?, ?)",
+        [
+            ("icon", "2026-05-31T06:00:00+00:00", "2026-05-31T07:00:00+00:00", 31.0),
+            ("ukmo", "2026-05-31T06:00:00+00:00", "2026-05-31T07:00:00+00:00", 32.0),
+        ],
+    )
+
+    kept = cr.filter_redecisions_with_spine_members(
+        forecasts, redecisions, beliefs=beliefs, decision_time="2026-05-31T08:00:00+00:00",
+    )
+
+    assert kept == (redecisions if admitted else [])
 
 
 def test_entry_redecision_reader_treats_18z_runtime_layer_live_as_live():

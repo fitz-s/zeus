@@ -42,6 +42,7 @@ from src.contracts.probability_arithmetic import one_minus
 from src.data.replacement_forecast_readiness import (
     SOURCE_ID as LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
 )
+from src.events.forecast_completeness import posterior_admits_spine_members
 from src.events.opportunity_event import OpportunityEvent
 
 logger = logging.getLogger(__name__)
@@ -2385,6 +2386,25 @@ def _latest_posterior_source_cycle_for_family(
     metric: str,
     decision_time: str,
 ) -> str | None:
+    latest = _latest_posterior_for_family(
+        forecasts_conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    return None if latest is None else latest[1]
+
+
+def _latest_posterior_for_family(
+    forecasts_conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    decision_time: str,
+) -> tuple[object, str] | None:
+    """(posterior_id or None, source_cycle_time) of the family's latest live posterior."""
     if not _table_exists(forecasts_conn, "forecast_posteriors"):
         return None
     columns = _table_columns(forecasts_conn, "forecast_posteriors")
@@ -2408,12 +2428,14 @@ def _latest_posterior_source_cycle_for_family(
     order_fields = ["source_cycle_time DESC"]
     if "computed_at" in columns:
         order_fields.append("computed_at DESC")
+    id_select = "NULL"
     if "posterior_id" in columns:
         order_fields.append("posterior_id DESC")
+        id_select = "posterior_id"
     try:
         row = forecasts_conn.execute(
             f"""
-            SELECT source_cycle_time
+            SELECT {id_select}, source_cycle_time
               FROM forecast_posteriors
              WHERE {' AND '.join(predicates)}
              ORDER BY {', '.join(order_fields)}
@@ -2423,10 +2445,10 @@ def _latest_posterior_source_cycle_for_family(
         ).fetchone()
     except sqlite3.Error:
         return None
-    if row is None or row[0] is None:
+    if row is None or row[1] is None:
         return None
-    cycle = str(row[0]).strip()
-    return cycle or None
+    cycle = str(row[1]).strip()
+    return (row[0], cycle) if cycle else None
 
 
 def _raw_model_member_count_for_cycle(
@@ -2481,15 +2503,15 @@ def filter_redecisions_with_spine_members(
     *,
     beliefs: list[CachedBelief],
     decision_time: str,
-    min_members: int = 3,
 ) -> list[EnqueuedRedecision]:
     """Keep only entry redecisions whose full q-kernel spine inputs can be served.
 
     The cheap entry screen proves fresh price plus conservative q_lcb edge; the downstream
-    q-kernel also requires at least three raw_model_forecasts provider members on the same
-    posterior source-cycle date. Without that second proof, the reactor only emits
-    SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED and clogs the live lane. Held positions
-    are intentionally outside this entry filter; monitor/exit owns hold/exit/shift.
+    q-kernel also requires raw_model_forecasts provider members on the same posterior
+    source-cycle date: three, or the posterior's own certified carrier count. Without
+    that second proof, the reactor only emits SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED
+    and clogs the live lane. Held positions are intentionally outside this entry filter;
+    monitor/exit owns hold/exit/shift.
     """
     if not redecisions:
         return []
@@ -2507,7 +2529,7 @@ def filter_redecisions_with_spine_members(
         key = (city, target_date, metric)
         ok = availability.get(key)
         if ok is None:
-            cycle = _latest_posterior_source_cycle_for_family(
+            latest = _latest_posterior_for_family(
                 forecasts_conn,
                 city=city,
                 target_date=target_date,
@@ -2520,13 +2542,15 @@ def filter_redecisions_with_spine_members(
                     city=city,
                     target_date=target_date,
                     metric=metric,
-                    source_cycle_time=cycle,
+                    source_cycle_time=latest[1],
                     decision_time=decision_time,
                 )
-                if cycle
+                if latest
                 else 0
             )
-            ok = count >= int(min_members)
+            ok = latest is not None and posterior_admits_spine_members(
+                forecasts_conn, posterior_id=latest[0], member_count=count,
+            )
             availability[key] = ok
         if ok:
             out.append(rd)
