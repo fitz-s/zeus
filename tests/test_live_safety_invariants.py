@@ -10154,7 +10154,9 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
     monkeypatch.setattr(
         global_batch_runtime,
         "held_sell_reauction_coverage",
-        lambda **_kwargs: SimpleNamespace(probability_content_identity=content_identity),
+        lambda **_kwargs: SimpleNamespace(
+            status="EVALUATED", probability_content_identity=content_identity
+        ),
     )
     monkeypatch.setattr(
         global_batch_runtime,
@@ -10303,7 +10305,9 @@ def test_monitor_reuses_one_wealth_witness_across_held_sell_coverage(monkeypatch
     monkeypatch.setattr(
         global_batch_runtime,
         "held_sell_reauction_coverage",
-        lambda **_kwargs: SimpleNamespace(probability_content_identity="q-epoch"),
+        lambda **_kwargs: SimpleNamespace(
+            status="EVALUATED", probability_content_identity="q-epoch"
+        ),
     )
     monkeypatch.setattr(
         global_batch_runtime,

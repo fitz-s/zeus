@@ -6767,6 +6767,11 @@ def _current_monitor_global_holding_coverage(
                 GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED,
                 "GLOBAL_HOLDING_COVERAGE_NOT_PUBLISHED",
             )
+        if published_row.status != "EVALUATED":
+            return unavailable(
+                GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+                str(published_row.reason or "GLOBAL_HOLDING_COVERAGE_EXCLUDED"),
+            )
         if published_row.probability_content_identity != probability_content_identity:
             # Day0 q is re-materialized on nearly every monitor refresh, so the
             # committed cut almost never carries the monitor's exact q. A newer
@@ -6776,9 +6781,7 @@ def _current_monitor_global_holding_coverage(
             return CurrentGlobalHoldingCoverage(
                 outcome=GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT,
                 reason="GLOBAL_HOLDING_COVERAGE_PROBABILITY_CONTENT_MISMATCH",
-                coverage=(
-                    published_row if published_row.status == "EVALUATED" else None
-                ),
+                coverage=published_row,
             )
         wealth_max_age = timedelta(
             seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
@@ -10540,17 +10543,17 @@ def execute_monitoring_phase(
                 if not isinstance(monitor_lineage, dict):
                     monitor_lineage = {}
                 request_selection_epoch = str(
-                    monitor_lineage.get("selection_epoch_identity", "")
-                    or existing_reauction_obligation.get(
+                    existing_reauction_obligation.get(
                         "selection_epoch_identity", ""
                     )
+                    or monitor_lineage.get("selection_epoch_identity", "")
                     or ""
                 ).strip()
                 request_book_witness = str(
-                    monitor_lineage.get("sell_book_witness_identity", "")
-                    or existing_reauction_obligation.get(
+                    existing_reauction_obligation.get(
                         "sell_book_witness_identity", ""
                     )
+                    or monitor_lineage.get("sell_book_witness_identity", "")
                     or ""
                 ).strip()
                 request_debt_event_id = str(
