@@ -5285,23 +5285,46 @@ def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path
     return batch_path
 
 
+_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DEFERRED_SNAPSHOT_CHANGED"
+)
+_PRIORITY_CLAIM_FENCE_UNREADABLE_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DEFERRED_FENCE_UNREADABLE"
+)
+_PRIORITY_CLAIM_UNKNOWN_OWNER_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DEFERRED_UNKNOWN_OWNER_IDENTITY"
+)
+# RACED_OWNER is reserved for a positively matched inflight owner of the
+# selected identity; only that observation carries the owner drain/reset pair.
+_PRIORITY_CLAIM_RACED_OWNER_REASONS = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DEFERRED_RACED_OWNER",
+    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DRAIN_OWNER_TERMINAL_OR_STALE_RECOVERY",
+    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_RESET_BATCH_REMOVED",
+)
+
+
 def _try_claim_priority_request(
     plan: _RequestClaimReadPlan,
-) -> _MaterializationQueueClaim | None:
+) -> tuple[_MaterializationQueueClaim | None, tuple[str, ...]]:
     """Atomically lease one already-planned priority identity without the broad flock.
 
     SCOPE: one exact semantic request identity, including source cycle and Day0
     conditioning identity. DRAIN: the child completes, or stale-claim recovery
     returns the file after its absolute lease deadline. RESET: the durable batch
-    disappears only after the request has a terminal or retry receipt.
+    disappears only after the request has a terminal or retry receipt. Returns
+    the claim, or None with the deferral observation that explains it.
     """
 
     source = next(iter(plan.claim.selected_files), None)
     if source is None:
-        return None
-    # Revalidate the same immutable read fence immediately before the atomic
-    # move. This is intentionally lock-free: a concurrent writer yields typed
-    # debt, never a stale priority claim and never a queue-wide wait.
+        return None, ()
+    # Revalidate immediately before the atomic move. This is intentionally
+    # lock-free: a concurrent writer yields typed debt, never a stale priority
+    # claim and never a queue-wide wait. The forecast-DB fingerprint only
+    # decides whether to re-rank; it is not required to stay equal across the
+    # re-rank. The DB feeds ranking here, while the child re-proves the
+    # target's dependency witness under its final writer transaction. Unrelated
+    # forecast writes therefore never revoke the planned request.
     try:
         with _claim_read_deadline_guard():
             current_fingerprint = _claim_db_fingerprint(plan.claim.forecast_db_path)
@@ -5322,36 +5345,34 @@ def _try_claim_priority_request(
                 )
                 # The builder sorts before its last snapshot. A held request
                 # or owner arriving between those reads invalidates the plan.
-                if (
-                    refreshed.claim.request_snapshot != current_snapshot
-                    or refreshed.claim.forecast_db_fingerprint != current_fingerprint
-                ):
-                    return None
+                if refreshed.claim.request_snapshot != current_snapshot:
+                    return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
+                if refreshed.active_conflict_batches:
+                    return None, _PRIORITY_CLAIM_RACED_OWNER_REASONS
+                if refreshed.unknown_inflight_batches:
+                    return None, (_PRIORITY_CLAIM_UNKNOWN_OWNER_REASON,)
+                if refreshed.stale_conflict_batches:
+                    return None, (_CLAIM_STALE_RECOVERY_DEFERRED_REASON,)
                 if (
                     not refreshed.claim.selected_files
                     or refreshed.claim.selected_files[0] != source
-                    or refreshed.unknown_inflight_batches
-                    or refreshed.active_conflict_batches
-                    or refreshed.stale_conflict_batches
                 ):
-                    return None
+                    return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
                 original = next((row for row in plan.claim.request_snapshot if row[0] == source.name), None)
                 updated = next((row for row in refreshed.claim.request_snapshot if row[0] == source.name), None)
                 if original is None or original != updated:
-                    return None
+                    return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
                 plan = refreshed
-            if (
-                _queue_files_snapshot(plan.claim.request_path) != plan.claim.request_snapshot
-                or _claim_db_fingerprint(plan.claim.forecast_db_path)
-                != plan.claim.forecast_db_fingerprint
-            ):
-                return None
-    except (sqlite3.Error, _ClaimReadDeadlineExceeded):
-        return None
+            if _queue_files_snapshot(plan.claim.request_path) != plan.claim.request_snapshot:
+                return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
+    except _ClaimReadDeadlineExceeded:
+        return None, (_CLAIM_READ_DEFERRED_REASON,)
+    except sqlite3.Error:
+        return None, (_PRIORITY_CLAIM_FENCE_UNREADABLE_REASON,)
     payload = _load_request_payload_for_coalescing(source)
     witness = _claim_identity_witness(payload or {})
     if witness is None:
-        return None
+        return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
     selected_record = next(
         (row for row in plan.claim.request_snapshot if row[0] == source.name), None
     )
@@ -5359,15 +5380,16 @@ def _try_claim_priority_request(
         source_bytes = source.read_bytes()
         source_stat = source.stat()
     except FileNotFoundError:
-        return None
+        return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
     if selected_record != (
         source.name, source_stat.st_mtime_ns, source_stat.st_size,
         hashlib.sha256(source_bytes).hexdigest(),
     ):
-        return None
+        return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
     inflight_path = plan.claim.request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
     if inflight_path.exists():
         identity_keys = _claim_identity_keys(witness)
+        unknown_owner = False
         for existing_batch in (path for path in inflight_path.iterdir() if path.is_dir()):
             existing_files = _claim_request_files(existing_batch)
             if not existing_files:
@@ -5378,8 +5400,12 @@ def _try_claim_priority_request(
                 if existing is None:
                     existing_payload = _load_request_payload_for_coalescing(existing_file)
                     existing = _claim_identity_witness(existing_payload or {})
-                if existing is None or identity_keys & _claim_identity_keys(existing):
-                    return None
+                if existing is None:
+                    unknown_owner = True  # may hold any identity; keep scanning for a match
+                elif identity_keys & _claim_identity_keys(existing):
+                    return None, _PRIORITY_CLAIM_RACED_OWNER_REASONS
+        if unknown_owner:
+            return None, (_PRIORITY_CLAIM_UNKNOWN_OWNER_REASON,)
     inflight_path.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     batch_path = inflight_path / f"priority.{stamp}.pid{os.getpid()}"
@@ -5420,7 +5446,7 @@ def _try_claim_priority_request(
         os.replace(source, batch_path / source.name)
     except FileNotFoundError:
         _remove_empty_claim_batch(batch_path)
-        return None
+        return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
     _fsync_directory(batch_path)
     _fsync_directory(inflight_path)
     _fsync_directory(source.parent)
@@ -5429,7 +5455,7 @@ def _try_claim_priority_request(
         batch_path=batch_path,
         claimed_count=1,
         selected_files=(batch_path / source.name,),
-    )
+    ), ()
 
 
 def _day0_enqueue_ownership_cursor_path(request_dir: Path, *, lane: str) -> Path:
@@ -7291,7 +7317,7 @@ def process_replacement_forecast_live_materialization_queue(
         # This is the money-path handoff: the single queued filename becomes a
         # durable identity lease before background discovery/retry can consume
         # it. It intentionally does not wait on the broad queue flock.
-        claim = _try_claim_priority_request(read_plan)
+        claim, claim_deferral = _try_claim_priority_request(read_plan)
         if claim is None:
             return ReplacementForecastLiveMaterializationQueueReport(
                 status="DEFERRED",
@@ -7300,9 +7326,7 @@ def process_replacement_forecast_live_materialization_queue(
                 skipped_count=0,
                 reason_codes=(
                     "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",
-                    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DEFERRED_RACED_OWNER",
-                    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DRAIN_OWNER_TERMINAL_OR_STALE_RECOVERY",
-                    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_RESET_BATCH_REMOVED",
+                    *claim_deferral,
                 ),
             )
     if claim is None:

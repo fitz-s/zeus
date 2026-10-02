@@ -5831,8 +5831,8 @@ def test_priority_legacy_unknown_inflight_scope_defers_without_consuming_held(
     assert (batch / "unknown.json").exists()
 
 
-def test_priority_wal_commit_between_plan_and_apply_defers_without_claim(tmp_path, monkeypatch):
-    """A WAL-only commit invalidates the plan before any request move."""
+def _priority_wal_fixture(tmp_path, monkeypatch, *, between_reads):
+    """One held request, a WAL forecast DB, and a write injected after the plan's fence read."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
     request_dir = tmp_path / "requests"
@@ -5861,32 +5861,70 @@ def test_priority_wal_commit_between_plan_and_apply_defers_without_claim(tmp_pat
         result = original(path)
         calls.append(result)
         if len(calls) == 1:
-            writer.execute("INSERT INTO fence VALUES (1)")
-            writer.commit()
+            between_reads(writer, request_dir)
         return result
 
     monkeypatch.setattr(queue_mod, "_claim_db_fingerprint", fingerprint_with_wal_commit)
     monkeypatch.setattr(
         queue_mod,
         "_claim_replacement_forecast_live_materialization_queue_locked",
-        lambda **_kwargs: pytest.fail("WAL mismatch must not enter legacy claim"),
+        lambda **_kwargs: pytest.fail("the priority fast path must not enter the legacy claim"),
     )
+    spawned: list[str] = []
+
+    def runner(argv):
+        spawned.append(Path(argv[argv.index("--input-json") + 1]).name)
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr="")
+
     try:
         report = queue_mod.process_replacement_forecast_live_materialization_queue(
             request_dir=request_dir, processed_dir=tmp_path / "processed",
             failed_dir=tmp_path / "failed", forecast_db=forecast_db,
             seed_dir=tmp_path / "seeds", seed_processed_dir=tmp_path / "seed_processed",
             seed_failed_dir=tmp_path / "seed_failed", seed_limit=0, discover=False,
-            limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+            limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY, runner=runner,
         )
     finally:
         writer.close()
+    return queue_mod, held, calls, report, spawned
 
-    assert len(calls) == 2
-    assert calls[0] != calls[1]
+
+def test_priority_unrelated_wal_commit_between_plan_and_apply_still_claims(tmp_path, monkeypatch):
+    """An unrelated forecast WAL write re-ranks but never revokes the planned request."""
+
+    def unrelated_write(writer, _request_dir):
+        writer.execute("INSERT INTO fence VALUES (1)")
+        writer.commit()
+
+    queue_mod, held, calls, report, spawned = _priority_wal_fixture(
+        tmp_path, monkeypatch, between_reads=unrelated_write,
+    )
+    assert calls[0] != calls[1]  # the write was observed and triggered a re-rank
+    assert report.status == "PROCESSED"
+    assert spawned == [held.name]
+    assert queue_mod._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON not in report.reason_codes
+
+
+def test_priority_target_request_change_between_plan_and_apply_revalidates(tmp_path, monkeypatch):
+    """A rewrite of the planned target request itself defers the claim as SNAPSHOT_CHANGED."""
+
+    def rewrite_target(writer, request_dir):
+        target = request_dir / "Istanbul.json"
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        target.write_text(json.dumps({**payload, "day0_observed_extreme_c": 28.0}),
+                          encoding="utf-8")
+        writer.execute("INSERT INTO fence VALUES (2)")
+        writer.commit()
+
+    queue_mod, held, _calls, report, spawned = _priority_wal_fixture(
+        tmp_path, monkeypatch, between_reads=rewrite_target,
+    )
     assert report.status == "DEFERRED"
+    assert queue_mod._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON in report.reason_codes
+    assert not any("RACED_OWNER" in reason for reason in report.reason_codes)
+    assert spawned == []
     assert held.exists()
-    assert not (tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME).exists()
+    assert not list((tmp_path / queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME).glob("*/*.json"))
 
 
 def test_materialization_queue_defers_same_family_while_inflight(tmp_path) -> None:

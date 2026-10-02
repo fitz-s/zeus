@@ -320,10 +320,51 @@ def test_priority_claim_replans_unrelated_queue_or_db_churn(tmp_path, monkeypatc
         other = dict(_materialization_request(), city="Paris")
         (requests / "Paris.2026-08-25.high.json").write_text(json.dumps(other), encoding="utf-8")
     revision[0] = 2  # Unrelated forecast WAL commit.
-    claimed = queue._try_claim_priority_request(prior)
+    claimed, deferral = queue._try_claim_priority_request(prior)
+    assert deferral == ()
     assert claimed is not None and claimed.claimed_count == 1
     assert not selected.exists()
     assert (claimed.batch_path / selected.name).exists()
+
+
+def test_priority_claim_db_fence_drift_after_rerank_still_claims(tmp_path, monkeypatch):
+    """Forecast writes during the re-rank itself never revoke an unchanged request."""
+    queue, _requests, selected, revision, plan = _priority_claim_plan(tmp_path, monkeypatch)
+    prior = plan()
+    reads = iter(range(2, 100))
+    monkeypatch.setattr(queue, "_claim_db_fingerprint", lambda _db: next(reads))
+    claimed, deferral = queue._try_claim_priority_request(prior)
+    assert deferral == ()
+    assert claimed is not None and not selected.exists()
+    del revision
+
+
+@pytest.mark.parametrize("observation", ("matched", "none", "unknown"))
+def test_priority_claim_names_owner_observation_distinctly(tmp_path, monkeypatch, observation):
+    """RACED_OWNER only for a positively matched owner; unknown identity has its own reason."""
+    queue, requests, selected, _revision, plan = _priority_claim_plan(tmp_path, monkeypatch)
+    prior = plan()
+    inflight = requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME
+    if observation == "matched":
+        duplicate = requests / "London.duplicate.json"
+        duplicate.write_text(selected.read_text(), encoding="utf-8")
+        # The owner of the same identity appears after the plan; the request
+        # snapshot is unchanged, so only the inflight scan can see it.
+        queue._new_claim_batch(inflight, (duplicate,))
+    elif observation == "unknown":
+        batch = inflight / "legacy-unkeyed"
+        batch.mkdir(parents=True)
+        (batch / "unreadable.json").write_text("{", encoding="utf-8")
+    claimed, deferral = queue._try_claim_priority_request(prior)
+    raced = "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DEFERRED_RACED_OWNER"
+    if observation == "matched":
+        assert claimed is None and raced in deferral
+    elif observation == "unknown":
+        assert claimed is None
+        assert deferral == (queue._PRIORITY_CLAIM_UNKNOWN_OWNER_REASON,)
+        assert raced not in deferral
+    else:
+        assert claimed is not None and deferral == ()
 
 
 @pytest.mark.parametrize("preemption", ("held", "superseder", "owner", "changed_selected"))
@@ -346,7 +387,7 @@ def test_priority_claim_replan_preserves_preemption_and_identity(tmp_path, monke
     else:
         selected.write_text(json.dumps(dict(_materialization_request(), computed_at="2026-08-24T10:00:00+00:00")), encoding="utf-8")
     revision[0] = 2
-    assert queue._try_claim_priority_request(prior) is None
+    assert queue._try_claim_priority_request(prior)[0] is None
     assert selected.exists()
 
 
@@ -381,11 +422,13 @@ def test_priority_replan_rejects_owner_or_held_arriving_after_sort_before_snapsh
         return original_snapshot(directory)
 
     monkeypatch.setattr(queue, "_queue_files_snapshot", publish_before_builder_snapshot)
-    assert queue._try_claim_priority_request(prior) is None
+    assert queue._try_claim_priority_request(prior)[0] is None
     assert selected.exists()
 
 
-@pytest.mark.parametrize("failure_step", ("replan", "final_fingerprint", "replan_deadline"))
+# The forecast-DB fingerprint is no longer re-read after the re-rank, so only
+# the re-rank's own read can fail.
+@pytest.mark.parametrize("failure_step", ("replan", "replan_deadline"))
 def test_priority_revalidation_read_failure_defers_without_moving_request(
     tmp_path, monkeypatch, failure_step,
 ):
