@@ -25,6 +25,7 @@ import numpy as np
 from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.contracts.probability_arithmetic import Z_TWO_SIDED_95, wilson_lower_bound
+from src.contracts.venue_submission_envelope import resting_limit_violation
 from src.contracts.family_fault_scope import (
     FAMILY_AUTHORITY_UNAVAILABLE,
     TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE,
@@ -1924,9 +1925,10 @@ def _load_current_maker_fill_samples(
 ) -> dict[str, _CurrentMakerFillSample]:
     """Read actual-policy fill fractions available by one frozen decision cut.
 
-    The population is every rest that was the sole best bid when submitted:
-    above the prior best bid (or into an empty bid side) and below the ask.
-    That is the population a maker proposal at any menu price belongs to.
+    BUY samples rest as the sole best bid, below a known ask. SELL samples
+    rest above the bid, including at or behind the ask or with an absent ask.
+    Both use the same resting book law as their current proposals. BUY fill
+    bounds are distance-conditioned; SELL retains its pooled fill bound.
     Early cancels remain zero/partial outcomes.  Treating them as right-censored
     would overstate the fill rate of the policy Zeus actually executes.
     """
@@ -2009,12 +2011,13 @@ def _load_current_maker_fill_samples(
         updated_at = _maker_fill_utc(row.get("updated_at"))
         observed_at = _maker_fill_utc(row.get("observed_at"))
         raw_bid = str(row.get("orderbook_top_bid") or "").strip()
+        raw_ask = str(row.get("orderbook_top_ask") or "").strip()
         try:
             size = Decimal(str(row.get("size")))
             price = Decimal(str(row.get("price")))
             # The snapshot stores an empty bid side as ABSENT, never as zero.
             bid = None if raw_bid.upper() == ABSENT_ORDERBOOK_SIDE else Decimal(raw_bid)
-            ask = Decimal(str(row.get("orderbook_top_ask")))
+            ask = None if raw_ask.upper() == ABSENT_ORDERBOOK_SIDE else Decimal(raw_ask)
             tick = Decimal(str(row.get("min_tick_size")))
             raw_matched = row.get("matched_size")
             matched = (
@@ -2034,15 +2037,16 @@ def _load_current_maker_fill_samples(
             or observed_at is None
             or not all(
                 value.is_finite()
-                for value in (size, price, ask, tick, matched)
+                for value in (size, price, tick, matched)
             )
             or (bid is not None and (not bid.is_finite() or bid <= 0))
+            or (ask is not None and (not ask.is_finite() or ask <= 0))
+            # BUY's measured distance requires an actual counterparty ask.
+            or (action == "BUY" and ask is None)
             or size <= 0
             or tick <= 0
-            # Sole best bid at submission: strictly above the prior bid.
-            or (bid is not None and price <= bid)
-            or price <= 0
-            or price >= ask
+            or resting_limit_violation(action, price, best_bid=bid, best_ask=ask)
+            is not None
             or matched < 0
             or matched > size + tolerance
             or not (created_at <= updated_at <= cut)
@@ -2058,9 +2062,8 @@ def _load_current_maker_fill_samples(
                 "size": size,
                 "price": price,
                 "matched": Decimal("0"),
-                # The counterparty side this rest had to be reached from. Validation above
-                # already proved price < ask, so this is positive.
-                "distance_to_ask": ask - price,
+                # SELL's existing witness is pooled, with no ask-distance claim.
+                "distance_to_ask": ask - price if action == "BUY" else None,
             },
         )
         if (
@@ -2076,7 +2079,7 @@ def _load_current_maker_fill_samples(
             command["matched"] = max(Decimal(command["matched"]), matched)
 
     samples_by_action: dict[
-        str, list[tuple[str, Decimal, Decimal, Decimal, Decimal]]
+        str, list[tuple[str, Decimal, Decimal, Decimal, Decimal | None]]
     ] = {
         "BUY": [],
         "SELL": [],
@@ -2092,7 +2095,7 @@ def _load_current_maker_fill_samples(
                 fraction,
                 size,
                 Decimal(row["price"]),
-                Decimal(row["distance_to_ask"]),
+                row["distance_to_ask"],
             )
         )
 
@@ -2122,6 +2125,8 @@ def _load_current_maker_fill_samples(
         # 62 attempts, and a pooled rate that says otherwise is what sent every winner there.
         band_rows: dict[int, list[Decimal]] = {}
         for _cid, fraction, _size, _price, distance in action_rows:
+            if distance is None:
+                continue
             band_rows.setdefault(
                 _maker_fill_distance_band(distance), []
             ).append(fraction)
@@ -2141,14 +2146,17 @@ def _load_current_maker_fill_samples(
         )
         canonical_rows = tuple(
             sorted(
-                (command_id, str(fraction), str(size), str(price), str(distance))
+                (
+                    command_id, str(fraction), str(size), str(price),
+                    str(distance) if distance is not None else None,
+                )
                 for command_id, fraction, size, price, distance in action_rows
             )
         )
         sample_identity = hashlib.sha256(
             json.dumps(
                 {
-                    "schema": "current-maker-fill-sample-v3-own-band-monotone",
+                    "schema": "current-maker-fill-sample-v4-side-specific-rest-law",
                     "action": action,
                     "selection_cut_at_utc": cut.isoformat(),
                     "window_days": _MAKER_FILL_SAMPLE_WINDOW_DAYS,

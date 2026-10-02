@@ -1340,22 +1340,26 @@ def select_prepared_global_auction(
                                 ),
                                 execution_mode=mode,
                                 # A held SELL binds one maker price (bid+tick).
-                                maker_fill_witness=next(
-                                    iter(
-                                        maker_witnesses_for(
-                                            family_key=family_key,
-                                            bin_id=str(holding.bin_id),
-                                            condition_id=str(
-                                                holding_binding(
-                                                    holding, probability
-                                                ).condition_id
-                                            ),
-                                            side=str(holding.side),
-                                            token_id=str(holding.token_id),
-                                            position_id=str(holding.position_id),
-                                        )
-                                    ),
-                                    None,
+                                maker_fill_witness=(
+                                    next(
+                                        iter(
+                                            maker_witnesses_for(
+                                                family_key=family_key,
+                                                bin_id=str(holding.bin_id),
+                                                condition_id=str(
+                                                    holding_binding(
+                                                        holding, probability
+                                                    ).condition_id
+                                                ),
+                                                side=str(holding.side),
+                                                token_id=str(holding.token_id),
+                                                position_id=str(holding.position_id),
+                                            )
+                                        ),
+                                        None,
+                                    )
+                                    if mode == "MAKER_REST"
+                                    else None
                                 ),
                                 asset_epoch_identity=book_epoch.witness_identity,
                                 neg_risk=asset.neg_risk,

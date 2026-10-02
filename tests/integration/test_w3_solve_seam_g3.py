@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-09-30
+# Last reused/audited: 2026-10-02
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -4011,6 +4011,171 @@ def _maker_fill_sample_conn() -> sqlite3.Connection:
         """
     )
     return conn
+
+
+def _filled_maker_population(*, action="SELL", bid="0.60", ask="0.61", price="0.61"):
+    conn = _maker_fill_sample_conn()
+    cut = _dt.datetime(2026, 7, 10, 8, tzinfo=_dt.timezone.utc)
+    created = cut - _dt.timedelta(minutes=25)
+    conn.execute(
+        "UPDATE executable_market_snapshots SET orderbook_top_bid=?, orderbook_top_ask=?",
+        (bid, ask),
+    )
+    for index in range(30):
+        command_id = f"{action.lower()}-{index}"
+        conn.execute(
+            "INSERT INTO venue_submission_envelopes VALUES (?, 'GTC', 1)",
+            (command_id,),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                command_id, command_id, "snapshot",
+                "ENTRY" if action == "BUY" else "EXIT", action, 10.0,
+                float(price), f"venue-{command_id}", "FILLED",
+                created.isoformat(), (cut - _dt.timedelta(minutes=5)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_order_facts(command_id,matched_size,observed_at) VALUES (?,?,?)",
+            (command_id, "10", (created + _dt.timedelta(minutes=1)).isoformat()),
+        )
+    return conn, cut
+
+
+@pytest.mark.parametrize(
+    ("action", "bid", "ask", "price", "admitted"),
+    (
+        ("SELL", "0.60", "0.61", "0.61", True),
+        ("SELL", "0.60", "0.61", "0.62", True),
+        ("SELL", "0.60", "ABSENT", "0.61", True),
+        ("SELL", "0.60", "0.61", "0.60", False),
+        ("SELL", "0.60", "0.61", "0.59", False),
+        ("SELL", "0.60", "0.61", "0.96", False),
+        ("SELL", "0.60", "NaN", "0.61", False),
+        ("SELL", "0.60", "0", "0.61", False),
+        ("SELL", "0.60", "-0.01", "0.61", False),
+        ("BUY", "0.60", "0.61", "0.61", False),
+        ("BUY", "0.60", "0.61", "0.62", False),
+        ("BUY", "0.60", "0.62", "0.61", True),
+        ("BUY", "0.60", "ABSENT", "0.61", False),
+    ),
+)
+def test_current_maker_fill_population_uses_action_specific_resting_law(
+    action, bid, ask, price, admitted,
+):
+    conn, cut = _filled_maker_population(action=action, bid=bid, ask=ask, price=price)
+    samples = global_batch_runtime._load_current_maker_fill_samples(
+        conn, selection_cut_at_utc=cut,
+    )
+    assert set(samples) == ({action} if admitted else set())
+    if admitted:
+        assert samples[action].fill_fractions == (Decimal("1"),) * 30
+        assert float(samples[action].fill_probability_lcb) == pytest.approx(0.7028379407756312)
+
+
+@pytest.mark.parametrize("surface", ("fact", "terminal", "minimum"))
+def test_current_at_ask_sell_samples_still_require_causal_terminal_facts_and_minimum(surface):
+    conn, cut = _filled_maker_population()
+    if surface == "fact":
+        conn.execute("UPDATE venue_order_facts SET observed_at=?", ((cut + _dt.timedelta(seconds=1)).isoformat(),))
+    elif surface == "terminal":
+        conn.execute("UPDATE venue_commands SET updated_at=?", ((cut + _dt.timedelta(seconds=1)).isoformat(),))
+    else:
+        conn.execute("DELETE FROM venue_order_facts WHERE command_id='sell-29'")
+    assert global_batch_runtime._load_current_maker_fill_samples(
+        conn, selection_cut_at_utc=cut,
+    ) == {}
+
+
+def test_current_at_ask_sell_samples_reach_bound_maker_proposal_with_positive_objective():
+    from src.engine.native_holdings import NativeHolding, NativeHoldingsSnapshot
+
+    conn, at = _filled_maker_population()
+    samples = global_batch_runtime._load_current_maker_fill_samples(conn, selection_cut_at_utc=at)
+    event = _global_scope_event(city="Alpha", source_run_id="maker-population")
+    scope = current_global_auction_scope_from_events((event,), captured_at_utc=at)
+    family = scope.family_keys[0]
+    fields = dict(
+        family_key=family,
+        bindings=(
+            OutcomeTokenBinding("bin", "condition", "yes-token", "no-token"),
+            OutcomeTokenBinding("other", "other-condition", "other-yes", "other-no"),
+        ),
+        q_version="q", resolution_identity="resolution", topology_identity="topology",
+        posterior_identity_hash="posterior", source_truth_identity="source",
+        authority_certificate_hash="certificate", band_alpha=0.05, band_basis="current-evidence",
+        yes_point_q=np.asarray((0.20, 0.80)),
+        yes_q_samples=np.tile((0.20, 0.80), (400, 1)), captured_at_utc=at,
+    )
+    probability = JointOutcomeProbabilityWitness(
+        **fields, max_age=_dt.timedelta(seconds=30),
+        witness_identity=joint_probability_witness_identity(**fields),
+    )
+    holding = NativeHolding("held", family, "bin", "YES", "yes-token", Decimal("10"))
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="decision", probability_witness=probability, candidate_seeds=(),
+        holdings_snapshot=NativeHoldingsSnapshot(family, "ledger", (holding,)),
+    )
+    curve = ExecutableSellCurve(
+        token_id="yes-token", side="YES", snapshot_id="snapshot", book_hash="book",
+        levels=(BidBookLevel(Decimal("0.60"), Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")), min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"), quote_ttl=_dt.timedelta(seconds=30),
+    )
+    asset = CurrentGlobalSellAsset(
+        family, "bin", "condition", "gamma", "market-event", "YES", "yes-token", curve, at, False,
+    )
+    ask_curve = ExecutableCostCurve(
+        token_id="yes-token", side="YES", snapshot_id="snapshot", book_hash="book",
+        levels=(BookLevel(Decimal("0.61"), Decimal("10")),),
+        fee_model=curve.fee_model, min_tick=curve.min_tick,
+        min_order_size=curve.min_order_size, quote_ttl=curve.quote_ttl,
+    )
+    buy_asset = CurrentGlobalBookAsset(
+        family, "bin", "condition", "gamma", "market-event", "YES", "yes-token", ask_curve, at, False,
+        bid_levels=curve.levels,
+    )
+    states = ((family, "bin", "condition", "YES", "yes-token", "EXECUTABLE", "book", "market-event", "gamma", "False"),)
+    epoch = CurrentGlobalBookEpoch(
+        assets=(buy_asset,), sell_assets=(asset,), asset_states=states, captured_at_utc=at,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(asset_states=states, captured_at_utc=at),
+    )
+    wealth = _test_wealth_witness(
+        ledger_snapshot_id="ledger", position_set_hash="positions",
+        wealth_floor_usd=Decimal("100"), wealth_ceiling_usd=Decimal("110"),
+        spendable_cash_usd=Decimal("100"), reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN", captured_at_utc=at,
+        native_holdings_micro=(("yes-token", 10_000_000),),
+    )
+    rebound, epoch = global_batch_runtime._bind_current_maker_fill_witnesses(
+        {event.event_id: prepared}, book_epoch=epoch, wealth_witness=wealth, samples=samples, issued_at_utc=at,
+    )
+    key = ("bin", "condition", "YES", "yes-token", "held", Decimal("0.61"))
+    maker = rebound[event.event_id].maker_fill_witnesses[key]
+    assert maker.sample_identity == samples["SELL"].sample_identity
+    assert maker.fill_probability == pytest.approx(0.7028379407756312)
+    assert sum(row.probability for row in maker.outcomes) == Decimal("1")
+    result = select_prepared_global_auction(
+        rebound, selection_epoch_identity="selection", selection_cut_at_utc=at,
+        current_scope=scope, current_scope_identity_resolver=lambda: scope.scope_identity,
+        venue_universe_identity=epoch.witness_identity,
+        current_venue_universe_identity_resolver=lambda: epoch.witness_identity,
+        universe_max_age=_dt.timedelta(seconds=30),
+        current_probability_resolver=lambda _family: CurrentFamilyProbabilityAuthority.from_witness(probability),
+        current_execution_resolver=lambda candidate: epoch.execution_authority(candidate, checked_at_utc=at),
+        current_wealth_identity_resolver=lambda: wealth.economic_identity,
+        wealth_witness=wealth, capital_limit_usd=Decimal("10"), decision_at_utc=at, book_epoch=epoch,
+    )
+    assert result.actuation is not None, result.decision.no_trade_reason
+    evaluations = result.actuation.decision.candidate_evaluations
+    sell_evaluations = [row for row in evaluations if row.action == "SELL"]
+    assert {row.execution_mode for row in sell_evaluations} == {"TAKER_LIMIT", "MAKER_REST"}
+    maker_evaluation = next(row for row in sell_evaluations if row.execution_mode == "MAKER_REST")
+    assert maker_evaluation.rejection_reason is None
+    assert maker_evaluation.expected_growth.expected_ev_usd > 0
+    assert maker_evaluation.expected_growth.expected_delta_log_wealth > 0
 
 
 def test_current_maker_fill_sample_is_point_in_time_and_action_specific():
