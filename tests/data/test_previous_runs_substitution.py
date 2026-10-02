@@ -5663,7 +5663,7 @@ def test_queue_connection_deadline_aborts_claim_instead_of_retrying_priority_rea
 
 
 def test_priority_stale_inflight_defers_then_background_recovers(tmp_path, monkeypatch):
-    """A same-family stale batch defers priority until the background drain restores it."""
+    """A same-family dead-owner batch defers priority one tick, which restores it itself."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
     request_dir = tmp_path / "requests"
@@ -5711,7 +5711,9 @@ def test_priority_stale_inflight_defers_then_background_recovers(tmp_path, monke
     assert held.exists()
     assert not (stale / "Istanbul.stale.json").exists()
     assert (request_dir / "Istanbul.stale.json").exists()
-    del legacy_claim
+    monkeypatch.setattr(
+        queue_mod, "_claim_replacement_forecast_live_materialization_queue_locked", legacy_claim
+    )
 
     priority = queue_mod.process_replacement_forecast_live_materialization_queue(
         request_dir=request_dir, processed_dir=tmp_path / "processed",
