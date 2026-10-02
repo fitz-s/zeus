@@ -14021,12 +14021,6 @@ def test_live_adapter_selection_telemetry_isolates_unsupported_family(monkeypatc
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED',
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:mature',
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:immature',
-        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
-        'REPLACEMENT_RAW_INPUT_HWM:basis=current_ensemble_snapshot_superseded:latest_snapshot_id=2:consumed_ensemble_cycle=old',
-        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
-        'REPLACEMENT_RAW_INPUT_HWM:basis=used_raw_model_forecasts_superseded:model=icon_d2:latest_raw_id=2:consumed_raw_id=1',
-        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
-        'REPLACEMENT_RAW_INPUT_HWM:basis=source_cycle_time_raw_forecast_artifacts_lag:latest_raw_cycle=2026-09-23T00:00:00+00:00:posterior_cycle=2026-09-22T18:00:00+00:00:consumed_anchor_cycle=2026-09-22T18:00:00+00:00:lag_h=6.00',
     ),
 )
 def test_superseded_preflight_evicts_only_selected_family_probability_cache(
@@ -14762,50 +14756,83 @@ def test_live_adapter_reuses_ineligible_probability_until_authority_db_changes(
 
 
 @pytest.mark.parametrize(
+    "basis",
+    (
+        "current_ensemble_snapshot_superseded:latest_snapshot_id=2",
+        "current_value_serving_physical_proof_dependency_changed:model=ecmwf_ifs",
+        "used_raw_model_forecasts_superseded:model=icon_d2",
+        "used_raw_model_forecasts_same_cycle_late_input:model=icon_d2",
+        "source_cycle_time_raw_forecast_artifacts_lag:lag_h=6.00",
+        "anchor_only_ifs9_raw_instrument_became_available",
+    ),
+)
+def test_refresh_debt_basis_is_never_a_superseded_posterior_verdict(basis):
+    """A newer input is refresh debt, never a reason to reject the posterior.
+
+    If one of these strings ever reached a blocker again, it must not be
+    classified as a supersession: no cached rejection, no probability-
+    superseded preflight fall-through, no cache eviction.
+    """
+    blocked = "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:basis=" + basis
+    receipt = era.EventSubmissionReceipt(
+        False,
+        "event",
+        "snapshot",
+        reason=(
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            f"{era._FAMILY_AUTHORITY_UNAVAILABLE}:{blocked}"
+        ),
+    )
+    assert not era._cacheable_global_probability_ineligible(receipt)
+    preflight = "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:" + blocked
+    assert era._global_preflight_block_status(preflight) == "BATCH_BLOCKED"
+    assert era._evict_superseded_global_probability_family_cache(
+        "refresh-debt",
+        reason=preflight,
+        actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=SimpleNamespace(family_key="family"))
+        ),
+    ) is False
+
+
+@pytest.mark.parametrize(
     "reason",
     [
-        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
-        "basis=current_value_serving_physical_proof_dependency_changed:"
-        "model=ecmwf_ifs:consumed_raw_id=7",
-        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
-        "basis=source_cycle_time_raw_forecast_artifacts_lag:"
-        "latest_raw_cycle=2026-07-10T06:00:00+00:00",
         "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_LIVE_READINESS_EXPIRED",
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global",
     ],
 )
-def test_live_adapter_reuses_superseded_posterior_until_its_frontier_moves(
+def test_live_adapter_reproves_clock_and_proof_rejections_every_cut(
     monkeypatch,
     reason,
 ):
+    """Readiness expiry is a clock compared on every read, and a consumed-proof
+    verdict belongs to the posterior that produced it: neither stands in for
+    the next cut, even when the posterior and readiness are unchanged."""
     trade = sqlite3.connect(":memory:")
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
     world = sqlite3.connect(":memory:")
     callbacks = []
     prepare_calls = []
-    revision = {"value": (1, 1, 1)}
-    frontier = {"value": (41, "readiness-a", "READY")}
     monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
     monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
     monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
     monkeypatch.setattr(
-        era,
-        "_global_probability_family_cache_revision",
-        lambda _connections: revision["value"],
+        era, "_global_probability_family_cache_revision", lambda _connections: (1, 1, 1),
     )
+    # Unchanged latest posterior and readiness on every cut.
     monkeypatch.setattr(
-        era,
-        "_global_probability_posterior_frontier",
-        lambda _conn, **_kwargs: frontier["value"],
+        era, "_global_probability_posterior_frontier",
+        lambda _conn, **_kwargs: (41, "readiness-a", "READY"), raising=False,
     )
 
     def fail_prepare(*_args, **_kwargs):
         prepare_calls.append(1)
         raise ValueError(reason)
 
-    monkeypatch.setattr(
-        era, "_prepare_current_global_probability_family", fail_prepare
-    )
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", fail_prepare)
     monkeypatch.setattr(
         global_batch_runtime,
         "process_current_global_batch",
@@ -14815,7 +14842,7 @@ def test_live_adapter_reuses_superseded_posterior_until_its_frontier_moves(
         ),
     )
 
-    def cut(event, seconds, *, batch=None):
+    def cut(event, seconds):
         at = _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
         at += _dt.timedelta(seconds=seconds)
         era.event_bound_live_adapter_from_trade_conn(
@@ -14824,99 +14851,14 @@ def test_live_adapter_reuses_superseded_posterior_until_its_frontier_moves(
             forecast_conn=forecast,
             topology_conn=topology,
             calibration_conn=world,
-        ).process_global_batch(batch or (event,), at)
+        ).process_global_batch((event,), at)
         return callbacks[-1](event, at)
 
     scope_event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
-    first = cut(scope_event, 0)
-    assert first.prepared_global_family is None
-    assert reason in first.reason
-    assert len(prepare_calls) == 1
-
-    # An unrelated forecast-DB commit leaves this family's verdict standing,
-    # whether or not the batch names the family.
-    revision["value"] = (2, 1, 1)
-    assert cut(scope_event, 1) is first
-    book_event = replace(scope_event, event_type="BOOK_SNAPSHOT")
-    assert cut(scope_event, 2, batch=(book_event,)) is first
-    assert len(prepare_calls) == 1
-
-    # A new live posterior re-proves on the very next cut.
-    frontier["value"] = (42, "readiness-a", "READY")
-    cut(scope_event, 3)
-    assert len(prepare_calls) == 2
-    cut(scope_event, 4)
-    assert len(prepare_calls) == 2
-
-    # So does a new readiness certificate for the same posterior.
-    frontier["value"] = (42, "readiness-b", "READY")
-    cut(scope_event, 5)
+    for seconds in range(3):
+        receipt = cut(scope_event, seconds)
+        assert receipt.prepared_global_family is None and reason in receipt.reason
     assert len(prepare_calls) == 3
-
-
-@pytest.mark.parametrize(
-    "reason",
-    [
-        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
-        "basis=HWM_READ_DEADLINE",
-        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
-        "basis=current_value_serving_read_unavailable:sqlite_error=locked",
-        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
-        "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE",
-    ],
-)
-def test_superseded_posterior_cache_excludes_transient_and_other_reasons(reason):
-    receipt = era.EventSubmissionReceipt(
-        False,
-        "event",
-        "snapshot",
-        reason=(
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-            f"{era._FAMILY_AUTHORITY_UNAVAILABLE}:{reason}"
-        ),
-    )
-    assert not era._superseded_posterior_ineligible(receipt)
-
-
-def test_day0_ineligible_verdict_is_not_bound_to_the_posterior_frontier(
-    monkeypatch,
-):
-    namespace = "ns"
-    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
-    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
-    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
-    receipt = era.EventSubmissionReceipt(
-        False,
-        "event",
-        "snapshot",
-        reason=(
-            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-            f"{era._FAMILY_AUTHORITY_UNAVAILABLE}:"
-            "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
-            "REPLACEMENT_LIVE_READINESS_EXPIRED"
-        ),
-    )
-    key = dict(family_key="Dallas|2026-07-11|high", event_id="event",
-               causal_snapshot_id="snapshot")
-    # A Day0 caller supplies no frontier, so nothing is stored for it.
-    era._store_global_probability_family_ineligible_cache(
-        namespace, **key, revision=(1,), receipt=receipt,
-    )
-    assert era._probe_global_probability_family_ineligible_cache(
-        namespace, **key, revision=(1,),
-    ) is None
-    era._store_global_probability_family_ineligible_cache(
-        namespace, **key, revision=(1,), receipt=receipt,
-        posterior_frontier=(7, "r", "READY"),
-    )
-    # A frontier-keyed entry never hits without a frontier to compare.
-    assert era._probe_global_probability_family_ineligible_cache(
-        namespace, **key, revision=(1,),
-    ) is None
-    assert era._probe_global_probability_family_ineligible_cache(
-        namespace, **key, revision=(1,),
-        posterior_frontier=lambda: (7, "r", "READY"),
-    ) is receipt
 
 
 def test_live_adapter_reuses_book_cache_after_probability_rebind(
@@ -39071,12 +39013,6 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED',
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:mature',
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:immature',
-        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
-        'REPLACEMENT_RAW_INPUT_HWM:basis=current_ensemble_snapshot_superseded:latest_snapshot_id=2:consumed_ensemble_cycle=old',
-        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
-        'REPLACEMENT_RAW_INPUT_HWM:basis=used_raw_model_forecasts_superseded:model=icon_d2:latest_raw_id=2:consumed_raw_id=1',
-        'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:'
-        'REPLACEMENT_RAW_INPUT_HWM:basis=source_cycle_time_raw_forecast_artifacts_lag:latest_raw_cycle=2026-09-23T00:00:00+00:00:posterior_cycle=2026-09-22T18:00:00+00:00:consumed_anchor_cycle=2026-09-22T18:00:00+00:00:lag_h=6.00',
     ),
     ids=(
         "probability",
@@ -39086,9 +39022,6 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
         "sell-temporal-identity",
         "sell-temporal-mature",
         "sell-temporal-immature",
-        "ensemble-clock",
-        "raw-model-clock",
-        "raw-artifact-cycle",
     ),
 )
 def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(

@@ -616,7 +616,7 @@ _GLOBAL_PROBABILITY_FAMILY_CACHE: dict[
 ] = {}
 _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE: dict[
     str,
-    tuple[str, str, tuple[str, object], EventSubmissionReceipt],
+    tuple[str, str, tuple[int, ...], EventSubmissionReceipt],
 ] = {}
 _GLOBAL_CURRENT_GAMMA_CLIENT_LOCK = threading.Lock()
 _GLOBAL_CURRENT_GAMMA_CLIENT: Any | None = None
@@ -646,25 +646,6 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
 )
 _FAMILY_AUTHORITY_UNAVAILABLE = FAMILY_AUTHORITY_UNAVAILABLE
 _TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE = TRANSIENT_FAMILY_AUTHORITY_UNAVAILABLE
-# A forecast-lane posterior rejected because newer inputs superseded it, or
-# because its readiness expired, stays rejected until the family's posterior
-# frontier (latest live posterior, current readiness) moves: inputs only
-# advance and time only passes. These verdicts are keyed on that frontier, not
-# on any commit to the forecast DB. Read-loss and deadline bases are excluded.
-_GLOBAL_PROBABILITY_SUPERSEDED_POSTERIOR_REASONS = (
-    "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_LIVE_READINESS_EXPIRED",
-) + tuple(
-    "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:basis="
-    + basis
-    for basis in (
-        "current_ensemble_snapshot_superseded",
-        "current_value_serving_physical_proof_dependency_changed",
-        "used_raw_model_forecasts_superseded",
-        "used_raw_model_forecasts_same_cycle_late_input",
-        "source_cycle_time_raw_forecast_artifacts_lag",
-        "anchor_only_ifs9_raw_instrument_became_available",
-    )
-)
 
 
 _GLOBAL_PREFLIGHT_CLOB_CLIENTS: dict[tuple[object, object, float], object] = {}
@@ -1433,60 +1414,6 @@ def _cacheable_global_probability_ineligible(
     )
 
 
-def _superseded_posterior_ineligible(receipt: EventSubmissionReceipt) -> bool:
-    prefix = (
-        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
-        f"{_FAMILY_AUTHORITY_UNAVAILABLE}:"
-    )
-    reason = str(receipt.reason or "")
-    return (
-        receipt.prepared_global_family is None
-        and reason.startswith(prefix)
-        and reason.removeprefix(prefix).startswith(
-            _GLOBAL_PROBABILITY_SUPERSEDED_POSTERIOR_REASONS
-        )
-    )
-
-
-def _global_probability_posterior_frontier(
-    conn: sqlite3.Connection,
-    *,
-    city: str,
-    target_date: str,
-    metric: str,
-    decision_time: datetime,
-) -> tuple[object, ...] | None:
-    """The family's latest live posterior and current readiness, or None."""
-
-    from src.data.replacement_forecast_readiness import (
-        latest_replacement_readiness,
-    )
-
-    try:
-        row = conn.execute(
-            "SELECT MAX(posterior_id) FROM forecast_posteriors "
-            "WHERE runtime_layer = 'live' AND city = ? AND target_date = ? "
-            "AND temperature_metric = ?",
-            (city, target_date, metric),
-        ).fetchone()
-        readiness = latest_replacement_readiness(
-            conn,
-            city=city,
-            target_date=target_date,
-            temperature_metric=metric,
-            decision_time=decision_time,
-        )
-    except (AttributeError, TypeError, ValueError, sqlite3.Error):
-        return None
-    if row is None or row[0] is None:
-        return None
-    return (
-        int(row[0]),
-        None if readiness is None else readiness.readiness_id,
-        None if readiness is None else readiness.status,
-    )
-
-
 def _reissue_cached_global_probability_family(
     prepared: object,
     *,
@@ -1687,22 +1614,24 @@ def _probe_global_probability_family_ineligible_cache(
     event_id: str,
     causal_snapshot_id: str,
     revision: tuple[int, ...] | None,
-    posterior_frontier: Callable[[], tuple[object, ...] | None] | None = None,
 ) -> EventSubmissionReceipt | None:
-    if not namespace or not family_key or not event_id or not causal_snapshot_id:
+    if (
+        not namespace
+        or not family_key
+        or not event_id
+        or not causal_snapshot_id
+        or revision is None
+    ):
         return None
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
             return None
         cached = _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.get(family_key)
-    if cached is None or cached[:2] != (event_id, causal_snapshot_id):
-        return None
-    kind, key = cached[2]
-    if kind == "posterior_frontier":
-        current = posterior_frontier() if posterior_frontier is not None else None
-    else:
-        current = revision
-    if current is None or current != key:
+    if cached is None or cached[:3] != (
+        event_id,
+        causal_snapshot_id,
+        revision,
+    ):
         return None
     return cached[3]
 
@@ -1715,25 +1644,17 @@ def _store_global_probability_family_ineligible_cache(
     causal_snapshot_id: str,
     revision: tuple[int, ...] | None,
     receipt: EventSubmissionReceipt,
-    posterior_frontier: tuple[object, ...] | None = None,
 ) -> None:
-    """Remember an ineligible verdict under the state it depends on.
-
-    ``posterior_frontier`` must be read before the verdict was computed, so
-    any posterior or readiness committed since then misses the entry.
-    """
-
     global _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE
 
-    if not namespace or not family_key or not event_id or not causal_snapshot_id:
-        return
-    if revision is not None and _cacheable_global_probability_ineligible(receipt):
-        key: tuple[str, object] = ("data_version", revision)
-    elif posterior_frontier is not None and _superseded_posterior_ineligible(
-        receipt
+    if (
+        not namespace
+        or not family_key
+        or not event_id
+        or not causal_snapshot_id
+        or revision is None
+        or not _cacheable_global_probability_ineligible(receipt)
     ):
-        key = ("posterior_frontier", posterior_frontier)
-    else:
         return
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
@@ -1750,7 +1671,7 @@ def _store_global_probability_family_ineligible_cache(
         _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE[family_key] = (
             event_id,
             causal_snapshot_id,
-            key,
+            revision,
             receipt,
         )
 
@@ -1785,21 +1706,6 @@ def _evict_global_probability_family_cache(
                 _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
 
 
-def _global_preflight_source_clock_superseded(reason: str) -> bool:
-    prefix = (
-        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
-        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
-        "REPLACEMENT_RAW_INPUT_HWM:basis="
-    )
-    return reason.startswith(
-        (
-            prefix + "current_ensemble_snapshot_superseded:",
-            prefix + "used_raw_model_forecasts_superseded:",
-            prefix + "source_cycle_time_raw_forecast_artifacts_lag:",
-        )
-    )
-
-
 def _global_preflight_sell_temporal_authority_superseded(reason: str) -> bool:
     prefix = "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
     return reason == prefix + "GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED" or (
@@ -1829,7 +1735,6 @@ def _evict_superseded_global_probability_family_cache(
     # never grafts a newer posterior onto the stale certificate in place.
     if not (
         reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
-        or _global_preflight_source_clock_superseded(reason)
         or _global_preflight_sell_temporal_authority_superseded(reason)
         or "model_identity_drift" in reason
     ):
@@ -9765,21 +9670,6 @@ def event_bound_live_adapter_from_trade_conn(
                 probability_refresh_family_keys is None
                 or family_key in probability_refresh_family_keys
             )
-            # Day0 q also moves with observations, so only a forecast-lane
-            # verdict is bound to the posterior frontier alone.
-            frontier = (
-                (
-                    lambda: _global_probability_posterior_frontier(
-                        forecast_conn,
-                        city=str(payload.get("city") or ""),
-                        target_date=str(payload.get("target_date") or ""),
-                        metric=str(payload.get("metric") or "").lower(),
-                        decision_time=at,
-                    )
-                )
-                if event.event_type in _FORECAST_DECISION_EVENT_TYPES
-                else None
-            )
             if force_refresh:
                 cached_ineligible = (
                     _probe_global_probability_family_ineligible_cache(
@@ -9788,7 +9678,6 @@ def event_bound_live_adapter_from_trade_conn(
                         event_id=event.event_id,
                         causal_snapshot_id=event.causal_snapshot_id,
                         revision=probability_cache_revision,
-                        posterior_frontier=frontier,
                     )
                 )
                 if cached_ineligible is not None:
@@ -9834,15 +9723,12 @@ def event_bound_live_adapter_from_trade_conn(
                         event_id=event.event_id,
                         causal_snapshot_id=event.causal_snapshot_id,
                         revision=probability_cache_revision,
-                        posterior_frontier=frontier,
                     )
                 )
                 if cached_ineligible is not None:
                     probability_cache_stats["ineligible_hit"] += 1
                     return cached_ineligible
                 probability_cache_stats["miss"] += 1
-            # Read before preparing: a posterior committed meanwhile must miss.
-            prepared_frontier = frontier() if frontier is not None else None
             cache_metadata: dict[str, str] = {}
             with _held_point_trace_capture(family_key in held_point_trace_scope) as capture:
                 receipt = _prepare_global_event(
@@ -9872,7 +9758,6 @@ def event_bound_live_adapter_from_trade_conn(
                     causal_snapshot_id=event.causal_snapshot_id,
                     revision=probability_cache_revision,
                     receipt=receipt,
-                    posterior_frontier=prepared_frontier,
                 )
             return receipt
 
@@ -15981,11 +15866,8 @@ def _global_preflight_candidate_receipt(
 def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
-    if (
-        _global_preflight_source_clock_superseded(reason)
-        or _global_preflight_sell_temporal_authority_superseded(reason)
-    ):
-        # SCOPE: the winner's source or temporal authority changed; retire its
+    if _global_preflight_sell_temporal_authority_superseded(reason):
+        # SCOPE: the winner's temporal authority changed; retire its
         # cached family instead of selecting an unverifiable SELL again.
         # DRAIN: rebuild the complete q/book/wealth auction within the existing
         # reauction budget. RESET: only fresh evidence can authorize a new
