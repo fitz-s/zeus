@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-10-02 (qualified-current candidate proof boundary)
+# Last reused or audited: 2026-10-02 (capture family keyed by request target; CURRENT_REUSABLE)
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — generalize the gem_global
 #   previous_runs exception (edc598b440 / K2 2026-06-09) into the operator law 没有新的就用老的
 #   applied to fusion membership: a provider absent from single_runs at the selected cycle serves
@@ -376,6 +376,27 @@ _CAPTURE_GROUP_CELLS_SQL = f"""SELECT a.artifact_id, CAST(lat.value AS REAL), CA
 
 _CAPTURE_BY_ID_SQL = f"SELECT a.artifact_id, {_ARTIFACT_IDENTITY_JSON_SQL} FROM raw_forecast_artifacts a WHERE a.artifact_id=?"
 
+# Within one issued product and cell, captures still differ by the target they
+# asked for: a previous_runs request names its own date window and lagged
+# variable. A raw row may cite only a capture of its own target request.
+_REQUEST_TARGET_KEYS = ("hourly", "start_date", "end_date")
+
+
+def _request_target(params_json: object) -> tuple[object, ...]:
+    """The request's target selector, read as SQLite's json_extract over '{}' would."""
+    try:
+        params = json.loads(str(params_json))
+    except (TypeError, ValueError):
+        params = None
+    if not isinstance(params, dict):
+        params = {}
+    return tuple(params.get(key) for key in _REQUEST_TARGET_KEYS)
+
+
+_REQUEST_TARGET_SQL = " AND ".join(
+    f"json_extract(CASE WHEN json_valid(a.request_params_json) THEN a.request_params_json "
+    f"ELSE '{{}}' END,'$.{key}') IS ?" for key in _REQUEST_TARGET_KEYS)
+
 
 @dataclass
 class _SnapshotMemo:
@@ -456,9 +477,11 @@ def _physical_artifact_candidates(conn: sqlite3.Connection, row: Mapping[str, ob
         memo.by_id[own_id] = (int(found[0][0]), str(found[0][1])) if found else None
     # SQLite's `CAST(lat AS REAL)=? AND CAST(lon AS REAL)=? AND tz=?` for a
     # float/int and text binding: REAL compares by value, text compares exactly.
+    target = _request_target(row.get("request_params_json"))
     matched = {artifact_id: text for artifact_id, text, found in group if any(
         isinstance(lat, float) and isinstance(lon, float) and isinstance(tz, str)
-        and lat == cell[0] and lon == cell[1] and tz == cell[2] for lat, lon, tz in found)}
+        and lat == cell[0] and lon == cell[1] and tz == cell[2] for lat, lon, tz in found)
+        and _request_target(json.loads(text).get("request_params_json")) == target}
     if memo.by_id[own_id] is not None:
         matched.setdefault(*memo.by_id[own_id])
     for artifact_id in sorted(matched, reverse=True):
@@ -476,10 +499,12 @@ def _physical_artifact_candidates_by_row(conn: sqlite3.Connection, row: Mapping[
             AND EXISTS (SELECT 1 FROM {_request_coordinates_sql('latitude')} lat
                 JOIN {_request_coordinates_sql('longitude')} lon ON lon.key=lat.key
                 JOIN {_request_coordinates_sql('timezone')} tz ON tz.key=lat.key
-                WHERE CAST(lat.value AS REAL)=? AND CAST(lon.value AS REAL)=? AND tz.value=?))
+                WHERE CAST(lat.value AS REAL)=? AND CAST(lon.value AS REAL)=? AND tz.value=?)
+            AND {_REQUEST_TARGET_SQL})
         ORDER BY a.artifact_id DESC"""
     cursor = conn.execute(sql, (row.get("artifact_id"), row["source_id"], row["product_id"], row["source_cycle_time"],
-        int(legacy), row["latitude_requested"], row["longitude_requested"], row["timezone_requested"]))
+        int(legacy), row["latitude_requested"], row["longitude_requested"], row["timezone_requested"],
+        *_request_target(row.get("request_params_json"))))
     try:
         while True:
             if time.monotonic() >= deadline:

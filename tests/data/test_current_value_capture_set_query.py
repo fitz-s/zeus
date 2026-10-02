@@ -1,5 +1,5 @@
 # Created: 2026-10-01
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-02
 # Authority basis: live auction prepare budget (45 s cut); loader cost is round-trips, not rows.
 """One request-family capture read per snapshot serves every raw row exactly as the per-row query."""
 
@@ -158,3 +158,53 @@ def test_expired_scan_budget_still_fails_closed(tmp_path, monkeypatch):
     _catalog(conn)
     with pytest.raises(serving.CurrentValueServingReadUnavailable, match="scan_budget_exceeded"):
         list(serving._physical_artifact_candidates(conn, ROWS[0], deadline=time.monotonic() - 1))
+
+
+def _previous_runs_row(target_date: str, hourly: str, *, artifact_id: int) -> dict:
+    params = {"cell_selection": "land", "start_date": target_date, "end_date": target_date, "hourly": hourly,
+              "latitude": 29.712254, "longitude": 106.651895, "models": "icon_global", "timezone": "Asia/Shanghai"}
+    return {"artifact_id": artifact_id, "source_id": "icon_previous_runs", "product_id": "icon_global::previous_runs",
+            "source_cycle_time": CYCLE, "latitude_requested": 29.712254, "longitude_requested": 106.651895,
+            "timezone_requested": "Asia/Shanghai", "elevation_param": "nan", "downscaling_policy": "none",
+            "endpoint_mode": "previous_runs", "request_params_json": json.dumps(params, separators=(",", ":"))}
+
+
+@pytest.mark.parametrize("snapshot", [True, False])
+def test_a_row_cites_only_captures_of_its_own_target_request(tmp_path, snapshot):
+    """Live 2026-10-02: a 10-04 previous_day2 capture of the same issued cycle and
+    cell landed at 17:07Z and became the 10-02 lead-0 row's latest capture, so the
+    row failed its variable proof and the held Chongqing family lost two providers."""
+    conn = sqlite3.connect(tmp_path / "f.db")
+    conn.execute(SCHEMA)
+    cell = {"cell_selection": "land", "latitude": 29.712254, "longitude": 106.651895,
+            "models": "icon_global", "timezone": "Asia/Shanghai"}
+    own = _insert(conn, source="icon_previous_runs", kind=BODY,
+                  params={**cell, "start_date": "2026-10-02", "end_date": "2026-10-02", "hourly": "temperature_2m"})
+    other_target = _insert(conn, source="icon_previous_runs", kind=RECEIPT,
+                           params={**cell, "start_date": "2026-10-04", "end_date": "2026-10-04",
+                                   "hourly": "temperature_2m_previous_day2"})
+    conn.execute("UPDATE raw_forecast_artifacts SET product_id='icon_global::previous_runs'")
+    conn.commit()
+    reader = sqlite3.connect(tmp_path / "f.db")
+    if snapshot:
+        reader.execute("BEGIN")
+    row = _previous_runs_row("2026-10-02", "temperature_2m", artifact_id=own)
+    later = _previous_runs_row("2026-10-04", "temperature_2m_previous_day2", artifact_id=None)
+    # The newer, other-target receipt shares (source, product, cycle, cell) yet
+    # is never a candidate for the 10-02 row; it remains one for its own row.
+    assert _ids(serving._physical_artifact_candidates(reader, row, deadline=time.monotonic() + 30)) == [own]
+    assert _ids(serving._physical_artifact_candidates(reader, later, deadline=time.monotonic() + 30)) == [other_target]
+    for item in (row, later):
+        assert list(serving._physical_artifact_candidates(reader, item, deadline=time.monotonic() + 30)) == _per_row(reader, item)
+
+
+def test_a_single_target_family_is_unchanged(tmp_path):
+    """Every catalog capture names no date window; a row with no window keeps the
+    exact candidate list it had before the target key existed."""
+    conn = sqlite3.connect(tmp_path / "f.db")
+    conn.execute(SCHEMA)
+    _catalog(conn)
+    reader = sqlite3.connect(tmp_path / "f.db")
+    row = {**ROWS[0], "request_params_json": json.dumps({"latitude": 40.7, "longitude": -74.0})}
+    assert _ids(serving._physical_artifact_candidates(reader, row, deadline=time.monotonic() + 30)) == \
+        _ids(serving._physical_artifact_candidates(reader, ROWS[0], deadline=time.monotonic() + 30)) == [4, 2, 1]
