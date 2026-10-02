@@ -3983,9 +3983,11 @@ def test_priority_claim_progresses_while_background_queue_lock_is_held(tmp_path,
     assert report.status == "PROCESSED"
     assert report.committed_posterior_count == report.reactor_wake_published_count == 1
     assert seen["stage"] == "claimed"
-    assert seen["attempt"] == 1
+    assert seen["attempts"] == {"Istanbul.json": 1}
     assert seen["deadline_at"]
-    assert seen["priority_identity"] == list(queue_mod._request_semantic_key(request))
+    assert seen["identities"]["Istanbul.json"]["semantic"] == list(
+        queue_mod._request_semantic_key(request)
+    )
     assert seen["identities"]["Istanbul.json"]["coalescing"] == list(
         queue_mod._request_coalescing_key(request)
     )
@@ -5700,23 +5702,16 @@ def test_priority_stale_inflight_defers_then_background_recovers(tmp_path, monke
         limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
     )
 
+    # The dead owner's batch is restored on this priority tick itself; nothing
+    # waits for the background cadence.
     assert report.status == "DEFERRED"
     assert queue_mod._CLAIM_STALE_RECOVERY_DEFERRED_REASON in report.reason_codes
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_STALE_CLAIM_RECOVERED" in report.reason_codes
     assert "REPLACEMENT_LIVE_MATERIALIZATION_STALE_BATCH_stale" in report.reason_codes
     assert held.exists()
-    assert (stale / "Istanbul.stale.json").exists()
-
-    monkeypatch.setattr(
-        queue_mod, "_claim_replacement_forecast_live_materialization_queue_locked", legacy_claim
-    )
-    background = queue_mod.process_replacement_forecast_live_materialization_queue(
-        request_dir=request_dir, processed_dir=tmp_path / "processed",
-        failed_dir=tmp_path / "failed", forecast_db=tmp_path / "forecasts.db",
-        limit=1, lane=queue_mod.MATERIALIZATION_LANE_BACKGROUND,
-        runner=lambda _argv: pytest.fail("background recovery must not process priority request"),
-    )
-    assert "REPLACEMENT_LIVE_MATERIALIZATION_STALE_CLAIM_RECOVERED" in background.reason_codes
     assert not (stale / "Istanbul.stale.json").exists()
+    assert (request_dir / "Istanbul.stale.json").exists()
+    del legacy_claim
 
     priority = queue_mod.process_replacement_forecast_live_materialization_queue(
         request_dir=request_dir, processed_dir=tmp_path / "processed",

@@ -320,7 +320,7 @@ def test_priority_claim_replans_unrelated_queue_or_db_churn(tmp_path, monkeypatc
         other = dict(_materialization_request(), city="Paris")
         (requests / "Paris.2026-08-25.high.json").write_text(json.dumps(other), encoding="utf-8")
     revision[0] = 2  # Unrelated forecast WAL commit.
-    claimed = queue._try_claim_priority_request(prior)
+    claimed, _reasons = queue._try_claim_priority_request(prior)
     assert claimed is not None and claimed.claimed_count == 1
     assert not selected.exists()
     assert (claimed.batch_path / selected.name).exists()
@@ -346,7 +346,7 @@ def test_priority_claim_replan_preserves_preemption_and_identity(tmp_path, monke
     else:
         selected.write_text(json.dumps(dict(_materialization_request(), computed_at="2026-08-24T10:00:00+00:00")), encoding="utf-8")
     revision[0] = 2
-    assert queue._try_claim_priority_request(prior) is None
+    assert queue._try_claim_priority_request(prior)[0] is None
     assert selected.exists()
 
 
@@ -381,11 +381,13 @@ def test_priority_replan_rejects_owner_or_held_arriving_after_sort_before_snapsh
         return original_snapshot(directory)
 
     monkeypatch.setattr(queue, "_queue_files_snapshot", publish_before_builder_snapshot)
-    assert queue._try_claim_priority_request(prior) is None
+    assert queue._try_claim_priority_request(prior)[0] is None
     assert selected.exists()
 
 
-@pytest.mark.parametrize("failure_step", ("replan", "final_fingerprint", "replan_deadline"))
+# The fence is read once per tick: a forecast commit after it only re-ranks,
+# and the child re-proves its inputs at commit, so there is no second DB read.
+@pytest.mark.parametrize("failure_step", ("replan", "replan_deadline"))
 def test_priority_revalidation_read_failure_defers_without_moving_request(
     tmp_path, monkeypatch, failure_step,
 ):
