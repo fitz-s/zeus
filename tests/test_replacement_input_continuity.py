@@ -154,6 +154,8 @@ def test_input_continuity_c3_unknown_or_invalid_consumed_authority_is_protective
         def unknown(*a,**k):raise sqlite3.OperationalError("interrupted")
         monkeypatch.setattr(H,"replacement_live_input_lag_reason",unknown)
     else:
+        # A faked reader is not a changed read: start from a cold memo.
+        H.clear_consumed_proof_memo()
         monkeypatch.setattr(C,"read_consumed_instrument_values",lambda *a,**k:{},raising=False)
     q=_c3_q(normal,normal.request.computed_at)
     assert q.startswith(f"__Q_AUTHORITY_BLOCKED__:{normal.row['posterior_identity_hash']}:") and basis in q
@@ -357,6 +359,85 @@ def test_input_continuity_unknown_successor_does_not_revoke_proven_consumed_inpu
         assert any("successor_" in r and "unavailable" in r for r in out["refresh_reasons"])
         assert H.replacement_input_refresh_reason(conn,**context)
     finally:conn.close()
+
+TAU="2026-10-01T05:05:56+00:00"  # in Paris's 2026-10-01, before the cut COMPUTED
+
+def _with_frozen_tau(context,tau):
+    """The family's Day0 window as the posterior recorded it (None: no window)."""
+    provenance=json.loads(json.dumps(context["posterior_provenance"]))
+    if tau is not None:
+        provenance["day0_conditioning"]={"active":True,"metric":"high","observation_time":tau}
+    return {**context,"city":"Paris","target_date":"2026-10-01","posterior_provenance":provenance}
+
+def _post_day_reader(monkeypatch):
+    """The consumed reader as the producer proves it: a post-day remaining-window
+    row covers its suffix only at an in-day tau, and is rejected at the cut."""
+    asked=[]
+    conn,context=_component(monkeypatch,scenario="none")
+    proven=C.read_consumed_instrument_values()  # the component's verified consumed row
+    def consumed(*a,day0_remaining_from_iso=None,**k):
+        asked.append(day0_remaining_from_iso)
+        return proven if day0_remaining_from_iso==TAU else {}
+    monkeypatch.setattr(C,"read_consumed_instrument_values",consumed,raising=False)
+    return conn,context,asked
+
+def test_post_day_consumed_rows_reverify_at_their_own_frozen_tau(monkeypatch):
+    conn,context,asked=_post_day_reader(monkeypatch)
+    try:
+        with_tau=_with_frozen_tau(context,TAU)
+        assert H.replacement_live_input_lag_reason(conn,**with_tau,use_memo=False) is None
+        assert asked==[TAU]
+        # The same rows judged without their tau take the whole-day law and reject.
+        assert "consumed_proof_unverifiable" in H.replacement_live_input_lag_reason(
+            conn,**_with_frozen_tau(context,None),use_memo=False)
+        assert asked[-1] is None
+        # A later decision (and any later observation) never moves the tau the
+        # consumed rows are judged at: it is read from the row, not the clock.
+        later={**with_tau,"decision_time":NOW+timedelta(hours=5)}
+        assert H.replacement_live_input_lag_reason(conn,**later,use_memo=False) is None
+        assert asked[-1]==TAU
+    finally:conn.close()
+
+def test_post_day_successor_census_reads_the_rows_frozen_tau(monkeypatch):
+    conn,context,_asked=_post_day_reader(monkeypatch)
+    marks=[];currents=[]
+    monkeypatch.setattr(H,"_latest_eligible_ensemble_input_mark",
+        lambda *a,day0_remaining_from_iso=None,**k:marks.append(day0_remaining_from_iso) or (1,CYCLE))
+    monkeypatch.setattr(C,"read_current_instrument_values",
+        lambda *a,day0_remaining_from_iso=None,**k:currents.append(day0_remaining_from_iso) or {})
+    try:
+        out={}
+        assert H.replacement_live_input_lag_reason(conn,**_with_frozen_tau(context,TAU),input_witness_out=out,
+            successor_census=True,use_memo=False) is None
+        assert marks==[TAU] and currents==[TAU]
+    finally:conn.close()
+
+def test_pinned_held_continuity_keeps_a_carrier_whose_consumed_proof_verifies(_shanghai_reader_current_certificate,monkeypatch):
+    # Live 10-02: REPLACEMENT_PINNED_RAW_INPUT_HWM on 8 held positions. The
+    # pinned reader's only HWM site is _latest_complete_held_continuity; a newer
+    # icon_global proof is refresh debt there, never a block.
+    normal=_shanghai_reader_current_certificate
+    provenance=json.loads(normal.row["provenance_json"])
+    F._reader_new_icon_cycle(normal);normal.conn.commit()
+    context=dict(row=normal.row,provenance=provenance,city=normal.row["city"],
+        target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],
+        decision_time=normal.request.computed_at)
+    later=normal.request.source_cycle_time+timedelta(hours=6)
+    monkeypatch.setattr(B,"latest_live_input_cycle",lambda *a,**k:(later,"newer-icon"))
+    monkeypatch.setattr(B,"latest_eligible_ensemble_input_cycle",
+        lambda *a,**k:datetime.fromisoformat(normal.row["source_cycle_time"]))
+    assert "current_value_serving_physical_proof_dependency_changed" in H.replacement_input_refresh_reason(
+        normal.conn,city=normal.row["city"],target_date=normal.row["target_date"],metric="high",
+        decision_time=normal.request.computed_at,posterior_source_cycle_time=normal.row["source_cycle_time"],
+        posterior_computed_at=normal.row["computed_at"],posterior_provenance=provenance)
+    status,reason=B._latest_complete_held_continuity(normal.conn,**context)
+    assert (status,reason)==(B._HeldContinuityStatus.READY,None)
+    # Only consumed-proof invalidity blocks the pinned carrier.
+    H.clear_consumed_proof_memo()
+    monkeypatch.setattr(C,"read_consumed_instrument_values",lambda *a,**k:{},raising=False)
+    status,reason=B._latest_complete_held_continuity(normal.conn,**context)
+    assert status is B._HeldContinuityStatus.BLOCKED
+    assert reason.startswith("REPLACEMENT_PINNED_RAW_INPUT_HWM:basis=current_value_serving_consumed_proof_unverifiable")
 
 def test_input_continuity_unknown_consumed_proof_always_fails_closed(monkeypatch):
     conn,context=_component(monkeypatch)

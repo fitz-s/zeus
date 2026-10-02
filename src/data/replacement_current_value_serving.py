@@ -2163,12 +2163,15 @@ def read_consumed_instrument_values(
     target_date: str,
     consumed_models: Mapping[int, str],
     materialized_at_iso: str,
+    day0_remaining_from_iso: str | None = None,
 ) -> dict[int, ServedInstrumentValue]:
     """Revalidate exact consumed rows, never substitute a newer row for an old proof.
 
     The same product, body, receipt and surface validator used by the producer
-    runs at its original possession cutoff. The family/metric/id predicates
-    are bound parameters. New inputs cannot change which rows are checked.
+    runs at its original possession cutoff and, for a post-day family, at the
+    Day0 tau the rows were proven under (``day0_remaining_from_iso``, from
+    their frozen identity). The family/metric/id predicates are bound
+    parameters. New inputs cannot change which rows are checked.
     """
     consumed_ids = tuple(consumed_models)
     if not consumed_ids or any(type(i) is not int or i <= 0 or not consumed_models[i] for i in consumed_ids):
@@ -2181,6 +2184,7 @@ def read_consumed_instrument_values(
         city=city, metric=metric, target_date=target_date,
         decision_iso=cutoff.isoformat(), schema=schema,
         max_substitution_age_hours=PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+        day0_remaining_from_iso=day0_remaining_from_iso,
     )
     marker = "ORDER BY model,"
     if sql.count(marker) != 1:

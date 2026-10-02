@@ -1944,11 +1944,16 @@ def _exact_current_value_serving_lag(
     from src.data.replacement_current_value_serving import (
         read_consumed_instrument_values, physical_source_proof_dependency,
     )
+    # The consumed rows are re-proven as consumed: at the posterior's own cut
+    # and, for a post-day family, at the Day0 tau recorded with them
+    # (day0_remaining_from_provenance), never at a tau derived from the clock
+    # or a newer observation.
     try:
         frozen = read_consumed_instrument_values(
             conn, city=city, metric=metric, target_date=str(target_date),
             consumed_models={item[0]: model for model, item in consumed.items()},
             materialized_at_iso=posterior_computed_at.isoformat(),
+            day0_remaining_from_iso=day0_tau,
         ) if consumed and not consumed_proof_verified else {}
     except sqlite3.OperationalError as exc:
         _raise_hwm_read_unavailable(exc, basis="consumed_physical_proof_read_unavailable")
@@ -2662,6 +2667,12 @@ def _replacement_live_input_lag_reason(
         )
     if reason is not None or not census:
         return reason
+    # The verdict above already refused an invalid window, so this is its tau.
+    from src.data.replacement_current_value_serving import day0_remaining_from_provenance
+    day0_tau, _window_reason = day0_remaining_from_provenance(
+        provenance, city=city, target_date=target_date, metric=metric,
+        posterior_computed_at=posterior_computed,
+    )
     try:
         latest_ensemble_mark = _latest_eligible_ensemble_input_mark(
             conn,
@@ -2669,6 +2680,7 @@ def _replacement_live_input_lag_reason(
             target_date=target_date,
             metric=metric,
             decision_time=decision_time,
+            day0_remaining_from_iso=day0_tau,
         )
     except sqlite3.OperationalError as exc:
         refresh_reasons.append("basis=successor_ensemble_frontier_unavailable:" + type(exc).__name__)
