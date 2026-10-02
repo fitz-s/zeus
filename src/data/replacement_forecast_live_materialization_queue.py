@@ -31,7 +31,11 @@ from src.contracts.replacement_pipeline_files import (
     validate_materialization_request,
     validate_materialization_seed,
 )
-from src.data.day0_fast_obs import FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+from src.data.day0_fast_obs import (
+    FAST_LANE_ENTRY_MAX_CACHE_AGE_S,
+    fast_extreme_supersedes_settlement,
+    is_fast_residual_tail_source,
+)
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_current_value_serving import (
     current_value_serving_schema,
@@ -2083,6 +2087,41 @@ def _parse_utc_iso(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _settlement_seed_retires_fast_tail(
+    seed: Mapping[str, object],
+    conditioning: Mapping[str, object] | None,
+) -> bool:
+    """Whether a settlement-channel seed supersedes a fast-tail posterior.
+
+    The fast tail stamps its print's publication clock; the settlement channel
+    stamps the observation's valid time. The same METAR therefore reads as
+    "older" on the settlement clock, so clock order cannot rank the two. The
+    fast tail serves only while it strictly advances settlement truth
+    (``fast_extreme_supersedes_settlement``); once the settlement extreme
+    reaches it, the settlement seed is the current Day0 authority, never a
+    regression.
+    """
+    if not isinstance(conditioning, Mapping):
+        return False
+    if not is_fast_residual_tail_source(conditioning.get("source")):
+        return False
+    if is_fast_residual_tail_source(seed.get("day0_observed_extreme_source")):
+        return False
+    metric = str(seed.get("temperature_metric") or "").strip().lower()
+    if str(conditioning.get("metric") or "").strip().lower() != metric:
+        return False
+    try:
+        settlement_c = float(seed["day0_observed_extreme_c"])
+        fast_c = float(conditioning["observed_extreme_c"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not (math.isfinite(settlement_c) and math.isfinite(fast_c)):
+        return False
+    return not fast_extreme_supersedes_settlement(
+        metric=metric, fast_extreme_c=fast_c, settlement_extreme_c=settlement_c
+    )
+
+
 def _seed_source_cycle_boundary(
     *,
     forecast_db: Path | str | None,
@@ -2223,6 +2262,7 @@ def _seed_source_cycle_boundary(
                     seed_observed_at < current_observed_at
                     or same_clock_older_correction
                 )
+                and not _settlement_seed_retires_fast_tail(seed, conditioning)
             ):
                 return "current_day0_observation", current_observed_at.isoformat()
     if (
