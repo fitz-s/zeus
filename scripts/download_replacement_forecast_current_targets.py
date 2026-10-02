@@ -1473,16 +1473,24 @@ def _try_bucket_rung_three(
         target_local_date=_date.fromisoformat(target_date),
         forecast_hours=request.forecast_hours,
     )
+    # Both rungs report the API's response geometry, whose ``elevation`` is the
+    # requested point's 90m DEM (captured once per request point, cached with
+    # provenance) — the SAME authority that VERIFIED the city and that the precision
+    # guard binds to the frozen O1280 cell proof. An uncapturable DEM (provider quota
+    # block, transport failure) leaves this city unserved this cycle, never guessed.
+    try:
+        target_elev = capture_city_target_elevation(
+            city,
+            request.latitude,
+            request.longitude,
+            timeout=_deadline_timeout(deadline_monotonic, default=20.0),
+        )
+    except (ValueError, httpx.HTTPError) as dem_exc:
+        raise BucketTransportNotAdmissible(
+            f"city {city} target DEM unavailable: {str(dem_exc)[:160]}"
+        ) from dem_exc
     try:
         if serve_method == "downscaled":
-            # target elevation = the API-reported 90m-DEM elevation (captured once per city,
-            # cached with provenance). This is the SAME authority that VERIFIED the city.
-            target_elev = capture_city_target_elevation(
-                city,
-                request.latitude,
-                request.longitude,
-                timeout=_deadline_timeout(deadline_monotonic, default=20.0),
-            )
             result = fetch_bucket_anchor_payload_downscaled(  # re-checks admission internally
                 latitude=request.latitude,
                 longitude=request.longitude,
@@ -1499,6 +1507,7 @@ def _try_bucket_rung_three(
             result = fetch_bucket_anchor_payload(  # re-checks admission (condition 2) internally
                 latitude=request.latitude,
                 longitude=request.longitude,
+                target_elevation_m=target_elev,
                 run=request.run,
                 timezone_name=timezone_name,
                 needed_valid_times=needed,
@@ -2385,7 +2394,10 @@ def download_current_target_raw_inputs(
             0, len(wave_resolved) - len(fetched_wave)
         )
 
-    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketPointReaderPool
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+        BucketPointReaderPool,
+        record_city_target_elevation,
+    )
 
     owns_bucket_pool = bucket_reader_pool is None
     bucket_pool = (
@@ -2488,6 +2500,19 @@ def download_current_target_raw_inputs(
                 except TimeoutError:
                     timeboxed_incomplete = True
                     continue
+                if not str(anchor_transport_provenance.get("run_authority", "")).startswith(
+                    "bucket_partial_run"
+                ):
+                    # An API answer for these exact coordinates carries the provider's
+                    # own target DEM: keep the bucket rung's DEM current for free.
+                    try:
+                        record_city_target_elevation(
+                            target.city, request.latitude, request.longitude, payload,
+                        )
+                    except (OSError, ValueError, TypeError) as dem_exc:
+                        _LOG.warning(
+                            "OM9 target DEM not recorded city=%s: %s", target.city, dem_exc,
+                        )
                 if not _current_target_payload_materializable(
                     payload,
                     city_timezone=city_config.timezone,

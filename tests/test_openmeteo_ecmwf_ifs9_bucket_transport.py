@@ -365,7 +365,7 @@ def test_bucket_payload_stops_after_current_timestep_when_deadline_expires(
 
     with pytest.raises(TimeoutError, match="deadline expired"):
         fetch_bucket_anchor_payload(
-            latitude=39.9,
+            target_elevation_m=10.0, latitude=39.9,
             longitude=116.4,
             run=run,
             timezone_name="UTC",
@@ -405,7 +405,7 @@ def test_bucket_payload_reads_distinct_valid_times_in_bounded_parallel_order(
         return float(datetime.strptime(stem, "%Y-%m-%dT%H%M").hour)
 
     result = fetch_bucket_anchor_payload(
-        latitude=39.9,
+        target_elevation_m=10.0, latitude=39.9,
         longitude=116.4,
         run=run,
         timezone_name="UTC",
@@ -481,7 +481,7 @@ def test_bucket_payload_shape_matches_api_and_extractor_consumes_identically() -
     reader = _stub_reader_from_series(series)
 
     result = fetch_bucket_anchor_payload(
-        latitude=40.71, longitude=-74.01, run=run, timezone_name=tz,
+        target_elevation_m=10.0, latitude=40.71, longitude=-74.01, run=run, timezone_name=tz,
         needed_valid_times=needed, manifest=manifest, read_point=reader,
     )
     payload = result.payload
@@ -509,7 +509,7 @@ def test_bucket_payload_refuses_to_assemble_when_admission_fails() -> None:
     manifest = _manifest(run=run, valid_times=[v for v in _hourly(run, 90) if v != dropped])
     with pytest.raises(ValueError, match="refused"):
         fetch_bucket_anchor_payload(
-            latitude=40.71, longitude=-74.01, run=run, timezone_name=tz,
+            target_elevation_m=10.0, latitude=40.71, longitude=-74.01, run=run, timezone_name=tz,
             needed_valid_times=needed, manifest=manifest,
             read_point=lambda uri, idx: 15.0,
         )
@@ -525,7 +525,7 @@ def test_provenance_records_all_required_partial_run_fields() -> None:
     needed = local_day_hourly_valid_times(run=run, city_timezone=tz, target_local_date=target)
     manifest = _manifest(run=run, valid_times=_hourly(run, 90))
     result = fetch_bucket_anchor_payload(
-        latitude=51.5, longitude=-0.13, run=run, timezone_name=tz,
+        target_elevation_m=10.0, latitude=51.5, longitude=-0.13, run=run, timezone_name=tz,
         needed_valid_times=needed, manifest=manifest, read_point=lambda uri, idx: 12.0,
     )
     prov = result.provenance
@@ -1266,4 +1266,124 @@ def test_city_target_elevation_capture_and_cache(tmp_path) -> None:
     )
     assert elev2 == 4.0
     assert calls["n"] == 1
-    assert load_city_target_elevation("Tokyo", cache_path=str(cache)) == 4.0
+    assert load_city_target_elevation("Tokyo", 35.553, 139.781, cache_path=str(cache)) == 4.0
+
+
+# --- one response geometry for every rung ---------------------------------------
+def test_raw_bucket_payload_carries_the_api_target_dem_for_the_same_cell() -> None:
+    """The raw rung reports the API's response geometry for the cell it read.
+
+    Busan's 2026-10-01 API answer: (35.184532, 128.91582, elevation 2.0). The raw bucket
+    read for the same request must name the same cell and carry the same target DEM —
+    an absent key is the precision guard's 'OM9 raw response geometry invalid'."""
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import same_grid_cell
+
+    run = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    needed = local_day_hourly_valid_times(
+        run=run, city_timezone="Asia/Seoul", target_local_date=date(2026, 10, 2))
+    manifest = _manifest(run=run, valid_times=_hourly(run, 90))
+    payload = fetch_bucket_anchor_payload(
+        latitude=35.179501, longitude=128.938004, target_elevation_m=2.0, run=run,
+        timezone_name="Asia/Seoul", needed_valid_times=needed, manifest=manifest,
+        read_point=lambda uri, idx: 20.0,
+    ).payload
+    assert payload["elevation"] == 2.0
+    assert same_grid_cell(payload["latitude"], payload["longitude"], 35.184532, 128.91582)
+
+
+def test_every_bucket_rung_writes_geometry_through_one_function(monkeypatch) -> None:
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as bucket
+
+    calls: list[tuple[float, float, float]] = []
+    real = bucket.bucket_payload_geometry
+
+    def spy(lat, lon, dem):
+        calls.append((lat, lon, dem))
+        return real(lat, lon, dem)
+
+    monkeypatch.setattr(bucket, "bucket_payload_geometry", spy)
+    run = datetime(2026, 6, 11, 0, tzinfo=UTC)
+    needed = local_day_hourly_valid_times(
+        run=run, city_timezone="UTC", target_local_date=date(2026, 6, 11))
+    manifest = _manifest(run=run, valid_times=_hourly(run, 90))
+    raw = bucket.fetch_bucket_anchor_payload(
+        latitude=51.5, longitude=-0.13, target_elevation_m=11.0, run=run,
+        timezone_name="UTC", needed_valid_times=needed, manifest=manifest,
+        read_point=lambda uri, idx: 12.0,
+    ).payload
+    down = bucket.fetch_bucket_anchor_payload_downscaled(
+        latitude=51.5, longitude=-0.13, target_elevation_m=11.0, run=run,
+        timezone_name="UTC", needed_valid_times=needed, manifest=manifest,
+        read_point=lambda uri, idx: 12.0, read_elevation=lambda idx: 15.0,
+    ).payload
+    assert len(calls) == 2
+    for payload, (lat, lon, dem) in zip((raw, down), calls):
+        assert {k: payload[k] for k in ("latitude", "longitude", "elevation")} == real(lat, lon, dem)
+        assert payload["elevation"] == 11.0
+    with pytest.raises(ValueError, match="finite"):
+        real(51.5, 0.0, float("nan"))
+
+
+def test_target_dem_cache_misses_on_a_coordinate_change_and_recaptures(tmp_path) -> None:
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import record_city_target_elevation
+
+    cache = tmp_path / "anchor_city_elevation.json"
+    record_city_target_elevation(
+        "Toronto", 43.679, -79.629, {"elevation": 170.0}, cache_path=str(cache))
+    assert load_city_target_elevation("Toronto", 43.679, -79.629, cache_path=str(cache)) == 170.0
+    # The city moved to its settlement station: the old point's DEM is not this point's.
+    assert load_city_target_elevation(
+        "Toronto", 43.675935, -79.629421, cache_path=str(cache)) is None
+    seen: list[str] = []
+
+    def api(url: str, **_kwargs):
+        seen.append(url)
+        return {"elevation": 183.0, "latitude": 43.690685, "longitude": -79.68326}
+
+    assert capture_city_target_elevation(
+        "Toronto", 43.675935, -79.629421, cache_path=str(cache), http_get=api) == 183.0
+    assert len(seen) == 1 and "latitude=43.675935" in seen[0]
+    assert load_city_target_elevation(
+        "Toronto", 43.675935, -79.629421, cache_path=str(cache)) == 183.0
+    with pytest.raises(ValueError, match="did not report"):
+        record_city_target_elevation("Toronto", 1.0, 2.0, {"latitude": 1.0}, cache_path=str(cache))
+
+
+def test_rung_three_raw_serves_the_request_points_dem(monkeypatch) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as bucket
+
+    run = datetime(2026, 10, 1, 12, tzinfo=UTC)
+
+    class _Req:
+        latitude = 25.78806
+        longitude = -80.31692
+        forecast_hours = 120
+
+    _Req.run = run
+    monkeypatch.setattr(bucket, "resolve_bucket_serve_method", lambda city, **_k: "raw")
+    dems: list[tuple] = []
+
+    def _dem(city, lat, lon, **_k):
+        dems.append((city, lat, lon))
+        return 2.0
+
+    monkeypatch.setattr(bucket, "capture_city_target_elevation", _dem)
+    kwargs = dict(
+        request=_Req(), city="Miami", target_date="2026-10-02",
+        timezone_name="America/New_York", meta_refusal=RuntimeError("quota"),
+        single_runs_exc=RuntimeError("quota"),
+        bucket_manifest_provider=lambda: {
+            "in_progress": _manifest(run=run, valid_times=_hourly(run, 90))},
+        bucket_read_point=lambda uri, idx: 28.0,
+    )
+    payload, _prov = dl._try_bucket_rung_three(**kwargs)
+    assert dems == [("Miami", 25.78806, -80.31692)]
+    assert payload["elevation"] == 2.0
+
+    def _no_dem(*_a, **_k):
+        raise ValueError("API did not report an elevation for Miami")
+
+    monkeypatch.setattr(bucket, "capture_city_target_elevation", _no_dem)
+    with pytest.raises(bucket.BucketTransportNotAdmissible, match="target DEM unavailable"):
+        dl._try_bucket_rung_three(**kwargs)

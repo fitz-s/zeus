@@ -516,6 +516,27 @@ def _check_deadline(deadline_monotonic: float | None) -> None:
         raise TimeoutError("bucket anchor payload deadline expired")
 
 
+def bucket_payload_geometry(
+    grid_latitude: float, grid_longitude_east: float, target_elevation_m: float
+) -> dict[str, float]:
+    """The response geometry every bucket rung writes, in the API's own terms.
+
+    ``latitude``/``longitude`` name the O1280 cell the temperatures were read from;
+    ``elevation`` is the requested point's 90 m DEM height the API reports (the
+    downscaling target), never the cell's HSURF: the precision guard proves the
+    cell's surface from the static field and demands this field equal the target DEM.
+    """
+    values = (grid_latitude, grid_longitude_east, target_elevation_m)
+    if any(isinstance(v, bool) or not math.isfinite(float(v)) for v in values):
+        raise ValueError("bucket payload geometry must be finite")
+    lon = float(grid_longitude_east)
+    return {
+        "latitude": float(grid_latitude),
+        "longitude": lon if lon <= 180 else lon - 360.0,
+        "elevation": float(target_elevation_m),
+    }
+
+
 @dataclass(frozen=True)
 class BucketAnchorPayloadResult:
     payload: dict[str, Any]
@@ -526,6 +547,7 @@ def fetch_bucket_anchor_payload(
     *,
     latitude: float,
     longitude: float,
+    target_elevation_m: float,
     run: datetime,
     timezone_name: str,
     needed_valid_times: Sequence[datetime],
@@ -591,8 +613,9 @@ def fetch_bucket_anchor_payload(
     utc_offset_seconds = int(sample_local.utcoffset().total_seconds()) if sample_local.utcoffset() else 0
 
     payload: dict[str, Any] = {
-        "latitude": float(point.grid_latitude),
-        "longitude": float(point.grid_longitude_east if point.grid_longitude_east <= 180 else point.grid_longitude_east - 360.0),
+        **bucket_payload_geometry(
+            point.grid_latitude, point.grid_longitude_east, target_elevation_m
+        ),
         "utc_offset_seconds": utc_offset_seconds,
         "timezone": timezone_name,
         "hourly_units": {"time": "iso8601", "temperature_2m": "°C"},
@@ -614,6 +637,7 @@ def fetch_bucket_anchor_payload(
         "o1280_grid_latitude": point.grid_latitude,
         "o1280_grid_longitude_east": point.grid_longitude_east,
         "o1280_nearest_distance_km": round(point.nearest_distance_km, 3),
+        "target_elevation_m": float(target_elevation_m),
         "cross_check_status": "PENDING_BUCKET_VS_API_VERIFICATION",
     }
     return BucketAnchorPayloadResult(payload=payload, provenance=provenance)
@@ -1310,9 +1334,13 @@ def apply_elevation_correction(
 # Per-city target elevation cache (the API-reported 90m-DEM elevation).
 # ---------------------------------------------------------------------------
 def load_city_target_elevation(
-    city: str, *, cache_path: str = CITY_ELEVATION_CACHE_PATH
+    city: str, latitude: float, longitude: float, *,
+    cache_path: str = CITY_ELEVATION_CACHE_PATH,
 ) -> float | None:
-    """The cached API-reported target elevation (90m DEM) for ``city``, or None if absent."""
+    """The cached API-reported 90m-DEM elevation for ``city`` at exactly this request point.
+
+    The DEM is a property of the requested coordinates, not the city name: a record
+    captured for other coordinates is a miss, never a stand-in."""
     from pathlib import Path as _Path
 
     try:
@@ -1320,9 +1348,62 @@ def load_city_target_elevation(
     except Exception:  # noqa: BLE001 — missing cache ⇒ not yet captured
         return None
     rec = cache.get(city) if isinstance(cache, Mapping) else None
-    if isinstance(rec, Mapping) and rec.get("elevation_m") is not None:
+    if (
+        isinstance(rec, Mapping)
+        and rec.get("elevation_m") is not None
+        and rec.get("request_latitude") == float(latitude)
+        and rec.get("request_longitude") == float(longitude)
+    ):
         return float(rec["elevation_m"])
     return None
+
+
+def record_city_target_elevation(
+    city: str, latitude: float, longitude: float, response: object, *,
+    cache_path: str = CITY_ELEVATION_CACHE_PATH,
+) -> float:
+    """Cache the ``elevation`` an Open-Meteo forecast response reported for this request point.
+
+    Any API answer for these exact coordinates carries the provider's own 90m-DEM height,
+    so the API rungs keep the cache current at no extra request; the bucket rung reads it
+    when the API is unreachable. Unchanged values are not rewritten."""
+    import os
+    import tempfile
+    from pathlib import Path as _Path
+
+    if not isinstance(response, Mapping) or response.get("elevation") is None:
+        raise ValueError(f"API did not report an elevation for {city}")
+    elevation = float(response["elevation"])
+    if not math.isfinite(elevation):
+        raise ValueError(f"API reported a non-finite elevation for {city}")
+    if load_city_target_elevation(city, latitude, longitude, cache_path=cache_path) == elevation:
+        return elevation
+    dest = _Path(cache_path)
+    try:
+        cache = json.loads(dest.read_text())
+        if not isinstance(cache, dict):
+            cache = {}
+    except Exception:  # noqa: BLE001 — fresh cache
+        cache = {}
+    cache[city] = {
+        "elevation_m": elevation,
+        "source": ELEVATION_API_URL,
+        "authority": "openmeteo_90m_dem_api_reported",
+        "api_grid_latitude": response.get("latitude"),
+        "api_grid_longitude": response.get("longitude"),
+        "request_latitude": float(latitude),
+        "request_longitude": float(longitude),
+        "captured_at": datetime.now(UTC).isoformat(),
+    }
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{dest.name}.", dir=dest.parent)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(json.dumps(cache, indent=1, sort_keys=True))
+        os.replace(temporary, dest)
+    finally:
+        _Path(temporary).unlink(missing_ok=True)
+    return elevation
 
 
 def capture_city_target_elevation(
@@ -1334,15 +1415,13 @@ def capture_city_target_elevation(
     http_get: Any = None,
     timeout: float = 20.0,
 ) -> float:
-    """Fetch + cache the API's 90m-DEM elevation for ``city`` (authority for downscaling target).
+    """Fetch + cache the API's 90m-DEM elevation for this request point.
 
     The directive's authority rule: cities_by_name has no elevation field, so the API-reported
-    ``elevation`` IS the target-elevation authority. Captured ONCE per city with provenance
-    (source URL, captured_at, the grid lat/lon the API reported). Sanctioned writer under
-    state/. Returns the elevation; a present cache entry is reused (no re-fetch)."""
-    from pathlib import Path as _Path
-
-    cached = load_city_target_elevation(city, cache_path=cache_path)
+    ``elevation`` IS the target-elevation authority. Captured once per (city, request point)
+    with provenance; a coordinate change misses and recaptures, superseding the record.
+    Sanctioned writer under state/. Returns the elevation."""
+    cached = load_city_target_elevation(city, latitude, longitude, cache_path=cache_path)
     if cached is not None:
         return cached
     getter = http_get or _default_http_get
@@ -1360,29 +1439,9 @@ def capture_city_target_elevation(
         ),
         timeout=timeout,
     )
-    if not isinstance(raw, Mapping) or raw.get("elevation") is None:
-        raise ValueError(f"API did not report an elevation for {city}")
-    elevation = float(raw["elevation"])
-    dest = _Path(cache_path)
-    try:
-        cache = json.loads(dest.read_text())
-        if not isinstance(cache, dict):
-            cache = {}
-    except Exception:  # noqa: BLE001 — fresh cache
-        cache = {}
-    cache[city] = {
-        "elevation_m": elevation,
-        "source": ELEVATION_API_URL,
-        "authority": "openmeteo_90m_dem_api_reported",
-        "api_grid_latitude": raw.get("latitude"),
-        "api_grid_longitude": raw.get("longitude"),
-        "request_latitude": latitude,
-        "request_longitude": longitude,
-        "captured_at": datetime.now(UTC).isoformat(),
-    }
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(cache, indent=1, sort_keys=True))
-    return elevation
+    return record_city_target_elevation(
+        city, latitude, longitude, raw, cache_path=cache_path
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1454,13 +1513,9 @@ def fetch_bucket_anchor_payload_downscaled(
     )
 
     payload: dict[str, Any] = {
-        "latitude": float(cell.grid_latitude),
-        "longitude": float(
-            cell.grid_longitude_east
-            if cell.grid_longitude_east <= 180
-            else cell.grid_longitude_east - 360.0
+        **bucket_payload_geometry(
+            cell.grid_latitude, cell.grid_longitude_east, target_elevation_m
         ),
-        "elevation": float(target_elevation_m),
         "utc_offset_seconds": utc_offset_seconds,
         "timezone": timezone_name,
         "hourly_units": {"time": "iso8601", "temperature_2m": "°C"},
