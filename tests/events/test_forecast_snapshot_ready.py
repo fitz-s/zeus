@@ -919,10 +919,7 @@ def test_posterior_bound_complete_provenance_fills_missing_raw_coverage():
         "target_local_date": "2026-07-12",
         "temperature_metric": "high",
         "sr_source_cycle_time": "2026-07-11T00:00:00+00:00",
-        "carrier_raw_model_forecast_ids_json": "[101,102,103]",
-        "carrier_complete": 1,
-        "carrier_served": 3,
-        "carrier_expected": 3,
+        "carrier_fusion_json": _carrier_fusion_json([101, 102, 103], True, 3, 3),
         "provenance_json": "{malformed-unused-provenance",
     }
     traced: list[str] = []
@@ -1012,13 +1009,8 @@ def test_complete_posterior_provenance_uses_exact_raw_ids_without_family_scan():
         "target_local_date": "2026-07-12",
         "temperature_metric": "high",
         "sr_source_cycle_time": "2026-07-11T00:00:00+00:00",
-        "provenance_json": json.dumps(
-            {
-                "bayes_precision_fusion": {
-                    "decorrelated_providers_complete": True,
-                    "raw_model_forecast_ids": [101, 102, 103],
-                }
-            }
+        "provenance_json": _fusion_provenance(
+            complete=True, served=3, expected=3, carrier_ids=[101, 102, 103]
         ),
     }
     traced: list[str] = []
@@ -1037,17 +1029,36 @@ def test_complete_posterior_provenance_uses_exact_raw_ids_without_family_scan():
     ) == 0
 
 
-def _fusion_provenance(*, complete, served, expected, raw_ids) -> str:
+# One model per decorrelated provider family, so each serving entry is one provider.
+_PROVIDER_MODELS = ("icon_global", "ukmo_global_deterministic_10km", "gem_hrdps_continental")
+
+
+def _serving(carrier_ids) -> object:
+    if not isinstance(carrier_ids, list):
+        return carrier_ids
+    return {
+        model: {"raw_model_forecast_id": raw_id}
+        for model, raw_id in zip(_PROVIDER_MODELS, carrier_ids)
+    }
+
+
+def _fusion_provenance(*, complete, served, expected, carrier_ids) -> str:
     return json.dumps(
         {
             "bayes_precision_fusion": {
                 "decorrelated_providers_complete": complete,
                 "decorrelated_providers_served": served,
                 "decorrelated_providers_expected": expected,
-                "raw_model_forecast_ids": raw_ids,
+                "current_value_serving": _serving(carrier_ids),
             }
         }
     )
+
+
+def _carrier_fusion_json(carrier_ids, complete, served, expected, scheme=None) -> str:
+    """The scan's typed projection of the same fields."""
+
+    return json.dumps([_serving(carrier_ids), complete, served, expected, scheme])
 
 
 def test_scan_admits_certified_two_of_two_posterior_and_keeps_uncertified_out():
@@ -1055,7 +1066,7 @@ def test_scan_admits_certified_two_of_two_posterior_and_keeps_uncertified_out():
 
     Tokyo: READY, decorrelated-complete, 2 of 2 carriers -> enters scope.
     Busan: 2 served of 3 expected (incomplete) -> stays out.
-    Chicago: carrier ids unreadable, only 2 raw models in the cycle -> stays out.
+    Chicago: serving record unreadable, only 2 raw models in the cycle -> stays out.
     """
     from src.state.db import init_schema_forecasts
 
@@ -1063,9 +1074,9 @@ def test_scan_admits_certified_two_of_two_posterior_and_keeps_uncertified_out():
     forecasts_conn.row_factory = sqlite3.Row
     init_schema_forecasts(forecasts_conn)
     families = (
-        ("Tokyo", _fusion_provenance(complete=True, served=2, expected=2, raw_ids=[1, 2]), (1, 2)),
-        ("Busan", _fusion_provenance(complete=False, served=2, expected=3, raw_ids=[3, 4]), (3, 4)),
-        ("Chicago", _fusion_provenance(complete=True, served=2, expected=2, raw_ids="garbage"), (5, 6)),
+        ("Tokyo", _fusion_provenance(complete=True, served=2, expected=2, carrier_ids=[1, 2]), (1, 2)),
+        ("Busan", _fusion_provenance(complete=False, served=2, expected=3, carrier_ids=[3, 4]), (3, 4)),
+        ("Chicago", _fusion_provenance(complete=True, served=2, expected=2, carrier_ids="garbage"), (5, 6)),
     )
     for city, provenance, raw_ids in families:
         forecasts_conn.execute(
@@ -1144,6 +1155,144 @@ def test_scan_admits_certified_two_of_two_posterior_and_keeps_uncertified_out():
     assert payloads[0]["min_members_floor"] == 2
 
 
+_ISTANBUL = ("Istanbul", "2026-05-24", "high")
+
+
+def _istanbul_727765_forecasts() -> sqlite3.Connection:
+    """Live posterior 727765's shape (Istanbul 2026-10-02 high) on fixture dates.
+
+    Two source-clock providers served 2 of 2 from the next cycle's rows, while
+    raw_model_forecast_ids also names an older-cycle row; the posterior's own
+    cycle date holds only two models.
+    """
+    from src.state.db import init_schema_forecasts
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    city, target_date, metric = _ISTANBUL
+    provenance = json.dumps({"bayes_precision_fusion": {
+        "decorrelated_providers_complete": True,
+        "decorrelated_providers_served": 2,
+        "decorrelated_providers_expected": 2,
+        "raw_model_forecast_ids": [2620683, 2627830, 2628890],
+        "source_clock_one_scheme": {
+            "configured_sources": ["ecmwf_ifs", "icon_global"],
+            "missing_sources": [],
+        },
+        "current_value_serving": {
+            "ecmwf_ifs": {"raw_model_forecast_id": 2628890},
+            "icon_global": {"raw_model_forecast_id": 2620683},
+        },
+    }})
+    conn.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
+            q_ucb_json, posterior_method, dependency_source_run_ids_json,
+            provenance_json, runtime_layer, training_allowed
+        ) VALUES (
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+            ?, ?, ?,
+            '2026-05-23T18:00:00+00:00', '2026-05-24T04:15:00+00:00',
+            '2026-05-24T04:16:00+00:00',
+            '{"bin:28":0.42}', NULL, NULL,
+            'openmeteo_ecmwf_ifs9_bayes_fusion', '[]', ?, 'live', 0
+        )
+        """,
+        (city, target_date, metric, provenance),
+    )
+    _bind_replacement_readiness(
+        conn,
+        posterior_id=int(conn.execute("SELECT posterior_id FROM forecast_posteriors").fetchone()[0]),
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        computed_at="2026-05-24T04:16:00+00:00",
+    )
+    conn.executemany(
+        """
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at, lead_days,
+            forecast_value_c, endpoint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 20.0, 'single_runs')
+        """,
+        [
+            (raw_id, model, city, target_date, metric, cycle, available, available)
+            for raw_id, model, cycle, available in (
+                (2620683, "icon_global", "2026-05-24T00:00:00+00:00", "2026-05-24T01:00:00+00:00"),
+                (2628890, "ecmwf_ifs", "2026-05-24T00:00:00+00:00", "2026-05-24T01:00:00+00:00"),
+                (2627830, "ecmwf_ifs", "2026-05-23T18:00:00+00:00", "2026-05-23T19:00:00+00:00"),
+                (2620600, "icon_global", "2026-05-23T18:00:00+00:00", "2026-05-23T19:00:00+00:00"),
+            )
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, temperature_metric, condition_id
+        ) VALUES ('istanbul-high-2026-05-24', ?, ?, ?, 'condition-istanbul')
+        """,
+        _ISTANBUL,
+    )
+    return conn
+
+
+def test_held_scope_admits_served_carriers_when_dependency_ids_outnumber_them():
+    """Istanbul 727765: 2 of 2 served carriers certify; 3 dependency ids do not decide.
+
+    Counting the dependency ids refused it (3 != 2 expected, then the cycle-date
+    count of 2 < 3) and the held family lost its probability carrier.
+    """
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+
+    events = trigger.build_committed_snapshot_events(
+        forecasts_conn=_istanbul_727765_forecasts(),
+        decision_time=_decision_time(),
+        received_at=_decision_time().isoformat(),
+        source="global-auction-current-scope",
+        limit=None,
+        phase_filter_exempt_families={_ISTANBUL},
+        restrict_to_families={_ISTANBUL},
+    )
+
+    payloads = [json.loads(event.payload_json) for event in events]
+    assert [(p["city"], p["member_count"], p["expected_members"], p["min_members_floor"])
+            for p in payloads] == [("Istanbul", 2, 2, 2)]
+
+
+def test_held_istanbul_727765_family_keeps_its_probability_carrier(monkeypatch):
+    """The universe held-coverage stage finds the 727765-shaped held family."""
+    from src.engine import global_auction_universe as universe
+
+    monkeypatch.setattr(
+        universe,
+        "executable_forecast_live_eligible_reader",
+        lambda _conn: lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(universe, "_current_day0_events", lambda *_args, **_kwargs: ())
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+
+    scope = universe.scan_current_global_auction_scope(
+        world_conn=world_conn,
+        forecasts_conn=_istanbul_727765_forecasts(),
+        decision_at_utc=_decision_time(),
+        held_families=(_ISTANBUL,),
+    )
+
+    assert [json.loads(event.payload_json)["city"] for event in scope.events] == ["Istanbul"]
+
+
 def test_unreadable_or_incomplete_carriers_keep_the_legacy_floor():
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -1175,10 +1324,36 @@ def test_unreadable_or_incomplete_carriers_keep_the_legacy_floor():
         {
             **base,
             "provenance_json": _fusion_provenance(
-                complete=False, served=2, expected=3, raw_ids=[101, 102]
+                complete=False, served=2, expected=3, carrier_ids=[101, 102]
             ),
         },
-        {**base, "carrier_raw_model_forecast_ids_json": "not-json"},
+        {**base, "carrier_fusion_json": "not-json"},
+        # Reviewer cases: the flag alone, malformed ids, fewer carriers than
+        # declared, each on the parsed and on the scan's typed projection.
+        {**base, "provenance_json": _fusion_provenance(
+            complete=True, served=2, expected=3, carrier_ids=[101, 102])},
+        {**base, "provenance_json": _fusion_provenance(
+            complete=True, served=2, expected=2, carrier_ids=["unreadable", {}])},
+        {**base, "provenance_json": _fusion_provenance(
+            complete=True, served=3, expected=3, carrier_ids=[101, 102])},
+        {**base, "carrier_fusion_json": _carrier_fusion_json([101, 102], True, 2, 3)},
+        {**base, "carrier_fusion_json": _carrier_fusion_json(["unreadable", {}], True, 2, 2)},
+        {**base, "carrier_fusion_json": _carrier_fusion_json([101, 102], True, 3, 3)},
+        # Same values with a JSON 1 for true or a string count are not certified.
+        {**base, "carrier_fusion_json": _carrier_fusion_json([101, 102], 1, 2, 2)},
+        {**base, "carrier_fusion_json": _carrier_fusion_json([101, 102], True, "2", 2)},
+        # Dependency ids are not carriers: no serving record certifies nothing.
+        {**base, "provenance_json": json.dumps({"bayes_precision_fusion": {
+            "decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
+            "decorrelated_providers_expected": 2, "raw_model_forecast_ids": [101, 102]}})},
+        # Two serving models of one provider family name no single carrier.
+        {**base, "carrier_fusion_json": json.dumps([
+            {"icon_global": {"raw_model_forecast_id": 101}, "icon_eu": {"raw_model_forecast_id": 102}},
+            True, 2, 2, None])},
+        # A source-clock scheme names its providers; serving must cover each.
+        {**base, "carrier_fusion_json": _carrier_fusion_json(
+            [101, 102], True, 2, 2,
+            {"configured_sources": ["icon_global", "ecmwf_ifs"], "missing_sources": []})},
     ]
 
     for row in rows:
@@ -1189,13 +1364,19 @@ def test_unreadable_or_incomplete_carriers_keep_the_legacy_floor():
     certified = {
         **base,
         "provenance_json": _fusion_provenance(
-            complete=True, served=2, expected=2, raw_ids=[101, 102]
+            complete=True, served=2, expected=2, carrier_ids=[101, 102]
         ),
     }
     enriched = _with_posterior_raw_member_counts(
         conn, [certified], decision_iso="2026-07-11T02:00:00+00:00"
     )
     assert [row["observed_members"] for row in enriched] == [2]
+    # Expected stays the declared certified set, not whatever was counted.
+    assert [row["expected_members"] for row in enriched] == [2]
+    conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=102")
+    assert _with_posterior_raw_member_counts(
+        conn, [certified], decision_iso="2026-07-11T02:00:00+00:00"
+    ) == []
 
 
 def test_coverage_is_completeness_authority_over_partial_source_run():

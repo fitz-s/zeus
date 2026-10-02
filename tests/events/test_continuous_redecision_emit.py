@@ -3299,16 +3299,46 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
     )
 
 
+# Carriers are the served providers' current_value_serving rows. Without a
+# source-clock scheme each decorrelated provider family is one provider.
+_TWO_PROVIDERS = {
+    "icon_global": {"raw_model_forecast_id": 1},
+    "ukmo_global_deterministic_10km": {"raw_model_forecast_id": 2},
+}
+# Istanbul posterior 727765 (live, 2026-10-02 high): 2 of 2 source-clock
+# providers served; raw_model_forecast_ids also names an older-cycle row.
+_ISTANBUL_727765 = {
+    "decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
+    "decorrelated_providers_expected": 2, "raw_model_forecast_ids": [2620683, 2627830, 2628890],
+    "source_clock_one_scheme": {"configured_sources": ["ecmwf_ifs", "icon_global"], "missing_sources": []},
+    "current_value_serving": {
+        "ecmwf_ifs": {"raw_model_forecast_id": 2628890},
+        "icon_global": {"raw_model_forecast_id": 2620683},
+    },
+}
+
+
 @pytest.mark.parametrize(
     "fusion,expired",
     [
         ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
-          "decorrelated_providers_expected": 2, "raw_model_forecast_ids": [1, 2]}, 0),
+          "decorrelated_providers_expected": 2, "current_value_serving": _TWO_PROVIDERS}, 0),
         ({"decorrelated_providers_complete": False, "decorrelated_providers_served": 2,
-          "decorrelated_providers_expected": 3, "raw_model_forecast_ids": [1, 2]}, 1),
+          "decorrelated_providers_expected": 3, "current_value_serving": _TWO_PROVIDERS}, 1),
         (None, 1),
+        # Reviewer cases: the flag alone, malformed ids, and fewer carriers than declared.
+        ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
+          "decorrelated_providers_expected": 3, "current_value_serving": _TWO_PROVIDERS}, 1),
+        ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
+          "decorrelated_providers_expected": 2, "current_value_serving": {
+              "icon_global": {"raw_model_forecast_id": "unreadable"},
+              "ukmo_global_deterministic_10km": {"raw_model_forecast_id": {}}}}, 1),
+        ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 3,
+          "decorrelated_providers_expected": 3, "current_value_serving": _TWO_PROVIDERS}, 1),
+        (_ISTANBUL_727765, 0),
     ],
-    ids=["certified-2-of-2", "2-of-3", "no-provenance"],
+    ids=["certified-2-of-2", "2-of-3", "no-provenance",
+         "complete-flag-2-of-3", "malformed-ids", "3-declared-2-named", "istanbul-727765"],
 )
 def test_unready_replacement_sweep_floor_is_the_posteriors_certified_carrier_count(fusion, expired):
     """Two same-cycle carriers keep a certified 2-of-2 FSR pending; uncertified keeps three."""

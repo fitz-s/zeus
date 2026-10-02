@@ -1065,22 +1065,40 @@ class ForecastSnapshotReadyTrigger:
                 fp.source_available_at AS snapshot_available_at,
                 fp.computed_at AS snapshot_fetch_time,
                 fp.posterior_identity_hash AS snapshot_manifest_hash,
-                json_extract(
-                    fp.provenance_json,
-                    '$.bayes_precision_fusion.raw_model_forecast_ids'
-                ) AS carrier_raw_model_forecast_ids_json,
-                json_extract(
-                    fp.provenance_json,
-                    '$.bayes_precision_fusion.decorrelated_providers_complete'
-                ) AS carrier_complete,
-                json_extract(
-                    fp.provenance_json,
-                    '$.bayes_precision_fusion.decorrelated_providers_served'
-                ) AS carrier_served,
-                json_extract(
-                    fp.provenance_json,
-                    '$.bayes_precision_fusion.decorrelated_providers_expected'
-                ) AS carrier_expected,
+                -- One JSON array keeps each field's JSON type (true is not 1,
+                -- "2" is not 2) for the certified-carrier predicate. Serving is
+                -- cut to each model's raw_model_forecast_id and the source-clock
+                -- scheme to the two lists that name its served providers.
+                json_array(
+                    CASE WHEN json_type(
+                        fp.provenance_json, '$.bayes_precision_fusion.current_value_serving'
+                    ) = 'object' THEN (
+                        SELECT json_group_object(
+                                   serving.key,
+                                   CASE WHEN serving.type = 'object' THEN json_object(
+                                       'raw_model_forecast_id',
+                                       serving.value -> '$.raw_model_forecast_id'
+                                   ) END
+                               )
+                          FROM json_each(
+                                   fp.provenance_json,
+                                   '$.bayes_precision_fusion.current_value_serving'
+                               ) AS serving
+                    ) END,
+                    fp.provenance_json -> '$.bayes_precision_fusion.decorrelated_providers_complete',
+                    fp.provenance_json -> '$.bayes_precision_fusion.decorrelated_providers_served',
+                    fp.provenance_json -> '$.bayes_precision_fusion.decorrelated_providers_expected',
+                    CASE WHEN json_type(
+                        fp.provenance_json, '$.bayes_precision_fusion.source_clock_one_scheme'
+                    ) = 'object' THEN json_object(
+                        'configured_sources',
+                        fp.provenance_json
+                            -> '$.bayes_precision_fusion.source_clock_one_scheme.configured_sources',
+                        'missing_sources',
+                        fp.provenance_json
+                            -> '$.bayes_precision_fusion.source_clock_one_scheme.missing_sources'
+                    ) ELSE fp.provenance_json -> '$.bayes_precision_fusion.source_clock_one_scheme' END
+                ) AS carrier_fusion_json,
                 NULL AS snapshot_members_json
               FROM ready_posterior AS rs
               -- The dependency carries the exact certified posterior_id. Keep
@@ -1558,22 +1576,21 @@ def _raw_model_member_counts_for_posterior_rows(
 def _posterior_carrier_fusion(row: dict[str, Any]) -> object:
     """The row's ``bayes_precision_fusion`` carrier fields, projected or parsed."""
 
-    projected_ids = row.get("carrier_raw_model_forecast_ids_json")
-    if projected_ids is not None:
+    projected = row.get("carrier_fusion_json")
+    if projected is not None:
         try:
-            raw_ids = (
-                json.loads(projected_ids)
-                if isinstance(projected_ids, str)
-                else projected_ids
-            )
-        except (TypeError, json.JSONDecodeError):
+            fields = json.loads(projected) if isinstance(projected, str) else None
+        except json.JSONDecodeError:
             return None
-        return {
-            "raw_model_forecast_ids": raw_ids,
-            "decorrelated_providers_complete": row.get("carrier_complete"),
-            "decorrelated_providers_served": row.get("carrier_served"),
-            "decorrelated_providers_expected": row.get("carrier_expected"),
-        }
+        if not isinstance(fields, list) or len(fields) != 5:
+            return None
+        return dict(zip((
+            "current_value_serving",
+            "decorrelated_providers_complete",
+            "decorrelated_providers_served",
+            "decorrelated_providers_expected",
+            "source_clock_one_scheme",
+        ), fields))
     raw = row.get("provenance_json")
     if not raw:
         return None
@@ -1591,9 +1608,9 @@ def _posterior_provenance_raw_member_ids(row: dict[str, Any]) -> tuple[str, ...]
     live event still needs a concrete carrier-member count.  Some current-target
     materializations stamp the posterior with the anchor/source cycle while the
     persisted raw member rows came from the served previous cycle; in that shape
-    the strict same-cycle raw table count is zero even though the posterior carries
-    the raw_model_forecast_ids it was fused from.  Only accept that fallback when
-    the fusion provenance says the decorrelated provider set was complete.
+    the strict same-cycle raw table count is zero even though the posterior names
+    each served provider's raw_model_forecast_id.  Only accept that fallback when
+    the fusion provenance certifies the decorrelated provider set complete.
     """
 
     return certified_carrier_ids(_posterior_carrier_fusion(row))
@@ -1611,11 +1628,13 @@ def _with_posterior_raw_member_counts(
 ) -> list[dict[str, Any]]:
     """Attach raw-model carrier counts after fairness/restriction has bounded rows.
 
-    A posterior whose provenance certifies a complete carrier set (served ==
-    expected, carriers named) needs only those carriers, so a certified 2-of-2
+    A posterior whose provenance certifies a complete carrier set
+    (certified_carrier_ids) needs only those carriers, so a certified 2-of-2
     posterior is admitted; the certificate lowers the legacy floor, never raises
     it. Any other posterior keeps the legacy floor. A count of 0 (unknown or
-    unreadable) never passes.
+    unreadable) never passes. A certified row's expected members stay the
+    count its provenance declared, never the carriers counted here, so a
+    partial set is never relabelled complete.
     """
 
     counts = _raw_model_member_counts_for_posterior_rows(
@@ -1625,16 +1644,18 @@ def _with_posterior_raw_member_counts(
     )
     out: list[dict[str, Any]] = []
     for row, count in zip(rows, counts):
+        certified = certified_carrier_ids(_posterior_carrier_fusion(row))
         if count < spine_member_floor(_posterior_carrier_fusion(row)):
             continue
+        expected = len(certified) if certified else count
         enriched = dict(row)
-        for key in (
-            "expected_members",
-            "observed_members",
-            "sr_expected_members",
-            "sr_observed_members",
+        for key, value in (
+            ("expected_members", expected),
+            ("observed_members", count),
+            ("sr_expected_members", expected),
+            ("sr_observed_members", count),
         ):
-            enriched[key] = count
+            enriched[key] = value
         out.append(enriched)
     return out
 

@@ -7561,24 +7561,57 @@ def test_day0_current_authority_pre_submit_rejects_replacement_parent_mutations(
         _run_replacement_pre_submit_builder(fixture, proof=proof)
 
 
+# Carriers are the served providers' current_value_serving rows. Without a
+# source-clock scheme (whose posteriors skip this floor) each decorrelated
+# provider family is one provider.
 _CERTIFIED_TWO = {
     "decorrelated_providers_complete": True,
     "decorrelated_providers_served": 2,
     "decorrelated_providers_expected": 2,
-    "raw_model_forecast_ids": [1, 2],
+    "current_value_serving": {
+        "icon_global": {"raw_model_forecast_id": 1},
+        "ukmo_global_deterministic_10km": {"raw_model_forecast_id": 2},
+    },
 }
 _UNCERTIFIED_TWO = {
+    **_CERTIFIED_TWO,
     "decorrelated_providers_complete": False,
-    "decorrelated_providers_served": 2,
     "decorrelated_providers_expected": 3,
-    "raw_model_forecast_ids": [1, 2],
 }
+# Reviewer cases: each claims completeness and must still keep the legacy floor.
+_FLAG_ONLY_TWO_OF_THREE = {**_UNCERTIFIED_TWO, "decorrelated_providers_complete": True}
+_MALFORMED_IDS = {
+    **_CERTIFIED_TWO,
+    "current_value_serving": {
+        "icon_global": {"raw_model_forecast_id": "unreadable"},
+        "ukmo_global_deterministic_10km": {"raw_model_forecast_id": {}},
+    },
+}
+_THREE_DECLARED_TWO_NAMED = {
+    **_CERTIFIED_TWO,
+    "decorrelated_providers_served": 3,
+    "decorrelated_providers_expected": 3,
+}
+_REVIEWER_UNCERTIFIED = (
+    (_FLAG_ONLY_TWO_OF_THREE, False),
+    (_MALFORMED_IDS, False),
+    (_THREE_DECLARED_TWO_NAMED, False),
+)
+# Istanbul posterior 727765's shape: the dependency ids also name an older-cycle
+# row, so they outnumber the two served carriers.
+_DEPENDENCIES_OUTNUMBER_CARRIERS = {**_CERTIFIED_TWO, "raw_model_forecast_ids": [1, 2, 3]}
+_REVIEWER_IDS = ["complete-flag-2-of-3", "malformed-ids", "3-declared-2-named"]
+_CARRIER_CASES = [
+    (_CERTIFIED_TWO, True), (_UNCERTIFIED_TWO, False), *_REVIEWER_UNCERTIFIED,
+    (_DEPENDENCIES_OUTNUMBER_CARRIERS, True),
+]
+_CARRIER_IDS = ["certified-2-of-2", "2-of-3", *_REVIEWER_IDS, "dependencies-outnumber-carriers"]
 
 
 @pytest.mark.parametrize(
     "fusion,admitted",
-    [(_CERTIFIED_TWO, True), (_UNCERTIFIED_TWO, False), ({}, False)],
-    ids=["certified-2-of-2", "2-of-3", "no-certificate"],
+    [*_CARRIER_CASES, ({}, False)],
+    ids=[*_CARRIER_IDS, "no-certificate"],
 )
 def test_posterior_bound_members_floor_is_the_certified_carrier_count(monkeypatch, fusion, admitted):
     """Non-source-clock posterior: a certified carrier set sets its own floor."""
@@ -7590,19 +7623,22 @@ def test_posterior_bound_members_floor_is_the_certified_carrier_count(monkeypatc
             served_cycle="2026-07-13T00:00:00+00:00", captured_at="2026-07-13T01:00:00+00:00",
             age_hours=1.0, lead_days=0,
         )
-        for model, raw_id, value in (("a", 1, 33.0), ("b", 2, 34.0))
+        for model, raw_id, value in (
+            ("icon_global", 1, 33.0), ("ukmo_global_deterministic_10km", 2, 34.0)
+        )
     }
     monkeypatch.setattr(serving_module, "read_current_instrument_values", lambda *_a, **_k: served)
     monkeypatch.setattr(
         era, "runtime_cities_by_name",
         lambda: {"Hong Kong": SimpleNamespace(timezone="Asia/Hong_Kong", settlement_unit="C")},
     )
+    recorded = fusion.get("current_value_serving", {})
     provenance = {"bayes_precision_fusion": {
         **fusion,
-        "used_models": ["a", "b"],
+        "used_models": list(served),
         "current_value_serving": {
             model: {"raw_model_forecast_id": value.raw_model_forecast_id, "served_via": "single_runs",
-                    "served_cycle": value.served_cycle}
+                    "served_cycle": value.served_cycle, **recorded.get(model, {})}
             for model, value in served.items()
         },
     }}
@@ -7623,17 +7659,27 @@ def test_posterior_bound_members_floor_is_the_certified_carrier_count(monkeypatc
 
 @pytest.mark.parametrize(
     "fusion,admitted",
-    [(_CERTIFIED_TWO, True), (_UNCERTIFIED_TWO, False)],
-    ids=["certified-2-of-2", "2-of-3"],
+    [
+        *_CARRIER_CASES,
+        # No serving record names no served carrier, so the legacy-member path
+        # keeps three even for a complete 2-of-2 that lists two dependency ids,
+        # well-formed or not (round-2 repro malformed-elements, no serving).
+        ({**{k: v for k, v in _CERTIFIED_TWO.items() if k != "current_value_serving"},
+          "raw_model_forecast_ids": [1, 2]}, False),
+        ({**{k: v for k, v in _CERTIFIED_TWO.items() if k != "current_value_serving"},
+          "raw_model_forecast_ids": ["unreadable", {}]}, False),
+    ],
+    ids=[*_CARRIER_IDS, "legacy-members-no-serving", "legacy-members-malformed-ids-no-serving"],
 )
 def test_forecast_authority_payload_floor_is_the_certified_carrier_count(monkeypatch, fusion, admitted):
-    """Legacy-member carrier path: two members pass only with a certified carrier set."""
+    """Two members pass only with a certified carrier set, on either member path."""
     from src.data import replacement_forecast_bundle_reader as reader
 
     monkeypatch.setattr(
         era, "_spine_multimodel_members_for_event",
         lambda *_a, geometry_out, **_k: ([20.0, 22.0], "2026-09-28", []),
     )
+    monkeypatch.setattr(era, "_posterior_bound_multimodel_members", lambda *_a, **_k: (20.0, 22.0))
     monkeypatch.setattr(
         era, "runtime_cities_by_name",
         lambda: {"Tokyo": SimpleNamespace(settlement_unit="C", timezone="Asia/Tokyo")},

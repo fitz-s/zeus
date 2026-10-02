@@ -828,17 +828,47 @@ def test_entry_redecision_requires_spine_members_on_latest_posterior_cycle():
     ) == redecisions
 
 
+# Carriers are the served providers' current_value_serving rows. Without a
+# source-clock scheme each decorrelated provider family is one provider.
+_TWO_PROVIDERS = {
+    "icon_global": {"raw_model_forecast_id": 1},
+    "ukmo_global_deterministic_10km": {"raw_model_forecast_id": 2},
+}
+# Istanbul posterior 727765 (live, 2026-10-02 high): 2 of 2 source-clock
+# providers served; raw_model_forecast_ids also names an older-cycle row.
+_ISTANBUL_727765 = {
+    "decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
+    "decorrelated_providers_expected": 2, "raw_model_forecast_ids": [2620683, 2627830, 2628890],
+    "source_clock_one_scheme": {"configured_sources": ["ecmwf_ifs", "icon_global"], "missing_sources": []},
+    "current_value_serving": {
+        "ecmwf_ifs": {"raw_model_forecast_id": 2628890},
+        "icon_global": {"raw_model_forecast_id": 2620683},
+    },
+}
+
+
 @pytest.mark.parametrize(
     "fusion,admitted",
     [
         ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
-          "decorrelated_providers_expected": 2, "raw_model_forecast_ids": [1, 2]}, True),
+          "decorrelated_providers_expected": 2, "current_value_serving": _TWO_PROVIDERS}, True),
         ({"decorrelated_providers_complete": False, "decorrelated_providers_served": 2,
-          "decorrelated_providers_expected": 3, "raw_model_forecast_ids": [1, 2]}, False),
-        ({"decorrelated_providers_complete": True, "raw_model_forecast_ids": "garbage"}, False),
+          "decorrelated_providers_expected": 3, "current_value_serving": _TWO_PROVIDERS}, False),
+        ({"decorrelated_providers_complete": True, "current_value_serving": "garbage"}, False),
         (None, False),
+        # Reviewer cases: the flag alone, malformed ids, and fewer carriers than declared.
+        ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
+          "decorrelated_providers_expected": 3, "current_value_serving": _TWO_PROVIDERS}, False),
+        ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 2,
+          "decorrelated_providers_expected": 2, "current_value_serving": {
+              "icon_global": {"raw_model_forecast_id": "unreadable"},
+              "ukmo_global_deterministic_10km": {"raw_model_forecast_id": {}}}}, False),
+        ({"decorrelated_providers_complete": True, "decorrelated_providers_served": 3,
+          "decorrelated_providers_expected": 3, "current_value_serving": _TWO_PROVIDERS}, False),
+        (_ISTANBUL_727765, True),
     ],
-    ids=["certified-2-of-2", "2-of-3", "unreadable-ids", "no-provenance"],
+    ids=["certified-2-of-2", "2-of-3", "unreadable-serving", "no-provenance",
+         "complete-flag-2-of-3", "malformed-ids", "3-declared-2-named", "istanbul-727765"],
 )
 def test_entry_redecision_spine_floor_is_the_posteriors_certified_carrier_count(fusion, admitted):
     """A certified 2-of-2 posterior needs its two carriers; anything else keeps three."""

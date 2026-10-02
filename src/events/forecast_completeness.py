@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from src.data.forecast_target_contract import OPENDATA_MAX_STEP_HOURS
+from src.data.replacement_fusion_upgrade_trigger import DECORRELATED_PROVIDER_FAMILIES
 
 
 ForecastCompletenessStatus = Literal["COMPLETE", "PARTIAL_ALLOWED", "PARTIAL_BLOCKED"]
@@ -22,38 +23,78 @@ LEGACY_SPINE_MIN_MODELS = 3
 def certified_carrier_ids(fusion: object) -> tuple[str, ...]:
     """Carrier ids a ``bayes_precision_fusion`` provenance certifies complete.
 
-    Certified means decorrelated_providers_complete, or served >= expected > 0,
-    with the carriers named (raw_model_forecast_ids, else the current_value_serving
-    ids). Anything else, including unreadable fields, certifies nothing.
+    The carriers are the current_value_serving rows of the served providers,
+    named as the materializer counted them for decorrelated_providers_served
+    (see served_provider_models). raw_model_forecast_ids is the fusion's whole
+    dependency set (anchor and older-cycle rows included), so it never names
+    the carriers.
+
+    Certified only when every one of these holds; anything else, including any
+    type mismatch, certifies nothing:
+    - decorrelated_providers_complete is the JSON boolean true (the flag alone
+      never certifies);
+    - decorrelated_providers_served and decorrelated_providers_expected are
+      integers with served == expected > 0;
+    - exactly ``expected`` served providers are named, each by a serving entry
+      whose raw_model_forecast_id is a positive integer, all distinct.
     """
 
     if not isinstance(fusion, Mapping):
         return ()
-    complete = fusion.get("decorrelated_providers_complete") in (True, 1)
-    if not complete:
-        try:
-            served = int(fusion.get("decorrelated_providers_served") or 0)
-            expected = int(fusion.get("decorrelated_providers_expected") or 0)
-        except (TypeError, ValueError):
-            served = expected = 0
-        complete = expected > 0 and served >= expected
-    if not complete:
-        return ()
-    raw_ids = fusion.get("raw_model_forecast_ids")
-    if isinstance(raw_ids, list):
-        unique_ids = {str(value) for value in raw_ids if value not in (None, "")}
-        if unique_ids:
-            return tuple(sorted(unique_ids))
+    served = fusion.get("decorrelated_providers_served")
+    expected = fusion.get("decorrelated_providers_expected")
     serving = fusion.get("current_value_serving")
-    if isinstance(serving, Mapping):
-        unique_ids = {
-            str(details.get("raw_model_forecast_id"))
-            for details in serving.values()
-            if isinstance(details, Mapping) and details.get("raw_model_forecast_id") not in (None, "")
-        }
-        if unique_ids:
-            return tuple(sorted(unique_ids))
-    return ()
+    if (
+        fusion.get("decorrelated_providers_complete") is not True
+        or type(served) is not int
+        or type(expected) is not int
+        or not served == expected > 0
+        or not isinstance(serving, Mapping)
+    ):
+        return ()
+    providers = served_provider_models(fusion.get("source_clock_one_scheme"), serving)
+    if providers is None or len(providers) != expected:
+        return ()
+    ids = [
+        serving[model].get("raw_model_forecast_id")
+        if isinstance(serving.get(model), Mapping) else None
+        for model in providers
+    ]
+    if any(type(value) is not int or value <= 0 for value in ids) or len(set(ids)) != len(ids):
+        return ()
+    return tuple(str(value) for value in sorted(ids))
+
+
+def served_provider_models(scheme: object, serving: Mapping) -> tuple[str, ...] | None:
+    """The models the materializer counted as served providers, or None if unreadable.
+
+    With a source_clock_one_scheme the providers are its configured_sources less
+    its missing_sources; without one, each decorrelated provider family
+    (DECORRELATED_PROVIDER_FAMILIES) represented in ``serving`` is one provider,
+    and a family with two serving models names no single carrier. The anchor
+    and station sources belong to no family, so they are never providers.
+    """
+
+    if scheme is None:
+        by_family = [
+            [model for model in serving if model in members]
+            for members in DECORRELATED_PROVIDER_FAMILIES.values()
+        ]
+        if any(len(models) > 1 for models in by_family):
+            return None
+        return tuple(models[0] for models in by_family if models)
+    if not isinstance(scheme, Mapping):
+        return None
+    configured = scheme.get("configured_sources")
+    missing = scheme.get("missing_sources")
+    if (
+        not isinstance(configured, list)
+        or not isinstance(missing, list)
+        or any(type(model) is not str for model in (*configured, *missing))
+        or len(set(configured)) != len(configured)
+    ):
+        return None
+    return tuple(model for model in configured if model not in missing)
 
 
 def spine_member_floor(fusion: object) -> int:
