@@ -4053,6 +4053,7 @@ def _blocked_evidence_holds(
     *,
     forecast_db: Path | str | None,
     prospective: Mapping[str, object] | None = None,
+    exact_request: Mapping[str, object] | None = None,
 ) -> bool:
     """Absent: the fence never depended on the database (a named-input verdict).
     Present: with ``prospective`` (the request the caller would build now), the
@@ -4071,7 +4072,7 @@ def _blocked_evidence_holds(
     except (sqlite3.Error, OSError):
         return False
     try:
-        return evidence_holds(conn, evidence, prospective)
+        return evidence_holds(conn, evidence, prospective, exact_request=exact_request)
     finally:
         conn.close()
 
@@ -4135,7 +4136,7 @@ def _bound_verdict(
         or not _consumed_inputs_unchanged(witness)
         or (blocked and evidence is None)
         # The worker judged exactly the claimed request: its facts must still hold.
-        or not _blocked_evidence_holds(evidence, forecast_db=forecast_db)
+        or not _blocked_evidence_holds(evidence, forecast_db=forecast_db, exact_request=payload)
     ):
         return None
     after = _blocked_attempt_fingerprint(
@@ -7539,6 +7540,7 @@ def _process_claimed_materialization_batch(
     preflight_blocked: list[str] = []
     unchanged_success: list[str] = []
     stale_day0_superseded: list[str] = []
+    cert_superseded: list[str] = []
     source_cycle_regressions: list[str] = []
     source_cycles_awaiting_ensemble: list[str] = []
     already_covered: list[str] = []
@@ -7960,6 +7962,22 @@ def _process_claimed_materialization_batch(
                 f"ERROR:{_subprocess_result_error_type(completed)}",
             )
             bound_fingerprint, dependencies, evidence = bound
+            if evidence is not None and evidence.get("reason") == "READINESS_CERT_SUPERSEDED":
+                # SCOPE: this exact failed request, its consumed files, and the
+                # canonical strictly newer incumbent. DRAIN: terminal receipt
+                # under normal queue ownership. RESET: the obsolete claim is
+                # gone; newer requests are independently selected/re-decided.
+                # Never turn supersession into READY or a family-wide fence.
+                receipt = _record_latest_terminal_request(
+                    input_json, processed_path=processed_path, request_payload=item.request_payload,
+                    receipt_dir_name="superseded_latest", status="SKIPPED_READINESS_CERT_SUPERSEDED",
+                    reason_codes=("READINESS_CERT_SUPERSEDED",),
+                    result_evidence={"attempt_fingerprint": bound_fingerprint,
+                                     "blocked_evidence": evidence},
+                )
+                processed.append(str(receipt))
+                cert_superseded.append(str(receipt))
+                continue
             try:
                 _write_blocked_attempt_marker(
                     marker_path=item.marker_path,
@@ -8055,6 +8073,8 @@ def _process_claimed_materialization_batch(
         reasons.append(_UNCHANGED_SUCCESS_SKIP_REASON)
     if stale_day0_superseded:
         reasons.append(_STALE_DAY0_OWNER_SUPERSEDED_REASON)
+    if cert_superseded:
+        reasons.append("READINESS_CERT_SUPERSEDED")
     if source_cycle_regressions:
         reasons.append("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION")
     if source_cycles_awaiting_ensemble:

@@ -15855,22 +15855,31 @@ def test_same_turn_reauction_rejects_ordinary_snapshot_debt(monkeypatch):
     assert published == []
 
 
-def test_reauction_deadline_expires_before_external_publish(monkeypatch):
+def test_reauction_deadline_expires_before_external_publish(monkeypatch, caplog):
     from contextlib import nullcontext
     from types import SimpleNamespace
 
     from src.execution import executor, exit_lifecycle
 
     position = SimpleNamespace(trade_id="deadline-before-publish")
+    checkpoints = []
 
     class Conn:
         in_transaction = False
 
+        def execute(self, statement):
+            assert statement == 'BEGIN IMMEDIATE'
+            assert not self.in_transaction
+            checkpoints.append('begin')
+            self.in_transaction = True
+
         def commit(self):
-            pass
+            checkpoints.append('commit')
+            self.in_transaction = False
 
         def rollback(self):
-            pass
+            checkpoints.append('rollback')
+            self.in_transaction = False
 
     conn = Conn()
     monotonic = iter((0.0, 0.0, 0.0, 0.0, 0.0, 6.0))
@@ -15907,11 +15916,12 @@ def test_reauction_deadline_expires_before_external_publish(monkeypatch):
         "_canonical_global_sell_command_ownership",
         lambda *_args, **_kwargs: "GLOBAL_NO_COMMAND",
     )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_record_global_sell_reauction_publish_claim",
-        lambda *_args, **_kwargs: True,
-    )
+    def claim(claim_conn, *_args):
+        assert claim_conn.in_transaction
+        checkpoints.append('claim')
+        return True
+
+    monkeypatch.setattr(exit_lifecycle, "_record_global_sell_reauction_publish_claim", claim)
     monkeypatch.setattr(
         executor,
         "_canonical_trade_write_lease",
@@ -15926,6 +15936,10 @@ def test_reauction_deadline_expires_before_external_publish(monkeypatch):
         deadline_monotonic=5.0,
     )
     assert published == []
+    assert 'reason=DEADLINE_EXPIRED_AFTER_CLAIM' in caplog.text
+    assert 'PUBLISH_CLAIM_FAILED' not in caplog.text
+    assert checkpoints == ['begin', 'claim', 'commit']
+    assert not conn.in_transaction
 
 def test_persisted_exit_envelope_rejects_non_maker_non_fak_mode(conn):
     from src.state.venue_command_repo import insert_command
@@ -18541,13 +18555,14 @@ def _seed_pending_lineage_debt(conn, *, position_id='pending-lineage', lineage=N
     )
 
 
-def _seed_post_debt_monitor(conn, position_id, *, trigger='HOLD', fresh=True, lineage=None):
+def _seed_post_debt_monitor(conn, position_id, *, trigger='HOLD', fresh=True, lineage=None,
+                            should_exit=False):
     seq = conn.execute('SELECT max(sequence_no)+1 FROM position_events WHERE position_id=?',
                        (position_id,)).fetchone()[0]
     event_id = f'{position_id}:monitor_refreshed:{seq}'
     payload = {
         'last_monitor_prob_is_fresh': fresh, 'last_monitor_market_price_is_fresh': fresh,
-        'exit_decision_available': True, 'exit_decision_should_exit': False,
+        'exit_decision_available': True, 'exit_decision_should_exit': should_exit,
         'exit_decision_trigger': trigger, 'exit_decision_reason': trigger,
         'held_sell_reauction_monitor_lineage': {
             'monitor_event_id': event_id, 'selection_epoch_identity': '',
@@ -18571,6 +18586,100 @@ def _capture_family_preparation(monkeypatch, *, accepted=True):
         lambda position: calls.append(position.trade_id) or accepted,
     )
     return calls
+
+
+@pytest.mark.parametrize('path', ['retire_hold', 'bind_lineage'])
+@pytest.mark.parametrize('interleaving', ['new_sell', 'new_hold', 'missing', 'unfresh', 'unchanged'])
+def test_pending_lineage_monitor_is_rechecked_in_claim_transaction(
+    conn, monkeypatch, path, interleaving,
+):
+    from src.execution import executor, exit_lifecycle
+
+    position = _seed_pending_lineage_debt(conn)
+    lineage = ({'selection_epoch_identity': 'epoch-old',
+                'sell_book_witness_identity': 'book-old'}
+               if path == 'bind_lineage' else None)
+    expected_monitor = _seed_post_debt_monitor(
+        conn, position.trade_id, lineage=lineage,
+        trigger='GLOBAL_CAPITAL_OPTIMAL_SELL' if lineage else 'HOLD',
+        should_exit=bool(lineage),
+    )
+    _capture_family_preparation(monkeypatch)
+    original_lease = executor._canonical_trade_write_lease
+    original_read = exit_lifecycle._latest_post_debt_monitor
+    reads = []
+    requested = []
+
+    def read_monitor(read_conn, position_id):
+        reads.append(read_conn.in_transaction)
+        return original_read(read_conn, position_id)
+
+    @contextmanager
+    def interleaved_lease(lease_conn, **kwargs):
+        # Commit another canonical event after the initial read but before
+        # acquiring the real lease; the leased transaction must see it.
+        if interleaving == 'missing':
+            row = conn.execute(
+                "SELECT payload_json FROM position_events WHERE position_id=? "
+                "AND event_type='EXIT_RETRY_RELEASED' ORDER BY sequence_no DESC LIMIT 1",
+                (position.trade_id,),
+            ).fetchone()
+            seq = conn.execute(
+                'SELECT max(sequence_no)+1 FROM position_events WHERE position_id=?',
+                (position.trade_id,),
+            ).fetchone()[0]
+            conn.execute('''INSERT INTO position_events
+                (event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+                 phase_before, phase_after, strategy_key, source_module, payload_json, env)
+                VALUES (?, ?, 1, ?, 'EXIT_RETRY_RELEASED', ?, 'day0_window', 'day0_window',
+                        'center_buy', 'src.execution.exit_lifecycle', ?, 'live')''',
+                (f'{position.trade_id}:new-release:{seq}', position.trade_id, seq,
+                 _NOW.isoformat(), row['payload_json']))
+            conn.commit()
+        elif interleaving != 'unchanged':
+            new_sell = interleaving == 'new_sell'
+            _seed_post_debt_monitor(
+                conn, position.trade_id, fresh=interleaving != 'unfresh',
+                trigger='GLOBAL_CAPITAL_OPTIMAL_SELL' if new_sell else 'HOLD',
+                should_exit=new_sell,
+                lineage=({'selection_epoch_identity': 'epoch-new',
+                          'sell_book_witness_identity': 'book-new'} if new_sell else None),
+            )
+        with original_lease(lease_conn, **kwargs) as lease:
+            yield lease
+
+    monkeypatch.setattr(executor, '_canonical_trade_write_lease', interleaved_lease)
+    monkeypatch.setattr(exit_lifecycle, '_latest_post_debt_monitor', read_monitor)
+    result = exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position, conn=conn,
+        requester=lambda *_a: requested.append(True) or True,
+    )
+    changed = interleaving != 'unchanged'
+    if changed:
+        assert result is False
+        assert requested == []
+        assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+        assert conn.execute(
+            "SELECT count(*) FROM position_events WHERE position_id=? "
+            "AND venue_status IN ('lineage_unbindable_retired', 'publish_claimed')",
+            (position.trade_id,),
+        ).fetchone()[0] == 0
+    elif path == 'retire_hold':
+        assert result is False
+        assert requested == []
+        assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+        row = conn.execute(
+            'SELECT payload_json FROM position_events WHERE position_id=? '
+            'ORDER BY sequence_no DESC LIMIT 1', (position.trade_id,),
+        ).fetchone()
+        assert json.loads(row['payload_json'])['retired_by_monitor_event_id'] == expected_monitor
+    else:
+        assert result is True
+        assert requested == [True]
+        assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+    assert reads == [False, True]
+    assert not conn.in_transaction
+    assert conn.execute('SELECT count(*) FROM venue_commands').fetchone()[0] == 0
 
 
 def test_pending_lineage_debt_under_fresh_hold_requests_binding_then_retires_typed(

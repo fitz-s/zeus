@@ -9036,14 +9036,17 @@ def _cert_regression_evidence(
     *,
     metric: str,
     incoming_posterior_id: int,
+    exact_supersession: bool = False,
 ) -> Mapping[str, object] | None:
     """What the cert-regression refusal judged: the incumbent certificate's row,
-    its bound posterior's serving key, and the incoming key. LOW is not covered:
-    its retired-dataset yield proof reads further rows this record does not name."""
-    if metric != "high":
+    its bound posterior's serving key, and the incoming key. LOW is not covered
+    by a family fence. Exact supersession covers only a positively current
+    incumbent dataset, which disproves the retired-LOW yield prerequisite."""
+    if metric != "high" and not exact_supersession:
         return None
     from src.data.materialization_block_evidence import (  # noqa: PLC0415
-        CERT_REGRESSION, blocked_evidence, cert_regression_item,
+        CERT_REGRESSION, CERT_SUPERSEDED, blocked_evidence, cert_regression_item,
+        current_low_incumbent_basis,
     )
     from src.state.readiness_repo import _compose_scope_key, _to_iso  # noqa: PLC0415
 
@@ -9063,14 +9066,24 @@ def _cert_regression_evidence(
         incumbent_id = None if incumbent is None else _bound_posterior_id(incumbent[0])
         incumbent_key = None if incumbent_id is None else _posterior_serving_key(conn, incumbent_id)
         incoming_key = _posterior_serving_key(conn, incoming_posterior_id)
+        low_basis = (current_low_incumbent_basis(conn, incumbent_id)
+                     if exact_supersession and metric == "low" and incumbent_id is not None else None)
     except Exception:  # noqa: BLE001 - unreadable evidence binds nothing
         return None
     if incumbent_id is None or incumbent_key is None or incoming_key is None:
         return None
-    return blocked_evidence(conn, request, CERT_REGRESSION, [cert_regression_item(
+    if exact_supersession and metric == "low" and low_basis is None:
+        return None
+    item = cert_regression_item(
         scope_key=scope_key, incumbent_posterior_id=incumbent_id,
         incumbent_key=incumbent_key, incoming_key=incoming_key,
-    )])
+    )
+    reason = CERT_SUPERSEDED if exact_supersession else CERT_REGRESSION
+    if exact_supersession:
+        item.update(kind=CERT_SUPERSEDED, incoming_posterior_id=incoming_posterior_id)
+        if metric == "low":
+            item["current_low_incumbent_basis"] = low_basis
+    return blocked_evidence(conn, request, reason, [item])
 
 
 def _readiness_cert_cycle_regression_reasons(
@@ -9482,6 +9495,7 @@ def write_prepared_replacement_forecast_live(
             readiness_id=None,
             evidence=_cert_regression_evidence(
                 conn, request, metric=metric, incoming_posterior_id=posterior_id,
+                exact_supersession=True,
             ),
         )
     expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]

@@ -27,6 +27,9 @@ Covered reasons (``SUPPORTED``) and their exact, required items:
 - CERT_REGRESSION (HIGH only): [CLOCK, CERT_REGRESSION]. The incumbent certificate
   at scope_key binds a posterior whose serving key is strictly newer than the
   incoming (source_cycle_time, effective clock).
+- CERT_SUPERSEDED: [CLOCK, CERT_SUPERSEDED], admitted only with the exact failed
+  request. LOW additionally binds a current incumbent baseline dataset, which
+  disproves the retired-dataset yield prerequisite. It cannot fence a family.
 - NO_COHERENT_COHORT: [CLOCK, NO_COHERENT_COHORT]. No coherent current provider
   cohort exists at the effective clock, over every model the family has rows for,
   station sources included; an empty superset cohort leaves every path's cohort
@@ -41,17 +44,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+import json
 import sqlite3
 
 EVIDENCE_REVISION = "materialization_block_evidence_v2"
 CLOCK = "MATERIALIZATION_CLOCK"
 STALE_CYCLE = "OM9_SOURCE_CYCLE_TOO_STALE"
 CERT_REGRESSION = "READINESS_CERT_CYCLE_REGRESSION"
+CERT_SUPERSEDED = "READINESS_CERT_SUPERSEDED"
 NO_COHERENT_COHORT = "NO_COHERENT_CURRENT_PROVIDER_COHORT"
 # reason -> the item kinds it must carry, in order (CLOCK first, each exactly once).
 SUPPORTED: dict[str, tuple[str, ...]] = {
     STALE_CYCLE: (CLOCK,),
     CERT_REGRESSION: (CLOCK, CERT_REGRESSION),
+    CERT_SUPERSEDED: (CLOCK, CERT_SUPERSEDED),
     NO_COHERENT_COHORT: (CLOCK, NO_COHERENT_COHORT),
 }
 # clock role -> (request field naming its run, request field of its fallback clock)
@@ -136,6 +142,33 @@ def cert_regression_item(
     }
 
 
+def current_low_incumbent_basis(conn, posterior_id: int) -> dict[str, object] | None:
+    """A current dataset proves the retired-LOW yield precondition false.
+
+    This positive, exact-row proof covers only current incumbents. A retired,
+    missing or unreadable baseline remains unbound; do not duplicate or weaken
+    the migration's snapshot/coverage/current-ENS predicate.
+    """
+    from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
+
+    row = conn.execute(
+        "SELECT dependency_source_run_ids_json FROM forecast_posteriors WHERE posterior_id=?",
+        (posterior_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    dependencies = json.loads(str(row[0]))
+    run_id = dependencies.get("baseline_b0") if isinstance(dependencies, Mapping) else None
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    run = conn.execute("SELECT source_id,dataset_id FROM source_run WHERE source_run_id=?", (run_id,)).fetchone()
+    expected = expected_replacement_dependency_identity_by_role("low")["baseline_b0"]
+    if run is None or run[0] != "ecmwf_open_data" or run[1] != expected.data_version:
+        return None
+    return {"dependencies_json": row[0], "baseline_source_run_id": run_id,
+            "source_id": run[0], "dataset_id": run[1]}
+
+
 def no_cohort_item(*, window_hours: float, decision_time_iso: str,
                    day0_remaining_from_iso: str | None = None) -> dict[str, object]:
     item = {
@@ -191,6 +224,8 @@ def _well_formed(evidence: object, prospective: Mapping[str, object] | None) -> 
         return False
     if prospective is None:
         return True
+    if reason == CERT_SUPERSEDED:
+        return False  # exact failed request only, never a prospective family fence
     scope = evidence.get("scope")
     if not isinstance(scope, Mapping) or any(
         not scope.get(field) or str(scope[field]) != str(prospective.get(field) or "")
@@ -261,6 +296,30 @@ def _recorded_facts_hold(conn, evidence: Mapping[str, object]) -> bool:
     ):
         return False
     item = evidence["items"][-1]
+    if evidence["reason"] == CERT_SUPERSEDED:
+        incumbent = _incumbent_key(conn, item)
+        incoming = tuple(_utc(value, "incoming_key") for value in item["incoming_key"])
+        if incumbent is None or tuple(value.isoformat() for value in incumbent) != tuple(item["incumbent_key"]):
+            return False
+        scope = evidence["scope"]
+        for posterior_id, expected_key in ((item["incumbent_posterior_id"], incumbent),
+                                            (item["incoming_posterior_id"], incoming)):
+            row = conn.execute(
+                "SELECT source_cycle_time,computed_at,source_id,runtime_layer,city,target_date,temperature_metric"
+                " FROM forecast_posteriors WHERE posterior_id=?", (posterior_id,),
+            ).fetchone()
+            if row is None or tuple(row[2:]) != ("openmeteo_ecmwf_ifs9_bayes_fusion", "live",
+                    scope["city"], scope["target_date"], scope["temperature_metric"]):
+                return False
+            if (_utc(row[0], "source_cycle_time"), _utc(row[1], "computed_at")) != expected_key:
+                return False
+        if scope["temperature_metric"] == "low":
+            basis = current_low_incumbent_basis(conn, int(item["incumbent_posterior_id"]))
+            if basis is None or basis != item.get("current_low_incumbent_basis"):
+                return False
+        elif scope["temperature_metric"] != "high":
+            return False
+        return _serving_key_strictly_newer(incumbent, incoming)
     if evidence["reason"] == CERT_REGRESSION:
         incumbent = _incumbent_key(conn, item)
         incoming = tuple(_utc(value, "incoming_key") for value in item["incoming_key"])
@@ -297,6 +356,8 @@ def evidence_holds(
     conn: sqlite3.Connection,
     evidence: object,
     prospective: Mapping[str, object] | None = None,
+    *,
+    exact_request: Mapping[str, object] | None = None,
 ) -> bool:
     """See the module doc. Malformed, unsupported, unbound or unreadable never holds."""
     if not _well_formed(evidence, prospective):
@@ -305,10 +366,23 @@ def evidence_holds(
     try:
         if owns:
             conn.execute("BEGIN")
+        if evidence["reason"] == CERT_SUPERSEDED:
+            if exact_request is None or prospective is not None:
+                return False
+            if any(str(evidence["scope"].get(field) or "") != str(exact_request.get(field) or "")
+                   for field in _SCOPE_FIELDS):
+                return False
+            if any(run.get("source_run_id") != (exact_request.get(_ROLES[run["role"]][0]) or None)
+                   for run in evidence["items"][0]["source_runs"]):
+                return False
+            request_key = (_utc(exact_request["source_cycle_time"], "source_cycle_time"),
+                           effective_computed_at(conn, exact_request))
+            incoming = tuple(_utc(value, "incoming_key") for value in evidence["items"][-1]["incoming_key"])
+            return request_key == incoming and _recorded_facts_hold(conn, evidence)
         if prospective is None:
             return _recorded_facts_hold(conn, evidence)
         return _prospective_blocks(conn, evidence, prospective)
-    except (EvidenceUnavailable, sqlite3.Error, KeyError, TypeError, ValueError, AttributeError):
+    except (EvidenceUnavailable, sqlite3.Error, OSError, KeyError, TypeError, ValueError, AttributeError):
         return False
     finally:
         if owns and conn.in_transaction:

@@ -421,6 +421,140 @@ remains unproved. Do not change write priority, budget or snapshot semantics bas
 on that single rejection. It remains a retry/observability gap, not an established
 money-path repair. The latency lane owns actual normal-cut callback attribution.
 
+### October 2 current acceptance and pending-lineage retirement race
+
+Checked at 18:29-18:31 UTC; basis is current loaded stamp, process/canonical
+handles, heartbeats and canonical command/event rows; until recheck-on-use.
+Normal runtime is `6788c294c` (contains `4b819fa`), main 77219, ingest 32110,
+forecast 32139, unchanged config hash `d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae`,
+GREEN and no active global gates. Chicago command `3192636f0f4240aa` already
+drained through CANCEL_REQUESTED/CANCEL_ACKED at 12:22:31/12:22:33, with zero
+fill and voided position. The current authenticated absence did not cause a
+second cancellation or restart. Do not attribute another owner's earlier
+normal cancellation/loading to this acceptance check.
+
+The real HOLD wake counter is now present (13 at 18:29:29). The original 50
+HOLD/SELL antibodies independently pass on `6788c294c`; this alone does not
+prove request-to-action convergence. Two normal full cuts at 18:29:31.736545
+and 18:29:56.525579 each execute 233 ENTRY plus 19 HELD callbacks without
+duplicate `(family,lane)` calls. Preparation takes 11.194/15.205 seconds and
+reservation-to-terminal takes 20.955/25.378 seconds, within the original
+45-second deadline. The older count of 97 means successful preparations,
+not the full traversed universe. These two observations do not establish
+continuous readiness or a fill/profit guarantee.
+
+Successor review finds a new canonical retirement race in `a699accf0`: a fresh
+HOLD read before acquiring the writer lease can be superseded by a fresh SELL
+monitor; `_retire_unbindable_hold_sell_debt` rechecks debt generation, command
+ownership and phase but not that monitor. A real-lease antibody commits the
+superseding monitor before acquisition and reproduces erroneous retirement.
+Plan the smallest repair in existing `src/execution/exit_lifecycle.py` and
+`tests/test_exit_safety.py`: re-read the latest post-debt monitor inside the
+canonical transaction, require the exact expected event and still-fresh HOLD
+without bindable lineage, otherwise preserve debt. SCOPE is one pending-lineage
+V4 obligation and its expected monitor event. DRAIN is the existing next
+recovery cadence, binding current SELL lineage or requesting full-family
+preparation. RESET is retirement proved by the same transaction's current HOLD,
+or normal current-lineage rebind; newer SELL/HOLD, absent/stale evidence and
+new command/phase ownership must refuse stale retirement. Its symmetric
+pending-to-bound claim path also reads monitor lineage before the lease; a newer
+monitor must prevent publishing the obsolete binding. Only a binding newly
+assembled from this pending-lineage read receives the exact expected-monitor
+guard; previously complete crash-recovery obligations keep their existing law.
+The lease coordinates canonical writers but does not itself start SQLite's
+transaction, so both affected branches explicitly begin the transaction before
+their authoritative re-read and commit the event with that same snapshot.
+The formal matrix has eight supersession behavior failures plus two unchanged
+twins proving that the authoritative re-read must be in a transaction.
+No probability,
+economic, execution-band, risk, writer-budget or venue permission changes.
+Acceptance requires the supersession antibody plus unchanged-HOLD, missing,
+stale and newly-bindable-lineage twins, affected exit checks, normal landing
+and loading, then current runtime redecision evidence. Remaining source-current
+and request-to-receipt gaps stay open until their independent current checks.
+
+Current LOW source-clock DRAIN defect, independently observed through 18:41 UTC:
+Hong Kong October 3 LOW repeatedly claims its 15:19:47 request, correctly rejects
+readiness regression against incumbent 726635 computed 16:08:41, then retains
+it as UNCLASSIFIED. The newer 18:30:52 request remains queued. Materializer
+`_cert_regression_evidence` deliberately excludes LOW because its retired-dataset
+yield depends on additional rows; the queue consequently cannot bind this
+otherwise legitimate refusal. This is not an exception-string classification
+bug, nor permission to delete an unknown failed request.
+
+Plan the bounded repair in existing
+`src/data/replacement_forecast_materializer.py`,
+`src/data/materialization_block_evidence.py`,
+`src/data/replacement_forecast_live_materialization_queue.py` and
+`tests/test_cycle_monotone_materialization.py`. At the actual regression refusal
+boundary provide a narrowly typed exact-request supersession witness only when
+the claimed inputs and canonical newer incumbent, source/serving identity and
+every LOW yield dependency are bound and reproduced by the queue. Preserve the
+regression rejection and legitimate retired-ENS migration. SCOPE is the exact
+obsolete failed request, never all LOW or the city family. DRAIN consumes only
+that proved superseded request through normal queue ownership and selects the
+new pending request normally. RESET is absence of that obsolete claim and a
+fresh normal decision on the newer request; do not write READY/success or a
+family-wide permanent blocked marker. Changed/missing evidence and truly
+unknown errors remain retained. Acceptance requires actual materializer/queue
+RED-to-GREEN LOW and HIGH twins, the LOW legitimate-yield twin, incumbent and
+dependency mutation negatives, next-request selection and normal post-load
+request/source/certificate/consumer convergence. The unrelated Hong Kong HIGH
+vector semantic mismatch stays separately attributed until its normal reseed
+can be verified; this LOW fix cannot claim to resolve HIGH.
+
+Acceptance update, checked 18:34-18:49 UTC; until recheck-on-use. A single RO
+matrix has 282 current/future market roots across 49 cities, 264 latest v6,
+six expired v5 and 12 missing certificates. Ordinary ENTRY-reader results
+(including already-ended local days) are not Day0 global-consumer coverage.
+Actual provider bodies independently prove 561 grid records' returned coordinates
+and entity hashes against 79 bodies; ten station forecasts do not invent grid
+coordinates. Six original native GRIB LSM files prove all 264 current v6 refs
+across 47 cities: native indices/coordinates/fractions and four-neighbor values
+match, with 21 actual closer-SEA exclusions. The six expired v5 refs lack the old
+September 30 mask and remain unproved/non-authoritative. A native temperature
+message's variable/height/unit/window and grid hash were independently checked;
+this is not a full ENS temperature-body replay or proof of the provider API's
+honestly UNKNOWN native-file-variable field.
+
+Hong Kong October 3 HIGH reseeded normally to posterior 727003, computed
+18:42:42.923702 and recorded 18:43:04, carrying the 18:30 HKO observation.
+Actual vector/bundle/hash validation succeeds and global cut 14855/decision
+892904 consumes it without the prior semantic-mismatch first block. Its rejected
+legs still obey price-band, depth and expected-objective law; no order is forced.
+The HIGH recovery is normal DRAIN, not an effect of the not-yet-loaded LOW patch.
+
+Real HOLD-to-generic publication and later same-family full-wealth redecision
+are observed for Singapore position 2259b2ad-176: wake 0e1bfc122be945548fc4ef6ba94c63f9
+at 18:31:01, subsequent cut/receipt 892847 with fresh exact holding/book/q and
+negative point delta-log yields lawful NO_TRADE. Generic markers/receipts lack
+exact wake-ID acknowledgement lineage; do not claim that particular ack or an
+82.917-second completion SLA. Expanded parent integration gives 89 pass and six
+failures, all six independently reproduced with original `6788c294c` exit code
+and identical XML failure attributes after only address/test-run-path
+normalization. The narrow 33 exit checks and original 50 real-capability
+HOLD/SELL checks pass; this does not make the entire baseline clean. Independent
+review caught a missing `Conn.execute` deadline-test double: the strengthened
+test now proves BEGIN/claim/commit then DEADLINE_EXPIRED_AFTER_CLAIM, rather than
+silently passing via AttributeError. Production cross-connection contention and
+post-commit retirement hard-deadline stress were not run.
+
+LOW implementation checkpoint: the current-incumbent baseline dataset exactly
+matches the active coordinate-bound LOW identity, decisively excluding the
+retired-dataset yield prerequisite without copying its remaining predicates.
+The normal queue revalidates exact request/files/source clocks, incumbent pointer
+and LOW basis before recording SKIPPED_READINESS_CERT_SUPERSEDED; no family
+marker, READY or successful current forecast is written. Formal supersession
+antibodies give 10 RED/one unaffected pass, then 32 focused GREEN, including real
+consumed-file SHA/version mutations, unknown retention and legitimate retired-
+LOW yield. Parent runs the full cycle-monotone file plus real HOLD/SELL and new
+exit antibodies: 177 pass, one failure. That single short-hourly-manifest fixture
+also fails on all three original `6788c294c` modules with identical normalized
+failure attributes. This is no new regression, not an all-suite clean claim.
+Normal landing/loading and actual LOW obsolete-claim/new-consumer drainage
+remain pending; new upstream source-window/capture fixes must be incorporated
+and proved before loading.
+
 Latest complete live stored-row audit is loss's existing
 `/Users/leofitz/.codex/worktrees/all-city-total-loss-pipeline/zeus/docs/operations/current/evidence/all_city_latest_probability_source_coverage_20260930T161539Z.json`,
 SHA256 `9222032d6bfe31fc09752563cb392d82f479d0760b6d4eae1523a6949de6c121`.

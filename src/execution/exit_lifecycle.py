@@ -13227,14 +13227,28 @@ def _retire_unbindable_hold_sell_debt(
 ) -> bool:
     """Durably retire one pending-lineage V4 debt that a fresh HOLD superseded.
 
-    Caller holds the canonical trade write lease. The retired obligation is the
-    newest obligation-carrying row, so ``latest_held_sell_reauction_obligation``
+    Caller holds the canonical trade write lease and transaction. The retired
+    obligation is the newest row, so ``latest_held_sell_reauction_obligation``
     returns no live obligation and a later SELL arms a fresh one.
     """
 
     from src.state.db import append_many_and_project
 
     trade_id = str(getattr(position, "trade_id", "") or "").strip()
+    monitor = _latest_post_debt_monitor(conn, trade_id)
+    current_monitor_id, _, payload = monitor or ("", "", {})
+    lineage = payload.get("held_sell_reauction_monitor_lineage")
+    lineage = lineage if isinstance(lineage, Mapping) else {}
+    if not (
+        current_monitor_id == monitor_event_id
+        and _monitor_evidence_is_fresh(payload)
+        and payload.get("exit_decision_available") is True
+        and payload.get("exit_decision_should_exit") is False
+        and payload.get("exit_decision_trigger") == "HOLD"
+    ) or all(str(lineage.get(key) or "").strip() for key in (
+        "selection_epoch_identity", "sell_book_witness_identity",
+    )):
+        return False
     current = latest_held_sell_reauction_obligation(conn, position)
     if (
         str(current.get("generation") or "") != str(obligation.get("generation") or "")
@@ -13372,13 +13386,15 @@ def _recover_global_sell_snapshot_reauction_debt(
         return "AWAITING_IN_BAND_LIQUIDITY"
     trade_id = str(getattr(position, "trade_id", "") or "").strip()
     retire_monitor_event_id = ""
+    bound_monitor_event_id = ""
     if obligation.get("schema_version") == 4 and not all(
         str(obligation.get(key) or "").strip() for key in _V4_CLAIM_LINEAGE_FIELDS
     ):
         # SCOPE: one V4 debt whose claim lineage is pending. DRAIN: bind the
         # newest post-debt fresh monitor's global-cut lineage, else ask the
         # auction to prepare the full family. RESET: a bound claim, or a typed
-        # retirement when a fresh HOLD shows no lineage can bind this debt.
+        # retirement when the same current fresh HOLD cannot bind this debt.
+        # Supersession retains debt for the next cadence's current rebind.
         try:
             monitor = _latest_post_debt_monitor(conn, trade_id)
         except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -13389,6 +13405,7 @@ def _recover_global_sell_snapshot_reauction_debt(
         epoch = str(lineage.get("selection_epoch_identity") or "").strip()
         witness = str(lineage.get("sell_book_witness_identity") or "").strip()
         if monitor_event_id and _monitor_evidence_is_fresh(payload) and epoch and witness:
+            bound_monitor_event_id = monitor_event_id
             obligation = {
                 **obligation,
                 "selection_epoch_identity": epoch,
@@ -13431,6 +13448,8 @@ def _recover_global_sell_snapshot_reauction_debt(
                 priority=WritePriority.MONITOR,
             ):
                 ensure_live()
+                # The lease serializes writers; it does not open a transaction.
+                conn.execute("BEGIN IMMEDIATE")
                 if not _retire_unbindable_hold_sell_debt(
                     conn,
                     position,
@@ -13457,6 +13476,22 @@ def _recover_global_sell_snapshot_reauction_debt(
             priority=WritePriority.MONITOR,
         ):
             ensure_live()
+            conn.execute("BEGIN IMMEDIATE")
+            if bound_monitor_event_id:
+                monitor = _latest_post_debt_monitor(conn, trade_id)
+                current_monitor_id, _, payload = monitor or ("", "", {})
+                lineage = payload.get("held_sell_reauction_monitor_lineage")
+                lineage = lineage if isinstance(lineage, Mapping) else {}
+                if not (
+                    current_monitor_id == bound_monitor_event_id
+                    and _monitor_evidence_is_fresh(payload)
+                    and all(
+                        str(lineage.get(key) or "").strip() == obligation[key]
+                        for key in ("selection_epoch_identity", "sell_book_witness_identity")
+                    )
+                ):
+                    conn.rollback()
+                    return "LINEAGE_PENDING_BINDING_SUPERSEDED"
             ownership = _canonical_global_sell_command_ownership(
                 conn,
                 position,

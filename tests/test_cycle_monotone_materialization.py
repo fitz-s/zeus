@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-10-02 (shared broad plan); 2026-09-15 (causal baseline completion witness;
+# Last reused or audited: 2026-10-02 (exact-request LOW/HIGH cert supersession); 2026-09-15 (causal baseline completion witness;
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
 # Lifecycle: created=2026-06-12; last_reviewed=2026-10-01; last_reused=2026-10-01
@@ -3630,6 +3630,179 @@ def test_evidence_binds_only_its_own_scope_and_roles(tmp_path) -> None:
         assert not evidence_holds(conn, evidence, {**stale, **change}), change
     # A fresh anchor cycle at the prospective clock is no longer stale.
     assert not evidence_holds(conn, evidence, {**stale, "openmeteo_source_cycle_time": "2026-10-01T00:00:00+00:00"})
+    conn.close()
+
+
+def _cert_supersession_context(tmp_path, monkeypatch, metric):
+    """Real final-write refusal and queue retention; upstream q is already prepared."""
+    from dataclasses import replace
+    import src.data.replacement_forecast_materializer as mat
+    import src.data.replacement_forecast_live_materialization_queue as queue
+    from src.state.readiness_repo import write_readiness_state
+    from tests.test_replacement_forecast_materializer import _request
+
+    db = tmp_path / "supersession.db"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    from src.state.db import _create_readiness_state
+    _create_readiness_state(conn)
+    conn.execute("CREATE TABLE source_run (source_run_id TEXT PRIMARY KEY, source_id TEXT, dataset_id TEXT, fetch_finished_at TEXT)")
+    at = lambda h, m=0: datetime(2026, 10, 2, h, m, tzinfo=UTC)
+    req = replace(_request(), city="Hong Kong", city_id="Hong Kong",
+        city_timezone="Asia/Hong_Kong", target_date=date(2026, 10, 3),
+        temperature_metric=metric, source_cycle_time=at(6), computed_at=at(15, 19),
+        baseline_source_run_id="base", openmeteo_source_run_id="om",
+        baseline_source_available_at=at(7), openmeteo_source_available_at=at(7))
+    version = expected_replacement_dependency_identity_by_role(metric)["baseline_b0"].data_version
+    conn.execute("INSERT INTO source_run VALUES ('base', 'ecmwf_open_data', ?, ?)", (version, at(7).isoformat()))
+    for computed in (at(16, 8), req.computed_at):
+        _insert_posterior(conn, city=req.city, target_date=req.target_date.isoformat(),
+            metric=metric, cycle_iso=at(6).isoformat(), computed_at=computed.isoformat())
+    conn.execute("UPDATE forecast_posteriors SET dependency_source_run_ids_json=? WHERE posterior_id=1",
+        (json.dumps({"baseline_b0": "base"}),))
+    identity = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
+    write_readiness_state(conn, readiness_id="incumbent", scope_type="strategy", status="LIVE_ELIGIBLE",
+        computed_at=at(16, 8), expires_at=at(23), city_id=req.city_id, city=req.city,
+        city_timezone=req.city_timezone, target_local_date=req.target_date,
+        temperature_metric=metric, physical_quantity=identity.physical_quantity,
+        observation_field=identity.observation_field, data_version=mat._data_version(metric),
+        strategy_key=mat.STRATEGY_KEY, source_id=mat.SOURCE_ID,
+        track="soft_anchor_posterior", source_run_id="posterior:1")
+    conn.commit()
+    monkeypatch.setattr(mat, "_day0_ledger_frontier_identity", lambda *_a, **_k: None)
+    monkeypatch.setattr(mat, "_write_posterior_row", lambda *_a, **_k: 2)
+    monkeypatch.setattr(mat, "_build_readiness", lambda *_a, **_k: None)
+    prepared = mat.PreparedReplacementForecastMaterialization(req, metric,
+        SimpleNamespace(live_eligible=True), None, anchor_id=1)
+    requests = tmp_path / "requests"
+    requests.mkdir()
+    payload = {"city": req.city, "target_date": req.target_date.isoformat(), "temperature_metric": metric,
+        "source_cycle_time": at(6).isoformat(), "computed_at": req.computed_at.isoformat(),
+        "baseline_source_run_id": "base", "openmeteo_source_run_id": "om",
+        "baseline_source_available_at": at(7).isoformat(), "openmeteo_source_available_at": at(7).isoformat(),
+        "bins": [{"bin_id": "20C"}]}
+    old = requests / "old.json"
+    old.write_text(json.dumps(payload))
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: "exact-inputs")
+    monkeypatch.setattr(queue, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+    monkeypatch.setattr(queue, "_priority_map_with_names", lambda *_a, **_k: ({"old.json": (0, ""), "new.json": (0, "")}, {"old.json", "new.json"}))
+    return conn, prepared, requests, old, payload, db, queue
+
+
+@pytest.mark.parametrize(("metric", "mutation"), [
+    (metric, mutation)
+    for metric in ("low", "high")
+    for mutation in (None, "incumbent", "dependency", "dataset", "unreadable_basis", "missing_witness", "missing_evidence", "foreign_request", "request_file")
+    if metric == "low" or mutation not in {"dataset", "unreadable_basis"}
+])
+def test_exact_cert_supersession_drains_only_proved_old_request(tmp_path, monkeypatch, metric, mutation):
+    import subprocess
+    import src.data.replacement_forecast_materializer as mat
+    from src.data.materialization_block_evidence import evidence_holds
+
+    conn, prepared, requests, old, payload, db, queue = _cert_supersession_context(tmp_path, monkeypatch, metric)
+    def runner(argv):
+        result = mat.write_prepared_replacement_forecast_live(conn, prepared)
+        conn.commit()
+        assert result.status == "BLOCKED" and result.reason_codes == ("READINESS_CERT_CYCLE_REGRESSION",)
+        assert result.evidence is not None, "the actual refusal must prove exact-request supersession"
+        assert result.evidence["reason"] == "READINESS_CERT_SUPERSEDED"
+        assert not evidence_holds(conn, result.evidence, payload), "never a prospective family fence"
+        body = {"status": result.status, "reason_codes": list(result.reason_codes),
+            "blocked_evidence": result.evidence, "consumed_inputs": _consumed_witness(argv),
+            "posterior_id": result.posterior_id, "committed": True, "reactor_wake_published": False}
+        if mutation == "incumbent":
+            conn.execute("UPDATE readiness_state SET source_run_id='posterior:2'")
+        elif mutation == "dependency":
+            conn.execute("UPDATE source_run SET fetch_finished_at='2026-10-02T18:00:00+00:00' WHERE source_run_id='base'")
+        elif mutation == "dataset":
+            conn.execute("UPDATE source_run SET dataset_id='changed' WHERE source_run_id='base'")
+        elif mutation == "unreadable_basis":
+            import src.data.replacement_forecast_source_run_identity as identities
+            def unavailable(_metric):
+                raise OSError("coordinate manifest unavailable")
+            monkeypatch.setattr(identities, "expected_replacement_dependency_identity_by_role", unavailable)
+        elif mutation == "missing_witness":
+            body.pop("consumed_inputs")
+        elif mutation == "missing_evidence":
+            body.pop("blocked_evidence")
+        elif mutation == "foreign_request":
+            body["blocked_evidence"]["scope"]["target_date"] = "2026-10-04"
+        elif mutation == "request_file":
+            # The real consumed-input version/SHA guard, not the controlled
+            # DB/fingerprint fixture, must reject a changed claimed body.
+            claimed = Path(argv[argv.index("--input-json") + 1])
+            changed = json.loads(claimed.read_text())
+            changed["bins"] = [{"bin_id": "21C"}]
+            claimed.write_text(json.dumps(changed))
+            assert not queue._consumed_inputs_unchanged(body["consumed_inputs"])
+        conn.commit()
+        return subprocess.CompletedProcess(argv, 1, json.dumps(body), "")
+
+    report = queue._process_claimed_materialization_batch(request_path=requests,
+        processed_path=tmp_path / "processed", failed_path=tmp_path / "failed",
+        forecast_db=db, limit=1, runner=runner, marker_dir=tmp_path / "blocked_attempts")
+    retained = mutation is not None
+    assert old.exists() is retained
+    assert report.committed_posterior_count == report.reactor_wake_published_count == 0
+    assert not list((tmp_path / "blocked_attempts").glob("*.json"))
+    if retained:
+        assert queue._UNBOUND_VERDICT_REASON in report.reason_codes
+    else:
+        receipt = json.loads((tmp_path / "superseded_latest" / f"Hong_Kong.2026-10-03.{metric}.json").read_text())
+        assert receipt["status"] == "SKIPPED_READINESS_CERT_SUPERSEDED"
+        newer = requests / "new.json"
+        newer.write_text(json.dumps({**payload, "computed_at": "2026-10-02T18:30:52+00:00"}))
+        plan = queue._build_request_claim_read_plan(request_path=requests,
+            processed_path=tmp_path / "processed", failed_path=tmp_path / "failed",
+            forecast_db=db, limit=1, lane=queue.MATERIALIZATION_LANE_PRIORITY)
+        assert plan.claim.selected_files == (newer,)
+    conn.close()
+
+
+def test_retired_low_incumbent_never_gets_the_current_dataset_supersession_proof(tmp_path, monkeypatch):
+    from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED, coordinate_bound_data_version
+    import src.data.replacement_forecast_materializer as mat
+    conn, prepared, *_ = _cert_supersession_context(tmp_path, monkeypatch, "low")
+    current = conn.execute("SELECT dataset_id FROM source_run WHERE source_run_id='base'").fetchone()[0]
+    retired = coordinate_bound_data_version(ECMWF_OPENDATA_LOW_DATA_VERSION_UNCERTIFIED, current.rsplit("__coordsha_", 1)[1])
+    conn.execute("UPDATE source_run SET dataset_id=? WHERE source_run_id='base'", (retired,))
+    result = mat.write_prepared_replacement_forecast_live(conn, prepared)
+    assert result.reason_codes == ("READINESS_CERT_CYCLE_REGRESSION",)
+    assert result.evidence is None
+    conn.close()
+
+
+def test_exact_cert_supersession_preserves_proven_retired_low_yield(monkeypatch):
+    """The real retired-to-current ENS proof still overrides the cycle guard."""
+    from dataclasses import replace
+    import src.data.replacement_forecast_materializer as mat
+    from src.data.replacement_input_hwm import retired_low_uncertified_incumbent_yields_to_current_ensemble
+    from src.state.readiness_repo import write_readiness_state
+    from tests.test_replacement_forecast_materializer import _low_revision_authority_conn, _request, _hko_dt
+
+    conn = _low_revision_authority_conn()
+    request = replace(_request(), city="Hong Kong", city_id="Hong Kong", city_timezone="Asia/Hong_Kong",
+        target_date=date(2026, 10, 1), temperature_metric="low", source_cycle_time=_hko_dt(12),
+        baseline_source_run_id="new12", computed_at=_hko_dt(20))
+    identity = expected_replacement_dependency_identity_by_role("low")["soft_anchor_posterior"]
+    write_readiness_state(conn, readiness_id="retired-incumbent", scope_type="strategy", status="LIVE_ELIGIBLE",
+        computed_at=_hko_dt(20), expires_at=_hko_dt(23), city_id=request.city_id, city=request.city,
+        city_timezone=request.city_timezone, target_local_date=request.target_date, temperature_metric="low",
+        physical_quantity=identity.physical_quantity, observation_field=identity.observation_field,
+        data_version=mat._data_version("low"), strategy_key=mat.STRATEGY_KEY, source_id=mat.SOURCE_ID,
+        track="soft_anchor_posterior", source_run_id="posterior:1")
+    _insert_posterior(conn, city=request.city, target_date=request.target_date.isoformat(), metric="low",
+        cycle_iso=request.source_cycle_time.isoformat(), computed_at=request.computed_at.isoformat())
+    incoming = conn.execute("SELECT max(posterior_id) FROM forecast_posteriors").fetchone()[0]
+    assert retired_low_uncertified_incumbent_yields_to_current_ensemble(conn,
+        city=request.city, target_date=request.target_date, metric="low", incoming_baseline_source_run_id="new12",
+        decision_time=request.computed_at, incumbent_posterior_id=1)
+    assert mat._readiness_cert_cycle_regression_reasons(conn, request, metric="low", incoming_posterior_id=incoming) == ()
+    assert mat._cert_regression_evidence(conn, request, metric="low",
+        incoming_posterior_id=incoming, exact_supersession=True) is None
     conn.close()
 
 
