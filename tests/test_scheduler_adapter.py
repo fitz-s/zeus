@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Lifecycle: created=2026-05-24; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
@@ -3394,6 +3394,19 @@ def test_replacement_maintenance_reports_stage_costs_including_post_deadline_can
             "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
             "timeboxed_incomplete": True,
             "committed_families": (("Dallas", "2026-09-24", "high"),),
+            "timeout_stage": "coverage",
+            "target_rotation_attempted_group_count": 2,
+            "target_rotation_owner_status": "ACQUIRED",
+            "target_rotation_cursor_write_status": "PERSISTED",
+            "target_rotation_progress_receipt_status": "EXACT",
+            "physical_capture_debt_scan": {
+                "status": "TIMEBOXED_INCOMPLETE", "scope_count": 30,
+                "attempted_scope_count": 4, "candidate_count": 1,
+                "unknown_scope_count": 20,
+                "unknown_scope_sample": tuple((f"City{i}", "2026-09-24", "high") for i in range(20)),
+                "last_attempted_group": ("Dallas", "2026-09-24"),
+                "rotation_progress_basis": "PHYSICAL_DEBT_JUDGMENT",
+            },
         }
 
     def broad(_cfg, *, max_wall_clock_seconds):
@@ -3425,6 +3438,11 @@ def test_replacement_maintenance_reports_stage_costs_including_post_deadline_can
 
     assert calls == ["bpf", "broad", "reseed", "reseed", "candidate"]
     assert report["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
+    diagnostics = report["bayes_precision_fusion_extra_diagnostics"]
+    assert diagnostics["timeout_stage"] == "coverage"
+    assert diagnostics["target_rotation_attempted_group_count"] == 2
+    assert diagnostics["physical_capture_debt_scan"]["unknown_scope_count"] == 20
+    assert len(diagnostics["physical_capture_debt_scan"]["unknown_scope_sample"]) == 16
     stages = report["stage_timings"]
     assert stages["bpf"] == {"elapsed_seconds": 4.0, "remaining_seconds": 16.0}
     assert stages["broad"] == {"elapsed_seconds": 6.0, "remaining_seconds": 10.0}

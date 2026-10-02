@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-08-31; last_reused=2026-08-31
+# Lifecycle: created=2026-04-30; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon; 2026-05-20
 #   live stability hotfix keeps SIGTERM scheduler shutdown exit code clean.
@@ -3672,6 +3672,43 @@ def _replacement_maintenance_tick():
         report["bayes_precision_fusion_extra_rows_written"] = extras_report.get(
             "written_row_count"
         )
+        diagnostic_keys = (
+            "timeout_stage", "target_rotation_attempted_group_count",
+            "target_rotation_owner_status", "target_rotation_cursor_write_status",
+            "target_rotation_progress_receipt_status",
+        )
+        diagnostics = {
+            key: extras_report[key] for key in diagnostic_keys if key in extras_report
+        }
+        scan = extras_report.get("physical_capture_debt_scan")
+        if isinstance(scan, dict):
+            unknown_scopes = scan.get("unknown_scopes")
+            unknown_scope_count = scan.get("unknown_scope_count")
+            if not isinstance(unknown_scope_count, int) or isinstance(unknown_scope_count, bool):
+                unknown_scope_count = (
+                    len(unknown_scopes)
+                    if isinstance(unknown_scopes, (tuple, list))
+                    else None
+                )
+            unknown_scope_sample = scan.get("unknown_scope_sample")
+            if not isinstance(unknown_scope_sample, (tuple, list)):
+                unknown_scope_sample = unknown_scopes if isinstance(unknown_scopes, (tuple, list)) else ()
+            scan_diagnostics = {
+                key: scan[key]
+                for key in (
+                    "status", "scope_count", "attempted_scope_count", "candidate_count",
+                    "last_attempted_group", "rotation_progress_basis",
+                    "rotation_cursor_write_status",
+                )
+                if key in scan
+            }
+            if unknown_scope_count is not None:
+                scan_diagnostics["unknown_scope_count"] = unknown_scope_count
+            if unknown_scope_sample:
+                scan_diagnostics["unknown_scope_sample"] = tuple(unknown_scope_sample[:16])
+            diagnostics["physical_capture_debt_scan"] = scan_diagnostics
+        if diagnostics:
+            report["bayes_precision_fusion_extra_diagnostics"] = diagnostics
     if cooldown_seconds > 0:
         report["cooldown_seconds"] = cooldown_seconds
     committed_reseed_started = _begin_stage("committed_reseed")

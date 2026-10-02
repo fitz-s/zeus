@@ -1641,6 +1641,8 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return None
+    timeout_stage = "probe"
+    physical_scan_report: dict[str, object] = {}
     try:
         from datetime import date  # noqa: PLC0415
 
@@ -1675,6 +1677,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         # in ``frozen_source_runs`` below.
         cycle = planning_cycle
         if cycle is None:
+            timeout_stage = "probe"
             cycle = _probe_resolved_bayes_precision_fusion_extras_cycle(
                 deadline_monotonic=deadline_monotonic
             )
@@ -1687,6 +1690,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             # materializer is reading; transport/quota failures are then surfaced
             # by the downloader as retryable health instead of hiding behind a
             # probe skip.
+            timeout_stage = "probe"
             cycle = _max_downloaded_current_target_cycle(
                 Path(str(forecast_db)), deadline_monotonic=deadline_monotonic
             )
@@ -1702,6 +1706,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         # an elapsed-prefix-only vector, but the downstream parser must prove that it spans
         # decision time through the unresolved evening before any row becomes authority.
         decision_time = datetime.now(timezone.utc)
+        timeout_stage = "held_discovery"
         try:
             from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
                 held_position_family_priorities,
@@ -1718,7 +1723,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             None if deadline_monotonic is None
             else time.monotonic() + max(0.0, deadline_monotonic - time.monotonic()) / 2.0
         )
-        physical_scan_report: dict[str, object] = {}
+        timeout_stage = "physical_debt_judgment"
         physical_recovery_candidates = (
             _held_legacy_physical_proof_recovery_candidates(Path(str(forecast_db)), held_priority,
                 decision_time=decision_time,
@@ -1733,6 +1738,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         # manifest and readiness joins. The latter remain materialization
         # authority; spending this bounded capture lane on them stranded every
         # city when the full plan exceeded its deadline.
+        timeout_stage = "target_keys"
         capture_rows: list[ReplacementForecastTargetKey] = (
             list(replacement_forecast_current_target_keys(
                 Path(str(forecast_db)),
@@ -1755,6 +1761,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         cohort_backtrack_candidates: dict[
             tuple[str, str, str], tuple[str, datetime]
         ] = {}
+        timeout_stage = "coverage"
         try:
             coverage = (
                 None
@@ -1779,6 +1786,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             coverage = None
         missing_scopes = None if coverage is None else coverage[0]
         _check_source_preflight_deadline(deadline_monotonic)
+        timeout_stage = "target_binding"
         planned_scopes = {
             (row.city, row.target_date, row.temperature_metric)
             for row in capture_rows
@@ -1885,6 +1893,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             if physical_scan_report:
                 result["physical_capture_debt_scan"] = physical_scan_report
             return result
+        timeout_stage = "producer"
         owner_status, owner_fd, owner_error = (
             _try_acquire_bpf_extra_rotation_owner(rotation_state_path)
         )
@@ -2168,12 +2177,28 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         finally:
             _release_bpf_extra_rotation_owner(owner_fd)
     except TimeoutError:
-        return {
+        timeout_report: dict[str, object] = {
             "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
             "timeboxed_incomplete": True,
             "attempted_target_group_count": 0,
             "max_wall_clock_seconds": max_wall_clock_seconds,
+            "timeout_stage": timeout_stage,
         }
+        if physical_scan_report:
+            unknown_scopes = tuple(physical_scan_report.get("unknown_scopes") or ())
+            timeout_report["physical_capture_debt_scan"] = {
+                key: physical_scan_report[key]
+                for key in (
+                    "status", "scope_count", "attempted_scope_count", "candidate_count",
+                    "last_attempted_group", "rotation_progress_basis",
+                    "rotation_cursor_write_status",
+                )
+                if key in physical_scan_report
+            } | {
+                "unknown_scope_count": len(unknown_scopes),
+                "unknown_scope_sample": unknown_scopes[:16],
+            }
+        return timeout_report
     except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle
         logger.warning("BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s", exc)
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}

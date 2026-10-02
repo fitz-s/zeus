@@ -1042,6 +1042,75 @@ def test_normal_held_physical_scan_reserves_capture_and_advances_with_zero_captu
     assert second["target_rotation_attempted_group_count"] == 0
 
 
+@pytest.mark.parametrize("timeout_stage", ("probe", "target_keys", "coverage"))
+def test_outer_timeout_preserves_stage_and_bounded_physical_scan(
+    tmp_path, monkeypatch, timeout_stage,
+) -> None:
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    now = [100.0]
+    monkeypatch.setattr(prod.time, "monotonic", lambda: now[0])
+    deadline = now[0] + 8.0
+    monkeypatch.setattr(discovery, "held_position_family_priorities", lambda **_kwargs: {
+        ("Chicago", "2026-06-17", "high"): 0,
+    })
+
+    def expire(*_args, **_kwargs):
+        now[0] = deadline
+        raise TimeoutError("real parent deadline expired")
+
+    if timeout_stage == "probe":
+        monkeypatch.setattr(prod, "_probe_resolved_bayes_precision_fusion_extras_cycle", expire)
+        planning_cycle = None
+        capture_target_scopes = None
+    else:
+        planning_cycle = _CYCLE
+        capture_target_scopes = (
+            None if timeout_stage == "target_keys"
+            else (("Chicago", "2026-06-17", "high"),)
+        )
+        monkeypatch.setattr(
+            prod, "_held_legacy_physical_proof_recovery_candidates",
+            lambda *_a, scan_report, **_kw: scan_report.update(
+                status="TIMEBOXED_INCOMPLETE", scope_count=40,
+                attempted_scope_count=3, candidate_count=1,
+                unknown_scopes=tuple((f"City{i}", "2026-06-17", "high") for i in range(20)),
+                last_attempted_group=("City2", "2026-06-17"),
+                rotation_progress_basis="PHYSICAL_DEBT_JUDGMENT",
+            ) or {("Chicago", "2026-06-17", "high"): ("icon_global", _CYCLE, "MISSING", 7)},
+        )
+        if timeout_stage == "target_keys":
+            from src.data import replacement_forecast_current_target_plan as target_plan
+            monkeypatch.setattr(
+                target_plan, "replacement_forecast_current_target_keys", expire,
+            )
+        else:
+            monkeypatch.setattr(
+                prod, "_extras_coverage_missing", lambda *_a, **_kw: expire(),
+            )
+
+    result = prod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": tmp_path / "unused.db",
+         "bpf_extra_rotation_state_path": tmp_path / "rotation.json"}, max_wall_clock_seconds=8.0,
+        planning_cycle=planning_cycle, capture_target_scopes=capture_target_scopes,
+    )
+
+    assert result["status"] == "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
+    assert result["timeboxed_incomplete"] is True
+    assert result["attempted_target_group_count"] == 0
+    assert result["timeout_stage"] == timeout_stage
+    assert not {"capture", "ready", "authority", "committed_families"}.intersection(result)
+    if timeout_stage == "probe":
+        assert "physical_capture_debt_scan" not in result
+    else:
+        scan = result["physical_capture_debt_scan"]
+        assert scan["candidate_count"] == 1
+        assert scan["unknown_scope_count"] == 20
+        assert len(scan["unknown_scope_sample"]) == 16
+        assert "unknown_scopes" not in scan
+        assert not {"capture", "ready", "authority"}.intersection(scan)
+
+
 @pytest.mark.parametrize("dense_metric", ("high", "low"))
 def test_held_physical_judgment_reserves_time_for_the_metric_twin(
     tmp_path, monkeypatch, dense_metric,
