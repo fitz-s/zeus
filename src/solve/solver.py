@@ -50,7 +50,9 @@ absent.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
@@ -132,6 +134,8 @@ _OPTIMIZER_BOUND_RESOLUTION = Decimal("1e-9")
 # of this grid because the venue also constrains SDK maker/taker amount precision.
 _SIZE_QUANTUM = Decimal("0.01")
 _MAX_ORDERS = 15
+
+_LOG = logging.getLogger(__name__)
 
 _WORST_PRICE_MODEL = "avg_cost_size_aware_depth_capped_v1"
 
@@ -7857,6 +7861,24 @@ def select_global_single_order(
         str, list[GlobalSingleOrderCandidate]
     ] = {}
 
+    # Log-only stage clock: wall time never enters selection, eligibility or rank.
+    stage_marks: list[tuple[str, float]] = [("start", time.monotonic())]
+
+    def mark_stage(name: str) -> None:
+        stage_marks.append((name, time.monotonic()))
+
+    def log_stage_timing(outcome: str) -> None:
+        mark_stage("evaluations")
+        _LOG.info(
+            "global solver stage timing: outcome=%s candidates=%d %s",
+            outcome,
+            len(candidates),
+            " ".join(
+                f"{name}_s={at - before:.3f}"
+                for (_, before), (name, at) in zip(stage_marks, stage_marks[1:])
+            ),
+        )
+
     def selection_cancelled() -> bool:
         if cancelled is None:
             return False
@@ -8189,6 +8211,7 @@ def select_global_single_order(
                 probability_witness.band_basis,
             )
         )
+    mark_stage("eligibility")
 
     # A dynamic authority change invalidates the epoch; it does not merely remove
     # one asset from the ranking. Choosing an unchanged runner-up after another
@@ -8545,6 +8568,7 @@ def select_global_single_order(
                     continue
                 return superseded_decision(candidate.candidate_id, horizon_reason)
             scored.append(score)
+    mark_stage("candidate_score")
 
     if family_portfolio_endowment_resolver is not None:
         joint_positive_candidate_ids = {
@@ -8835,6 +8859,7 @@ def select_global_single_order(
                         payoff_q_correction=joint_correction,
                     )
                 )
+    mark_stage("joint_plan")
 
     if selected_order_rejection_resolver is not None:
         # The submit boundary's order-level laws (e.g. the same-token terminal
@@ -8868,6 +8893,7 @@ def select_global_single_order(
             if score.candidate is None
             or score.candidate.candidate_id not in refused_order_ids
         ]
+    mark_stage("order_policy")
     positive_scored = tuple(
         score
         for score in scored
@@ -8885,7 +8911,7 @@ def select_global_single_order(
             and set(rejections.values()) == {"ROBUST_MAJORITY_LOSS"}
             else "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
         )
-        return GlobalSingleOrderDecision(
+        no_trade_decision = GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
             cost_usd=Decimal("0"),
@@ -8903,6 +8929,8 @@ def select_global_single_order(
             ),
             candidate_input_count=len(candidates),
         )
+        log_stage_timing(no_trade_reason)
+        return no_trade_decision
 
     # Each action first passes its own admission/sizing law. Rank all fixed
     # proposals by terminal expected gain on the current cash-constrained set.
@@ -8921,7 +8949,7 @@ def select_global_single_order(
         ),
     )
     winner_id = winner.candidate.candidate_id if winner.candidate is not None else None
-    return GlobalSingleOrderDecision(
+    winner_decision = GlobalSingleOrderDecision(
         candidate=winner.candidate,
         shares=winner.shares,
         cost_usd=winner.cost_usd,
@@ -8962,6 +8990,8 @@ def select_global_single_order(
         ),
         candidate_input_count=len(candidates),
     )
+    log_stage_timing("WINNER")
+    return winner_decision
 
 
 def _ru_cvar_optimum(

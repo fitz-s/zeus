@@ -9981,12 +9981,16 @@ def event_bound_live_adapter_from_trade_conn(
             decision = getattr(actuation, "decision", None)
             candidate = getattr(decision, "candidate", None)
             action = str(getattr(candidate, "action", "") or "").upper()
+            # Log-only stage clock; no timing value reaches any authority.
+            preflight_started = _time.monotonic()
             receipt = _global_preflight_candidate_receipt(
                 _submit_inner,
                 event=event,
                 actuation=actuation,
                 decision_time=at,
             )
+            candidate_proof_done = _time.monotonic()
+            jit_book_done = entry_authority_done = candidate_proof_done
             sell_preflight = (
                 action == "SELL"
                 or str(receipt.reason or "").startswith("GLOBAL_SELL_")
@@ -10001,6 +10005,7 @@ def event_bound_live_adapter_from_trade_conn(
                     checked_at_utc=datetime.now(UTC),
                     trade_conn=trade_conn,
                 )
+                jit_book_done = _time.monotonic()
                 receipt = _global_preflight_entry_authority_receipt(
                     event,
                     receipt,
@@ -10008,7 +10013,19 @@ def event_bound_live_adapter_from_trade_conn(
                     live_cap_conn=live_cap_conn or trade_conn,
                     trade_conn=trade_conn,
                 )
+                entry_authority_done = _time.monotonic()
             reason = str(receipt.reason or "")
+            logging.getLogger(__name__).info(
+                "global winner preflight timing: action=%s accepted=%s "
+                "candidate_proof_s=%.3f jit_book_s=%.3f entry_authority_s=%.3f "
+                "reason=%s",
+                action or "BUY",
+                receipt.proof_accepted,
+                candidate_proof_done - preflight_started,
+                jit_book_done - candidate_proof_done,
+                entry_authority_done - jit_book_done,
+                reason[:80],
+            )
             if receipt.proof_accepted is True and (
                 receipt.decision_proof_bundle is not None
                 or reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
@@ -19529,6 +19546,8 @@ def _build_event_bound_no_submit_receipt_core(
     if calibration_conn is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="CALIBRATION_AUTHORITY_CONNECTION_MISSING")
     if global_actuation is not None:
+        # Log-only: times the winner's submit-time q replay; never an authority input.
+        q_replay_started = _time.monotonic()
         try:
             (
                 current_actuation_family,
@@ -19542,6 +19561,11 @@ def _build_event_bound_no_submit_receipt_core(
                 decision_time=decision_time,
             )
         except Exception as exc:  # noqa: BLE001 - current probability must fail closed
+            logging.getLogger(__name__).info(
+                "global actuation q replay timing: event_type=%s ok=False q_replay_s=%.3f",
+                event.event_type,
+                _time.monotonic() - q_replay_started,
+            )
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
@@ -19552,6 +19576,11 @@ def _build_event_bound_no_submit_receipt_core(
                 ),
                 proof_accepted=False,
             )
+        logging.getLogger(__name__).info(
+            "global actuation q replay timing: event_type=%s ok=True q_replay_s=%.3f",
+            event.event_type,
+            _time.monotonic() - q_replay_started,
+        )
         _bind_current_global_day0_payload(
             payload,
             provenance_capture,

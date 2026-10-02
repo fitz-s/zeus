@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal
@@ -850,6 +851,8 @@ def select_prepared_global_auction(
     from this same epoch; its family remains in the probability/book universe.
     """
 
+    # Log-only: wall time never enters materialization or selection.
+    materialize_started = time.monotonic()
     if (
         not str(selection_epoch_identity or "").strip()
         or selection_cut_at_utc.tzinfo is None
@@ -1594,6 +1597,14 @@ def select_prepared_global_auction(
             return "DAY0_STATISTICAL_CERTAINTY_UNSUPPORTED"
         return None
 
+    _LOG.info(
+        "global auction materialization timing: families=%d candidates=%d "
+        "holdings=%d materialize_s=%.3f",
+        len(probability_witnesses),
+        len(candidates),
+        len(holding_coverage),
+        time.monotonic() - materialize_started,
+    )
     decision = select_global_single_order(
         tuple(candidates),
         probability_witnesses=probability_witnesses,

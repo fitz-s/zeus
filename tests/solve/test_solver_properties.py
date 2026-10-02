@@ -9742,3 +9742,39 @@ def test_early_value_quote_expiry_is_not_a_return_multiplier():
                               probability_functional="POSTERIOR_PREDICTIVE_MEAN")
     assert _global_select((z, a)).candidate is a
 
+
+
+def test_global_solver_stage_timing_is_log_only(caplog, monkeypatch):
+    """Stage timing names every solver stage and never moves the decision."""
+
+    exhausted = _global_candidate(
+        candidate_id="exhausted-yes", family="exhausted", side="YES", q=0.90
+    )
+    feasible = _global_candidate(
+        candidate_id="feasible-no", family="feasible", side="NO", q=0.70
+    )
+
+    def select():
+        return _global_select(
+            (exhausted, feasible),
+            candidate_capital_limit_resolver=lambda candidate: (
+                Decimal("0")
+                if candidate.candidate_id == exhausted.candidate_id
+                else Decimal("5")
+            ),
+        )
+
+    with caplog.at_level("INFO", logger=S.__name__):
+        baseline = select()
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("global solver stage timing:")]
+    assert len(lines) == 1
+    assert "outcome=WINNER candidates=2" in lines[0]
+    for stage in ("eligibility", "candidate_score", "joint_plan",
+                  "order_policy", "evaluations"):
+        assert f" {stage}_s=" in lines[0]
+
+    ticks = iter(range(10_000))
+    monkeypatch.setattr(S.time, "monotonic", lambda: float(next(ticks)) * 1e6)
+    shifted = select()
+    assert shifted == baseline
