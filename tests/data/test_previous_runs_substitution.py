@@ -4496,6 +4496,86 @@ def test_day0_seed_older_than_current_posterior_observation_is_regression(
     )
 
 
+def _fast_tail_posterior_boundary(tmp_path, monkeypatch, *, metric, fast_c, seed_c):
+    """Austin 2026-10-01: fast tail on the 16:55:38 AWC publish clock vs the
+    16:53 settlement-channel valid time of the same METAR."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    import src.data.replacement_input_hwm as input_hwm
+
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY, runtime_layer TEXT, source_id TEXT,
+            city TEXT, target_date TEXT, temperature_metric TEXT,
+            source_cycle_time TEXT, computed_at TEXT, provenance_json TEXT
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(
+                runtime_layer, city, target_date, temperature_metric, computed_at
+            );
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            1, "live", queue_mod.SOURCE_ID, "Austin", "2026-10-01", metric,
+            "2026-10-01T00:00:00+00:00", "2026-10-01T16:58:22+00:00",
+            json.dumps({"day0_provisional_observation": {
+                "active": True, "metric": metric,
+                "source": "wu_api+same_station_fast_tail",
+                "observation_time": "2026-10-01T16:55:38+00:00",
+                "observed_extreme_c": fast_c, "unit": "F",
+            }}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        input_hwm, "latest_eligible_ensemble_input_cycle", lambda *_a, **_k: None
+    )
+    return queue_mod._seed_source_cycle_boundary(
+        forecast_db=db_path,
+        seed={
+            "city": "Austin", "target_date": "2026-10-01",
+            "temperature_metric": metric,
+            "source_cycle_time": "2026-10-01T00:00:00+00:00",
+            "computed_at": "2026-10-01T17:08:51+00:00",
+            "baseline_source_run_id": "",
+            "day0_observed_extreme_source": "noaa_wrh_kaus",
+            "day0_observed_extreme_observation_time": "2026-10-01T16:53:00+00:00",
+            "day0_observed_extreme_c": seed_c,
+            "day0_observed_extreme_unit": "F",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("metric", "fast_c", "seed_c"),
+    [("high", 30.6, 30.6), ("high", 30.6, 31.1), ("low", 18.0, 18.0), ("low", 18.0, 17.2)],
+)
+def test_settlement_seed_reaching_fast_tail_extreme_is_not_a_regression(
+    tmp_path, monkeypatch, metric, fast_c, seed_c
+):
+    """A new-NBM held reseed carrying settlement truth that reaches the fast-tail
+    extreme is the current Day0 authority; the fast tail's later publish clock
+    cannot drop it as an observation regression."""
+    assert _fast_tail_posterior_boundary(
+        tmp_path, monkeypatch, metric=metric, fast_c=fast_c, seed_c=seed_c
+    ) is None
+
+
+@pytest.mark.parametrize(("metric", "fast_c", "seed_c"), [("high", 30.6, 30.0), ("low", 18.0, 18.6)])
+def test_settlement_seed_behind_fast_tail_extreme_stays_a_regression(
+    tmp_path, monkeypatch, metric, fast_c, seed_c
+):
+    """While the fast tail strictly advances settlement truth it keeps serving."""
+    assert _fast_tail_posterior_boundary(
+        tmp_path, monkeypatch, metric=metric, fast_c=fast_c, seed_c=seed_c
+    ) == ("current_day0_observation", "2026-10-01T16:55:38+00:00")
+
+
 def test_current_money_seed_window_follows_rotated_cursor_order(tmp_path):
     """A bounded priority window advances with the durable seed cursor."""
     import src.data.replacement_forecast_live_materialization_queue as queue_mod

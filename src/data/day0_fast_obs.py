@@ -901,6 +901,21 @@ def build_fast_station_residual_likelihood(
     )
 
 
+def fast_extreme_supersedes_settlement(
+    *, metric: str, fast_extreme_c: float, settlement_extreme_c: float
+) -> bool:
+    """Whether a fast-tail extreme strictly advances settlement-channel truth.
+
+    The one rule for when the fast tail may stand in for the settlement
+    channel; once settlement reaches the fast value, settlement truth governs.
+    """
+    if metric == "high":
+        return fast_extreme_c > settlement_extreme_c + 1e-9
+    if metric == "low":
+        return fast_extreme_c < settlement_extreme_c - 1e-9
+    return False
+
+
 def latest_fast_station_conditioning(
     conn: sqlite3.Connection,
     *,
@@ -956,18 +971,11 @@ def latest_fast_station_conditioning(
     )
     if likelihood is None:
         return None
-    supersedes = (
-        settlement_extreme_c is None
-        or (
-            normalized_metric == "high"
-            and observed_extreme_c > settlement_extreme_c + 1e-9
-        )
-        or (
-            normalized_metric == "low"
-            and observed_extreme_c < settlement_extreme_c - 1e-9
-        )
-    )
-    if not supersedes:
+    if settlement_extreme_c is not None and not fast_extreme_supersedes_settlement(
+        metric=normalized_metric,
+        fast_extreme_c=observed_extreme_c,
+        settlement_extreme_c=settlement_extreme_c,
+    ):
         return None
     return FastStationConditioning(
         observed_extreme_c=float(observed_extreme_c),
