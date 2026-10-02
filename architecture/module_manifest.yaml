@@ -165,6 +165,7 @@ modules:
       - src/events/triggers/day0_extreme_updated.py
       - src/events/triggers/market_channel_ingestor.py
       - src/events/public_trade_observations.py
+      - src/events/market_tob_recorder.py
       - src/events/triggers/user_channel_ingestor.py
       - src/events/reactor.py
     public_entry_files:
@@ -194,6 +195,7 @@ modules:
       - tests/strategy/live_inference/test_trade_score.py
       - tests/events/test_market_channel_ingestor.py
       - tests/events/test_public_trade_observations.py
+      - tests/events/test_market_tob_recorder.py
       - tests/events/test_reactor.py
       - tests/events/test_live_cap.py
       - tests/events/test_live_order_aggregate.py

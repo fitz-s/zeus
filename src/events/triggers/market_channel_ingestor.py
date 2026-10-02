@@ -26,6 +26,7 @@ from src.events.event_coalescer import EventCoalescer
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import MarketBookEventPayload, OpportunityEvent, make_opportunity_event
 from src.events.idempotency import stable_event_id
+from src.events.market_tob_recorder import TobRecorder
 from src.events.public_trade_observations import PublicTradeBuffer, write_public_trade_observations
 
 UTC = timezone.utc
@@ -53,6 +54,7 @@ SETTLEMENT_DAY_GRACE = timedelta(hours=36)
 MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
 MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS = 0.01
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS = 0.05
+MARKET_CHANNEL_TOB_FLUSH_SECONDS = 1.0
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_MAX_SECONDS = 1.0
 MARKET_CHANNEL_DEPTH_REPAIR_DEBOUNCE_SECONDS = 0.05
 MARKET_CHANNEL_DEPTH_REPAIR_RETRY_SECONDS = 1.0
@@ -264,6 +266,7 @@ class MarketChannelIngestor:
         self.public_trades = PublicTradeBuffer(
             max_pending=max(1024, len(active_token_ids) * 8)
         )
+        self.tob = TobRecorder()
 
     def _token_is_open_at(self, token_id: str, *, now: datetime | None = None) -> bool:
         metadata = self._token_metadata.get(str(token_id))
@@ -2483,6 +2486,57 @@ class MarketChannelOnlineService:
                 await asyncio.sleep(MARKET_CHANNEL_QUOTE_FLUSH_RETRY_MAX_SECONDS)
             await asyncio.sleep(MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS)
 
+    async def _flush_tob_forever(
+        self, *, connection_done: asyncio.Event, write_gate: Any,
+        commit: Callable[[], None] | None,
+        rollback: Callable[[], None] | None, logger: Any | None,
+    ) -> None:
+        """Append top-of-book transitions in batches; capture never blocks quotes."""
+
+        recorder = self.ingestor.tob
+        conn = self.ingestor._feasibility_conn
+        schema = self.ingestor._feasibility_schema
+        while True:
+            if not recorder.pending:
+                if connection_done.is_set():
+                    return
+                await asyncio.sleep(MARKET_CHANNEL_TOB_FLUSH_SECONDS)
+                continue
+            coalescer = self.ingestor._coalescer
+            if coalescer is not None:
+                queued = coalescer.pending_counts()
+                if queued["lossless"] or queued["market"]:
+                    if connection_done.is_set():
+                        return
+                    await asyncio.sleep(MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS)
+                    continue
+            try:
+                with write_gate:
+                    try:
+                        recorder.write_pending(conn, schema=schema)
+                        recorder.trim_expired(conn, schema=schema)
+                        if commit is not None:
+                            commit()
+                        else:
+                            conn.commit()
+                    except BaseException:
+                        if rollback is not None:
+                            rollback()
+                        else:
+                            conn.rollback()
+                        raise
+                recorder.acknowledge()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # capture failure cannot disconnect quotes
+                if logger is not None:
+                    logger.warning("Top-of-book append deferred: %s", exc)
+                if connection_done.is_set():
+                    return
+                await asyncio.sleep(MARKET_CHANNEL_QUOTE_FLUSH_RETRY_MAX_SECONDS)
+                continue
+            await asyncio.sleep(MARKET_CHANNEL_TOB_FLUSH_SECONDS)
+
     async def _flush_quote_projection_forever(
         self,
         *,
@@ -3188,6 +3242,10 @@ class MarketChannelOnlineService:
                             connection_done=connection_done, write_gate=_quote_write_gate,
                             commit=commit, rollback=rollback, logger=logger,
                         ))
+                        tasks.create_task(self._flush_tob_forever(
+                            connection_done=connection_done, write_gate=_quote_write_gate,
+                            commit=commit, rollback=rollback, logger=logger,
+                        ))
                         tasks.create_task(_seed_initial_books())
                         tasks.create_task(
                             self._refresh_subscription_universe_forever(
@@ -3229,10 +3287,15 @@ class MarketChannelOnlineService:
                             pending_actions: list[MarketChannelAction] = []
                             quote_messages: list[dict[str, Any]] = []
                             world_messages: list[dict[str, Any]] = []
+                            received_ms = time.time_ns() // 1_000_000
                             for message in _parse_channel_messages(raw_message):
                                 event_type = str(
                                     message.get("event_type") or message.get("type") or ""
                                 )
+                                try:
+                                    self.ingestor.tob.observe(message, received_ms=received_ms)
+                                except Exception:  # noqa: BLE001 - capture never blocks quotes
+                                    _logger.exception("top-of-book observe failed")
                                 if event_type == "last_trade_price":
                                     self.ingestor.handle_message(
                                         message, received_at=datetime.now(UTC).isoformat(),

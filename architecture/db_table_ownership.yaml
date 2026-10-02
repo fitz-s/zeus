@@ -1236,6 +1236,38 @@ tables:
       SOURCE_UNSEQUENCED and PUBLIC_DELIVERY_ONLY cannot authorize trades or
       become Zeus fill, position, realized profit or complete-cohort truth.
 
+  - name: market_tob_tokens
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: token_ref
+    required_columns:
+      - {name: token_ref, type: INTEGER, nullable: true}
+      - {name: token_id, type: TEXT, nullable: false}
+    notes: >
+      Token dictionary for market_tob_transitions: the venue token id is stored
+      once and rows reference it by integer. Append-only; rows are not retired
+      with the transitions (about 3k rows).
+
+  - name: market_tob_transitions
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: "[observed_ms, token_ref, seq]"
+    required_columns:
+      - {name: observed_ms, type: INTEGER, nullable: false}
+      - {name: token_ref, type: INTEGER, nullable: false}
+      - {name: seq, type: INTEGER, nullable: false}
+    notes: >
+      Capture-only top-of-book transition log for every subscribed market-channel
+      token (best bid/ask price and size, fixed-point 1e-4 price, 1e-2 size), one
+      row per change, written in batches by the price-channel ingest under the
+      TRADE lease. Evidence for adverse-selection study only; never a quote, fill
+      or admission input. Time-bound retention: rows older than 21 days are
+      head-deleted by the writer (src/events/market_tob_recorder.py RETENTION_DAYS).
+
   - name: market_channel_connectivity_events
     db: trade
     schema_class: trade_class

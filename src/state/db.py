@@ -6121,6 +6121,8 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     # sync-owned collateral head + durable CTF token discovery registry.
     "wallet_balance_head",
     "ctf_token_registry",
+    "market_tob_tokens",
+    "market_tob_transitions",
     "execution_fact",
     "execution_feasibility_evidence",
     "executable_market_snapshots",
@@ -7276,6 +7278,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     _ensure_market_channel_connectivity_table(conn)
     from src.state.schema.public_market_trade_observations_schema import ensure_table as _ensure_public_market_trade_observations
     _ensure_public_market_trade_observations(conn)
+    from src.state.schema.market_tob_transitions_schema import ensure_table as _ensure_market_tob_transitions
+    _ensure_market_tob_transitions(conn)
     # LX-T4 (docs/rebuild/local_ledger_excision_2026-07-12.md): durable coverage
     # watermark for the continuous fill synchronizer (src.ingest.fill_synchronizer).
     # Trade DB owner, mirrors the schema_epoch registration pattern.

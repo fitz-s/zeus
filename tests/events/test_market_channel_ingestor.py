@@ -2604,14 +2604,14 @@ def test_websocket_routes_quote_and_world_events_to_independent_write_lanes(
         )
     )
 
-    assert entered == [
-        "enter:trade",
-        "exit:trade",
-        "enter:trade",
-        "exit:trade",
-        "enter:world",
-        "exit:world",
-    ]
+    # Two quote units, one top-of-book capture batch and one world unit; each
+    # lease is entered and exited as a pair on its own lane.
+    assert sorted(entered) == sorted(
+        ["enter:trade", "exit:trade"] * 3 + ["enter:world", "exit:world"]
+    )
+    assert trade_conn.execute(
+        "SELECT COUNT(*) FROM market_tob_transitions"
+    ).fetchone()[0] == 1
     assert trade_conn.execute(
         "SELECT COUNT(*) FROM execution_feasibility_latest"
     ).fetchone()[0] == 2

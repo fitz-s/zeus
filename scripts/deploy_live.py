@@ -3670,9 +3670,13 @@ def _ensure_restart_trade_schemas(conn: sqlite3.Connection) -> None:
         ensure_table as ensure_tier0_candidate_set_table,
     )
     from src.state.day0_receipt_store import ensure_table as ensure_day0_receipt_blob
+    from src.state.schema.market_tob_transitions_schema import (
+        ensure_table as ensure_market_tob_tables,
+    )
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        ensure_market_tob_tables(conn)
         ensure_tier0_auction_corpus_tables(conn)
         ensure_tier0_candidate_set_table(conn)
         ensure_day0_receipt_blob(conn)

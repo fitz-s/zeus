@@ -3185,6 +3185,19 @@ files:
     why: TRADE append-only public delivery and coverage-gap schema, initialized by the existing trade owner and explicitly distinct from execution truth.
     downstream:
     - src/state/db.py
+  src/state/schema/market_tob_transitions_schema.py:
+    zone: K2_runtime
+    authority_role: market_tob_transitions_schema_owner
+    why: TRADE append-only top-of-book transition log and token dictionary for the adverse-selection study; capture only, initialized by the existing trade owner.
+    downstream:
+    - src/state/db.py
+    - src/events/market_tob_recorder.py
+  src/events/market_tob_recorder.py:
+    zone: K2_runtime
+    authority_role: market_tob_capture
+    why: Maintains per-token ladders from market-channel book/price_change messages and batches one row per top-of-book change; 21-day head retention. Never a quote, fill or admission input.
+    downstream:
+    - src/events/triggers/market_channel_ingestor.py
   src/state/schema/market_channel_connectivity_schema.py:
     zone: K2_runtime
     authority_role: market_channel_connectivity_schema_owner

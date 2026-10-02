@@ -8,6 +8,10 @@ in separate processing tables.
 delivery FIFO and append path. It records delivery identities and local gaps,
 never opportunity events, own fills, source completeness or entry authority.
 
+`market_tob_recorder.py` captures every market-channel top-of-book transition
+(price and size, all subscribed tokens) into TRADE `market_tob_transitions`;
+evidence only, 21-day retention, never a quote, fill or admission input.
+
 Rules:
 - Do not import or call venue adapters from this package.
 - Do not treat market-channel data as fill truth.
