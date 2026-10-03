@@ -253,6 +253,25 @@ def day0_is_noaa_preliminary_source(source: object) -> bool:
     )
 
 
+def day0_is_carrier_source(source: object) -> bool:
+    """Whether a Day0 conditioning source is priced by the remaining-path carrier.
+
+    The one source-admission predicate of the carrier region: the materializer
+    routes by it and the queue's preflight twin and attempt fingerprint scope by
+    it, so they cannot disagree on which requests the carrier prices. NOAA
+    preliminary prints and HKO's hourly accumulator are statistical boundaries;
+    the qualified same-station fast tail is priced through its residual
+    likelihood.
+    """
+
+    normalized = str(source or "").strip().lower()
+    return (
+        day0_is_noaa_preliminary_source(normalized)
+        or normalized.startswith("hko_hourly_accumulator")
+        or normalized == DAY0_WU_FAST_RESIDUAL_SOURCE
+    )
+
+
 def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     """Classify current observation evidence without conflating source and finality."""
 

@@ -1423,7 +1423,7 @@ def _day0_noaa_preliminary_carrier(
     hko_provisional = _is_hko_provisional_source(source)
     from src.events.day0_authority import (
         DAY0_WU_FAST_RESIDUAL_SOURCE, DAY0_REMAINING_CENTER_POLICY,
-        current_day0_remaining_center_policy_has_authority,
+        current_day0_remaining_center_policy_has_authority, day0_is_carrier_source,
     )
 
     if not current_day0_remaining_center_policy_has_authority({
@@ -1433,7 +1433,7 @@ def _day0_noaa_preliminary_carrier(
         raise ValueError("DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT")
 
     wu_fast_residual = source == DAY0_WU_FAST_RESIDUAL_SOURCE
-    if not (noaa_preliminary or hko_provisional or wu_fast_residual):
+    if not day0_is_carrier_source(source):
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_INVALID")
     observed = _day0_observed_extreme_c(request)
     if observed is None:
@@ -1694,12 +1694,15 @@ def _day0_noaa_future_vector_members(
     request: ReplacementForecastMaterializeRequest,
     *,
     metric: str,
+    raise_on_db_error: bool = False,
 ) -> tuple[tuple[float, ...], float, str]:
     """Read the exact complete hourly bundle at the materialization cutoff.
 
     One physical provider contributes one path: a regional product supersedes
     its global sibling. Every consumer rebuild and replay applies this same
-    collapse, so any other member set is a different carrier.
+    collapse, so any other member set is a different carrier. The queue's
+    preflight twin calls this with ``raise_on_db_error`` so an unreadable store
+    is an error, never the VECTOR_MISSING verdict.
     """
     observation_time = _day0_observed_extreme_time(request)
     if observation_time is None:
@@ -1739,6 +1742,7 @@ def _day0_noaa_future_vector_members(
         remaining_window_start=window_start,
         require_complete_remaining_window=True,
         conn=conn,
+        raise_on_db_error=raise_on_db_error,
     )
     future_values, _innovations = remaining_day_extremes_c_with_current_state(
         day0_hourly_provider_representatives(vectors),
@@ -2222,6 +2226,123 @@ def _day0_observed_extreme_time(request: ReplacementForecastMaterializeRequest) 
         return _to_utc(value, field_name="day0_observed_extreme_observation_time")
     except ValueError:
         return None
+
+
+def _day0_provisional_extreme_c(request: ReplacementForecastMaterializeRequest) -> float | None:
+    """The observed extreme a started Day0 request prices as a statistical overlay.
+
+    An absorbing extreme truncates support instead; a NOAA preliminary print is
+    always an overlay.
+    """
+    if not _target_local_day_has_started(request):
+        return None
+    if (
+        _day0_absorbing_observed_extreme_c(request) is None
+        or _is_noaa_preliminary_source(request.day0_observed_extreme_source)
+    ):
+        return _day0_observed_extreme_c(request)
+    return None
+
+
+def _day0_carrier_extreme_c(request: ReplacementForecastMaterializeRequest) -> float | None:
+    """The boundary the Day0 remaining-path carrier prices; None routes elsewhere.
+
+    The one admission predicate of the carrier region: the materializer and the
+    queue's preflight twin both decide by it, so they cannot disagree on routing.
+    """
+    from src.events.day0_authority import day0_is_carrier_source  # noqa: PLC0415
+
+    if not day0_is_carrier_source(request.day0_observed_extreme_source):
+        return None
+    return _day0_provisional_extreme_c(request)
+
+
+def _day0_fast_residual_likelihood(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+):
+    """Same-station residual likelihood of the qualified fast tail, else None.
+
+    Only the fast tail carries one: a raw NOAA METAR boundary is already
+    conditioned by its preliminary survival likelihood, and a second one on it
+    double-counts. Thin or mismatched evidence is None.
+    """
+    from src.data.day0_fast_obs import (  # noqa: PLC0415
+        build_fast_station_residual_likelihood,
+        is_fast_residual_tail_source,
+    )
+
+    if (
+        _day0_provisional_extreme_c(request) is None
+        or request.day0_observed_extreme_observation_time is None
+        or not is_fast_residual_tail_source(request.day0_observed_extreme_source)
+    ):
+        return None
+    return build_fast_station_residual_likelihood(
+        conn,
+        city=request.city,
+        target_date=_date_text(request.target_date),
+        metric=metric,
+        observed_source=str(request.day0_observed_extreme_source or ""),
+        observation_time=request.day0_observed_extreme_observation_time,
+        decision_time=request.computed_at,
+    )
+
+
+_DAY0_CARRIER_VECTOR_MISSING = "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING"
+
+
+def day0_carrier_vector_missing(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> bool:
+    """Whether the materializer's prepare of ``request`` ends BLOCKED on a missing hourly bundle.
+
+    The queue's preflight may suppress a child process only on this verdict, so
+    it is the materializer's own, computed read-only: any request that would end
+    another way (an earlier BLOCKED, another route, an unready fusion, an
+    unavailable residual likelihood, a missing current-temperature state, a
+    complete bundle) is False. A cheap necessary screen runs the carrier's own
+    admission and bundle stage on the normalized request, with an unreadable
+    store raising instead of reading as an absent bundle; only a screen that
+    ends on the missing bundle pays for the full prepare that confirms it. Both
+    read one snapshot, so the screen's proof is the prepare's.
+
+    A request whose source cannot reach the carrier skips the database entirely:
+    normalization only rebinds a request to an absorbing source, or an HKO spot
+    to its hourly accumulator, so no other source ever becomes a carrier source.
+    """
+    from src.events.day0_authority import day0_is_carrier_source  # noqa: PLC0415
+
+    source = str(request.day0_observed_extreme_source or "").strip().lower()
+    if not (day0_is_carrier_source(source) or source.startswith("hko_")):
+        return False
+    with _materialization_read_snapshot(conn):
+        validated = _validated_replacement_forecast_request(conn, request)
+        if isinstance(validated, ReplacementForecastMaterializeResult):
+            return False
+        normalized, metric = validated
+        if _day0_carrier_extreme_c(normalized) is None:
+            return False
+        try:
+            _day0_noaa_future_vector_members(
+                conn, normalized, metric=metric, raise_on_db_error=True,
+            )
+        except ValueError as exc:
+            if str(exc) != _DAY0_CARRIER_VECTOR_MISSING:
+                return False
+        else:
+            return False
+        try:
+            prepared = prepare_replacement_forecast_live(conn, request)
+        except ValueError:
+            return False  # the child ends on another named failure, not this BLOCKED
+    return (
+        isinstance(prepared, ReplacementForecastMaterializeResult)
+        and prepared.reason_codes == (_DAY0_CARRIER_VECTOR_MISSING,)
+    )
 
 
 def _om9_localday_hourly_coverage_ok(
@@ -7269,7 +7390,7 @@ def _compute_posterior_payload(
     _day0_remaining_bias_provenance: dict[str, object] = {}
     _day0_shared_carrier_error: str | None = None
     _provisional_extreme_c: float | None = None
-    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+    from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE, day0_is_carrier_source
 
     if (
         bayes_precision_fusion_override is not None
@@ -7282,55 +7403,19 @@ def _compute_posterior_payload(
             # asymmetric floor() preimage is used instead of the symmetric WMO one. Uniform
             # across the family (fail-loud if mixed).
             _rounding_rule = _family_rounding_rule(request.bins)
-            _noaa_preliminary_source = _is_noaa_preliminary_source(
-                request.day0_observed_extreme_source
-            )
             _day0_obs_extreme_c = (
                 None
-                if _noaa_preliminary_source
+                if _is_noaa_preliminary_source(request.day0_observed_extreme_source)
                 else (
                     _day0_absorbing_observed_extreme_c(request)
                     if _target_local_day_has_started(request)
                     else None
                 )
             )
-            _provisional_extreme_c = (
-                _day0_observed_extreme_c(request)
-                if _target_local_day_has_started(request)
-                and (_day0_obs_extreme_c is None or _noaa_preliminary_source)
-                else None
+            _provisional_extreme_c = _day0_provisional_extreme_c(request)
+            _fast_residual_likelihood = _day0_fast_residual_likelihood(
+                conn, request, metric=metric,
             )
-            from src.data.day0_fast_obs import (
-                build_fast_station_residual_likelihood,
-                is_fast_residual_tail_source,
-            )
-
-            # Only the qualified fast tail carries a residual likelihood. A raw
-            # NOAA METAR boundary is already conditioned by its preliminary
-            # survival likelihood; a second likelihood on it double-counts.
-            if (
-                _provisional_extreme_c is not None
-                and request.day0_observed_extreme_observation_time is not None
-                and is_fast_residual_tail_source(
-                    request.day0_observed_extreme_source
-                )
-            ):
-
-                _fast_residual_likelihood = (
-                    build_fast_station_residual_likelihood(
-                        conn,
-                        city=request.city,
-                        target_date=_date_text(request.target_date),
-                        metric=metric,
-                        observed_source=str(
-                            request.day0_observed_extreme_source or ""
-                        ),
-                        observation_time=(
-                            request.day0_observed_extreme_observation_time
-                        ),
-                        decision_time=request.computed_at,
-                    )
-                )
             # Wave-2 item 6 (2026-06-12): the settlement σ-floor is applied by PER-CELL DATA
             # AVAILABILITY, not a global flag (edli_settlement_sigma_floor_enabled / _required
             # merged + deleted). Look up the SAME floor the EMOS path uses (city|season|metric)
@@ -7386,13 +7471,7 @@ def _compute_posterior_payload(
                 str(request.day0_observed_extreme_source or "").strip().lower()
                 == DAY0_WU_FAST_RESIDUAL_SOURCE
             )
-            if (
-                _provisional_extreme_c is not None
-                and (
-                    _is_noaa_preliminary_source(request.day0_observed_extreme_source)
-                    or _is_hko_provisional_source(request.day0_observed_extreme_source)
-                    or _wu_fast_residual_source)
-            ):
+            if _day0_carrier_extreme_c(request) is not None:
                 if _wu_fast_residual_source and _fast_residual_likelihood is None:
                     raise ValueError("DAY0_WU_CURRENT_CARRIER_RESIDUAL_UNAVAILABLE")
                 (
@@ -8051,12 +8130,7 @@ def _compute_posterior_payload(
     if (
         _target_local_day_has_started(request)
         and _day0_observed_extreme_c(request) is not None
-        and (
-            _is_noaa_preliminary_source(request.day0_observed_extreme_source)
-            or _is_hko_provisional_source(request.day0_observed_extreme_source)
-            or str(request.day0_observed_extreme_source or "").strip().lower()
-            == DAY0_WU_FAST_RESIDUAL_SOURCE
-        )
+        and day0_is_carrier_source(request.day0_observed_extreme_source)
         and bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None
         and _day0_shared_carrier is None
