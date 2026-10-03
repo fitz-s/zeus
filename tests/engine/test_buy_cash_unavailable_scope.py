@@ -239,26 +239,35 @@ def test_reactor_preflight_vetoes_buy_but_not_sell(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("bins", (2, 3, 5))
 @pytest.mark.parametrize("floor", (Decimal("27"), Decimal("0")))
-def test_held_sell_selectable_buy_rejected_and_receipt_persists(floor):
+def test_held_sell_selectable_buy_rejected_and_receipt_persists(floor, bins):
     at = _dt.datetime(2026, 10, 2, 23, 50, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="buy-cash-unavailable")
     scope = current_global_auction_scope_from_events((event,), captured_at_utc=at)
     family = scope.family_keys[0]
     # Held YES on "bin" likely loses (q=0.05) against a 0.60 bid: SELL beats
     # HOLD. The "other" YES ask at 0.10 vs q=0.95 is a strong BUY when funded.
+    rest = (0.0,) * (bins - 2)
+    point_q = (0.05, 0.95 - 0.01 * len(rest), *(0.01 for _ in rest))
     fields = dict(
         family_key=family,
+        # 3+ MECE bins: a BUY on "other" has a zero payout on both branches
+        # at a zero cash floor, which a sizing endowment would reject.
         bindings=(
             OutcomeTokenBinding("bin", "condition", "yes-token", "no-token"),
             OutcomeTokenBinding("other", "other-condition", "other-yes", "other-no"),
+            *(
+                OutcomeTokenBinding(f"x{i}", f"x{i}-condition", f"x{i}-yes", f"x{i}-no")
+                for i in range(bins - 2)
+            ),
         ),
         q_version="q", resolution_identity="resolution", topology_identity="topology",
         posterior_identity_hash="posterior", source_truth_identity="source",
         authority_certificate_hash="certificate", band_alpha=0.05,
         band_basis="current-evidence",
-        yes_point_q=np.asarray((0.05, 0.95)),
-        yes_q_samples=np.tile((0.05, 0.95), (400, 1)), captured_at_utc=at,
+        yes_point_q=np.asarray(point_q),
+        yes_q_samples=np.tile(point_q, (400, 1)), captured_at_utc=at,
     )
     probability = JointOutcomeProbabilityWitness(
         **fields, max_age=_dt.timedelta(seconds=30),

@@ -654,6 +654,35 @@ def _candidate_portfolio_endowment(
     wealth_witness: PortfolioWealthWitness,
 ) -> CandidatePortfolioEndowment:
     """Project exact same-family holdings onto one native action's branches."""
+    loss_payouts, win_payouts, current_token_shares = _candidate_family_payouts(
+        candidate,
+        probability_witness=probability_witness,
+        holdings_snapshot=holdings_snapshot,
+        wealth_witness=wealth_witness,
+    )
+    utility_liquid = (
+        wealth_witness.strategy_capital_allocation.utility_liquid_cash_usd
+    )
+    return CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=(
+            utility_liquid + min(loss_payouts)
+        ),
+        win_wealth_floor_usd=(
+            utility_liquid + min(win_payouts)
+        ),
+        current_token_shares=current_token_shares,
+        ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
+    )
+
+
+def _candidate_family_payouts(
+    candidate: GlobalSingleOrderAnyCandidate,
+    *,
+    probability_witness: Any,
+    holdings_snapshot: Any,
+    wealth_witness: PortfolioWealthWitness,
+) -> tuple[tuple[Decimal, ...], tuple[Decimal, ...], Decimal]:
+    """Ledger-aligned same-family payouts on each branch plus own-token shares."""
     outcomes = tuple(str(bin_id) for bin_id in probability_witness.bin_ids)
     if (
         len(outcomes) < 2
@@ -710,19 +739,7 @@ def _candidate_portfolio_endowment(
     )
     if not loss_payouts or not win_payouts:
         raise ValueError("candidate payoff branches are incomplete")
-    utility_liquid = (
-        wealth_witness.strategy_capital_allocation.utility_liquid_cash_usd
-    )
-    return CandidatePortfolioEndowment(
-        loss_wealth_floor_usd=(
-            utility_liquid + min(loss_payouts)
-        ),
-        win_wealth_floor_usd=(
-            utility_liquid + min(win_payouts)
-        ),
-        current_token_shares=current_token_shares,
-        ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
-    )
+    return loss_payouts, win_payouts, current_token_shares
 
 
 def _family_portfolio_endowment(
@@ -1109,12 +1126,23 @@ def select_prepared_global_auction(
                     token_id=asset.token_id,
                     position_id=None,
                 )
-                current_token_shares = _candidate_portfolio_endowment(
-                    native,
-                    probability_witness=probability,
-                    holdings_snapshot=holdings_by_family[asset.family_key],
-                    wealth_witness=wealth_witness,
-                ).current_token_shares
+                holdings = holdings_by_family[asset.family_key]
+                if wealth_witness.buy_cash_unavailable_reason is not None:
+                    # Typed-rejected before sizing: needs own-token shares
+                    # only, never a positive sizing endowment.
+                    _, _, current_token_shares = _candidate_family_payouts(
+                        native,
+                        probability_witness=probability,
+                        holdings_snapshot=holdings,
+                        wealth_witness=wealth_witness,
+                    )
+                else:
+                    current_token_shares = _candidate_portfolio_endowment(
+                        native,
+                        probability_witness=probability,
+                        holdings_snapshot=holdings,
+                        wealth_witness=wealth_witness,
+                    ).current_token_shares
                 candidates.extend(
                     global_candidates_from_native(
                         native,
