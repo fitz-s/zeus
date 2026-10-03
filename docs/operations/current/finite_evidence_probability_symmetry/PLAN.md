@@ -12973,3 +12973,417 @@ remain explicit. Root does not mark the original goal complete or source-all-
 clear. This checkpoint is committed/pushed only to the unfinished task branch;
 live remains source78 with no new loader. Preserve that remote branch while
 the root-managed temporary tree is archived after clean/handle checks.
+
+### Restored source-physics priority: three read-only ownership lanes
+
+The task branch94cfb688 and source/live78e were restored without code changes.
+Root prioritizes real ENS land/sea cell choice, native provider location and
+surface, causal source clocks and settlement-source physical semantics. The
+earlier normal18Z HIGH/LOW quantity chain is already closed (11215--11224);
+do not re-report its historical failed download as a current missing shape.
+Quantity completeness, raw-byte physical proof and current consumer authority
+remain separate, and old dated packet evidence requires recheck-on-use.
+
+- ENS lane, current_exit: inspect exact current mask grid/hash/cycle, four
+  surrounding cells and selected land fraction>0.5; native variable/height/
+  member/window receipt must bind same cycle/target/metric through canonical
+  shape, posterior and actual consumer. Existing owner surfaces are extractor,
+  typed TIGGE payload, canonical GRIB ingest and source-run identity reader.
+- Provider lane, kma: inspect actual response/native grid, model surface and
+  true source-site/ground roles. Requested coordinates, target DEM, model
+  terrain, effective downscaling height, station ground and sensor AGL cannot
+  substitute for one another. Preserve MPMG/ZSQD and missing datum/height-role
+  UNKNOWN; WRH station-reference capture does not grant ground authority.
+- Clock lane, source_clock_physics: bind source-issued, first available/
+  fetched, recorded and actual commit/snapshot boundaries through normal
+  source wake, queue, materializer and consumer. Imported is not transaction
+  commit. HKO provisional intraday and finalized Daily Extract are separate;
+  independent venue rounding/winner proof remains unknown where unavailable.
+
+All three lanes are initially read-only on live, with no source ownership
+grant. The integrator owns only this PLAN, scoped registry/test integration
+after assignment, and task-branch/delivery operations. A repair requires a
+replicable wrong binding or physics defect, original-code failure and minimal
+fixed-code antibody including HIGH/LOW and YES/NO twins as affected. Declare
+exact source/site/raw/shape SCOPE, existing normal producer/materializer DRAIN
+and genuine new qualified input/cut RESET. Preserve immutable old clocks;
+metadata recovery cannot renew them. Missing external proof is not a new
+temperature error or permission to invent geometry/height/zero values.
+
+Keep current mu*, same-cycle within spread, ENS-center disagreement and provider
+between spread unchanged. No historical bias fit, sigma floor, fitted offset
+or probability/action/freshness/price-band waiver may bridge source uncertainty.
+Acquire metadata only through an approved existing normal producer/path, not
+manual live fetch or seed. Code fix, private pass, loaded process and natural
+production capture/consumer evidence are reported independently; a future
+normal raw arrival may leave a runtime gap without delaying a proven small fix.
+No new packet, venue action, forced cycle, guard clear or appearance reload.
+
+Private-test readiness: host pytest/ecCodes/YAML are available; netCDF4 is
+absent and its existing skip stays explicit. Use tiny encoded GRIB or raw HTTP
+fixtures and sqlite memory/private temp DBs, never a canonical DB copy. Normal
+conftest must validate ZEUS_TEST_STATE_ROOT in the host tempfile root and keep
+TI-1 live-write isolation; disable plugin autoload/bytecode/cache as applicable.
+No private settings link is currently installed; only the integrator may add
+the already-approved read-only link if focused tests actually require it and
+must remove it before stage/archive. Prior722/9 is not rerun for this plan;
+new exact write sets select their own focused and mandated affected checks.
+
+### Current ground-action qualification: exact two-city residual
+
+At20:33:50Z the live pure runtime_station_geometry_for_city read reports both
+MPMG/Panama City and ZSQD/Qingdao as airport_reference/OurAirports, ground_status
+UNPROVEN, ground_reason STATION_GROUND_PROOF_MISSING, ground_elevation_m=None
+and station_surface=UNKNOWN. Registry SHA is
+1edc6fcc312b4598d91ad76c9736d21a0edd399b1df2cff7372ce69b0263b405.
+Their config/station_precise_coords.json city rows have no station_ground_proof;
+the existing reference elevations9.4m/9.1m are not admitted ground evidence.
+The configured source contracts remain WRH MPMG and WRH ZSQD in cities.json;
+no airport-name string, DEM or reported-reference latitude overrides that role.
+
+Provider lane's20:33:29Z canonical FORECAST read-only two-city check finds
+read_current_station_ground_evidence=None for both. Actual target coverage is
+DATA_DEGRADED/TARGET_STATION_GROUND_EVIDENCE_INVALID: Panama localOct3 spans
+05:00Oct3--05:00Oct4 UTC, Qingdao localOct4 spans16:00Oct3--16:00Oct4 UTC.
+The same current targets have no latest HIGH or LOW posterior. Normal producer
+materializer's ground-target gate refuses STATION_GROUND_DATA_DEGRADED; its
+anchor gate also preserves OM9_STATION_GROUND_ENTITY_NOT_POSSESSED. This is
+current scoped unavailability, not a missing WRH-reference capture or an
+all-city stop. An existing eligible historical certificate is not newly granted
+authority by this report.
+
+The exact expected evidence surface is station_ground_proof plus the approved
+original source/identity entity, archived normally as raw_forecast_artifacts
+source_id station_ground::{station_id} and artifact_metadata_json's
+station_ground_evidence. A future official public-evidence lane must bind the
+actual source site, physical ground-MSL quantity/datum and identity; airport
+ARP, WRH ELEV_DEM, nearby station or sensor AGL cannot substitute. Retain these
+two exclusions until existing normal qualification/materialization consumes
+valid proof, without inventing metadata or manually fetching weather/seed work.
+
+Root's new ENS evidence separately confirms HK1400495's selected land cell and
+same-grid mask/cycle chain; native selected-cell orography/MSL remains UNKNOWN
+and belongs to the ENS lane. Provider HK HIGH/LOW native-body location,24h
+aggregation and certificate binding pass without double lapse; this does not
+grant ground to the two cities above. Clock lane's112 bounded passes and current
+samples identify no confirmed clock bug. Absent body-issued fields in33classes
+are explicit UNKNOWN while exact single-run cycle/bytes/possession can remain
+lawful; absence of a publisher field is not a new universal fail-closed gate.
+Await the lanes' exact anchors before proposing or loading any physical repair.
+
+### Approved metadata bracket evidence: before-edit three-file repair
+
+Root accepts a reproducible evidence-loss gap, not a proved bad source clock:
+the normal metadata shared client has actual HTTP entity bytes, but
+fetch_model_updates drops entity/network observations; exact_request absent
+also skips the metadata cache. BPF before/after retains only run-modified and
+related scalar fields, losing actual bytes/header/first-seen provenance. The
+private actual normal-call antibody fails on original code; it performs no
+HTTP request or canonical write. It is behavioral RED, not missing-test-config
+or marker-harness failure.
+
+The assigned source-clock worker exclusively owns
+src/data/openmeteo_model_updates.py, src/data/bayes_precision_fusion_download.py
+and existing tests/test_bayes_precision_fusion_download.py. The integrator
+owns this PLAN and necessary existing registry entries only, and does not
+duplicate the implementation. No extra source file, schema/table, authority
+flag, parallel writer or protocol document is approved.
+
+SCOPE is the actual standard metadata bracket, exact request identity and its
+temperature-response body SHA. Preserve observed entity/header bytes, genuine
+transport possession/first-seen and explicit provider-issued fields separately;
+missing provider publication time stays UNKNOWN, never replaced with fetched.
+DRAIN is the next existing normal producer capture retaining its own proof.
+RESET is a new real qualified capture; absent optional sidecar is UNKNOWN and
+does not rewrite old source/availability clocks or change existing admission.
+Do not manufacture retrospective wire hashes, renew old timestamps from local
+file mtime, bind unrelated latest metadata, or present cached reconstruction as
+an original HTTP entity. Same exact capture must remain stable in all existing
+shape/q/RNG/current-temperature identities; diagnostic proof is not q authority.
+
+Acceptance requires original-code failure and fixed-code pass at the actual
+fetch/bracket/BPF seam with controlled private HTTP bytes, exact request/body
+binding, HIGH/LOW twins and cache/no-request/unknown/header/duplicate negatives.
+Unchanged source-cycle and issued/fetched/available semantics, numeric values,
+qualification, probability/action law and existing network/budget behavior must
+be demonstrated, not asserted. Independently review byte authenticity and old-
+clock non-renewal before freeze. Tests use in-memory/private temp DBs and normal
+isolation; only the integrator may supply the approved task-only read-only config
+link if needed, removed before stage/archive. No live fetch, seed, cycle, money
+action or guard mutation is authorized.
+
+After frozen sources and named review, integrate focused download/metadata/
+source-event tests plus the current prescribed affected data manifest routes,
+compile, touched registry/freshness/YAML/planning/diff checks. Compare any new
+failure only at its exact original-source seam and node; old722/9 is not rerun
+as appearance evidence or assumed harmless. Root acceptance precedes any
+normal FF/load, with actual component boot identity and natural capture proof
+reported separately. ENS756-row land-mask PASS does not prove selected-cell
+native orography/MSL (currently0/756); that independent ENS design stays outside
+this metadata worker's write scope and cannot be patched by bias fitting.
+
+Provider lane's20:31:41Z actual-body replay independently binds current HK
+HIGH/LOW raw pairs IFS2688036/37 to artifact1409143 (location18), ICON2680274/75
+to1400816 (location22), and UKMO2690549/50 to1412235 (location9). Full-body SHA,
+24 unique00:00--23:00 hourly C extrema and canonical values match; all three
+surface witnesses are VERIFIED and posterior734005/733885 binds current raw
+IDs/geometry hashes. Effective DEM38 is not proof that native IFS102 was
+numerically shifted to38: no double lapse, center debias, lapse penalty or shape
+translation is introduced. Properly typed Seoul all-sea center behavior is not
+an invented height. Current91 of108 city/metric latest-q role declarations bind;
+the17 absent q are not evidence that every market fails.
+
+These are bounded source/binding proofs, not prediction-accuracy guarantees.
+ENS selected land fraction0.5078125 is not100% land; regular_ll0.25 is the public
+wire-distribution grid, not IFS's true reduced-Gaussian dynamics grid. Source-
+reference metadata, model-surface phi and actual sensor ground are distinct.
+Keep unknown provider-issued clocks in33classes explicit without misclassifying
+lawful run/byte/possession binding as a clock defect. Panama/Qingdao remain
+unactivated; no station/source/coordinate or fitted residual correction follows.
+
+### Approved optional ENS geopotential capture: before-edit four-file scope
+
+Current ENS lane verifies all756 inspected snapshot rows' mask/grid/cycle
+binding, including HK1400495's selected LAND cell. That does not prove selected-
+cell surface geopotential: none of those756 carries the native selected-cell
+orography/MSL evidence. Root approves an evidence-preservation repair, not a
+temperature error, lapse adjustment or new q-eligibility gate.
+
+ENS executor kma exclusively owns src/data/ecmwf_open_data.py,
+scripts/extract_open_ens_localday.py and existing
+tests/test_ecmwf_open_data_collect_cycle.py plus
+tests/test_ingest_grib_source_run_context.py. The integrator owns only this PLAN
+and necessary touched existing registries. Metadata worker's separate three
+files stay disjoint. current_exit independently reviews both frozen repairs
+read-only, never as source writer. Existing typed provenance accepts the whole dict; no
+third source file, schema/table or new protocol is approved.
+
+SCOPE is an optional existing real cached same-cycle surface z (param129, sfc,
+step0), exact real raw bytes/receipt, distribution-grid identity and the already
+selected flat cell. Preserve observed selected phi value and its actual unit,
+header/grid/model/cycle/byte binding. This is model-surface geopotential on the
+wire-distribution grid, not independently proved MSL/AGL or the true native
+terrain of deterministic IFS. Do not relabel derived height, DEM, temperature
+anchor or station elevation as that quantity. No empirical correction follows.
+
+DRAIN is the existing collector passing an already present real same-cycle z
+cache into the extractor, preserving that entity's receipt rather than issuing
+a new request. RESET is a real matching cache input with valid variable/grid/
+cycle/date/unit and selected-cell proof. Absent cache, wrong grid/date/units or
+unavailable receipt stays UNKNOWN; it must not turn into zero, qualify an old
+body or fail the already valid temperature/LSM chain. The normal collector adds
+no z HTTP, unused fetch helper, deadline or budget. Automatic network acquisition
+is explicitly DEFERRED: optional added cost can delay mandatory source updates.
+No new retry, writer, timer or manual weather fetch is allowed.
+
+Keep numerical temperatures, selected land cell, shape/q/gates, source identity,
+48-step temperature completeness and existing possession/freshness clocks
+unchanged. Preserve actual bytes through optional canonical provenance without
+pretending pruned original fields can be reconstructed. Actual-byte HIGH/LOW
+extract/typed/ingest tests must prove exact selected index/phi/unit/receipt,
+unknown negatives, replay identity/value parity, optional failure independence
+and original shared-budget behavior. Encoded test GRIB is not a current provider
+body. Independently review authenticity, old-clock non-renewal, identity parity
+and collector deadline before final freeze.
+
+After both independent repairs freeze, integrate their focused/mandatory
+affected checks and exact baseline dispositions once; do not repeat unrelated
+old matrices. Root acceptance precedes one normal FF/load, with actual owning
+component renewal and natural provider capture/consumer proof separate from
+private passes. Until then no production fetch, seed, cycle, guard or venue
+mutation is authorized. The global profit/source-physics goal remains open.
+
+### Physical evidence integration readiness and bounded ground research
+
+checked=2026-W40; basis=current manifest/scoped routes and root-relayed bounded
+official research; until=recheck-on-use. The approved metadata worker's frozen
+three blobs match SHA3297d967/01e9a402/62ee7ffd. Its actual normal private-HTTP
+call gives original2RED then11GREEN; its whole owned suite is304PASS/4FAIL with
+the same four original-source failures, not an all-green result or proof those
+failures are harmless. Preserve exact node/message dispositions at integration.
+
+The minimum prescribed final selection is19 unique test files: all15 data
+module-manifest required files, the three owned metadata/ENS test files, and
+tests/test_topology_doctor.py from the scripts manifest. The scripts module's
+other required tier-resolver/obs-writer files and book's backfill-config test
+are already included. Run once after both repairs freeze and named review;
+include the data/scripts module-book syntax checks and changed registry,
+freshness, YAML, planning-lock and diff checks. Do not rerun the unrelated old
+bridge/state/engine matrices. Previously recorded removed registry API, TIGGE
+policy, V2 total-call fixture and unexercised placeholder-envelope failures
+are comparison leads, not waivers or presumed harmless current outcomes.
+
+The prior metadata pytest-22556 three-file private capture path has expired:
+exact preservation returned ENOENT. No DB or temperature body was copied.
+The integration evidence directory is
+/tmp/zeus-source-physical-final-20261003.x3HhvF; it is currently empty, not a
+receipt. If the required final private test regenerates evidence, preserve its
+actual metadata entities and sidecar there, explicitly as controlled HTTP-fake
+evidence rather than the missing old artifact or a current provider body.
+
+Bounded official research still cannot promote either missing station ground.
+MPMG AAC AIP2026-09-03 gives ARP085824N0793320W and AD31.2FT, not exact MET
+sensor ground; the official1999 relocation does not bind the WRH location.
+ZSQD AWC36.362/120.087 reports WMO54857, while official WMO QINGDAO54857 gives
+36.066667/120.333333 and no ground proof; those distinct locations cannot be
+joined into station-ground authority. Sources are the AAC AD2.2-MPMG PDF,
+AWC stationinfo for MPMG/ZSQD and OSCAR WMDR0-20000-0-54857. Both remain typed
+UNPROVEN, currently without a target posterior and normally scoped out. This
+research is closed as insufficient, not a new ongoing backlog: no activation,
+DEM/ARP-to-ground substitution, station relocation or fitted correction follows.
+
+Root resolves the ENS optional-HTTP deadline risk with cache-only evidence
+preservation. The intermediate HTTP-fetch design is superseded, not shipped:
+no automatic new z capture, unused fetch helper or budget change is accepted.
+Two actual-byte extraction passes alone do not prove final collector behavior.
+Source acquisition remains unclosed even after cache/extract code passes; keep
+mandatory temperature capture and its original clocks/deadline/identity intact.
+
+Metadata named independent review is APPROVE: eight checks include hostile
+two-location actual three-HTTP capture, unreasonable Date header without clock
+pollution, equal original/new actual product identities and original-code
+AssertionError for missing receipt. Root relays the four exact whole-suite
+baseline nodes in tests/test_bayes_precision_fusion_download.py:
+test_real_damaged_receipt_is_reacquired_without_rewriting_raw_truth parametrized
+all_clocks_and_receipt_file-high/low and all_clocks_and_body_files-high/low.
+Original affected two-source in-process overlay chunk576f2b reproduces the
+same decision2026-09-29T23:30Z assertion near5085: actual None instead of
+HTTP_CAPTURE_RECEIPT_MISSING or ENTITY_BODY_MISSING. These are named unresolved
+old fixture/behavior dispositions, not dismissed as harmless; this optional
+metadata repair neither weakens missing-body refusal nor repairs that recovery
+claim. Confirm actual IDs/messages in the final required result without
+rerunning the worker's entire suite separately.
+
+### Named review corrections: phi clock and damaged-receipt private timeline
+
+Before further edit, root approves two narrow corrections. ENS executor kma
+owns only scripts/extract_open_ens_localday.py and existing
+tests/test_ingest_grib_source_run_context.py for the new phi proof: acquire one
+real aware UTC read/capture clock and require cycle <= fetched <= read. Do not
+require phi possession <= the earlier temperature possession; a later audit
+of the same-cycle cached physical field is lawful. A future or unknown phi
+clock makes only this optional proof UNKNOWN, without changing temperature,
+selected cell, source identity, shape/q/gates or old source clocks. Named
+independent review found the future2100 receipt accepted as OBSERVED (Important
+T3), with two actual HIGH/LOW counterexamples RED; retain those and later-audit
+positive twins through the corrected four-antibody matrix. No z HTTP follows.
+SCOPE is the exact optional cached entity; DRAIN validates it at real read;
+RESET is an actually possessed causal receipt, never a rewritten old clock.
+Label audit_observed_at_utc as AUDIT_ONLY_NOT_DECISION_INPUT and keep cache
+source-fetched possession separate from the original temperature clock.
+
+The source-clock worker owns only the existing BPF test function
+test_real_damaged_receipt_is_reacquired_without_rewriting_raw_truth for private
+timeline repair. Its default private_sql_clock=False uses Sep29 run/caller cut
+against real SQL-now Oct3: the capture is expired, so debt None is correct.
+Root's actual current500-artifact/186-receipt check is parseable, and one private
+counterproof with fresh controlled SQL clock produces MISSING while the expired
+case remains None. Only its four all_clocks_and_receipt_file/all_clocks_and_body_files
+HIGH/LOW cases use private_sql_clock=True and world.open_forecast; its other18
+cases keep their original defaults. Remove the old real-walltime HTTP/dl.datetime
+block only for these four. Enhance the existing HIGH/LOW
+test_extreme_observer_uses_sql_now_not_historical_decision_to_wash_age with the
+fresh missing-receipt assertion before its existing SQL+35h expired basis/public
+None/no-HTTP check, without adding a duplicate expiry function or restoring
+unknown clocks. Preserve the four intended damaged-body/receipt negatives.
+No metadata production source, global fixture default or gate waiver is
+authorized. The prior four failures are refuted as an illegal private timeline,
+not four observed runtime capture defects. SCOPE is this private test timeline;
+DRAIN is real intended missing-evidence execution; RESET keeps fresh and
+expired cases distinct under the unchanged physical-debt predicate.
+
+The completed required19 snapshot is1177PASS/42FAIL/13deselected (existing
+not-live_topology/not-live_drift selection), rc1,246.17s at
+/tmp/zeus-source-physical-final-20261003.x3HhvF/required19.xml and required19.log.
+It is not final-source all-green proof. After these three files change, rerun
+only affected whole owned files and the narrow named review, not all19. Continue
+the34 topology-node original-HEAD comparison independently. Metadata source
+pair and ENS collector/collector-test hashes stay fixed; extractor, ingest test
+and BPF test receive explicit new final hashes after correction.
+
+The34 previously unseen topology failures have an actual original-HEAD
+comparison, not a count-based waiver. The private harness reads git-show HEAD
+blobs for the four affected production sources, three registries and this PLAN
+in memory, preserving current test definitions and all worktree files. Exact
+34 failure IDs recur in38.35s;31 failure messages are byte-identical and three
+vary only in0x memory addresses, with no other message delta. Six complete
+tracebacks additionally include the harness's read-only open-wrapper frames,
+but keep the same FileNotFound reason/path (five deleted old script fixtures
+and one old handoff skill). The other classes are obsolete navigation/API/
+format fixtures, root/manifest/reference drift and an undefined _json fixture
+name. They remain deferred governance/testing debt, not evidence of a current
+weather, budget or probability defect and not a globally clean pass. Artifacts:
+baseline_topology_failures.py, baseline-topology34.xml and baseline-topology34.log
+under the same final evidence directory; no source or test was restored on disk.
+
+Full registry checks return scripts281/source459/tests539 issues, rc1. No issue
+names the touched script or tests; the three touched source rows have only
+downstream warnings, and their downstream lists exactly match original HEAD.
+These are recorded pre-existing coverage drift, not repaired or hidden by
+changed why/note text. Three registry YAMLs parse; all474 top-level data/scripts
+Python files compile in memory; touched script/test freshness and diff checks
+pass. Planning-evidence checker passes but is currently a compatibility no-op,
+so actual adjacent before-edit plans and independent review remain the proof.
+
+The required run regenerated and preserved exactly three new controlled
+HTTP-fake evidence files at the final evidence directory root: native metadata
+entities SHA840c5192 and a1bcfb5d, and bracket sidecar SHAa4dad8ac750e19489b0a349ddbc3bcab522b5e1aebbc5a736c81b5e007df3ee1.
+The prior pytest-22556 sidecar SHA0f755103 was unavailable; this new receipt is
+not substituted for it or presented as current provider production proof.
+No temperature body or canonical DB was copied. Private fixture DBs/raw bytes
+created by the required tests stay isolated under the dedicated pytest child.
+
+The metadata worker's corrected test-only blob is
+7e184edc7862cda3c34b785ceb83a21017dc5b26abb28158441765e81350baa2;
+production metadata source SHA3297d967/01e9a402 stays unchanged. Root reports
+its current whole-file287PASS, including the four original damaged-clock
+failures,18 unaffected sibling cases,11 metadata checks and the original HIGH/
+LOW35h expiry/no-HTTP controls. The actual required19 XML had287 cases from
+that file (283PASS/4FAIL); the earlier relayed304/4 result has a different run
+boundary and is not merged into this batch. Accept exact current worker proof
+without rerunning its whole file merely to duplicate287. Narrow independent
+test-delta review and final ENS correction proof remain pending before landing.
+
+### Final corrected blobs and integration acceptance boundary
+
+The final optional phi clock correction freezes extractor
+03a1a644e8727558853cd7258b88561c53d88f14535eb5eff33c851a2fe0ac4c and
+ingest test50087a963fcaf6460557bf50b421aabee83609bef8d79d73709518f556f97b45.
+KMA's whole ingest file62PASS/37.43s includes original58 and four future/later-
+audit HIGH/LOW controls: actual future-clock2RED becomes GREEN, a later lawful
+audit keeps the old January temperature possession unchanged, and typed/
+canonical payload and product identity parity passes. Original collector
+1dcfb2da and collector test4a337353 stay unchanged; their46 required-batch passes
+remain valid. Metadata production pair3297d967/01e9a402 is unchanged, and
+corrected BPF test7e184edc has whole-file287PASS. These are separate actual runs,
+not a claimed repeated all-green19-file matrix or summed duplicate coverage.
+
+The former missing receipt/body four failures are closed by qualified private
+SQL timing, not production changes. The remaining first-batch failures are
+34 exact-baseline governance/fixture cases plus four existing data cases:
+removed ensemble quota_tracker API (fixture migration deferred), TIGGE primary
+versus experimental policy expectation (source activation policy mismatch in
+the old fixture, not overridden), V2 account truth orders/trades each max-page1
+giving two calls (refuted total-call expectation; existing production guards
+privately pass), and the placeholder envelope rejected before minimum-notional
+authority (that branch remains unexercised evidence debt). None is waved through
+as proof of continuous readiness, profit or all source physics.
+
+Root's metadata and legal-timeline reviews accept the narrow correction; the
+final phi clock named review must close its identified future-clock finding
+before source landing/load. The integrator verifies all seven frozen blobs,
+11 expected changed paths, final registry/YAML/freshness/syntax/diff proof and
+fresh origin/live. No other source is edited, no unrelated drift repaired,
+and the test-only config link is removed before stage/clean. Until root accepts
+delivery, no production restart is performed. Cache-only z acquisition, true
+dynamical native terrain/station MSL/AGL, two cities' ground proof and a natural
+new provider capture remain distinct unresolved evidence, not code-test passes.
+
+Root grants delivery acceptance after final ENS named review closes the
+Important future-clock finding: four new nodes PASS/7.10s and two independent
+actual-ecCodes canonical-microsecond boundaries PASS/5.76s. A frozen read cut is
+not renewed by a second now; cut+1us/2100 possession stays UNKNOWN without phi,
+and later audit preserves original temperature clocks. Metadata production and
+test-only timeline reviews remain APPROVE. This authorizes one normal FF/load
+for the bounded evidence repairs, not any source/ground activation, manual
+capture/reseed/action, guard clearing or claim that the original goal is done.

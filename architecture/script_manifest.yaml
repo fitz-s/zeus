@@ -951,7 +951,7 @@ scripts:
     dry_run_default: false
     apply_flag: implicit
     external_inputs: [ECMWF_OPEN_DATA_GRIB]
-    reuse_when: "Extract checked-in ECMWF Open Data ENS GRIB into local-calendar-day JSON for canonical ingest, preserving optional real-message hash/observed metadata bytes and HIGH/LOW selected-point periods."
+    reuse_when: "Extract checked-in ECMWF Open Data ENS GRIB into local-calendar-day JSON for canonical ingest, preserving optional real-message hash/observed metadata bytes and HIGH/LOW selected-point periods. Existing same-cycle surface-z bytes may bind selected-cell distribution-grid geopotential and receipt without changing temperature/land selection or claiming station MSL, sensor AGL or the true dynamical native grid. Its UTC read clock validates original cache possession as audit-only evidence; later audit is allowed and future possession stays UNKNOWN without renewing temperature clocks."
     do_not_use_when: "Do not use for settlement observations, direct DB writes, or a GRIB whose native startStep/endStep/stepRange/lengthOfTimeRange provenance cannot be verified."
     canonical_command: "python3 scripts/extract_open_ens_localday.py --grib-path PATH --track mx2t6_high|mn2t6_low --manifest-path PATH --output-root PATH"
     delete_policy: retain_until_superseded

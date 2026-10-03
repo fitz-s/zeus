@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-10-02; last_reused=2026-10-02 (physical read pass equivalence and current-serving poison negatives)
+# Lifecycle: created=2026-06-08; last_reviewed=2026-10-03; last_reused=2026-10-03 (native metadata bracket evidence)
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -1104,6 +1104,163 @@ def test_standard_fallback_accepts_availability_skew_across_meta_replicas(
     assert stamp.run == run
     assert stamp.modification_time == modified
     assert stamp.source_available_at == before_available
+
+
+def _native_standard_metadata_http(tmp_path, monkeypatch):
+    """Real shared client and parsers, with only the HTTP origin replaced."""
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data import openmeteo_client as client
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    run = datetime(2026, 10, 3, 12, tzinfo=UTC)
+    modified = datetime(2026, 10, 3, 18, 35, tzinfo=UTC)
+    available = datetime(2026, 10, 3, 18, 30, tzinfo=UTC)
+    metadata = {"last_run_initialisation_time": run.isoformat(),
+        "last_run_availability_time": available.isoformat(),
+        "last_run_modification_time": modified.isoformat()}
+    before = json.dumps(metadata, indent=2).encode() + b"\n"
+    after = b" " + json.dumps({**metadata,
+        "last_run_availability_time": (available + timedelta(minutes=2)).isoformat()}).encode() + b"\n"
+    temperature = {**_complete_hourly_local_day_payload(date(2026, 10, 4), base=25, utc_offset_seconds=-18000),
+        "latitude": 30.25, "longitude": -97.75, "elevation": 150,
+        "timezone": "America/Chicago"}
+    temperature_body = json.dumps(temperature, indent=1).encode() + b"\n"
+    calls = []
+    bodies = [before, after]
+
+    def get(url, *, params, **_kwargs):
+        calls.append((url, dict(params)))
+        body = bodies.pop(0) if url.endswith("meta.json") else temperature_body
+        return httpx.Response(200, content=body,
+            headers={"date": "Sat, 03 Oct 2026 19:00:00 GMT", "content-type": "application/json"},
+            request=httpx.Request("GET", url, params=params))
+
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "quota.json")
+    monkeypatch.setattr(client, "quota_tracker", tracker)
+    monkeypatch.setattr(client, "response_store", None)
+    monkeypatch.setattr(dl, "_BPF_OPENMETEO_QUOTA_TRACKER", tracker)
+    monkeypatch.setattr(client._SHARED_HTTP_CLIENT, "get", get)
+    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / "state" / name)
+    return {"run": run, "modified": modified, "available": available,
+        "before": before, "after": after, "temperature": temperature,
+        "temperature_body": temperature_body, "calls": calls, "bodies": bodies}
+
+
+def _normal_standard_metadata_call(fixture):
+    from src.data import bayes_precision_fusion_download as dl
+    return dl._fetch_standard_meta_stamped_payloads(
+        model="ncep_nbm_conus", locations=((30.25, -97.75, "America/Chicago", (date(2026, 10, 4),)),),
+        run=fixture["run"], source_available_at=fixture["available"],
+        forecast_hours=120, deadline_monotonic=None)
+
+
+@pytest.mark.parametrize("metric,expected", (("high", 27.0), ("low", 24.0)))
+def test_standard_metadata_bracket_preserves_native_origin_bytes(tmp_path, monkeypatch, metric, expected):
+    import hashlib
+    from src.data import bayes_precision_fusion_download as dl
+
+    fixture = _native_standard_metadata_http(tmp_path, monkeypatch)
+    payloads, transport = _normal_standard_metadata_call(fixture)
+    evidence = getattr(transport, "metadata_bracket_evidence", None)
+    assert evidence and evidence["status"] == "CAPTURED", "native metadata bracket evidence missing"
+    manifest_path = Path(evidence["manifest_path"])
+    manifest_body = manifest_path.read_bytes()
+    assert hashlib.sha256(manifest_body).hexdigest() == evidence["sha256"]
+    manifest = json.loads(manifest_body)
+    assert manifest["temperature"]["body_sha256"] == hashlib.sha256(fixture["temperature_body"]).hexdigest()
+    assert manifest["temperature"]["request_params"] == fixture["calls"][1][1]
+    assert manifest["temperature"]["response_role"] == "NETWORK_200_ENTITY"
+    for name in ("before", "after"):
+        proof = manifest[name]
+        assert Path(proof["artifact_path"]).read_bytes() == fixture[name]
+        assert proof["body_sha256"] == hashlib.sha256(fixture[name]).hexdigest()
+        assert proof["response_role"] == "NETWORK_200_ENTITY"
+        assert proof["request_url"] == fixture["calls"][0][0]
+        assert proof["request_params"] == {}
+        assert proof["clock_role"] == "LOCAL_HTTP_ENTITY_POSSESSION"
+        assert proof["http_response_headers"]["date"] == "Sat, 03 Oct 2026 19:00:00 GMT"
+        assert "issued_at" not in proof
+    assert manifest["model_reference_time_utc"] == fixture["run"].isoformat()
+    assert transport.run == fixture["run"] and transport.modification_time == fixture["modified"]
+    assert transport.source_available_at == fixture["available"]
+    assert len(fixture["calls"]) == 3  # Two existing metadata probes and one temperature request.
+    values = dl._parse_batched_single_runs_payload(payloads[0], ["ncep_nbm_conus"],
+        date(2026, 10, 4), "America/Chicago")["ncep_nbm_conus"]
+    assert values[0 if metric == "high" else 1] == expected
+    temperature_proof = payloads[0][dl._BATCH_PHYSICAL_RESPONSE_KEY]
+    assert temperature_proof["sha256"] == manifest["temperature"]["body_sha256"]
+    assert "metadata_bracket_evidence" not in temperature_proof
+    assert manifest_path.name.startswith("openmeteo_bpf_metadata_bracket_" + temperature_proof["sha256"] + "_")
+
+
+@pytest.mark.parametrize("field", ("last_run_initialisation_time", "last_run_modification_time"))
+def test_standard_metadata_native_bracket_mismatch_keeps_original_refusal(tmp_path, monkeypatch, field):
+    fixture = _native_standard_metadata_http(tmp_path, monkeypatch)
+    later = json.loads(fixture["after"])
+    later[field] = (datetime.fromisoformat(later[field]) + timedelta(hours=1)).isoformat()
+    fixture["bodies"][1] = json.dumps(later).encode()
+    with pytest.raises(ValueError, match="metadata changed mid-fetch"):
+        _normal_standard_metadata_call(fixture)
+    assert len(fixture["calls"]) == 3
+    assert not list((tmp_path / "state").rglob("openmeteo_bpf_metadata_bracket_*"))
+
+
+def test_standard_metadata_injected_parsed_evidence_remains_unknown(tmp_path, monkeypatch, caplog):
+    from src.data import openmeteo_model_updates as metadata
+    fixture = _native_standard_metadata_http(tmp_path, monkeypatch)
+    raw = {**json.loads(fixture["before"]), "capture_metadata_response": {
+        "body_base64": "aW52ZW50ZWQ=", "fetched_at": "2026-10-03T19:00:00Z"}}
+    update = metadata.parse_model_update("ncep_nbm_conus", raw)
+    monkeypatch.setattr(metadata, "fetch_model_updates", lambda *_a, **_k: (update,))
+    payloads, transport = _normal_standard_metadata_call(fixture)
+    assert transport.metadata_bracket_evidence == {"status": "UNKNOWN", "reason": "native_capture_missing"}
+    assert transport.source_available_at == fixture["available"]
+    assert len(fixture["calls"]) == 1  # Only temperature; injection supplies no HTTP metadata evidence.
+    assert payloads[0]["hourly"] == fixture["temperature"]["hourly"]
+    assert "OPENMETEO_METADATA_BRACKET_UNKNOWN" in caplog.text
+    assert not list((tmp_path / "state").rglob("openmeteo_bpf_metadata_bracket_*"))
+
+
+def test_standard_metadata_evidence_write_failure_is_unknown_not_forecast_failure(tmp_path, monkeypatch, caplog):
+    fixture = _native_standard_metadata_http(tmp_path, monkeypatch)
+    original_open = Path.open
+
+    def open_path(path, *args, **kwargs):
+        if path.name.startswith("openmeteo_model_metadata_"):
+            raise OSError("private evidence write unavailable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_path)
+    payloads, transport = _normal_standard_metadata_call(fixture)
+    assert transport.metadata_bracket_evidence == {"status": "UNKNOWN", "reason": "capture_unavailable"}
+    assert transport.run == fixture["run"] and transport.modification_time == fixture["modified"]
+    assert payloads[0]["hourly"] == fixture["temperature"]["hourly"]
+    assert len(fixture["calls"]) == 3
+    assert "OPENMETEO_METADATA_BRACKET_UNKNOWN" in caplog.text
+
+
+def test_standard_metadata_temperature_cache_keeps_original_possession(tmp_path, monkeypatch):
+    from src.data import openmeteo_client as client
+    fixture = _native_standard_metadata_http(tmp_path, monkeypatch)
+    original_fetch = client.fetch
+    possessed = fixture["available"].timestamp()
+
+    def fetch(url, params, **kwargs):
+        if url.endswith("/v1/forecast"):
+            kwargs["capture_entity_body"](fixture["temperature_body"], possessed)
+            return json.loads(fixture["temperature_body"])
+        return original_fetch(url, params, **kwargs)
+
+    monkeypatch.setattr(client, "fetch", fetch)
+    payloads, transport = _normal_standard_metadata_call(fixture)
+    assert transport.metadata_bracket_evidence["status"] == "CAPTURED"
+    manifest = json.loads(Path(transport.metadata_bracket_evidence["manifest_path"]).read_bytes())
+    assert manifest["temperature"]["response_role"] == "HELD_ENTITY_REPLAY"
+    assert manifest["temperature"]["fetched_at_utc"] == fixture["available"].isoformat()
+    assert "http_response_headers" not in manifest["temperature"]
+    from src.data import bayes_precision_fusion_download as dl
+    assert payloads[0][dl._BATCH_PHYSICAL_RESPONSE_KEY]["captured_at"] == fixture["available"].isoformat()
+    assert len(fixture["calls"]) == 2  # Metadata only; evidence never forces a temperature re-fetch.
 
 
 def test_nbm_meta_stamped_transport_is_persisted_as_physical_identity(
@@ -4893,10 +5050,14 @@ def test_real_capture_debt_recovers_same_issued_rows_and_leaves_neighbor_cost_ze
 def test_real_damaged_receipt_is_reacquired_without_rewriting_raw_truth(tmp_path, monkeypatch, damage, metric):
     from src.data import bayes_precision_fusion_download as dl
     from src.data.replacement_current_value_serving import physical_capture_debt_reason, read_current_instrument_values
-    actual_time = time.time
-    world = _real_capture_world(tmp_path, monkeypatch, "single", metric)
+    # Lost recording clocks and sealed receipts use independently observed SQL
+    # now for acquisition eligibility, so keep that clock on this private run's
+    # timeline as well as its fake HTTP clock; a historical caller cut cannot
+    # renew an expired source on the real host clock.
+    private_clock = damage in ("all_clocks_and_receipt_file", "all_clocks_and_body_files")
+    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=private_clock)
     target = world.targets[0]
-    with sqlite3.connect(world.db) as conn:
+    with world.open_forecast(world.db) as conn:
         raw_id, body_id = conn.execute("SELECT raw_model_forecast_id,artifact_id FROM raw_model_forecasts WHERE city=?", (target.city,)).fetchone()
         before = conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall()
         assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
@@ -4931,18 +5092,11 @@ def test_real_damaged_receipt_is_reacquired_without_rewriting_raw_truth(tmp_path
             target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
             decision_time_iso=world.clock[0].isoformat())
     old_calls = len(world.calls)
-    if damage in ("all_clocks_and_receipt_file", "all_clocks_and_body_files"):
-        # The new protocol samples actual SQLite now: do not pretend an earlier
-        # fixture HTTP timestamp happened after that independent observation.
-        monkeypatch.setattr(dl, "datetime", datetime)
-        monkeypatch.setattr("src.data.openmeteo_client.time.time", actual_time)
     report = dl.download_bayes_precision_fusion_extra_raw_inputs(**world.kwargs, targets=[target],
         network_capture_reason=reason, capture_debt_raw_ids=(raw_id,))
-    if damage in ("all_clocks_and_receipt_file", "all_clocks_and_body_files"):
-        world.clock[0] = datetime.now(UTC)
     assert len(world.calls) == old_calls + 1
     assert report["written_row_count"] == 0 and report["physical_capture_recovered_raw_ids"] == (raw_id,), report
-    with sqlite3.connect(world.db) as conn:
+    with world.open_forecast(world.db) as conn:
         assert conn.execute("SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id").fetchall() == before
         assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_id,
             decision_time_iso=world.clock[0].isoformat()) is None
@@ -5447,6 +5601,7 @@ def test_extreme_observer_uses_sql_now_not_historical_decision_to_wash_age(tmp_p
     historical_cut = world.clock[0]
     with world.open_forecast(world.db) as conn:
         assert observe_physical_capture_repair_basis(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=historical_cut.isoformat()) is not None
+        assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=historical_cut.isoformat()) == "HTTP_CAPTURE_RECEIPT_MISSING"
         world.clock[0] = world.run + timedelta(hours=35)
         assert observe_physical_capture_repair_basis(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=historical_cut.isoformat()) is None
         assert physical_capture_debt_reason(conn, raw_model_forecast_id=raw_ids[0], decision_time_iso=historical_cut.isoformat()) is None

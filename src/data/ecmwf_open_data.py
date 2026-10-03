@@ -3544,6 +3544,8 @@ def collect_open_ens_cycle(
                     "reason": "ENS_LAND_MASK_UNAVAILABLE", "stages": stages,
                     "snapshots_inserted": 0}
         _fetch_finished_at = datetime.now(timezone.utc)
+        # Audit-only cache input: never add z network work to the prediction budget.
+        surface_path = mask_path.with_suffix(".z.grib2")
         if cycle_deadline_monotonic is not None:
             remaining = cycle_deadline_monotonic - time.monotonic()
             if remaining <= 0:
@@ -3563,6 +3565,8 @@ def collect_open_ens_cycle(
                 "--grib-path", str(output_path),
                 "--mask-grib-path", str(mask_path),
                 "--mask-proof-path", str(mask_path.with_suffix(".proof.json")),
+                "--surface-geopotential-grib-path", str(surface_path),
+                "--surface-geopotential-proof-path", str(surface_path.with_suffix(".proof.json")),
                 "--track", cfg["ingest_track"],
                 "--output-root", str(coordinate_raw_root),
                 "--manifest-path", str(coordinate_manifest),

@@ -1,5 +1,8 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-05-11; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Purpose: Protect bounded collector, cross-track isolation and optional native capture without prediction-budget regression.
+# Reuse: Inspect source-run, land-mask and shared-deadline contracts; use private DB/GRIB fixtures and fake HTTP.
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.5
 #   Cross-track filename collision antibody: per-step filenames include param
 #   (e.g. .step003_mx2t3.grib2 vs .step003_mn2t3.grib2) so concurrent mx2t6_high
@@ -65,6 +68,60 @@ def test_mask_possession_clock_cannot_use_pre_fetch_cycle_start() -> None:
     source_run_time = _source_possession_clock(cycle_start, snapshot_time, extracted=True)
     assert cycle_start < mask_fetched <= snapshot_time <= source_run_time
     assert _source_possession_clock(cycle_start, None, extracted=False) == cycle_start
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_optional_surface_cache_adds_no_http_or_prediction_budget_gate(tmp_path, monkeypatch, track):
+    from src.data import ecmwf_open_data
+
+    root = tmp_path / "source"
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", root)
+    requests_seen = []
+
+    def forbidden_network(*args, **kwargs):
+        requests_seen.append((args, kwargs))
+        raise AssertionError("optional audit capture must not start slow HTTP")
+
+    monkeypatch.setattr(ecmwf_open_data._RateLimitedSession, "get", forbidden_network)
+    issue = date(2026, 6, 6)
+    trusted = _trusted_land_source_for_date(issue)
+    mask_source = {key.removeprefix("mask_"): value for key, value in trusted.items()
+                   if key.startswith("mask_source")}
+    mask_source.update(mask_sha256=trusted["mask_sha256"],
+                       mask_grid_identity_hash=trusted["mask_grid_identity_hash"])
+    mask_deadlines, extract_timeouts = [], []
+    deadline = time.monotonic() + 2
+
+    def mask_fetch(**kwargs):
+        mask_deadlines.append(kwargs["deadline"])
+        return mask_source
+
+    def extract(cmd, *, label, timeout):
+        extract_timeouts.append(timeout)
+        manifest_path = Path(cmd[cmd.index("--manifest-path") + 1])
+        manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        payload = _native_partial_scope_payload(track=track, target=date(2026, 6, 7),
+                                                issue=issue, manifest_sha=manifest_sha)
+        output_root = Path(cmd[cmd.index("--output-root") + 1])
+        folder = output_root / ecmwf_open_data.TRACKS[track]["extract_subdir"] / "london" / "20260606"
+        folder.mkdir(parents=True)
+        (folder / "target.json").write_text(json.dumps(payload))
+        surface = Path(cmd[cmd.index("--surface-geopotential-grib-path") + 1])
+        assert not surface.exists()  # No fabricated cache or weather acquisition.
+        return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
+
+    conn = _make_conn(tmp_path)
+    result = ecmwf_open_data.collect_open_ens_cycle(
+        track=track, run_date=issue, run_hour=0,
+        now_utc=datetime(2026, 6, 6, 9, tzinfo=timezone.utc), skip_download=True,
+        conn=conn, _runner=extract, _mask_fetch_impl=mask_fetch,
+        cycle_deadline_monotonic=deadline,
+    )
+    assert requests_seen == []
+    assert mask_deadlines == [deadline]
+    assert len(extract_timeouts) == 1 and 0 < extract_timeouts[0] <= 2
+    assert result["snapshots_inserted"] == 1, result
+    assert conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0] == 1
 
 
 def test_collector_does_not_authorize_payload_with_different_mask_hash(tmp_path, monkeypatch) -> None:

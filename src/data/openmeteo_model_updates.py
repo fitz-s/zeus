@@ -11,14 +11,15 @@ the repository.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
-from urllib.parse import urlencode, urlsplit
+from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -239,7 +240,29 @@ def fetch_model_updates(
     session: requests.Session | None = None,
     max_workers: int | None = None,
     priority: bool = False,
+    capture_metadata_response: Callable[[str, dict, bytes, float, Mapping[str, str]], None] | None = None,
 ) -> tuple[OpenMeteoModelUpdate, ...]:
+    def _fetch_metadata(url: str, **kwargs: object) -> object:
+        # Only the shared transport's actual 200 callback can supply evidence.
+        # Parsed payload fields and JSONL caches never manufacture native bytes.
+        responses: list[tuple[bytes, float, Mapping[str, str]]] = []
+        if capture_metadata_response is not None:
+            kwargs["capture_network_response"] = lambda body, at, headers: responses.append((body, at, headers))
+        payload = _fetch_openmeteo(url, {}, **kwargs)
+        if capture_metadata_response is not None and responses:
+            try:
+                body, fetched_at, headers = responses[-1]
+                if json.loads(body) != payload:
+                    raise ValueError("metadata native body differs from parsed response")
+                parts = urlsplit(url)
+                query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+                         if not any(secret in key.lower() for secret in ("key", "token", "auth", "password"))]
+                clean_url = urlunsplit((parts.scheme, parts.netloc.split("@")[-1], parts.path, urlencode(query), ""))
+                capture_metadata_response(clean_url, {}, body, fetched_at, dict(headers))
+            except (OSError, TypeError, ValueError):
+                logging.getLogger(__name__).warning("OPENMETEO_METADATA_CAPTURE_UNKNOWN", exc_info=True)
+        return payload
+
     base = endpoint_url or os.environ.get(ENV_MODEL_UPDATES_ENDPOINT) or DEFAULT_MODEL_UPDATES_ENDPOINT
     if "{model}" in base:
         clean_models = tuple(str(model).strip() for model in models if str(model).strip())
@@ -248,9 +271,8 @@ def fetch_model_updates(
             url = _metadata_url(base, clean_model)
             quota_lane = quota_tracker.priority_lane() if priority else nullcontext()
             with quota_lane:
-                payload = _fetch_openmeteo(
+                payload = _fetch_metadata(
                     url,
-                    {},
                     timeout=timeout_seconds,
                     max_retries=1,
                     endpoint_label=f"source_clock_model_meta_{clean_model}",
@@ -272,9 +294,8 @@ def fetch_model_updates(
     url = _endpoint_url(base, models)
     quota_lane = quota_tracker.priority_lane() if priority else nullcontext()
     with quota_lane:
-        payload = _fetch_openmeteo(
+        payload = _fetch_metadata(
             url,
-            {},
             timeout=timeout_seconds,
             max_retries=1,
             endpoint_label="source_clock_model_meta_batch",

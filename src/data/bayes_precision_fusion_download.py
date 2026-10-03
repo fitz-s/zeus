@@ -48,7 +48,7 @@ import math
 import os
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
@@ -560,6 +560,8 @@ class _StandardMetaStampedTransport:
     source_available_at: datetime
     modification_time: datetime
     forecast_hours: int
+    # Ancillary raw evidence: excluded from run/temperature identity and gates.
+    metadata_bracket_evidence: Mapping[str, object] | None = field(default=None, compare=False)
 
 
 def _read_source_clock_single_runs_requests(
@@ -1781,6 +1783,75 @@ def _utc_datetime(value: datetime | str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _persist_standard_metadata_bracket(
+    *, model: str, run: datetime, modified: datetime, params: Mapping[str, object],
+    before: Sequence[tuple], after: Sequence[tuple],
+    temperature: Sequence[tuple[bytes, float]],
+    temperature_network: Sequence[tuple[bytes, float, Mapping[str, str]]],
+) -> dict[str, object]:
+    """Append diagnostic native evidence without changing forecast authority."""
+    if not before or not after or not temperature:
+        _LOG.warning("OPENMETEO_METADATA_BRACKET_UNKNOWN model=%s reason=native_capture_missing", model)
+        return {"status": "UNKNOWN", "reason": "native_capture_missing"}
+    try:
+        from src.config import state_path
+        from src.data.openmeteo_ecmwf_ifs9_anchor import STANDARD_FORECAST_URL
+        from src.data.openmeteo_model_updates import parse_model_update
+
+        directory = state_path(str(Path("replacement_forecast_live") / "raw_manifests" / run.strftime("%Y%m%dT%H%M%SZ")))
+        directory.mkdir(parents=True, exist_ok=True)
+
+        def append(path: Path, body: bytes) -> None:
+            try:
+                with path.open("xb") as handle:
+                    handle.write(body)
+            except FileExistsError:
+                if path.read_bytes() != body:
+                    raise ValueError("immutable metadata evidence changed")
+
+        manifest: dict[str, object] = {"revision": "openmeteo_standard_metadata_bracket_v1",
+            "model": model, "model_reference_time_utc": run.isoformat(),
+            "provider_modification_time_utc": modified.isoformat(),
+            "publisher_issue_time": "UNKNOWN"}
+        for name, readings in (("before", before), ("after", after)):
+            url, request_params, body, fetched_at, headers = readings[-1]
+            update = parse_model_update(model, json.loads(body))
+            if update.model != model or update.last_run_initialisation_time != run or update.last_run_modification_time != modified:
+                raise ValueError("native metadata differs from accepted bracket")
+            digest = hashlib.sha256(body).hexdigest()
+            path = directory / f"openmeteo_model_metadata_{digest}.json"
+            append(path, body)
+            manifest[name] = {"artifact_path": str(path), "body_sha256": digest, "byte_size": len(body),
+                "request_url": url, "request_params": request_params,
+                "fetched_at_utc": datetime.fromtimestamp(fetched_at, UTC).isoformat(),
+                "clock_role": "LOCAL_HTTP_ENTITY_POSSESSION", "response_role": "NETWORK_200_ENTITY",
+                "http_response_headers": dict(headers)}
+        body, fetched_at = temperature[-1]
+        digest = hashlib.sha256(body).hexdigest()
+        request_hash = hashlib.sha256(json.dumps({"url": STANDARD_FORECAST_URL, "params": params},
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        manifest["temperature"] = {"body_sha256": digest, "byte_size": len(body),
+            "request_url": STANDARD_FORECAST_URL, "request_params": dict(params), "request_hash": request_hash,
+            "fetched_at_utc": datetime.fromtimestamp(fetched_at, UTC).isoformat(),
+            "clock_role": "LOCAL_HTTP_ENTITY_POSSESSION",
+            "response_role": "NETWORK_200_ENTITY" if temperature_network else "HELD_ENTITY_REPLAY"}
+        if temperature_network:
+            network_body, network_at, headers = temperature_network[-1]
+            if network_body != body or network_at != fetched_at:
+                raise ValueError("temperature entity and network capture differ")
+            manifest["temperature"]["http_response_headers"] = dict(headers)
+        encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        manifest_hash = hashlib.sha256(encoded).hexdigest()
+        path = directory / f"openmeteo_bpf_metadata_bracket_{digest}_{request_hash}_{manifest_hash}.json"
+        append(path, encoded)
+        return {"status": "CAPTURED", "manifest_path": str(path), "sha256": manifest_hash}
+    except (OSError, KeyError, TypeError, ValueError, OverflowError):
+        # SCOPE: this diagnostic bracket. DRAIN/RESET: the next normal producer
+        # captures both native metadata bodies. No inferred clock or q gate.
+        _LOG.warning("OPENMETEO_METADATA_BRACKET_UNKNOWN model=%s reason=capture_unavailable", model, exc_info=True)
+        return {"status": "UNKNOWN", "reason": "capture_unavailable"}
+
+
 def _fetch_standard_meta_stamped_payloads(
     *,
     model: str,
@@ -1814,21 +1885,23 @@ def _fetch_standard_meta_stamped_payloads(
 
     expected_run = _utc_datetime(run) if run is not None else None
 
-    def _meta() -> object:
+    def _meta() -> tuple[object, list[tuple]]:
+        native: list[tuple] = []
         deadline_kwargs = _deadline_fetch_kwargs(deadline_monotonic)
         timeout_seconds = float(deadline_kwargs.get("timeout", 30.0))
         updates = fetch_model_updates(
             (model,),
             timeout_seconds=timeout_seconds,
             max_workers=1,
+            capture_metadata_response=lambda url, params, body, at, headers: native.append((url, params, body, at, headers)),
         )
         if len(updates) != 1:
             raise ValueError(f"{model} metadata response count must be 1, got {len(updates)}")
         if str(updates[0].model) != model:
             raise ValueError(f"{model} metadata identity mismatch: {updates[0].model!r}")
-        return updates[0]
+        return updates[0], native
 
-    meta_before = _meta()
+    meta_before, native_before = _meta()
     before_run = meta_before.last_run_initialisation_time.astimezone(UTC)
     before_available = meta_before.last_run_availability_time.astimezone(UTC)
     before_modified = meta_before.last_run_modification_time
@@ -1875,7 +1948,7 @@ def _fetch_standard_meta_stamped_payloads(
     ):
         raise ValueError(f"{model} standard fallback multi-location response shape mismatch")
 
-    meta_after = _meta()
+    meta_after, native_after = _meta()
     after_available = meta_after.last_run_availability_time.astimezone(UTC)
     after_modified = meta_after.last_run_modification_time
     if (
@@ -1889,6 +1962,10 @@ def _fetch_standard_meta_stamped_payloads(
         source_available_at=min(before_available, after_available),
         modification_time=before_modified,
         forecast_hours=int(forecast_hours),
+        metadata_bracket_evidence=_persist_standard_metadata_bracket(
+            model=model, run=before_run, modified=before_modified, params=params,
+            before=native_before, after=native_after, temperature=captures,
+            temperature_network=network_captures),
     )
 
 

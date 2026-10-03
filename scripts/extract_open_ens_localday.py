@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Created: 2026-09-22
-# Last reused/audited: 2026-10-02
+# Last reused/audited: 2026-10-03
 # Authority basis: current OpenData source contract; native 3h local-day extrema.
-# Lifecycle: created=2026-09-22; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Lifecycle: created=2026-09-22; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Native ENS GRIB -> local-day JSON with optional byte/point capture; no DB writes.
 # Reuse: Use the collector's explicit coordinate manifest and same-cycle land-mask proof.
 """Decode native ENS windows at settlement coordinates.
@@ -411,6 +411,63 @@ def _read_land_mask(mask_path: Path, proof_path: Path) -> dict[str, object]:
             codes_release(gid)
 
 
+def _read_surface_geopotential(path: Path, proof_path: Path) -> dict[str, Any]:
+    """Optional raw phi on the distributed surface grid, not a station height."""
+    if not 100 <= path.stat().st_size <= 1024 * 1024:
+        raise ValueError("ENS_SURFACE_GEOPOTENTIAL_BODY_BOUNDS_INVALID")
+    raw = path.read_bytes()
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    audit_observed_at = datetime.now(timezone.utc)
+    if (not isinstance(proof, dict)
+            or proof.get("source") != "ecmwf_open_data_ifs_oper_fc_step0_z"
+            or proof.get("raw_message_sha256") != hashlib.sha256(raw).hexdigest()
+            or not 100 <= len(raw) <= 1024 * 1024
+            or proof.get("source_index_length") != len(raw)
+            or type(proof.get("source_index_offset")) is not int
+            or proof["source_index_offset"] < 0
+            or not str(proof.get("source_url", "")).startswith("https://")
+            or proof.get("source_index_url") != str(proof["source_url"]).rsplit(".", 1)[0] + ".index"):
+        raise ValueError("ENS_SURFACE_GEOPOTENTIAL_SOURCE_INVALID")
+    with path.open("rb") as fh:
+        gid = codes_grib_new_from_file(fh)
+        if gid is None:
+            raise ValueError("ENS_SURFACE_GEOPOTENTIAL_MESSAGE_MISSING")
+        try:
+            headers = {key: codes_get(gid, key) for key in (
+                "edition", "centre", "paramId", "shortName", "units", "typeOfLevel",
+                "level", "dataDate", "dataTime", "dataType", "step", *_GRID_KEYS,
+            )}
+            if (headers["paramId"] != 129 or headers["shortName"] != "z"
+                    or headers["units"] != "m**2 s**-2"
+                    or headers["typeOfLevel"] != "surface" or headers["level"] != 0
+                    or headers["centre"] != "ecmf" or headers["dataType"] != "fc"
+                    or headers["step"] != 0):
+                raise ValueError("ENS_SURFACE_GEOPOTENTIAL_PARAMETER_INVALID")
+            cycle = datetime.strptime(
+                f'{int(headers["dataDate"]):08d}{int(headers["dataTime"]):04d}', "%Y%m%d%H%M",
+            ).replace(tzinfo=timezone.utc)
+            fetched = datetime.fromisoformat(str(proof["source_fetched_at"]))
+            if cycle.isoformat() != proof.get("source_cycle_time"):
+                raise ValueError("ENS_SURFACE_GEOPOTENTIAL_CYCLE_INVALID")
+            if fetched.tzinfo is None or not cycle <= fetched <= audit_observed_at:
+                raise ValueError("ENS_SURFACE_GEOPOTENTIAL_POSSESSION_CLOCK_INVALID")
+            values = codes_get_values(gid)
+            fields = {key: headers[key] for key in _GRID_KEYS}
+            if len(values) != fields["Ni"] * fields["Nj"]:
+                raise ValueError("ENS_SURFACE_GEOPOTENTIAL_GRID_SIZE_INVALID")
+            extra = codes_grib_new_from_file(fh)
+            if extra is not None:
+                codes_release(extra)
+                raise ValueError("ENS_SURFACE_GEOPOTENTIAL_NOT_SINGLE_MESSAGE")
+            if codes_get_message(gid) != raw:
+                raise ValueError("ENS_SURFACE_GEOPOTENTIAL_BODY_INVALID")
+            return {"values": values, "fields": fields, "observed_headers": headers,
+                    "proof": proof, "grid_identity_hash": _grid_identity(fields),
+                    "audit_observed_at_utc": audit_observed_at.isoformat()}
+        finally:
+            codes_release(gid)
+
+
 def _native_message_capture(gid: int) -> dict[str, Any]:
     """Capture observed metadata and byte identity, not a full-grid replay body.
 
@@ -750,6 +807,8 @@ def extract_open_ens_localday(
     cities_filter: Optional[set[str]] = None,
     mask_grib_path: Path | None = None,
     mask_proof_path: Path | None = None,
+    surface_geopotential_grib_path: Path | None = None,
+    surface_geopotential_proof_path: Path | None = None,
 ) -> dict:
     """Single GRIB → per-city local-calendar-day JSONs (one per lead_day).
 
@@ -788,6 +847,21 @@ def extract_open_ens_localday(
     issue_dt: datetime = scan["issue_dt"]
     if issue_dt is None:
         return {"status": "no_matching_messages", "track": track_name, "written": 0}
+
+    surface = None
+    surface_unknown = {"capture_status": "UNKNOWN", "unavailable_reason": "SURFACE_GEOPOTENTIAL_UNAVAILABLE"}
+    try:
+        surface_path = surface_geopotential_grib_path or mask_grib_path.with_suffix(".z.grib2")
+        surface = _read_surface_geopotential(
+            surface_path, surface_geopotential_proof_path or surface_path.with_suffix(".proof.json"),
+        )
+        if (surface["fields"] != mask["fields"]
+                or surface["grid_identity_hash"] != scan["temperature_grid_identity_hash"]
+                or surface["proof"]["source_cycle_time"] != issue_dt.isoformat()):
+            raise ValueError("ENS_SURFACE_GEOPOTENTIAL_GRID_OR_CYCLE_MISMATCH")
+    except Exception as exc:
+        surface = None
+        surface_unknown["unavailable_reason"] = str(exc)[:200] or type(exc).__name__
 
     issue_date_compact = issue_dt.strftime("%Y%m%d")
     cycle_hour = issue_dt.hour
@@ -1071,6 +1145,30 @@ def extract_open_ens_localday(
                 "messages": native_messages,
                 "point_windows": point_windows,
             }
+            terrain_receipt = dict(surface_unknown)
+            if surface is not None:
+                phi = float(surface["values"][selected["selected_flat_index"]])
+                if math.isfinite(phi) and abs(phi) < 1e10:
+                    terrain_receipt = {
+                        "capture_status": "OBSERVED",
+                        "quantity_role": "model_surface_geopotential_on_wire_distribution_grid",
+                        "observed_headers": surface["observed_headers"],
+                        "grid_identity_hash": surface["grid_identity_hash"],
+                        "selected_point": dict(payload["native_capture_receipt"]["selected_point"]),
+                        "raw_phi_m2_s2": phi,
+                        **{key: surface["proof"][key] for key in (
+                            "source", "source_url", "source_index_url", "source_cycle_time",
+                            "source_fetched_at", "source_index_offset", "source_index_length",
+                            "raw_message_sha256",
+                        )},
+                        "source_issued_at": None,
+                        "audit_observed_at_utc": surface["audit_observed_at_utc"],
+                        "audit_scope": "AUDIT_ONLY_NOT_DECISION_INPUT",
+                        "source_fetched_at_role": "LOCAL_CACHE_POSSESSION",
+                    }
+                else:
+                    terrain_receipt["unavailable_reason"] = "ENS_SURFACE_GEOPOTENTIAL_VALUE_INVALID"
+            payload["native_capture_receipt"]["surface_geopotential_receipt_v1"] = terrain_receipt
             out_path = _record_path(
                 output_root=output_root,
                 output_subdir=track.output_subdir,
@@ -1104,6 +1202,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--grib-path", type=Path, required=True)
     parser.add_argument("--mask-grib-path", type=Path, required=True)
     parser.add_argument("--mask-proof-path", type=Path, required=True)
+    parser.add_argument("--surface-geopotential-grib-path", type=Path)
+    parser.add_argument("--surface-geopotential-proof-path", type=Path)
     parser.add_argument("--track", choices=sorted(TRACKS), required=True)
     parser.add_argument("--manifest-path", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--output-root", type=Path, default=ROOT / "raw")
@@ -1116,6 +1216,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         grib_path=args.grib_path,
         mask_grib_path=args.mask_grib_path,
         mask_proof_path=args.mask_proof_path,
+        surface_geopotential_grib_path=args.surface_geopotential_grib_path,
+        surface_geopotential_proof_path=args.surface_geopotential_proof_path,
         track_name=args.track,
         manifest_path=args.manifest_path,
         output_root=args.output_root,

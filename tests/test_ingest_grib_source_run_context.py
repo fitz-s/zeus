@@ -1,6 +1,6 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-10-02
-# Lifecycle: created=2026-05-03; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-05-03; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Protect native snapshot linkage, land-cell proof and HIGH/LOW local-day boundary semantics.
 # Reuse: Inspect collector/ingester SourceRunContext and current grid/clock contracts before relying on this component suite.
 # Authority basis: LOW local-day-min interval provenance contract plus the original SourceRunContext contract.
@@ -192,14 +192,16 @@ def _tiny_native_grib(tmp_path: Path, track_name: str, member_count: int = 51,
         try:
             fields = {"centre": "ecmf", **grid,
                       "dataDate": int(issue.strftime("%Y%m%d")), "dataTime": issue.hour * 100}
-            if param != 172:
+            if param not in (172, 129):
                 fields.update(productDefinitionTemplateNumber=11)
             for key, value in fields.items():
                 ec.codes_set(gid, key, value)
             ec.codes_set(gid, "paramId", param)
-            if param == 172:
+            if param in (172, 129):
                 ec.codes_set(gid, "step", 0)
-                ec.codes_set_values(gid, [.2, .2, .8, .2])
+                if param == 129:
+                    ec.codes_set(gid, "dataType", "fc")
+                ec.codes_set_values(gid, [.2, .2, .8, .2] if param == 172 else [100., 200., 313.75, 400.])
             else:
                 for key, value in {
                     "dataType": "cf" if member == 0 else "pf", "number": member,
@@ -235,6 +237,17 @@ def _tiny_native_grib(tmp_path: Path, track_name: str, member_count: int = 51,
         "source_index_offset": 0, "source_index_length": mask.stat().st_size,
         "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
     }))
+    surface = mask.with_suffix(".z.grib2")
+    surface.write_bytes(message(129))
+    surface.with_suffix(".proof.json").write_text(json.dumps({
+        "source": "ecmwf_open_data_ifs_oper_fc_step0_z",
+        "source_url": "https://example.test/native-z.grib2",
+        "source_index_url": "https://example.test/native-z.index",
+        "source_cycle_time": issue.isoformat(),
+        "source_fetched_at": (issue + timedelta(hours=1)).isoformat(),
+        "source_index_offset": 512, "source_index_length": surface.stat().st_size,
+        "raw_message_sha256": hashlib.sha256(surface.read_bytes()).hexdigest(),
+    }))
     return raw, mask, proof, expected
 
 
@@ -264,12 +277,24 @@ def test_real_native_capture_survives_typed_ingest_and_raw_prune(tmp_path, monke
     path = Path(result["sample_outputs"][0])
     payload = json.loads(path.read_text())
     receipt = payload["native_capture_receipt"]
+    terrain = receipt["surface_geopotential_receipt_v1"]
+    assert terrain["capture_status"] == "OBSERVED"
+    assert terrain["selected_point"] == {"flat_index": 2, "lat": 51.5, "lon": 0.0}
+    assert terrain["raw_phi_m2_s2"] == 313.75
+    assert terrain["observed_headers"]["units"] == "m**2 s**-2"
+    assert terrain["raw_message_sha256"] == hashlib.sha256(mask.with_suffix(".z.grib2").read_bytes()).hexdigest()
+    assert terrain["grid_identity_hash"] == payload["grid_surface_evidence"]["temperature_grid_identity_hash"]
     repeated = extractor.extract_open_ens_localday(
         grib_path=raw, track_name=track_name, manifest_path=manifest,
         output_root=tmp_path / "replayed", mask_grib_path=mask, mask_proof_path=proof,
     )
     replayed = json.loads(Path(repeated["sample_outputs"][0]).read_text())
-    assert replayed["native_capture_receipt"] == receipt
+    stable_receipt = json.loads(json.dumps(receipt))
+    stable_replayed = replayed["native_capture_receipt"]
+    # Byte/source identities are stable; each independent audit read has its own clock.
+    for captured in (stable_receipt, stable_replayed):
+        captured["surface_geopotential_receipt_v1"].pop("audit_observed_at_utc")
+    assert stable_replayed == stable_receipt
     assert receipt["capture_status"] == "OBSERVED"
     assert receipt["capture_kind"] == "grib_metadata_and_selected_point_decode"
     assert len(receipt["messages"]) == len(receipt["point_windows"]) == 408
@@ -308,7 +333,8 @@ def test_real_native_capture_survives_typed_ingest_and_raw_prune(tmp_path, monke
     canonical = json.loads(stored["provenance_json"])["native_capture_receipt"]
     assert canonical == receipt
     # Only this test's own generated raw artifacts are pruned.
-    for fixture_path in (raw, mask, proof, path):
+    for fixture_path in (raw, mask, proof, path, mask.with_suffix(".z.grib2"),
+                         mask.with_suffix(".z.proof.json")):
         fixture_path.unlink()
     aggregate = max if metric == HIGH_LOCALDAY_MAX else min
     rebuilt = [aggregate(window["value_native_unit"] for window in canonical["point_windows"]
@@ -328,6 +354,132 @@ def test_real_native_capture_survives_typed_ingest_and_raw_prune(tmp_path, monke
                 "forecast_window_attribution_status", "source_available_at"):
         assert old[key] == stored[key]
     assert "native_capture_receipt" not in json.loads(old["provenance_json"])
+
+
+@pytest.mark.parametrize("track_name", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("fault", ("missing", "hash", "gh_pl", "unit", "cycle", "grid", "identity", "clock"))
+def test_surface_geopotential_unknown_preserves_temperature_contract(tmp_path, monkeypatch, track_name, fault):
+    import eccodes as ec
+    from scripts import extract_open_ens_localday as extractor
+    from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload
+
+    raw, mask, proof, _ = _tiny_native_grib(tmp_path, track_name)
+    station = _land_grid_proof()["station_geometry"]
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"cities": [{
+        "city": "London", "lat": station["lat"], "lon": station["lon"],
+        "timezone": "Europe/London", "unit": "C", "station_geometry": station,
+    }]}))
+    kwargs = dict(grib_path=raw, track_name=track_name, manifest_path=manifest,
+                  mask_grib_path=mask, mask_proof_path=proof)
+    before = extractor.extract_open_ens_localday(output_root=tmp_path / "before", **kwargs)
+    observed = json.loads(Path(before["sample_outputs"][0]).read_text())
+    surface = mask.with_suffix(".z.grib2")
+    surface_proof = surface.with_suffix(".proof.json")
+    envelope = json.loads(surface_proof.read_text())
+    if fault == "missing":
+        surface.unlink()
+    elif fault == "hash":
+        envelope["raw_message_sha256"] = "0" * 64
+    elif fault == "identity":
+        envelope["source"] = "invented_surface"
+    elif fault == "clock":
+        envelope["source_fetched_at"] = "2026-01-01T01:00:00"
+    elif fault == "unit":
+        original_get = extractor.codes_get
+        monkeypatch.setattr(extractor, "codes_get", lambda gid, key: "K"
+            if key == "units" and original_get(gid, "paramId") == 129 else original_get(gid, key))
+    else:
+        with surface.open("rb") as fh:
+            gid = ec.codes_grib_new_from_file(fh)
+        try:
+            if fault == "gh_pl":
+                ec.codes_set(gid, "typeOfLevel", "isobaricInhPa")
+                ec.codes_set(gid, "level", 500)
+                ec.codes_set(gid, "paramId", 156)
+            elif fault == "cycle":
+                ec.codes_set(gid, "dataDate", 20260102)
+                envelope["source_cycle_time"] = "2026-01-02T00:00:00+00:00"
+                envelope["source_fetched_at"] = "2026-01-02T01:00:00+00:00"
+            else:
+                ec.codes_set(gid, "longitudeOfFirstGridPointInDegrees", .25)
+            surface.write_bytes(ec.codes_get_message(gid))
+        finally:
+            ec.codes_release(gid)
+        envelope["raw_message_sha256"] = hashlib.sha256(surface.read_bytes()).hexdigest()
+        envelope["source_index_length"] = surface.stat().st_size
+    surface_proof.write_text(json.dumps(envelope))
+    after = extractor.extract_open_ens_localday(output_root=tmp_path / "after", **kwargs)
+    unknown = json.loads(Path(after["sample_outputs"][0]).read_text())
+    terrain = unknown["native_capture_receipt"]["surface_geopotential_receipt_v1"]
+    assert terrain["capture_status"] == "UNKNOWN", terrain
+    assert "raw_phi_m2_s2" not in terrain
+    typed = TiggeSnapshotPayload.from_json_dict(unknown).to_json_dict()
+    assert typed["native_capture_receipt"] == unknown["native_capture_receipt"]
+    observed["native_capture_receipt"].pop("surface_geopotential_receipt_v1")
+    unknown["native_capture_receipt"].pop("surface_geopotential_receipt_v1")
+    # Extraction wall times differ; provider issue/grid/member/causal fields do not.
+    observed.pop("generated_at")
+    unknown.pop("generated_at")
+    assert unknown == observed
+
+
+@pytest.mark.parametrize("track_name", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("audit_clock", ("future", "late"))
+def test_surface_geopotential_audit_clock_is_not_temperature_possession(tmp_path, track_name, audit_clock):
+    from scripts import extract_open_ens_localday as extractor
+    from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload
+
+    raw, mask, proof, _ = _tiny_native_grib(tmp_path, track_name)
+    station = _land_grid_proof()["station_geometry"]
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"cities": [{
+        "city": "London", "lat": station["lat"], "lon": station["lon"],
+        "timezone": "Europe/London", "unit": "C", "station_geometry": station,
+    }]}))
+    kwargs = dict(grib_path=raw, track_name=track_name, manifest_path=manifest,
+                  mask_grib_path=mask, mask_proof_path=proof)
+    before = extractor.extract_open_ens_localday(output_root=tmp_path / "before", **kwargs)
+    original = json.loads(Path(before["sample_outputs"][0]).read_text())
+    surface_proof = mask.with_suffix(".z.proof.json")
+    envelope = json.loads(surface_proof.read_text())
+    fetched = (datetime(2100, 1, 1, 1, tzinfo=UTC) if audit_clock == "future"
+               else datetime.now(UTC) - timedelta(hours=1))
+    old_temperature_possession = datetime.fromisoformat(original["grid_surface_evidence"]["mask_source_fetched_at"])
+    assert fetched > old_temperature_possession
+    envelope["source_fetched_at"] = fetched.isoformat()
+    surface_proof.write_text(json.dumps(envelope))
+    started = datetime.now(UTC)
+    after = extractor.extract_open_ens_localday(output_root=tmp_path / "after", **kwargs)
+    finished = datetime.now(UTC)
+    path = Path(after["sample_outputs"][0])
+    current = json.loads(path.read_text())
+    receipt = current["native_capture_receipt"]["surface_geopotential_receipt_v1"]
+    if audit_clock == "future":
+        assert receipt["capture_status"] == "UNKNOWN", receipt
+        assert receipt["unavailable_reason"] == "ENS_SURFACE_GEOPOTENTIAL_POSSESSION_CLOCK_INVALID"
+        assert "raw_phi_m2_s2" not in receipt
+    else:
+        assert receipt["capture_status"] == "OBSERVED", receipt
+        read_clock = datetime.fromisoformat(receipt["audit_observed_at_utc"])
+        assert started <= read_clock <= finished
+        assert old_temperature_possession < fetched <= read_clock
+        assert receipt["source_fetched_at"] == fetched.isoformat()
+        assert receipt["audit_scope"] == "AUDIT_ONLY_NOT_DECISION_INPUT"
+        assert receipt["source_fetched_at_role"] == "LOCAL_CACHE_POSSESSION"
+    typed = TiggeSnapshotPayload.from_json_dict(current).to_json_dict()
+    assert typed["native_capture_receipt"] == current["native_capture_receipt"]
+    metric = HIGH_LOCALDAY_MAX if track_name == "mx2t6_high" else LOW_LOCALDAY_MIN
+    conn = _conn()
+    context = _land_run_context(current["issue_time_utc"], current["grid_surface_evidence"])
+    assert ingest_json_file(conn, path, metric=metric, model_version="ecmwf_ens",
+                            overwrite=False, source_run_context=context) == "written"
+    stored = dict(conn.execute("SELECT * FROM ensemble_snapshots").fetchone())
+    assert json.loads(stored["provenance_json"])["native_capture_receipt"]["surface_geopotential_receipt_v1"] == receipt
+    for payload in (original, current):
+        payload["native_capture_receipt"].pop("surface_geopotential_receipt_v1")
+        payload.pop("generated_at")
+    assert current == original
 
 
 @pytest.mark.parametrize("track_name", ("mx2t6_high", "mn2t6_low"))
