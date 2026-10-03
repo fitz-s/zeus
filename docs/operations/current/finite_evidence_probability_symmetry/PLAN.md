@@ -11199,8 +11199,8 @@ negatives. Parent owns independent review, exact focused checks and the next
 normal FF/load after the worker delivers; no reader/probability-law source is
 owned by this repair.
 
-Native production receipt remains an external transport blocker, not a proved
-capture-code defect: the normal 18Z collector starting 00:40:54Z reports LOW
+At 00:40:54Z native production receipt was an external transport blocker, not
+a proved capture-code defect: the normal 18Z collector then reported LOW
 ok0/failed33/not_released15 and HIGH ok0/failed37/not_released11. Existing stderr
 records AWS HTTP503 and Google SSL failure; source_run is FAILED with
 captured_at/imported_at NULL. Collector download early return (ecmwf_open_data.py
@@ -11211,6 +11211,17 @@ successful completed normal download/extraction/ingest and canonical receipt
 are still required, with no new timer, manual huge fetch or fabricated old
 proof. The bounded source lane captures this current blocker separately from
 694's accepted actual-byte tests and running software.
+
+Subsequent parent runtime evidence closes this pending production quantity
+chain, not all source/physical/probability authority: the normal 18Z HIGH/LOW
+runs are COMPLETE with expected48/missing0. HK Oct4 HIGH shape1398439 is
+consumed by q729467 and LOW shape1398402 by q729358, with the LOW censored
+51-member scalar21 representation preserved; both exact reader gates return
+None. Oct3 18Z still lacks the first two physical hours and is lawfully rejected
+while the eligible 12Z shape remains in service. No partial-window admission,
+old-body fabrication or global authority upgrade follows from the new success.
+The earlier failed transport attempt remains historical evidence, not a current
+claim that this production quantity chain is still missing.
 
 Producer acceptance: eight weighted cases are RED on original HEAD694 while
 16 diagnostic/callback controls remain GREEN; final new24 cases all PASS,
@@ -11363,6 +11374,18 @@ remain original METAR and existing-row NOOP stays untouched: the change does
 not retrofit metadata into historical daily rows. Production proof requires
 future normal authorized fetch/write; it does not activate missing-ground cities.
 
+Subsequent fast-path production acceptance closes that future-sample pending:
+parent runtime RO at02:56:57 confirms normal new observation_prints rows41339342
+(KLGA) and41339341 (KORD), observed02:51 and fetched02:56:20.834495. Their
+station_reference retains the existing receipt millisecond834, provider-reported
+reference fields with original ft/DEM semantics and full HTTP-body SHA0d69edf1...
+independent from KLGA parser-input SHA5902244d... and KORD ac697cab.... Height
+role, vertical datum and metadata source-issued time remain UNKNOWN/None.
+This is normal future capture/write, not metadata retrofit into old samples;
+the old daily same-observation NOOP remains unchanged. Fast reference persistence
+is now actual PASS; complete daily historical/reference coverage and true ground
+or sensor-AGL authority are not inferred from it.
+
 Final XML/log anchors are /tmp/zeus-wrh-station-final-affected-20261003 and
 /tmp/zeus-wrh-station-final-required10-20261003 (each .xml/.log). The required
 ten-file batch gives268PASS/four failures whose exact testcase identities and
@@ -11378,3 +11401,163 @@ original-body SHA and unchanged current-q/hard-fact authority contracts. The
 test-only settings symlink is removed before commit/landing. SCOPE remains
 the exact station/response, DRAIN is future normal capture and existing guarded
 write, RESET is later authentic reference evidence without ground promotion.
+
+### 2026-10-03 Required data-test fixture/expectation correction (test-only)
+
+Parent authorizes a separate bounded test-only follow-up on the clean landed
+0cb36fc83 task tree. The same WRH source worker owns the existing three required
+test files/four failing cases; integration owns this PLAN and their necessary
+existing registry rows. This is not permission to alter source validation or
+reverse a protected assertion to obtain green tests. Independent current132
+probability-ineligible grouping and future WRH sample persistence remain pending
+outside these test edits, and the original continuous-profit goal is not complete.
+
+The four exact baseline failures are now explicitly disposed for correction,
+rather than treated as harmless because they predate WRH: ensemble diagnostic
+role is unauthorized by the current source-role contract; malformed target-date
+is already fail-closed but its expected regex does not match the actual A2
+error; both HK fixtures lack required local_hour, so neither reaches the intended
+positive writer or wrong-station validation. Correct only the stale fixtures or
+expectations to assert current law, preserving legitimate role/date rejections.
+The HK positive and negative twins must actually reach their own canonical
+writer/station-identity behavior with valid prerequisite fields. If that exposes
+a real source bug, report it with the actual-function counterexample and do not
+invert an expectation, weaken the gate or silently widen this test-only slice.
+
+Use private pytest state/DB fixtures and read-only test settings as needed; no
+live DB writes, source activation, manual provider fetch or daemon operation.
+Require the four corrected actual cases and the final same required ten-file
+batch, with exact nodes/results and no unreviewed expectation reversal. Source
+content must remain the tested 0cb implementation. Do not commit/load until the
+worker evidence and the parent's current132 grouping disposition return. The
+final test-only integration does not restart the daemon. SCOPE is these exact
+test cases/fixtures; DRAIN is correction against current source/writer contracts;
+RESET is their truthful behavioral coverage, not a new live runtime permission.
+
+### 2026-10-03 HKO typed hourly writer station-binding defect
+
+The corrected positive HK fixture reaches the real typed writer and passes;
+the corrected VHHH negative now reaches actual insert_rows and persists a
+qualified hko_hourly_accumulator row instead of rejecting it. Worker evidence
+has required10 at271PASS/one real-bug RED, rather than four old fixture failures
+(private XML /tmp/zeus-required-baseline-repair-20261003.MmRPM7/required10.xml).
+Additional actual candidates demonstrate explicit foreign row station with HKO
+provenance, HKO row with foreign provenance and both foreign station fields.
+Independent inspection confirms the normal producer selects HK Observatory
+and emits correct HKO identities; no live contaminated row is established.
+This is a validated construction-time identity enforcement defect, not a claim
+of observed wrong live temperatures or historical economic loss.
+
+Correct owner is src/data/observation_instants_writer.py, ObsV2Row._validate
+adjacent to A6. The earlier parent shorthand src/state/writer.py does not exist:
+do not create it or move ownership. Data scoped law/module book and the state
+truth/K0 authority spine have been read; canonical FORECAST observation_instants
+remains authoritative, with existing transaction/causal write discipline intact.
+In scope are source-role separation, identity/metric spine and scoped fail-closed
+behavior (INV-06/INV-14/INV-37/INV-47); no probability/settlement rounding or
+lifecycle transition is changed. Source worker owns this single additional source
+file and the exact existing writer tests; integration owns PLAN/necessary existing
+registry rows. No insert SQL, schema, existing data or other-city behavior changes.
+
+The parent's refined minimal contract replaces an initially proposed blanket
+nonnull HK requirement: reject any explicitly foreign station identifier at
+either the row or provenance layer, and reject conflicting identities. At least
+one layer must explicitly bind canonical HKO. Preserve row None/provenance HKO
+and row HKO/provenance missing as legal; nullable row alone is not an unknown
+source. Two missing station layers with only a registry/hash do not prove an
+actual station binding and must reject. Do not invent aliases such as HKO_HQ or
+infer HKO from VHHH; do not impose global nonnull station IDs on other cities.
+The initial None/HKO candidate is therefore not a defect under the accepted
+minimal contract. Preserve all other A1/A2/unit/date/local-hour/causality checks.
+
+SCOPE: one Hong Kong hko_hourly_accumulator candidate's explicit row/provenance
+station binding, before any canonical insert. DRAIN: the existing normal HKO
+hourly producer emits a valid station-bound candidate through the same typed
+writer; no manual database rewrite or deletion of historical rows. RESET: a
+new valid candidate with a nonconflicting explicit HKO binding is admitted by
+this stateless predicate, including the lawful nullable twins. Missing/foreign
+proof remains unavailable only for its own candidate, not a citywide pause.
+
+Acceptance: HIGH/LOW actual insert twins reject foreign row, foreign provenance,
+conflict/both foreign and completely absent station binding with no persisted
+rows; correct HKO/HKO, None/HKO and HKO/missing bindings persist. Preserve other
+city nullable/freeform station behavior and actual normal HKO producer output.
+Retain the original counterexample RED on old source and show GREEN after the
+small A6 fix, then run affected writer tests and data's required ten files with
+exact results. Any new semantic failure is reported, not hidden by test reversal.
+Parent waits for independent fix review, these checks and current132 grouping
+before commit/landing. This is now a production truth-path repair: the preceding
+tests-only no-restart disposition does not authorize leaving the writer fix
+unloaded; final landing/loading requires the parent's normal lane approval, with
+no allow flags, guard clearing, manual ingest/reducer, venue action or live edits.
+
+Worker fix is complete and awaiting independent review/current132 disposition.
+The source change adds13 adjacent A6 logic lines, preserving all insert SQL,
+schema, source producer paths, other cities, unit/local-hour and causal checks.
+The station-binding matrix proves14 HIGH/LOW negatives reject before write,
+six actual HKO/HKO, None/HKO and HKO/missing positive writes, and one Chicago
+nullable actual write. Seven selected original-source negative counterexamples
+remain RED with13 original controls GREEN; fixed affected three-file run is
+102PASS. The final same required ten-file run is291PASS/0FAIL/0SKIP, recorded
+in /tmp/zeus-required-baseline-repair-20261003.MmRPM7/required10-fixed.xml;
+the preceding corrected-fixture271PASS/one actual VHHH-persistence RED remains
+at required10.xml in that directory. Source/test compile and whitespace pass.
+
+All four original required failures are thus disposed through truthful paths,
+not baseline waiver: authorized monitor/historical roles retain separate cache
+entries and diagnostic remains rejected before extra provider calls even with
+a populated cache; malformed target date still rejects with its underlying
+ValueError verified; valid HK positive fixtures now actually persist; invalid
+VHHH qualified fixtures now exercise the new real identity rejection and leave
+the canonical table empty. The test correction exposed and fixed the actual
+writer defect instead of flipping the wrong-station expectation to acceptance.
+There is still no evidence that normal live HKO ingestion wrote foreign rows,
+and no old-row rewrite/cleanup follows. The accepted production WRH reference
+and native ENS quantity receipts above remain distinct evidence surfaces.
+
+Independent bounded writer review accepts with zero critical/important finding:
+12 selected cases plus three local-time cases pass, with explicit non-string or
+non-HKO identities and two missing bindings rejected while nullable canonical
+twins, HIGH/LOW, other cities and existing A1/A2/source/tier/time checks remain
+intact. The parent's normal-ingestion RO inspection of the most recent two days
+finds205 HK rows all HKO/HKO and wrong0: this is enforcement repair for a private
+actual counterexample, not evidence of live source contamination. Changed-source
+compile, YAML and source-rationale delta pass; one touched ensemble test Lifecycle
+header was completed by its owning worker, not a global metadata sweep. Final
+freshness identified the same touched file's remaining Purpose/Reuse header
+fields, also completed by that owner. Scoped freshness and planning-lock now
+actually pass. No header-only completion changes the291PASS test body/source
+evidence or warrants a repeat suite.
+
+Current132 disposition is separate: the parent establishes that the two largest
+reader rejection classes are correct with valid READY seeds not yet claimed
+(the parent's Miami/Beijing example positions);98 DRAIN cases have not recovered.
+Do not refute a valid reader/HWM proof or force a queue claim. A bounded read-only
+lane is investigating whether held/global interleaving loses a global slot when
+the claim path consumes only its first selection; this remains an unproved fair
+scheduling risk, not an attributed root cause or authorized queue source edit.
+Wait for its bounded result before the parent's single combined land/load.
+
+The intermediate private single-request test repeats held claims six times
+while its global item stays queued, but the parent also establishes that the
+normal same-tick caller follows with seedlimit3 through the locked multi-claim
+path. That counter-evidence means the first API-level RED is not proof of
+overall normal global starvation. Final caller control is still pending; do
+not patch queue policy, enlarge budgets or weaken HWM on this incomplete proof.
+
+Final queue disposition is a named local-risk defer: request-only global slot
+reservation can remain unclaimed, but actual normal same-tick seedlimit3 flocked
+multi-slot controls pass. Neither whole-daemon starvation nor the current132
+root cause is established. Reopen only with evidence that the subsequent normal
+seed pass is persistently prevented by lock/deadline conditions and globals fail
+to drain across that actual path. No unproved unlocked multi-owner batch redesign
+is admitted.98 DRAIN remains pending and no overall probability/profit PASS follows.
+
+The parent accepts the verified HK station-binding repair, truthful three-test
+corrections, independent15 checks and final291 required checks for normal landing
+and one normal loader attempt. Scope remains one data writer/three existing tests
+plus exact existing registry/PLAN updates. Remove test settings, fetch current
+origin/live, rebase/reprove affected behavior only if the base moved, FF push and
+live FF; no guard clearing, venue operation or manual queue claim. Record actual
+loader loaded identity and return separately; pending external ground evidence,
+98 DRAIN and the broader continuous-profit goal are not acceptance substitutes.

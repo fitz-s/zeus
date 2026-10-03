@@ -1,8 +1,9 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-07-23; last_reused=2026-07-23
-# Last reused/audited: 2026-07-23
+# Lifecycle: created=2026-04-21; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused/audited: 2026-10-03
 # Authority basis: plan v3 antibodies A1/A2/A6 (.omc/plans/observation-
 #                  instants-migration-iter3.md L119-124); step2 Phase 0 file #3.
+#   docs/operations/current/finite_evidence_probability_symmetry/PLAN.md HKO station-binding defect.
 """Typed writer for observation_instants with A1/A2/A6 and causality enforcement.
 
 This module is the single entry point for any row that will be written
@@ -249,6 +250,19 @@ class ObsV2Row:
                     f"A6 violation: Hong Kong resolved to {tier.name}, "
                     "expected HKO_NATIVE. tier_resolver drift — refusing "
                     "to write."
+                )
+            # SCOPE: this HK accumulator candidate's station binding.
+            # DRAIN: the ordinary HKO producer emits a bound candidate.
+            # RESET: a subsequent candidate has a nonconflicting HKO identity.
+            stations = (self.station_id, parsed.get("station_id"))
+            if any(
+                value is not None and (not isinstance(value, str) or value != "HKO")
+                for value in stations
+            ) or all(value is None for value in stations):
+                raise InvalidObsV2RowError(
+                    f"A6 violation: Hong Kong station_id={self.station_id!r}, "
+                    f"provenance station_id={parsed.get('station_id')!r} must bind "
+                    "canonical HKO without conflicting station identities."
                 )
 
         # Structural sanity

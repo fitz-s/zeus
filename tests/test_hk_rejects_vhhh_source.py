@@ -1,9 +1,10 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-21; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Pin the Hong Kong HKO-vs-VHHH category-error boundary for obs_v2 writes.
 # Reuse: Reconfirm current_source_validity and HKO station semantics before editing.
-# Last reused/audited: 2026-04-25
+# Last reused/audited: 2026-10-03
 # Authority basis: plan v3 antibody A6; P1 obs_v2 provenance identity packet.
+#   WRH required-check baseline repair 2026-10-03; qualified HKO write/station rejection.
 """Antibody A6: Hong Kong rows can NEVER be routed through a WU ICAO or
 OpenMeteo grid-snap source.
 
@@ -23,27 +24,31 @@ audible instead of silent.
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
 from src.data.observation_instants_writer import (
     InvalidObsV2RowError,
     ObsV2Row,
+    insert_rows,
 )
 from src.data.tier_resolver import Tier, allowed_sources_for_tier, tier_for_city
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
-def _hk_provenance() -> str:
-    return json.dumps(
-        {
-            "tier": "HKO_NATIVE",
-            "station_id": "HKO",
-            "payload_hash": "sha256:" + "b" * 64,
-            "source_file": "hko_hourly_accumulator",
-            "parser_version": "test_hk_rejects_vhhh_source_v1",
-        },
-        sort_keys=True,
-    )
+def _hk_provenance(**overrides) -> str:
+    data = {
+        "tier": "HKO_NATIVE",
+        "station_id": "HKO",
+        "payload_hash": "sha256:" + "b" * 64,
+        "source_file": "hko_hourly_accumulator",
+        "parser_version": "test_hk_rejects_vhhh_source_v1",
+    }
+    data.update(overrides)
+    if data.get("station_id") is None:
+        data.pop("station_id", None)
+    return json.dumps(data, sort_keys=True)
 
 
 def _hk_kwargs(**overrides) -> dict:
@@ -53,6 +58,7 @@ def _hk_kwargs(**overrides) -> dict:
         target_date="2024-01-15",
         source="hko_hourly_accumulator",
         timezone_name="Asia/Hong_Kong",
+        local_hour=22.0,
         local_timestamp="2024-01-15T22:00:00+08:00",
         utc_timestamp="2024-01-15T14:00:00+00:00",
         utc_offset_minutes=480,
@@ -74,11 +80,33 @@ def _hk_kwargs(**overrides) -> dict:
 # ----------------------------------------------------------------------
 
 
-def test_hk_accumulator_source_accepted():
+@pytest.fixture
+def mem_db():
+    conn = sqlite3.connect(":memory:")
+    apply_canonical_schema(conn)
+    yield conn
+    conn.close()
+
+
+@pytest.mark.parametrize("row_station,provenance_station", [("HKO", "HKO"), (None, "HKO"), ("HKO", None)])
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_hk_accumulator_source_accepted(mem_db, row_station, provenance_station, metric):
     """Positive: 'hko_hourly_accumulator' is the only legal HK source."""
-    row = ObsV2Row(**_hk_kwargs())
+    row = ObsV2Row(**_hk_kwargs(
+        station_id=row_station,
+        provenance_json=_hk_provenance(station_id=provenance_station, station_registry_hash="fixture-registry"),
+        running_max=24.5 if metric == "high" else None,
+        running_min=20.5 if metric == "low" else None,
+    ))
     assert row.city == "Hong Kong"
     assert row.source == "hko_hourly_accumulator"
+    assert insert_rows(mem_db, [row]) == 1
+    assert mem_db.execute(
+        "SELECT city, source, station_id, local_hour, temp_current, authority FROM observation_instants"
+    ).fetchall() == [("Hong Kong", "hko_hourly_accumulator", row_station, 22.0, 22.5, "ICAO_STATION_NATIVE")]
+    assert mem_db.execute("SELECT running_max, running_min FROM observation_instants").fetchone() == (
+        24.5 if metric == "high" else None, 20.5 if metric == "low" else None,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -119,16 +147,53 @@ def test_hko_native_allowed_sources_is_exactly_accumulator():
     assert allowed == frozenset({"hko_hourly_accumulator"})
 
 
-def test_hk_rejects_station_id_vhhh():
-    """Even if someone passes the correct source tag but wrong station_id,
-    the tier still matches — so station_id drift would be a separate bug.
-    This test documents that we don't (yet) check station_id against
-    expected HKO; if we did, this test would switch to expecting failure."""
-    # Current behavior: station_id is nullable/free-form. Documenting
-    # the gap rather than masking it.
-    row = ObsV2Row(**_hk_kwargs(station_id="VHHH"))  # technically wrong ID
-    assert row.station_id == "VHHH"  # writer does not yet enforce station_id
-    # TODO (Phase 1+): add station_id check against expected per-tier mapping.
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_hk_rejects_station_id_vhhh(mem_db, metric):
+    """An otherwise qualified HKO row cannot persist the VHHH airport identity."""
+    try:
+        row = ObsV2Row(**_hk_kwargs(station_id="VHHH", running_max=24.5 if metric == "high" else None,
+                                  running_min=20.5 if metric == "low" else None))
+        insert_rows(mem_db, [row])
+    except InvalidObsV2RowError as exc:
+        message = str(exc)
+        assert "station_id" in message and "VHHH" in message and "HKO" in message
+    else:
+        persisted = mem_db.execute(
+            "SELECT city, source, station_id, local_hour, temp_current, authority FROM observation_instants"
+        ).fetchall()
+        pytest.fail(f"Wrong station was accepted and persisted: {persisted!r}")
+    assert mem_db.execute("SELECT COUNT(*) FROM observation_instants").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("row_station,provenance_station", [
+    ("HKO", "VHHH"), ("VHHH", "VHHH"), (None, None),
+    (7, "HKO"), ("HKO", False), ("HKO", {"unexpected": "station"}),
+])
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_hk_rejects_unbound_or_conflicting_station_identity_before_write(mem_db, row_station, provenance_station, metric):
+    with pytest.raises(InvalidObsV2RowError, match="A6 violation.*station_id"):
+        row = ObsV2Row(**_hk_kwargs(
+            station_id=row_station,
+            provenance_json=_hk_provenance(station_id=provenance_station, station_registry_hash="fixture-registry"),
+            running_max=24.5 if metric == "high" else None,
+            running_min=20.5 if metric == "low" else None,
+        ))
+        insert_rows(mem_db, [row])
+    assert mem_db.execute("SELECT COUNT(*) FROM observation_instants").fetchone()[0] == 0
+
+
+def test_other_city_nullable_station_identity_remains_insertable(mem_db):
+    provenance = json.loads(_hk_provenance())
+    provenance.update(tier="WU_ICAO", station_id="KORD", source_file="private-wu-fixture")
+    row = ObsV2Row(**_hk_kwargs(
+        city="Chicago", source="wu_icao_history", station_id=None,
+        timezone_name="America/Chicago", local_hour=8.0,
+        local_timestamp="2024-01-15T08:00:00-06:00", utc_offset_minutes=-360,
+        temp_unit="F", temp_current=32.0, authority="VERIFIED",
+        provenance_json=json.dumps(provenance),
+    ))
+    assert insert_rows(mem_db, [row]) == 1
+    assert mem_db.execute("SELECT station_id, temp_current FROM observation_instants").fetchone() == (None, 32.0)
 
 
 # ----------------------------------------------------------------------

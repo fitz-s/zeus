@@ -336,7 +336,7 @@ test_trust_policy:
     tests/test_dedup_gate_token.py: {created: "2026-05-17", last_used: "2026-09-01"}
     tests/test_solar_append_future_window.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_data_density_discount_v2.py: {created: "2026-05-03", last_used: "2026-05-15"}
-    tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-07-17", note: "Ensemble cache, source-role gates, provenance, and pre-request shared quota reservation."}
+    tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-10-03", note: "Ensemble cache separates authorized monitor/historical roles; populated cache cannot authorize diagnostic role denied by source registry. Existing provenance/quota tests retained."}
     tests/test_forecasts_writer_provenance_required.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_forecast_fetch_plan.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_live_entry_forecast_status.py: {created: "2026-09-10", last_used: "2026-09-10", note: "Current coordinate manifest scopes both snapshot counts and producer readiness; legacy and other-profile rows do not establish live readiness."}
@@ -455,7 +455,7 @@ test_trust_policy:
     tests/test_executor_db_target.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-27"}
     tests/test_flash_crash_evidence_gate.py: {created: "2026-06-02", last_used: "2026-09-03", note: "Persistent market-path catastrophe evidence is causal, scale-free held-side executable-bid drawdown: ask-sensitive mark price cannot mask a collapse, established positions use a bounded one-hour reference, new low-price holdings use the causal trailing-hour bid high, missing history remains explicitly unavailable, and only fresh executable multi-sample collapse can override HOLD while guaranteed settlement winners remain protected."}
-    tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-04-25"}
+    tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-10-03", note: "Actual HIGH/LOW canonical writes accept nonconflicting HKO binding at either layer; foreign/conflicting/unbound station identities reject before insert, while other-city nullable station writes remain legal."}
     tests/test_hk_settlement_floor_rounding.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_hourly_clients_parse.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_k1_slice_d.py: {created: "2026-04-17", last_used: "2026-04-29"}
@@ -479,7 +479,7 @@ test_trust_policy:
     tests/test_obs_v2_dst_missing_hour_flag.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_obs_v2_physical_bounds.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_obs_v2_reader_gate.py: {created: "2026-04-25", last_used: "2026-04-25"}
-    tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-08-20", note: "Typed observation writer provenance/source contracts plus exact Shenzhen same-hour WU downward-revision supersession with immutable observation_revisions audit evidence."}
+    tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-10-03", note: "Typed observation provenance/source contracts and fail-closed malformed-date A2 cause; existing Shenzhen downward-revision supersession and immutable observation_revisions evidence retained."}
     tests/test_pe_reconstruction_relationships.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_phase4_5_extractor.py: {created: "2026-04-16", last_used: "2026-04-16"}
     tests/test_phase5_gate_d_low_purity.py: {created: "2026-04-17", last_used: "2026-04-17"}
@@ -2062,7 +2062,8 @@ test_metadata:
       - docs/operations/current_source_validity.md
     notes: >
       Category-impossibility test for the Hong Kong HKO vs VHHH station/source
-      boundary.
+      boundary. HIGH/LOW actual inserts cover lawful nullable HKO bindings and
+      zero writes for explicit foreign/conflicting or wholly unbound station identities.
   tests/test_backfill_scripts_match_live_config.py:
     modules: [data, scripts]
     category: migration_compatibility

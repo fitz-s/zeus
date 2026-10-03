@@ -1733,7 +1733,7 @@ files:
     zone: K2_runtime
     authority_role: observation_instants_v2_typed_writer
     why: Typed writer enforcing plan v3 antibodies A1 (non-default authority/data_version/provenance_json), A2 (per-city expected
-      source), A6 (HK must route hko_hourly_accumulator, never VHHH), and possession causality (imported_at cannot precede
+      source), A6 (HK must route hko_hourly_accumulator and have a nonconflicting explicit HKO station binding at row or provenance, never foreign or both absent), and possession causality (imported_at cannot precede
       the observation bucket or raw source print) before every observation_instants INSERT. A causally newer same-hour WU
       payload supersedes the current row in either direction while the displaced view remains immutable in observation_revisions;
       append-only-extremum assumptions cannot preserve a provider value after WU has corrected it.

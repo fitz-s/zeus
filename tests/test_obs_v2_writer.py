@@ -1,8 +1,9 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-08-20; last_reused=2026-08-20
-# Last reused/audited: 2026-08-20
+# Lifecycle: created=2026-04-21; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused/audited: 2026-10-03
 # Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet;
 #                  2026-05-20 live tick payload hash material-extrema repair.
+#                  WRH required-check baseline repair 2026-10-03; current A2 date parsing contract.
 # Purpose: Pin observation_instants writer provenance and source-role semantics.
 # Reuse: Inspect P1.2 packet, tier_resolver registry, and test topology first.
 # Authority basis: plan v3 antibodies A1/A2 (.omc/plans/observation-instants-
@@ -338,8 +339,10 @@ def test_rejects_bad_temp_unit():
 
 
 def test_rejects_bad_target_date():
-    with pytest.raises(InvalidObsV2RowError, match="target_date"):
+    with pytest.raises(InvalidObsV2RowError, match="A2 violation.*2024/01/15") as error:
         _make_row(target_date="2024/01/15")
+    assert isinstance(error.value.__context__, ValueError)
+    assert "Invalid isoformat string" in str(error.value.__context__)
 
 
 def test_rejects_bad_utc_timestamp():

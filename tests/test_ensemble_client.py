@@ -1,6 +1,10 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-07-17
+# Lifecycle: created=2026-04-30; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused/audited: 2026-10-03
+# Purpose: Pin authorized-role ensemble cache, quota and provenance contracts.
+# Reuse: Inspect current ensemble_client and forecast_source_registry before reuse.
 # Authority basis: Phase 1D forecast source policy + first-principles safety implementation 2026-04-30
+#   current forecast_source_registry role contract; WRH required-check baseline repair 2026-10-03
 """Tests for ensemble client caching and request behavior."""
 
 from datetime import datetime, timezone
@@ -177,17 +181,25 @@ def test_fetch_ensemble_cache_key_includes_role(monkeypatch):
         model="gfs025",
         role="monitor_fallback",
     )
-    diagnostic = ensemble_client.fetch_ensemble(
+    historical = ensemble_client.fetch_ensemble(
         NYC,
         forecast_days=4,
         model="gfs025",
-        role="diagnostic",
+        role="historical_evidence",
     )
 
     assert calls["n"] == 2
-    assert monitor is not None and diagnostic is not None
+    assert monitor is not None and historical is not None
     assert monitor["forecast_source_role"] == "monitor_fallback"
-    assert diagnostic["forecast_source_role"] == "diagnostic"
+    assert historical["forecast_source_role"] == "historical_evidence"
+    cached_historical = ensemble_client.fetch_ensemble(
+        NYC, forecast_days=4, model="gfs025", role="historical_evidence",
+    )
+    assert cached_historical["forecast_source_role"] == "historical_evidence"
+    # A populated cache cannot authorize a role the source registry denies.
+    with pytest.raises(SourceNotEnabled, match="not authorized for role 'diagnostic'"):
+        ensemble_client.fetch_ensemble(NYC, forecast_days=4, model="gfs025", role="diagnostic")
+    assert calls["n"] == 2
 
 
 def test_fetch_ensemble_returns_none_when_shared_quota_is_blocked(monkeypatch):
