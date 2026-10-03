@@ -12611,3 +12611,99 @@ one normal loader. Keep configd7 and all third-party work unchanged. Remove the
 temporary read-only test config link before commit. New runtime must separately
 prove natural fair service and source-to-q DRAIN; GREEN is not permission to
 force RED, create a cancel or claim production cancellation when none occurs.
+
+### Continuation: three named read-only gaps on the current landed base
+
+The original goal remains open. On 2026-10-03 the clean task branch was
+fast-forwarded from 2b7171bd4 to the freshly confirmed origin/live
+0375ec09ff7b93e0cf824a93c8b883903a4d88f9, solely in this managed task tree.
+2b is an ancestor; its named queue sorting/multi-lease/read-plan functions,
+live_tick generic-review reorder and two existing test blobs remain unchanged.
+Other intervening source changes are not thereby independently accepted.
+The live checkout and loaded stamp had already advanced through another task;
+this task did not quarantine index.lock, FF live or invoke a new loader, and
+has no new loader return code. The earlier 3b5 rc1 and subsequent natural
+guard RESET remain separate historical evidence, not rewritten success.
+
+Root has assigned three bounded read-only lanes, with no source-edit authority:
+
+- Hong Kong: locate the first actual probability flip with an executable
+  bid >=0.05 and trace the corresponding current statistical exit decision.
+  Require exact posterior/position/book/decision clocks and typed action-law
+  evidence; no fill, continuous-profit or hypothetical profitable-exit claim.
+- Seoul KMA: identify why the old request has not naturally serviced after
+  the current load. Bind the exact request, owner/lease, retained turn and
+  current raw-to-posterior-to-held-consumer chain. Separate queue progress
+  from fresh source consumption; no manual seed, claim or clock rewriting.
+- Quote consumption: trace the actual consumer of fresh executable quotes
+  versus expired pointers. Require same position/market/side and captured/
+  deadline/decision clocks; distinguish a stale projection from a genuine
+  fail-closed rejection. No guard reset, evaluation trigger or venue action.
+
+Acceptance is a decisive current trace that fixes, refutes or defers each
+named hypothesis with its narrow SCOPE/DRAIN/RESET dependencies. A verified
+software defect requires separate root-approved before-edit scope, behavioral
+antibodies and affected checks; unknown or external missing truth cannot be
+promoted to zero/fresh/permission. These lanes do not authorize repairs of
+intervening third-party code, old baseline fixtures or the whole universe.
+
+Retained fair service, Seoul HIGH/LOW and Busan LOW new-source consumption,
+and native production cancellation remain separately pending where their
+actual chain is unproved. Prescribed seven-file 234PASS/37FAIL with the same
+original-3b5 recovery failures establishes no introduced delta, not harmless
+baseline behavior or whole-green. Broader known source/ground and executable
+exit gaps retain their existing dispositions. The three lanes have now returned
+the bounded dispositions below. Root authorizes this checkpoint only on the
+task branch, pushed there to preserve unfinished work; no live push, reload or
+branch deletion is authorized. Any task-tree archive remains root-managed.
+
+### Read-only continuation checkpoint: resolved hypotheses and remaining gaps
+
+Actual loaded 0375 contains 2b and the named repaired seams; main stamp
+2026-10-03T15:35:23.719528Z/PID50154 and config SHA d7d28bd3... were checked.
+Independent current runtime evidence reports guard=None. This is third-party
+integration/loading, not a new deployment by this task; no new loader rc is
+claimed. Eight actual-0375 private relation cases pass, but do not establish
+that the generic review helper's family set is a native ENTRY veto.
+
+Fresh-quote suspicion is refuted for the traced held tokens: price rows1846991
+and1846989 were updated in the relevant cycle. The event lacks quote ID/hash
+and source-clock telemetry, so no venue-issued clock or complete lineage is
+claimed. Latest receipt899101's three Hong Kong outcomes are typed EXCLUDED
+without an in-band executable bid/candidate; all nine traced hashes match.
+This is a lawful rejection trace, not a positive trading/profit receipt.
+
+Hong Kong b598 seq181/intent182/order command7925164b29f8402c actually filled
+1.17 shares at0.20, leaving1.61; CAPITAL_REDUCTION_FILLED is not a failed retry.
+It proves reduction, not profit or continuous profitable exits. Early monitor206
+had probability identity but lacked epoch/book lineage and only woke its family.
+Adjacent family receipts895983/895984 at06:04:25 were complete EVALUATED and
+rejected NON_POSITIVE_EXPECTED_OBJECTIVE: q0.4045887, price0.091, shares0.01,
+mean delta-log -0.00067859 and EV -0.003177. No other-city preparation blocker
+is proved; the memory-coverage linkage to that exact generation remains a
+telemetry gap. SELL may lawfully reduce ruin risk with positive mean delta-log
+despite negative EV (solver3064/E2/E6); a BUY-style positive-EV gate is not its
+law. This is not a profit flip or an independently reproduced wealth proof.
+
+The old Seoul Oct3 owner at14:26 was past-date tier2/rank94--95, with no retry
+or lease; higher-priority work continued producing q. That does not reproduce
+an Oct4 fresh-source bug. Postload Seoul HIGH/LOW and Busan LOW complete fresh
+source-to-q-to-held-consumer chains remain unproved where previously named.
+
+The b598 input-clock trace starts with HKO28.9 at05:50, locally available
+05:58:04.480, pin730330 at06:02:41. New HKO29.3 at06:00 became locally available
+06:08:43.010783; pin730373 at06:09:04.957851 followed about21.947s later, and
+the last monitor followed about63.758s after q. The06:08:49 middle monitor still
+used old pin730359 computed06:06:14, but its source-read/snapshot start is not
+recorded: completion time alone cannot prove stale consumption. Bid0.001 at
+06:09:02 preceded the new q by about2.215s; the new source was not available
+before the first06:04 decision. ENS1397518 (Oct2 12Z,51 members) and member hash
+were unchanged; body anchor28.375 is not an independent mu* proof. Source-issued
+extremum time and actual DB commit remain UNKNOWN; imported time is not commit.
+
+The original global probability-to-realized-profit goal is NOT complete.
+Early source-cut/stage telemetry, postload fresh-consumer and physical/source
+proof gaps retain explicit unknown/deferred status. The234PASS/37 baseline
+failures remain reported, not whole-green or presumed harmless. No new software
+fix, live source/DB/venue mutation, forced cycle or appearance-only reload is
+part of this checkpoint. Preserve this pushed unfinished task branch.
