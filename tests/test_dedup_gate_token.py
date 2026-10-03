@@ -2417,3 +2417,287 @@ def test_snapshot_fallback_when_conn_none():
         positions=[pos_closed],
     )
     assert has_same_token_open(portfolio_closed, TOKEN_X) is False
+
+
+# ── Increment fact backing nets confirmed exits (Ankara 2026-10-02) ──────────
+#
+# Law: projected shares == Σ confirmed entry fills − Σ confirmed exit fills,
+# each command-deduped; cost reduces proportionally on each exit.
+
+
+def _seed_partially_exited_position(conn, *, shares=0.45, cost=0.0765):
+    """Ankara 8694f1ed-781: entry 6.0 @0.17, exits 3.64 @0.15 + 1.91 @0.17."""
+
+    _insert_position(
+        conn,
+        "exited-position",
+        "active",
+        token_id=TOKEN_X,
+        direction="buy_yes",
+        shares=shares,
+        chain_shares=shares,
+        chain_state="synced",
+        cost_basis_usd=cost,
+    )
+    conn.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-entry', 'exited-position', ?, 'ENTRY', 'BUY',
+                   'order-entry', 'FILLED',
+                   '2026-10-02T10:57:00+00:00', '2026-10-02T10:58:09+00:00')""",
+        (TOKEN_X,),
+    )
+    conn.execute(
+        """INSERT INTO execution_fact
+           (intent_id, position_id, command_id, order_role, filled_at, posted_at,
+            fill_price, shares, terminal_exec_status, venue_status)
+           VALUES ('exited-position:entry', 'exited-position', 'cmd-entry',
+                   'entry', '2026-10-02T10:58:09+00:00',
+                   '2026-10-02T10:57:00+00:00', 0.17, 6.0, 'filled', 'CONFIRMED')"""
+    )
+    for command_id, filled_at, price, sold in (
+        ("cmd-exit-1", "2026-10-02T11:19:16+00:00", 0.15, 3.64),
+        ("cmd-exit-2", "2026-10-02T12:41:00+00:00", 0.17, 1.91),
+    ):
+        conn.execute(
+            """INSERT INTO venue_commands
+               (command_id, position_id, token_id, intent_kind, side,
+                venue_order_id, state, size, price, created_at, updated_at)
+               VALUES (?, 'exited-position', ?, 'EXIT', 'SELL', ?, 'FILLED',
+                       ?, ?, ?, ?)""",
+            (command_id, TOKEN_X, "order-" + command_id, sold, price,
+             filled_at, filled_at),
+        )
+        conn.execute(
+            """INSERT INTO execution_fact
+               (intent_id, position_id, command_id, order_role, filled_at,
+                posted_at, fill_price, shares, terminal_exec_status, venue_status)
+               VALUES (?, 'exited-position', ?, 'exit', ?, ?, ?, ?,
+                       'CONFIRMED', 'CONFIRMED')""",
+            (f"exited-position:exit:{command_id}", command_id, filled_at,
+             filled_at, price, sold),
+        )
+    conn.commit()
+
+
+def _increment(conn):
+    return _entry_duplicate_same_token_component(
+        conn,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+
+
+def test_partially_exited_position_is_explained_by_net_fills(mem_db):
+    _seed_partially_exited_position(mem_db)
+
+    allowed = _increment(mem_db)
+
+    assert allowed["allowed"] is True
+    assert allowed["reason"] == "allowed_reconciled_position_increment"
+    assert allowed["increment_position_id"] == "exited-position"
+    backing = _entry_increment_fact_backing_component(
+        mem_db,
+        position_id="exited-position",
+        shares=0.45,
+        cost_basis_usd=0.0765,
+    )
+    assert backing["allowed"] is True
+    # 6.0 × 0.17 × (0.45 / 6.0): proportional cost reduction on each exit.
+    assert float(backing["details"]["shares"]) == pytest.approx(0.45)
+    assert float(backing["details"]["cost_basis_usd"]) == pytest.approx(0.0765)
+
+
+def test_partially_exited_position_unexplained_projection_still_rejects(mem_db):
+    _seed_partially_exited_position(mem_db, shares=0.55, cost=0.0935)
+
+    blocked = _increment(mem_db)
+
+    assert blocked["allowed"] is False
+    assert blocked["reason"] == "position_economics_not_reconciled_for_increment"
+    assert blocked["fact_backing"]["reason"] == (
+        "position_projection_differs_from_fill_aggregate"
+    )
+
+
+def test_gross_entry_projection_with_confirmed_exits_rejects(mem_db):
+    """A projection that still shows the sold shares is not explained."""
+
+    _seed_partially_exited_position(mem_db, shares=6.0, cost=1.02)
+
+    blocked = _increment(mem_db)
+
+    assert blocked["allowed"] is False
+    assert blocked["reason"] == "position_economics_not_reconciled_for_increment"
+
+
+@pytest.mark.parametrize("command_state", ["ACKED", "PARTIAL", "UNKNOWN", "POSTING"])
+def test_pending_exit_command_keeps_increment_closed(mem_db, command_state):
+    _seed_partially_exited_position(mem_db)
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-exit-open', 'exited-position', ?, 'EXIT', 'SELL',
+                   'order-exit-open', ?,
+                   '2026-10-02T13:00:00+00:00', '2026-10-02T13:00:01+00:00')""",
+        (TOKEN_X, command_state),
+    )
+    mem_db.commit()
+
+    blocked = _increment(mem_db)
+
+    assert blocked["allowed"] is False
+    assert blocked["reason"] == "position_economics_not_reconciled_for_increment"
+    assert blocked["fact_backing"]["reason"] == "execution_fact_aggregate_unavailable"
+    assert "exit command not terminal" in blocked["fact_backing"]["details"]["error"]
+
+
+@pytest.mark.parametrize("fact_status", ["MATCHED", "MINED", "placed", "pending"])
+def test_unconfirmed_exit_fill_keeps_increment_closed(mem_db, fact_status):
+    _seed_partially_exited_position(mem_db)
+    mem_db.execute(
+        "UPDATE execution_fact SET terminal_exec_status=? "
+        "WHERE intent_id='exited-position:exit:cmd-exit-2'",
+        (fact_status,),
+    )
+    mem_db.commit()
+
+    blocked = _increment(mem_db)
+
+    assert blocked["allowed"] is False
+    assert blocked["fact_backing"]["reason"] == "execution_fact_aggregate_unavailable"
+
+
+def test_filled_exit_command_without_fact_keeps_increment_closed(mem_db):
+    _seed_partially_exited_position(mem_db)
+    mem_db.execute(
+        "DELETE FROM execution_fact WHERE intent_id='exited-position:exit:cmd-exit-2'"
+    )
+    mem_db.commit()
+
+    blocked = _increment(mem_db)
+
+    assert blocked["allowed"] is False
+    assert "filled exit command has no confirmed fill fact" in (
+        blocked["fact_backing"]["details"]["error"]
+    )
+
+
+def test_duplicate_exit_rows_for_one_command_count_once(mem_db):
+    """``<pid>:exit`` and ``<pid>:exit:<cmd>`` mirror one venue fill."""
+
+    from src.state.db import query_net_execution_fill_aggregate
+
+    _seed_partially_exited_position(mem_db)
+    # Same command under both identity shapes (live 551c9c9c / 8694f1ed).
+    mem_db.execute(
+        """INSERT INTO execution_fact
+           (intent_id, position_id, command_id, order_role, filled_at, posted_at,
+            fill_price, shares, terminal_exec_status, venue_status)
+           VALUES ('exited-position:exit', 'exited-position', 'cmd-exit-2',
+                   'exit', '2026-10-02T12:41:00.100000+00:00',
+                   '2026-10-02T12:41:00+00:00', 0.17, 1.91, 'filled', 'CONFIRMED')"""
+    )
+    mem_db.commit()
+
+    aggregate = query_net_execution_fill_aggregate(mem_db, "exited-position")
+    assert aggregate["shares_filled"] == pytest.approx(0.45)
+    assert aggregate["exit_execution_fact_command_ids"] == (
+        "cmd-exit-1",
+        "cmd-exit-2",
+    )
+    assert _increment(mem_db)["allowed"] is True
+
+    # A command-less position-scoped mirror has no command identity and
+    # grants no fill authority; counting it would double the last exit.
+    mem_db.execute(
+        "UPDATE execution_fact SET command_id=NULL "
+        "WHERE intent_id='exited-position:exit'"
+    )
+    mem_db.commit()
+    aggregate = query_net_execution_fill_aggregate(mem_db, "exited-position")
+    assert aggregate["shares_filled"] == pytest.approx(0.45)
+    assert _increment(mem_db)["allowed"] is True
+
+
+def test_net_fill_aggregate_without_exits_equals_entry_aggregate(mem_db):
+    from src.state.db import (
+        query_entry_execution_fill_aggregate,
+        query_net_execution_fill_aggregate,
+    )
+
+    _seed_partially_exited_position(mem_db)
+    mem_db.execute("DELETE FROM execution_fact WHERE order_role='exit'")
+    mem_db.execute("DELETE FROM venue_commands WHERE intent_kind='EXIT'")
+    mem_db.commit()
+
+    assert query_net_execution_fill_aggregate(
+        mem_db, "exited-position"
+    ) == query_entry_execution_fill_aggregate(
+        mem_db, "exited-position", strict=True
+    )
+
+
+def test_selector_refuses_what_the_executor_duplicate_guard_refuses(mem_db):
+    from src.engine.event_reactor_adapter import (
+        global_selected_order_same_token_rejection,
+    )
+
+    score = SimpleNamespace(
+        candidate=SimpleNamespace(
+            action="BUY", token_id=TOKEN_X, candidate_id="cand-1"
+        ),
+        limit_price=0.22,
+        shares=5.0,
+    )
+    now = datetime.fromisoformat("2026-10-02T14:03:02+00:00")
+
+    # Explained partial exit: the executor admits a certified increment and
+    # skips cooldown; the selector agrees.
+    _seed_partially_exited_position(mem_db)
+    assert _increment(mem_db)["allowed"] is True
+    assert (
+        global_selected_order_same_token_rejection(score, now, trade_conn=mem_db)
+        is None
+    )
+
+    # Unexplained projection: both refuse with the executor's reason.
+    mem_db.execute(
+        "UPDATE position_current SET shares=0.55 WHERE position_id='exited-position'"
+    )
+    mem_db.commit()
+    executor_verdict = _increment(mem_db)
+    assert executor_verdict["allowed"] is False
+    assert global_selected_order_same_token_rejection(
+        score, now, trade_conn=mem_db
+    ) == f"duplicate_entry_same_token:{executor_verdict['reason']}"
+
+    # Open same-token ENTRY command: refused by both.
+    mem_db.execute(
+        "UPDATE position_current SET shares=0.45 WHERE position_id='exited-position'"
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-open', 'another-attempt', ?, 'ENTRY', 'BUY',
+                   'order-open', 'ACKED',
+                   '2026-10-02T14:00:00+00:00', '2026-10-02T14:00:01+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.commit()
+    assert _increment(mem_db)["allowed"] is False
+    assert global_selected_order_same_token_rejection(
+        score, now, trade_conn=mem_db
+    ) == "duplicate_entry_same_token:open_or_filled_entry_command_same_token"
+
+
+def test_duplicate_entry_same_token_reason_is_registered():
+    from src.contracts.rejection_reasons import is_registered_rejection_reason
+
+    assert is_registered_rejection_reason(
+        "duplicate_entry_same_token:position_economics_not_reconciled_for_increment"
+    )

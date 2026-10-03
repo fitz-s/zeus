@@ -1585,22 +1585,21 @@ def _entry_increment_fact_backing_component(
     shares: object,
     cost_basis_usd: object,
 ) -> dict:
-    """Prove terminal fill facts fully cover the projected position shares.
+    """Prove confirmed fill facts exactly explain the projected position.
 
-    ``position_current.cost_basis_usd`` may be a lossy chain-position summary.
-    Once command-deduped terminal execution facts cover every projected share,
-    those facts own exact entry cost for increment admission.  A projection
-    cost delta is therefore evidence, not an exposure ambiguity.
+    Explained shares = confirmed entry fills - confirmed exit fills, each
+    command-deduped; explained cost reduces proportionally on every exit, as
+    the partial-exit projection does.  ``position_current.cost_basis_usd`` may
+    be a lossy chain-position summary, so once the facts explain every
+    projected share they own exact cost for increment admission and a
+    projection cost delta is evidence, not an exposure ambiguity.  An exit
+    that is not yet terminal leaves the position unexplained.
     """
 
     try:
-        from src.state.db import query_entry_execution_fill_aggregate
+        from src.state.db import query_net_execution_fill_aggregate
 
-        aggregate = query_entry_execution_fill_aggregate(
-            conn,
-            position_id,
-            strict=True,
-        )
+        aggregate = query_net_execution_fill_aggregate(conn, position_id)
     except Exception as exc:  # noqa: BLE001 - ambiguous exposure cannot be incremented.
         return _capability_component(
             "entry_increment_fact_backing",

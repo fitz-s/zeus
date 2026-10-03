@@ -6784,22 +6784,53 @@ def global_selected_order_same_token_rejection(
     *,
     trade_conn: sqlite3.Connection | None,
 ) -> str | None:
-    """Selection-time half of the executor's one same-token re-post law.
+    """Selection-time half of the executor's same-token submit laws.
 
+    Mirrors ``_live_order`` in its order: the duplicate/fact-backing guard,
+    then the re-post cooldown, which a reconciled increment does not take.
     Evaluated on the scored proposal's exact limit price and shares, at the
-    decision instant, so the auction never selects an order ``_live_order``
-    refuses with ``entry_cooldown``; the runner-up competes instead.
+    decision instant, so the auction never selects an order its submit
+    refuses; the runner-up competes instead.
+
+    The executor passes ``_certified_global_increment_authorized`` as
+    ``allow_reconciled_position_increment``; that flag needs the final
+    intent's economics proof, which does not exist at selection.  Passing
+    True is exact for refusal: the guard's True-refusals are a subset of its
+    False-refusals (True only opens the reconciled-increment branch), so every
+    proposal refused here is refused at submit whatever the flag resolves to.
+    A proposal that the guard admits only as a certified increment is still
+    refused at submit if its certificate fails.
     """
 
-    from src.execution.executor import _entry_same_token_cooldown_component
+    from src.execution.executor import (
+        _entry_duplicate_same_token_component,
+        _entry_same_token_cooldown_component,
+    )
 
     candidate = getattr(score, "candidate", None)
     if trade_conn is None or str(getattr(candidate, "action", "BUY")).upper() != "BUY":
         return None
+    token_id = str(getattr(candidate, "token_id", "") or "")
+    candidate_position_id = (
+        f"global-selection:{getattr(candidate, 'candidate_id', '')}"
+    )
+    duplicate = _entry_duplicate_same_token_component(
+        trade_conn,
+        token_id=token_id,
+        candidate_position_id=candidate_position_id,
+        allow_reconciled_position_increment=True,
+    )
+    if not duplicate.get("allowed"):
+        return (
+            "duplicate_entry_same_token:"
+            f"{duplicate.get('reason') or 'duplicate_entry_same_token'}"
+        )
+    if duplicate.get("increment_position_id"):
+        return None
     verdict = _entry_same_token_cooldown_component(
         trade_conn,
-        token_id=str(getattr(candidate, "token_id", "") or ""),
-        candidate_position_id=f"global-selection:{getattr(candidate, 'candidate_id', '')}",
+        token_id=token_id,
+        candidate_position_id=candidate_position_id,
         limit_price=getattr(score, "limit_price", None),
         shares=getattr(score, "shares", None),
         now=decided_at,

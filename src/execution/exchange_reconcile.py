@@ -7060,7 +7060,7 @@ def _ensure_entry_fill_position_event(
         projection_order_status = order_status
         projection_size_usd = _decimal_text(projection_cost)
     elif incremental_fill:
-        from src.state.db import query_entry_execution_fill_aggregate
+        from src.state.db import query_net_execution_fill_aggregate
 
         selected_token_id = str(command.get("token_id") or "").strip()
         token_scope = conn.execute(
@@ -7099,10 +7099,12 @@ def _ensure_entry_fill_position_event(
                 selected_token_id,
             )
             return
-        historical = query_entry_execution_fill_aggregate(
+        # The base is the position the confirmed fills explain: entries net of
+        # confirmed exits.  A gross entry base would resurrect sold shares.
+        historical = query_net_execution_fill_aggregate(
             conn,
             position_id,
-            strict=True,
+            require_terminal_exit_commands=False,
         )
         if historical is None:
             logger.error(
@@ -7141,6 +7143,17 @@ def _ensure_entry_fill_position_event(
             # the same result until the command becomes terminal.
             projection_shares += shares_dec
             projection_cost += cost_basis_dec
+        elif historical.get("exit_execution_fact_command_ids"):
+            # Average-cost exit reduction is not additive in one entry's
+            # economics: replacing this command's fill would rescale every
+            # later exit.  Refuse rather than approximate.
+            logger.error(
+                "exchange_reconcile: refuse entry increment replacement after "
+                "confirmed exits position_id=%s command_id=%s",
+                position_id,
+                current_command_id,
+            )
+            return
         else:
             # The current command's execution_fact is the durable projection
             # written by this helper. Reconcile can receive a newer

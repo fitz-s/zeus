@@ -265,6 +265,13 @@ class RejectionReason(str, Enum):
         "Duplicate-entry suppression while the same token/direction is cooling down "
         "or already active; prevents repeated same-order submission.",
     )
+    DUPLICATE_ENTRY_SAME_TOKEN = (
+        "duplicate_entry_same_token",
+        RejectionCategory.DESIGNED_GATE,
+        "Same-token exposure is open, unknown, or not exactly explained by "
+        "confirmed fill facts, so a new BUY on that token is refused; applied "
+        "at selection and at the executor's pre-persistence boundary.",
+    )
     VENUE_REJECTED_GEOBLOCK_403 = (
         "venue_rejected_geoblock_403",
         RejectionCategory.DESIGNED_GATE,

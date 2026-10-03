@@ -14035,6 +14035,53 @@ def _finite_float_or_none(value) -> float | None:
     return numeric
 
 
+def _command_deduped_fill_rows(rows, *, order_role: str) -> list:
+    """Keep one execution_fact row per (position, venue command).
+
+    A command's fill can be mirrored under the position-scoped identity
+    ``<position>:<role>`` and the command-scoped ``<position>:<role>:<command>``.
+    Entry prefers the baseline row; exit prefers the command-scoped row, which
+    ``log_execution_fact`` makes the canonical exit identity.  Rows without a
+    command id stay keyed by their intent.  ``rows`` order decides ties.
+    """
+
+    canonical_intents: dict[tuple[str, str], str] = {}
+    for row in rows:
+        position_id = str(row["position_id"] or "")
+        command_id = str(row["command_id"] or "")
+        intent_id = str(row["intent_id"] or "")
+        if not command_id:
+            continue
+        key = (position_id, command_id)
+        baseline_id = f"{position_id}:{order_role}"
+        scoped_id = f"{baseline_id}:{command_id}"
+        preferred, fallback = (
+            (baseline_id, scoped_id) if order_role == "entry" else (scoped_id, baseline_id)
+        )
+        if intent_id == preferred:
+            canonical_intents[key] = preferred
+        elif intent_id == fallback and key not in canonical_intents:
+            canonical_intents[key] = fallback
+    kept = []
+    seen_commands: dict[str, set[str]] = {}
+    for row in rows:
+        position_id = str(row["position_id"] or "")
+        if not position_id:
+            continue
+        intent_id = str(row["intent_id"] or "")
+        command_id = str(row["command_id"] or "")
+        canonical_intent = canonical_intents.get((position_id, command_id))
+        if canonical_intent is not None and intent_id != canonical_intent:
+            continue
+        command_key = command_id or f"intent:{intent_id}"
+        seen = seen_commands.setdefault(position_id, set())
+        if command_key in seen:
+            continue
+        seen.add(command_key)
+        kept.append(row)
+    return kept
+
+
 def _query_entry_execution_fill_hints(
     conn: sqlite3.Connection,
     trade_ids: list[str],
@@ -14096,36 +14143,11 @@ def _query_entry_execution_fill_hints(
         """,
         normalized_trade_ids,
     ).fetchall()
-    canonical_intents: dict[tuple[str, str], str] = {}
-    for row in rows:
-        position_id = str(row["position_id"] or "")
-        command_id = str(row["command_id"] or "")
-        intent_id = str(row["intent_id"] or "")
-        if not command_id:
-            continue
-        key = (position_id, command_id)
-        baseline_id = f"{position_id}:entry"
-        increment_id = f"{baseline_id}:{command_id}"
-        if intent_id == baseline_id:
-            canonical_intents[key] = baseline_id
-        elif intent_id == increment_id and key not in canonical_intents:
-            canonical_intents[key] = increment_id
     hints: dict[str, dict] = {}
-    seen_commands: dict[str, set[str]] = {}
-    for row in rows:
+    for row in _command_deduped_fill_rows(rows, order_role="entry"):
         trade_id = str(row["position_id"] or "")
-        if not trade_id:
-            continue
         intent_id = str(row["intent_id"] or "")
         command_id = str(row["command_id"] or "")
-        canonical_intent = canonical_intents.get((trade_id, command_id))
-        if canonical_intent is not None and intent_id != canonical_intent:
-            continue
-        command_key = command_id or f"intent:{intent_id}"
-        seen = seen_commands.setdefault(trade_id, set())
-        if command_key in seen:
-            continue
-        seen.add(command_key)
         if strict:
             filled_at = str(row["filled_at"] or "")
             if _parse_iso_timestamp(filled_at) is None:
@@ -14232,6 +14254,198 @@ def query_entry_execution_fill_aggregate(
         [position_id],
         strict=strict,
     ).get(position_id)
+
+
+_EXIT_FILL_FINAL_STATUSES = frozenset({"FILLED", "CONFIRMED", "PARTIAL"})
+_EXIT_FILL_NON_FINAL_STATUSES = frozenset({"MATCHED", "MINED"})
+_EXIT_COMMAND_TERMINAL_STATES = frozenset(
+    {"FILLED", "CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
+)
+
+
+def query_net_execution_fill_aggregate(
+    conn: sqlite3.Connection,
+    position_id: str,
+    *,
+    require_terminal_exit_commands: bool = True,
+) -> dict | None:
+    """Return the position that confirmed fill facts alone explain.
+
+    Law: replay command-deduped confirmed entry fills and confirmed EXIT fills
+    in fill order under average cost.  An entry adds its shares and
+    ``shares * fill_price``; an exit removes its shares and the proportional
+    cost ``cost * sold / open`` -- the same reduction the partial-exit
+    projection applies.  Without exits the result equals
+    :func:`query_entry_execution_fill_aggregate`.
+
+    Exit authority is command-scoped: a venue command is the execution atom,
+    so a command-less ``<position>:exit`` lifecycle mirror grants no fill.
+    Fail-closed (``RuntimeError``) when the exit side is not fully proven: a
+    FILLED EXIT command without a confirmed fact, a non-final fill status, or
+    an exit exceeding open shares.  ``require_terminal_exit_commands`` also
+    refuses any in-flight EXIT command: admission of new exposure needs the
+    complete exit history, while projection materialization folds only fills
+    that already reduced the position.
+    """
+
+    position_id = str(position_id or "").strip()
+    entry = query_entry_execution_fill_aggregate(conn, position_id, strict=True)
+    if entry is None:
+        return None
+    if _table_exists(conn, "venue_commands"):
+        command_columns = _table_columns(conn, "venue_commands")
+        if {"position_id", "intent_kind", "state"}.issubset(command_columns):
+            for row in conn.execute(
+                """
+                SELECT command_id, state
+                  FROM venue_commands
+                 WHERE position_id = ?
+                   AND UPPER(COALESCE(intent_kind, '')) = 'EXIT'
+                """,
+                (position_id,),
+            ).fetchall():
+                state = str(row["state"] or "").upper()
+                if (
+                    require_terminal_exit_commands
+                    and state not in _EXIT_COMMAND_TERMINAL_STATES
+                ):
+                    raise RuntimeError(
+                        "exit command not terminal: "
+                        f"position_id={position_id} command_id={row['command_id']} "
+                        f"state={state}"
+                    )
+    else:
+        command_columns = set()
+    exit_columns = _table_columns(conn, "execution_fact")
+    voided_filter = "AND voided_at IS NULL" if "voided_at" in exit_columns else ""
+    exit_rows = conn.execute(
+        f"""
+        SELECT position_id, intent_id, command_id, filled_at, fill_price, shares,
+               terminal_exec_status
+          FROM execution_fact
+         WHERE position_id = ?
+           AND order_role = 'exit'
+           AND COALESCE(command_id, '') != ''
+           AND COALESCE(shares, 0.0) > 0.0
+           {voided_filter}
+         ORDER BY COALESCE(filled_at, posted_at, '') DESC, intent_id DESC
+        """,
+        (position_id,),
+    ).fetchall()
+    exits: list[tuple[str, Decimal, str]] = []
+    for row in _command_deduped_fill_rows(exit_rows, order_role="exit"):
+        status_parts = {
+            part.strip().upper()
+            for part in str(row["terminal_exec_status"] or "").split(",")
+        }
+        if (
+            not status_parts & _EXIT_FILL_FINAL_STATUSES
+            or status_parts & _EXIT_FILL_NON_FINAL_STATUSES
+        ):
+            raise RuntimeError(
+                "exit fill not final: "
+                f"position_id={position_id} intent_id={row['intent_id']} "
+                f"status={row['terminal_exec_status']!r}"
+            )
+        filled_at = str(row["filled_at"] or "")
+        if _parse_iso_timestamp(filled_at) is None:
+            raise RuntimeError(
+                "exit fill has invalid filled_at: "
+                f"position_id={position_id} intent_id={row['intent_id']} "
+                f"filled_at={filled_at!r}"
+            )
+        _strict_runtime_exposure_number(
+            row["fill_price"],
+            position_id=position_id,
+            field="execution_fact.fill_price",
+            allow_none=False,
+        )
+        shares = _strict_runtime_exposure_number(
+            row["shares"],
+            position_id=position_id,
+            field="execution_fact.shares",
+            allow_none=False,
+        )
+        exits.append((filled_at, Decimal(str(shares)), str(row["command_id"])))
+    exit_command_ids = {command_id for _, _, command_id in exits}
+    if {"position_id", "intent_kind", "state"}.issubset(command_columns):
+        for row in conn.execute(
+            """
+            SELECT command_id
+              FROM venue_commands
+             WHERE position_id = ?
+               AND UPPER(COALESCE(intent_kind, '')) = 'EXIT'
+               AND UPPER(COALESCE(state, '')) = 'FILLED'
+            """,
+            (position_id,),
+        ).fetchall():
+            if str(row["command_id"]) not in exit_command_ids:
+                raise RuntimeError(
+                    "filled exit command has no confirmed fill fact: "
+                    f"position_id={position_id} command_id={row['command_id']}"
+                )
+    if not exits:
+        return entry
+
+    entry_rows = conn.execute(
+        """
+        SELECT position_id, intent_id, command_id, filled_at, posted_at, fill_price,
+               shares
+          FROM execution_fact
+         WHERE position_id = ?
+           AND order_role = 'entry'
+           AND lower(COALESCE(terminal_exec_status, '')) IN ('filled', 'partial')
+         ORDER BY CASE
+                    WHEN filled_at IS NOT NULL
+                     AND COALESCE(fill_price, 0.0) > 0.0
+                     AND COALESCE(shares, 0.0) > 0.0
+                    THEN 0 ELSE 1
+                  END,
+                  COALESCE(filled_at, posted_at, '') DESC,
+                  intent_id DESC
+        """,
+        (position_id,),
+    ).fetchall()
+    # Entries were validated by the strict entry aggregate above.  Ties order
+    # an entry before an exit: a fill cannot sell shares not yet bought.
+    timeline = [
+        (
+            _parse_iso_timestamp(str(row["filled_at"])),
+            0,
+            Decimal(str(_finite_float_or_zero(row["shares"]))),
+            Decimal(str(_finite_float_or_zero(row["fill_price"]))),
+        )
+        for row in _command_deduped_fill_rows(entry_rows, order_role="entry")
+    ]
+    timeline.extend(
+        (_parse_iso_timestamp(filled_at), 1, shares, Decimal("0"))
+        for filled_at, shares, _ in exits
+    )
+    timeline.sort(key=lambda item: (item[0], item[1]))
+    open_shares = Decimal("0")
+    open_cost = Decimal("0")
+    for _, kind, shares, price in timeline:
+        if kind == 0:
+            open_shares += shares
+            open_cost += shares * price
+            continue
+        if shares > open_shares:
+            raise RuntimeError(
+                "exit fill exceeds open entry shares: "
+                f"position_id={position_id} exit_shares={shares} "
+                f"open_shares={open_shares}"
+            )
+        open_cost -= open_cost * shares / open_shares
+        open_shares -= shares
+    if open_shares <= 0 or open_cost <= 0:
+        return None
+    return {
+        **entry,
+        "entry_price_avg_fill": float(open_cost / open_shares),
+        "shares_filled": float(open_shares),
+        "filled_cost_basis_usd": float(open_cost),
+        "exit_execution_fact_command_ids": tuple(sorted(exit_command_ids)),
+    }
 
 
 def _position_current_effective_entry_economics(

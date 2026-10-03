@@ -4653,12 +4653,12 @@ def reconciled_increment_no_fill_proof(
     current_order_id = str(current["order_id"] or "").strip()
     condition_id = str(envelope["condition_id"] or "").strip()
     snapshot_condition_id = str(snapshot["condition_id"] or "").strip()
-    from src.state.db import query_entry_execution_fill_aggregate
+    from src.state.db import query_net_execution_fill_aggregate
 
-    aggregate = query_entry_execution_fill_aggregate(
+    aggregate = query_net_execution_fill_aggregate(
         conn,
         position_id,
-        strict=True,
+        require_terminal_exit_commands=False,
     )
     fact_shares = _decimal_or_none(
         (aggregate or {}).get("shares_filled") if aggregate else None

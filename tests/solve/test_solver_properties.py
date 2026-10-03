@@ -9687,6 +9687,10 @@ def _cooldown_trade_db(token_id, *, price, rejection_payload, updated_at):
             venue_order_id TEXT NOT NULL, command_id TEXT NOT NULL,
             state TEXT NOT NULL, filled_size TEXT NOT NULL DEFAULT '0',
             observed_at TEXT NOT NULL, local_sequence INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY, phase TEXT NOT NULL, order_id TEXT,
+            shares REAL, cost_basis_usd REAL, direction TEXT, token_id TEXT,
+            no_token_id TEXT, chain_shares REAL, chain_state TEXT);
         """
     )
     conn.execute(
@@ -9819,6 +9823,11 @@ def test_same_token_repost_law_is_one_predicate_for_selector_submit_and_cleanup(
     law = "_entry_same_token_cooldown_component("
     assert law in inspect.getsource(era.global_selected_order_same_token_rejection)
     assert law in inspect.getsource(executor._live_order)
+    duplicate_law = "_entry_duplicate_same_token_component("
+    assert duplicate_law in inspect.getsource(
+        era.global_selected_order_same_token_rejection
+    )
+    assert duplicate_law in inspect.getsource(executor._live_order)
     assert law in inspect.getsource(
         cycle_runtime._same_token_terminal_no_fill_reprice_block_detail
     )
@@ -9836,6 +9845,11 @@ def test_same_token_repost_law_is_one_predicate_for_selector_submit_and_cleanup(
         return {"allowed": False, "reason": "spy_refusal"}
 
     monkeypatch.setattr(executor, "_entry_same_token_cooldown_component", refuse)
+    monkeypatch.setattr(
+        executor,
+        "_entry_duplicate_same_token_component",
+        lambda conn, **kwargs: {"allowed": True, "reason": "allowed"},
+    )
     only = _global_candidate(
         candidate_id="spy-only", family="spy", side="YES", q=0.85,
         levels=(("0.40", "100"),),

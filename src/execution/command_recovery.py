@@ -10601,12 +10601,12 @@ def _terminal_entry_execution_aggregate_absorbed(
     ):
         return False
 
-    from src.state.db import query_entry_execution_fill_aggregate
+    from src.state.db import query_net_execution_fill_aggregate
 
-    aggregate = query_entry_execution_fill_aggregate(
+    aggregate = query_net_execution_fill_aggregate(
         conn,
         position_id,
-        strict=True,
+        require_terminal_exit_commands=False,
     )
     if not aggregate:
         return False
