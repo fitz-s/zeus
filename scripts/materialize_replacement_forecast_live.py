@@ -1591,16 +1591,27 @@ def _resident_worker() -> int:
             or "--commit" not in arguments
             or any(x.startswith("--") and x not in allowed for x in arguments)):
             return 2
-        output, errors = StringIO(), StringIO()
+        from src.runtime.warm_materializer import receive_leases
+
+        # The claim's identity leases arrive before compute and are held until
+        # its reply: parent death cannot free them while this worker executes.
+        lease_fds = receive_leases(
+            message, lambda frame: (sys.stdout.write(frame), sys.stdout.flush()),
+        )
         try:
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                returncode = main(arguments)
-        except Exception as exc:
-            returncode = 2
-            errors.write(json.dumps(_error_response(exc), sort_keys=True))
-        print(json.dumps({"request_id": message["request_id"], "returncode": returncode,
-                          "stdout": output.getvalue(), "stderr": errors.getvalue(),
-                          "worker_pid": os.getpid()}), flush=True)
+            output, errors = StringIO(), StringIO()
+            try:
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    returncode = main(arguments)
+            except Exception as exc:
+                returncode = 2
+                errors.write(json.dumps(_error_response(exc), sort_keys=True))
+            print(json.dumps({"request_id": message["request_id"], "returncode": returncode,
+                              "stdout": output.getvalue(), "stderr": errors.getvalue(),
+                              "worker_pid": os.getpid()}), flush=True)
+        finally:
+            for fd in lease_fds:
+                os.close(fd)
     return 0
 
 
