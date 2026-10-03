@@ -81,6 +81,11 @@ def mem_db():
             command_id TEXT NOT NULL,
             state TEXT NOT NULL,
             filled_size TEXT NOT NULL DEFAULT '0',
+            fill_price TEXT,
+            source TEXT,
+            tx_hash TEXT,
+            raw_payload_json TEXT,
+            venue_timestamp TEXT,
             observed_at TEXT NOT NULL,
             local_sequence INTEGER NOT NULL DEFAULT 1
         )
@@ -197,6 +202,19 @@ def _insert_position(
         ),
     )
     conn.commit()
+
+
+def _confirm_trade(conn, command_id, shares, *, trade_id=None, state="CONFIRMED"):
+    """Command-scoped venue trade fact: the fill evidence an execution_fact folds."""
+
+    conn.execute(
+        """INSERT INTO venue_trade_facts
+           (trade_id, venue_order_id, command_id, state, filled_size,
+            observed_at, local_sequence)
+           VALUES (?, ?, ?, ?, ?, '2026-07-14T05:01:00+00:00', 1)""",
+        (trade_id or f"trade-{command_id}", f"order-{command_id}", command_id,
+         state, str(shares)),
+    )
 
 
 def _make_position(**kwargs):
@@ -653,6 +671,7 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
                    'entry', '2026-07-14T05:01:00+00:00',
                    '2026-07-14T05:00:00+00:00', 0.67, 24.0, 'filled', 'FILLED')"""
     )
+    _confirm_trade(mem_db, "cmd-filled", 24.0)
     mem_db.commit()
 
     allowed = _entry_duplicate_same_token_component(
@@ -891,6 +910,7 @@ def test_executor_certified_increment_accepts_materialized_partial_fill(mem_db):
                    '2026-08-29T22:30:27+00:00', '2026-08-29T22:20:43+00:00',
                    0.27, 14.999588, 'partial', 'PARTIAL')"""
     )
+    _confirm_trade(mem_db, "cmd-partial-materialized", 14.999588)
     mem_db.commit()
 
     allowed = _entry_duplicate_same_token_component(
@@ -950,6 +970,7 @@ def test_certified_increment_uses_fills_when_projection_cost_differs(mem_db):
                 shares,
             ),
         )
+        _confirm_trade(mem_db, command_id, shares)
     mem_db.commit()
 
     allowed = _entry_duplicate_same_token_component(
@@ -2456,6 +2477,7 @@ def _seed_partially_exited_position(conn, *, shares=0.45, cost=0.0765):
                    'entry', '2026-10-02T10:58:09+00:00',
                    '2026-10-02T10:57:00+00:00', 0.17, 6.0, 'filled', 'CONFIRMED')"""
     )
+    _confirm_trade(conn, "cmd-entry", 6.0)
     for command_id, filled_at, price, sold in (
         ("cmd-exit-1", "2026-10-02T11:19:16+00:00", 0.15, 3.64),
         ("cmd-exit-2", "2026-10-02T12:41:00+00:00", 0.17, 1.91),
@@ -2701,3 +2723,54 @@ def test_duplicate_entry_same_token_reason_is_registered():
     assert is_registered_rejection_reason(
         "duplicate_entry_same_token:position_economics_not_reconciled_for_increment"
     )
+
+
+def test_increment_refused_while_a_confirmed_leg_is_not_folded(mem_db):
+    """Command B is FILLED with leg 1 folded (execution_fact 'partial') and a
+    confirmed leg 2 the projection never folded: the stale projection equals
+    the stale net replay, so only the trade-fact comparison sees the missing
+    exposure.  Increments stay closed with a typed reason."""
+
+    _seed_partially_exited_position(mem_db)
+    # B: a materialized increment on the same position, leg 1 only.
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-b', 'exited-position', ?, 'ENTRY', 'BUY', 'order-cmd-b',
+                   'FILLED', '2026-10-02T13:00:00+00:00', '2026-10-02T13:05:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO execution_fact
+           (intent_id, position_id, command_id, order_role, filled_at, posted_at,
+            fill_price, shares, terminal_exec_status, venue_status)
+           VALUES ('exited-position:entry:cmd-b', 'exited-position', 'cmd-b',
+                   'entry', '2026-10-02T13:01:00+00:00',
+                   '2026-10-02T13:00:00+00:00', 0.2, 2.0, 'partial', 'PARTIAL')"""
+    )
+    # Projection = net base 0.45/0.0765 + leg 1 (2.0 @ 0.2).
+    mem_db.execute(
+        "UPDATE position_current SET shares=2.45, cost_basis_usd=0.4765 "
+        "WHERE position_id='exited-position'"
+    )
+    _confirm_trade(mem_db, "cmd-b", 2.0, trade_id="trade-b-1")
+    mem_db.commit()
+    assert _increment(mem_db)["allowed"] is True
+
+    _confirm_trade(mem_db, "cmd-b", 1.5, trade_id="trade-b-2")
+    mem_db.commit()
+
+    blocked = _increment(mem_db)
+    assert blocked["allowed"] is False
+    assert blocked["reason"] == "entry_command_confirmed_fill_not_folded"
+    assert blocked["existing_command_id"] == "cmd-b"
+    assert blocked["fill_folding"]["details"]["confirmed_trade_fact_shares"] == "3.5"
+
+    # A MATCHED leg is exposure not yet confirmed: still closed.
+    mem_db.execute("DELETE FROM venue_trade_facts WHERE trade_id='trade-b-2'")
+    _confirm_trade(mem_db, "cmd-b", 1.5, trade_id="trade-b-2", state="MATCHED")
+    mem_db.commit()
+    pending = _increment(mem_db)
+    assert pending["allowed"] is False
+    assert pending["fill_folding"]["reason"] == "entry_command_fill_not_confirmed"

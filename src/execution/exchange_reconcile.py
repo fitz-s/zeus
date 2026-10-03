@@ -589,19 +589,16 @@ def refresh_unresolved_reconcile_findings(
                 )
             )
             continue
-        try:
-            finding = _append_linkable_trade_fact_if_missing_isolated(
-                conn,
-                command,
-                raw,
-                venue_trade_id,
-                observed,
-                state=state,
-                context=context,
-                matched_order_id=order_id,
-            )
-        except EntryIncrementUnprovable:
-            continue
+        finding = _append_linkable_trade_fact_if_missing_isolated(
+            conn,
+            command,
+            raw,
+            venue_trade_id,
+            observed,
+            state=state,
+            context=context,
+            matched_order_id=order_id,
+        )
         if finding is not None:
             new_findings.append(finding)
 
@@ -871,19 +868,16 @@ def run_reconcile_sweep(
                 )
             )
             continue
-        try:
-            finding = _append_linkable_trade_fact_if_missing_isolated(
-                conn,
-                command,
-                raw,
-                venue_trade_id,
-                observed,
-                state=state,
-                context=context,
-                matched_order_id=order_id,
-            )
-        except EntryIncrementUnprovable:
-            continue
+        finding = _append_linkable_trade_fact_if_missing_isolated(
+            conn,
+            command,
+            raw,
+            venue_trade_id,
+            observed,
+            state=state,
+            context=context,
+            matched_order_id=order_id,
+        )
         if finding is not None:
             findings.append(finding)
 
@@ -5811,8 +5805,12 @@ def _append_linkable_trade_fact_if_missing_isolated(
 ) -> ReconcileFinding | None:
     """Append one trade fact; an unprovable increment rolls back only itself.
 
-    The trade fact stays absent, so the next sweep re-observes it once the
-    net base is provable.  Every other exception keeps aborting the sweep.
+    The rollback leaves no projection of the leg, so the unprovable increment
+    is recorded as a durable ``unrecorded_trade`` finding after it: the
+    reconcile latch stays set, refresh has the trade as its subject, and
+    admission refuses increments while the leg is unfolded.  The ordering
+    that made it unprovable is immutable, so this does not self-heal; it
+    stays visible until resolved.  Every other exception aborts the sweep.
     """
 
     savepoint = f"sp_linkable_trade_{uuid.uuid4().hex[:12]}"
@@ -5825,13 +5823,25 @@ def _append_linkable_trade_fact_if_missing_isolated(
         conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
         logger.error(
-            "exchange_reconcile: entry increment unprovable; trade fact deferred "
-            "trade_id=%s command_id=%s error=%s",
+            "exchange_reconcile: entry increment unprovable trade_id=%s "
+            "command_id=%s error=%s",
             trade_id,
             command.get("command_id"),
             exc,
         )
-        raise
+        return record_finding(
+            conn,
+            kind="unrecorded_trade",
+            subject_id=trade_id,
+            context=kwargs.get("context", "periodic"),
+            evidence={
+                "exchange_trade": dict(raw),
+                "local_command": _command_evidence(command),
+                "reason": "entry_increment_unprovable",
+                "error": str(exc),
+            },
+            recorded_at=observed_at,
+        )
     except BaseException:
         conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
@@ -7005,7 +7015,47 @@ def _ensure_entry_fill_position_event(
             # exposure authority after capital has been released.  Replaying
             # its cumulative fill here would resurrect already-sold shares;
             # any late economics revision needs a reduction-aware correction
-            # atom instead of an entry projection rewrite.
+            # atom instead of an entry projection rewrite.  A cumulative fill
+            # beyond the command's execution_fact is a confirmed leg this
+            # projection never folds: record it durably (admission already
+            # refuses increments on the unfolded command).
+            folded = conn.execute(
+                """
+                SELECT MAX(shares) AS shares
+                  FROM execution_fact
+                 WHERE position_id = ?
+                   AND command_id = ?
+                   AND order_role = 'entry'
+                   AND voided_at IS NULL
+                """,
+                (position_id, str(command.get("command_id") or "")),
+            ).fetchone()
+            folded_shares = _positive_decimal_or_none(
+                folded["shares"] if folded else None
+            )
+            if folded_shares is None or shares_dec > folded_shares + Decimal(
+                "0.000001"
+            ):
+                record_finding(
+                    conn,
+                    kind="unrecorded_trade",
+                    subject_id=(
+                        f"entry_fill_unfolded:{command.get('command_id')}"
+                    ),
+                    context=context,
+                    evidence={
+                        "local_command": _command_evidence(command),
+                        "reason": "entry_fill_after_reduction_not_folded",
+                        "position_id": position_id,
+                        "cumulative_shares": _decimal_text(shares_dec),
+                        "execution_fact_shares": (
+                            _decimal_text(folded_shares)
+                            if folded_shares is not None
+                            else None
+                        ),
+                    },
+                    recorded_at=observed_at,
+                )
             logger.info(
                 "exchange_reconcile: preserve post-reduction exposure on "
                 "entry reobservation position_id=%s order_id=%s",

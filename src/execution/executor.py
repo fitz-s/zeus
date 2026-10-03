@@ -2928,6 +2928,90 @@ def _entry_same_token_cooldown_component(
     }
 
 
+def _entry_command_confirmed_fills_folded_component(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    position_id: str,
+) -> dict:
+    """Prove every CONFIRMED fill of one entry command is in its execution_fact.
+
+    A command is materialized only when every positive command-deduped
+    economic trade fact is CONFIRMED and each of its entry execution_fact rows
+    carries exactly their summed shares.  A leg the projection never folded
+    (an unprovable increment, a post-reduction re-observation, or any later
+    stranding) understates exposure, and a MATCHED/MINED leg is exposure not
+    yet confirmed; either keeps increments closed.
+    """
+
+    try:
+        from src.state.fill_dedup import economic_trade_facts_for_command
+
+        facts = economic_trade_facts_for_command(conn, command_id)
+    except sqlite3.Error as exc:
+        return _capability_component(
+            "entry_command_fill_folding",
+            allowed=False,
+            reason="trade_facts_unavailable",
+            error=f"{type(exc).__name__}:{exc}",
+        )
+    confirmed = Decimal("0")
+    unconfirmed = Decimal("0")
+    for fact in facts:
+        size = _positive_decimal_or_none(fact.get("filled_size"))
+        if size is None:
+            continue
+        if str(fact.get("state") or "").upper() == "CONFIRMED":
+            confirmed += size
+        else:
+            unconfirmed += size
+    folded = [
+        _decimal_or_none(row[0])
+        for row in conn.execute(
+            """
+            SELECT shares
+              FROM execution_fact
+             WHERE command_id = ?
+               AND position_id = ?
+               AND lower(COALESCE(order_role, '')) = 'entry'
+               AND lower(COALESCE(terminal_exec_status, '')) IN ('filled', 'partial')
+            """,
+            (command_id, position_id),
+        ).fetchall()
+    ]
+    if unconfirmed > 0:
+        return _capability_component(
+            "entry_command_fill_folding",
+            allowed=False,
+            reason="entry_command_fill_not_confirmed",
+            command_id=command_id,
+            confirmed_trade_fact_shares=str(confirmed),
+            unconfirmed_trade_fact_shares=str(unconfirmed),
+        )
+    if (
+        confirmed <= 0
+        or not folded
+        or any(
+            shares is None
+            or abs(shares - confirmed) > _ENTRY_INCREMENT_POSITION_SHARE_TOLERANCE
+            for shares in folded
+        )
+    ):
+        return _capability_component(
+            "entry_command_fill_folding",
+            allowed=False,
+            reason="confirmed_trade_facts_differ_from_execution_fact",
+            command_id=command_id,
+            confirmed_trade_fact_shares=str(confirmed),
+            execution_fact_shares=[str(value) for value in folded],
+        )
+    return _capability_component(
+        "entry_command_fill_folding",
+        command_id=command_id,
+        shares=str(confirmed),
+    )
+
+
 def _entry_duplicate_same_token_component(
     conn: sqlite3.Connection,
     *,
@@ -3205,6 +3289,23 @@ def _entry_duplicate_same_token_component(
                         ).fetchone()
                         is not None
                     )
+                if materialized:
+                    folded = _entry_command_confirmed_fills_folded_component(
+                        conn,
+                        command_id=command_id,
+                        position_id=increment_position_id,
+                    )
+                    if not folded.get("allowed"):
+                        return {
+                            "component": "entry_duplicate_same_token",
+                            "allowed": False,
+                            "reason": "entry_command_confirmed_fill_not_folded",
+                            "existing_command_id": command_id,
+                            "existing_position_id": position_id,
+                            "existing_command_state": state,
+                            "existing_phase": "" if phase is None else str(phase),
+                            "fill_folding": folded,
+                        }
                 if not materialized:
                     return {
                         "component": "entry_duplicate_same_token",

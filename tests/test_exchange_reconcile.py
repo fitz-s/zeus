@@ -13918,7 +13918,102 @@ def test_increment_reobservation_with_exit_after_its_fill_is_typed_and_deferred(
         "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
     ).fetchone()
     assert dict(after) == dict(before)
-    # The deferred leg left no partial durable state behind.
+    # The deferred leg left no partial projection behind ...
     assert conn.execute(
         "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id='trade-top-up-2'"
     ).fetchone()[0] == 0
+    # ... but a durable finding keyed by the trade: the latch stays set and
+    # refresh has a subject.  The clocks that made it unprovable are immutable,
+    # so a later sweep keeps it open instead of silently converging.
+    from src.execution.exchange_reconcile import list_unresolved_findings
+
+    unresolved = [
+        f for f in list_unresolved_findings(conn)
+        if f.kind == "unrecorded_trade" and f.subject_id == "trade-top-up-2"
+    ]
+    assert len(unresolved) == 1
+    assert json.loads(unresolved[0].evidence_json)["reason"] == (
+        "entry_increment_unprovable"
+    )
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[first_leg, second_leg]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=3),
+    )
+    assert [
+        f.subject_id for f in list_unresolved_findings(conn)
+        if f.kind == "unrecorded_trade"
+    ].count("trade-top-up-2") == 1
+
+
+def test_entry_leg_after_reduction_is_preserved_and_recorded_unfolded(conn):
+    """The post-reduction branch keeps the projection (no resurrection of sold
+    shares) but a cumulative fill beyond the folded execution_fact is a
+    stranded confirmed leg: it must leave a durable finding."""
+
+    import json
+
+    from src.execution.exchange_reconcile import (
+        _ensure_entry_fill_position_event,
+        list_unresolved_findings,
+        run_reconcile_sweep,
+    )
+    from src.state.venue_command_repo import get_command
+
+    seed_command(conn, size=24, price=0.67)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(trade_id="trade-initial", order_id="ord-m5", size="20",
+                      price="0.67", status="CONFIRMED")
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    seq = conn.execute(
+        "SELECT MAX(sequence_no) FROM position_events WHERE position_id='pos-m5'"
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, source_module,
+            payload_json, env
+        ) VALUES (
+            'evt-reduction', 'pos-m5', 1, ?, 'EXIT_ORDER_FILLED', ?, 'active',
+            'active', 'opening_inertia', 'tests', '{}', 'live'
+        )
+        """,
+        (seq + 1, (NOW + timedelta(seconds=30)).isoformat()),
+    )
+    before = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+
+    _ensure_entry_fill_position_event(
+        conn,
+        command=get_command(conn, "cmd-m5"),
+        venue_order_id="ord-m5",
+        filled_size="24",
+        fill_price="0.67",
+        observed_at=NOW + timedelta(minutes=1),
+    )
+
+    after = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+    assert dict(after) == dict(before)
+    stranded = [
+        f for f in list_unresolved_findings(conn)
+        if f.kind == "unrecorded_trade"
+        and f.subject_id == "entry_fill_unfolded:cmd-m5"
+    ]
+    assert len(stranded) == 1
+    assert json.loads(stranded[0].evidence_json)["reason"] == (
+        "entry_fill_after_reduction_not_folded"
+    )
