@@ -326,3 +326,35 @@ def test_producer_drops_a_republish_whose_forecast_inputs_already_blocked(tmp_pa
     assert failed == []
     assert queue._UNCHANGED_BLOCKED_SEED_SKIP_REASON in reasons
     assert not list((queue_root / "requests").glob("*.json"))
+
+
+# --- quiescent migration reconcile -------------------------------------------
+
+
+def test_reconcile_restores_only_ownerless_claims_and_refuses_live_ones(tmp_path):
+    requests, inflight, (dead, live) = _queued(tmp_path, "Dead.json", "Live.json")
+    live.write_text(json.dumps(_request(city="Live")), encoding="utf-8")
+    dead_batch = queue._new_claim_batch(inflight, (dead,))
+    queue._release_claim_batch(dead_batch)
+    live_batch = queue._new_claim_batch(inflight, (live,))
+    legacy = inflight / f"20260101T000000Z.pid{os.getpid()}"  # this process is alive
+    legacy.mkdir()
+    (legacy / "Legacy.json").write_text(json.dumps(_request(city="Legacy")), encoding="utf-8")
+
+    dry = queue.reconcile_inflight_for_migration(request_path=requests)
+    assert (dead_batch / "Dead.json").exists()  # a dry run moves nothing
+    report = queue.reconcile_inflight_for_migration(request_path=requests, apply=True)
+    assert dry.refused == report.refused
+    assert dict(report.refused) == {live_batch.name: "HELD", legacy.name: "LEGACY_OWNER_ALIVE"}
+    assert not report.quiescent
+    assert (requests / "Dead.json").exists() and not dead_batch.exists()
+    assert (live_batch / "Live.json").exists() and (legacy / "Legacy.json").exists()
+
+    queue._release_claim_batch(live_batch)
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    legacy.rename(inflight / f"20260101T000000Z.pid{gone.pid}")
+    report = queue.reconcile_inflight_for_migration(request_path=requests, apply=True)
+    assert report.quiescent
+    assert {p.name for p in requests.glob("*.json")} == {"Dead.json", "Live.json", "Legacy.json"}
+    assert not list(inflight.iterdir())
