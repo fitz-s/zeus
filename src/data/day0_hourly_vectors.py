@@ -4385,15 +4385,19 @@ def read_day0_current_temperature_state(
         return None
     from src.data.day0_fast_obs import (
         KMA_PRIORITY_STATIONS,
+        KmaObservationUnavailable,
         _latest_kma_day0_event_state,
     )
 
     kma = None
     if station in KMA_PRIORITY_STATIONS:
-        kma = _latest_kma_day0_event_state(
-            conn, city=city, target_date=target_date, decision_time=decision_time,
-            metric=None,
-        )
+        try:
+            kma = _latest_kma_day0_event_state(
+                conn, city=city, target_date=target_date, decision_time=decision_time,
+                metric=None,
+            )
+        except KmaObservationUnavailable:
+            return None
     kma_state = (
         Day0CurrentTemperatureState(
             value_native=(

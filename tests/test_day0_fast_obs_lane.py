@@ -1,6 +1,8 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-10-01
-# Lifecycle: created=2026-06-10; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-06-10; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Purpose: Defend causal same-station Day0 observations, source clocks and held q binding.
+# Reuse: Inspect raw source/event identity, unit laws and private SQLite fixtures before reuse.
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -5965,7 +5967,7 @@ def test_kma_helper_reads_attached_world_and_drains_conflict_to_valid(monkeypatc
         )
         event = make_day0_extreme_updated_event(
             entity_key=f"Seoul|2026-09-22|high|{'conflict' if conflict else 'valid'}|{received}",
-            source="test", observed_at=observed.isoformat(), received_at=received, payload=payload,
+            source="day0_extreme_updated_trigger", observed_at=observed.isoformat(), received_at=received, payload=payload,
         )
         values = dataclasses.asdict(event)
         cols = ",".join(values)
@@ -6000,6 +6002,408 @@ def test_kma_helper_reads_attached_world_and_drains_conflict_to_valid(monkeypatc
     assert high is not None and low is not None
     assert high.raw_identity == low.raw_identity == state.raw_identity
     conn.close()
+
+
+def _kma_source_clock_context(city_name, metric, *, with_raw=True):
+    """Real raw emitter -> posterior bridge, with an older lawful AWC print."""
+    import src.data.day0_fast_obs as fast
+    from src.config import cities_by_name
+    from src.events.event_store import EventStore
+    from src.events.opportunity_event import make_opportunity_event
+    from src.events.reactor import _build_day0_posterior_redecision_events
+
+    city = cities_by_name[city_name]
+    source = fast.fast_obs_source_for_city(city, "2026-10-03")
+    assert source is not None and source.margin_units == 0
+    conn = _world_conn()
+    observed = datetime(2026, 10, 3, 4, tzinfo=UTC)
+    available = observed + timedelta(minutes=2, seconds=33, microseconds=916532)
+    decision = observed + timedelta(minutes=5)
+    reports = tuple(
+        MetarReport(
+            city.wu_station, observed - timedelta(hours=13-index), None,
+            float(14 + index * 11 // 13), "METAR",
+            f"METAR {city.wu_station} {(observed - timedelta(hours=13-index)):%d%H%M}Z 00000KT 9999 {14 + index * 11 // 13:02d}/12 Q1016",
+            available, fast.AVAILABILITY_LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE,
+            fast.KMA_METAR_TRANSPORT_ID,
+        )
+        for index in range(14)
+    )
+    prior = reports[-2]
+    conn.execute(
+        "INSERT INTO observation_prints "
+        "(city,station_id,source_channel,publish_ts_utc,value_native,unit,raw_report,fetched_at_utc) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (city.name, city.wu_station, FAST_OBS_SOURCE_ID,
+         (prior.obs_time + timedelta(minutes=4)).isoformat(), prior.temp_c, "C",
+         prior.raw, (prior.obs_time + timedelta(minutes=4, seconds=1)).isoformat()),
+    )
+    prefetch = fast.FastObsPrefetch(
+        eligible=((city, source, "2026-10-03"),), reports=reports,
+        freshness_status=fast.FETCH_FRESH, cache_age_s=0.0,
+        decision_time=observed + timedelta(minutes=2, seconds=58, microseconds=567939),
+        ledger_reports=(), station_statuses=((city.wu_station, fast.FETCH_FRESH, 0.0),),
+        event_reports=reports,
+    )
+    if with_raw:
+        assert fast.Day0FastObsEmitter().emit_prefetched(
+            world_conn=conn, prefetch=prefetch,
+            received_at=prefetch.decision_time.isoformat(), persist_ledger=False,
+        ) == 2
+    posterior = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY", entity_key=f"{city.name}|2026-10-03|{metric}|729837",
+        source="test_posterior", observed_at=observed.isoformat(),
+        available_at="2026-10-03T04:03:04.293103+00:00",
+        received_at="2026-10-03T04:03:37.571338+00:00",
+        payload={"city": city.name, "target_date": "2026-10-03", "metric": metric},
+        causal_snapshot_id="posterior729837",
+    )
+    bridge = _build_day0_posterior_redecision_events(
+        conn, (posterior,), day0_families={(city.name, "2026-10-03", metric)},
+        received_at=posterior.received_at,
+    )
+    for event in bridge:
+        EventStore(conn).insert_or_ignore(event)
+    return conn, city, observed, available, decision, prefetch, bridge
+
+
+@pytest.mark.parametrize("city_name", ("Busan", "Seoul"))
+@pytest.mark.parametrize("metric,expected", (("high", 25.0), ("low", 14.0)))
+def test_kma_raw_source_clock_survives_real_posterior_bridge(city_name, metric, expected):
+    import src.data.day0_fast_obs as fast
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+
+    conn, city, observed, available, decision, _prefetch, bridge = _kma_source_clock_context(city_name, metric)
+    try:
+        assert len(bridge) == 1 and bridge[0].source == "day0_posterior_advanced"
+        assert datetime.fromisoformat(bridge[0].available_at) > available
+        assert json.loads(bridge[0].payload_json)["observation_available_at"] == available.isoformat()
+        state = fast._latest_kma_day0_event_state(
+            conn, city=city, target_date="2026-10-03", decision_time=decision, metric=metric,
+        )
+        assert state is not None
+        assert (state.high_native, state.low_native, len(state.reports)) == (25.0, 14.0, 14)
+        assert state.observed_at == observed and state.available_at == available
+        assert state.event_id != bridge[0].event_id
+        assert fast.latest_fast_station_extreme_c(
+            conn, city=city.name, target_date="2026-10-03", metric=metric, decision_time=decision,
+        ) == (expected, observed.isoformat(), 14, "C")
+        context = fast.read_noaa_fast_obs_context_from_ledger(
+            world_conn=conn, city=city, target_date="2026-10-03", decision_time=decision,
+        )
+        assert context is not None
+        assert (context.current_temp, context.high_so_far, context.low_so_far, context.sample_count) == (25.0, 25.0, 14.0, 14)
+        assert context.observation_time == observed.isoformat()
+        assert context.observation_available_at == available.isoformat()
+        current = read_day0_current_temperature_state(conn=conn, city=city, target_date="2026-10-03", decision_time=decision)
+        assert current is not None and current.value_native == 25.0 and current.observed_at == observed
+        fact = _latest_authorized_day0_fact(conn, city=city.name, target_date="2026-10-03", temperature_metric=metric, decision_time=decision)
+        assert fact is not None and fact["observed_extreme_native"] == expected
+        assert fact["observation_time"] == observed.isoformat()
+        assert fact["observation_available_at"] == available.isoformat()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("city_name", ("Busan", "Seoul"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("fault", (
+    "missing_available", "unknown_available", "future_available", "regressed_available",
+    "invented_available", "missing_received", "unknown_received", "naive_received",
+    "foreign_station", "foreign_raw_station", "foreign_date", "foreign_unit",
+    "unknown_source", "malformed_window", "foreign_observation_clock", "future_first_seen",
+    "missing_transport", "wrong_transport",
+    "missing_transport_malformed_window",
+))
+def test_kma_latest_invalid_raw_is_unknown_never_older_fallback(city_name, metric, fault):
+    from dataclasses import replace
+    from src.data import day0_fast_obs as fast
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.events.event_store import EventStore
+    from src.events.opportunity_event import make_opportunity_event
+
+    conn, city, observed, available, decision, _prefetch, _bridge = _kma_source_clock_context(city_name, metric)
+    try:
+        raw = conn.execute(
+            "SELECT payload_json FROM opportunity_events WHERE source='day0_extreme_updated_trigger' "
+            "AND json_extract(payload_json, '$.metric')=? LIMIT 1", (metric,),
+        ).fetchone()
+        payload = json.loads(raw[0])
+        source = "day0_extreme_updated_trigger"
+        row_available = available.isoformat()
+        received = "2026-10-03T04:04:00.100001+00:00"
+        if fault == "missing_available":
+            payload.pop("observation_available_at")
+        elif fault == "unknown_available":
+            row_available = payload["observation_available_at"] = "UNKNOWN"
+        elif fault in {"future_available", "regressed_available", "invented_available"}:
+            clock = decision + timedelta(seconds=1) if fault == "future_available" else available - timedelta(seconds=1) if fault == "regressed_available" else available + timedelta(seconds=1)
+            row_available = payload["observation_available_at"] = clock.isoformat()
+        elif fault == "missing_received":
+            received = ""
+        elif fault == "unknown_received":
+            received = "UNKNOWN"
+        elif fault == "naive_received":
+            received = "2026-10-03T04:04:00.100001"
+        elif fault == "foreign_station":
+            payload["station_id"] = "RKSI" if city.wu_station == "RKPK" else "RKPK"
+        elif fault == "foreign_raw_station":
+            item = payload["kma_report_window"][-1]
+            item["raw_report"] = item["raw_report"].replace(city.wu_station, "KAAA")
+            item["raw_report_identity"] = fast._normalized_raw_report_identity(item["raw_report"])
+        elif fault == "foreign_date":
+            item = payload["kma_report_window"][-1]
+            item["raw_report"] = item["raw_report"].replace("030400Z", "020400Z")
+            item["raw_report_identity"] = fast._normalized_raw_report_identity(item["raw_report"])
+        elif fault == "foreign_unit":
+            payload["settlement_unit"] = "F"
+        elif fault == "unknown_source":
+            source = "unproven_source"
+        elif fault == "malformed_window":
+            payload["kma_report_window"] = []
+        elif fault == "foreign_observation_clock":
+            payload["observation_time"] = (observed - timedelta(hours=1)).isoformat()
+        elif fault == "future_first_seen":
+            payload["kma_report_window"][-1]["first_seen_at"] = (decision + timedelta(seconds=1)).isoformat()
+        elif fault == "missing_transport":
+            payload.pop("observation_transport")
+        elif fault == "wrong_transport":
+            payload["observation_transport"] = "unproven_transport"
+        elif fault == "missing_transport_malformed_window":
+            payload.pop("observation_transport")
+            payload["kma_report_window"] = {"malformed": True}
+        event = make_opportunity_event(
+            event_type="DAY0_EXTREME_UPDATED", entity_key=f"{city.name}|{metric}|{fault}",
+            source=source, observed_at=observed.isoformat(), available_at=available.isoformat(),
+            received_at="2026-10-03T04:04:00.100001+00:00", payload=payload,
+        )
+        # Bypass only construction-time clock validation to inspect existing
+        # damaged canonical rows; append-only persistence stays intact.
+        EventStore(conn).insert_or_ignore(replace(event, available_at=row_available, received_at=received))
+        with pytest.raises(fast.KmaObservationUnavailable):
+            fast._latest_kma_day0_event_state(conn, city=city, target_date="2026-10-03", decision_time=decision, metric=metric)
+        assert fast.latest_fast_station_extreme_c(conn, city=city.name, target_date="2026-10-03", metric=metric, decision_time=decision) is None
+        assert fast.read_noaa_fast_obs_context_from_ledger(world_conn=conn, city=city, target_date="2026-10-03", decision_time=decision) is None
+        assert read_day0_current_temperature_state(conn=conn, city=city, target_date="2026-10-03", decision_time=decision) is None
+        assert _latest_authorized_day0_fact(conn, city=city.name, target_date="2026-10-03", temperature_metric=metric, decision_time=decision) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("city_name", ("Busan", "Seoul"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_kma_genuine_absence_preserves_awc_and_derived_only_is_unavailable(city_name, metric):
+    import src.data.day0_fast_obs as fast
+    from src.events.event_store import EventStore
+    conn, city, _observed, _available, decision, _prefetch, bridge = _kma_source_clock_context(city_name, metric, with_raw=False)
+    try:
+        assert bridge == []
+        assert fast._latest_kma_day0_event_state(conn, city=city, target_date="2026-10-03", decision_time=decision, metric=metric) is None
+        assert fast.latest_fast_station_extreme_c(conn, city=city.name, target_date="2026-10-03", metric=metric, decision_time=decision) is not None
+    finally:
+        conn.close()
+    raw_conn, city, _observed, _available, decision, _prefetch, bridge = _kma_source_clock_context(city_name, metric)
+    conn = _world_conn()
+    try:
+        EventStore(conn).insert_or_ignore(bridge[0])
+        with pytest.raises(fast.KmaObservationUnavailable, match="ORIGINAL_SOURCE_EVENT_MISSING"):
+            fast._latest_kma_day0_event_state(conn, city=city, target_date="2026-10-03", decision_time=decision, metric=metric)
+        assert fast.latest_fast_station_extreme_c(conn, city=city.name, target_date="2026-10-03", metric=metric, decision_time=decision) is None
+    finally:
+        conn.close()
+        raw_conn.close()
+
+
+@pytest.mark.parametrize("city_name", ("Busan", "Seoul"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_kma_received_microseconds_choose_latest_raw_and_cut_off_future(city_name, metric):
+    from src.data import day0_fast_obs as fast
+    from src.events.event_store import EventStore
+    from src.events.opportunity_event import make_opportunity_event
+
+    conn, city, observed, available, decision, _prefetch, _bridge = _kma_source_clock_context(city_name, metric)
+    try:
+        payload = json.loads(conn.execute(
+            "SELECT payload_json FROM opportunity_events WHERE source='day0_extreme_updated_trigger' "
+            "AND json_extract(payload_json, '$.metric')=?", (metric,),
+        ).fetchone()[0])
+        older = make_opportunity_event(
+            event_type="DAY0_EXTREME_UPDATED", entity_key=f"{city.name}|{metric}|older",
+            source="day0_extreme_updated_trigger", observed_at=observed.isoformat(),
+            available_at=available.isoformat(), received_at="2026-10-03T04:04:00.100001+00:00",
+            payload=payload,
+        )
+        newer = make_opportunity_event(
+            event_type="DAY0_EXTREME_UPDATED", entity_key=f"{city.name}|{metric}|newer",
+            source="day0_extreme_updated_trigger", observed_at=observed.isoformat(),
+            available_at=available.isoformat(), received_at="2026-10-03T04:04:00.100002+00:00",
+            payload={**payload, "kma_report_window": []},
+        )
+        EventStore(conn).insert_or_ignore(newer)
+        EventStore(conn).insert_or_ignore(older)  # Later append must not beat the later receipt.
+        before_new = datetime(2026, 10, 3, 4, 4, 0, 100001, tzinfo=UTC)
+        state = fast._latest_kma_day0_event_state(conn, city=city, target_date="2026-10-03", decision_time=before_new, metric=metric)
+        assert state is not None and state.event_id == older.event_id
+        with pytest.raises(fast.KmaObservationUnavailable):
+            fast._latest_kma_day0_event_state(conn, city=city, target_date="2026-10-03", decision_time=decision, metric=metric)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("city_name", ("Busan", "Seoul"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_kma_unavailable_is_station_scoped_and_new_raw_delta_resets(city_name, metric):
+    from dataclasses import replace
+    from src.config import cities_by_name
+    from src.data import day0_fast_obs as fast
+    from src.events.event_store import EventStore
+    from src.events.opportunity_event import make_opportunity_event
+
+    conn, city, observed, available, decision, prefetch, bridge = _kma_source_clock_context(city_name, metric)
+    try:
+        damaged = make_opportunity_event(
+            event_type="DAY0_EXTREME_UPDATED", entity_key=f"{city.name}|{metric}|damaged",
+            source="day0_extreme_updated_trigger", observed_at=observed.isoformat(),
+            available_at=bridge[0].available_at, received_at="2026-10-03T04:04:00+00:00",
+            payload=json.loads(bridge[0].payload_json),
+        )
+        EventStore(conn).insert_or_ignore(damaged)  # Raw type carrying a derived clock is invalid.
+        assert fast.latest_fast_station_extreme_c(conn, city=city.name, target_date="2026-10-03", metric=metric, decision_time=decision) is None
+        other = cities_by_name["Seoul" if city.name == "Busan" else "Busan"]
+        other_source = fast.fast_obs_source_for_city(other, "2026-10-03")
+        assert other_source is not None
+        other_report = replace(prefetch.reports[-1], station_id=other.wu_station,
+                               raw=prefetch.reports[-1].raw.replace(city.wu_station, other.wu_station),
+                               raw_report_identity="")
+        emitter = fast.Day0FastObsEmitter()
+        no_delta = replace(prefetch, eligible=(*prefetch.eligible, (other, other_source, "2026-10-03")),
+                           reports=(other_report,), event_reports=(other_report,),
+                           station_statuses=((other.wu_station, fast.FETCH_FRESH, 0.0),))
+        assert emitter.emit_prefetched(world_conn=conn, prefetch=no_delta, received_at=decision.isoformat(), persist_ledger=False) == 2
+        assert fast.latest_fast_station_extreme_c(conn, city=city.name, target_date="2026-10-03", metric=metric, decision_time=decision) is None
+        new_obs = observed + timedelta(minutes=30)
+        new_available = observed + timedelta(minutes=31)
+        new_report = replace(prefetch.reports[-1], obs_time=new_obs, first_seen_at=new_available,
+                             raw=prefetch.reports[-1].raw.replace("030400Z", "030430Z"), raw_report_identity="")
+        refreshed = replace(prefetch, reports=(*prefetch.reports, new_report), event_reports=(new_report,),
+                            decision_time=observed + timedelta(minutes=32))
+        assert emitter.emit_prefetched(world_conn=conn, prefetch=refreshed, received_at=refreshed.decision_time.isoformat(), persist_ledger=False) == 2
+        state = fast._latest_kma_day0_event_state(conn, city=city, target_date="2026-10-03", decision_time=refreshed.decision_time, metric=metric)
+        assert state is not None and state.observed_at == new_obs and state.available_at == new_available
+        assert (state.high_native, state.low_native, len(state.reports)) == (25.0, 14.0, 15)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("city_name", ("Busan", "Seoul"))
+@pytest.mark.parametrize("metric,expected", (("high", 25.0), ("low", 14.0)))
+def test_kma_real_bridge_reaches_held_q_guard_and_value_drift_still_rejects(city_name, metric, expected):
+    from src.data import day0_fast_obs as fast
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.engine.event_reactor_adapter import _global_day0_execution_payload
+
+    conn, city, observed, _available, decision, _prefetch, bridge = _kma_source_clock_context(city_name, metric)
+    try:
+        # Original matching products establish a real residual witness, outside
+        # the current local-day KMA window. No probability guard is mocked.
+        for index in range(fast.FAST_RESIDUAL_MIN_PAIRS):
+            timestamp = observed - timedelta(hours=24 + index)
+            raw = f"METAR {city.wu_station} {timestamp:%d%H%M}Z 00000KT 9999 14/12 Q1016"
+            for channel in (FAST_OBS_SOURCE_ID, f"noaa_wrh_{city.wu_station.lower()}"):
+                conn.execute(
+                    "INSERT INTO observation_prints "
+                    "(city,station_id,source_channel,publish_ts_utc,value_native,unit,raw_report,fetched_at_utc) VALUES (?,?,?,?,?,?,?,?)",
+                    (city.name, city.wu_station, channel, (timestamp + timedelta(seconds=30)).isoformat(),
+                     14.0, "C", raw, (timestamp + timedelta(minutes=1)).isoformat()),
+                )
+        likelihood = fast.build_fast_station_residual_likelihood(
+            conn, city=city.name, target_date="2026-10-03", metric=metric,
+            observed_source=FAST_OBS_SOURCE_ID, observation_time=observed, decision_time=decision,
+        )
+        assert likelihood is not None
+        residual = likelihood.as_payload()
+        residual["scenario_weights"] = [{"observed_bound_c": expected, "weight": 1.0}]
+        conditioning = {
+            "active": True, "metric": metric, "unit": "C", "source": FAST_OBS_SOURCE_ID,
+            "observed_extreme_c": expected, "observation_time": observed.isoformat(),
+            "sample_count": 14, "fast_residual_likelihood": residual,
+        }
+        fact = _latest_authorized_day0_fact(conn, city=city.name, target_date="2026-10-03", temperature_metric=metric, decision_time=decision)
+        assert fact is not None
+        kwargs = dict(
+            family=SimpleNamespace(city=city.name, target_date="2026-10-03", metric=metric),
+            resolution=SimpleNamespace(measurement_unit="C", station_id=city.wu_station),
+            conditioning=conditioning, observation_conn=conn, decision_time=decision,
+            posterior_id=729837, current_day0_facts=(None, fact),
+            allow_equivalent_conditioning_clock_advance=True,
+        )
+        held = _global_day0_execution_payload(bridge[0], **kwargs)
+        assert held["_edli_global_day0_binding"]["observed_extreme_native"] == expected
+        with pytest.raises(ValueError, match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH"):
+            _global_day0_execution_payload(bridge[0], **{**kwargs, "conditioning": {**conditioning, "observed_extreme_c": expected + 1.0}})
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("city_name", ("Busan", "Seoul"))
+@pytest.mark.parametrize("metric,expected", (("high", 25.0), ("low", 14.0)))
+def test_kma_late_interior_ledger_report_keeps_original_source_clock(city_name, metric, expected):
+    from src.data import day0_fast_obs as fast
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+
+    conn, city, observed, available, decision, _prefetch, bridge = _kma_source_clock_context(city_name, metric)
+    try:
+        interior = observed - timedelta(minutes=30)
+        publication = observed + timedelta(minutes=4)
+        conn.execute(
+            "INSERT INTO observation_prints "
+            "(city,station_id,source_channel,publish_ts_utc,value_native,unit,raw_report,fetched_at_utc) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (city.name, city.wu_station, FAST_OBS_SOURCE_ID, publication.isoformat(), 23.0, "C",
+             f"METAR {city.wu_station} {interior:%d%H%M}Z 00000KT 9999 23/12 Q1016",
+             (publication + timedelta(seconds=1)).isoformat()),
+        )
+        state = fast._latest_kma_day0_event_state(conn, city=city, target_date="2026-10-03", decision_time=decision, metric=metric)
+        assert state is not None and state.observed_at == observed
+        assert (state.high_native, state.low_native, len(state.reports)) == (25.0, 14.0, 15)
+        assert state.available_at == publication
+        original = conn.execute("SELECT available_at FROM opportunity_events WHERE event_id=?", (state.event_id,)).fetchone()[0]
+        assert original == available.isoformat()
+        assert json.loads(bridge[0].payload_json)["observation_available_at"] == available.isoformat()
+        assert fast.latest_fast_station_extreme_c(conn, city=city.name, target_date="2026-10-03", metric=metric, decision_time=decision) == (expected, observed.isoformat(), 15, "C")
+        current = read_day0_current_temperature_state(conn=conn, city=city, target_date="2026-10-03", decision_time=decision)
+        assert current is not None and current.value_native == 25.0 and current.observed_at == observed
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("city_name", ("Busan", "Seoul"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_kma_source_query_failure_is_unknown_not_absence(city_name, metric):
+    from src.data import day0_fast_obs as fast
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+
+    conn, city, _observed, _available, decision, _prefetch, _bridge = _kma_source_clock_context(city_name, metric)
+
+    class InterruptedSourceRead:
+        def execute(self, sql, *args):
+            if "MAX(CASE WHEN source" in sql:
+                raise sqlite3.OperationalError("interrupted")
+            return conn.execute(sql, *args)
+
+    interrupted = InterruptedSourceRead()
+    try:
+        with pytest.raises(fast.KmaObservationUnavailable, match="SOURCE_QUERY_UNAVAILABLE"):
+            fast._latest_kma_day0_event_state(interrupted, city=city, target_date="2026-10-03", decision_time=decision, metric=metric)
+        assert fast.latest_fast_station_extreme_c(interrupted, city=city.name, target_date="2026-10-03", metric=metric, decision_time=decision) is None
+        assert fast.read_noaa_fast_obs_context_from_ledger(world_conn=interrupted, city=city, target_date="2026-10-03", decision_time=decision) is None
+        assert read_day0_current_temperature_state(conn=interrupted, city=city, target_date="2026-10-03", decision_time=decision) is None
+        assert _latest_authorized_day0_fact(interrupted, city=city.name, target_date="2026-10-03", temperature_metric=metric, decision_time=decision) is None
+    finally:
+        conn.close()
 
 
 def test_kma_mixed_window_uses_latest_contributing_noaa_clock() -> None:
@@ -6252,7 +6656,7 @@ def test_kma_complete_cor_response_recovers_prior_durable_conflict() -> None:
         )
         assert emitter.emit_prefetched(
             world_conn=conn, prefetch=normal_prefetch,
-            received_at="2026-09-22T04:04:00+00:00", persist_ledger=False,
+            received_at="2026-09-22T04:05:00+00:00", persist_ledger=False,
         ) == 2
         assert any(
             '"city":"Busan"' in row[0]

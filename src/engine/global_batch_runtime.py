@@ -4382,6 +4382,7 @@ def _store_global_auction_receipt(
     full_scope_identity: str,
     full_scope_family_keys: Sequence[str],
     probability_ineligible_by_family: Mapping[str, str],
+    probability_materialization_scope_kind: str = "restricted",
     # T-day0inelig.md §6 D1: sibling of probability_ineligible_by_family, same
     # key shape (family_key -> string), carrying the real cause behind a
     # catch-all ineligibility reason without perturbing the reason value
@@ -4434,6 +4435,8 @@ def _store_global_auction_receipt(
     persist = persist_artifact or (lambda artifact: store_artifact(conn, artifact))
 
     scope_keys = tuple(str(key) for key in full_scope_family_keys)
+    if probability_materialization_scope_kind not in {"universe", "restricted"}:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_MATERIALIZATION_SCOPE_INVALID")
     probability_keys = tuple(str(key) for key, _ in probability_manifest)
     manifest_by_family = {
         str(key): str(witness_identity)
@@ -4846,6 +4849,7 @@ def _store_global_auction_receipt(
         ),
         "full_scope_identity": full_scope_identity,
         "full_scope_family_count": len(scope_keys),
+        "probability_materialization_scope_kind": probability_materialization_scope_kind,
         "eligible_probability_family_count": len(probability_keys),
         "probability_ineligible_family_count": len(ineligible),
         "probability_ineligible_by_family": ineligible,
@@ -9150,6 +9154,15 @@ def process_current_global_batch(
                 for event in event_tuple
             )
         )
+        scan_restrict_to_families = (
+            (
+                held_families
+                if restrict_to_family_keys == held_family_keys
+                else (restricted_families or held_families)
+            )
+            if not buy_candidates_enabled and not proof_buy_candidates_enabled
+            else (restricted_families or None)
+        )
         missing_held_families: list[tuple[str, str, str]] = []
         last_stage[0] = "scope_scan"
         try:
@@ -9174,16 +9187,7 @@ def process_current_global_batch(
                     decision_at_utc=scope_at,
                     held_families=held_families,
                     missing_held_families=missing_held_families,
-                    restrict_to_families=(
-                        (
-                            held_families
-                            if restrict_to_family_keys == held_family_keys
-                            else (restricted_families or held_families)
-                        )
-                        if not buy_candidates_enabled
-                        and not proof_buy_candidates_enabled
-                        else (restricted_families or None)
-                    ),
+                    restrict_to_families=scan_restrict_to_families,
                     day0_only=day0_only_scope,
                     cancelled=selection_cancelled,
                 )
@@ -10466,6 +10470,14 @@ def process_current_global_batch(
                     )
                 ),
                 probability_ineligible_by_family=ineligible_by_family,
+                # This describes enumeration, never BUY permission. A held-only
+                # scan or a later local wake projection cannot replace the
+                # materializer's full-universe priority hint (INV-47 DRAIN).
+                probability_materialization_scope_kind=(
+                    "universe"
+                    if scan_restrict_to_families is None and decision_scope is full_scope
+                    else "restricted"
+                ),
                 probability_ineligible_cause_by_family=ineligible_cause_by_family,
                 buy_disabled_reason_by_family={
                     family_key: reason

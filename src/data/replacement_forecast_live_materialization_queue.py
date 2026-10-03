@@ -82,6 +82,10 @@ _MATERIALIZATION_BATCH_MISSING_ENVELOPE_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_BATCH_PROCESS_EXITED_WITHOUT_ENVELOPE"
 )
 _GLOBAL_AUCTION_SCOPE_CACHE: tuple[str, int, frozenset[str]] | None = None
+# A priority hint may inspect a recent burst, never the legacy receipt history.
+# 256 PK rows cover more than eight local wakes; older hints lose only a bonus.
+_GLOBAL_AUCTION_SCOPE_RECENT_ROWS = 256
+_GLOBAL_AUCTION_SCOPE_READ_SECONDS = 0.25
 _AWAITING_ENSEMBLE_HWM_REASON = (
     "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
 )
@@ -2488,47 +2492,65 @@ def _current_global_auction_family_ids(
     trade_db: Path | str | None = None,
     trade_conn: sqlite3.Connection | None = None,
 ) -> frozenset[str]:
-    """Return the latest complete global cut's full family-id scope."""
+    """Return the latest producer-declared complete universe priority hint.
+
+    SCOPE: queued families from an unrestricted scan, not a local wake's
+    complete subset. DRAIN: each normal unrestricted cut replaces membership.
+    RESET: a newer universe replaces this hint; no declared universe leaves
+    held/first-q/own-clock priorities intact. This never authorizes a q or order.
+    """
 
     global _GLOBAL_AUCTION_SCOPE_CACHE
 
+    from src.engine.global_auction_universe import (  # noqa: PLC0415
+        WorkContext, WorkDeferred, bounded_work_sqlite,
+    )
+
     try:
-        from src.state.db import _zeus_trade_db_path  # noqa: PLC0415
+        from src.state.db import _connect_read_only, _zeus_trade_db_path  # noqa: PLC0415
 
         db_path = Path(trade_db) if trade_db is not None else _zeus_trade_db_path()
         if not db_path.exists():
             return frozenset()
         path_identity = str(db_path.resolve())
         owns_conn = trade_conn is None
-        conn = trade_conn or _queue_read_only_connection(db_path)
+        hint_deadline = time.monotonic() + _GLOBAL_AUCTION_SCOPE_READ_SECONDS
+        conn = trade_conn or _connect_read_only(db_path, deadline_monotonic=hint_deadline)
         try:
-            latest = conn.execute(
-                """
-                SELECT id
-                  FROM decision_log
-                 WHERE mode LIKE 'global_single_order_auction%'
-                 ORDER BY id DESC
-                 LIMIT 1
-                """
-            ).fetchone()
-            if latest is None:
-                return frozenset()
-            latest_id = int(latest[0])
-            cached = _GLOBAL_AUCTION_SCOPE_CACHE
-            if cached is not None and cached[:2] == (path_identity, latest_id):
-                return cached[2]
-            rows = conn.execute(
-                """
-                SELECT id, artifact_json
-                  FROM decision_log
-                 WHERE mode LIKE 'global_single_order_auction%'
-                 ORDER BY id DESC
-                 LIMIT 8
-                """
-            ).fetchall()
+            # The existing shared-read fence preserves caller progress handlers
+            # and restores busy_timeout. Its independent deadline yields only
+            # an empty hint, leaving the enclosing claim window unchanged.
+            with bounded_work_sqlite(
+                conn, WorkContext(hint_deadline, monotonic=time.monotonic),
+                stage="materialization_universe_hint", shared_connection=True,
+            ):
+                latest = conn.execute("SELECT MAX(id) FROM decision_log").fetchone()
+                if latest is None or latest[0] is None:
+                    return frozenset()
+                latest_id = int(latest[0])
+                cached = _GLOBAL_AUCTION_SCOPE_CACHE
+                if cached is not None and cached[:2] == (path_identity, latest_id):
+                    return cached[2]
+                rows = conn.execute(
+                    """
+                    SELECT id, artifact_json
+                      FROM decision_log
+                     WHERE id >= ?
+                       AND mode LIKE 'global_single_order_auction%'
+                       AND json_valid(artifact_json)
+                       AND json_extract(artifact_json, '$.summary.probability_materialization_scope_kind') = 'universe'
+                       AND json_extract(artifact_json, '$.summary.scope_family_coverage_complete') = 1
+                     ORDER BY id DESC
+                     LIMIT 8
+                    """,
+                    (max(0, latest_id - _GLOBAL_AUCTION_SCOPE_RECENT_ROWS + 1),),
+                ).fetchall()
         finally:
             if owns_conn:
                 conn.close()
+    except WorkDeferred:
+        _LOG.debug("replacement materialization universe hint exhausted its optional read budget")
+        return frozenset()
     except _ClaimReadDeadlineExceeded:
         raise
     except Exception as exc:  # noqa: BLE001 - priority loss is loud; queue still drains
@@ -2607,6 +2629,7 @@ def _current_global_auction_scope_families(
             )
         )
         matched: set[tuple[str, str, str]] = set()
+        now_utc = datetime.now(timezone.utc)
         for path in queue_files:
             for city, prefix in city_prefixes:
                 if not path.name.startswith(prefix):
@@ -2624,6 +2647,16 @@ def _current_global_auction_scope_families(
                     target_date=target_date,
                     metric=metric,
                 ) in family_ids:
+                    # The historical universe is only a priority hint. Current
+                    # queue membership and the request's existing local-day /
+                    # expiry contract decide whether that hint still applies.
+                    today = _city_local_today(city, now_utc)
+                    if today is not None and date.fromisoformat(target_date) < today:
+                        break
+                    payload = _load_request_payload_for_coalescing(path)
+                    expires_at = _parse_utc_iso((payload or {}).get("expires_at"))
+                    if expires_at is not None and expires_at <= now_utc:
+                        break
                     matched.add(family)
                 break
         return frozenset(matched)

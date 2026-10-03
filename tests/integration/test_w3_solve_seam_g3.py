@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-02
+# Last reused/audited: 2026-10-03
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -2579,6 +2579,7 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
         book_captured_at_utc=at,
         book_max_age=_dt.timedelta(seconds=30),
         market_anchored_fit_artifact_audit=fit_artifact_audit,
+        probability_materialization_scope_kind="universe",
     )
 
     artifact = json.loads(
@@ -2589,6 +2590,7 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
     )
     summary = artifact["summary"]
     assert summary["candidate_evaluation_count"] == 0
+    assert summary["probability_materialization_scope_kind"] == "universe"
     assert summary["candidate_coverage_complete"] is True
     assert summary["book_native_side_candidate_coverage_status"] == "COMPLETE"
     assert summary["book_native_side_candidate_coverage_complete"] is True
@@ -33304,6 +33306,9 @@ def test_generic_completion_restricts_action_family_but_retains_full_held_wealth
     assert selected_actions and all(families == expected_families for families in selected_actions)
     assert book_families == [expected_families]
     assert stored["wealth_witness"] is wealth
+    assert stored["probability_materialization_scope_kind"] == (
+        "universe" if scope_kind == "unrestricted" and proof_enabled else "restricted"
+    )
     assert {
         obligation.position_id for obligation in stored["expected_holding_obligations"]
     } == {"position-a", "position-b"}
@@ -52884,3 +52889,220 @@ def test_negative_cash_ev_sell_persists_fake_sdk_fill_before_partial_reduction(
     record_property("simulated_sell_accounting",json.dumps({"q":case.q,"shares":str(case.ranked.decision.shares),
         "net_proceeds":str(net),"cash_ev":case.ranked.decision.expected_terminal_wealth.expected_ev_usd,
         "delta_log":case.ranked.decision.expected_terminal_wealth.expected_delta_log_wealth}))
+
+
+def _persist_materialization_scope_receipt(conn, events, *, kind=None):
+    """Use real scope construction and canonical receipt persistence; no venue."""
+    at = _dt.datetime(2026, 7, 10, 8, tzinfo=_dt.timezone.utc)
+    scope = current_global_auction_scope_from_events(events, captured_at_utc=at)
+    keys = scope.family_keys
+    manifest = ((keys[0], "q-current"),)
+    decision = GlobalSingleOrderDecision(
+        candidate=None, shares=Decimal("0"), cost_usd=Decimal("0"),
+        robust_delta_log_wealth=0.0, robust_ev_usd=0.0, capital_efficiency=0.0,
+        no_trade_reason="CASH_DOMINATES", rejection_reasons={}, candidate_evaluations=(),
+        candidate_input_count=0,
+    )
+    kwargs = {} if kind is None else {"probability_materialization_scope_kind": kind}
+    row_id = global_batch_runtime._store_global_auction_receipt(
+        conn, selected=SimpleNamespace(decision=decision),
+        selection_epoch_identity=scope.scope_identity, selection_cut_at_utc=at,
+        decision_at_utc=at + _dt.timedelta(seconds=1), probability_manifest=manifest,
+        full_scope_identity=scope.scope_identity, full_scope_family_keys=keys,
+        probability_ineligible_by_family={key: "CURRENT_Q_RECOMPUTE_REQUIRED" for key in keys[1:]},
+        book_epoch_identity="book-current", book_asset_count=0, book_asset_states=(),
+        wealth_witness=_test_receipt_wealth_witness(
+            witness_identity="wealth-current", economic_identity="wealth-current-economics",
+        ),
+        fractional_kelly_multiplier=Decimal("0.25"),
+        proof_counterfactual={
+            "role": "SIDE_EFFECT_FREE_CAPITAL_COUNTERFACTUAL",
+            "venue_actuation_available": False,
+            "global_selection_revision": global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+            "probability_manifest": [list(row) for row in manifest],
+        },
+        **kwargs,
+    )
+    return row_id, frozenset(keys)
+
+
+@pytest.mark.parametrize("family_count", (1, 189))
+def test_materialization_priority_universe_survives_more_than_eight_local_wakes(
+    tmp_path, monkeypatch, family_count,
+):
+    """A real complete singleton universe is as valid as the incident's 189."""
+    from src.data import replacement_forecast_live_materialization_queue as queue
+
+    conn = sqlite3.connect(tmp_path / "trades.db")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, started_at TEXT, completed_at TEXT, artifact_json TEXT, timestamp TEXT, env TEXT)")
+    monkeypatch.setattr(queue, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
+    events = tuple(_global_scope_event(city=f"City-{i}", source_run_id=f"run-{i}") for i in range(family_count))
+    _, universe = _persist_materialization_scope_receipt(conn, events, kind="universe")
+    for i in range(12):
+        _persist_materialization_scope_receipt(
+            conn, (_global_scope_event(city="Local", source_run_id=f"local-{i}"),), kind="restricted",
+        )
+    assert queue._current_global_auction_family_ids(trade_db=tmp_path / "trades.db", trade_conn=conn) == universe
+
+    _, changed = _persist_materialization_scope_receipt(
+        conn, (_global_scope_event(city="New", source_run_id="new-run"),), kind="universe",
+    )
+    assert queue._current_global_auction_family_ids(trade_db=tmp_path / "trades.db", trade_conn=conn) == changed
+    assert changed.isdisjoint(universe)
+    conn.close()
+
+
+def test_materialization_priority_does_not_promote_legacy_or_incomplete_scope(
+    tmp_path, monkeypatch,
+):
+    from src.data import replacement_forecast_live_materialization_queue as queue
+
+    conn = sqlite3.connect(tmp_path / "trades.db")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, started_at TEXT, completed_at TEXT, artifact_json TEXT, timestamp TEXT, env TEXT)")
+    monkeypatch.setattr(queue, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
+    event = _global_scope_event(city="Legacy", source_run_id="legacy-run")
+    row_id, _ = _persist_materialization_scope_receipt(conn, (event,))
+    assert queue._current_global_auction_family_ids(trade_db=tmp_path / "trades.db", trade_conn=conn) == frozenset()
+    raw = json.loads(conn.execute("SELECT artifact_json FROM decision_log WHERE id=?", (row_id,)).fetchone()[0])
+    raw["summary"]["probability_materialization_scope_kind"] = "universe"
+    raw["summary"]["scope_family_coverage_complete"] = False
+    conn.execute("UPDATE decision_log SET artifact_json=? WHERE id=?", (json.dumps(raw), row_id))
+    monkeypatch.setattr(queue, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
+    assert queue._current_global_auction_family_ids(trade_db=tmp_path / "trades.db", trade_conn=conn) == frozenset()
+    conn.close()
+
+
+def test_materialization_universe_hint_only_maps_current_queued_unexpired_families(
+    tmp_path, monkeypatch,
+):
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    import src.config as config
+
+    conn = sqlite3.connect(tmp_path / "trades.db")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, started_at TEXT, completed_at TEXT, artifact_json TEXT, timestamp TEXT, env TEXT)")
+    monkeypatch.setattr(queue, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
+    cities = ("Hong Kong", "Tel Aviv", "Paris", "New")
+    monkeypatch.setattr(config, "cities_by_name", {city: SimpleNamespace(name=city) for city in cities})
+    monkeypatch.setattr(queue, "_city_local_today", lambda city, _: _dt.date(2026, 7, 12) if city == "Paris" else _dt.date(2026, 7, 11))
+    events = tuple(_global_scope_event(city=city, source_run_id=city) for city in cities[:3])
+    _persist_materialization_scope_receipt(conn, events, kind="universe")
+    paths = []
+    for city in cities:
+        path = tmp_path / f"{city.replace(' ', '_')}.2026-07-11.high.json"
+        path.write_text(json.dumps({"city": city, "target_date": "2026-07-11", "temperature_metric": "high", "expires_at": "2000-01-01T00:00:00+00:00" if city == "Tel Aviv" else "2100-01-01T00:00:00+00:00"}))
+        paths.append(path)
+    current = queue._current_global_auction_scope_families(paths, trade_db=tmp_path / "trades.db", trade_conn=conn)
+    assert current == frozenset({("Hong Kong", "2026-07-11", "high")})
+    assert queue._current_global_auction_scope_families(paths[1:], trade_db=tmp_path / "trades.db", trade_conn=conn) == frozenset()
+    paths[1].write_text(json.dumps({"city": "Tel Aviv", "target_date": "2026-07-11", "temperature_metric": "high", "expires_at": "2100-01-01T00:00:00+00:00"}))
+    current = queue._current_global_auction_scope_families(paths, trade_db=tmp_path / "trades.db", trade_conn=conn)
+    held = ("Hong Kong", "2026-07-11", "high")
+    global_family = ("Tel Aviv", "2026-07-11", "high")
+    first_q = ("New", "2026-07-11", "high")
+    sibling = tmp_path / "held-sibling.json"
+    payloads = {
+        path: {"city": family[0], "target_date": family[1], "temperature_metric": family[2]}
+        for path, family in ((paths[0], held), (sibling, held), (paths[1], global_family), (paths[3], first_q))
+    }
+    ordered = queue._interleave_current_priority_request_files(
+        (paths[0], sibling, paths[1], paths[3]), payloads,
+        current_money_risk=frozenset({held}), current_global_scope=current, limit=3,
+    )
+    assert ordered[:3] == (paths[0], paths[1], paths[3])
+    _persist_materialization_scope_receipt(conn, (_global_scope_event(city="New", source_run_id="new"),), kind="universe")
+    assert queue._current_global_auction_scope_families(paths, trade_db=tmp_path / "trades.db", trade_conn=conn) == frozenset({("New", "2026-07-11", "high")})
+    conn.close()
+
+
+def test_materialization_universe_hint_recent_tail_boundary_and_reset(tmp_path, monkeypatch):
+    from src.data import replacement_forecast_live_materialization_queue as queue
+
+    conn = sqlite3.connect(tmp_path / "trades.db")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, started_at TEXT, completed_at TEXT, artifact_json TEXT, timestamp TEXT, env TEXT)")
+    monkeypatch.setattr(queue, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
+    event = _global_scope_event(city="Old", source_run_id="old")
+    _, old = _persist_materialization_scope_receipt(conn, (event,), kind="universe")
+    local = json.dumps({"summary": {"probability_materialization_scope_kind": "restricted"}})
+    conn.executemany("INSERT INTO decision_log(mode,artifact_json) VALUES(?,?)", [("global_single_order_auction_delta", local)] * (queue._GLOBAL_AUCTION_SCOPE_RECENT_ROWS - 1))
+    assert queue._current_global_auction_family_ids(trade_db=tmp_path / "trades.db", trade_conn=conn) == old
+    conn.execute("INSERT INTO decision_log(mode,artifact_json) VALUES(?,?)", ("global_single_order_auction_delta", local))
+    assert queue._current_global_auction_family_ids(trade_db=tmp_path / "trades.db", trade_conn=conn) == frozenset()
+    _, fresh = _persist_materialization_scope_receipt(conn, (_global_scope_event(city="New", source_run_id="new"),), kind="universe")
+    assert queue._current_global_auction_family_ids(trade_db=tmp_path / "trades.db", trade_conn=conn) == fresh
+    conn.close()
+
+
+@pytest.mark.parametrize("expire_hint_budget", (False, True))
+def test_optional_universe_hint_cannot_consume_normal_claim_window(
+    tmp_path, monkeypatch, expire_hint_budget,
+):
+    """Legacy history / hint timeout leaves the real queue owner and runner alive."""
+    import subprocess
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from tests.test_materialization_queue_stale_lock import _materialization_request
+
+    conn = sqlite3.connect(tmp_path / "trades.db")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT)")
+    conn.executemany("INSERT INTO decision_log(mode,artifact_json) VALUES(?,?)", [("global_single_order_auction_delta", '{"summary":{}}')] * 4096)
+    monkeypatch.setattr(queue, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
+    clock = [100.0]
+    import time as real_time
+    monkeypatch.setattr(queue, "time", SimpleNamespace(monotonic=lambda: clock[0], time=real_time.time, sleep=real_time.sleep))
+    inspections = []
+    caller_progress = []
+    conn.set_progress_handler(lambda: caller_progress.append(True) or 0, 1)
+
+    def inspect_json(raw):
+        inspections.append(raw)
+        if expire_hint_budget and len(inspections) == 1:
+            clock[0] += queue._GLOBAL_AUCTION_SCOPE_READ_SECONDS * 2
+            conn.interrupt()
+        return 1
+
+    conn.create_function("json_valid", 1, inspect_json)
+    original = queue._current_global_auction_scope_families
+    hint_inspections = []
+    claim_windows = []
+
+    def current_scope(files, **_):
+        claim = queue._active_claim_read_deadline()
+        claim_windows.append(claim is not None)
+        deadline = None if claim is None else claim.deadline_monotonic
+        before = len(inspections)
+        result = original(files, trade_db=tmp_path / "trades.db", trade_conn=conn)
+        hint_inspections.append(len(inspections) - before)
+        assert queue._active_claim_read_deadline() is claim
+        if claim is not None:
+            assert claim.deadline_monotonic == deadline
+        return result
+
+    monkeypatch.setattr(queue, "_current_global_auction_scope_families", current_scope)
+    monkeypatch.setattr(queue, "_current_money_risk_families", lambda **_: frozenset())
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    (request_dir / "London.2026-08-25.high.json").write_text(json.dumps(_materialization_request()))
+    spawned = []
+
+    def runner(argv):
+        spawned.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    report = queue.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir, processed_dir=tmp_path / "processed", failed_dir=tmp_path / "failed",
+        forecast_db=None, seed_limit=0, limit=1, runner=runner, discover=False,
+    )
+    assert report.status == "PROCESSED"
+    assert report.processed_count == len(spawned) == 1
+    assert max(hint_inspections) <= queue._GLOBAL_AUCTION_SCOPE_RECENT_ROWS
+    assert any(claim_windows)
+    # The hint's temporary SQLite guard must not poison a following caller read.
+    before = len(caller_progress)
+    conn.execute("SELECT 1").fetchone()
+    assert len(caller_progress) > before
+    assert queue._active_claim_read_deadline() is None
+    conn.close()

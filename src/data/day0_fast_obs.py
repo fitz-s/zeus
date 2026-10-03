@@ -66,7 +66,11 @@ from src.data.metar_temperature import (
     metar_temperature_c,
 )
 from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
-from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
+from src.state.schema.observation_prints_schema import (
+    RECEIPT_US_SQL,
+    receipt_us,
+    receipt_us_sql,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -526,6 +530,8 @@ def latest_fast_station_extreme_c(
             )
         except KmaObservationConflict:
             raise
+        except KmaObservationUnavailable:
+            return None
         if state is not None:
             value = state.high_native if normalized_metric == "high" else state.low_native
             return float(value), state.observed_at.astimezone(UTC).isoformat(), len(state.reports), "C"
@@ -1984,6 +1990,10 @@ class KmaObservationConflict(ValueError):
         self.reports = tuple(reports)
 
 
+class KmaObservationUnavailable(ValueError):
+    """An existing KMA source event cannot reproduce its physical evidence."""
+
+
 @dataclass(frozen=True)
 class KmaDay0EventState:
     observed_at: datetime
@@ -2499,6 +2509,8 @@ def read_noaa_fast_obs_context_from_ledger(
             )
         except KmaObservationConflict:
             raise
+        except KmaObservationUnavailable:
+            return None
         if state is not None:
             from src.data.observation_client import (
                 Day0ObservationContext,
@@ -2878,54 +2890,80 @@ def _latest_kma_day0_event_state(
     if not city_name or station not in KMA_PRIORITY_STATIONS:
         return None
     try:
-        event_table = "main.opportunity_events"
-        try:
-            world_conn.execute("SELECT 1 FROM world.opportunity_events LIMIT 1").fetchone()
-            event_table = "world.opportunity_events"
-        except sqlite3.DatabaseError:
-            pass
+        attached = {
+            str(item[1]) for item in world_conn.execute("PRAGMA database_list").fetchall()
+        }
+        event_table = None
+        for schema in ("world", "main"):
+            if schema not in attached:
+                continue
+            exists = world_conn.execute(
+                f"SELECT 1 FROM {schema}.sqlite_master "
+                "WHERE type='table' AND name='opportunity_events' LIMIT 1"
+            ).fetchone()
+            if exists is not None:
+                event_table = f"{schema}.opportunity_events"
+                break
+        if event_table is None:
+            return None
         metric_clause = (
             "AND json_extract(payload_json, '$.metric') = ?"
             if metric is not None
             else "AND json_extract(payload_json, '$.metric') IN ('high', 'low')"
         )
         metric_params = (metric,) if metric is not None else ()
+        event_receipt_sql = receipt_us_sql("received_at")
         row = world_conn.execute(
             f"""
-            SELECT event_id, observed_at, available_at, received_at, payload_json
+            SELECT event_id, observed_at, available_at, received_at, payload_json,
+                   source, rowid,
+                   MAX(CASE WHEN source != 'day0_posterior_advanced'
+                            AND {event_receipt_sql} IS NULL THEN rowid END) OVER ()
               FROM {event_table}
              WHERE event_type = 'DAY0_EXTREME_UPDATED'
                AND json_extract(payload_json, '$.city') = ?
                AND json_extract(payload_json, '$.target_date') = ?
                {metric_clause}
-               AND json_extract(payload_json, '$.observation_transport') = ?
-               AND datetime(available_at) <= datetime(?)
-               AND datetime(received_at) <= datetime(?)
-             ORDER BY datetime(available_at) DESC, datetime(received_at) DESC,
-                      event_id DESC
+               AND (json_extract(payload_json, '$.observation_transport') = ?
+                    OR json_type(payload_json, '$.kma_report_window') != 'null')
+               AND ({event_receipt_sql} <= ? OR {event_receipt_sql} IS NULL)
+             ORDER BY CASE WHEN source = 'day0_posterior_advanced' THEN 1 ELSE 0 END,
+                      {event_receipt_sql} DESC, rowid DESC
              LIMIT 1
             """,
             (city_name, target, *metric_params, KMA_METAR_TRANSPORT_ID,
-             decision_time.astimezone(UTC).isoformat(),
-             decision_time.astimezone(UTC).isoformat()),
+             receipt_us(decision_time)),
         ).fetchone()
-    except Exception:
-        return None
+    except Exception as exc:
+        # A read failure cannot prove source absence or authorize fallback.
+        raise KmaObservationUnavailable(
+            f"KMA_SOURCE_QUERY_UNAVAILABLE station={station} target={target} metric={metric}"
+        ) from exc
     if row is None:
         return None
     try:
+        # SCOPE: this station/city/local-day/metric source frontier only.
+        # DRAIN: normal complete raw-response publication, then seed/monitor read.
+        # RESET: a newer valid raw event supersedes invalid evidence. Derived
+        # posterior dispatches never supersede a physical source observation.
+        if row[5] == "day0_posterior_advanced":
+            raise ValueError("KMA_ORIGINAL_SOURCE_EVENT_MISSING")
+        if row[7] is not None and int(row[7]) > int(row[6]):
+            raise ValueError("KMA_SOURCE_RECEIVED_CLOCK_MISSING")
+        if row[5] not in {"day0_extreme_updated_trigger", "day0_kma_conflict"}:
+            raise ValueError("KMA_SOURCE_EVENT_TYPE_INVALID")
         payload = json.loads(str(row[4]))
         observed_at = datetime.fromisoformat(str(row[1]).replace("Z", "+00:00"))
         available_at = datetime.fromisoformat(str(row[2]).replace("Z", "+00:00"))
         received_at = datetime.fromisoformat(str(row[3]).replace("Z", "+00:00"))
         if any(value.tzinfo is None for value in (observed_at, available_at, received_at)):
-            return None
+            raise ValueError("KMA_SOURCE_CLOCK_UNQUALIFIED")
         decision = decision_time.astimezone(UTC)
-        if available_at.astimezone(UTC) > decision or received_at.astimezone(UTC) > decision:
-            return None
+        if not observed_at <= available_at <= received_at <= decision:
+            raise ValueError("KMA_SOURCE_CLOCK_NONCAUSAL")
         payload_available_raw = payload.get("observation_available_at")
         if payload_available_raw is None:
-            return None
+            raise ValueError("KMA_SOURCE_AVAILABILITY_MISSING")
         payload_available = datetime.fromisoformat(
             str(payload_available_raw).replace("Z", "+00:00")
         )
@@ -2933,7 +2971,7 @@ def _latest_kma_day0_event_state(
             payload_available.tzinfo is None
             or payload_available.astimezone(UTC) != available_at.astimezone(UTC)
         ):
-            return None
+            raise ValueError("KMA_SOURCE_AVAILABILITY_MISMATCH")
         payload_conflict = payload.get("observation_conflict")
         if payload_conflict is None and (
             payload.get("city") != city_name
@@ -2949,8 +2987,17 @@ def _latest_kma_day0_event_state(
             or payload.get("local_date_status") != "MATCH"
             or payload.get("station_match_status") != "MATCH"
             or payload.get("dst_status") != "UNAMBIGUOUS"
+            or payload.get("settlement_source") != FAST_OBS_SOURCE_ID
+            or payload.get("source_match_status") != "MATCH"
+            or payload.get("metric_match_status") != "MATCH"
+            or payload.get("rounding_status") != "MATCH"
+            or (
+                "settlement_unit" in payload
+                and payload["settlement_unit"]
+                != str(getattr(city, "settlement_unit", "") or "").upper()
+            )
         ):
-            return None
+            raise ValueError("KMA_SOURCE_IDENTITY_UNQUALIFIED")
         window = payload.get("kma_report_window")
         if not isinstance(window, list) or not window or len(window) > 512:
             raise ValueError("KMA_REPORT_WINDOW_INVALID")
@@ -2999,6 +3046,7 @@ def _latest_kma_day0_event_state(
         except sqlite3.DatabaseError:
             observation_table = "observation_prints"
         ledger_reports: list[MetarReport] = []
+        source_event_ledger_reports: list[MetarReport] = []
         ogimet_channel = f"ogimet_metar_{station.lower()}"
         # Keep the publication channel in the typed report so same-station
         # Ogimet rows participate in COR precedence without entering the KMA
@@ -3048,20 +3096,21 @@ def _latest_kma_day0_event_state(
                             value = (value - 32.0) * 5.0 / 9.0
                     else:
                         value = float(parsed_temp)
-                    ledger_reports.append(
-                        MetarReport(
-                            station_id=station,
-                            obs_time=observed.astimezone(UTC),
-                            receipt_time=published,
-                            temp_c=value,
-                            metar_type=(
-                                "COR" if re.search(r"\b(?:METAR|SPECI)\s+COR\b", raw_text, re.I)
-                                else "METAR"
-                            ),
-                            raw=raw_text,
-                            transport_id=str(channel or "").strip() or "noaa_ledger",
-                        )
+                    report = MetarReport(
+                        station_id=station,
+                        obs_time=observed.astimezone(UTC),
+                        receipt_time=published,
+                        temp_c=value,
+                        metar_type=(
+                            "COR" if re.search(r"\b(?:METAR|SPECI)\s+COR\b", raw_text, re.I)
+                            else "METAR"
+                        ),
+                        raw=raw_text,
+                        transport_id=str(channel or "").strip() or "noaa_ledger",
                     )
+                    ledger_reports.append(report)
+                    if published <= received_at and fetched <= received_at:
+                        source_event_ledger_reports.append(report)
                 except (TypeError, ValueError, OSError, OverflowError):
                     continue
         canonical_kma = _kma_canonicalize_reports(
@@ -3073,7 +3122,15 @@ def _latest_kma_day0_event_state(
         )
         reports = _kma_canonicalize_reports((*ledger_reports, *target_kma_reports))
         if not reports:
-            return None
+            raise ValueError("KMA_SOURCE_WINDOW_EMPTY")
+        source_event_reports = _kma_canonicalize_reports(
+            (*source_event_ledger_reports, *target_kma_reports)
+        )
+        # Bind the immutable source clock only to evidence possessed at that
+        # event's receipt. Later corroboration retains its own publication/fetch
+        # clocks and may contribute to the current window without restamping it.
+        if available_at != max(report.available_at for report in source_event_reports):
+            raise ValueError("KMA_SOURCE_WINDOW_AVAILABILITY_MISMATCH")
         extremes = running_extremes_for_local_day(
             reports, city=city, target_date=target, as_of=decision, margin_units=0.0
         )
@@ -3083,9 +3140,9 @@ def _latest_kma_day0_event_state(
             or extremes.high_so_far is None
             or extremes.low_so_far is None
         ):
-            return None
+            raise ValueError("KMA_SOURCE_EXTREMES_UNAVAILABLE")
         if not canonical_kma:
-            return None
+            raise ValueError("KMA_SOURCE_TARGET_WINDOW_EMPTY")
         current_raw = str(payload.get("current_observation_raw_report") or "")
         current_identity = str(payload.get("raw_report_identity") or "")
         latest = max(
@@ -3093,19 +3150,24 @@ def _latest_kma_day0_event_state(
             key=lambda report: (report.obs_time, -report.available_at.timestamp()),
         )
         if (
-            current_identity != latest.raw_report_identity
+            observed_at != latest.obs_time
+            or datetime.fromisoformat(
+                str(payload.get("observation_time")).replace("Z", "+00:00")
+            )
+            != latest.obs_time
+            or current_identity != latest.raw_report_identity
             or current_raw != latest.raw
             or float(payload.get("current_observation_temp_c")) != float(latest.temp_c)
         ):
-            return None
+            raise ValueError("KMA_SOURCE_CURRENT_OBSERVATION_MISMATCH")
         margin = float(getattr(source, "margin_units", 0.0) or 0.0)
         payload_margin = float(payload.get("metar_margin_units_applied") or 0.0)
         if payload_margin != margin:
-            return None
+            raise ValueError("KMA_SOURCE_MARGIN_MISMATCH")
         high_native = float(extremes.high_so_far)
         low_native = float(extremes.low_so_far)
         if not math.isfinite(high_native) or not math.isfinite(low_native) or margin < 0.0:
-            return None
+            raise ValueError("KMA_SOURCE_EXTREMES_INVALID")
         return KmaDay0EventState(
             observed_at=latest.obs_time,
             available_at=max(
@@ -3123,8 +3185,11 @@ def _latest_kma_day0_event_state(
         )
     except KmaObservationConflict:
         raise
-    except (TypeError, ValueError, KeyError, json.JSONDecodeError, OSError):
-        return None
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError, OSError) as exc:
+        raise KmaObservationUnavailable(
+            f"KMA_SOURCE_UNAVAILABLE station={station} target={target} metric={metric} "
+            f"event={row[0]} reason={exc}"
+        ) from exc
 
 
 def _append_metar_prints_to_ledger(
@@ -4999,6 +5064,15 @@ class Day0FastObsEmitter:
                         for report in revisions
                     )
                 ):
+                    historically_conflicted_stations.add(station)
+                    continue
+                reports = _merge_report_windows(window, reports)
+                continue
+            except KmaObservationUnavailable:
+                # Invalid historical evidence drains only through this poll's
+                # complete qualified station window and genuine source delta.
+                window = fresh_kma_reports.get(station)
+                if not window or not fresh_kma_event_deltas.get(station):
                     historically_conflicted_stations.add(station)
                     continue
                 reports = _merge_report_windows(window, reports)

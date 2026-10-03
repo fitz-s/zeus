@@ -11689,3 +11689,282 @@ Remove the read-only test-settings symlink, commit only the four owned source/te
 paths and exact PLAN/registry updates, then the parent's approved normal FF/load.
 One successful new classifier attempt/release does not establish whole132/98
 drain, provider permission, source ground or continuous realized-profit success.
+
+### 2026-10-03 Global universe / KMA source-clock parity bounded repair plan
+
+Parent admits two independently verified Important defects into one managed
+task worktree, global-scope-source-clock, based on origin/live6484bc17e.
+Integration owns only setup, this existing PLAN, necessary touched registries,
+verification/integration, normal authorized landing/loading and final cleanup.
+The two source workers own disjoint source/test slices; preserve other changes.
+Data/engine/src/tests and operations/architecture scoped laws and module routes
+are read. Current-data/source documents are expired routing evidence, not proof
+of today's provider truth. INV-37 canonical transaction ownership, INV-47
+adjacent SCOPE/DRAIN/RESET and the unchanged single-q/source authority apply.
+
+Slice A: _current_global_auction_family_ids currently admits the latest
+LIKE-prefix selection receipt even when it is a one-family closed delta/wake
+scope. Parent's real895500 receipt alone retains189 families including Tel Aviv;
+adding later895506 reduces the result to one family and excludes Tel Aviv.
+This is a universe-identity defect, not permission to turn a compressed wake
+into a global exclusion. Probability worker initially owns
+replacement_forecast_live_materialization_queue.py and existing focused tests.
+A producer/engine seam may be added only after its exact full-universe versus
+delta/wake contract and owned files are identified and recorded before editing.
+Do not guess completeness from receipt recency, LIKE prefix or a family count;
+small genuine complete universes must remain legal. Keep priority economics,
+queue budgets, fail-closed probability eligibility and all family source gates.
+
+SCOPE A: exact global-universe declaration/receipt and its family identities,
+distinct from a scoped wake/delta receipt. DRAIN A: the existing normal global
+auction/seed queue considers every declared current family; a delta wakes work
+without replacing that universe. RESET A: a new valid complete universe may
+add/remove families, and normal current input arrivals/recomputation can make a
+family eligible; immutable old receipts retain their own scope. Acceptance
+requires actual full-small-universe and one-family delta RED/GREEN, Tel Aviv
+membership, HIGH/LOW family twins, successive/churning wake scopes and normal
+queue drainage without manual claims or fabricated READY/probability authority.
+
+Slice B: day0_fast_obs.py KMA reader compares payload observation possession
+04:02:33 to the derived event availability04:03:04 for strict equality. These
+are different causal clock roles. Parent verified that this hides the original
+7d704 current record (25 C at04:00), falls back to older AWC24 C at03:04 and
+leaves Busan033 with a stale-q guard mismatch. A private proxy using the original
+source's actual consumer yields valid HIGH25 / LOW14 with14 samples. Exit/source
+worker initially owns day0_fast_obs.py and existing tests; add the actual source
+event emitter only if exact provenance/call-chain evidence requires it and its
+ownership/law is recorded first. Preserve payload/event clocks separately;
+compare the clock required by each contract, not unlike fields or a invented
+equality. Do not delete the q guard, restamp old observations, promote UNKNOWN
+to zero, change station/provider routing, temperature values or fallback order.
+
+SCOPE B: exact city/station/product/day/metric observation and bound event/input
+identity with original source-issued, fetched/possessed and event clocks.
+DRAIN B: the normal source writer/event and Day0 reader/seed/monitor cadence
+consume that lawful causal source record; no direct DB reducer/ingest or forced
+queue action. RESET B: a new valid source observation and currently reproduced
+posterior clear the exact mismatch; genuinely changed values/identity, future,
+missing or unbound clocks and malformed evidence remain unavailable. Acceptance
+requires actual station HIGH/LOW RED/GREEN, legitimate unequal-clock positive,
+future/unknown/wrong-station or identity negatives, and unchanged q/hard-fact
+source authority and normal fallback behavior when the preferred record truly
+is absent or invalid. Availability delay is not a temperature observation time.
+
+Each worker first returns exact file-level design and actual predicate evidence
+within the bounded design window; integration records any necessary extra
+engine/state/events scoped and K0 reads before authorizing cross-zone edits.
+Independent review targets unresolved semantic scope/clock risks, not file count.
+Run each slice's actual behavioral antibodies and all required checks for the
+finally touched subtrees, plus compile/diff/YAML/freshness/planning/source-registry
+delta checks. Use the existing private pytest state isolation and temporary
+read-only settings symlink only; no canonical DB copies or live configuration
+writes. Remove the symlink at closeout. No commit/load until both source slices,
+their required checks and acceptance are complete. Any later landing uses fresh
+origin/live ancestry, FF push and only normal uniquely owned live FF/deploy;
+no allow flags, guard clearing, pause, venue/cancel command or manual seed.
+
+The third uncertain synthetic daily-extremum time reused as settled_at remains
+read-only reachability investigation, not authorized for repair here. Prior
+154 ineligible / pending current-posterior consumption, untriggered missing-input
+production proof, external station-ground/terrain unknowns and the named obsolete
+CLOCK fixture remain separate dispositions. Neither these two fixes nor a
+successful load proves global continuous realized-profit completion.
+
+Slice A exact-source design is now approved before edits. Probability worker
+owns src/data/replacement_forecast_live_materialization_queue.py and
+src/engine/global_batch_runtime.py, plus existing tests whose exact names the
+worker will declare before editing. The engine scoped AGENTS and full engine
+module book are read; source_rationale/module_manifest ownership and current
+global selection authority are checked. No src/state writer/schema change is
+authorized. Integration will update only the necessary existing registry rows.
+
+At the real market-scope scan (restrict_to_families around9171), preserve its
+actual scan origin through the later restricted decision_scope constructions
+around9257/9293. Persist explicit probability_materialization_scope_kind as
+universe or restricted, the original selection_cut_at, and the same scope
+identity/member list. Only an actual enumeration of all current market families
+may declare universe. Local wake, held-only/reduce-only and narrowed scopes
+remain restricted even when their own coverage is complete. Neither mode_delta,
+family count nor risk BUY permission proves a universe; metadata may not promote
+a narrower decision scope merely because a preceding scan was wider.
+
+The queue consumer must filter for explicit current complete universe receipts
+before SQL LIMIT, so newer or numerous restricted receipts cannot shadow the
+last eligible universe. Keep existing freshness TTL and original clocks;
+missing, malformed or expired universe proof does not authorize a fabricated
+global set. Do not add a table/schema, new cache, source permission or gate.
+Normal new/expired families retain their independent source eligibility and
+redecision/queue path, rather than being frozen to an old receipt. Required
+antibodies include complete genuinely small universes, more than the old eight
+newer restricted wakes, held-only scans, shrink-after-full-scan, actual family
+membership and normal churn/drain under the typed marker and unchanged TTL.
+
+Slice A exact existing relationship-test owner is
+tests/integration/test_w3_solve_seam_g3.py, using its real batch/receipt fixture
+for full and restricted producer -> canonical receipt -> queue membership.
+If separate narrow SQL controls are necessary, the same worker may also use
+existing tests/test_materialization_queue_stale_lock.py; declare its necessity
+before editing. No new test file. Include more than eight later restricted
+wakes, a legitimate one-family complete universe, newly appearing/expired
+families, mixed held scope and unchanged-input/new-universe RESET. A missing
+marker defaults to restricted, never legacy-by-prefix promotion. Freshness here
+means the existing queued-family deadline/current-input eligibility and normal
+universe refresh, not a newly invented executable-book TTL for priority scope.
+The universe supplies ordering only, never source/probability/BUY permission;
+new families retain their ordinary lawful queue path before a newer full cut.
+
+Slice B exact four-path design is approved before source edits. KMA executor
+owns src/data/day0_fast_obs.py, src/data/day0_hourly_vectors.py,
+src/data/replacement_forecast_current_target_plan.py and existing
+tests/test_day0_fast_obs_lane.py. All are data-owned; scoped data law/full module
+book and caller/registry routing are checked. No events/reactor.py change:
+its known derived source day0_posterior_advanced intentionally advances dispatch
+availability and is not the original KMA source observation possession clock.
+The two source workers' files are disjoint; only integration owns registries.
+
+Select the latest nonderived KMA source event, excluding only that explicitly
+known derived carrier. Preserve precision when ordering actual received time
+(julianday/timestamp and row-id tie) and decision-time causality. Then strictly
+validate the selected raw event's source allowlist
+(day0_extreme_updated_trigger/day0_kma_conflict), exact station/target/date/unit,
+payload source availability versus the raw source event/receipt clocks and
+complete physical observation window. Do not SQL-filter malformed raw events
+away and accidentally borrow older valid facts. Missing/unknown received or
+available clocks require explicit unavailable treatment, not silent selection
+of an older observation or UNKNOWN-as-zero. The worker must prove this handling
+with actual timestamp-precision, future and missing-clock antibodies.
+
+Introduce the narrow typed KmaObservationUnavailable(ValueError) for an existing
+but invalid raw source record; None means true absence only. All actual direct
+callers, fast current-temperature/authorized-fact helpers and the vectors/current
+target consumers handle unavailable locally and return no authority before any
+fallback to older AWC/other facts. Retain normal fallback only for genuine
+absence. Emitter hydration catches unavailable in its station scope rather
+than aborting a multi-city refresh or relabeling malformed data as a KMA conflict.
+Only a new valid complete raw KMA window plus a real source delta clears the
+exact station/target debt via normal emission/seed/monitor; other stations keep
+running. No q guard, history, schema, temperature law, source authority, event
+timestamp rewrite or new global gate is authorized.
+
+B acceptance starts with nineteen existing KMA baseline cases GREEN and the
+actual original emitter -> bridge -> same-reader raw25 C becoming None RED.
+Require RKPK/RKSI HIGH/LOW twins through those real functions and held context,
+including legitimate derived-delay clocks, equal raw-clock binding, malformed
+source/type/station/date/unit, unknown/future received and source clocks, and
+new-raw-delta RESET without fallback promotion. New typed unavailable must not
+escape into a global abort. Compile/freshness/registry and required data/engine
+checks are integrated after both disjoint patches settle, not repeated before
+behavior changes. A source/protocol ambiguity or a newly failing money contract
+stops that seam for concrete evidence; it does not authorize weakening a gate.
+
+Slice A performance refinement is approved before its next patch. A JSON marker
+filter before LIMIT on the existing186GB legacy decision_log can scan history
+with no markers and consume the ten-second global claim budget. The accepted
+twenty-nine focused behavior cases alone do not close this named material risk.
+Do not measure the history scan against live or add an index/schema for this
+slice. In the existing helper only, first constrain the hint read to a finite
+recent primary-key tail; within that bounded window filter explicit universe
+markers before LIMIT, retaining the twelve-wake and boundary cases. The tail
+cap is a query-cost bound, never a family-count test for universe completeness.
+
+Give that scope-hint read an independent short budget within the existing claim
+budget. Its typed budget failure returns an empty global bonus, not DEFERRED for
+the whole claim. Held/own-clock/ordinary classes continue their existing normal
+claim path under their original gates and deadlines. An absent, too-old,
+malformed or unmarked universe likewise provides no hint; this is optional
+priority metadata, not a relaxed source TTL/probability or permission gate.
+No new mode, retained cache, schema or q law. A newer valid complete universe
+inside the bounded tail resets the bonus; new member changes must not reuse an
+older cached family set. Worker declares concrete short budget/tail cap and
+their rationale and reports the actual existing cache invalidation behavior.
+
+Private antibodies must traverse many unmarked legacy rows or an interrupted
+hint query -> empty bonus -> actual normal claim continuing, not only a helper
+Boolean. Cover twelve later wakes, a universe at the bounded-window edge,
+outside-window absence, legitimate small complete universes and new-membership
+RESET. Preserve whole-claim deadline semantics for genuinely overdue normal
+claim work; catch only the independently bounded optional-hint failure. This
+refinement supersedes an unbounded reading of earlier SQL filter-before-LIMIT,
+without authorizing source freshness changes or a global scan.
+
+Worker's declared initial bounds are256 recent decision_log primary-key IDs
+and0.25 seconds for this optional scope-hint read. They are resource bounds,
+not provider age or authority thresholds; an older universe losing its bonus
+does not block lawful normal queue work. Reuse only the existing cache, with
+identity sensitive to the bounded tail and new universe/member content so a new
+complete cut can RESET the bonus. Verify cancellation/SQLite progress cleanup
+does not leave a short hint deadline installed on the surrounding claim read.
+
+Final source-worker evidence: A's38 selected cases pass, including actual
+restricted/full producer receipts, six existing canonical full/delta persistence
+controls, twelve newer wakes, a real189-versus-one scope counterexample, tail256
+edge and4096 unmarked legacy rows. The actual normal runner continues after a
+missing hint or VM interruption; original progress handler/deadline are restored.
+B's complete existing fast-observation file passes302 cases, with103 selected
+KMA cases including nineteen original baseline cases, RKPK/RKSI HIGH/LOW actual
+emitter/bridge/reader twins,64 malformed-proof twins, true absence, exact receipt
+microseconds and new-window RESET. Four unmocked real q-guard cases accept the
+same lawful extreme and continue rejecting genuine value drift. Source/test
+owners freeze their five source/two existing test files; integration changes no
+source or test body. Independent semantic reviews are still pending acceptance
+at this record point, not implied by these worker results.
+
+The final integrated required batch runs data's ten files plus engine's six
+scoped files and its manifest-listed RED-command file once:342PASS/46FAIL/4SKIP.
+Data ten alone is291PASS/0FAIL/0SKIP. For only the46 failing engine nodes, a
+separate private test process restores all five touched source modules from
+HEAD6484bc17e (including static Path/inspect source reads); the identical46 node
+IDs fail again. Forty-five failure messages match exactly; the one outside-Day0
+stale-probability assertion differs only in its repr's0x memory address. No new
+message delta remains after normalizing that address only. XML/log and the exact
+HEAD-overlay script are retained under
+/tmp/zeus-global-source-required-20261003.LTVd8Z/ (required-data-engine and
+required46-head-baseline). This is baseline evidence, not an engine suite PASS
+or a finding that every old failure is economically harmless. The failed exit
+expectations, obsolete fixture APIs/receipt fakes, scheduler decoration, RED
+fixture contract and pre-existing semantic-linter findings remain separately
+deferred for their owning contracts; no assertions, guards or other sources are
+weakened here. Current live impact would require its own bounded evidence.
+
+Compile of all seven source/test paths, whitespace, both touched registry YAML
+parses, all five source owner rows and changed-surface freshness/planning-lock
+pass. Source-rationale delta's two station_temperature import heuristic findings
+are unchanged imports already present in HEAD's hourly-vectors/current-target
+modules, not a newly introduced provider or authority. The existing adapter row
+remains registered; this old heuristic/source-family coverage discrepancy is
+reported separately and not repaired by widening this slice's source registry.
+Final review, parent acceptance, test-link removal, current-origin rebase proof
+and normal uniquely owned loading still precede any production success claim.
+
+Final named review accepts A and B with no new Critical/Important finding.
+A's independent verifier covers singleton/full scopes, twenty newer local wakes,
+tail/cache changes, optional-budget timeout and shared-handler restoration.
+B's final frozen file passes322 tests; its KMA selection passes123 and the
+reviewer independently passes eight counterexamples. Three named review blockers
+are fixed before integration: verify immutable raw-header reconstruction at the
+original event-received ledger possession cut so later interior corroboration
+does not falsely invalidate it; select the newest raw record before validating
+its transport so an invalid newest record cannot promote an older raw record;
+and classify primary source query/read errors as typed unavailable rather than
+absence that could authorize AWC fallback. No new probability or source-clock
+permission is introduced. The integrator recompiles the frozen seven paths and
+rechecks the same required batch once for this final B behavior change, retaining
+the original342/46/4 and exact HEAD-baseline evidence rather than rerunning
+unrelated tests or treating old failures as a suite PASS.
+
+Parent authorizes the normal task integration lane after that final check:
+remove only the temporary settings symlink, commit the frozen five source/two
+test files and exact existing registry/PLAN changes, fetch/rebase only if current
+origin/live moved and reprove any affected delta, FF push then live FF and one
+unique normal deploy_live.py restart live-trading. Keep configuration unchanged,
+no guard clear, manual money/source fetch or queue claim. Actual landed tip,
+loaded main identity, canonical paths/process/config and loader return are
+separate facts; independent runtime acceptance is still pending. Keep the managed
+tree until parent runtime acceptance/archive, then delete only its landed branch.
+
+Final frozen-blob required recheck also returns342PASS/46FAIL/4SKIP in38.07s;
+all46 IDs still match the existing HEAD baseline,45 messages exact plus the
+same single address-only repr difference and no new delta. Final XML/log:
+/tmp/zeus-global-source-required-20261003.LTVd8Z/required-data-engine-final.
+Compile and changed-surface freshness/planning/whitespace pass again. No source,
+test assertion or unrelated registry repair is performed by integration.

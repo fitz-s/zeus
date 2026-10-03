@@ -1785,14 +1785,18 @@ def _latest_authorized_day0_fact(
     if not require_settlement_channel and city_obj is not None:
         from src.data.day0_fast_obs import (
             KMA_PRIORITY_STATIONS,
+            KmaObservationUnavailable,
             _latest_kma_day0_event_state,
         )
 
         if expected_station in KMA_PRIORITY_STATIONS:
-            kma = _latest_kma_day0_event_state(
-                conn, city=city_obj, target_date=target_date,
-                decision_time=decision_utc, metric=metric,
-            )
+            try:
+                kma = _latest_kma_day0_event_state(
+                    conn, city=city_obj, target_date=target_date,
+                    decision_time=decision_utc, metric=metric,
+                )
+            except KmaObservationUnavailable:
+                return None
             if kma is not None:
                 facts = [
                     fact for fact in facts
