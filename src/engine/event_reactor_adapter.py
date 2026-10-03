@@ -29042,6 +29042,7 @@ def _posterior_bound_multimodel_members(
             target_date=family.target_date,
             source_cycle_time_iso=str(source_cycle_time),
             decision_time_iso=cut.astimezone(UTC).isoformat(),
+            day0_remaining_from_iso=tau,
             include_station_sources=True,
         )
         city_config = runtime_cities_by_name()[str(family.city)]
@@ -29085,6 +29086,7 @@ def _posterior_bound_multimodel_members(
             decision_time_iso=str(scheme["configured_cohort_decision_time"]),
             models=tuple(scheme["configured_sources"]),
             cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+            day0_remaining_from_iso=tau,
         )
         expected_cohort = set(scheme["configured_current_sources"]).intersection(configured_cohort)
         recorded_cohort = scheme["configured_cohort_value_serving"]

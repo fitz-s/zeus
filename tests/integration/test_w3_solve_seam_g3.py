@@ -51759,6 +51759,143 @@ def test_hko_authority_binds_members_from_the_consumed_proof_not_the_latest_run(
         fixture.conn.close()
 
 
+def _hko_partial_current_post_day_posterior(tmp_path,monkeypatch,metric):
+    """Round-3 shape: lawful HK scheme ICON+UKMO+HKO+KMA, KMA missing (partial-current),
+    re-materialized post-day at 16:30Z with a frozen Day0 tau, by the ordinary producer."""
+    from src.data import bayes_precision_fusion_download as dl, day0_hourly_vectors as hourly
+    from src.data import openmeteo_ecmwf_ifs9_bucket_transport as transport
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.strategy.live_inference import source_clock_city_weights as weights
+    configured = ("icon_global","ukmo_global_deterministic_10km","hko_fnd","kma_gdps")
+    scheme_path = tmp_path/"partial-scheme.csv"
+    scheme_path.write_text("city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n"
+        +"Hong Kong,ACTIVE,"+"+".join(configured)+","+"+".join(m+":0.25" for m in configured)+",30,true,GRID_CAP10_LIVE_READY\n")
+    monkeypatch.setenv(weights.ENV_CITY_ONE_SCHEME_PATH,str(scheme_path))
+    weights.load_city_one_schemes.cache_clear()
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric)
+    city = fixture.city
+    row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                                    (fixture.result.posterior_id,)).fetchone())
+    cycle = _dt.datetime(2026,9,30,6,tzinfo=_dt.timezone.utc)
+    capture = _dt.datetime(2026,9,30,12,32,4,tzinfo=_dt.timezone.utc)
+    cells = {"icon_global":(22.25,114.125),"ukmo_global_deterministic_10km":(22.3125,114.1875)}
+    cell = transport.source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,target_elevation_m=32.)
+    cells["ecmwf_ifs"] = (cell["selected_grid_lat"],cell["selected_grid_lon"])
+    times = [(cycle+_dt.timedelta(hours=i+8)).strftime("%Y-%m-%dT%H:%M") for i in range(30)]
+    def http(_url,params,**kwargs):
+        lat,lon = cells[params["models"]]
+        body = (json.dumps({"latitude":lat,"longitude":lon,"elevation":32.,"timezone":city.timezone,
+            "utc_offset_seconds":28800,"hourly_units":{"temperature_2m":"°C"},
+            "hourly":{"time":times,"temperature_2m":[26.+i%7 for i in range(len(times))]}},indent=2)+"\n").encode()
+        kwargs["capture_entity_body"](body,capture.timestamp())
+        kwargs["capture_network_response"](body,capture.timestamp(),{"content-type":"application/json"})
+        return json.loads(body)
+    class CaptureClock(_dt.datetime):
+        @classmethod
+        def now(cls,tz=None): return capture.astimezone(tz) if tz else capture.replace(tzinfo=None)
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear(); dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    fixture.conn.commit()
+    with monkeypatch.context() as fetch:
+        fetch.setattr(dl,"datetime",CaptureClock); fetch.setattr("src.data.openmeteo_client.fetch",http)
+        assert dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=cycle,
+            targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,target_date=row["target_date"],metric=axis,
+                latitude=city.lat,longitude=city.lon,timezone_name=city.timezone,lead_days=0) for axis in ("high","low")],
+            models=tuple(cells),frozen_source_runs={m:(cycle,capture) for m in cells},include_previous_runs=False,
+            prune_after=False)["written_row_count"] == 6
+    post_cut = _dt.datetime(2026,9,30,16,30,tzinfo=_dt.timezone.utc)
+    vector_at = _dt.datetime(2026,9,30,15,58,tzinfo=_dt.timezone.utc)
+    for index,model in enumerate(hourly.day0_hourly_models_for_city(city)):
+        payload = {"timezone":city.timezone,"utc_offset_seconds":28800,
+            "hourly":{"time":[f"{row['target_date']}T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m":[32.+index*.05+(1. if 14<=hour<=18 else -.5) for hour in range(24)]},
+            "hourly_units":{"temperature_2m":"°C"}}
+        endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
+        params = {"endpoint":endpoint,"models":OPENMETEO_MODEL_IDS.get(model,model),"timezone":city.timezone,"hourly":"temperature_2m"}
+        request_hash = hourly.build_request_hash(endpoint=endpoint,params=params,models=[model],captured_at=vector_at.isoformat(),payload=payload)
+        meta = hourly._day0_provider_run_meta(model=model,model_api_id=OPENMETEO_MODEL_IDS.get(model,model),run=cycle,
+            available_at=cycle+_dt.timedelta(hours=1),modified_at=cycle+_dt.timedelta(hours=1),authority="run_pinned_single_runs",
+            endpoint_mode="single_runs",request_params=params,request_hash=request_hash,fetch_started_at=vector_at,fetch_finished_at=vector_at)
+        vectors = hourly.parse_openmeteo_hourly_payload(payload,city=city,models=[model],captured_at=vector_at.isoformat(),source_run_meta_json=json.dumps(meta))
+        assert hourly.persist_day0_hourly_vectors(vectors,target_date=row["target_date"],conn=fixture.conn,
+            request_hash=request_hash,endpoint=endpoint,now=post_cut) == 1
+    fixture.sql_clock[0] = post_cut
+    post = materializer.materialize_replacement_forecast_live(fixture.conn,replace(fixture.request,
+        computed_at=post_cut,expires_at=post_cut+_dt.timedelta(hours=1)))
+    fixture.conn.commit()
+    assert post.ok, post.reason_codes
+    row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(post.posterior_id,)).fetchone())
+    scheme = json.loads(row["provenance_json"])["bayes_precision_fusion"]["source_clock_one_scheme"]
+    assert scheme["fallback_reason"] == "configured_current_provider_set_incomplete"
+    return fixture, row, post_cut
+
+
+@pytest.mark.parametrize("metric",("high","low"))
+@pytest.mark.parametrize("cohort",("recorded","recorded_cohort_row_deleted"))
+def test_partial_current_replay_reads_the_cohort_at_the_frozen_tau(tmp_path,monkeypatch,metric,cohort,_hko_clock_native_sources):
+    """Round-3 finding: the partial-current scheme replay read the configured
+    cohort without the posterior's Day0 tau, chose other rows (HIGH 1/3 for
+    recorded 7/9, LOW 2/4 for 8/10), failed model_identity_drift:configured_cohort
+    and evicted a lawful posterior. With the tau the recorded cohort re-proves
+    through the real authority wrapper; a deleted recorded cohort row still
+    fails the same way and evicts.
+    """
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    fixture, row, post_cut = _hko_partial_current_post_day_posterior(tmp_path,monkeypatch,metric)
+    try:
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+        class ReaderClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return post_cut.astimezone(tz) if tz else post_cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",ReaderClock)
+        scheme = json.loads(row["provenance_json"])["bayes_precision_fusion"]["source_clock_one_scheme"]
+        if cohort == "recorded_cohort_row_deleted":
+            victim = int(scheme["configured_cohort_value_serving"]["icon_global"]["raw_model_forecast_id"])
+            fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(victim,))
+            fixture.conn.commit()
+        hwm.clear_consumed_proof_memo(); reader._LIVE_GRADE_MEMO.clear()
+        family = SimpleNamespace(city=row["city"],target_date=row["target_date"],metric=metric)
+        event = make_opportunity_event(event_type="FORECAST_SNAPSHOT_READY",
+            entity_key=f"{family.city}|{family.target_date}|{metric}",source="partial-tau-test",
+            observed_at=row["computed_at"],available_at=row["source_available_at"],received_at=post_cut.isoformat(),
+            payload=dict(city=family.city,target_date=family.target_date,metric=metric,
+                source_id=row["source_id"],source_run_id=row["posterior_identity_hash"]),
+            causal_snapshot_id=f"rmf-{family.city}|{family.target_date}|{metric}|{str(row['source_cycle_time'])[:10]}")
+        ro = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
+        ro.row_factory = sqlite3.Row
+        try:
+            kwargs = dict(event=event,family=family,payload=json.loads(event.payload_json),
+                bound_posterior_id=row["posterior_id"])
+            if cohort == "recorded":
+                for at in (post_cut, post_cut+_dt.timedelta(minutes=10)):
+                    payload = era._forecast_authority_payload_and_clock(ro,decision_time=at,**kwargs)[0]
+                    assert payload["posterior_identity_hash"] == row["posterior_identity_hash"]
+            else:
+                # The recorded cohort row is also a consumed row here, so the
+                # wrapper refuses at the consumed proof before the members.
+                with pytest.raises(ValueError, match="consumed_proof_unverifiable"):
+                    era._forecast_authority_payload_and_clock(ro,decision_time=post_cut,**kwargs)
+                members_reason: dict[str,str] = {}
+                assert era._posterior_bound_multimodel_members(ro,family=family,decision_time=post_cut,
+                    source_cycle_time=row["source_cycle_time"],provenance=json.loads(row["provenance_json"]),
+                    posterior_computed_at=row["computed_at"],reason_out=members_reason) is None
+                assert members_reason["reason"].startswith("model_identity_drift:"), members_reason
+                reason = "FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior:" + members_reason["reason"]
+                namespace = "partial-tau-eviction"
+                monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",namespace)
+                monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",
+                    {("family-hk",era._CurrentProbabilityUse.ENTRY.value):("event-1","binding-1",object())})
+                assert era._evict_superseded_global_probability_family_cache(namespace,reason=reason,
+                    actuation=SimpleNamespace(decision=SimpleNamespace(candidate=SimpleNamespace(family_key="family-hk"))))
+                assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
+        finally:
+            ro.close()
+    finally:
+        fixture.conn.close()
+
+
 @pytest.mark.parametrize("metric",("high","low"))
 def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tmp_path,monkeypatch,metric,_hko_clock_native_sources):
     """Actual source tick and seed transport, with only private routing/HTTP clocks.
