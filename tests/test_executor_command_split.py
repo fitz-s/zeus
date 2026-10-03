@@ -408,6 +408,10 @@ def _cutover_guard_live_enabled(monkeypatch):
     )
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._current_wealth_buy_cash_unavailable_reason",
+        lambda *_args, **_kwargs: None,
+    )
     # Pre-submit identity binding resolves the canonical funder address via the
     # operator Keychain (OPENCLAW_HOME) — absent in CI. Not this file's subject;
     # same hermetic stub as tests/test_unknown_side_effect.py's conn fixture.

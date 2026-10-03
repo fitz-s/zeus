@@ -1169,6 +1169,10 @@ class TestExecutor:
                 allow(component),
             )
         monkeypatch.setattr(
+            "src.execution.executor._current_wealth_buy_cash_unavailable_reason",
+            lambda conn: None,
+        )
+        monkeypatch.setattr(
             "src.execution.executor._entry_actionable_certificate_payload_and_component",
             lambda *args, **kwargs: (
                 {

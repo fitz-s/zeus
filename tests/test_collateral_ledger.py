@@ -225,6 +225,10 @@ def _allow_non_collateral_execution_guards(monkeypatch):
         "src.execution.executor._assert_ws_gap_allows_submit",
         lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "unit_test"},
     )
+    monkeypatch.setattr(
+        "src.execution.executor._current_wealth_buy_cash_unavailable_reason",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def test_init_collateral_schema_preserves_existing_busy_timeout(tmp_path):

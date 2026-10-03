@@ -1550,11 +1550,11 @@ def _current_global_increment_wealth_component(
 def _current_wealth_buy_cash_unavailable_reason(
     conn: sqlite3.Connection,
 ) -> str | None:
-    """Return the typed BUY-cash veto of the current wealth witness, if any.
+    """Return why current wealth cannot prove BUY cash, or None when it can.
 
-    Only the typed verdict vetoes here; a witness that cannot be built keeps
-    its existing owners (global preflight, increment binding, collateral
-    preflight) so this check adds no new failure mode to unrelated BUYs.
+    Collateral preflight does not count uncovered OPEN entry obligations, so
+    a BUY must also prove cash on the wealth witness: a witness that cannot
+    be built refuses the BUY. SELL never reaches this check.
     """
 
     try:
@@ -1566,8 +1566,8 @@ def _current_wealth_buy_cash_unavailable_reason(
             decision_at_utc=datetime.now(timezone.utc),
             max_age=timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)),
         )
-    except Exception:  # noqa: BLE001 - see docstring
-        return None
+    except Exception as exc:  # noqa: BLE001 - capital ambiguity blocks new risk.
+        return f"CURRENT_WEALTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
     return current.buy_cash_unavailable_reason
 
 

@@ -142,7 +142,11 @@ def _assert_v22_capital_fields(summary: Mapping[str, Any]) -> None:
                 f"GLOBAL_AUCTION_RECEIPT_PORTFOLIO_WEALTH_{field.upper()}_INVALID"
             )
         values[field] = value
-    if values["wealth_floor_usd"] <= 0:
+    # A zero cash floor is lawful only with zero spendable cash: no BUY can
+    # be sized, while reduce-only SELL/HOLD of held claims stays decidable.
+    if values["wealth_floor_usd"] < 0 or (
+        values["wealth_floor_usd"] == 0 and values["spendable_cash_usd"] != 0
+    ):
         raise ValueError(
             "GLOBAL_AUCTION_RECEIPT_PORTFOLIO_WEALTH_FLOOR_INVALID"
         )

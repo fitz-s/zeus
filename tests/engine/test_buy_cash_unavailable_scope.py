@@ -9,8 +9,12 @@ import datetime as _dt
 from decimal import Decimal
 from types import SimpleNamespace
 
+import sqlite3
+
 import numpy as np
 import pytest
+
+import src.engine.global_batch_runtime as gbr
 
 import src.engine.global_auction_universe as universe
 import src.engine.qkernel_spine_bridge as bridge
@@ -75,8 +79,7 @@ def _witness(conn, at):
     )
 
 
-def _wealth(at, *, reason, spendable=Decimal("0")):
-    floor = Decimal("27")
+def _wealth(at, *, reason, spendable=Decimal("0"), floor=Decimal("27")):
     policy = StrategyCapitalAllocationWitness.build(
         capital_basis_usd=floor,
         committed_capital_usd=Decimal("0"),
@@ -139,6 +142,41 @@ def test_buy_cash_state_changes_economic_identity_and_requires_zero_cash():
         _wealth(at, reason=REASON, spendable=Decimal("1"))
 
 
+def test_zero_cash_floor_witness_and_receipt_law():
+    from src.contracts.global_auction_receipt import _assert_v22_capital_fields
+
+    at = _dt.datetime(2026, 10, 2, 23, 50, tzinfo=_dt.timezone.utc)
+    # pUSD 0, legacy 0, OPEN obligation cost 30: floor 0, BUY cash unavailable.
+    conn = _over_reserved_conn(at)
+    conn.execute(
+        "UPDATE collateral_ledger_snapshots"
+        " SET pusd_balance_micro = 0, usdc_e_legacy_balance_micro = 0"
+    )
+    witness = _witness(conn, at)
+    assert witness.wealth_floor_usd == 0
+    assert witness.spendable_cash_usd == 0
+    assert witness.buy_cash_unavailable_reason == REASON
+
+    def summary(floor, spendable):
+        return {
+            "global_selection_revision": "v7",
+            "portfolio_wealth": {
+                "ledger_snapshot_id": "ledger",
+                "position_set_hash": "positions",
+                "collateral_authority": "CHAIN",
+                "wealth_floor_usd": floor,
+                "wealth_ceiling_usd": "10",
+                "spendable_cash_usd": spendable,
+                "reservations_usd": "30",
+            },
+        }
+
+    _assert_v22_capital_fields(summary("0", "0"))
+    for floor, spendable in (("0", "1"), ("-1", "0")):
+        with pytest.raises(ValueError, match="FLOOR_INVALID"):
+            _assert_v22_capital_fields(summary(floor, spendable))
+
+
 def test_executor_increment_binding_rejects_buy_with_typed_reason(monkeypatch):
     witness = SimpleNamespace(buy_cash_unavailable_reason=REASON, economic_identity="w")
     monkeypatch.setattr(
@@ -164,8 +202,11 @@ def test_executor_buy_pre_submit_reads_typed_reason(monkeypatch):
         raise ValueError("CURRENT_WEALTH_CHAIN_POSITION_SET_MISMATCH")
 
     monkeypatch.setattr(universe, "current_portfolio_wealth_witness", broken)
-    # A witness that cannot be built stays owned by the existing capital gates.
-    assert executor._current_wealth_buy_cash_unavailable_reason(object()) is None
+    # A BUY must prove cash: a witness that cannot be built refuses it.
+    assert executor._current_wealth_buy_cash_unavailable_reason(object()) == (
+        "CURRENT_WEALTH_UNAVAILABLE:ValueError:"
+        "CURRENT_WEALTH_CHAIN_POSITION_SET_MISMATCH"
+    )
 
 
 def test_reactor_preflight_vetoes_buy_but_not_sell(monkeypatch):
@@ -198,7 +239,8 @@ def test_reactor_preflight_vetoes_buy_but_not_sell(monkeypatch):
     )
 
 
-def test_held_sell_selectable_and_no_buy_candidate_in_same_cut():
+@pytest.mark.parametrize("floor", (Decimal("27"), Decimal("0")))
+def test_held_sell_selectable_buy_rejected_and_receipt_persists(floor):
     at = _dt.datetime(2026, 10, 2, 23, 50, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="buy-cash-unavailable")
     scope = current_global_auction_scope_from_events((event,), captured_at_utc=at)
@@ -248,6 +290,16 @@ def test_held_sell_selectable_and_no_buy_candidate_in_same_cut():
         family, "other", "other-condition", "gamma", "market-event", "YES",
         "other-yes", buy_curve, at, False,
     )
+    held_ask_asset = CurrentGlobalBookAsset(
+        family, "bin", "condition", "gamma", "market-event", "YES", "yes-token",
+        ExecutableCostCurve(
+            token_id="yes-token", side="YES", snapshot_id="snapshot", book_hash="book",
+            levels=(BookLevel(Decimal("0.62"), Decimal("10")),),
+            fee_model=fee, min_tick=Decimal("0.01"),
+            min_order_size=Decimal("5"), quote_ttl=_dt.timedelta(seconds=30),
+        ),
+        at, False, bid_levels=sell_curve.levels,
+    )
     states = (
         (family, "bin", "condition", "YES", "yes-token", "EXECUTABLE", "book",
          "market-event", "gamma", "False"),
@@ -255,7 +307,7 @@ def test_held_sell_selectable_and_no_buy_candidate_in_same_cut():
          "book-2", "market-event", "gamma", "False"),
     )
     epoch = CurrentGlobalBookEpoch(
-        assets=(buy_asset,), sell_assets=(sell_asset,), asset_states=states,
+        assets=(held_ask_asset, buy_asset), sell_assets=(sell_asset,), asset_states=states,
         captured_at_utc=at, max_age=_dt.timedelta(seconds=30),
         witness_identity=current_global_book_epoch_identity(
             asset_states=states, captured_at_utc=at
@@ -291,9 +343,66 @@ def test_held_sell_selectable_and_no_buy_candidate_in_same_cut():
     )
     assert "BUY" in {row.action for row in funded_decision.candidate_evaluations}
 
-    result = select(_wealth(at, reason=REASON))
+    wealth = _wealth(at, reason=REASON, floor=floor)
+    result = select(wealth)
     assert result.actuation is not None, result.decision.no_trade_reason
     decision = result.actuation.decision
     assert decision.candidate.action == "SELL"
     assert decision.candidate.token_id == "yes-token"
-    assert {row.action for row in decision.candidate_evaluations} == {"SELL"}
+    buys = [r for r in decision.candidate_evaluations if r.action == "BUY"]
+    # BUY sides still materialize for book coverage, each typed-rejected.
+    assert buys and all(
+        r.status == "REJECTED" and r.rejection_reason == REASON for r in buys
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " mode TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT NOT NULL,"
+        " artifact_json TEXT NOT NULL, timestamp TEXT NOT NULL, env TEXT NOT NULL)"
+    )
+    obligations = (
+        gbr._CurrentHeldObligation(
+            "held", family, "bin", "condition", "YES", "yes-token", Decimal("10"),
+        ),
+    )
+    from dataclasses import replace
+
+    selected = replace(
+        result,
+        holding_coverage=gbr._complete_holding_coverage(
+            result.holding_coverage,
+            obligations=obligations,
+            probability_witnesses={family: probability},
+            ineligible_by_family={},
+            ledger_snapshot_id=wealth.ledger_snapshot_id,
+            wealth_economic_identity=wealth.economic_identity,
+            selection_epoch_identity="selection",
+            book_epoch_identity=epoch.witness_identity,
+            selection_cut_at_utc=at,
+            decision_at_utc=at,
+            book_deadline_at_utc=epoch.captured_at_utc + epoch.max_age,
+        ),
+    )
+    row_id = gbr._store_global_auction_receipt(
+        conn,
+        selected=selected,
+        selection_epoch_identity="selection",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        probability_manifest=((family, probability.witness_identity),),
+        full_scope_identity=scope.scope_identity,
+        full_scope_family_keys=(family,),
+        probability_ineligible_by_family={},
+        book_epoch_identity=epoch.witness_identity,
+        book_asset_count=len(epoch.assets),
+        book_asset_states=epoch.asset_states,
+        wealth_witness=wealth,
+        fractional_kelly_multiplier=Decimal("0.25"),
+        book_captured_at_utc=epoch.captured_at_utc,
+        book_max_age=epoch.max_age,
+        expected_holding_obligations=obligations,
+        holding_probability_witnesses={family: probability},
+    )
+    assert row_id is not None
