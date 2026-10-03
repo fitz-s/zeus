@@ -1,5 +1,5 @@
 # Created: 2026-03-26
-# Last reused/audited: 2026-09-25
+# Last reused/audited: 2026-10-02
 # Authority basis: Phase 4B audited GRIB ingest + PLAN_v4 Phase 6 SourceRunContext linkage.
 #   2026-09-25: interval-censored boundary rows (statistical_calibration_addendum D2;
 #   docs/operations/current/plans/ens_boundary_interval_2026-09-25.md) persist per-member
@@ -13,7 +13,7 @@
 #   WAL=0 bytes — wedge is somewhere between rglob and first INSERT or in
 #   the per-file loop). Observation; not a fix. Expected to pinpoint the
 #   wedge on the next ingest cycle.
-# Lifecycle: created=2026-03-26; last_reviewed=2026-09-25; last_reused=2026-09-25
+# Lifecycle: created=2026-03-26; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Audited GRIB→ensemble_snapshots ingestor (Phase 4B / task #53);
 #          applies INV-14 identity spine and Law 5 causality gate before INSERT.
 # Reuse: Requires extracted local-calendar-day JSON files under FIFTY_ONE_ROOT
@@ -599,8 +599,9 @@ def _provenance_json(
     reader-inert full blobs computed by the ingest contract and by
     ``_low_local_day_min_interval_evidence`` respectively; only their identity
     fingerprints (sha256 + member_count) are persisted here. If the full
-    evidence is ever needed, retain the extraction payload: scalar
-    ``members_json`` alone cannot reconstruct native boundary endpoints.
+    Native capture receipts independently retain observed metadata bytes and
+    selected-point decoded periods when supplied; they do not restore a pruned
+    full-grid field. Legacy scalar ``members_json`` cannot reconstruct periods.
     """
     prov = {
         "data_version": payload.get("data_version"),
@@ -623,6 +624,8 @@ def _provenance_json(
         "grid_surface_evidence": payload.get("grid_surface_evidence"),
         "member_axis": _member_axis_provenance(payload),
     }
+    if payload.get("native_capture_receipt") is not None:
+        prov["native_capture_receipt"] = payload["native_capture_receipt"]
     # Reuse precomputed evidence when available to avoid duplicate timezone/range parsing.
     evidence = contract_evidence if contract_evidence is not None else _contract_evidence_fields(
         payload,

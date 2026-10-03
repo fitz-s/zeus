@@ -1,6 +1,6 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-09-30
-# Lifecycle: created=2026-05-03; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Last reused/audited: 2026-10-02
+# Lifecycle: created=2026-05-03; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Protect native snapshot linkage, land-cell proof and HIGH/LOW local-day boundary semantics.
 # Reuse: Inspect collector/ingester SourceRunContext and current grid/clock contracts before relying on this component suite.
 # Authority basis: LOW local-day-min interval provenance contract plus the original SourceRunContext contract.
@@ -165,6 +165,303 @@ def _land_run_context(issue_iso: str, proof: dict) -> SourceRunContext:
         source_available_at=max(issue + timedelta(hours=10), datetime.fromisoformat(proof["mask_source_fetched_at"])),
         grid_surface_source_evidence=_trusted_land_source(proof),
     )
+
+
+def _tiny_native_grib(tmp_path: Path, track_name: str, member_count: int = 51,
+                      *, issue: datetime | None = None, horizon: int = 24,
+                      boundary_member: int | None = None,
+                      grid_origin: tuple[float, float] = (51.75, 0.0)) -> tuple[Path, Path, Path, dict]:
+    """Real ecCodes messages, not a mocked header or configured body hash."""
+    ec = pytest.importorskip("eccodes")
+    from scripts import extract_open_ens_localday as extractor
+
+    track = extractor.TRACKS[track_name]
+    issue = issue or datetime(2026, 1, 1, tzinfo=UTC)
+    grid = {
+        "Ni": 2, "Nj": 2,
+        "latitudeOfFirstGridPointInDegrees": grid_origin[0],
+        "longitudeOfFirstGridPointInDegrees": grid_origin[1],
+        "latitudeOfLastGridPointInDegrees": grid_origin[0] - .25,
+        "longitudeOfLastGridPointInDegrees": grid_origin[1] + .25,
+        "iDirectionIncrementInDegrees": .25,
+        "jDirectionIncrementInDegrees": .25, "scanningMode": 0,
+    }
+
+    def message(param: int, member: int = 0, end: int = 0) -> bytes:
+        gid = ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+        try:
+            fields = {"centre": "ecmf", **grid,
+                      "dataDate": int(issue.strftime("%Y%m%d")), "dataTime": issue.hour * 100}
+            if param != 172:
+                fields.update(productDefinitionTemplateNumber=11)
+            for key, value in fields.items():
+                ec.codes_set(gid, key, value)
+            ec.codes_set(gid, "paramId", param)
+            if param == 172:
+                ec.codes_set(gid, "step", 0)
+                ec.codes_set_values(gid, [.2, .2, .8, .2])
+            else:
+                for key, value in {
+                    "dataType": "cf" if member == 0 else "pf", "number": member,
+                    "startStep": end - 3, "endStep": end,
+                }.items():
+                    ec.codes_set(gid, key, value)
+                # Distinct cells and periods make an index/window mixup observable.
+                value = 280 + member / 8 + end / 4
+                if boundary_member is not None and end in (6, 30):
+                    value = 270 if member == boundary_member and end == 6 else 310
+                ec.codes_set_values(gid, [value + 20, value + 30, value, value + 10])
+            return ec.codes_get_message(gid)
+        finally:
+            ec.codes_release(gid)
+
+    expected = {}
+    raw = tmp_path / f"{track_name}.grib2"
+    with raw.open("wb") as handle:
+        for member in range(member_count):
+            for end in range(3, horizon + 1, 3):
+                body = message(track.paramId, member, end)
+                handle.write(body)
+                expected[(member, end)] = body
+    mask = tmp_path / "lsm.grib2"
+    mask.write_bytes(message(172))
+    proof = tmp_path / "lsm-proof.json"
+    proof.write_text(json.dumps({
+        "source": "ecmwf_open_data_ifs_oper_fc_step0_lsm",
+        "source_url": "https://example.test/native-mask.grib2",
+        "source_index_url": "https://example.test/native-mask.index",
+        "source_cycle_time": issue.isoformat(),
+        "source_fetched_at": (issue + timedelta(hours=1)).isoformat(),
+        "source_index_offset": 0, "source_index_length": mask.stat().st_size,
+        "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
+    }))
+    return raw, mask, proof, expected
+
+
+@pytest.mark.parametrize("track_name", ("mx2t6_high", "mn2t6_low"))
+def test_real_native_capture_survives_typed_ingest_and_raw_prune(tmp_path, monkeypatch, track_name):
+    """Headers/body identity and decoded point periods survive; full grids do not."""
+    import base64
+    from scripts import extract_open_ens_localday as extractor
+    from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload
+
+    raw, mask, proof, expected = _tiny_native_grib(tmp_path, track_name)
+    observed_param = extractor.TRACKS[track_name].paramId
+    # Deliberately disagree with a declaration; capture must still use the gid.
+    monkeypatch.setitem(extractor.TRACKS, track_name,
+                        dataclasses.replace(extractor.TRACKS[track_name], paramId=-1))
+    station = _land_grid_proof()["station_geometry"]
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"cities": [{
+        "city": "London", "lat": station["lat"], "lon": station["lon"],
+        "timezone": "Europe/London", "unit": "C", "station_geometry": station,
+    }]}))
+    result = extractor.extract_open_ens_localday(
+        grib_path=raw, track_name=track_name, manifest_path=manifest,
+        output_root=tmp_path / "extracted", mask_grib_path=mask, mask_proof_path=proof,
+    )
+    assert result["written"] == 1, result
+    path = Path(result["sample_outputs"][0])
+    payload = json.loads(path.read_text())
+    receipt = payload["native_capture_receipt"]
+    repeated = extractor.extract_open_ens_localday(
+        grib_path=raw, track_name=track_name, manifest_path=manifest,
+        output_root=tmp_path / "replayed", mask_grib_path=mask, mask_proof_path=proof,
+    )
+    replayed = json.loads(Path(repeated["sample_outputs"][0]).read_text())
+    assert replayed["native_capture_receipt"] == receipt
+    assert receipt["capture_status"] == "OBSERVED"
+    assert receipt["capture_kind"] == "grib_metadata_and_selected_point_decode"
+    assert len(receipt["messages"]) == len(receipt["point_windows"]) == 408
+    assert receipt["selected_point"] == {"flat_index": 2, "lat": 51.5, "lon": 0.0}
+    for captured in receipt["messages"]:
+        headers = captured["observed_headers"]
+        body = expected[(headers["number"], headers["endStep"])]
+        assert captured["raw_message_sha256"] == hashlib.sha256(body).hexdigest()
+        assert captured["raw_message_length"] == len(body)
+        assert headers["paramId"] == observed_param
+        assert (headers["units"], headers["typeOfLevel"], headers["level"]) == (
+            "K", "heightAboveGround", 2,
+        )
+        assert headers["lengthOfTimeRange"] == 3
+        for section in captured["metadata_sections"]:
+            decoded = base64.b64decode(section["bytes_base64"], validate=True)
+            offset = section["offset"]
+            assert decoded == body[offset:offset + len(decoded)]
+            assert section["section_number"] in (0, 1, 3, 4)
+    assert all(len(member["native_windows"]) == 8 for member in payload["members"])
+    for window in receipt["point_windows"]:
+        value_k = 280 + window["member"] / 8 + window["end_step_hours"] / 4
+        assert window["value_k"] == value_k
+        assert window["value_native_unit"] == pytest.approx(value_k - 273.15)
+    # Changing a legacy declaration cannot turn it into an observed GRIB header.
+    assert payload["paramId"] == -1
+    typed = TiggeSnapshotPayload.from_json_dict(payload).to_json_dict()
+    assert typed["native_capture_receipt"] == receipt
+    path.write_text(json.dumps(typed))
+    metric = HIGH_LOCALDAY_MAX if track_name == "mx2t6_high" else LOW_LOCALDAY_MIN
+    conn = _conn()
+    context = _land_run_context(payload["issue_time_utc"], payload["grid_surface_evidence"])
+    assert ingest_json_file(conn, path, metric=metric, model_version="ecmwf_ens",
+                            overwrite=False, source_run_context=context) == "written"
+    stored = dict(conn.execute("SELECT * FROM ensemble_snapshots").fetchone())
+    canonical = json.loads(stored["provenance_json"])["native_capture_receipt"]
+    assert canonical == receipt
+    # Only this test's own generated raw artifacts are pruned.
+    for fixture_path in (raw, mask, proof, path):
+        fixture_path.unlink()
+    aggregate = max if metric == HIGH_LOCALDAY_MAX else min
+    rebuilt = [aggregate(window["value_native_unit"] for window in canonical["point_windows"]
+                         if window["member"] == member) for member in range(51)]
+    assert rebuilt == pytest.approx(json.loads(stored["members_json"]))
+    assert "raw_payload_hash" not in canonical
+    # The optional receipt never changes existing values, qualification or source clocks.
+    legacy = dict(typed)
+    legacy.pop("native_capture_receipt")
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(json.dumps(legacy))
+    legacy_conn = _conn()
+    assert ingest_json_file(legacy_conn, legacy_path, metric=metric, model_version="ecmwf_ens",
+                            overwrite=False, source_run_context=context) == "written"
+    old = dict(legacy_conn.execute("SELECT * FROM ensemble_snapshots").fetchone())
+    for key in ("members_json", "dataset_id", "contributes_to_target_extrema",
+                "forecast_window_attribution_status", "source_available_at"):
+        assert old[key] == stored[key]
+    assert "native_capture_receipt" not in json.loads(old["provenance_json"])
+
+
+@pytest.mark.parametrize("track_name", ("mx2t6_high", "mn2t6_low"))
+def test_native_byte_api_unknown_does_not_fabricate_proof_or_change_values(tmp_path, monkeypatch, track_name):
+    from scripts import extract_open_ens_localday as extractor
+    from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload
+
+    raw, mask, proof, _ = _tiny_native_grib(tmp_path, track_name)
+    station = _land_grid_proof()["station_geometry"]
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"cities": [{
+        "city": "London", "lat": station["lat"], "lon": station["lon"],
+        "timezone": "Europe/London", "unit": "C", "station_geometry": station,
+    }]}))
+    kwargs = dict(grib_path=raw, track_name=track_name, manifest_path=manifest,
+                  mask_grib_path=mask, mask_proof_path=proof)
+    before = extractor.extract_open_ens_localday(output_root=tmp_path / "before", **kwargs)
+    observed = json.loads(Path(before["sample_outputs"][0]).read_text())
+    monkeypatch.setattr(extractor, "codes_get_message", lambda gid: None)
+    after = extractor.extract_open_ens_localday(output_root=tmp_path / "after", **kwargs)
+    unknown = json.loads(Path(after["sample_outputs"][0]).read_text())
+    receipt = unknown["native_capture_receipt"]
+    assert receipt["capture_status"] == "UNKNOWN"
+    assert all(message["capture_status"] == "UNKNOWN" for message in receipt["messages"])
+    assert all("raw_message_sha256" not in message for message in receipt["messages"])
+    assert all(window["raw_message_sha256"] is None for window in receipt["point_windows"])
+    assert receipt["messages"][0]["observed_headers"]["units"] == "K"
+    assert TiggeSnapshotPayload.from_json_dict(unknown).to_json_dict()["native_capture_receipt"] == receipt
+    for key in ("members", "member_count", "missing_members", "training_allowed",
+                "boundary_ambiguous", "causality", "data_version"):
+        assert unknown[key] == observed[key]
+
+
+@pytest.mark.parametrize("member_count", (50, 51))
+def test_real_low_capture_preserves_boundary_nulls_and_member_count(tmp_path, monkeypatch, member_count):
+    from scripts import extract_open_ens_localday as extractor
+    from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload
+
+    raw, mask, proof, _ = _tiny_native_grib(tmp_path, "mn2t6_low", member_count)
+    station = _land_grid_proof()["station_geometry"]
+    manifest = tmp_path / "manifest.json"
+    # The timezone offset cuts the actual 03–06Z minimum window at 05Z.
+    # A synthetic city label keeps this extraction-only fixture out of ingest authority.
+    manifest.write_text(json.dumps({"cities": [{
+        "city": "Boundary fixture", "lat": station["lat"], "lon": station["lon"],
+        "timezone": "America/New_York", "unit": "C", "station_geometry": station,
+    }]}))
+    kwargs = dict(grib_path=raw, track_name="mn2t6_low", manifest_path=manifest,
+                  mask_grib_path=mask, mask_proof_path=proof)
+    before = extractor.extract_open_ens_localday(output_root=tmp_path / "before", **kwargs)
+    payload = json.loads(Path(before["sample_outputs"][0]).read_text())
+    receipt = payload["native_capture_receipt"]
+    assert receipt["capture_status"] == "OBSERVED"
+    assert len(receipt["messages"]) == len(receipt["point_windows"]) == member_count * 7
+    assert payload["member_count"] == 51
+    assert payload["missing_members"] == ([50] if member_count == 50 else [])
+    assert sum(bool(member["native_windows"]) for member in payload["members"]) == member_count
+    assert payload["boundary_policy"]["ambiguous_member_count"] == member_count
+    assert payload["boundary_ambiguous"] is True and payload["training_allowed"] is False
+    assert all(member["value_native_unit"] is None for member in payload["members"])
+    assert TiggeSnapshotPayload.from_json_dict(payload).to_json_dict()["members"] == payload["members"]
+    monkeypatch.setattr(extractor, "codes_get_message", lambda gid: None)
+    after = extractor.extract_open_ens_localday(output_root=tmp_path / "unknown", **kwargs)
+    unknown = json.loads(Path(after["sample_outputs"][0]).read_text())
+    assert unknown["native_capture_receipt"]["capture_status"] == "UNKNOWN"
+    for key in ("members", "member_count", "missing_members", "training_allowed",
+                "boundary_policy", "boundary_ambiguous"):
+        assert payload[key] == unknown[key]
+
+
+def test_real_low_capture_preserves_51_records_50_usable_boundary_member(tmp_path, monkeypatch):
+    from scripts import extract_open_ens_localday as extractor
+    from src.contracts.tigge_snapshot_payload import TiggeSnapshotPayload
+    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
+
+    issue = datetime(2025, 12, 31, 12, tzinfo=UTC)
+    raw, mask, proof, expected = _tiny_native_grib(
+        tmp_path, "mn2t6_low", issue=issue, horizon=30, boundary_member=22,
+        grid_origin=(22.5, 114.0),
+    )
+    # Explicit isolated station fixture: the HKO source has no airport registry
+    # identity in this checkout. This is not a live source/READY assertion.
+    city = runtime_cities_by_name()["Hong Kong"]
+    station = {**_land_grid_proof()["station_geometry"],
+               "station_id": "HKO_HQ", "lat": city.lat, "lon": city.lon}
+    real_station_reader = runtime_station_geometry_for_city
+    monkeypatch.setattr("src.config.runtime_station_geometry_for_city",
+                        lambda city: station if getattr(city, "name", city) == "Hong Kong" else real_station_reader(city))
+    manifest = tmp_path / "manifest.json"
+    # Use a real canonical city/contract timezone; the private grid is synthetic.
+    manifest.write_text(json.dumps({"cities": [{
+        "city": "Hong Kong", "lat": station["lat"], "lon": station["lon"],
+        "timezone": "Asia/Hong_Kong", "unit": "C", "station_geometry": station,
+    }]}))
+    result = extractor.extract_open_ens_localday(
+        grib_path=raw, track_name="mn2t6_low", manifest_path=manifest,
+        output_root=tmp_path / "extracted", mask_grib_path=mask, mask_proof_path=proof,
+    )
+    path = next(Path(value) for value in result["sample_outputs"] if "target_2026-01-01" in value)
+    payload = json.loads(path.read_text())
+    assert payload["local_day_start_utc"] == "2025-12-31T16:00:00+00:00"
+    assert payload["local_day_end_utc"] == "2026-01-01T16:00:00+00:00"
+    assert payload["member_count"] == 51 and payload["missing_members"] == []
+    assert [member["member"] for member in payload["members"] if member["value_native_unit"] is None] == [22]
+    assert all(len(member["native_windows"]) == 9 for member in payload["members"])
+    receipt = payload["native_capture_receipt"]
+    assert len(receipt["point_windows"]) == len(receipt["messages"]) == 51 * 9
+    for window in receipt["point_windows"]:
+        body = expected[(window["member"], window["end_step_hours"])]
+        assert window["raw_message_sha256"] == hashlib.sha256(body).hexdigest()
+    assert TiggeSnapshotPayload.from_json_dict(payload).to_json_dict()["native_capture_receipt"] == receipt
+    surface = payload["grid_surface_evidence"]
+    conn = _conn()
+    assert ingest_json_file(
+        conn, path, metric=LOW_LOCALDAY_MIN, model_version="ecmwf_ens", overwrite=False,
+        source_run_context=_land_run_context(issue.isoformat(), surface),
+    ) == "written"
+    stored = dict(conn.execute("SELECT * FROM ensemble_snapshots").fetchone())
+    members = json.loads(stored["members_json"])
+    assert len(members) == 51 and sum(value is not None for value in members) == 50
+    assert members[22] is None
+    canonical = json.loads(stored["provenance_json"])["native_capture_receipt"]
+    assert canonical == receipt
+    for fixture_path in (raw, mask, proof, path):
+        fixture_path.unlink()
+    for member in range(51):
+        windows = [window for window in canonical["point_windows"] if window["member"] == member]
+        inner = min(window["value_native_unit"] for window in windows
+                    if window["start_step_hours"] >= 4 and window["end_step_hours"] <= 28)
+        boundary = min(window["value_native_unit"] for window in windows
+                       if window["start_step_hours"] < 4 or window["end_step_hours"] > 28)
+        assert (boundary < inner) is (member == 22)
+        if member != 22:
+            assert members[member] == pytest.approx(inner)
 
 
 def _assert_current_station_geometry_binding(row: sqlite3.Row, monkeypatch: pytest.MonkeyPatch) -> None:

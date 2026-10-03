@@ -99,6 +99,7 @@ file_naming:
         resume_backfills_sequential.sh: K2 sequential backfill orchestrator; resume_ prefix reflects its role as a restart wrapper
         r3_drift_check.py: R3 packet drift shim name fixed by existing packet/runbook references; read-only validation utility.
         refit_platt.py: established repair command name (canonical)
+        ingest_grib_to_snapshots.py: established canonical ETL library imported by the authorized collector; preserve API/import compatibility while standalone manual CLI remains DO_NOT_RUN
         regenerate_registries.py: harness-debate manifest audit/update helper; verb retained because docs already cite this command and safe use is audit-only
         replay_parity.py: established telemetry command
         semantic_linter.py: established enforcement tool

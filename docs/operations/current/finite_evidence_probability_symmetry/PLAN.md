@@ -10995,3 +10995,150 @@ symlink reads live config SHA256
 `d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae`;
 pytest runs on isolated private temporary state with live DB isolation enabled.
 Remove that symlink at handoff; no live config/DB/venue writes were performed.
+
+### 2026-10-02 Forward ENS native-capture evidence preservation
+
+Verified gap, not a demonstrated temperature-value error: the Open Data ENS
+extractor validates actual K/2m/member/native 3h headers but discards those
+observations and message-byte identity; top-level paramId is configuration.
+HIGH carries decoded period windows, LOW does not. Typed payload roundtrip
+drops new top-level evidence and canonical ingest retains only LOW interval
+fingerprints, so raw retention can erase the physical capture audit trail.
+
+Own only scripts/extract_open_ens_localday.py,
+src/contracts/tigge_snapshot_payload.py, scripts/ingest_grib_to_snapshots.py,
+necessary existing tests/registries and this plan. Add an optional compact
+native_capture_receipt from actual gid message bytes: per-message SHA256/length,
+observed variable/unit/height/member/issue/window/grid fields, and feasible raw
+GRIB metadata-section bytes. Preserve selected-point native period values for
+both HIGH and LOW with their message identity and selected index/coordinates.
+Carry the receipt unchanged through the existing typed payload into canonical
+provenance_json. Never relabel a multi-message aggregate as one raw body hash.
+
+Metadata/header bytes prove observed physical descriptors, not complete
+temperature-grid decoding. Persisted selected-point decoded values support
+independent canonical reaggregation after self-generated test raw files are
+removed; they cannot restore a pruned original full-grid GRIB. Missing byte
+capture stays explicitly UNKNOWN, never a fabricated hash or verification.
+Old receipt-free payloads, all values/units/window qualification, probability,
+freshness, source authority, schema and retention stay unchanged. Expired dated
+current-data docs were read only as routing context, not current runtime proof.
+
+SCOPE: the exact new native message/city/date/metric capture. DRAIN: the next
+ordinary successful extraction and canonical ingestion preserves its own
+receipt. RESET: each subsequent capture independently records its real bytes;
+no old evidence is reconstructed and no local missing receipt adds a gate.
+Acceptance: actual-byte HIGH/LOW tiny ecCodes fixture -> typed roundtrip ->
+isolated ingest -> raw-fixture prune -> canonical decoded reaggregation; old
+payload/value/qualification parity and UNKNOWN negatives; required scoped
+checks, with real GRIB evidence explicitly distinct from mocks. Host ecCodes
+2.46.2 and its MEMFS samples are available. No downloads, live DB writes,
+push/load, or raw-retention edits in this implementation lane.
+
+Touched writer registry conflict is resolved in this slice, not dismissed as
+unrelated drift: ingest_grib_to_snapshots was incorrectly marked unimplemented,
+world_data_write and dry-run despite the current in-process collector calling
+ingest_track/SourceRunContext (ecmwf_open_data.py:183–187,3697) under the existing
+writer lock/forecasts connection. §1d-bis names it as the single admission writer.
+Register that existing active long-lived ETL library writer precisely for
+FORECAST_CLASS ensemble_snapshots; SourceRunContext binds source_run identity,
+it does not write that table here. ingest_track's existing success commit/error
+rollback remains unchanged. Legacy/manual main writes immediately with no
+dry-run/apply boundary: canonical_command remains DO_NOT_RUN and this task
+neither invokes nor authorizes that CLI or local_post_extract_chain.sh.
+The established ingest_grib_to_snapshots.py library filename receives one exact
+existing-format naming exception for its canonical import/API compatibility;
+no global prefix, rename or unrelated registry drift is changed.
+
+Native-capture implementation verification (checked=2026-W40;
+basis=actual-byte tests and exact baseline XML; until=recheck-on-use): seven
+new cases cover HIGH/LOW real ecCodes-encoded 2m/K/member/3h messages, typed
+roundtrip, isolated canonical ingest, self-generated raw-file prune and point
+reaggregation; repeated identical bytes yield identical receipts. A deliberately
+wrong configured paramId cannot replace the observed gid paramId. Missing byte
+API stays UNKNOWN without a synthetic hash or changed numeric admission.
+LOW missing-pf50/all-NULL cases are separate from the 51-record/50-usable HK
+timezone case: nine overlapping native windows per member, only member22's
+strictly colder boundary quarantined, its NULL and all 459 decoded periods and
+message hashes persist canonically. HK uses an explicit private test station
+fixture and encoded grid; no fixture is called a current ECMWF provider body.
+
+Final native contract/component subset: 79 PASS. Initial five-file component
+batch: 112 PASS/10 collector failures; all ten reproduce with original 4337c9cae
+extractor/class/provenance functions restored only in test memory (six exact
+messages, four only sqlite.Row repr addresses). Required data ten-file batch:
+268 PASS/4 FAIL, exact IDs/messages match final ff5415ea baseline XML. Required
+contracts/scripts module-book batch: 465 PASS/45 FAIL; original native functions
+and three old registry blobs restored in memory reproduce all 45 failures
+(42 exact messages, three only StringIO/generator repr addresses). Existing
+writer-registration required tests: 19 PASS/3 FAIL; all three exact original
+messages (legacy fixtures lack ensemble_snapshots/calibration_pairs tables). These are baseline
+failures, not clean full-suite passes; no unrelated assertions, schema or missing
+legacy skill/header surfaces were repaired.
+
+Evidence logs/XML: /tmp/zeus-ens-native-{components,components-baseline,
+required10,scoped-books,scoped-books-baseline,writer-required,writer-baseline,
+final-contracts,low-minority}-20261002.{xml,log}. Actual upstream extractor,
+typed-payload and ingest-provenance seams each independently lose the receipt
+in the HIGH/LOW real-byte antibody (two RED per seam), whereas current chain
+preserves it. Compile, whitespace, planning evidence, scoped freshness and
+source-rationale delta pass; both changed script rows have no registry issue.
+The other 281 script issues remain unrelated drift, not a whole-repo pass.
+The only extra naming surface is the approved exact ingester exception.
+Read-only test settings symlink loads live config SHA256
+d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae;
+private pytest state and in-memory DBs isolate writes. Remove the symlink at
+handoff. Forward normal collector receipt capture still needs a genuinely new
+provider run after loading; old raw/evidence gaps cannot be repaired by tests.
+
+### 2026-10-02 Current authenticated FILLED candidate drainage parity
+
+Adjacent verified capital-drain gap: exact command 038b is FILLED with a
+same-order active five-share position and authenticated chain/cash evidence,
+but its fill-event/execution-fact projection is missing. The actual projection
+blocker includes 038b; the priority authenticated candidate reader returns no
+candidate, while the generic latest-unprojected-FILLED reader finds one positive
+WS_USER trade candidate. Existing FILLED handling admits only different-order
+top-up/prior-execution cases, leaving the ordinary same-order new-position
+drain unreachable. This is a candidate-parity defect, not a cash budget change.
+
+The separately owned command_recovery.py slice will align the existing priority
+candidate path with exact authenticated same-order economic facts and normal
+projection/reconciliation. Preserve source authentication, order/token/market,
+positive quantity/price/principal binding and strict reducer proof; missing or
+conflicting proof retains the obligation. No inferred funds, balance changes,
+cash-gate bypass, new cadence, venue call or manual DB reducer invocation.
+Writer ownership: cash leaf owns command_recovery.py and its necessary existing
+recovery tests; native-capture leaf owns registries and this shared plan, with
+disjoint source ownership and no reversion of other work.
+
+SCOPE: the exact command/order/market and its unresolved projection/obligation.
+DRAIN: existing normal recovery candidate consumption, fill projection and
+strict same-connection obligation reconciliation. RESET: exact authenticated
+projection and terminal obligation resolution remove that command's debt;
+new unknown/conflicting evidence is not promoted. Acceptance: actual candidate
+and normal-cadence reachability RED/GREEN, same-order positive economics,
+different-order/prior-execution compatibility, negative proof and idempotence
+antibodies; cash values and gates unchanged. Overall runtime money acceptance
+remains separate from forward native-capture evidence acceptance.
+
+Candidate-parity closeout: worker final 26 new + nine related existing cases
+PASS (35); complete command-recovery file 873 PASS/13 FAIL, with original HEAD
+versions of only its two changed functions restored in test memory reproducing
+the same 13 baseline failures. Independent review accepts exact same-order
+token membership, unchanged different-order/prior-execution guard, scoped
+reduction-aware projection and existing strict savepoint/postconditions.
+Partial SELL or CAPITAL_REDUCTION with missing immutable ENTRY provenance may
+still retain OPEN debt when strict economic/event reproduction is unavailable;
+defer that incompleteness rather than inventing the original acquisition or
+inflating current residual shares. The negative antibody preserves that debt
+and holding, not a claim that every partial-reduction case drains.
+
+Final combined source validation: 33 PASS (seven new native byte cases plus
+26 new cash cases), required data ten files 268 PASS/four exact known baseline
+failures; /tmp/zeus-ens-native-capital-final-{focused,required10}-20261002.{xml,log}.
+Exact baseline comparisons including required writer checks are in
+/tmp/zeus-ens-native-baseline-comparison-20261002.log. Freshness, compile and
+whitespace checks pass. Both independent bounded reviews accept; production
+loading and real normal-cadence cash/next-provider-run evidence remain distinct
+runtime obligations, not proof supplied by these isolated tests.

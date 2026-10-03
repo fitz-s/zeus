@@ -951,13 +951,13 @@ scripts:
     dry_run_default: false
     apply_flag: implicit
     external_inputs: [ECMWF_OPEN_DATA_GRIB]
-    reuse_when: "Extract a checked-in ECMWF Open Data ENS GRIB into local-calendar-day JSON payloads for the canonical ingester."
+    reuse_when: "Extract checked-in ECMWF Open Data ENS GRIB into local-calendar-day JSON for canonical ingest, preserving optional real-message hash/observed metadata bytes and HIGH/LOW selected-point periods."
     do_not_use_when: "Do not use for settlement observations, direct DB writes, or a GRIB whose native startStep/endStep/stepRange/lengthOfTimeRange provenance cannot be verified."
     canonical_command: "python3 scripts/extract_open_ens_localday.py --grib-path PATH --track mx2t6_high|mn2t6_low --manifest-path PATH --output-root PATH"
     delete_policy: retain_until_superseded
     promotion_barrier: "JSON output is consumed by the canonical ingest path; it does not by itself authorize live forecasts or trading."
     required_helpers: []
-    required_tests: [tests/test_ecmwf_open_data_collect_cycle.py]
+    required_tests: [tests/test_ecmwf_open_data_collect_cycle.py, tests/test_ingest_grib_source_run_context.py]
   force_lifecycle.py: {class: repair, apply_flag: implicit, target_db: state/zeus_trades.db, unguarded_write_rationale: "Direct lifecycle forcing is unsafe and currently unguarded; do not run outside a dedicated repair packet."}
   watch_full_loss_investigation.py:
     class: runtime_support
@@ -987,31 +987,25 @@ scripts:
     reason: "Read-only harness-debate audit utility for recent architecture/history_lore.yaml card mentions; outputs read_only_evidence evidence only."
     write_targets: [stdout, temp, .code-review-graph]
   ingest_grib_to_snapshots.py:
-    class: promotion_candidate
-    status: pending_implementation
-    lifecycle: promotion_candidate
-    owner_packet: task_2026-04-14_session_backlog_53
-    created_for: "Audited TIGGE GRIB-to-ensemble_snapshots ingestion replacement."
-    promotion_deadline: "2026-06-15"
-    promotion_decision: deferred_pending_implementation
-    authority_scope: world_data_write
-    reuse_when: "After task #53 implements audited TIGGE GRIB-to-snapshots ingestion."
-    do_not_use_when: "Before task #53 implementation and dry-run evidence exist."
+    class: etl_writer
+    status: active
+    lifecycle: long_lived
+    authority_scope: forecast_snapshot_write
+    reuse_when: "Authorized in-process ingest_track/SourceRunContext called by src.data.ecmwf_open_data.collect_open_ens_cycle under its existing writer lock and forecasts connection; replacement_final_form_2026_06_09 §1d-bis single admission writer. ingest_track commits the supplied connection on success and rolls it back on errors. Optional native-capture evidence persists unchanged in canonical provenance_json, not as a single aggregate raw-body hash."
+    do_not_use_when: "Legacy/manual immediate-write CLI main is not authorized: it has no dry-run/apply boundary. Do not invoke it or local_post_extract_chain.sh under this library registration, infer missing source proof, or bypass existing native geometry/clock/contract admission."
     canonical_command: DO_NOT_RUN
-    delete_policy: retain_until_implemented
-    # K1-batch2 fix 2026-05-17: writes ensemble_snapshots / source_run to forecasts DB.
-    read_targets: [external_tigge_grib_extracts]
-    write_targets: [state/zeus-forecasts.db]
-    dry_run_default: true
-    apply_flag: null
+    delete_policy: retain_until_superseded
+    read_targets: [extracted_local_day_json, SourceRunContext, ensemble_snapshots]
+    write_targets: [ensemble_snapshots]
+    dry_run_default: false
+    apply_flag: implicit
     target_db: state/zeus-forecasts.db
-    external_inputs: [TIGGE_GRIB_CACHE]
-    dangerous_if_run: false
-    promotion_barrier: "Requires task #53 implementation, dry-run evidence, and reviewer approval."
-    # K1-batch2 fix 2026-05-17: now uses ZEUS_FORECASTS_DB_PATH / get_forecasts_connection
-    # (ensemble_snapshots + source_run are forecast_class post-K1 split).
-    required_helpers: [src.state.db.get_forecasts_connection]
-    required_tests: [tests/test_data_rebuild_relationships.py, tests/test_k1_reader_isolation_batch2.py]
+    external_inputs: [extracted_local_day_json]
+    dangerous_if_run: true
+    unguarded_write_rationale: "Registered active FORECAST_CLASS library writer uses the normal collector's lock/connection and existing typed contract. CLI writes immediately and remains DO_NOT_RUN; this row grants no standalone production CLI permission."
+    promotion_barrier: "Only existing collector library ingestion is registered; optional metadata/point decode receipts are audit evidence, not full-grid replay, new probability authority or legacy-CLI approval."
+    required_helpers: [src.data.ecmwf_open_data.collect_open_ens_cycle, src.contracts.tigge_snapshot_payload.TiggeSnapshotPayload, src.contracts.snapshot_ingest_contract.validate_snapshot_contract]
+    required_tests: [tests/test_data_rebuild_relationships.py, tests/test_k1_reader_isolation_batch2.py, tests/test_ingest_grib_source_run_context.py, tests/test_ingest_grib_law5_antibody.py]
   install_codegraph_hooks.sh: {class: runtime_support, lifecycle: long_lived, status: active, canonical_command: "bash scripts/install_codegraph_hooks.sh [repo-or-worktree-root]", read_targets: [repo, git_config], write_targets: [git_hooks_path, git_hooks_path/codegraph-sync-roots, stdout], dangerous_if_run: false, dry_run_default: false, reason: "Installs an idempotent quiet post-commit CodeGraph sync hook at the effective git hooks path and registers only explicit roots, so global hooksPath does not make unrelated repos run codegraph."}
   live_readiness_check.py:
     class: enforcement

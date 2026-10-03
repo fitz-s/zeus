@@ -28659,19 +28659,31 @@ def _authenticated_entry_trade_fact_candidates(
            AND (
                 cmd.state != 'FILLED'
                 OR (
-                    lower(COALESCE(pc.order_id, '')) != lower(cmd.venue_order_id)
-                    AND EXISTS (
-                        SELECT 1
-                          FROM execution_fact prior_execution
-                          JOIN venue_commands prior_command
-                            ON prior_command.command_id = prior_execution.command_id
-                         WHERE prior_execution.position_id = cmd.position_id
-                           AND prior_execution.command_id != cmd.command_id
-                           AND prior_execution.order_role = 'entry'
-                           AND prior_execution.voided_at IS NULL
-                           AND prior_execution.filled_at IS NOT NULL
-                           AND prior_execution.shares > 0
-                           AND prior_command.token_id = cmd.token_id
+                    (
+                        pc.position_id IS NULL
+                        OR pc.phase = 'pending_entry'
+                        OR (
+                            lower(COALESCE(pc.order_id, '')) = lower(cmd.venue_order_id)
+                            AND cmd.token_id IN (
+                                COALESCE(pc.token_id, ''), COALESCE(pc.no_token_id, '')
+                            )
+                        )
+                        OR (
+                            lower(COALESCE(pc.order_id, '')) != lower(cmd.venue_order_id)
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM execution_fact prior_execution
+                                  JOIN venue_commands prior_command
+                                    ON prior_command.command_id = prior_execution.command_id
+                                 WHERE prior_execution.position_id = cmd.position_id
+                                   AND prior_execution.command_id != cmd.command_id
+                                   AND prior_execution.order_role = 'entry'
+                                   AND prior_execution.voided_at IS NULL
+                                   AND prior_execution.filled_at IS NOT NULL
+                                   AND prior_execution.shares > 0
+                                   AND prior_command.token_id = cmd.token_id
+                            )
+                        )
                     )
                     AND (
                         NOT EXISTS (
@@ -29213,6 +29225,31 @@ def _reconcile_authenticated_entry_trade_fact(
         raise ValueError(
             "terminal FILLED entry lacks complete authenticated fill economics"
         )
+    terminal_projection_candidate = None
+    if already_filled and str(command.get("projected_phase") or "") in {
+        "active", "day0_window", "pending_exit",
+    }:
+        existing_fill = conn.execute(
+            """
+            SELECT 1 FROM position_events
+             WHERE position_id = ? AND event_type = 'ENTRY_ORDER_FILLED'
+               AND (command_id = ? OR lower(COALESCE(order_id, '')) = lower(?))
+             LIMIT 1
+            """,
+            (str(command.get("position_id") or ""), command_id, venue_order_id),
+        ).fetchone()
+        if existing_fill is None:
+            # SCOPE: this FILLED command's missing acquisition provenance.
+            # DRAIN: the same scheduled priority fold uses the existing
+            # reduction-aware materializer, including a chain-rescued holding.
+            # RESET: exact entry event/execution facts exist; re-observation
+            # cannot add the holding again or resurrect released shares.
+            candidates = _latest_unprojected_filled_entry_candidates(
+                conn, command_id=command_id,
+            )
+            if len(candidates) != 1:
+                return "stayed"
+            terminal_projection_candidate = candidates[0]
     cancel_pending = command_state == CommandState.CANCEL_PENDING.value
     terminal_fill_review = command_state == CommandState.REVIEW_REQUIRED.value
     if (cancel_pending or terminal_fill_review) and not complete:
@@ -29385,19 +29422,24 @@ def _reconcile_authenticated_entry_trade_fact(
                         **projection_command,
                         "state": str(canonical_command["state"] or ""),
                     }
-        _ensure_entry_fill_position_event(
-            conn,
-            command=projection_command,
-            venue_order_id=venue_order_id,
-            filled_size=_decimal_text(filled),
-            fill_price=_decimal_text(fill_price),
-            observed_at=_coerce_iso_datetime(observed_at),
-            command_event=event_type,
-            order_fact_source=source,
-            authoritative_market_metadata=snapshot_market_identity,
-            defer_identity_finding_until_rollback=True,
-            decision_log_id=terminal_fill_decision_log_id,
-        )
+        if terminal_projection_candidate is not None:
+            _append_filled_entry_projection_repair(
+                conn, candidate=terminal_projection_candidate,
+            )
+        else:
+            _ensure_entry_fill_position_event(
+                conn,
+                command=projection_command,
+                venue_order_id=venue_order_id,
+                filled_size=_decimal_text(filled),
+                fill_price=_decimal_text(fill_price),
+                observed_at=_coerce_iso_datetime(observed_at),
+                command_event=event_type,
+                order_fact_source=source,
+                authoritative_market_metadata=snapshot_market_identity,
+                defer_identity_finding_until_rollback=True,
+                decision_log_id=terminal_fill_decision_log_id,
+            )
         expected_state = (
             CommandState.FILLED.value if complete else CommandState.PARTIAL.value
         )

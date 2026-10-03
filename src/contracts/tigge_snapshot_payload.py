@@ -1,5 +1,5 @@
 # Created: 2026-04-29
-# Last reused/audited: 2026-04-29
+# Last reused/audited: 2026-10-02
 # Authority basis: Antibody #16 — TIGGE extractor↔ingester schema drift fix.
 #   Derived from full field audit of:
 #     scripts/extract_tigge_mx2t6_localday_max.py (_finalize_record)
@@ -119,6 +119,7 @@ class TiggeSnapshotPayload:
         forecast_window_start_local: Optional[str] = None,
         forecast_window_end_local: Optional[str] = None,
         grid_surface_evidence: Optional[dict] = None,
+        native_capture_receipt: Optional[dict] = None,
     ) -> None:
         self.generated_at = generated_at
         self.data_version = data_version
@@ -164,6 +165,7 @@ class TiggeSnapshotPayload:
         self.forecast_window_start_local = forecast_window_start_local
         self.forecast_window_end_local = forecast_window_end_local
         self.grid_surface_evidence = grid_surface_evidence
+        self.native_capture_receipt = native_capture_receipt
 
     def to_json_dict(self) -> dict:
         """Produce a JSON-serializable dict. None fields are omitted."""
@@ -215,6 +217,7 @@ class TiggeSnapshotPayload:
             ("forecast_window_start_local", "forecast_window_start_local"),
             ("forecast_window_end_local", "forecast_window_end_local"),
             ("grid_surface_evidence", "grid_surface_evidence"),
+            ("native_capture_receipt", "native_capture_receipt"),
         ]:
             val = getattr(self, attr)
             if val is not None:
@@ -309,6 +312,7 @@ class TiggeSnapshotPayload:
             forecast_window_start_local=d.get("forecast_window_start_local"),
             forecast_window_end_local=d.get("forecast_window_end_local"),
             grid_surface_evidence=d.get("grid_surface_evidence"),
+            native_capture_receipt=d.get("native_capture_receipt"),
         )
 
     def validate(self) -> None:

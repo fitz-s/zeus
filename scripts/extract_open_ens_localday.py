@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # Created: 2026-09-22
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-02
 # Authority basis: current OpenData source contract; native 3h local-day extrema.
-# Lifecycle: long_lived; raw GRIB -> decoded JSON only; no DB writes.
+# Lifecycle: created=2026-09-22; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Purpose: Native ENS GRIB -> local-day JSON with optional byte/point capture; no DB writes.
+# Reuse: Use the collector's explicit coordinate manifest and same-cycle land-mask proof.
 """Decode native ENS windows at settlement coordinates.
 
 HIGH retains every member's inner and overlapping boundary windows so the
@@ -13,6 +15,7 @@ are preserved; crossing-midnight extrema are never reassigned to a local day.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import logging
@@ -27,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 from eccodes import (
     codes_get,
+    codes_get_message,
     codes_get_values,
     codes_grib_new_from_file,
     codes_is_defined,
@@ -407,6 +411,63 @@ def _read_land_mask(mask_path: Path, proof_path: Path) -> dict[str, object]:
             codes_release(gid)
 
 
+def _native_message_capture(gid: int) -> dict[str, Any]:
+    """Capture observed metadata and byte identity, not a full-grid replay body.
+
+    Optional audit capture must not change the existing numeric/eligibility path.
+    No configuration declaration or synthetic digest substitutes for missing bytes.
+    """
+    capture: dict[str, Any] = {"capture_status": "UNKNOWN", "observed_headers": {}}
+    try:
+        for field in (
+            "edition", "centre", "tablesVersion", "discipline", "paramId",
+            "shortName", "units", "typeOfLevel", "level", "dataDate", "dataTime",
+            "dataType", "number", "perturbationNumber", "stepUnits", "stepType",
+            "startStep", "endStep", "stepRange", "lengthOfTimeRange",
+            "indicatorOfUnitForTimeRange", "productDefinitionTemplateNumber",
+            "typeOfStatisticalProcessing", *_GRID_KEYS,
+        ):
+            if codes_is_defined(gid, field):
+                capture["observed_headers"][field] = codes_get(gid, field)
+        if not all(field in capture["observed_headers"] for field in (
+            "paramId", "shortName", "units", "typeOfLevel", "level",
+            "dataDate", "dataTime", "dataType", "startStep", "endStep",
+            "stepRange", "lengthOfTimeRange", "indicatorOfUnitForTimeRange",
+        )):
+            raise ValueError("native physical headers unavailable")
+        raw = codes_get_message(gid)
+        if not isinstance(raw, bytes) or not raw:
+            raise ValueError("native message bytes unavailable")
+        capture["raw_message_sha256"] = hashlib.sha256(raw).hexdigest()
+        capture["raw_message_length"] = len(raw)
+        # GRIB2 sections 0/1/3/4 describe identity/grid/product. Do not persist
+        # section 7 or claim these metadata bytes can reconstruct its field.
+        sections = []
+        if raw[:4] != b"GRIB" or raw[7] != 2 or len(raw) < 20:
+            raise ValueError("unsupported native metadata layout")
+        if int.from_bytes(raw[8:16], "big") != len(raw) or raw[-4:] != b"7777":
+            raise ValueError("invalid native message framing")
+        sections.append({"section_number": 0, "offset": 0,
+                         "bytes_base64": base64.b64encode(raw[:16]).decode("ascii")})
+        offset = 16
+        while offset < len(raw) - 4:
+            length = int.from_bytes(raw[offset:offset + 4], "big")
+            if length < 5 or offset + length > len(raw) - 4:
+                raise ValueError("invalid native metadata section length")
+            number = raw[offset + 4]
+            if number in (1, 3, 4):
+                sections.append({"section_number": number, "offset": offset,
+                                 "bytes_base64": base64.b64encode(
+                                     raw[offset:offset + length]).decode("ascii")})
+            offset += length
+        if offset != len(raw) - 4 or {row["section_number"] for row in sections} != {0, 1, 3, 4}:
+            raise ValueError("native metadata sections incomplete")
+        capture.update(capture_status="OBSERVED", metadata_sections=sections)
+    except Exception as exc:
+        capture["unavailable_reason"] = type(exc).__name__
+    return capture
+
+
 def _scan_grib_with_city_values(
     grib_path: Path,
     track: TrackConfig,
@@ -642,6 +703,7 @@ def _scan_grib_with_city_values(
                         "start_step": start_step,
                         "end_step": end_step,
                         "step_range": raw_step_range,
+                        "native_capture": _native_message_capture(gid),
                         "city_values_k": {},
                     }
                 values = codes_get_values(gid)
@@ -787,6 +849,8 @@ def extract_open_ens_localday(
             members_inner_ranges: dict[int, list[str]] = {}
             members_boundary_ranges: dict[int, list[str]] = {}
             members_native_windows: dict[int, list[dict[str, Any]]] = {}
+            native_messages: list[dict[str, Any]] = []
+            point_windows: list[dict[str, Any]] = []
             selected_step_ranges_inner: set[str] = set()
             selected_step_ranges_boundary: set[str] = set()
             for (member, step_hours), bucket in entries.items():
@@ -804,12 +868,21 @@ def extract_open_ens_localday(
                 # is intentionally not reconstructed from endStep so the
                 # ingester can prove boundary clipping per member.
                 step_label = str(bucket["step_range"])
-                if track.mode == "high":
-                    members_native_windows.setdefault(member, []).append({
-                        "start_step_hours": int(bucket["start_step"]),
-                        "end_step_hours": int(bucket["end_step"]),
-                        "value_native_unit": value_native,
-                    })
+                members_native_windows.setdefault(member, []).append({
+                    "start_step_hours": int(bucket["start_step"]),
+                    "end_step_hours": int(bucket["end_step"]),
+                    "value_native_unit": value_native,
+                })
+                capture = bucket.get("native_capture") or {
+                    "capture_status": "UNKNOWN", "unavailable_reason": "CAPTURE_MISSING",
+                }
+                native_messages.append(capture)
+                point_windows.append({
+                    "member": member, "start_step_hours": int(bucket["start_step"]),
+                    "end_step_hours": int(bucket["end_step"]), "value_k": value_k,
+                    "value_native_unit": value_native,
+                    "raw_message_sha256": capture.get("raw_message_sha256"),
+                })
                 if fully:
                     members_inner.setdefault(member, []).append(value_native)
                     members_inner_ranges.setdefault(member, []).append(step_label)
@@ -932,6 +1005,8 @@ def extract_open_ens_localday(
                         "boundary_ambiguous": boundary_ambiguous,
                         "inner_step_ranges": sorted(set(members_inner_ranges.get(m, []))),
                         "boundary_step_ranges": sorted(set(members_boundary_ranges.get(m, []))),
+                        "native_windows": sorted(members_native_windows.get(m, []),
+                                                 key=lambda row: (row["start_step_hours"], row["end_step_hours"])),
                     })
                 training_allowed = len(missing_members) == 0 and len(boundary_ambiguous_members) == 0
                 payload = {
@@ -983,6 +1058,19 @@ def extract_open_ens_localday(
                     "members": members_out,
                 }
 
+            selected = scan["selected_cities"][city_name]
+            payload["native_capture_receipt"] = {
+                "revision": "ens_native_capture_receipt_v1",
+                "capture_kind": "grib_metadata_and_selected_point_decode",
+                "capture_status": "OBSERVED" if all(
+                    capture.get("capture_status") == "OBSERVED" for capture in native_messages
+                ) else "UNKNOWN",
+                "selected_point": {"flat_index": selected["selected_flat_index"],
+                                   "lat": selected["selected_lat"], "lon": selected["selected_lon"]},
+                "native_unit": unit,
+                "messages": native_messages,
+                "point_windows": point_windows,
+            }
             out_path = _record_path(
                 output_root=output_root,
                 output_subdir=track.output_subdir,

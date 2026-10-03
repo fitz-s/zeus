@@ -3060,6 +3060,278 @@ def test_live_tick_terminal_filled_entry_projection_has_own_capital_deadline(
     )
 
 
+def _seed_chain_rescued_terminal_entry(
+    conn, *, direction="buy_yes", metric="high", target_date="2026-05-17",
+    trade_source="WS_USER", trade_order="ord-001", trade_size="5", trade_price="0.081",
+):
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+    from src.state.ledger import append_many_and_project
+    from src.state.venue_command_repo import append_event
+
+    selected = "tok-001-no" if direction == "buy_no" else "tok-001"
+    now = datetime.now(timezone.utc).isoformat()
+    _insert(conn, selected_token_id=selected, size=5, price=0.081, min_tick_size=Decimal("0.001"))
+    _advance_to_acked(conn, venue_order_id="ord-001")
+    _seed_pending_entry_projection(conn)
+    if Decimal(trade_size) > 0 and Decimal(trade_price) > 0:
+        _append_trade_fact(conn, order_id=trade_order, filled_size=trade_size,
+                           fill_price=trade_price, source=trade_source, observed_at=now)
+    append_event(conn, command_id="cmd-001", event_type="FILL_CONFIRMED", occurred_at=now,
+                 payload={"venue_order_id": "ord-001", "filled_size": "5", "fill_price": "0.081"})
+    current = dict(conn.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone())
+    current.update(phase="active", direction=direction, temperature_metric=metric,
+                   target_date=target_date, shares=5.0, cost_basis_usd=0.405,
+                   size_usd=0.405, entry_price=0.081, order_status="filled",
+                   chain_state="synced", chain_shares=5.0, chain_avg_price=0.081,
+                   chain_cost_basis_usd=0.405, chain_seen_at=now, updated_at=now,
+                   fill_authority="venue_confirmed_full")
+    append_many_and_project(conn, [{
+        "event_id": "chain-rescued-entry", "position_id": "pos-001", "sequence_no": 3,
+        "event_type": "CHAIN_SYNCED", "event_version": 1, "occurred_at": now,
+        "phase_before": "pending_entry", "phase_after": "active",
+        "strategy_key": "opening_inertia", "decision_id": "dec-001",
+        "snapshot_id": "snap-pos-001", "order_id": "ord-001", "command_id": "cmd-001",
+        "caused_by": None, "idempotency_key": "chain-rescued-entry",
+        "venue_status": "filled", "source_module": "src.state.chain_reconciliation",
+        "env": "live", "payload_json": json.dumps({"reason": "chain_pending_fill_rescued", "shares": 5}),
+    }], current)
+    open_entry_exposure_obligation(conn, command_id="cmd-001", owner_domain="trade",
+                                  token_id=selected, condition_id="condition-test",
+                                  shares=5, cost_basis_usd=0.405, now=now)
+    conn.commit()
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("target_date", ["2026-05-17", "2099-05-17"])
+def test_live_tick_chain_rescued_filled_entry_drains_canonical_debt(
+    conn, tmp_path, monkeypatch, direction, metric, target_date,
+):
+    """Actual FILLED priority repairs WS/chain provenance once without buying twice."""
+    from src.execution import command_recovery as recovery, venue_sync_contract
+
+    _seed_chain_rescued_terminal_entry(conn, direction=direction, metric=metric, target_date=target_date)
+    conn.execute("INSERT INTO collateral_ledger_snapshots (pusd_balance_micro, "
+                 "pusd_allowance_micro, usdc_e_legacy_balance_micro, "
+                 "ctf_token_balances_json, ctf_token_allowances_json, captured_at, authority_tier) "
+                 "VALUES (190549, 190549, 0, '{}', '{}', ?, 'CHAIN')",
+                 (datetime.now(timezone.utc).isoformat(),))
+    cash_before = [tuple(row) for row in conn.execute("SELECT * FROM collateral_ledger_snapshots")]
+    conn.commit()
+    assert recovery._terminal_filled_entry_projection_blocker_command_ids(conn) == ("cmd-001",)
+    scope = recovery.capital_blocking_command_scope(conn)
+    assert (scope.total_count, scope.projection_count, scope.scoped_markets) == (2, 1, ("mkt-001",))
+    assert scope.requires_global_handoff(systemic_market_count_limit=2)
+    assert len(recovery._latest_unprojected_filled_entry_candidates(conn, command_id="cmd-001")) == 1
+    assert [row["command_id"] for row in recovery._authenticated_entry_trade_fact_candidates(
+        conn, command_id="cmd-001",
+    )] == ["cmd-001"]
+    db_path = tmp_path / "chain-rescued-entry.db"
+    with sqlite3.connect(db_path) as target:
+        conn.backup(target)
+
+    def factory(**_kwargs):
+        result = sqlite3.connect(db_path)
+        result.row_factory = sqlite3.Row
+        return result
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    # Stop after the real priority transaction, before unrelated maintenance.
+    def stop_maintenance(_conn):
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(recovery, "reconcile_review_required_matched_submit_trade_facts", stop_maintenance)
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    client = MagicMock()
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        recovery._reconcile_passes_short_conn(client, summary, datetime.now(timezone.utc).isoformat(), scope="live_tick")
+    assert summary["authenticated_entry_projection_fast"] == {
+        "scanned": 1, "advanced": 1, "stayed": 0, "errors": 0,
+    }
+    with factory() as verified:
+        current = verified.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone()
+        assert current["phase"] == "active"
+        assert current["direction"] == direction
+        assert current["temperature_metric"] == metric
+        assert current["target_date"] == target_date
+        assert current["shares"] == pytest.approx(5)
+        assert current["cost_basis_usd"] == pytest.approx(0.405)
+        assert current["chain_shares"] == pytest.approx(5)
+        assert [tuple(row) for row in verified.execute("SELECT * FROM collateral_ledger_snapshots")] == cash_before
+        assert verified.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "RESOLVED"
+        execution = verified.execute("SELECT shares, fill_price FROM execution_fact WHERE command_id='cmd-001' AND order_role='entry'").fetchall()
+        assert len(execution) == 1
+        assert tuple(execution[0]) == pytest.approx((5, 0.081))
+        assert verified.execute("SELECT COUNT(*) FROM position_events WHERE command_id='cmd-001' AND event_type='ENTRY_ORDER_FILLED'").fetchone()[0] == 1
+        assert recovery._terminal_filled_entry_projection_blocker_command_ids(verified) == ()
+        assert recovery.capital_blocking_command_scope(verified).total_count == 0
+        before = tuple(verified.execute("SELECT (SELECT COUNT(*) FROM position_events), (SELECT COUNT(*) FROM execution_fact)").fetchone())
+        assert recovery.reconcile_authenticated_entry_trade_facts(verified, command_id="cmd-001") == {
+            "scanned": 0, "advanced": 0, "stayed": 0, "errors": 0,
+        }
+        assert tuple(verified.execute("SELECT (SELECT COUNT(*) FROM position_events), (SELECT COUNT(*) FROM execution_fact)").fetchone()) == before
+    assert not client.mock_calls
+
+
+@pytest.mark.parametrize("present_fact", ["entry_event", "execution"])
+def test_chain_rescued_filled_entry_repairs_only_missing_canonical_fact(conn, present_fact):
+    from src.execution import command_recovery as recovery
+    from src.state.db import log_execution_fact
+    from src.state.ledger import append_many_and_project
+
+    _seed_chain_rescued_terminal_entry(conn)
+    if present_fact == "execution":
+        log_execution_fact(conn, intent_id="pos-001:entry", position_id="pos-001",
+                           command_id="cmd-001", order_role="entry", shares=5, fill_price=0.081,
+                           filled_at=datetime.now(timezone.utc).isoformat(), terminal_exec_status="filled")
+    else:
+        current = dict(conn.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone())
+        append_many_and_project(conn, [{
+            "event_id": "existing-entry-fill", "position_id": "pos-001", "sequence_no": 4,
+            "event_type": "ENTRY_ORDER_FILLED", "event_version": 1,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "phase_before": "active", "phase_after": "active", "strategy_key": "opening_inertia",
+            "decision_id": "dec-001", "snapshot_id": "snap-pos-001", "order_id": "ord-001",
+            "command_id": "cmd-001", "caused_by": None, "idempotency_key": "existing-entry-fill",
+            "venue_status": "filled", "source_module": "src.execution.exchange_reconcile", "env": "live",
+            "payload_json": json.dumps({"shares": 5, "size_usd": 0.405, "entry_price": 0.081}),
+        }], current)
+    conn.commit()
+    result = recovery.reconcile_authenticated_entry_trade_facts(conn, command_id="cmd-001")
+    assert result == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert tuple(conn.execute("SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-001'").fetchone()) == pytest.approx((5, 0.405))
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "RESOLVED"
+    assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='ENTRY_ORDER_FILLED'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM execution_fact WHERE command_id='cmd-001'").fetchone()[0] == 1
+    assert recovery.reconcile_authenticated_entry_trade_facts(conn, command_id="cmd-001")["scanned"] == 0
+
+
+@pytest.mark.parametrize("mutation", [
+    "wrong_order", "wrong_token", "wrong_projected_token", "unauthenticated", "zero_size", "zero_price",
+    "overfill", "incomplete_fill", "unknown_command", "unrecognized_review",
+    "economically_closed", "settled",
+])
+def test_chain_rescued_filled_entry_preserves_unproven_or_closed_debt(conn, mutation):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+
+    trade = {
+        "wrong_order": {"trade_order": "different-order"},
+        "unauthenticated": {"trade_source": "CHAIN"},
+        "zero_size": {"trade_size": "0"},
+        "zero_price": {"trade_price": "0"},
+        "overfill": {"trade_size": "6"},
+        "incomplete_fill": {"trade_size": "4"},
+    }.get(mutation, {})
+    _seed_chain_rescued_terminal_entry(conn, **trade)
+    if mutation == "wrong_token":
+        conn.execute("UPDATE venue_commands SET token_id='different-token' WHERE command_id='cmd-001'")
+    elif mutation == "wrong_projected_token":
+        conn.execute("UPDATE position_current SET token_id='different-token', no_token_id='different-no-token' WHERE position_id='pos-001'")
+    elif mutation == "unknown_command":
+        conn.execute("UPDATE venue_commands SET state='SUBMIT_UNKNOWN_SIDE_EFFECT' WHERE command_id='cmd-001'")
+    elif mutation == "unrecognized_review":
+        append_event(conn, command_id="cmd-001", event_type="REVIEW_REQUIRED",
+                     occurred_at=datetime.now(timezone.utc).isoformat(), payload={"reason": "unknown-proof"})
+    elif mutation in {"economically_closed", "settled"}:
+        conn.execute("UPDATE position_current SET phase=? WHERE position_id='pos-001'", (mutation,))
+    conn.commit()
+    before = dict(conn.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone())
+    summary = recovery.reconcile_authenticated_entry_trade_facts(conn, command_id="cmd-001")
+    assert summary["advanced"] == 0
+    assert dict(conn.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone()) == before
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "OPEN"
+    assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='ENTRY_ORDER_FILLED'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_fact WHERE command_id='cmd-001'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("semantic_event", [None, "CAPITAL_REDUCTION_FILLED"])
+def test_chain_rescued_missing_entry_event_never_resurrects_sold_shares(conn, semantic_event):
+    from src.execution import command_recovery as recovery
+    from src.state.ledger import append_many_and_project
+
+    _seed_chain_rescued_terminal_entry(conn)
+    _insert(conn, command_id="cmd-reduction", position_id="pos-001", intent_kind="EXIT",
+            side="SELL", size=2, price=0.20)
+    _advance_to_acked(conn, command_id="cmd-reduction", venue_order_id="ord-reduction")
+    _append_trade_fact(conn, command_id="cmd-reduction", order_id="ord-reduction",
+                       trade_id="trade-reduction", filled_size="2", fill_price="0.20")
+    current = dict(conn.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone())
+    current.update(shares=3, cost_basis_usd=0.243, size_usd=0.243,
+                   chain_shares=3, chain_cost_basis_usd=0.243)
+    payload = {"shares": 2, "exit_price": 0.20}
+    if semantic_event:
+        payload["semantic_event"] = semantic_event
+    append_many_and_project(conn, [{
+        "event_id": "reduction", "position_id": "pos-001", "sequence_no": 4,
+        "event_type": "MANUAL_OVERRIDE_APPLIED" if semantic_event else "EXIT_ORDER_FILLED",
+        "event_version": 1, "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "phase_before": "active", "phase_after": "active", "strategy_key": "opening_inertia",
+        "decision_id": "dec-reduction", "snapshot_id": "snap-pos-001",
+        "order_id": "ord-reduction", "command_id": "cmd-reduction", "caused_by": None,
+        "idempotency_key": "reduction", "venue_status": "partial",
+        "source_module": "src.execution.exit_lifecycle", "env": "live",
+        "payload_json": json.dumps(payload),
+    }], current)
+    conn.commit()
+    before = dict(conn.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone())
+    assert recovery._latest_unprojected_filled_entry_candidates(conn, command_id="cmd-001")
+    summary = recovery.reconcile_authenticated_entry_trade_facts(conn, command_id="cmd-001")
+    # The existing provenance-only reducer cannot invent the absent entry event;
+    # the strict postcondition therefore rolls back and retains this exact debt.
+    assert summary["advanced"] == 0
+    assert dict(conn.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone()) == before
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "OPEN"
+    assert conn.execute("SELECT COUNT(*) FROM execution_fact WHERE command_id='cmd-001'").fetchone()[0] == 0
+
+
+def test_chain_rescued_filled_top_up_keeps_exact_aggregate_once(conn):
+    from src.execution import command_recovery as recovery
+    from src.state.db import log_execution_fact
+
+    _seed_chain_rescued_terminal_entry(conn)
+    _insert(conn, command_id="cmd-prior", position_id="pos-001", size=3, price=0.20)
+    _advance_to_acked(conn, command_id="cmd-prior", venue_order_id="ord-prior")
+    _append_trade_fact(conn, command_id="cmd-prior", order_id="ord-prior",
+                       trade_id="trade-prior", filled_size="3", fill_price="0.20")
+    log_execution_fact(conn, intent_id="pos-001:entry", position_id="pos-001",
+                       command_id="cmd-prior", order_role="entry",
+                       filled_at="2026-04-26T00:05:00Z", shares=3, fill_price=0.20,
+                       terminal_exec_status="filled")
+    conn.execute("UPDATE position_current SET order_id='ord-prior', shares=3, cost_basis_usd=.60, size_usd=.60, entry_price=.20, chain_shares=8, chain_cost_basis_usd=1.005, chain_avg_price=1.005/8 WHERE position_id='pos-001'")
+    conn.commit()
+    assert len(recovery._authenticated_entry_trade_fact_candidates(conn, command_id="cmd-001")) == 1
+    assert recovery.reconcile_authenticated_entry_trade_facts(conn, command_id="cmd-001")["advanced"] == 1
+    row = conn.execute("SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-001'").fetchone()
+    assert tuple(row) == pytest.approx((8, 1.005))
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "RESOLVED"
+    assert recovery.reconcile_authenticated_entry_trade_facts(conn, command_id="cmd-001")["scanned"] == 0
+    assert tuple(conn.execute("SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-001'").fetchone()) == pytest.approx((8, 1.005))
+
+
+def test_chain_rescued_priority_materialization_and_drain_roll_back_together(conn, monkeypatch):
+    from src.execution import command_recovery as recovery
+
+    _seed_chain_rescued_terminal_entry(conn)
+    original = recovery._append_filled_entry_projection_repair
+    before = dict(conn.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone())
+
+    def fail_after_projection(connection, *, candidate):
+        assert connection is conn
+        assert original(connection, candidate=candidate)
+        assert connection.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "RESOLVED"
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(recovery, "_append_filled_entry_projection_repair", fail_after_projection)
+    assert recovery.reconcile_authenticated_entry_trade_facts(conn, command_id="cmd-001") == {
+        "scanned": 1, "advanced": 0, "stayed": 0, "errors": 1,
+    }
+    assert dict(conn.execute("SELECT * FROM position_current WHERE position_id='pos-001'").fetchone()) == before
+    assert conn.execute("SELECT status FROM entry_exposure_obligations WHERE command_id='cmd-001'").fetchone()[0] == "OPEN"
+    assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='ENTRY_ORDER_FILLED'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_fact WHERE command_id='cmd-001'").fetchone()[0] == 0
+
+
 
 def test_live_tick_entry_projection_rotation_bounds_and_wraps():
     from src.execution import command_recovery
@@ -3751,7 +4023,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             outcome_label: str | None = None,
             event_slug: str | None = None,
             side="BUY", order_type="GTC", size=10.0, price=0.5,
-            created_at="2026-04-26T00:00:00Z"):
+            created_at="2026-04-26T00:00:00Z", min_tick_size=Decimal("0.01")):
     """Insert a command row and return its command_id."""
     from src.state.venue_command_repo import insert_command
     if idempotency_key is None:
@@ -3770,6 +4042,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         selected_outcome_token_id=selected_token_id,
         outcome_label=outcome_label,
         event_slug=event_slug,
+        min_tick_size=min_tick_size,
     )
     decision_certificate_hash = hashlib.sha256(
         f"test-certificate:{command_id}".encode()
@@ -3807,6 +4080,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             post_only=order_type in {"GTC", "GTD"},
             price=price,
             size=size,
+            tick_size=min_tick_size,
         )
         direction = "buy_no" if selected_token_id == no_token_id else "buy_yes"
         conn.execute(
@@ -4530,6 +4804,7 @@ def _ensure_snapshot(
     selected_outcome_token_id: str | None = None,
     outcome_label: str = "YES",
     event_slug: str | None = None,
+    min_tick_size: Decimal = Decimal("0.01"),
 ) -> str:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -4560,7 +4835,7 @@ def _ensure_snapshot(
             market_end_at=None,
             market_close_at=None,
             sports_start_at=None,
-            min_tick_size=Decimal("0.01"),
+            min_tick_size=min_tick_size,
             min_order_size=Decimal("0.01"),
             fee_details={},
             token_map_raw={"YES": token_id, "NO": no_token_id},
@@ -4657,6 +4932,7 @@ def _make_envelope(
     signed_order_hash: str | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    tick_size: Decimal = Decimal("0.01"),
 ):
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 
@@ -4679,7 +4955,7 @@ def _make_envelope(
         size=Decimal(str(size)),
         order_type=order_type,
         post_only=post_only,
-        tick_size=Decimal("0.01"),
+        tick_size=tick_size,
         min_order_size=Decimal("0.01"),
         neg_risk=False,
         fee_details={},
