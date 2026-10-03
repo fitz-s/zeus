@@ -2190,13 +2190,15 @@ def test_source_clock_partial_current_producer_to_jit(
             source_cycle_time=run.isoformat(), provenance=provenance, **posterior_kwargs,
         ) is not None
         later = arrived + timedelta(minutes=1)
+        # Once it arrives it is a newer configured source: refresh debt, never a
+        # retirement of the posterior proven without it (validated-input
+        # continuity). The recorded rows are re-proven at the posterior's cut.
         reason: dict[str, str] = {}
         assert adapter._posterior_bound_multimodel_members(
             conn, family=family, decision_time=later,
             source_cycle_time=run.isoformat(), provenance=provenance,
             reason_out=reason, **posterior_kwargs,
-        ) is None
-        assert reason == {"reason": "model_identity_drift:configured_current_sources"}
+        ) is not None, reason
 
         refreshed = materializer_mod._replacement_bayes_precision_fusion_override(
             replace(request, computed_at=later), metric=metric,
@@ -2236,13 +2238,13 @@ def test_source_clock_partial_current_producer_to_jit(
         ) is not None
         reason: dict[str, str] = {}
         _qualify_raw_fixture_rows(conn)
+        # HRRR's newer row is refresh debt; the posterior keeps the HRRR row it
+        # consumed (validated-input continuity).
         assert adapter._posterior_bound_multimodel_members(
             conn, family=family, decision_time=arrived + timedelta(minutes=1),
             source_cycle_time=run.isoformat(), provenance=provenance,
             reason_out=reason, **posterior_kwargs,
-        ) is None
-        # HRRR is consumed directly now, so its newer row names itself.
-        assert reason == {"reason": "model_identity_drift:gfs_hrrr"}
+        ) is not None, reason
 
 
 @pytest.mark.usefixtures("_hko_source_surface")
@@ -2337,12 +2339,13 @@ def test_source_clock_uses_exactly_the_scheme_sources_whatever_sibling_is_newer(
 def test_partial_current_replay_uses_the_pinned_scheme_not_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Replay must judge drift with the producer's pinned scheme, not ACTIVE.
+    """Replay judges the producer's pinned scheme at the posterior's cut, not ACTIVE.
 
     The producer's scheme weights icon/ukmo/gfs_hrrr; HRRR is missing so the
-    posterior is partial-current.  When HRRR later arrives (older cycle than a new
-    NBM row) the pinned scheme names the drift.  A replay that re-resolved a
-    rotated ACTIVE (weighting NBM) would collapse HRRR away and miss it.
+    posterior is partial-current. HRRR and a new NBM row arriving later are
+    refresh debt, so the posterior keeps serving; a rotated ACTIVE (weighting
+    NBM) never changes the replayed basket, and without the pinned weights the
+    replay refuses (pinned_scheme_missing).
     """
     from src.data.station_ground_evidence import archive_station_ground_evidence, forecast_db_from_connection
     from src.engine import event_reactor_adapter as adapter
@@ -2455,8 +2458,15 @@ def test_partial_current_replay_uses_the_pinned_scheme_not_active(
         conn, family=family, decision_time=later,
         source_cycle_time=run.isoformat(), provenance=provenance,
         reason_out=pinned_reason, posterior_computed_at=decision,
+    ) is not None, pinned_reason
+    unpinned = json.loads(json.dumps(provenance))
+    unpinned["bayes_precision_fusion"]["source_clock_one_scheme"].pop("configured_weights")
+    assert adapter._posterior_bound_multimodel_members(
+        conn, family=family, decision_time=later,
+        source_cycle_time=run.isoformat(), provenance=unpinned,
+        reason_out=pinned_reason, posterior_computed_at=decision,
     ) is None
-    assert pinned_reason == {"reason": "model_identity_drift:configured_current_sources"}
+    assert pinned_reason == {"reason": "model_identity_drift:pinned_scheme_missing"}
     conn.close()
 
 

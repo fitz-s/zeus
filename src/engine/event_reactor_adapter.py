@@ -28978,17 +28978,51 @@ def _posterior_bound_multimodel_members(
         return None
 
     from src.data.replacement_current_value_serving import (
+        day0_remaining_from_provenance,
+        read_consumed_instrument_values,
         read_current_instrument_values,
     )
 
-    current = read_current_instrument_values(
+    # The posterior's own cut, not the decision clock: a newer served run is
+    # successor refresh debt and never re-binds or retires this posterior.
+    cut = (
+        _parse_utc(
+            posterior_computed_at.isoformat()
+            if isinstance(posterior_computed_at, datetime)
+            else str(posterior_computed_at)
+        )
+        if posterior_computed_at is not None
+        else decision_time
+    )
+    if cut is None:
+        _fail("posterior_computed_at_unparseable")
+        return None
+    tau, window_reason = day0_remaining_from_provenance(
+        provenance, city=family.city, target_date=family.target_date,
+        metric=family.metric, posterior_computed_at=cut,
+    )
+    if window_reason is not None:
+        _fail(window_reason)
+        return None
+    recorded_ids: dict[int, str] = {}
+    for model in models:
+        recorded = serving.get(model)
+        try:
+            recorded_id = int(recorded["raw_model_forecast_id"])
+        except (KeyError, TypeError, ValueError):
+            recorded_id = 0
+        if recorded_id <= 0 or recorded_id in recorded_ids:
+            _fail(f"served_instrument_missing:{model}")
+            return None
+        recorded_ids[recorded_id] = model
+    consumed = read_consumed_instrument_values(
         conn,
         city=family.city,
         metric=family.metric,
         target_date=family.target_date,
-        source_cycle_time_iso=str(source_cycle_time),
-        decision_time_iso=decision_time.astimezone(UTC).isoformat(),
-        include_station_sources=True,
+        consumed_models=recorded_ids,
+        materialized_at_iso=cut.astimezone(UTC).isoformat(),
+        day0_remaining_from_iso=tau,
     )
     scheme = fusion.get("source_clock_one_scheme")
     if (
@@ -29001,9 +29035,18 @@ def _posterior_bound_multimodel_members(
         )
         from src.forecast.model_selection import source_physically_eligible
 
+        current = read_current_instrument_values(
+            conn,
+            city=family.city,
+            metric=family.metric,
+            target_date=family.target_date,
+            source_cycle_time_iso=str(source_cycle_time),
+            decision_time_iso=cut.astimezone(UTC).isoformat(),
+            include_station_sources=True,
+        )
         city_config = runtime_cities_by_name()[str(family.city)]
         lead_days = _bayes_precision_fusion_city_local_lead_days(
-            computed_at=decision_time.astimezone(UTC),
+            computed_at=cut.astimezone(UTC),
             target_local_date=date.fromisoformat(str(family.target_date)),
             tz_name=str(city_config.timezone),
         )
@@ -29067,29 +29110,25 @@ def _posterior_bound_multimodel_members(
         return None
 
     members: list[float] = []
-    for model in models:
-        recorded = serving.get(model)
-        served = current.get(model)
-        if not isinstance(recorded, Mapping) or served is None:
-            _fail(f"served_instrument_missing:{model}")
-            return None
+    for recorded_id, model in recorded_ids.items():
+        recorded = serving[model]
+        served = consumed.get(recorded_id)
         try:
-            recorded_id = int(recorded.get("raw_model_forecast_id"))
-            value_c = float(served.value_c)
+            value_c = float(served.value_c) if served is not None else math.nan
         except (TypeError, ValueError):
             _fail(f"served_value_unparseable:{model}")
             return None
         if (
-            recorded_id != served.raw_model_forecast_id
+            served is None
             or str(recorded.get("served_via") or "") != served.served_via
             or str(recorded.get("served_cycle") or "") != served.served_cycle
             or not math.isfinite(value_c)
         ):
-            # The posterior's FROZEN snapshot of this model's serving instrument no
-            # longer matches what is served NOW: a bound model advanced a run since
-            # this posterior was computed. This posterior_id can never re-verify
-            # again (read_current_instrument_values always serves latest-as-of-now);
-            # the caller must retire it, not retry it.
+            # The posterior's recorded row for this model no longer re-proves at
+            # the posterior's own cut (deleted, changed body, or a different
+            # served identity): this posterior_id can never re-verify again, so
+            # the caller must retire it, not retry it. A newer served run is not
+            # this case; it is refresh debt and leaves the recorded row provable.
             # SCOPE: per bound-posterior candidate for one (family_key, event_id)
             # -- a drift here fails only THIS witness's re-verification attempt; it
             # never blocks the family's other candidates or any other family.
@@ -29109,7 +29148,8 @@ def _posterior_bound_multimodel_members(
             # snapshot could never re-equal read_current_instrument_values once
             # any bound model advanced, so the SAME posterior_id was rejected
             # bit-identically forever (Austin/SF high, 92% of a day's events,
-            # 24h+). Safety today depends entirely on the eviction wiring above;
+            # 24h+). The recorded row is now re-proven exactly, so a newer run no
+            # longer reaches this branch. Safety still depends on the eviction wiring above;
             # if it is ever removed or this reason string renamed without
             # updating the eviction match, the check reverts to a ratchet.
             _fail(f"model_identity_drift:{model}")

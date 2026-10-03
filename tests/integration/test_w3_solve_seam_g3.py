@@ -51673,6 +51673,92 @@ def test_hko_held_refresh_is_not_hard_blocked_when_the_raw_frontier_is_unknown(
         fixture.conn.close()
 
 
+@pytest.mark.parametrize("change",("newer_provider_cohort","consumed_row_deleted","consumed_body_changed"))
+def test_hko_authority_binds_members_from_the_consumed_proof_not_the_latest_run(
+        tmp_path,monkeypatch,change,_hko_clock_native_sources):
+    """Round-2 blocker 3 through the real authority wrapper.
+
+    _posterior_bound_multimodel_members compared each recorded serving row with
+    read_current_instrument_values (latest as of now), so a newer 18Z ICON+UKMO
+    cohort raised FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior:
+    model_identity_drift:icon_global while the consumed proof was valid and both
+    public bundles served the same posterior. Members now re-prove the recorded
+    rows at the posterior's own cut: a newer run keeps the same payload; a
+    consumed row that is gone or whose body changed still fails with
+    model_identity_drift, which evicts the cached family witness.
+    """
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high")
+    try:
+        row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                                        (fixture.result.posterior_id,)).fetchone())
+        cut = fixture.cut
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+        class ReaderClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",ReaderClock)
+        family = SimpleNamespace(city=row["city"],target_date=row["target_date"],metric=row["temperature_metric"])
+        event = make_opportunity_event(event_type="FORECAST_SNAPSHOT_READY",
+            entity_key=f"{family.city}|{family.target_date}|{family.metric}",source="continuity-test",
+            observed_at=row["computed_at"],available_at=row["source_available_at"],received_at=cut.isoformat(),
+            payload=dict(city=family.city,target_date=family.target_date,metric=family.metric,
+                source_id=row["source_id"],source_run_id=row["posterior_identity_hash"]),
+            causal_snapshot_id=f"rmf-{family.city}|{family.target_date}|{family.metric}|{str(row['source_cycle_time'])[:10]}")
+        kwargs = dict(event=event,family=family,payload=json.loads(event.payload_json),decision_time=cut,
+            bound_posterior_id=row["posterior_id"])
+        before = era._forecast_authority_payload_and_clock(fixture.conn,**kwargs)[0]
+        serving = json.loads(row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
+        icon_id = int(serving["icon_global"]["raw_model_forecast_id"])
+        if change == "newer_provider_cohort":
+            fixture.write_provider_cohort(_dt.datetime.fromisoformat(row["source_cycle_time"])+_dt.timedelta(hours=6),
+                cut-_dt.timedelta(minutes=5))
+        elif change == "consumed_row_deleted":
+            fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(icon_id,))
+        else:
+            # Point the consumed row's body artifact at a one-byte-different
+            # copy; the shared fixture body stays intact for other tests.
+            artifact_id,artifact = fixture.conn.execute("SELECT a.artifact_id,a.artifact_path FROM raw_model_forecasts r"
+                " JOIN raw_forecast_artifacts a ON a.artifact_id=r.artifact_id WHERE r.raw_model_forecast_id=?",
+                (icon_id,)).fetchone()
+            body = bytearray(open(artifact,"rb").read())
+            body[-2] = ord(" ") if body[-2] != ord(" ") else ord("\t")
+            changed = tmp_path/"changed-consumed-body.json"
+            changed.write_bytes(bytes(body))
+            fixture.conn.execute("UPDATE raw_forecast_artifacts SET artifact_path=? WHERE artifact_id=?",
+                (str(changed),artifact_id))
+        fixture.conn.commit()
+        hwm.clear_consumed_proof_memo()
+        reader._LIVE_GRADE_MEMO.clear()
+        ro = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
+        ro.row_factory = sqlite3.Row
+        try:
+            if change == "newer_provider_cohort":
+                after = era._forecast_authority_payload_and_clock(ro,**kwargs)[0]
+                assert after["posterior_identity_hash"] == before["posterior_identity_hash"]
+                assert after["members_json_hash"] == before["members_json_hash"]
+            else:
+                members_reason: dict[str,str] = {}
+                assert era._posterior_bound_multimodel_members(ro,family=family,decision_time=cut,
+                    source_cycle_time=row["source_cycle_time"],provenance=json.loads(row["provenance_json"]),
+                    posterior_computed_at=row["computed_at"],reason_out=members_reason) is None
+                assert members_reason == {"reason":"model_identity_drift:icon_global"}
+                namespace = "consumed-drift-eviction"
+                monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",namespace)
+                monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",
+                    {("family-hko",era._CurrentProbabilityUse.ENTRY.value):("event-1","binding-1",object())})
+                assert era._evict_superseded_global_probability_family_cache(namespace,
+                    reason="FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior:"+members_reason["reason"],
+                    actuation=SimpleNamespace(decision=SimpleNamespace(candidate=SimpleNamespace(family_key="family-hko"))))
+                assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
+        finally:
+            ro.close()
+    finally:
+        fixture.conn.close()
+
+
 @pytest.mark.parametrize("metric",("high","low"))
 def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tmp_path,monkeypatch,metric,_hko_clock_native_sources):
     """Actual source tick and seed transport, with only private routing/HTTP clocks.

@@ -7627,7 +7627,9 @@ def test_posterior_bound_members_floor_is_the_certified_carrier_count(monkeypatc
             ("icon_global", 1, 33.0), ("ukmo_global_deterministic_10km", 2, 34.0)
         )
     }
-    monkeypatch.setattr(serving_module, "read_current_instrument_values", lambda *_a, **_k: served)
+    by_id = {value.raw_model_forecast_id: value for value in served.values()}
+    monkeypatch.setattr(serving_module, "read_consumed_instrument_values",
+        lambda *_a, consumed_models, **_k: {i: by_id[i] for i in consumed_models if i in by_id})
     monkeypatch.setattr(
         era, "runtime_cities_by_name",
         lambda: {"Hong Kong": SimpleNamespace(timezone="Asia/Hong_Kong", settlement_unit="C")},
