@@ -1332,6 +1332,7 @@ def _record_materialization_blocked_identity(
                 "request": dict(request_payload),
                 "attempt_fingerprint": attempt_fingerprint,
                 "identity_version": MATERIALIZATION_IDENTITY_VERSION,
+                "fence_version": MATERIALIZATION_FENCE_VERSION,
                 **({"dependencies": list(dependencies)} if dependencies is not None else {}),
                 **({"blocked_evidence": dict(blocked_evidence)} if blocked_evidence is not None else {}),
             },
@@ -3591,6 +3592,18 @@ _TRANSIENT_BLOCK_RETRY_REASONS = frozenset(
     }
 )
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
+# The publication envelope: which seed file published this request. It differs
+# on every republish of unchanged inputs, so it is not part of the
+# forecast-input identity. A verdict on the envelope itself (worker
+# ``verdict_scope == "envelope"``) is terminal for those exact publication
+# bytes and never writes or matches a forecast-input marker.
+_ATTEMPT_ENVELOPE_FIELDS = frozenset({"day0_enqueue_owner_witness"})
+# Version of the forecast-input fence (blocked-attempt markers and
+# materialization-blocked receipts). Hashed into every attempt fingerprint, so
+# a marker written under an earlier fence can never match. f1 hashed the
+# envelope; f2 (forecast-input) excludes it.
+MATERIALIZATION_FENCE_VERSION = "f2-forecast-input"
+_ENVELOPE_INVALID_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_ENVELOPE_INVALID"
 # Version of the materialization attempt identity (blocked-attempt markers and
 # materialization-blocked receipts). m3 keys the attempt on its resolved
 # dependency record (every named input and the manifest's artifact, each by the
@@ -4203,11 +4216,13 @@ def _blocked_attempt_fingerprint(
 
     identity = {
             "identity_version": MATERIALIZATION_IDENTITY_VERSION,
+            "fence_version": MATERIALIZATION_FENCE_VERSION,
             "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
             "request": {
                 key: value
                 for key, value in payload.items()
                 if key not in _ATTEMPT_CLOCK_FIELDS
+                and key not in _ATTEMPT_ENVELOPE_FIELDS
             },
             "dependencies": dependencies,
             "raw": {
@@ -4638,6 +4653,7 @@ def _write_blocked_attempt_marker(
                 "reason_codes": [_UNCHANGED_BLOCKED_REASON],
                 "attempt_fingerprint": fingerprint,
                 "identity_version": MATERIALIZATION_IDENTITY_VERSION,
+                "fence_version": MATERIALIZATION_FENCE_VERSION,
                 **({"dependencies": list(dependencies)} if dependencies is not None else {}),
                 **({"blocked_evidence": dict(blocked_evidence)} if blocked_evidence is not None else {}),
                 "city": payload.get("city"),
@@ -4752,6 +4768,22 @@ def _subprocess_result_error_type(completed: subprocess.CompletedProcess[str]) -
                 continue
             if isinstance(payload, Mapping) and payload.get("error_type") not in (None, ""):
                 return str(payload["error_type"])
+    return None
+
+
+def _subprocess_result_verdict_scope(
+    completed: subprocess.CompletedProcess[str],
+) -> str | None:
+    """What an INPUT_VERDICT judged: "forecast_input" or "envelope"."""
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, Mapping) and payload.get("status") not in (None, ""):
+                scope = payload.get("verdict_scope")
+                return scope if isinstance(scope, str) else None
     return None
 
 
@@ -5646,9 +5678,15 @@ def _claim_construction(
         f"{prefix}{stamp}{_LEASE_BATCH_MARK}{generation[:12]}.pid{os.getpid()}"
     )
     moved: list[tuple[Path, Path]] = []
+    staging = inflight_path / f".staging.{batch_path.name}"
+    published = False
     try:
-        batch_path.mkdir()
-        _write_lease_claim_metadata(batch_path, slots, leases, generation)
+        # Metadata first, published by rename: a visible lease-v1 batch always
+        # names its leases, so UNKNOWN means unreadable state, never a gap.
+        staging.mkdir(parents=True)
+        _write_lease_claim_metadata(staging, slots, leases, generation)
+        os.rename(staging, batch_path)
+        published = True
         for slot in slots:
             # Validate under the lease: the bytes moved are the bytes leased.
             current = slot.source.read_bytes()
@@ -5672,7 +5710,7 @@ def _claim_construction(
                     _rename_back(claimed, source)
                 except OSError:
                     pass  # stays in the dead batch; lease recovery restores it
-            _remove_empty_claim_batch(batch_path)
+            _remove_empty_claim_batch(batch_path if published else staging)
         finally:
             _lease.release(leases)
         raise
@@ -5976,8 +6014,8 @@ def _try_claim_priority_request(
         return None, (_PRIORITY_CLAIM_UNKNOWN_OWNER_REASON,)
     except FileNotFoundError:
         return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-    except OSError:
-        return None, (_PRIORITY_CLAIM_FENCE_UNREADABLE_REASON,)
+    # Any other I/O fault propagates: the constructor already restored every
+    # moved request and released every lease, so nothing is left owned.
     return replace(
         plan.claim,
         batch_path=batch_path,
@@ -7804,6 +7842,23 @@ def process_replacement_forecast_live_materialization_queue(
     )
     read_plan: _RequestClaimReadPlan | None = None
     if request_only:
+        # SCOPE: lease-v1 batches whose every lease is free (dead owner).
+        # DRAIN: restored here, while this call holds their leases; no queue
+        # flock is needed because the leases exclude every other owner. RESET:
+        # the batch leaves inflight. Held or UNKNOWN batches are untouched.
+        _keys, lease_recovered, _unknown = _recover_stale_claims(
+            request_path=request_path,
+            inflight_path=request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME,
+            lease_only=True,
+        )
+        if lease_recovered:
+            # The restored requests re-enter ranking on the next tick's plan.
+            return ReplacementForecastLiveMaterializationQueueReport(
+                status="DEFERRED", request_dir=str(request_path),
+                processed_dir=str(processed_path), failed_dir=str(failed_path),
+                processed_count=0, failed_count=0, skipped_count=0,
+                reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_STALE_CLAIM_RECOVERED",),
+            )
         try:
             with _claim_read_deadline_guard():
                 read_plan = _build_request_claim_read_plan(
@@ -8588,6 +8643,20 @@ def _process_claimed_materialization_batch(
             )
             processed.append(str(receipt))
             stale_day0_superseded.append(str(receipt))
+        elif (
+            verdict
+            and result_status == "ERROR"
+            and _subprocess_result_verdict_scope(completed) == "envelope"
+        ):
+            # SCOPE: these exact publication bytes. DRAIN: terminal now; no
+            # forecast-input marker is written or consulted. RESET: a repaired
+            # republish is new bytes and is judged on its own.
+            moved = _move_request(input_json, failed_path)
+            _write_sidecar(moved, {
+                **payload, "reason_codes": [_ENVELOPE_INVALID_REASON],
+                "verdict_scope": "envelope",
+            })
+            failed.append(str(moved))
         elif (
             verdict
             and (bound := _bound_verdict(completed, item=item, forecast_db=forecast_db))

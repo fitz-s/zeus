@@ -88,7 +88,24 @@ class MaterializationDeadlineExceeded(RuntimeError):
 
 
 class RequestInputInvalid(ValueError):
-    """Validation of the inputs this request names found it inadmissible."""
+    """Validation of the inputs this request names found it inadmissible.
+
+    ``scope`` names what the verdict is about: "forecast_input" (the inputs a
+    posterior is computed from) or "envelope" (the publication envelope,
+    ``day0_enqueue_owner_witness``). An envelope verdict is terminal for these
+    exact publication bytes only and fences no forecast-input identity.
+    """
+
+    def __init__(self, message: str, *, scope: str = "forecast_input") -> None:
+        super().__init__(message)
+        self.scope = scope
+
+
+def _owner_witness(payload: Mapping[str, Any]):
+    try:
+        return day0_enqueue_ownership_witness_from_payload(payload)
+    except ValueError as exc:
+        raise RequestInputInvalid(str(exc), scope="envelope") from exc
 
 
 @contextlib.contextmanager
@@ -1085,6 +1102,8 @@ def _error_response(
         "failure_category": _failure_category(exc).value,
         "error": str(exc),
     }
+    if isinstance(exc, RequestInputInvalid):
+        response["verdict_scope"] = exc.scope
     if isinstance(exc, ReplacementForecastWriteDeferred):
         response["reason_codes"] = [_WRITE_DEFERRED_REASON]
     if receipt is not None:
@@ -1350,9 +1369,7 @@ def _validated_request(
         upgrade_trigger=(
             str(payload["upgrade_trigger"]) if payload.get("upgrade_trigger") else None
         ),
-        day0_enqueue_owner_witness=day0_enqueue_ownership_witness_from_payload(
-            payload
-        ),
+        day0_enqueue_owner_witness=_owner_witness(payload),
     )
     return request
 
