@@ -3831,9 +3831,8 @@ def _cert_supersession_context(tmp_path, monkeypatch, metric):
 
 @pytest.mark.parametrize(("metric", "mutation"), [
     (metric, mutation)
-    for metric in ("low", "high")
+    for metric in ("low",)
     for mutation in (None, "incumbent", "dependency", "dataset", "unreadable_basis", "missing_witness", "missing_evidence", "foreign_request", "request_file")
-    if metric == "low" or mutation not in {"dataset", "unreadable_basis"}
 ])
 def test_exact_cert_supersession_drains_only_proved_old_request(tmp_path, monkeypatch, metric, mutation):
     import subprocess
@@ -3897,6 +3896,21 @@ def test_exact_cert_supersession_drains_only_proved_old_request(tmp_path, monkey
             processed_path=tmp_path / "processed", failed_path=tmp_path / "failed",
             forecast_db=db, limit=1, lane=queue.MATERIALIZATION_LANE_PRIORITY)
         assert plan.claim.selected_files == (newer,)
+    conn.close()
+
+
+def test_high_cert_regression_keeps_its_prospective_family_fence(tmp_path, monkeypatch):
+    """Exact supersession is the LOW retired-dataset repair only. A HIGH refusal
+    stays CERT_REGRESSION: its typed evidence re-decides the prospective family."""
+    import src.data.replacement_forecast_materializer as mat
+    from src.data.materialization_block_evidence import CERT_REGRESSION, evidence_holds
+
+    conn, prepared, _requests, _old, payload, _db, _queue = _cert_supersession_context(tmp_path, monkeypatch, "high")
+    result = mat.write_prepared_replacement_forecast_live(conn, prepared)
+    conn.commit()
+    assert result.reason_codes == ("READINESS_CERT_CYCLE_REGRESSION",)
+    assert result.evidence is not None and result.evidence["reason"] == CERT_REGRESSION
+    assert evidence_holds(conn, result.evidence, payload), "HIGH regression fences the prospective family"
     conn.close()
 
 

@@ -9518,7 +9518,7 @@ def write_prepared_replacement_forecast_live(
             readiness_id=None,
             evidence=_cert_regression_evidence(
                 conn, request, metric=metric, incoming_posterior_id=posterior_id,
-                exact_supersession=True,
+                exact_supersession=(metric == "low"),
             ),
         )
     expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
