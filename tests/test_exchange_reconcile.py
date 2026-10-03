@@ -13699,3 +13699,226 @@ def test_external_operator_close_synthetic_exit_command_has_null_q_version(conn)
     assert row["intent_kind"] == "EXIT"
     assert row["side"] == "SELL"
     assert row["q_version"] is None
+
+
+def _confirm_partial_exit(conn, *, shares, price, filled_at, remaining_shares, remaining_cost):
+    """Record one confirmed partial EXIT exactly as the exit lifecycle leaves it."""
+
+    seed_command(
+        conn,
+        command_id="cmd-partial-exit",
+        venue_order_id="ord-partial-exit",
+        position_id="pos-m5",
+        side="SELL",
+        size=shares,
+        price=price,
+        created_at=filled_at,
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state='FILLED' WHERE command_id='cmd-partial-exit'"
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_fact (
+            intent_id, position_id, command_id, order_role, posted_at, filled_at,
+            fill_price, shares, venue_status, terminal_exec_status
+        ) VALUES (
+            'pos-m5:exit:cmd-partial-exit', 'pos-m5', 'cmd-partial-exit', 'exit',
+            ?, ?, ?, ?, 'CONFIRMED', 'CONFIRMED'
+        )
+        """,
+        (filled_at.isoformat(), filled_at.isoformat(), price, shares),
+    )
+    conn.execute(
+        "UPDATE position_current SET shares=?, cost_basis_usd=? WHERE position_id='pos-m5'",
+        (remaining_shares, remaining_cost),
+    )
+
+
+def test_increment_after_partial_exit_projects_net_base_across_fill_legs(conn):
+    """Partial exit, then a top-up whose second leg lands later: projection
+    must equal the net fill base plus the full cumulative increment, on every
+    leg.  A gross base would resurrect the sold shares; refusing the second
+    leg would strand real exposure outside the projection."""
+
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.db import query_net_execution_fill_aggregate
+
+    seed_command(conn, size=24, price=0.67)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id="trade-initial",
+                    order_id="ord-m5",
+                    size="24",
+                    price="0.67",
+                    status="CONFIRMED",
+                )
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    # Sell 4 of 24: average cost keeps 16.08 * 20 / 24 = 13.40.
+    _confirm_partial_exit(
+        conn,
+        shares=4.0,
+        price=0.70,
+        filled_at=NOW + timedelta(seconds=30),
+        remaining_shares=20.0,
+        remaining_cost=13.40,
+    )
+    net = query_net_execution_fill_aggregate(conn, "pos-m5")
+    assert Decimal(str(net["shares_filled"])) == Decimal("20")
+    assert Decimal(str(net["filled_cost_basis_usd"])).quantize(
+        Decimal("0.000001")
+    ) == Decimal("13.400000")
+
+    seed_command(
+        conn,
+        command_id="cmd-top-up",
+        venue_order_id="ord-top-up",
+        position_id="pos-m5",
+        size=15,
+        price=0.08,
+        created_at=NOW + timedelta(minutes=1),
+        order_type="GTC",
+        post_only=True,
+    )
+    first_leg = trade(
+        trade_id="trade-top-up-1",
+        order_id="ord-top-up",
+        size="11",
+        price="0.058",
+        status="CONFIRMED",
+    )
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[first_leg]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=1),
+    )
+    after_first = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+    assert Decimal(str(after_first["shares"])) == Decimal("31")
+    assert Decimal(str(after_first["cost_basis_usd"])) == Decimal("14.038")
+
+    second_leg = trade(
+        trade_id="trade-top-up-2",
+        order_id="ord-top-up",
+        size="2",
+        price="0.06",
+        status="CONFIRMED",
+    )
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[first_leg, second_leg]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=2),
+    )
+    after_second = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+    # Net base 20 / 13.40 plus the full cumulative increment 13 / 0.758.
+    assert Decimal(str(after_second["shares"])) == Decimal("33")
+    assert Decimal(str(after_second["cost_basis_usd"])) == Decimal("14.158")
+    execution = conn.execute(
+        "SELECT shares FROM execution_fact WHERE command_id='cmd-top-up'"
+    ).fetchone()
+    assert execution["shares"] == 13.0
+    # The admission comparator now sees projection == net fills.
+    net = query_net_execution_fill_aggregate(conn, "pos-m5")
+    assert Decimal(str(net["shares_filled"])) == Decimal("33")
+    assert float(net["filled_cost_basis_usd"]) == pytest.approx(14.158)
+
+
+def test_increment_reobservation_with_exit_after_its_fill_is_typed_and_deferred(conn):
+    """An exit newer than the increment's first fill is unprovable by the
+    linear replacement; the leg is deferred per command, never projected
+    or silently counted, and the sweep keeps running."""
+
+    from src.execution.exchange_reconcile import (
+        EntryIncrementUnprovable,
+        _ensure_entry_fill_position_event,
+        run_reconcile_sweep,
+    )
+    from src.state.venue_command_repo import get_command
+
+    seed_command(conn, size=24, price=0.67)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(trade_id="trade-initial", order_id="ord-m5", size="24",
+                      price="0.67", status="CONFIRMED")
+            ]
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    seed_command(
+        conn,
+        command_id="cmd-top-up",
+        venue_order_id="ord-top-up",
+        position_id="pos-m5",
+        size=15,
+        price=0.08,
+        created_at=NOW + timedelta(minutes=1),
+        order_type="GTC",
+        post_only=True,
+    )
+    first_leg = trade(trade_id="trade-top-up-1", order_id="ord-top-up", size="11",
+                      price="0.058", status="CONFIRMED")
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[first_leg]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=1),
+    )
+    # A confirmed exit after the increment's first fill, without a reduction
+    # event in the position journal (fact landed before the event fold).
+    _confirm_partial_exit(
+        conn,
+        shares=5.0,
+        price=0.70,
+        filled_at=NOW + timedelta(minutes=1, seconds=30),
+        remaining_shares=30.0,
+        remaining_cost=13.0,
+    )
+    before = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+
+    with pytest.raises(EntryIncrementUnprovable):
+        _ensure_entry_fill_position_event(
+            conn,
+            command=get_command(conn, "cmd-top-up"),
+            venue_order_id="ord-top-up",
+            filled_size="13",
+            fill_price="0.058307692307692",
+            observed_at=NOW + timedelta(minutes=2),
+        )
+
+    second_leg = trade(trade_id="trade-top-up-2", order_id="ord-top-up", size="2",
+                       price="0.06", status="CONFIRMED")
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[first_leg, second_leg]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=2),
+    )
+    after = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+    assert dict(after) == dict(before)
+    # The deferred leg left no partial durable state behind.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id='trade-top-up-2'"
+    ).fetchone()[0] == 0

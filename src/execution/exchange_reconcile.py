@@ -589,16 +589,19 @@ def refresh_unresolved_reconcile_findings(
                 )
             )
             continue
-        finding = _append_linkable_trade_fact_if_missing(
-            conn,
-            command,
-            raw,
-            venue_trade_id,
-            observed,
-            state=state,
-            context=context,
-            matched_order_id=order_id,
-        )
+        try:
+            finding = _append_linkable_trade_fact_if_missing_isolated(
+                conn,
+                command,
+                raw,
+                venue_trade_id,
+                observed,
+                state=state,
+                context=context,
+                matched_order_id=order_id,
+            )
+        except EntryIncrementUnprovable:
+            continue
         if finding is not None:
             new_findings.append(finding)
 
@@ -868,16 +871,19 @@ def run_reconcile_sweep(
                 )
             )
             continue
-        finding = _append_linkable_trade_fact_if_missing(
-            conn,
-            command,
-            raw,
-            venue_trade_id,
-            observed,
-            state=state,
-            context=context,
-            matched_order_id=order_id,
-        )
+        try:
+            finding = _append_linkable_trade_fact_if_missing_isolated(
+                conn,
+                command,
+                raw,
+                venue_trade_id,
+                observed,
+                state=state,
+                context=context,
+                matched_order_id=order_id,
+            )
+        except EntryIncrementUnprovable:
+            continue
         if finding is not None:
             findings.append(finding)
 
@@ -5795,6 +5801,45 @@ def reconcile_persisted_terminal_late_entry_fills(
     return summary
 
 
+def _append_linkable_trade_fact_if_missing_isolated(
+    conn: sqlite3.Connection,
+    command: Mapping[str, Any],
+    raw: Mapping[str, Any],
+    trade_id: str,
+    observed_at: datetime,
+    **kwargs: Any,
+) -> ReconcileFinding | None:
+    """Append one trade fact; an unprovable increment rolls back only itself.
+
+    The trade fact stays absent, so the next sweep re-observes it once the
+    net base is provable.  Every other exception keeps aborting the sweep.
+    """
+
+    savepoint = f"sp_linkable_trade_{uuid.uuid4().hex[:12]}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        finding = _append_linkable_trade_fact_if_missing(
+            conn, command, raw, trade_id, observed_at, **kwargs
+        )
+    except EntryIncrementUnprovable as exc:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        logger.error(
+            "exchange_reconcile: entry increment unprovable; trade fact deferred "
+            "trade_id=%s command_id=%s error=%s",
+            trade_id,
+            command.get("command_id"),
+            exc,
+        )
+        raise
+    except BaseException:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    return finding
+
+
 def _append_linkable_trade_fact_if_missing(
     conn: sqlite3.Connection,
     command: Mapping[str, Any],
@@ -6766,6 +6811,23 @@ def _missing_entry_projection_from_linked_fill(
     }
 
 
+class EntryIncrementUnprovable(RuntimeError):
+    """An increment fill whose net position base the fill facts cannot prove.
+
+    Raised instead of returning so a stranded fill is never counted as
+    projected; sweep callers roll back that one trade fact and continue.
+    """
+
+
+def _parse_utc_or_none(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        return _coerce_dt(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _ensure_entry_fill_position_event(
     conn: sqlite3.Connection,
     *,
@@ -7101,11 +7163,17 @@ def _ensure_entry_fill_position_event(
             return
         # The base is the position the confirmed fills explain: entries net of
         # confirmed exits.  A gross entry base would resurrect sold shares.
-        historical = query_net_execution_fill_aggregate(
-            conn,
-            position_id,
-            require_terminal_exit_commands=False,
-        )
+        try:
+            historical = query_net_execution_fill_aggregate(
+                conn,
+                position_id,
+                require_terminal_exit_commands=False,
+            )
+        except RuntimeError as exc:
+            raise EntryIncrementUnprovable(
+                f"position_id={position_id} command_id={command.get('command_id')} "
+                f"{exc}"
+            ) from exc
         if historical is None:
             logger.error(
                 "exchange_reconcile: refuse entry increment without prior "
@@ -7137,23 +7205,74 @@ def _ensure_entry_fill_position_event(
         projection_shares = historical_shares
         projection_cost = historical_cost
         if current_command_id not in historical_commands:
-            # Partial execution facts are deliberately excluded from the
-            # terminal-fill aggregate. Add the command's latest cumulative
-            # venue economics once; re-observation deterministically rebuilds
-            # the same result until the command becomes terminal.
+            # First materialization of this command: no execution_fact row
+            # carries it yet.  Add its latest cumulative venue economics once;
+            # re-observation then takes the replacement branches below.
             projection_shares += shares_dec
             projection_cost += cost_basis_dec
         elif historical.get("exit_execution_fact_command_ids"):
-            # Average-cost exit reduction is not additive in one entry's
-            # economics: replacing this command's fill would rescale every
-            # later exit.  Refuse rather than approximate.
-            logger.error(
-                "exchange_reconcile: refuse entry increment replacement after "
-                "confirmed exits position_id=%s command_id=%s",
-                position_id,
-                current_command_id,
+            # Re-observation of a materialized increment after confirmed
+            # exits.  ``later_reduction`` above already returned if a
+            # reduction event followed this command's fill, so every exit
+            # precedes it and average cost is linear in this command: the
+            # base is the replay without it, plus its new cumulative fill.
+            # A confirmed exit fact newer than the command's first fill is
+            # unprovable here and must not be projected or skipped silently.
+            first_fill = conn.execute(
+                """
+                SELECT MIN(occurred_at) AS first_fill_at
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'ENTRY_ORDER_FILLED'
+                   AND command_id = ?
+                """,
+                (position_id, current_command_id),
+            ).fetchone()
+            first_fill_at = _parse_utc_or_none(
+                first_fill["first_fill_at"] if first_fill else None
             )
-            return
+            later_exit_at = conn.execute(
+                """
+                SELECT MAX(filled_at) AS filled_at
+                  FROM execution_fact
+                 WHERE position_id = ?
+                   AND order_role = 'exit'
+                   AND COALESCE(command_id, '') != ''
+                   AND voided_at IS NULL
+                   AND COALESCE(shares, 0.0) > 0.0
+                """,
+                (position_id,),
+            ).fetchone()["filled_at"]
+            later_exit = _parse_utc_or_none(later_exit_at)
+            if first_fill_at is None or later_exit is None or later_exit > first_fill_at:
+                raise EntryIncrementUnprovable(
+                    f"position_id={position_id} command_id={current_command_id} "
+                    "confirmed exit after the increment's first fill "
+                    f"first_fill_at={first_fill_at} latest_exit_at={later_exit}"
+                )
+            try:
+                base = query_net_execution_fill_aggregate(
+                    conn,
+                    position_id,
+                    require_terminal_exit_commands=False,
+                    exclude_entry_command_id=current_command_id,
+                )
+            except RuntimeError as exc:
+                raise EntryIncrementUnprovable(
+                    f"position_id={position_id} command_id={current_command_id} "
+                    f"{exc}"
+                ) from exc
+            base_shares = _positive_decimal_or_none((base or {}).get("shares_filled"))
+            base_cost = _positive_decimal_or_none(
+                (base or {}).get("filled_cost_basis_usd")
+            )
+            if base_shares is None or base_cost is None:
+                raise EntryIncrementUnprovable(
+                    f"position_id={position_id} command_id={current_command_id} "
+                    "net base without the increment is not positive"
+                )
+            projection_shares = base_shares + shares_dec
+            projection_cost = base_cost + cost_basis_dec
         else:
             # The current command's execution_fact is the durable projection
             # written by this helper. Reconcile can receive a newer

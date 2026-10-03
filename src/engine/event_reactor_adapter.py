@@ -6799,7 +6799,10 @@ def global_selected_order_same_token_rejection(
     False-refusals (True only opens the reconciled-increment branch), so every
     proposal refused here is refused at submit whatever the flag resolves to.
     A proposal that the guard admits only as a certified increment is still
-    refused at submit if its certificate fails.
+    refused at submit if its certificate fails.  Known gap: that refusal (a
+    non-post-only GTC/GTD, a FAK without a prefix certificate, or a missing
+    certificate identity) cannot be predicted here because the flag also
+    requires ``qkernel_execution_economics`` proven on the final intent.
     """
 
     from src.execution.executor import (

@@ -14261,6 +14261,11 @@ _EXIT_FILL_NON_FINAL_STATUSES = frozenset({"MATCHED", "MINED"})
 _EXIT_COMMAND_TERMINAL_STATES = frozenset(
     {"FILLED", "CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
 )
+# Exit states that need recovery or an operator to resolve; until then the
+# position stays unexplained and certified increments stay refused.
+_EXIT_COMMAND_STALLED_STATES = frozenset(
+    {"REVIEW_REQUIRED", "UNKNOWN", "SUBMIT_UNKNOWN_SIDE_EFFECT"}
+)
 
 
 def query_net_execution_fill_aggregate(
@@ -14268,6 +14273,7 @@ def query_net_execution_fill_aggregate(
     position_id: str,
     *,
     require_terminal_exit_commands: bool = True,
+    exclude_entry_command_id: str = "",
 ) -> dict | None:
     """Return the position that confirmed fill facts alone explain.
 
@@ -14285,7 +14291,9 @@ def query_net_execution_fill_aggregate(
     an exit exceeding open shares.  ``require_terminal_exit_commands`` also
     refuses any in-flight EXIT command: admission of new exposure needs the
     complete exit history, while projection materialization folds only fills
-    that already reduced the position.
+    that already reduced the position.  ``exclude_entry_command_id`` replays
+    without that entry command's fill: the base onto which a re-observed
+    command's cumulative economics are added.
     """
 
     position_id = str(position_id or "").strip()
@@ -14309,6 +14317,14 @@ def query_net_execution_fill_aggregate(
                     require_terminal_exit_commands
                     and state not in _EXIT_COMMAND_TERMINAL_STATES
                 ):
+                    if state in _EXIT_COMMAND_STALLED_STATES:
+                        logger.warning(
+                            "certified increment blocked until exit resolves: "
+                            "position_id=%s command_id=%s state=%s",
+                            position_id,
+                            row["command_id"],
+                            state,
+                        )
                     raise RuntimeError(
                         "exit command not terminal: "
                         f"position_id={position_id} command_id={row['command_id']} "
@@ -14384,7 +14400,7 @@ def query_net_execution_fill_aggregate(
                     "filled exit command has no confirmed fill fact: "
                     f"position_id={position_id} command_id={row['command_id']}"
                 )
-    if not exits:
+    if not exits and not exclude_entry_command_id:
         return entry
 
     entry_rows = conn.execute(
@@ -14416,6 +14432,7 @@ def query_net_execution_fill_aggregate(
             Decimal(str(_finite_float_or_zero(row["fill_price"]))),
         )
         for row in _command_deduped_fill_rows(entry_rows, order_role="entry")
+        if str(row["command_id"] or "") != exclude_entry_command_id
     ]
     timeline.extend(
         (_parse_iso_timestamp(filled_at), 1, shares, Decimal("0"))
