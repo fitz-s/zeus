@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Lifecycle: created=2026-04-26; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-10-02
+# Last reused/audited: 2026-10-03
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -23370,16 +23370,31 @@ class TestRecoveryResolutionTable:
         finally:
             verified.close()
 
+    @pytest.mark.parametrize(
+        ("general_budget", "elapsed_general", "expired_cancel"),
+        [
+            pytest.param("0", False, False, id="zero-general"),
+            pytest.param("-1", False, False, id="negative-general"),
+            pytest.param(None, False, False, id="default-general"),
+            pytest.param("0.1", True, False, id="elapsed-general"),
+            pytest.param("0.1", False, True, id="expired-own-cancel"),
+        ],
+    )
     def test_live_tick_prioritizes_cancel_pending_before_general_budget(
         self,
         tmp_path,
         monkeypatch,
         mock_client,
+        general_budget,
+        elapsed_general,
+        expired_cancel,
     ):
-        """A zero DB budget cannot strand a venue-absent CANCEL_PENDING order."""
-        from src.execution import command_recovery, venue_sync_contract
+        """General debt cannot strand cancel debt or extend its own deadline."""
+        from src.contracts.review_work_item import FamilyKey, ReviewReasonCode
+        from src.execution import command_recovery, review_work_delivery, venue_sync_contract
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.db import init_schema, init_schema_trade_only
+        from src.state.review_work_items import blocked_family_keys, open_work_item
 
         db_path = tmp_path / "priority-cancel-pending.db"
         seed = sqlite3.connect(db_path)
@@ -23389,6 +23404,19 @@ class TestRecoveryResolutionTable:
         init_collateral_schema(seed)
         _insert(seed, size=81.0, price=0.58)
         _advance_to_cancel_pending(seed, venue_order_id="ord-cancel-pending")
+        _seed_deterministic_terminal_no_fill_for_test(
+            seed, command_id="general-terminal-review"
+        )
+        work = open_work_item(
+            seed,
+            owner_domain="trade",
+            owner_table="position_current",
+            subject_id="unreconciled-position",
+            reason_code=ReviewReasonCode.TERMINAL_RESTORE_EXPOSURE,
+            family_key=FamilyKey("London", "2026-04-26", "HIGH", "review-family"),
+            exposure_bound_usd=9.0,
+            now=_NOW.isoformat(),
+        )
         seed.commit()
         seed.close()
 
@@ -23402,14 +23430,63 @@ class TestRecoveryResolutionTable:
             "default_trade_conn_factory",
             _conn_factory,
         )
+        now = [10.0]
+        monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+        if general_budget is None:
+            monkeypatch.delenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", raising=False)
+        else:
+            monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", general_budget)
+        real_cancel_candidates = command_recovery._capital_blocking_cancel_commands
+
+        def _cancel_candidates(db_conn):
+            rows = real_cancel_candidates(db_conn)
+            if elapsed_general and now[0] == 10.0:
+                now[0] = 11.0
+            return rows
+
+        monkeypatch.setattr(
+            command_recovery, "_capital_blocking_cancel_commands", _cancel_candidates
+        )
+        real_policy = command_recovery._run_recovery_pass_with_lock_policy
+
+        def _policy(label, fn, **kwargs):
+            if expired_cancel and label == "cancel_recovery_fast":
+                now[0] = kwargs["deadline_monotonic"] + 0.01
+            return real_policy(label, fn, **kwargs)
+
+        monkeypatch.setattr(
+            command_recovery, "_run_recovery_pass_with_lock_policy", _policy
+        )
+
+        def _historical_candidates(db_conn, **_kwargs):
+            assert _get_state(db_conn, "cmd-001") == "CANCELLED", (
+                "exact cancel debt must preempt the historical partial scan"
+            )
+            return []
+
         monkeypatch.setattr(
             command_recovery,
             "_partial_remainder_candidates",
-            lambda *_args, **_kwargs: pytest.fail(
-                "exact cancel debt must preempt the historical partial scan"
-            ),
+            _historical_candidates,
         )
-        monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+        review_calls = []
+        real_work_retry = review_work_delivery.reconcile_review_work_items
+        real_terminal_review = command_recovery.reconcile_deterministic_terminal_no_fill_reviews
+
+        def _work_retry(db_conn):
+            assert _get_state(db_conn, "cmd-001") == "CANCELLED"
+            review_calls.append("work")
+            return real_work_retry(db_conn)
+
+        def _terminal_review(db_conn):
+            assert _get_state(db_conn, "cmd-001") == "CANCELLED"
+            review_calls.append("terminal")
+            return real_terminal_review(db_conn)
+
+        monkeypatch.setattr(review_work_delivery, "reconcile_review_work_items", _work_retry)
+        monkeypatch.setattr(
+            command_recovery, "reconcile_deterministic_terminal_no_fill_reviews", _terminal_review
+        )
         mock_client.get_order.return_value = None
         mock_client.get_open_orders.return_value = []
         mock_client.get_trades.return_value = []
@@ -23419,18 +23496,47 @@ class TestRecoveryResolutionTable:
             scope="live_tick",
         )
 
-        assert summary["cancel_recovery_fast"] == {
-            "scanned": 1,
-            "advanced": 1,
-            "stayed": 0,
-            "errors": 0,
-        }
-        assert summary["partial_remainder_scan_deferred_for_cancel"] is True
+        general_can_apply = general_budget not in {"0", "-1"} and not expired_cancel
         verified = _conn_factory()
         try:
-            assert _get_state(verified, "cmd-001") == "CANCELLED"
+            assert _get_state(verified, "cmd-001") == (
+                "CANCEL_PENDING" if expired_cancel else "CANCELLED"
+            )
+            events = [row["event_type"] for row in _get_events(verified, "cmd-001")]
+            assert events.count("CANCEL_ACKED") == (0 if expired_cancel else 1)
+            assert _get_state(verified, "general-terminal-review") == (
+                "EXPIRED" if general_can_apply else "REVIEW_REQUIRED"
+            )
+            row = verified.execute(
+                "SELECT status, exposure_bound_usd, attempt_count FROM review_work_items "
+                "WHERE work_id = ?", (work.work_id,),
+            ).fetchone()
+            assert tuple(row) == ("OPEN", 9.0, 1 if general_can_apply else 0)
+            assert any(key.market_family_id == "review-family" for key in blocked_family_keys(verified))
         finally:
             verified.close()
+        if expired_cancel:
+            assert summary["db_budget_deferred_at"] == "cancel_recovery_fast"
+            assert "cancel_recovery_fast" not in summary
+        else:
+            assert summary["cancel_recovery_fast"] == {
+                "scanned": 1,
+                "advanced": 1,
+                "stayed": 0,
+                "errors": 0,
+            }
+        assert summary["partial_remainder_scan_deferred_for_cancel"] is True
+        mock_client.get_account_truth.assert_called()
+        assert any(
+            call.args == ("ord-cancel-pending",)
+            and "deadline_monotonic" in call.kwargs
+            for call in mock_client.get_order.call_args_list
+        )
+        assert review_calls == (["work", "terminal"] if general_can_apply else [])
+        assert summary["live_tick_db_budget_seconds"] == (
+            command_recovery._LIVE_TICK_DB_BUDGET_SECONDS
+            if general_budget is None else max(0.0, float(general_budget))
+        )
 
     def test_live_tick_prioritizes_partial_remainder_before_general_budget(
         self,

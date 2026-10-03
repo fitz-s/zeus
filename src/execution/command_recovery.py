@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-31; last_reused=2026-08-31
+# Lifecycle: created=2026-04-26; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -21946,7 +21946,7 @@ def _deterministic_terminal_no_fill_review_candidates(conn: sqlite3.Connection) 
 
 
 def reconcile_deterministic_terminal_no_fill_reviews(conn: sqlite3.Connection) -> dict:
-    """Drain exact terminal rejection reviews before any venue read.
+    """Drain exact terminal rejection reviews without requiring venue reads.
 
     SCOPE: the latest typed rejection on one command. DRAIN: the bounded normal
     recovery pass rechecks its immutable proof and atomically releases its
@@ -35054,7 +35054,8 @@ def _reconcile_passes_short_conn(
         return result
 
     from src.execution.review_work_delivery import reconcile_review_work_items
-    _db_pass("review_work_retry", reconcile_review_work_items, "review_work_retry")
+    if scope != "live_tick":
+        _db_pass("review_work_retry", reconcile_review_work_items, "review_work_retry")
 
     if scope == "boot_fast":
         # Boot recovery must not perform account-wide or per-order venue reads.
@@ -35383,7 +35384,7 @@ def _reconcile_passes_short_conn(
         deterministic_reviews_pending = bool(
             _deterministic_terminal_no_fill_review_candidates(conn)
         )
-    if deterministic_reviews_pending:
+    if deterministic_reviews_pending and scope != "live_tick":
         _db_pass(
             "deterministic_terminal_no_fill_reviews",
             reconcile_deterministic_terminal_no_fill_reviews,
@@ -35419,6 +35420,16 @@ def _reconcile_passes_short_conn(
             scope=scope,
             deadline_monotonic=apply_deadline,
         )
+        # General review work shares this re-anchored maintenance slice. It
+        # cannot exhaust a different fast lane's independently bounded budget.
+        # Actual lock/preemption/deadline defer flags remain fail-closed.
+        _db_pass("review_work_retry", reconcile_review_work_items, "review_work_retry")
+        if deterministic_reviews_pending:
+            _db_pass(
+                "deterministic_terminal_no_fill_reviews",
+                reconcile_deterministic_terminal_no_fill_reviews,
+                "deterministic_terminal_no_fill_reviews",
+            )
 
     # A confirmed trade already persisted for a REVIEW_REQUIRED submit is the
     # narrowest unresolved capital truth: it resolves known exposure and releases

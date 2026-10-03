@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -104,6 +104,9 @@ _OWN_CLOCK_STATION_REVISION_FAST_LIMIT = 3
 _OWN_CLOCK_STATION_REVISION_CANDIDATE_LIMIT = 12
 _OWN_CLOCK_STATION_REVISION_CURSOR_NAME = ".replacement-station-revision.cursor"
 _CLAIM_READ_DEFERRED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_READ_DEADLINE"
+_CLAIM_ROTATION_CLOCK_DEFERRED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REQUEST_ROTATION_CLOCK"
+)
 _CLAIM_STALE_RECOVERY_DEFERRED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_STALE_RECOVERY"
 )
@@ -127,6 +130,10 @@ REPLACEMENT_MATERIALIZATION_CLAIM_WINDOW_EXHAUSTED_STATUSES = frozenset(
 
 class _ClaimReadDeadlineExceeded(RuntimeError):
     """The pre-claim read tranche spent its fixed wall-clock budget."""
+
+
+class _RequestRotationClockUnavailable(RuntimeError):
+    """One request lacks a readable operational ordering clock."""
 
 
 @dataclass
@@ -3220,17 +3227,43 @@ def _request_file_sort_key(
     path: Path,
     priority: dict[str, tuple[float, str]],
 ) -> tuple[float, int, str, str]:
-    """Priority tier, then turn: an unattempted request precedes every retained
-    one of its tier, and retained requests rotate by when each was last retained.
+    """Priority tier, then queue arrival or last-retained UNIX wall-clock ns.
 
     SCOPE: order within one priority tier only; the held/non-held tiers and the
-    interleaver are unchanged. A retained failure keeps its single ownership but
-    waits its turn behind its tier, so it cannot monopolize a slot. RESET: the
-    request leaves the queue. Order only: no delay, no attempt cap.
+    interleaver are unchanged. New arrivals cannot perpetually precede an older
+    retained turn; a failed retry moves behind already waiting work. Filesystem
+    time is order only, never source/probability freshness, a delay or attempt cap.
     """
     tier, request_time = priority.get(path.name, (1, ""))
     turn = (_read_stage_receipt(path) or {}).get("retained_turn")
-    return tier, turn if isinstance(turn, int) else 0, request_time, path.name
+    if type(turn) is not int or turn <= 0:
+        try:
+            turn = path.stat().st_mtime_ns
+        except OSError as exc:
+            raise _RequestRotationClockUnavailable(str(path)) from exc
+        if type(turn) is not int or turn <= 0:
+            raise _RequestRotationClockUnavailable(str(path))
+    return tier, turn, request_time, path.name
+
+
+def _sort_request_files(
+    paths: Iterable[Path], priority: dict[str, tuple[float, str]],
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Defer only files whose ordering clock cannot be read, without moving them.
+
+    SCOPE: each unavailable-clock candidate. DRAIN: normal republish/readable
+    clock and replan, or stale recovery for an already leased file. RESET: its
+    own clock is readable. No clock rewrite or source-time substitution.
+    """
+    keys: dict[Path, tuple[float, int, str, str]] = {}
+    deferred: list[Path] = []
+    for path in paths:
+        try:
+            keys[path] = _request_file_sort_key(path, priority)
+        except _RequestRotationClockUnavailable:
+            deferred.append(path)
+            _LOG.warning("materialization rotation clock unavailable; retained file=%s", path)
+    return tuple(sorted(keys, key=keys.__getitem__)), tuple(deferred)
 
 
 def _lane_matches(*, path: Path, priority_names: set[str], lane: str) -> bool:
@@ -4858,15 +4891,10 @@ def _build_request_claim_read_plan(
         current_money_risk=current_money_risk,
         current_global_scope=current_global_scope,
     )
-    requests = tuple(
-        sorted(
-            (
-                path
-                for path in request_files
-                if _lane_matches(path=path, priority_names=priority_names, lane=lane)
-            ),
-            key=lambda path: _request_file_sort_key(path, priority),
-        )
+    requests, clock_deferred = _sort_request_files(
+        (path for path in request_files
+         if _lane_matches(path=path, priority_names=priority_names, lane=lane)),
+        priority,
     )
     remaining, superseded = _plan_superseded_materialization_requests(requests)
     now = time.time()
@@ -4931,7 +4959,7 @@ def _build_request_claim_read_plan(
         failed_path=failed_path,
         claimed_count=len(selected),
         skipped_count=(
-            identity_deferred + inflight_deferred + timeout_retry_deferred
+            len(clock_deferred) + identity_deferred + inflight_deferred + timeout_retry_deferred
             + max(len(claimable) - limit, 0)
         ),
         inflight_deferred_count=inflight_deferred,
@@ -4941,9 +4969,9 @@ def _build_request_claim_read_plan(
         seed_processed_files=(),
         seed_failed_files=(),
         seed_reasons=(
-            ("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_IDENTITY_DEFERRED",)
-            if identity_deferred
-            else ()
+            (("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_IDENTITY_DEFERRED",)
+             if identity_deferred else ())
+            + ((_CLAIM_ROTATION_CLOCK_DEFERRED_REASON,) if clock_deferred else ())
         ),
         discovery_report=None,
         selected_files=selected,
@@ -7064,21 +7092,15 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         current_global_scope=current_global_scope,
     )
     identity_deferred = 0
-    requests = tuple(
-        sorted(
-            (
-                path
-                for path in request_files
-                if _lane_matches(
-                    path=path,
-                    priority_names=priority_names,
-                    lane=lane,
-                )
-                and (payload := request_payloads.get(path)) is not None
-                and _claim_identity_witness(payload) is not None
-            ),
-            key=lambda path: _request_file_sort_key(path, priority),
-        )
+    requests, clock_deferred = _sort_request_files(
+        (
+            path
+            for path in request_files
+            if _lane_matches(path=path, priority_names=priority_names, lane=lane)
+            and (payload := request_payloads.get(path)) is not None
+            and _claim_identity_witness(payload) is not None
+        ),
+        priority,
     )
     identity_deferred = sum(
         1
@@ -7135,7 +7157,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         failed_path=failed_path,
         claimed_count=len(selected),
         skipped_count=(
-            identity_deferred + inflight_deferred
+            len(clock_deferred) + identity_deferred + inflight_deferred
             + timeout_retry_deferred
             + max(len(claimable) - limit, 0)
         ),
@@ -7149,6 +7171,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             (*seed_reasons,)
             + (("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_IDENTITY_DEFERRED",)
                if identity_deferred else ())
+            + ((_CLAIM_ROTATION_CLOCK_DEFERRED_REASON,) if clock_deferred else ())
         ),
         discovery_report=discovery_report,
     )
@@ -7176,13 +7199,15 @@ def _claim_only_report(
             reasons.append(
                 "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE"
             )
-    elif not (seed_processed or seed_failed):
+    elif not (seed_processed or seed_failed) and _CLAIM_ROTATION_CLOCK_DEFERRED_REASON not in reasons:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY")
     return ReplacementForecastLiveMaterializationQueueReport(
         status=(
             "FAILED"
             if failed or seed_failed
-            else ("PROCESSED" if processed or seed_processed else "NO_REQUESTS")
+            else ("PROCESSED" if processed or seed_processed else (
+                "DEFERRED" if _CLAIM_ROTATION_CLOCK_DEFERRED_REASON in reasons else "NO_REQUESTS"
+            ))
         ),
         request_dir=str(claim.request_path),
         processed_dir=str(claim.processed_path),
@@ -7561,12 +7586,7 @@ def _process_claimed_materialization_batch(
             reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY",),
         )
     priority = _cycle_advance_seed_priority_map(forecast_db, request_files)
-    requests = tuple(
-        sorted(
-            request_files,
-            key=lambda path: _request_file_sort_key(path, priority),
-        )
-    )
+    requests, clock_deferred = _sort_request_files(request_files, priority)
 
     requests, superseded = _coalesce_superseded_materialization_requests(
         requests,
@@ -8079,7 +8099,7 @@ def _process_claimed_materialization_batch(
                     restored, category=category, error_type=error_type, bound=bound,
                 )
             except OSError:
-                pass  # no turn stamp: the request still retries, ordered as fresh
+                pass  # no turn stamp: the request still retries by queue mtime
             _LOG.log(
                 logging.ERROR if category is FailureCategory.UNCLASSIFIED else logging.WARNING,
                 "materialize[%s] %s %s retained by its request: returncode=%s outcome=%s stderr=%s",
@@ -8100,6 +8120,11 @@ def _process_claimed_materialization_batch(
 
     status = "FAILED" if failed else "PROCESSED"
     reasons = ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_PROCESSED"]
+    if clock_deferred:
+        reasons.append(_CLAIM_ROTATION_CLOCK_DEFERRED_REASON)
+        if not requests:
+            status = "DEFERRED"
+            reasons.remove("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_PROCESSED")
     if superseded:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE")
     if unchanged_blocked:
@@ -8166,7 +8191,7 @@ def _process_claimed_materialization_batch(
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")
     if committed_posterior_count > reactor_wake_published_count:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REACTOR_WAKE_FALLBACK_REQUIRED")
-    skipped = max(len(requests) - limit, 0)
+    skipped = len(clock_deferred) + max(len(requests) - limit, 0)
     if skipped:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LIMIT_REACHED")
     return ReplacementForecastLiveMaterializationQueueReport(

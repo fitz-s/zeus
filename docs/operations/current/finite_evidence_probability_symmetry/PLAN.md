@@ -12425,3 +12425,189 @@ fetch/seed or venue operation. Afterload still must prove natural cancellation
 delivery where needed, the three-slot handoff and actual new source-to-q DRAIN;
 old Seoul/Chicago/Busan claims and historical timeout causes are not certified
 by these private tests. External missing provider/ground evidence stays unknown.
+
+### Same-tier arrival starvation: operational rotation clock
+
+Before editing, root authorizes a second bounded fairness slice on the existing
+task branch/tree. The B writer owns only
+src/data/replacement_forecast_live_materialization_queue.py and existing
+tests/test_materialization_queue_stale_lock.py. The integrator retains PLAN,
+registries, verification and normal delivery; other sources/tests stay frozen.
+
+Verified pure actual counterexample: with a constant five-request backlog and
+continuous same-tier arrivals,100 rounds process300 new requests while the old
+retained request receives zero attempts. `_request_file_sort_key` gives every
+unattempted request turn0, forever ahead of any positive retained turn. Current
+Seoul rank117→78 and backlog360→262 also demonstrate that this is not proof of
+a present permanent daemon deadlock; the constructed arrival starvation itself
+is still a confirmed scheduler defect requiring an antibody.
+
+Repair only ordering within the already assigned tier. An unattempted request
+uses its actual queue-file st_mtime_ns as the operational turn; a retained
+request keeps its existing last-attempt/retained nanosecond turn. This clock is
+not computed_at, provider/source-issued time, q authority, or a new source cut.
+Keep held/global/expansion slots, tier precedence, one writer, shared29/30-second
+deadline, retry/terminal qualification, ownership and input bytes unchanged.
+Unknown, unreadable or malformed queue-clock evidence must use the existing
+typed defer/replan path with no lost request, not a guessed source-clock or zero.
+
+SCOPE: same-tier request-file operational scheduling identity. DRAIN: the normal
+claim/runner eventually offers the retained request a turn despite continued
+arrivals; a failed attempt moves behind other older operational turns without
+monopolizing the writer. RESET: successful/qualified terminal removal retires
+the exact request; genuinely newer input follows normal admission and ownership
+rules, never forced readiness or discarded unbound proof.
+
+Acceptance: actual100-arrival-round HIGH/LOW no-starvation twins; refailure
+rotation; finite backlog; higher-tier/fresh-lead precedence; same/unknown clock
+and request-byte race no-loss; existing multi-lease/no-clobber/typed-witness
+tests. Freeze after source/test evidence, then run only affected required data/
+queue/actual-bridge checks, compile, freshness and touched registry checks.
+Do not repeat unrelated39 or rewrite the known57 baseline dispositions.
+
+Delivery is a new small source commit and one normal FF/load attempt, not a
+retry of the previous entry-resume rejection. Independent runtime proved the
+3b5 guard naturally None at08:51:29 after Paris2a fresh probability/book HOLD;
+the previous normal loader rc1 remains historical fact. Natural batch-three
+ownership/shared deadline is proved, but this does not mean all three inputs
+computed successfully or that Seoul/Busan LOW new-source-to-q DRAIN is closed.
+No manual reset, seed, source fetch, venue operation, or permission bypass.
+
+### Named recovery fast-lane latch: conditional read-only proposal
+
+Independent C has now classified an actual Important within the13 unchanged
+recovery failures. It is not harmless merely because HEAD also fails: a zero
+general DB budget reaches review_work_retry before own fast lanes and latches
+the summary exhausted flag, so CANCEL_PENDING's independently budgeted cancel
+drain can be skipped. The other historical summary/API fixtures are not thereby
+authorized for migration or treated as known safe.
+
+Root has assigned the existing RED executor a read-only minimal proposal,
+expected to touch only src/execution/command_recovery.py and its existing
+recovery test. This section is conditional preparation, not source-edit
+authorization; exact before-edit approval and file ownership will follow the
+proposal. Existing repo/cycle sources stay frozen. Read execution scoped law,
+module verification routes and normal ownership/lease grammar before editing.
+
+Candidate SCOPE is the exact owned nonterminal cancel command and its drain
+lane, not all recovery work. DRAIN must remain the existing normal live_tick
+owned-cancel path with its own already-declared budget. RESET is genuine
+terminal venue/command evidence or a later normal retry with valid truth, not
+budget inflation or forced lifecycle closure. Preserve capability, lease,
+foreign ownership, persistence-before-side-effect, probability and action-band
+contracts; do not upgrade general or fast budgets. Private zero-general-budget
+actual cancellation/independent deadline evidence and negative ownership/
+failure twins will determine the minimum approved change. No live reducer,
+venue cancel, source fetch, guard mutation or extra daemon cycle is permitted.
+
+If both the operational queue fix and this separate fast-lane fix are accepted,
+they may share one small commit and one normal load; otherwise keep their
+evidence/acceptance separate. Neither replaces remaining source-to-q production
+proof, and no unrelated static DDL or ten old summary-key APIs are repaired.
+
+### Approved recovery reorder: before-edit exact two-file scope
+
+Root now approves src/execution/command_recovery.py and existing
+tests/test_command_recovery.py, both owned by the existing RED executor. Only
+for live_tick, move generic review_work_retry and
+deterministic_terminal_no_fill_reviews after owned fast lanes into the existing
+general-deadline anchor segment. FULL/BOOT/RESTART retain their current order.
+This approval supersedes the conditional status above; no other files or
+historical summary APIs are authorized for repair.
+
+Keep all general/capital budgets, global deadline, lease/capability/ownership
+and latch semantics unchanged. Do not clear an exhausted generic latch or
+grant new entry permission because generic review moved. Conservative pending
+exposure must remain persisted for its existing consumers; the review helper's
+family set is not itself native ENTRY authority. Generic budget0 must not run generic work; an
+expired owned deadline must still defer. The positive must prove an actual
+private SDK point-read/cancel path and durable CANCELLED, not merely that a
+summary key exists. Pair it with ownership, failure, expired-deadline and
+scope-order negatives. No source-state/schema/policy/age-terminal changes.
+
+This is the identified Important inside the prior13 baseline failures; its
+HEAD equality did not make it obsolete. Remaining old fixtures/unknown paths
+are kept as residuals, not silently migrated. Require final source/test
+freeze, named independent C review, execution modulebook §20's seven existing
+test files and compile. Queue acceptance uses its affected checks separately;
+do not repeat the unaffected state24/engine5 or combined39. If both repairs
+accept, integrate them into one small commit and one normal FF/load attempt.
+
+### Operational rotation frozen evidence
+
+B's final queue SHA is
+2480976ed68537c2b5fc04bbfd79811c2af51b7fa2041eb989add4b86b8e20eb;
+the existing test SHA is
+a1c7248b978dfe0af3848a9281a29bdc5e1d243d12ca81d5603e7b1fefb9474a.
+All86 owned cases pass (54 prior plus32 new). The integrator's affected data10
+passes291, and the two actual background batch/deadline bridge cases pass.
+XML/logs are rotation-data10, rotation-queue86 and rotation-bridge2 under the
+existing /tmp/zeus-red-source-final39-20261003.4KEE7z evidence directory.
+No unrelated39 rerun is used.
+
+The three sort callers share the same helper: claim read-plan, ordinary flocked
+transport and already-leased worker. Unknown-clock24 twins keep exact bad-file
+bytes/ownership while two healthy siblings actually lease/process; a leased
+bad-clock file returns through normal stale recovery. The complete snapshot/
+is_file byte/stat safety fence is not weakened. Continuous-arrival fairness is
+proved for normal advancing actual queue clocks; malicious fixed-mtime infinite
+arrivals and persistent whole-file permission failure are not certified. No
+future-of-wallnow gate or clock mutation is added. Named review and the separate
+recovery source acceptance still precede combined landing.
+
+### Recovery frozen verification and final narrow checks
+
+Recovery source SHA is
+67342b1cbb447c7c0d1c5805754be41122a26e6477364f6644f39cde7037f800;
+its existing test SHA is
+c1ca408d0a5f37d79b8d9da440e8bd47480cfb98e44dee96f8b2212d902ec508.
+Twenty targeted cases pass, including actual private SDK point/cancel calls,
+durable cancellation, generic budget0, owned-deadline expiry, lock/preemption
+and FULL/BOOT/RESTART controls. The original3b5 source in-memory counterproof
+fails the new zero-budget durable antibody with CANCEL_PENDING != CANCELLED.
+This causal closure is not inferred from missing summary keys disappearing.
+
+Modulebook §20's prescribed seven files ran once against the frozen source:
+execution3=133PASS/29FAIL, risk1=43PASS/5FAIL, exit3=58PASS/3FAIL; total
+234PASS/37FAIL. The exact37 failing nodes alone were rerun with only original
+3b5 recovery code overlaid in memory, retaining current test context: the same
+37 fail. Thirty-five messages are byte-exact; one differs only in assertrepr
+addresses; one differs only in addresses plus the specific invalid_amount_400
+fixture's generated trade_id (executor uuid4[:12]). No hash/model/source clock/
+order/cash differences are normalized. Evidence recovery-{execution3,risk1,
+exit3}.xml, recovery37-head-baseline.xml and matching logs resides under
+/tmp/zeus-red-source-final39-20261003.4KEE7z/.
+
+The37 remain deferred historical q_version/taker-quality/expected-fill or SDK/
+identity/schema fixture prerequisites, a removed canonical-exit flag API,
+legacy consecutive-cycle expectation and static old callsites. One legacy
+entry test observes a mocked submit callback; baseline equality does not
+certify that boundary harmless or replace current typed live-route proof.
+These unchanged paths are not broadened into this fix. The earlier57 required39
+failures are not arithmetically reduced by13; actual recovery causal evidence
+and current seven-file outcomes are reported separately. No whole-repo GREEN.
+
+Named review narrows the exposure antibody claim: retained OPEN review state,
+bound9 and a helper family set prove no dropped/cleared exposure, not that every
+native global ENTRY is rejected. That helper declares it is not authority;
+current native admission would require its actual unresolved-exposure/risk
+consumer proof. This source reorder changes no grant or consumer. No new gate
+is introduced to make the private helper assertion authoritative.
+
+All execution Python modules compile, both changed tests' freshness checks,
+YAML parsing, changed registry coverage, unchanged downstream lists, whitespace
+and planning checks pass. B's final291 data/86 queue/two bridge evidence is
+unchanged and not counted again. Final named C acceptance still gates one
+combined commit/normal FF/load; no config/source/venue/guard bypass is licensed.
+
+Final independent acceptance: C approves recovery67342/testc1ca with five
+budget/durable-effect cases and seven lock/deadline/non-live controls passing;
+the same-tier queue2480976e/testa1c7248b has twelve independent passing cases
+and no unresolved blocking finding. The prescribed234PASS/37 original-HEAD
+failures are accepted only as zero introduced delta, never whole-green or
+closure of every old execution boundary. Root authorizes one combined small
+commit, fresh-origin rebase if required, FF push/live checkout FF and exactly
+one normal loader. Keep configd7 and all third-party work unchanged. Remove the
+temporary read-only test config link before commit. New runtime must separately
+prove natural fair service and source-to-q DRAIN; GREEN is not permission to
+force RED, create a cancel or claim production cancellation when none occurs.

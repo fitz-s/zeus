@@ -508,6 +508,263 @@ def _run_priority_fixture(queue, requests, tmp_path):
     )
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_same_tier_retained_owner_gets_service_during_100_arrival_rounds(
+    tmp_path, monkeypatch, metric,
+):
+    queue, requests, original, _revision, _plan = _priority_claim_plan(tmp_path, monkeypatch)
+    original.unlink()
+    wall = [queue.time.time_ns() - 1_000_000_000]
+    monkeypatch.setattr(queue.time, "time_ns", lambda: wall[0])
+    monkeypatch.setattr(queue, "_validate_request_payload", lambda _path: (True, "", ""))
+    monkeypatch.setattr(queue, "_cycle_advance_seed_priority_map", lambda _db, files: {
+        path.name: (-3.0, "") for path in files
+    })
+    monkeypatch.setattr(queue, "_priority_map_with_names", lambda _db, files, *_a, **_kw: (
+        {path.name: (-3.0, "") for path in files}, {path.name for path in files},
+    ))
+    old = requests / f"Seoul.2026-08-25.{metric}.old.json"
+    body = dict(_materialization_request(), city="Seoul", metric=metric)
+    old.write_text(json.dumps(body))
+    os.utime(old, ns=(wall[0] - 1, wall[0] - 1))
+    queue._record_retained_turn(old, category=queue.FailureCategory.UNCLASSIFIED, error_type=None)
+    batches = []
+
+    def batch_command(argv):
+        names = argv[argv.index("--batch-input-json") + 1:argv.index("--deadline-utc")]
+        batches.append(tuple(os.path.basename(name) for name in names))
+        envelopes = []
+        for name in names:
+            retained = os.path.basename(name) == old.name
+            result = ({"status": "ERROR", "failure_category": "UNCLASSIFIED"}
+                      if retained else {"status": "SUCCEEDED"})
+            envelopes.append(json.dumps({"input_json": name, "returncode": 2 if retained else 0,
+                                         "stdout": json.dumps(result), "stderr": ""}))
+        return subprocess.CompletedProcess(argv, 0, stdout="\n".join(envelopes), stderr="")
+
+    monkeypatch.setattr(queue, "_run_command", batch_command)
+    attempts = []
+    for turn in range(100):
+        wall[0] += 1_000_000
+        for slot in range(3):
+            path = requests / f"New{turn:03d}-{slot}.{metric}.json"
+            # A newly queued historical cut remains new operational work:
+            # its probability/source clock is deliberately older than Seoul's.
+            path.write_text(json.dumps(dict(body, city=f"New{turn:03d}-{slot}",
+                                            computed_at="2026-08-24T07:00:00+00:00")))
+            os.utime(path, ns=(wall[0], wall[0]))
+        report = _run_priority_fixture(queue, requests, tmp_path)
+        assert report.failed_count == 0 and len(batches[-1]) == 3
+        if old.name in batches[-1]:
+            attempts.append(turn)
+            assert queue._read_stage_receipt(old)["retained_turn"] == wall[0]
+            waiting = tuple(requests.glob("*.json"))
+            ordered = sorted(waiting, key=lambda path: queue._request_file_sort_key(
+                path, {p.name: (-3.0, "") for p in waiting},
+            ))
+            # Failed again: it rotates behind genuinely earlier waiting work.
+            assert ordered[-1] == old
+    assert len(attempts) >= 2, attempts
+    assert any(right > left + 1 for left, right in zip(attempts, attempts[1:]))
+    assert all(sum(name != old.name for name in batch) >= 2 for batch in batches)
+    assert sum(name != old.name for batch in batches for name in batch) > 200
+    assert old.read_text() == json.dumps(body)  # no stale-as-fresh rewrite
+
+
+def test_same_tier_finite_backlog_and_higher_tier_keep_their_order(tmp_path, monkeypatch):
+    queue, requests, old, _revision, plan = _priority_claim_plan(tmp_path, monkeypatch)
+    clock = queue.time.time_ns() - 1_000_000_000
+    monkeypatch.setattr(queue.time, "time_ns", lambda: clock + 100)
+    queue._record_retained_turn(old, category=queue.FailureCategory.ENVIRONMENT_RETRY, error_type=None)
+    earlier = requests / "Seoul.low.earlier.json"
+    later = requests / "Paris.high.later.json"
+    fresh = requests / "Fresh.station-input-revision.json"
+    for path, city, stamp in ((earlier, "Seoul", clock - 1), (later, "Paris", clock + 101),
+                              (fresh, "Fresh", clock + 102)):
+        path.write_text(json.dumps(dict(_materialization_request(), city=city)))
+        os.utime(path, ns=(stamp, stamp))
+    monkeypatch.setattr(queue.time, "time_ns", lambda: clock + 200)
+    priorities = {old.name: (-3, ""), earlier.name: (-3, ""), later.name: (-3, ""),
+                  fresh.name: (-3.5, "")}
+    monkeypatch.setattr(queue, "_priority_map_with_names", lambda *_a, **_kw: (
+        priorities, set(priorities),
+    ))
+    selected = plan().claim.selected_files
+    assert selected == (fresh, earlier, old)
+    assert later.exists()
+    claimed, reason = queue._try_claim_priority_request(plan())
+    assert claimed is not None and reason == ()
+    assert tuple(p.name for p in claimed.selected_files) == tuple(p.name for p in selected)
+
+
+@pytest.mark.parametrize("clock", (0, None, True, "unknown", "missing", "unreadable"))
+@pytest.mark.parametrize("with_siblings", (False, True))
+@pytest.mark.parametrize("flocked", (False, True))
+def test_request_rotation_clock_unknown_defers_only_its_file(
+    tmp_path, monkeypatch, clock, with_siblings, flocked,
+):
+    from pathlib import Path
+
+    queue, requests, paths, _revision, _plan = _three_request_priority_plan(tmp_path, monkeypatch)
+    selected = paths[0]
+    if not with_siblings:
+        for path in paths[1:]:
+            path.unlink()
+    original_stat = Path.stat
+    original_read = queue._read_stage_receipt
+    sorting = [False]
+
+    def receipt(path):
+        value = original_read(path)
+        if path == selected:
+            sorting[0] = True
+        return value
+
+    def stat(path, *args, **kwargs):
+        if path == selected and sorting[0]:
+            sorting[0] = False
+            if clock in ("missing", "unreadable"):
+                raise FileNotFoundError() if clock == "missing" else PermissionError()
+            return SimpleNamespace(st_mtime_ns=clock)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(queue, "_read_stage_receipt", receipt)
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(queue, "_validate_request_payload", lambda _path: (True, "", ""))
+    spawned = []
+
+    def batch_command(argv):
+        names = argv[argv.index("--batch-input-json") + 1:argv.index("--deadline-utc")]
+        spawned.extend(os.path.basename(name) for name in names)
+        return subprocess.CompletedProcess(argv, 0, stdout="\n".join(json.dumps({
+            "input_json": name, "returncode": 0, "stdout": '{"status":"SUCCEEDED"}', "stderr": "",
+        }) for name in names), stderr="")
+
+    monkeypatch.setattr(queue, "_run_command", batch_command)
+    before = selected.read_bytes()
+    if flocked:
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+        report = queue.process_replacement_forecast_live_materialization_queue(
+            request_dir=requests, processed_dir=tmp_path / "processed", failed_dir=tmp_path / "failed",
+            seed_dir=seeds, seed_limit=1, discover=False, forecast_db=None, limit=3,
+            lane=queue.MATERIALIZATION_LANE_PRIORITY,
+        )
+    else:
+        report = _run_priority_fixture(queue, requests, tmp_path)
+    assert report.processed_count == (2 if with_siblings else 0) and report.failed_count == 0
+    if not with_siblings:
+        assert report.status == "DEFERRED"
+    assert queue._CLAIM_ROTATION_CLOCK_DEFERRED_REASON in report.reason_codes
+    assert selected.read_bytes() == before and selected.name not in spawned
+    assert set(spawned) == ({path.name for path in paths[1:]} if with_siblings else set())
+    assert not tuple((requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME).glob("*"))
+
+
+def test_leased_clock_unknown_keeps_owner_until_normal_recovery(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    queue, requests, paths, _revision, _plan = _three_request_priority_plan(tmp_path, monkeypatch)
+    original_stat = Path.stat
+    original_read = queue._read_stage_receipt
+    sorting = [None]
+
+    def receipt(path):
+        value = original_read(path)
+        if path.name == paths[0].name and path.parent.parent.name == queue.MATERIALIZATION_INFLIGHT_DIR_NAME:
+            sorting[0] = path
+        return value
+
+    def stat(path, *args, **kwargs):
+        if path == sorting[0]:
+            sorting[0] = None
+            return SimpleNamespace(st_mtime_ns=0)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(queue, "_read_stage_receipt", receipt)
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(queue, "_validate_request_payload", lambda _path: (True, "", ""))
+    spawned = []
+
+    def batch_command(argv):
+        names = argv[argv.index("--batch-input-json") + 1:argv.index("--deadline-utc")]
+        spawned.extend(os.path.basename(name) for name in names)
+        return subprocess.CompletedProcess(argv, 0, stdout="\n".join(json.dumps({
+            "input_json": name, "returncode": 0, "stdout": '{"status":"SUCCEEDED"}', "stderr": "",
+        }) for name in names), stderr="")
+
+    monkeypatch.setattr(queue, "_run_command", batch_command)
+    before = paths[0].read_bytes()
+    report = _run_priority_fixture(queue, requests, tmp_path)
+    assert report.processed_count == 2 and report.failed_count == 0 and report.skipped_count == 1
+    assert queue._CLAIM_ROTATION_CLOCK_DEFERRED_REASON in report.reason_codes
+    assert set(spawned) == {path.name for path in paths[1:]}
+    inflight = requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME
+    batches = tuple(inflight.iterdir())
+    assert len(batches) == 1
+    leased = batches[0] / paths[0].name
+    assert leased.read_bytes() == before and not paths[0].exists()
+    with monkeypatch.context() as recovery:
+        recovery.setattr(queue, "_read_stage_receipt", original_read)
+        recovery.setattr(Path, "stat", original_stat)
+        recovery.setattr(queue, "_claim_age_seconds", lambda _batch: 10_000)
+        _keys, recovered, unknown = queue._recover_stale_claims(request_path=requests, inflight_path=inflight)
+    assert recovered == 1 and not unknown
+    assert paths[0].read_bytes() == before and not tuple(inflight.iterdir())
+
+
+def test_same_tier_finite_backlog_completes_each_request_once(tmp_path, monkeypatch):
+    queue, requests, paths, _revision, _plan = _three_request_priority_plan(tmp_path, monkeypatch)
+    queue._record_retained_turn(paths[0], category=queue.FailureCategory.UNCLASSIFIED, error_type=None)
+    extra = requests / "Busan.2026-08-25.low.json"
+    extra.write_text(json.dumps(dict(_materialization_request(), city="Busan", metric="low")))
+    monkeypatch.setattr(queue, "_validate_request_payload", lambda _path: (True, "", ""))
+    spawned = []
+
+    def batch_command(argv):
+        names = argv[argv.index("--batch-input-json") + 1:argv.index("--deadline-utc")]
+        spawned.extend(os.path.basename(name) for name in names)
+        return subprocess.CompletedProcess(argv, 0, stdout="\n".join(json.dumps({
+            "input_json": name, "returncode": 0, "stdout": '{"status":"SUCCEEDED"}', "stderr": "",
+        }) for name in names), stderr="")
+
+    monkeypatch.setattr(queue, "_run_command", batch_command)
+    first = _run_priority_fixture(queue, requests, tmp_path)
+    second = _run_priority_fixture(queue, requests, tmp_path)
+    assert (first.processed_count, second.processed_count) == (3, 1)
+    assert len(spawned) == len(set(spawned)) == 4
+    assert set(spawned) == {path.name for path in (*paths, extra)}
+    assert not tuple(requests.glob("*.json"))
+
+
+def test_positive_future_filesystem_clock_is_only_an_order_key(tmp_path, monkeypatch):
+    queue, _requests, selected, _revision, plan = _priority_claim_plan(tmp_path, monkeypatch)
+    stamp = queue.time.time_ns() + 10_000_000_000
+    os.utime(selected, ns=(stamp, stamp))
+    assert queue._request_file_sort_key(selected, {selected.name: (-3, "")})[1] == stamp
+    claim, reason = queue._try_claim_priority_request(plan())
+    assert claim is not None and reason == ()
+
+
+@pytest.mark.parametrize("race", ("bytes", "mtime"))
+def test_constant_queue_clock_does_not_weaken_claim_record_fence(tmp_path, monkeypatch, race):
+    queue, requests, paths, _revision, plan = _three_request_priority_plan(tmp_path, monkeypatch)
+    stamp = queue.time.time_ns() - 1_000_000_000
+    for path in paths:
+        os.utime(path, ns=(stamp, stamp))
+    prior = plan()
+    target = paths[1]
+    if race == "bytes":
+        target.write_text(json.dumps(dict(_materialization_request(), city="Paris",
+                                         computed_at="2026-08-24T09:00:00+00:00")))
+        os.utime(target, ns=(stamp, stamp))
+    else:
+        os.utime(target, ns=(stamp + 1, stamp + 1))
+    claim, reason = queue._try_claim_priority_request(prior)
+    assert claim is None and reason == (queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
+    assert all(path.exists() for path in paths)
+
+
 @pytest.mark.parametrize("tail", ("environment_error", "missing_envelope"))
 def test_priority_batch_partial_completion_retries_only_unfinished_requests(
     tmp_path, monkeypatch, tail,
