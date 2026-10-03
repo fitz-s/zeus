@@ -13673,3 +13673,151 @@ the proposed first-raw cursor rotation, so stable-family-frontier design remains
 pending. Do not execute that superseded recipe or delay the verified NoObs repair
 for it. A normal load refusal remains a real refusal until its native blocker
 changes; no blind retry, forced source/venue action or guard clear is authorized.
+
+Separate bounded public surface audit (not production capture): root's private
+/tmp/zeus-ifs-z12-publicaudit.6MnuIx/receipt.json records two requests/no retry,
+Oct3/12Z public oper/fc index200(40581bytes) and a bounded z range206
+(896851bytes), no full-file fetch. The real z body hashes to
+85c53034b225aac01ddb025233b93625e982a58c2970abe94483cdffc8871677;
+observed header is z/param129/surface/step0/m**2s**-2/dateOct3/time12/fc/oper.
+Distribution-grid hash1e3d9b92 matches the actual LSM and persisted HK HIGH1400496
+/LOW1400571 temperature-message grid. Selected flat391416(22.25,114) has
+phi604.8818359375, phi/g61.6807815m; relative to the qualified station-ground
+reference32m the difference is29.6808m. Two independent phi decodes PASS.
+No lapse, center/q shift, canonical write or forced re-extraction occurs.
+The full temperature GRIB is already gone from cache, so persisted receipt
+comparison is not an independent temperature-value re-decode. Source-issued
+and fetched clocks are UNKNOWN; local write22:56:04, audit23:00:44 and HTTP
+Last-Modified19:34 remain separate. Public fc reference surface is neither the
+true ENS dynamical native terrain nor sensor-ground proof. Production terrain
+capture remains0/756 and its automatic normal acquisition owner is unknown;
+this audit does not close that pending source path.
+
+### Queue family frontier revised plan (before edit)
+
+Root now accepts a narrower stable-family design, replacing the defeated
+filename-only candidate above. The appointed writer alone owns
+src/data/replacement_forecast_live_materialization_queue.py and existing
+tests/test_day0_extreme_updated_materialization_bridge.py. Integrator completes
+this plan and private test configuration before writer edits; during execution
+it does not alter the writer's source/tests or parallel registry/PLAN surfaces.
+
+The existing single filename cursor remains the storage contract. Only the
+priority !own-clock path rotates by parsed family(city,target_date,metric),
+crossing all current filename versions of that cursor family before the next
+window. A deleted old filename may still identify that family; an unparseable
+cursor retains the original fallback. Background/all/fast paths retain their
+original filename rotator and cursor. If actual off-scope injection occurs,
+the durable cursor is rotatedraw[0]; without injection it remains the tail.
+Keep the latest-per-cycle12Z/18Z distinction, tiers, held/global/first-q slots,
+cap, byte/owner/revalidation/source gates and existing work budget. There is no
+new persistent field, clock, priority policy, source actor or forced release.
+
+SCOPE is the retained priority-window family frontier and actual injected slot,
+not all market/date owners. DRAIN is successive normal bounded passes with
+durable reload while version churn cannot pin that frontier. RESET is genuine
+family-frontier progress/new source membership under existing owner semantics;
+malformed identity never authorizes a synthetic source or no-loss bypass.
+The constant14-filename/54round churn counterexample must become GREEN: former
+filename candidates omit familyZ, whereas family rotation reachesZ at14/28/42
+with all12held served. Fixed26 controls must preserve every nonsuperseded held
+and all unowned, Denver by the fourth pass, and global/first-q on each pass.
+Test HIGH/LOW, deleted cursor, malformed fallback, multiple source cycles,
+no injection, actual injection, duplicate/superseded versions, persistent reload,
+normal new-source churn and healthy sibling/no-loss behavior. No seconds SLA or
+historical Denver/16-minute cause is claimed by these synthetic controls.
+After freeze, select the data manifest's15 existing required files plus the
+owned bridge (16unique), and any separately named actual queue regression
+necessary for this changed path; do not repeat NoObs's34 or unrelated state/
+engine suites. Original469 failed-node comparisons remain explicit, not a
+baseline waiver. No production action occurs until independent review and
+root accepts the frozen queue delivery.
+
+### NoObs469 land and normal loader refusal (not main loaded)
+
+NoObs46982a45bac878d71475de8dbd987e38dd639c4c is FF-landed and the live checkout
+is tracked clean with configd7. One normal loader starts23:03:12.430529 and
+returns rc1/session61067, with the complete normal-loader.log retained in the
+NoObs evidence directory. Initial loaded432 warm handoff admits27open/fresh22/
+probability-degraded1; the normal CLI reloads five prerequisites and verifies
+their identities. Actual ingest57261/forecast57312 have fixed boot469, but
+main28866/stamp432@21:53:24.160643 remains unchanged.
+
+The immediate pre-stop recheck finds capital handoff changed:7ede0ebb-7b8,
+f949926f-559 and a6c31638-562 are monitor_probability_and_clob_stale. It refuses
+partial/fresh stuck-monitor recovery, incomplete fresh-failed no-action
+partition and unprotected executable-exit quote repair. Main is not stopped;
+partial prerequisite load is not NoObs main-consumer acceptance. No retry,
+allow, forced source/queue/venue action or manual guard clear follows. Observe
+the exact native handoff/blocker change before root decides any new normal
+retry. The metadata432 rc0 and source evidence remain true historical proof,
+not substitutes for this failed469 main load or the original trading goal.
+
+### NoObs changed-condition retry and queue frontier final evidence
+
+The first refusal above remains rc1. After normal monitor changes, root permits
+one complete current handoff check rather than treating three fresh positions
+as a whole-book proof. At23:16:41.758828 the real handoff has27open/26fresh,
+no nonterminal commands; its exact failed-monitor repair admission is TRUE
+with a complete typed no-action partition and current held-quote sidecar.
+The single changed-condition retry starts23:17:15.120803, session6138, and
+actually loads main469 at23:18:16.027839/PID37029. Ingest57261/forecast57312
+retain fixed boot469. The retry nevertheless returns rc1: final entry-resume
+proof has monitorGreen FALSE, with Atlanta's later monitor losing probability/
+quote freshness and complete-held receipt. Its complete log is
+/tmp/zeus-noobs-final-20261003.fmJUjk/normal-loader-changed-condition-retry.log.
+Actual loaded code is not equivalent to a successful loader return. No third
+retry or manual reset occurs. Read-only guard getter23:26:39.541611 returns
+None, independently confirmed23:28:09: the existing normal reactor recovery
+revalidates current proof and CAS-resets its exact deployment witness. New
+full900730@23:20:55 has217families/held scope complete and two matching hashes;
+this does not prove a naturally triggered NoObs consumer or profit.
+
+Queue final source72f23f1d36f3c6f206683d428c26104717eaf6be511780d2966f9ae11d6e21f8
+and bridge test99f725c1241bff78d00c70420d301e796e59e4921ff624621dcf54f3f903ddb9
+are frozen. Actual preselector/private canonical DB/real guard antibodies are
+five original RED to fifteen GREEN. Worker whole bridge153PASS/5FAIL and
+original469138PASS/the same5FAIL are retained in
+/tmp/zeus-queue-owned-{final,original469}-20261003.xml. Named independent review
+APPROVE covers six nodes plus two non-mirror variants of another node: continuous
+filename churn, dotted city names, same-city LOW/next-day HIGH, complete fixed
+family coverage and no request/seed loss. No Critical/HIGH finding remains.
+
+Integrator runs the required data manifest15 plus owned bridge once:
+737PASS/9FAIL, rc1,20.54s. Exact XML/log and original-source data comparison are
+in /tmp/zeus-queue-frontier-final-20261003.AjIzKI/. Original469 queue import in
+a fresh private process reproduces all four data failures with byte-exact
+messages. Worker original/current bridge comparison reproduces the same five
+nodes; four messages are byte-exact and one differs only in the private pytest
+root and operational failed-marker timestamp/PID, not any provider clock/hash.
+This establishes zero new failure delta, not a whole-green run or harmlessness.
+
+Remaining nine dispositions: removed ensemble quota_tracker API fixture is
+deferred for current API migration; TIGGE primary-versus-experimental assertion
+is deferred for policy/registry alignment. Account-truth's total-page-count-one
+assertion is refuted by one bounded page for each orders/trades endpoint, while
+the intended minimum-notional test fails at BOUND_ENVELOPE_NOT_LIVE_AUTHORITY
+and leaves that placeholder's intended branch unexercised. The bridge's old
+Jul19 target legitimately reaches TARGET_LOCAL_DAY_ENDED before its expected
+incomplete identity. Four bridge seed/marker positives lack the current
+anchor_local_proof:seed_body_path authority; defer those fixtures rather than
+fabricating physical qualification or weakening source gates. All nine stay
+visible; no unrelated test/source change is made. In-memory data118 compilation,
+YAML2, changed bridge freshness and diff checks PASS. Existing global registry
+drift is not repaired. Queue delivery/runtime family-frontier service remains
+pending root authorization and a subsequent normal loaded-process observation;
+finite-family controls promise neither a seconds SLA nor infinite-family fairness.
+
+Separate settlement case proof checked23:34:06.462343: the existing independent
+HKO Oct1 DailyExtract HIGH33.6 receipt pairs with a single public CLOB GET for
+exact CID0xa359b4e307d3878fc0a527d102dece6cd91f08d13d7c5b986e25520afed6c3e2.
+HTTP200/3756bytes, closed TRUE, specified YES winner TRUE/price1 and NO winner
+FALSE/price0 are preserved in /tmp/zeus-hko-oct1-clob-winner.HiT9Nk/receipt.json,
+response.body and headers, raw SHA
+5fbc0e5db664299c95dd63dcc32e913581766d20ab2ed96693e34cb1415eb9e0.
+This independently supports that day's33 bucket rather than nearest34; it does
+not establish every rounding mapping, chain payout or initial-publication clock.
+The finalized HKO DailyExtract0.1C role remains distinct from intraday source,
+private fc surface audit and exact sensor-ground authority. Original profitable
+trading goal, production terrain acquisition and unresolved physical proof are
+not declared complete.

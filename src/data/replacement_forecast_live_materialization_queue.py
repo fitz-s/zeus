@@ -5861,7 +5861,7 @@ def _read_day0_enqueue_ownership_cursor(cursor_path: Path) -> str | None:
 
 
 def _write_day0_enqueue_ownership_cursor(cursor_path: Path, filename: str) -> bool:
-    """Atomically persist the last inspected seed filename while the queue lock is held."""
+    """Atomically persist the raw scheduling frontier filename under the queue lock."""
     temporary: Path | None = None
     try:
         cursor_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5881,11 +5881,32 @@ def _write_day0_enqueue_ownership_cursor(cursor_path: Path, filename: str) -> bo
                 pass
 
 
-def _rotate_seed_snapshot_after_cursor(seeds: Sequence[Path], cursor: str | None) -> tuple[Path, ...]:
+def _rotate_seed_snapshot_after_cursor(
+    seeds: Sequence[Path], cursor: str | None, *, family_frontier: bool = False,
+) -> tuple[Path, ...]:
     """Visit each sorted snapshot seed at most once, beginning after the durable cursor."""
     snapshot = tuple(seeds)
     if not snapshot or cursor is None:
         return snapshot
+    if family_frontier:
+        family = re.fullmatch(r"(.+)\.(\d{4}-\d{2}-\d{2})\.(high|low)\..+\.json", cursor)
+        if family is not None:
+            try:
+                date.fromisoformat(family[2])
+            except ValueError:
+                family = None
+        if family is not None:
+            prefix = _current_money_risk_seed_prefixes(frozenset({family.groups()}))[0]
+            # SCOPE: the priority lane's city/local-date/metric frontier only.
+            # DRAIN: move past the whole family on each bounded pass, even if
+            # its old cursor file disappeared and a new version arrived.
+            # RESET: wrap the sorted snapshot after the last family. Filename
+            # order grants no source/ownership authority; malformed names keep
+            # their ordinary singleton turns and malformed cursors fall back.
+            for index, path in enumerate(snapshot):
+                if path.name > prefix and not path.name.startswith(prefix):
+                    return snapshot[index:] + snapshot[:index]
+            return snapshot
     for index, path in enumerate(snapshot):
         if path.name == cursor:
             return snapshot[index + 1 :] + snapshot[: index + 1]
@@ -6296,6 +6317,7 @@ def _prepare_seed_requests_with_connection(
         rotated_raw_snapshot = _rotate_seed_snapshot_after_cursor(
             raw_snapshot,
             _read_day0_enqueue_ownership_cursor(cursor_path),
+            family_frontier=lane == MATERIALIZATION_LANE_PRIORITY,
         )
         try:
             current_money_risk = _current_money_risk_families(trade_conn=trade_conn)
@@ -6832,14 +6854,17 @@ def _prepare_seed_requests_with_connection(
                 _write_sidecar(moved, receipt)
             failed.append(str(moved))
             actionable_count += 1
-    if (
-        not fast_own_clock_station_revision
-        and raw_window
-        and not _write_day0_enqueue_ownership_cursor(
-        cursor_path, raw_window[-1].name
-        )
-    ):
-        reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_CURSOR_WRITE_FAILED")
+    if not fast_own_clock_station_revision and raw_window:
+        cursor_seed = raw_window[-1]
+        if (
+            lane == MATERIALIZATION_LANE_PRIORITY
+            and tuple(prioritized_raw_snapshot[:inspection_cap]) != tuple(raw_window)
+        ):
+            # An injected offscope witness is not the raw traversal boundary:
+            # advancing to its filename strands the retained capital prefix.
+            cursor_seed = rotated_raw_snapshot[0]
+        if not _write_day0_enqueue_ownership_cursor(cursor_path, cursor_seed.name):
+            reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_CURSOR_WRITE_FAILED")
     if indeterminate_count:
         reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE")
     if processed:

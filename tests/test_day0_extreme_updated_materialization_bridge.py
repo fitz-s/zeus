@@ -2843,6 +2843,318 @@ def test_queue_rotates_bounded_indeterminate_inspections_across_reload(
     assert all(path.is_file() for path in indeterminate)
 
 
+def _retained_priority_seed_queue(tmp_path, monkeypatch, *, held, global_scope=()):
+    """Use real priority/ownership reads; absent enqueue owners retain valid seeds."""
+    import src.config as config
+    from src.events.candidate_binding import weather_family_id
+
+    db_path = _prepare_forecast_db(tmp_path)
+    trade_path = tmp_path / "trades.db"
+    with sqlite3.connect(trade_path) as conn:
+        conn.execute(
+            "CREATE TABLE position_current (city TEXT, target_date TEXT, "
+            "temperature_metric TEXT, phase TEXT, chain_state TEXT, "
+            "chain_shares REAL, chain_cost_basis_usd REAL, "
+            "last_monitor_prob_is_fresh INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO position_current VALUES (?, ?, ?, 'day0_window', "
+            "'synced', 10, 5, 0)",
+            sorted(held),
+        )
+        conn.execute(
+            "CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT)"
+        )
+        if global_scope:
+            family_ids = [
+                weather_family_id(city=city, target_date=target, metric=metric)
+                for city, target, metric in global_scope
+            ]
+            conn.execute(
+                "INSERT INTO decision_log VALUES (1, 'global_single_order_auction', ?)",
+                (json.dumps({"summary": {
+                    "schema_version": 22,
+                    "probability_materialization_scope_kind": "universe",
+                    "scope_family_coverage_complete": True,
+                    "full_scope_family_count": len(family_ids),
+                    "proof_counterfactual": {"probability_manifest": [[fid] for fid in family_ids]},
+                    "probability_ineligible_by_family": {},
+                }}),),
+            )
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(config, "cities_by_name", {
+        **config.cities_by_name,
+        **{city: SimpleNamespace(name=city, timezone="UTC") for city, _, _ in global_scope},
+    })
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    request_dir = tmp_path / "requests"
+    windows = []
+    ownership = []
+    probes = []
+
+    def observe_real_queue():
+        real_coalesce = materialization_queue._coalesce_superseded_materialization_seeds
+        real_ownership = materialization_queue._day0_enqueue_ownership_snapshot
+
+        def coalesce(seeds, **kwargs):
+            windows.append(tuple(seeds))
+            return real_coalesce(seeds, **kwargs)
+
+        def snapshot(conn, paths, payloads):
+            probes.append(tuple(paths))
+            result = real_ownership(conn, paths, payloads)
+            ownership.append(result)
+            return result
+
+        monkeypatch.setattr(materialization_queue, "_coalesce_superseded_materialization_seeds", coalesce)
+        monkeypatch.setattr(materialization_queue, "_day0_enqueue_ownership_snapshot", snapshot)
+
+    observe_real_queue()
+
+    def write(city, target, metric, suffix="seed", *, cycle="2026-10-03T12:00:00+00:00"):
+        path = seed_dir / f"{city}.{target}.{metric}.{suffix}.json"
+        payload = {
+            "city": city, "target_date": target, "temperature_metric": metric,
+            "computed_at": "2026-10-03T22:07:39+00:00" if city == "Denver" else "2026-10-03T22:08:00+00:00",
+            "source_cycle_time": cycle,
+            "baseline_source_run_id": f"baseline:{cycle}",
+            "openmeteo_source_run_id": f"openmeteo:{cycle}",
+            "openmeteo_payload_json": "payload.json",
+            "precision_metadata_json": "precision.json",
+            "bins": [{"bin_id": "warm"}],
+            "upgrade_trigger": "day0_observation_advanced",
+            "cycle_advance_enqueue_owner": True,
+            "day0_observed_extreme_source": "wu_icao_history",
+            "day0_observed_extreme_observation_time": "2026-10-03T20:00:00+00:00",
+            "day0_observed_extreme_c": 21.0,
+            "day0_observed_extreme_unit": "C",
+        }
+        materialization_queue.validate_materialization_seed(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def tick(*, lane="priority", limit=3):
+        return materialization_queue._prepare_seed_requests(
+            seed_dir=seed_dir, seed_processed_dir=tmp_path / "seed_processed",
+            seed_failed_dir=tmp_path / "seed_failed", request_dir=request_dir,
+            forecast_db=db_path, limit=limit, lane=lane,
+        )
+
+    return SimpleNamespace(
+        db=db_path, seeds=seed_dir, requests=request_dir, windows=windows,
+        ownership=ownership, probes=probes, write=write, tick=tick, observe=observe_real_queue,
+        cursor=tmp_path / ".replacement-day0-enqueue.cursor.priority",
+    )
+
+
+@pytest.mark.parametrize("churn", (False, True))
+@pytest.mark.parametrize("ownership_read_failure", (False, True))
+def test_priority_seed_family_frontier_drains_retained_churn_across_reload(
+    tmp_path, monkeypatch, churn, ownership_read_failure,
+) -> None:
+    """New filenames in one family cannot starve a fixed retained offscope owner."""
+    held = frozenset((f"H{i:03}", "2026-10-04", "high") for i in range(12))
+    harness = _retained_priority_seed_queue(tmp_path, monkeypatch, held=held)
+    fixed = {harness.write(*scope) for scope in held}
+    tail = harness.write("Z_retained", "2026-10-04", "high")
+    fixed.add(tail)
+    if ownership_read_failure:
+        with sqlite3.connect(harness.db) as conn:
+            conn.execute("DROP TABLE cycle_advance_enqueues")
+    seen = set()
+    tail_turns = []
+    arrival = None
+    for turn in range(54):
+        if arrival is not None and churn:
+            arrival.unlink()
+        if arrival is None or churn:
+            arrival = harness.write("N_arrival", "2026-10-04", "high", f"{turn:06}")
+        processed, failed, reasons = harness.tick()
+        assert not processed and not failed
+        assert "REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE" in reasons
+        window = harness.windows[-1]
+        assert len(window) == 12
+        seen.update(window)
+        if tail in window:
+            tail_turns.append(turn + 1)
+        assert fixed <= set(harness.seeds.glob("*.json"))
+        if turn == 15:
+            cursor = harness.cursor.read_text(encoding="utf-8")
+            importlib.reload(materialization_queue)
+            harness.observe()
+            assert harness.cursor.read_text(encoding="utf-8") == cursor
+    assert fixed <= seen
+    assert fixed <= {path for probe in harness.probes for path in probe}
+    assert tail_turns == [14, 28, 42]
+    assert not list(harness.requests.glob("*.json"))
+    assert all(
+        check.ownership.value == materialization_queue._Day0EnqueueOwnership.INDETERMINATE.value
+        for snapshot in harness.ownership for check in snapshot.values()
+    )
+
+
+def test_priority_seed_family_frontier_keeps_full_capital_preselector(
+    tmp_path, monkeypatch,
+) -> None:
+    """Held/debt H/L, global and first-q keep speed while all offscope work drains."""
+    held = frozenset({
+        *((f"City{i:02}", "2026-10-05", "high" if i % 2 == 0 else "low") for i in range(11)),
+        ("Denver", "2026-10-05", "high"),
+    })
+    global_scope = frozenset({("Global", "2026-10-05", "high")})
+    harness = _retained_priority_seed_queue(
+        tmp_path, monkeypatch, held=held, global_scope=global_scope,
+    )
+    first_q = harness.write("FirstQ", "2026-10-05", "low", "20261003T220800Z")
+    with sqlite3.connect(harness.db) as conn:
+        conn.row_factory = sqlite3.Row
+        assert cycle_advance._record_enqueue(
+            conn, city="FirstQ", target_date="2026-10-05", metric="low",
+            consumed_cycle_iso="2026-10-03T12:00:00+00:00",
+            target_cycle_iso="2026-10-03T12:00:00+00:00", held_position=False,
+            seed_file=str(first_q),
+            day0_observed_extreme_source="wu_icao_history",
+            day0_observed_extreme_observation_time="2026-10-03T20:00:00+00:00",
+            day0_observed_extreme_c=21.0, day0_observed_extreme_unit="C",
+        )
+        # An unknown conditioning witness retains the first-q marker without
+        # fabricating a CURRENT owner or changing its real first-q classification.
+        conn.execute("UPDATE cycle_advance_enqueues SET day0_conditioning_identity_json = NULL")
+    required = {first_q}
+    required.update(harness.write(*scope, "20261003T220800Z") for scope in held | global_scope)
+    required.update(
+        harness.write(f"Zulu_Unowned{i:02}", "2026-10-05", "high", "20261003T220800Z")
+        for i in range(10)
+    )
+    old = next(path for path in required if path.name.startswith("City00."))
+    required.remove(old)
+    required.add(harness.write("City00", "2026-10-05", "high", "20261003T220900Z"))
+    new_cycle = harness.write(
+        "City00", "2026-10-05", "high", "20261003T221000Z",
+        cycle="2026-10-03T18:00:00+00:00",
+    )
+    required.add(new_cycle)
+    assert len(tuple(harness.seeds.glob("*.json"))) == 26
+    seen = set()
+    denver_turns = []
+    cursors = []
+    for turn in range(26):
+        processed, failed, _ = harness.tick()
+        assert not processed and not failed
+        window = harness.windows[-1]
+        assert len(window) == 12
+        assert first_q in window
+        assert any(path.name.startswith("Global.") for path in window)
+        seen.update(window)
+        if any(path.name.startswith("Denver.") for path in window):
+            denver_turns.append(turn + 1)
+        cursors.append(harness.cursor.read_text(encoding="utf-8").strip())
+    assert required <= seen
+    assert required <= {path for probe in harness.probes for path in probe}
+    assert denver_turns[0] == 4
+    assert [name.split(".")[0] for name in cursors[:3]] == ["City00", "City01", "City02"]
+    assert old.is_file() and new_cycle.is_file()
+    assert not list(harness.requests.glob("*.json"))
+
+
+@pytest.mark.parametrize("cursor_exists", (False, True))
+def test_priority_seed_family_frontier_separates_metric_date_and_versions(cursor_exists) -> None:
+    """Filename scheduling never merges a city's HIGH, LOW or next local day."""
+    old = Path("Town.With.Dots.2026-10-04.high.000000.json")
+    newer = Path("Town.With.Dots.2026-10-04.high.000001.json")
+    low = Path("Town.With.Dots.2026-10-04.low.000000.json")
+    next_day = Path("Town.With.Dots.2026-10-05.high.000000.json")
+    malformed = Path("Town.With.Dots.2026-10-04.high!broken.json")
+    paths = tuple(sorted((newer, low, next_day, malformed, *((old,) if cursor_exists else ())), key=lambda p: p.name))
+    rotated = materialization_queue._rotate_seed_snapshot_after_cursor(
+        paths, old.name, family_frontier=True,
+    )
+    assert rotated[0] == low
+    assert rotated.index(low) < rotated.index(next_day) < rotated.index(newer)
+    assert set(rotated) == set(paths)
+    ordinary = materialization_queue._rotate_seed_snapshot_after_cursor(paths, old.name)
+    assert ordinary[0] == newer
+
+
+@pytest.mark.parametrize("cursor", ("broken.json", "Town.2026-99-99.high.old.json", "Town.2026-10-04.mid.old.json"))
+def test_priority_seed_family_frontier_malformed_cursor_keeps_filename_rotation(cursor) -> None:
+    paths = tuple(Path(name) for name in (
+        "Town.2026-10-04.high.new.json", "Town.2026-10-04.low.new.json", "broken.json",
+    ))
+    assert materialization_queue._rotate_seed_snapshot_after_cursor(
+        paths, cursor, family_frontier=True,
+    ) == materialization_queue._rotate_seed_snapshot_after_cursor(paths, cursor)
+
+
+@pytest.mark.parametrize("lane", ("all", "background", "priority"))
+def test_seed_frontier_without_offscope_injection_keeps_old_window_tail(tmp_path, monkeypatch, lane) -> None:
+    held = frozenset({("Town", "2026-10-04", "high")})
+    harness = _retained_priority_seed_queue(tmp_path, monkeypatch, held=held)
+    harness.write("Town", "2026-10-04", "high", "000000")
+    harness.write("Town", "2026-10-04", "high", "000001")
+    harness.write("Town", "2026-10-04", "low")
+    harness.write("Town", "2026-10-05", "high")
+    cursor = materialization_queue._day0_enqueue_ownership_cursor_path(harness.requests, lane=lane)
+    for _ in range(3):
+        processed, failed, _ = harness.tick(lane=lane)
+        assert not processed and not failed
+        assert cursor.read_text(encoding="utf-8").strip() == harness.windows[-1][-1].name
+        assert len(harness.windows[-1]) == 4
+
+
+def test_station_seed_frontier_keeps_own_filename_cursor_and_retained_ownership(tmp_path, monkeypatch) -> None:
+    harness = _retained_priority_seed_queue(tmp_path, monkeypatch, held=frozenset())
+    paths = tuple(harness.write(
+        "Town", "2026-10-04", "high", f"station-input-revision.{index:06}",
+    ) for index in range(14))
+    report = materialization_queue.process_own_clock_station_revision_fast_path(
+        request_dir=harness.requests, seed_dir=harness.seeds,
+        seed_processed_dir=tmp_path / "seed_processed", seed_failed_dir=tmp_path / "seed_failed",
+        forecast_db=harness.db, limit=3,
+    )
+    assert report.status == "DEFERRED"
+    cursor = tmp_path / ".replacement-station-revision.cursor"
+    assert cursor.read_text(encoding="utf-8").strip() == paths[11].name
+    assert materialization_queue._newest_own_clock_station_revision_seed_files(
+        harness.seeds, cursor=paths[0].name, limit=1,
+    ) == (paths[1],)
+    assert all(path.is_file() for path in paths)
+    assert not harness.cursor.exists()
+    assert not list(harness.requests.glob("*.json"))
+
+
+def test_priority_seed_frontier_advances_despite_actionable_early_break(tmp_path, monkeypatch) -> None:
+    held = frozenset((f"H{i:03}", "2026-10-04", "high") for i in range(12))
+    harness = _retained_priority_seed_queue(tmp_path, monkeypatch, held=held)
+    fixed = sorted(harness.write(*scope) for scope in held)
+    harness.write("N_arrival", "2026-10-04", "high")
+    harness.write("Z_retained", "2026-10-04", "high")
+    with sqlite3.connect(harness.db) as conn:
+        conn.row_factory = sqlite3.Row
+        for path in fixed[:3]:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            assert cycle_advance._record_enqueue(
+                conn, city=payload["city"], target_date=payload["target_date"], metric="high",
+                consumed_cycle_iso=payload["source_cycle_time"], target_cycle_iso=payload["source_cycle_time"],
+                held_position=True, seed_file=str(path.with_name(path.stem + ".new-owner.json")),
+                day0_observed_extreme_source=payload["day0_observed_extreme_source"],
+                day0_observed_extreme_observation_time=payload["day0_observed_extreme_observation_time"],
+                day0_observed_extreme_c=21.0, day0_observed_extreme_unit="C",
+            )
+    processed, failed, reasons = harness.tick()
+    assert len(processed) == 3 and not failed
+    assert harness.cursor.read_text(encoding="utf-8").strip() == fixed[0].name
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_LIMIT_REACHED" in reasons
+    assert all(not path.exists() for path in fixed[:3])
+    assert all(path.is_file() for path in fixed[3:])
+    for path in processed:
+        receipt = json.loads(Path(path + ".receipt.json").read_text(encoding="utf-8"))
+        assert receipt["status"] == "SKIPPED_STALE_DAY0_ENQUEUE_OWNER"
+        assert receipt["request_written"] is False
+    assert not list(harness.requests.glob("*.json"))
+
+
 def test_day0_conditioning_marker_allows_same_time_revisions_but_never_regresses_time(
     tmp_path,
 ) -> None:
