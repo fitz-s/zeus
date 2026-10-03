@@ -52200,6 +52200,238 @@ def test_day0_sell_pinned_carrier_refusal_evicts_the_cached_family(tmp_path,monk
         fixture.conn.close()
 
 
+def _chicago_between_cohort_posterior(tmp_path,monkeypatch):
+    """Round-4 shape: the ordinary Chicago future-day LOW producer under a frozen
+    partial scheme (ICON+UKMO+IFS+KMA, KMA absent), then ICON alone advances +6 h.
+    The re-materialized posterior serves the new ICON as its center while the old
+    ICON row is its configured-cohort and between-cohort spread input."""
+    import functools
+    from src.data import bayes_precision_fusion_download as dl
+    from src.data import openmeteo_model_surface as surface
+    from src.data import replacement_forecast_materializer as materializer
+    from src.strategy.live_inference import source_clock_city_weights as weights
+    configured = ("icon_global","ukmo_global_deterministic_10km","ecmwf_ifs","kma_gdps")
+    scheme_path = tmp_path/"partial-scheme.csv"
+    scheme_path.write_text("city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n"
+        +"Chicago,ACTIVE,"+"+".join(configured)+","+"+".join(m+":0.25" for m in configured)+",30,true,GRID_CAP10_LIVE_READY\n")
+    monkeypatch.setenv(weights.ENV_CITY_ONE_SCHEME_PATH,str(scheme_path))
+    monkeypatch.setattr(weights,"load_city_one_schemes",
+        functools.lru_cache(maxsize=8)(weights.load_city_one_schemes.__wrapped__))
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    first = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (fixture.result.posterior_id,)).fetchone())
+    cycle = _dt.datetime.fromisoformat(first["source_cycle_time"])+_dt.timedelta(hours=6)
+    capture, cut = fixture.cut+_dt.timedelta(minutes=1), fixture.cut+_dt.timedelta(minutes=5)
+    city = fixture.city
+    def http(_url,params,**kwargs):
+        profile = surface._profile(params["models"])
+        lat = profile["lat_min"]+round((city.lat-profile["lat_min"])/profile["dy"])*profile["dy"]
+        lon = profile["lon_min"]+round((city.lon-profile["lon_min"])/profile["dx"])*profile["dx"]
+        body = json.dumps({"latitude":lat,"longitude":lon,"elevation":32.,"timezone":city.timezone,
+            "utc_offset_seconds":-18000,"hourly_units":{"temperature_2m":"°C"},
+            "hourly":{"time":[f"{first['target_date']}T{hour:02d}:00" for hour in range(24)],
+                      "temperature_2m":[25.]*24}},sort_keys=True).encode()
+        kwargs["capture_entity_body"](body,capture.timestamp())
+        kwargs["capture_network_response"](body,capture.timestamp(),{"content-type":"application/json"})
+        return json.loads(body)
+    class CaptureClock(_dt.datetime):
+        @classmethod
+        def now(cls,tz=None): return capture.astimezone(tz) if tz else capture.replace(tzinfo=None)
+    dl._SINGLE_RUNS_PAYLOAD_CACHE.clear(); dl._SINGLE_RUNS_PAYLOAD_CACHE_INDEX.clear()
+    fixture.conn.commit()
+    with monkeypatch.context() as fetch:
+        fetch.setattr(dl,"datetime",CaptureClock); fetch.setattr("src.data.openmeteo_client.fetch",http)
+        assert dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=cycle,
+            targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,target_date=first["target_date"],metric="low",
+                latitude=city.lat,longitude=city.lon,timezone_name=city.timezone,lead_days=1)],
+            models=("icon_global",),frozen_source_runs={"icon_global":(cycle,capture)},
+            include_previous_runs=False,prune_after=False)["written_row_count"] == 1
+    fixture.sql_clock[0] = cut
+    produced = materializer.materialize_replacement_forecast_live(fixture.conn,
+        replace(fixture.request,computed_at=cut,expires_at=cut+_dt.timedelta(hours=1)))
+    fixture.conn.commit()
+    assert produced.ok, produced.reason_codes
+    row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (produced.posterior_id,)).fetchone())
+    fusion = json.loads(row["provenance_json"])["bayes_precision_fusion"]
+    victim = int(fusion["source_clock_one_scheme"]["between_cohort_value_serving"]["icon_global"]["raw_model_forecast_id"])
+    assert victim not in {int(v["raw_model_forecast_id"]) for v in fusion["current_value_serving"].values()}
+    return fixture, row, cut, victim
+
+
+@pytest.mark.parametrize("fault",("cohort_row_deleted","cohort_body_same_mtime"))
+def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkeypatch,fault,_noaa_native_sources):
+    """Round-4: the consumed verdict re-proved only current_value_serving. A
+    posterior whose between-cohort spread input (the old ICON row, not a serving
+    center) was deleted or changed in place kept PREPARED on ENTRY and HELD, and
+    its BUY actuation replay passed. Every recorded serving role is now re-proven,
+    so all three refuse with the consumed-proof basis, warm and cold, and the
+    refusal evicts both cached lanes.
+    """
+    import os
+    from pathlib import Path
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    from src.events.triggers.forecast_snapshot_ready import ForecastSnapshotReadyTrigger
+    from src.state import db as db_module
+    from src.state.db import init_schema_trade_only
+    fixture, row, cut, victim = _chicago_between_cohort_posterior(tmp_path,monkeypatch)
+    ro = trade = restore_body = None
+    try:
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+        class ReaderClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",ReaderClock)
+        def read_only():
+            conn = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            return conn
+        ro = read_only()
+        public = ForecastSnapshotReadyTrigger(SimpleNamespace(conn=None)).build_committed_snapshot_events(
+            forecasts_conn=ro,decision_time=cut,received_at=cut.isoformat(),source="global-auction-current-scope",
+            limit=None,restrict_to_families={(fixture.city.name,row["target_date"],"low")},
+            phase_filter_exempt_families={(fixture.city.name,row["target_date"],"low")})
+        assert len(public) == 1, public
+        event = make_opportunity_event(event_type="EDLI_REDECISION_PENDING",entity_key=public[0].entity_key,
+            source="between-cohort",observed_at=public[0].observed_at,available_at=public[0].available_at,
+            received_at=cut.isoformat(),payload=json.loads(public[0].payload_json),
+            causal_snapshot_id=public[0].causal_snapshot_id)
+        trade = sqlite3.connect(":memory:")
+        trade.row_factory = sqlite3.Row
+        init_schema_trade_only(trade)
+        monkeypatch.setattr(db_module,"get_world_connection",read_only)
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",None)
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",{})
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",{})
+        hooks = []
+        with monkeypatch.context() as batch:
+            batch.setattr(global_batch_runtime,"process_current_global_batch",
+                lambda events,**callbacks: hooks.append(callbacks) or SimpleNamespace(
+                    events=tuple(events),winner_event_id=None,receipts={}))
+            era.event_bound_live_adapter_from_trade_conn(trade,get_current_level=lambda: era.RiskLevel.GREEN,
+                forecast_conn=ro,topology_conn=ro,calibration_conn=ro,live_cap_conn=trade,
+                executor_submit=lambda *a,**k: pytest.fail("executor must never run"),
+            ).process_global_batch((event,),cut)
+        callbacks = hooks[-1]
+        def clear_memos():
+            hwm.clear_consumed_proof_memo()
+            reader._LIVE_GRADE_MEMO.clear()
+        clear_memos()
+        entry = callbacks["prepare_event"](event,cut)
+        held = callbacks["prepare_held_event"](event,cut)
+        assert entry.prepared_global_family.posterior_id == row["posterior_id"], entry.reason
+        assert held.prepared_global_family.posterior_id == row["posterior_id"], held.reason
+        witness = entry.prepared_global_family.probability_witness
+        tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
+        selected = universe._rebind_probability_witness_tokens(witness,token_map_by_condition=tokens,
+            required_token_ids=frozenset(t for pair in tokens.values() for t in pair))
+        binding = selected.bindings[1]
+        curve = ExecutableCostCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
+            levels=(BookLevel(price=Decimal(".10"),size=Decimal("100")),),fee_model=FeeModel(fee_rate=Decimal("0")),
+            min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+        candidate = GlobalSingleOrderCandidate(candidate_id="between-cohort-buy",family_key=selected.family_key,
+            bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
+            probability_witness_identity=selected.witness_identity,book_snapshot_id=curve.snapshot_id,
+            book_captured_at_utc=cut,execution_curve_identity=executable_curve_identity(curve),
+            ledger_snapshot_id="ledger",executable_cost_curve=curve,resolution_identity=selected.resolution_identity,
+            neg_risk=False)
+        actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=selected,
+            decision=SimpleNamespace(candidate=candidate),actuation_identity="between-cohort-actuation")
+        assert era._current_global_actuation_prepared_family(event,global_actuation=actuation,forecast_conn=ro,
+            topology_conn=ro,observation_conn=ro,decision_time=cut)[0].probability_witness is selected
+        cached = dict(era._GLOBAL_PROBABILITY_FAMILY_CACHE)
+        assert {use for _family,use in cached} == {"entry","held_monitor"}
+        if fault == "cohort_row_deleted":
+            fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(victim,))
+            fixture.conn.commit()
+        else:
+            body = Path(fixture.conn.execute("SELECT a.artifact_path FROM raw_model_forecasts r"
+                " JOIN raw_forecast_artifacts a ON a.artifact_id=r.artifact_id WHERE r.raw_model_forecast_id=?",
+                (victim,)).fetchone()[0])
+            assert body.resolve().is_relative_to(Path(os.environ["ZEUS_TEST_STATE_ROOT"]).resolve())
+            original,before = body.read_bytes(),body.stat()
+            body.write_bytes(bytes([original[0]^1])+original[1:])
+            os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns))
+            restore_body = lambda: (body.write_bytes(original),
+                os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns)))
+            after = body.stat()
+            assert (after.st_ino,after.st_size,after.st_mtime_ns) == (before.st_ino,before.st_size,before.st_mtime_ns)
+        basis = ("basis=current_value_serving_consumed_proof_unverifiable:"
+                 f"model=icon_global:consumed_raw_id={victim}:role=between_cohort_value_serving")
+        for temperature in ("warm","cold"):
+            if temperature == "cold":
+                clear_memos()
+            for lane in ("prepare_event","prepare_held_event"):
+                era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+                fresh = callbacks[lane](event,cut+_dt.timedelta(seconds=1))
+                assert fresh.prepared_global_family is None, (temperature,lane,fresh.reason)
+                assert basis in fresh.reason, (temperature,lane,fresh.reason)
+            era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+            era._GLOBAL_PROBABILITY_FAMILY_CACHE.update(cached)
+            with pytest.raises(ValueError, match=basis):
+                era._current_global_actuation_prepared_family(event,global_actuation=actuation,forecast_conn=ro,
+                    topology_conn=ro,observation_conn=ro,decision_time=cut)
+            receipt = era._build_event_bound_no_submit_receipt_core(event,trade_conn=trade,decision_time=cut,
+                get_current_level=lambda: era.RiskLevel.GREEN,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                global_actuation=actuation,reserve_on_pass=False)
+            assert receipt.reason.startswith("GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
+                "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"+basis), receipt.reason
+            result = callbacks["preflight_winner"](event,actuation,cut,SimpleNamespace())
+            assert (result.status,result.reason) == ("BATCH_BLOCKED",receipt.reason), result
+            assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
+        assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    finally:
+        if restore_body is not None:
+            restore_body()
+        if ro is not None:
+            ro.close()
+        if trade is not None:
+            trade.close()
+        fixture.conn.close()
+        fixture.builtin.close()
+
+
+def test_a_newer_center_beside_a_valid_cohort_keeps_the_posterior(tmp_path,monkeypatch,_noaa_native_sources):
+    """The healthy shape of the case above: with the old ICON cohort row intact,
+    the re-proof of every role passes and the public bundle serves this exact
+    posterior; a further ICON advance is refresh debt, not exclusion."""
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    fixture, row, cut, _victim = _chicago_between_cohort_posterior(tmp_path,monkeypatch)
+    try:
+        provenance = json.loads(row["provenance_json"])
+        computed = _dt.datetime.fromisoformat(row["computed_at"])
+        hwm.clear_consumed_proof_memo()
+        assert hwm.replacement_live_input_lag_reason(fixture.conn,city=row["city"],target_date=row["target_date"],
+            metric="low",decision_time=cut,posterior_source_cycle_time=row["source_cycle_time"],
+            posterior_computed_at=computed,posterior_provenance=provenance) is None
+        claims = hwm._recorded_serving_claims(provenance["bayes_precision_fusion"])
+        assert {claim[4] for claim in claims.values()} >= {"current_value_serving","between_cohort_value_serving"}
+        assert set(claims) <= set(provenance["bayes_precision_fusion"]["raw_model_forecast_ids"])
+    finally:
+        fixture.conn.close()
+        fixture.builtin.close()
+
+
+@pytest.mark.parametrize("claim",("conflicting_cycle","malformed_id"))
+def test_recorded_serving_claims_refuse_a_row_claimed_two_ways(claim):
+    item = {"raw_model_forecast_id":7,"served_cycle":"2026-10-01T00:00:00+00:00",
+            "captured_at":"2026-10-01T00:10:00+00:00","physical_response":None}
+    other = dict(item, served_cycle="2026-10-01T06:00:00+00:00") if claim == "conflicting_cycle" else dict(
+        item, raw_model_forecast_id="seven")
+    fusion = {"current_value_serving":{"icon_global":item},
+              "source_clock_one_scheme":{"between_cohort_value_serving":{"icon_global":other}}}
+    from src.data import replacement_input_hwm as hwm
+    assert hwm._recorded_serving_claims(fusion) is None
+    assert hwm._recorded_serving_claims({"current_value_serving":{"icon_global":item},
+        "source_clock_one_scheme":{"between_cohort_value_serving":{"icon_global":item}}}) == {
+        7:("icon_global",_dt.datetime(2026,10,1,tzinfo=_dt.timezone.utc),
+           _dt.datetime(2026,10,1,0,10,tzinfo=_dt.timezone.utc),None,"current_value_serving")}
+
+
 @pytest.mark.parametrize("metric",("high","low"))
 def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tmp_path,monkeypatch,metric,_hko_clock_native_sources):
     """Actual source tick and seed transport, with only private routing/HTTP clocks.

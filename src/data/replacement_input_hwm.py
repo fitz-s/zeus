@@ -1832,6 +1832,48 @@ def _current_station_ground_state(
             str(coverage["applicability_identity"]))
 
 
+def _recorded_serving_claims(
+    fusion: Mapping[str, object],
+) -> dict[int, tuple[str, datetime, datetime | None, object, str]] | None:
+    """Every raw row a posterior records as consumed, by id, across its roles.
+
+    The roles are read from the provenance itself: ``current_value_serving``
+    and every ``*_value_serving`` mapping in ``source_clock_one_scheme``. One
+    row shared by several roles must claim one identity; a malformed or
+    conflicting claim returns None (unverifiable).
+    """
+    from src.data.replacement_current_value_serving import physical_source_proof_dependency
+
+    scheme = fusion.get("source_clock_one_scheme")
+    roles = [("current_value_serving", fusion.get("current_value_serving"))]
+    if isinstance(scheme, Mapping):
+        roles += [(key, value) for key, value in scheme.items()
+                  if str(key).endswith("_value_serving")]
+    claims: dict[int, tuple[str, datetime, datetime | None, object, str]] = {}
+    for role, serving in roles:
+        if serving is None and role != "current_value_serving":
+            continue
+        if not isinstance(serving, Mapping):
+            return None
+        for model, item in serving.items():
+            if not isinstance(item, Mapping):
+                return None
+            try:
+                raw_id = int(item.get("raw_model_forecast_id"))
+            except (TypeError, ValueError):
+                return None
+            cycle = _parse_source_cycle_utc(item.get("served_cycle"))
+            if raw_id <= 0 or cycle is None:
+                return None
+            claim = (str(model), cycle, _parse_source_cycle_utc(item.get("captured_at")),
+                     item.get("physical_response"), role)
+            prior = claims.setdefault(raw_id, claim)
+            if prior[:3] != claim[:3] or (physical_source_proof_dependency(prior[3])
+                                          != physical_source_proof_dependency(claim[3])):
+                return None
+    return claims
+
+
 def _exact_current_value_serving_lag(
     conn: sqlite3.Connection,
     *,
@@ -1990,31 +2032,34 @@ def _exact_current_value_serving_lag(
     # The consumed rows are re-proven as consumed: at the posterior's own cut
     # and, for a post-day family, at the Day0 tau recorded with them
     # (day0_remaining_from_provenance), never at a tau derived from the clock
-    # or a newer observation.
+    # or a newer observation. Every recorded serving role is a consumed input:
+    # the center rows and the source-clock cohort rows behind the between-
+    # provider spread are checked alike.
+    claims = {} if consumed_proof_verified else _recorded_serving_claims(fusion)
+    if claims is None:
+        return True, "basis=current_value_serving_provenance_unverifiable:role_claim", None
     try:
         frozen = read_consumed_instrument_values(
             conn, city=city, metric=metric, target_date=str(target_date),
-            consumed_models={item[0]: model for model, item in consumed.items()},
+            consumed_models={raw_id: claim[0] for raw_id, claim in claims.items()},
             materialized_at_iso=posterior_computed_at.isoformat(),
             day0_remaining_from_iso=day0_tau,
-        ) if consumed and not consumed_proof_verified else {}
+        ) if claims else {}
     except sqlite3.OperationalError as exc:
         _raise_hwm_read_unavailable(exc, basis="consumed_physical_proof_read_unavailable")
-    for model, (raw_id, cycle, captured) in consumed.items():
-        if consumed_proof_verified:
-            break
+    for raw_id, (model, cycle, captured, response, role) in claims.items():
         old = frozen.get(raw_id)
         if old is None:
             return True, ("basis=current_value_serving_consumed_proof_unverifiable:"
-                f"model={model}:consumed_raw_id={raw_id}"), None
+                f"model={model}:consumed_raw_id={raw_id}:role={role}"), None
         if (_parse_source_cycle_utc(old.served_cycle) != cycle
             or captured is None or _parse_source_cycle_utc(old.captured_at) != captured):
             return True, ("basis=current_value_serving_raw_row_identity_mismatch:"
-                f"model={model}:consumed_raw_id={raw_id}"), None
-        claimed = physical_source_proof_dependency(serving[model].get("physical_response"))
+                f"model={model}:consumed_raw_id={raw_id}:role={role}"), None
+        claimed = physical_source_proof_dependency(response)
         if claimed is None or claimed != physical_source_proof_dependency(old.physical_response):
             return True, ("basis=current_value_serving_consumed_physical_proof_invalid:"
-                f"model={model}:consumed_raw_id={raw_id}"), None
+                f"model={model}:consumed_raw_id={raw_id}:role={role}"), None
     anchor = consumed.get("ecmwf_ifs")
     if not census:
         return True, None, anchor[1] if anchor is not None else None
