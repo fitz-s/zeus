@@ -4300,122 +4300,43 @@ def _day0_carrier_vector_preflight_reason(
     *,
     forecast_db: Path | str | None,
     payload: Mapping[str, object],
+    input_json: Path | None = None,
 ) -> str | None:
-    """Prove an immutable Day0 request lacks its required future-path bundle.
+    """Prove a Day0 request's prepare ends BLOCKED on a missing hourly bundle.
 
-    This is the queue-side twin of
-    ``replacement_forecast_materializer._day0_noaa_future_vector_members``.
-    Unknown schema, identity, or DB state falls through to the authoritative
-    materializer; only the same strict complete-bundle predicate may suppress a
-    child process.
+    The queue-side twin of the materializer's own verdict
+    (``replacement_forecast_materializer.day0_carrier_vector_missing``): the same
+    request normalization, routing, fusion readiness, residual likelihood,
+    current-temperature state and complete-bundle stage, read-only on the same
+    forecast DB. It re-derives nothing, so it suppresses a child only where that
+    child would end on this exact reason; a request the materializer would end
+    any other way, and any unreadable or unrecognized input, falls through to it.
 
-    The remaining-window boundary is the latest causal same-station
-    observation (``read_day0_current_temperature_state``), not the timestamp
-    of the running extreme (``day0_observed_extreme_observation_time``): a
-    post-peak cooler HIGH print (or warmer LOW print) leaves the extreme
-    unchanged but still shortens the future opportunity window, and the
-    running-extreme timestamp can be hours older than the last causal print
-    (the extreme-ordered ``observation_instants`` row vs. the true latest
-    ``observation_prints`` row). Using the older extreme timestamp as the
-    window start over-widens the hours a hourly-vector bundle must cover,
-    declining bundles the materializer child would accept. That field is kept
-    only as ``fallback_window_start`` when no current-temperature witness is
-    available, matching the materializer exactly.
+    SCOPE: this exact immutable request. DRAIN: the terminal receipt replaces it
+    without a child. RESET: the verdict is a function of the request's own bytes
+    and the facts the materializer reads (current-temperature prints, hourly
+    vectors, forecast rows, residual evidence), so a new print or vector changes
+    what a later request evaluates, and the attempt fingerprint's frontier makes
+    that request a new attempt; there is no clock.
     """
 
-    source = str(payload.get("day0_observed_extreme_source") or "").strip().lower()
-    from src.events.day0_authority import day0_is_noaa_preliminary_source  # noqa: PLC0415
-
-    if not (
-        day0_is_noaa_preliminary_source(source)
-        or source.startswith("hko_hourly_accumulator")
-    ):
+    if forecast_db is None or input_json is None:
         return None
-    observation_time = _parse_utc_iso(
-        payload.get("day0_observed_extreme_observation_time")
+    from src.data.replacement_forecast_materialization_request_builder import (  # noqa: PLC0415
+        build_materialize_request_dataclass,
     )
-    computed_at = _parse_utc_iso(payload.get("computed_at"))
-    city_name = str(payload.get("city") or "").strip()
-    target_date = str(payload.get("target_date") or "").strip()
-    metric = str(payload.get("temperature_metric") or "").strip().lower()
-    if (
-        forecast_db is None
-        or observation_time is None
-        or computed_at is None
-        or observation_time > computed_at
-        or not city_name
-        or not target_date
-        or metric not in {"high", "low"}
-    ):
-        return None
-    from src.config import runtime_cities_by_name  # noqa: PLC0415
-    from src.data.day0_hourly_vectors import (  # noqa: PLC0415
-        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-        day0_hourly_models_for_city,
-        read_day0_current_temperature_state,
-        read_freshest_day0_hourly_vectors,
-        remaining_day_extremes_c_with_current_state,
+    from src.data.replacement_forecast_materializer import (  # noqa: PLC0415
+        day0_carrier_vector_missing,
     )
 
-    city = runtime_cities_by_name().get(city_name)
-    if city is None or payload.get("day0_observed_extreme_c") is None:
-        return None
-    try:
-        from src.data.forecast_target_contract import (  # noqa: PLC0415
-            compute_target_local_day_window_utc,
-        )
-
-        target_window = compute_target_local_day_window_utc(
-            city_timezone=city.timezone,
-            target_local_date=date.fromisoformat(target_date[:10]),
-        )
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if computed_at < target_window.start_utc:
-        return None
-    expected_models = tuple(day0_hourly_models_for_city(city))
-    if not expected_models:
-        return None
     conn: sqlite3.Connection | None = None
     try:
+        request = build_materialize_request_dataclass(
+            payload, base_dir=input_json.parent,
+        )
         conn = _queue_read_only_connection(Path(forecast_db))
         _attach_world_read_only(conn)
-        current_state = read_day0_current_temperature_state(
-            conn=conn,
-            city=city,
-            target_date=target_date,
-            decision_time=computed_at,
-        )
-        if current_state is None:
-            # The materializer twin (``_day0_noaa_future_vector_members``)
-            # raises DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING
-            # here rather than falling back to the extreme's timestamp — a
-            # different failure than DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING.
-            # Only the same predicate may suppress a child process, so fall
-            # through and let the authoritative materializer run and report
-            # its own reason.
-            return None
-        vectors = read_freshest_day0_hourly_vectors(
-            city=city_name,
-            target_date=target_date,
-            now=computed_at,
-            expected_models=expected_models,
-            require_expected=True,
-            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-            remaining_window_start=current_state.observed_at,
-            require_complete_remaining_window=True,
-            conn=conn,
-            raise_on_db_error=True,
-        )
-        future, _innovations = remaining_day_extremes_c_with_current_state(
-            vectors,
-            target_date=target_date,
-            decision_time=computed_at,
-            metric=metric,
-            current_state=current_state,
-            settlement_unit=str(getattr(city, "settlement_unit", "") or "").upper(),
-            fallback_window_start=observation_time,
-        )
+        missing = day0_carrier_vector_missing(conn, request)
     except _ClaimReadDeadlineExceeded:
         raise
     except Exception:  # noqa: BLE001 - unknown truth must reach the materializer
@@ -4423,9 +4344,7 @@ def _day0_carrier_vector_preflight_reason(
     finally:
         if conn is not None:
             conn.close()
-    if future:
-        return None
-    return _DAY0_CARRIER_VECTOR_MISSING_REASON
+    return _DAY0_CARRIER_VECTOR_MISSING_REASON if missing else None
 
 
 def _recent_success_coalesce_seconds() -> float:
@@ -7791,6 +7710,7 @@ def _process_claimed_materialization_batch(
             _day0_carrier_vector_preflight_reason(
                 forecast_db=forecast_db,
                 payload=request_payload,
+                input_json=input_json,
             )
             if request_payload is not None
             else None

@@ -11846,3 +11846,308 @@ def test_low_revision_queue_refuses_same_version_backward_cycle(
     assert queue._seed_source_cycle_boundary(forecast_db=db_path, seed=seed) == (
         "current_posterior", _hko_dt(18).isoformat(),
     )
+
+
+# --- Day0 carrier preflight twin: one admission predicate, the child's own verdict ---------------
+
+_FAST_TAIL = "wu_api+same_station_fast_tail"
+_CARRIER_VECTOR_MISSING = "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING"
+
+
+def _carrier_child_outcome(conn, request) -> str:
+    """What the child's prepare ends with for ``request``: the parity ground truth."""
+    try:
+        prepared = materializer_mod.prepare_replacement_forecast_live(conn, request)
+    except ValueError as exc:
+        return f"RAISED:{exc}"
+    if isinstance(prepared, materializer_mod.ReplacementForecastMaterializeResult):
+        return "BLOCKED:" + ",".join(prepared.reason_codes)
+    return "PREPARED"
+
+
+def _carrier_queue_payload(request, directory: Path) -> dict:
+    """The queue request JSON that rebuilds ``request`` through the child's own builder."""
+    directory.mkdir(parents=True, exist_ok=True)
+    raw = directory / "openmeteo.json"
+    raw.write_bytes(request.openmeteo_raw_payload_bytes)
+    meta = directory / "precision.json"
+    meta.write_text(json.dumps(asdict(request.openmeteo_precision_guard.metadata), default=str))
+
+    def iso(value):
+        return None if value is None else (value.isoformat() if hasattr(value, "isoformat") else str(value))
+
+    payload = {
+        "city": request.city, "city_id": request.city_id, "city_timezone": request.city_timezone,
+        "target_date": iso(request.target_date), "temperature_metric": request.temperature_metric,
+        "source_cycle_time": iso(request.source_cycle_time), "computed_at": iso(request.computed_at),
+        "expires_at": iso(request.expires_at),
+        "baseline_source_run_id": request.baseline_source_run_id,
+        "baseline_data_version": request.baseline_data_version,
+        "baseline_source_available_at": iso(request.baseline_source_available_at),
+        "openmeteo_source_run_id": request.openmeteo_source_run_id,
+        "openmeteo_source_available_at": iso(request.openmeteo_source_available_at),
+        "openmeteo_source_cycle_time": iso(request.openmeteo_anchor.source_cycle_time),
+        "openmeteo_anchor_artifact_id": request.anchor_artifact_id,
+        "openmeteo_payload_json": str(raw), "precision_metadata_json": str(meta),
+        "anchor_weight": request.anchor_weight, "anchor_sigma_c": request.anchor_sigma_c,
+        "settlement_step_c": request.settlement_step_c,
+        "bins": [{"bin_id": b.bin_id, "lower_c": b.lower_c, "upper_c": b.upper_c, "center_c": b.center_c,
+                  "display_unit": b.display_unit, "settlement_unit": b.settlement_unit,
+                  "rounding_rule": b.rounding_rule} for b in request.bins],
+    }
+    for field in ("day0_observed_extreme_c", "day0_observed_extreme_source",
+                  "day0_observed_extreme_observation_time", "day0_observed_extreme_sample_count",
+                  "day0_observed_extreme_unit", "day0_observation_state"):
+        value = getattr(request, field)
+        if value is not None:
+            payload[field] = iso(value) if field.endswith("observation_time") else value
+    return payload
+
+
+def _carrier_twin(conn, request, directory: Path, monkeypatch):
+    """The queue preflight's verdict for ``request`` on the request's own forecast DB."""
+    from src.data import replacement_forecast_live_materialization_queue as queue_mod
+    from src.data.station_ground_evidence import forecast_db_from_connection
+
+    monkeypatch.setattr(queue_mod, "_attach_world_read_only", lambda _conn: None)
+    conn.commit()
+    payload = _carrier_queue_payload(request, directory)
+    input_json = directory / "request.json"
+    input_json.write_text(json.dumps(payload))
+    return queue_mod._day0_carrier_vector_preflight_reason(
+        forecast_db=forecast_db_from_connection(conn), payload=payload, input_json=input_json,
+    )
+
+
+@pytest.mark.parametrize(("source", "computed_at", "expected"), (
+    ("aviationweather_metar", _dt(18), 31.0),
+    ("ogimet_metar_zspd", _dt(18), 31.0),
+    ("hko_hourly_accumulator", _dt(18), 31.0),
+    (_FAST_TAIL, _dt(18), 31.0),
+    (_FAST_TAIL, _dt(10), None),  # the target local day has not started
+    ("noaa_wrh_zspd", _dt(18), None),  # absorbing settlement channel truncates support instead
+    ("wu_icao_history", _dt(18), None),
+))
+def test_day0_carrier_admission_is_one_predicate(source, computed_at, expected) -> None:
+    """The child routes into the carrier region by exactly this predicate, twin included."""
+    request = _request(
+        computed_at=computed_at, day0_observed_extreme_c=31.0,
+        day0_observed_extreme_source=source,
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+    )
+    assert materializer_mod._day0_carrier_extreme_c(request) == expected
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_day0_carrier_twin_suppresses_exactly_what_the_child_ends_on_vector_missing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, metric: str,
+) -> None:
+    """Set equality over the routing branches: {twin suppresses} == {child ends VECTOR_MISSING}."""
+    conn, base = _shanghai_noaa_future_request(tmp_path, monkeypatch, metric=metric)
+    fast_tail = replace(base, day0_observed_extreme_source=_FAST_TAIL)
+    corpus: dict[str, tuple[str, object]] = {}
+
+    def record(name, request):
+        corpus[name] = (_carrier_child_outcome(conn, request),
+                        _carrier_twin(conn, request, tmp_path / name, monkeypatch))
+
+    record("fast_tail_complete_bundle", fast_tail)
+    record("noaa_preliminary_complete_bundle", base)
+    assert conn.execute("SELECT 1 FROM day0_hourly_vectors WHERE model = 'icon_global'").fetchone()
+    conn.execute("DELETE FROM day0_hourly_vectors WHERE model = 'icon_global'")
+    conn.commit()
+    record("fast_tail_incomplete_bundle", fast_tail)
+    record("noaa_preliminary_incomplete_bundle", base)
+    absorbing = replace(base, day0_observed_extreme_source="noaa_wrh_zspd")
+    record("absorbing_settlement_channel_incomplete_bundle", absorbing)
+
+    assert corpus["fast_tail_incomplete_bundle"] == (f"BLOCKED:{_CARRIER_VECTOR_MISSING}", _CARRIER_VECTOR_MISSING)
+    assert corpus["noaa_preliminary_incomplete_bundle"] == (
+        f"BLOCKED:{_CARRIER_VECTOR_MISSING}", _CARRIER_VECTOR_MISSING)
+    assert corpus["fast_tail_complete_bundle"][1] is None
+    assert corpus["noaa_preliminary_complete_bundle"][1] is None
+    assert corpus["absorbing_settlement_channel_incomplete_bundle"][1] is None
+    for name, (child, twin) in corpus.items():
+        assert (twin is not None) == (child == f"BLOCKED:{_CARRIER_VECTOR_MISSING}"), (name, child, twin)
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_day0_carrier_twin_falls_through_when_the_residual_likelihood_is_unavailable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The residual verdict precedes the bundle read: an incomplete bundle must not mask it."""
+    conn, base = _shanghai_noaa_future_request(tmp_path, monkeypatch)
+    fast_tail = replace(base, day0_observed_extreme_source=_FAST_TAIL)
+    conn.execute("DELETE FROM day0_hourly_vectors WHERE model = 'icon_global'")
+    conn.commit()
+    assert _carrier_twin(conn, fast_tail, tmp_path / "evidence", monkeypatch) == _CARRIER_VECTOR_MISSING
+    monkeypatch.setattr("src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+                        lambda *_a, **_k: None)
+    assert _carrier_child_outcome(conn, fast_tail) == "RAISED:DAY0_WU_CURRENT_CARRIER_RESIDUAL_UNAVAILABLE"
+    assert _carrier_twin(conn, fast_tail, tmp_path / "no_evidence", monkeypatch) is None
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_day0_carrier_twin_falls_through_without_a_current_temperature_state(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, base = _shanghai_noaa_future_request(tmp_path, monkeypatch, without_current_state=True)
+    fast_tail = replace(base, day0_observed_extreme_source=_FAST_TAIL)
+    assert _carrier_child_outcome(conn, fast_tail) in {
+        "BLOCKED:DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING",
+        "RAISED:DAY0_WU_CURRENT_CARRIER_RESIDUAL_UNAVAILABLE",
+    }
+    assert _carrier_twin(conn, fast_tail, tmp_path / "twin", monkeypatch) is None
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_day0_carrier_twin_falls_through_when_the_store_is_unreadable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable vector store is an error, never the absent-bundle verdict."""
+    import src.data.day0_hourly_vectors as hourly
+
+    conn, base = _shanghai_noaa_future_request(tmp_path, monkeypatch)
+    fast_tail = replace(base, day0_observed_extreme_source=_FAST_TAIL)
+    conn.execute("DELETE FROM day0_hourly_vectors WHERE model = 'icon_global'")
+    conn.commit()
+    assert _carrier_twin(conn, fast_tail, tmp_path / "readable", monkeypatch) == _CARRIER_VECTOR_MISSING
+
+    def unreadable(**kwargs):
+        assert kwargs["raise_on_db_error"] is True
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(hourly, "read_freshest_day0_hourly_vectors", unreadable)
+    assert _carrier_twin(conn, fast_tail, tmp_path / "unreadable", monkeypatch) is None
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_day0_carrier_preflight_suppresses_once_then_reopens_on_a_new_vector_or_observation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through the real queue: no child for a doomed fast-tail request, and no clock to reopen it."""
+    from src.data import replacement_forecast_live_materialization_queue as queue_mod
+    from src.data.station_ground_evidence import forecast_db_from_connection
+
+    conn, base = _shanghai_noaa_future_request(tmp_path, monkeypatch)
+    fast_tail = replace(base, day0_observed_extreme_source=_FAST_TAIL)
+    rows = conn.execute("SELECT * FROM day0_hourly_vectors WHERE model = 'icon_global'").fetchall()
+    columns = rows[0].keys()
+    conn.execute("DELETE FROM day0_hourly_vectors WHERE model = 'icon_global'")
+    conn.commit()
+    db = forecast_db_from_connection(conn)
+    monkeypatch.setattr(queue_mod, "_attach_world_read_only", lambda _conn: None)
+    monkeypatch.setattr(queue_mod, "_seed_source_cycle_boundary", lambda **_k: None)
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_k: False)
+    verdicts: list[bool] = []
+    real_verdict = materializer_mod.day0_carrier_vector_missing
+
+    def traced(conn_, request_):
+        verdicts.append(real_verdict(conn_, request_))
+        return verdicts[-1]
+
+    monkeypatch.setattr(materializer_mod, "day0_carrier_vector_missing", traced)
+    spawned: list[list[str]] = []
+
+    def runner(argv):
+        spawned.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not a verdict")
+
+    def run_queue(payload):
+        request_dir = tmp_path / "requests"
+        request_dir.mkdir(exist_ok=True)
+        (request_dir / "Shanghai.request.json").write_text(json.dumps(payload))
+        return queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir, processed_dir=tmp_path / "processed", failed_dir=tmp_path / "failed",
+            forecast_db=db, raw_manifest_dir=None, limit=1, runner=runner, discover=False,
+        )
+
+    payload = _carrier_queue_payload(fast_tail, tmp_path / "inputs")
+    report = run_queue(payload)
+    assert spawned == [] and verdicts == [True]
+    assert queue_mod._DAY0_CARRIER_VECTOR_MISSING_REASON in report.reason_codes
+    receipt = json.loads(next((tmp_path / "blocked_latest").glob("*.json")).read_text())
+    assert receipt["status"] == "BLOCKED_MISSING_PROBABILITY_AUTHORITY"
+    assert receipt["result_evidence"]["subprocess_spawned"] is False
+    assert next((tmp_path / "blocked_attempts").glob("*.json")), "the verdict is bound to input identity"
+
+    # Identical bytes and identical facts: the unchanged marker answers; nothing is re-derived.
+    again = run_queue(payload)
+    assert spawned == [] and verdicts == [True]
+    assert queue_mod._UNCHANGED_BLOCKED_SKIP_REASON in again.reason_codes
+
+    # A new observation changes the request identity: it is evaluated afresh, on its own cut.
+    observed = (datetime.fromisoformat(payload["day0_observed_extreme_observation_time"])
+                + timedelta(minutes=1)).isoformat()
+    run_queue({**payload, "day0_observed_extreme_observation_time": observed})
+    assert verdicts == [True, True] and spawned == []
+
+    # A new hourly vector changes the fact the verdict depends on: the child runs immediately.
+    for row in rows:
+        conn.execute(
+            f"INSERT INTO day0_hourly_vectors ({','.join(columns)}) VALUES ({','.join('?' * len(columns))})",
+            tuple(row))
+    conn.commit()
+    run_queue(payload)
+    assert verdicts == [True, True, False]
+    assert len(spawned) == 1
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_day0_carrier_preflight_reopens_when_a_new_current_temperature_print_lands(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A print the request's cut did not yet possess changes the next request, not a clock.
+
+    The doomed request is bound to its facts. The same family's next request carries the
+    newly possessed print (the state identity moves the attempt fingerprint) and is judged on
+    its own cut: here the longer window now needs a vector the bundle lacks, so it stays doomed
+    on its own evidence; once that vector exists the child runs at once.
+    """
+    from src.data import day0_fast_obs as fast
+    from src.data import replacement_forecast_live_materialization_queue as queue_mod
+    from src.data.station_ground_evidence import forecast_db_from_connection
+
+    conn, base = _shanghai_noaa_future_request(tmp_path, monkeypatch)
+    fast_tail = replace(base, day0_observed_extreme_source=_FAST_TAIL)
+    conn.execute("DELETE FROM day0_hourly_vectors WHERE model = 'icon_global'")
+    conn.commit()
+    db = forecast_db_from_connection(conn)
+    monkeypatch.setattr(queue_mod, "_attach_world_read_only", lambda _conn: None)
+    payload = _carrier_queue_payload(fast_tail, tmp_path / "inputs")
+    seed = tmp_path / "seed.json"
+
+    def fingerprint(body):
+        return queue_mod._blocked_attempt_fingerprint(input_json=seed, forecast_db=db, payload=body)
+
+    before = fingerprint(payload)
+    assert before is not None
+    assert _carrier_twin(conn, fast_tail, tmp_path / "before", monkeypatch) == _CARRIER_VECTOR_MISSING
+
+    city = __import__("src.config", fromlist=["runtime_cities_by_name"]).runtime_cities_by_name()[fast_tail.city]
+    observed = fast_tail.computed_at + timedelta(minutes=1)
+    fetched = observed + timedelta(minutes=1)
+
+    class CaptureClock(fast.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fetched.astimezone(tz) if tz else fetched.replace(tzinfo=None)
+
+    monkeypatch.setattr(fast, "datetime", CaptureClock)
+    reports = fast.parse_metar_api_payload([{"icaoId": "ZSPD", "obsTime": observed.timestamp(),
+        "receiptTime": fetched.isoformat(), "temp": 30., "metarType": "METAR",
+        "rawOb": f"ZSPD {observed:%d%H%M}Z 30/20 T03000200"}])
+    source = fast.fast_obs_source_for_city(city, fast_tail.target_date)
+    assert fast._append_metar_prints_to_ledger(conn, ((city, source, str(fast_tail.target_date)),), reports)
+    conn.commit()
+
+    # The old cut did not possess the print: its verdict and its fingerprint are unchanged.
+    assert fingerprint(payload) == before
+    assert _carrier_twin(conn, fast_tail, tmp_path / "same_cut", monkeypatch) == _CARRIER_VECTOR_MISSING
+    # The next request names the newly possessed print: a new attempt on a new cut.
+    later = {**payload, "computed_at": (fetched + timedelta(minutes=1)).isoformat(),
+             "day0_observed_extreme_observation_time": observed.isoformat(),
+             "day0_current_temperature_state": {"value_native": 30.0, "source": "aviationweather_metar",
+                                                "observed_at_utc": observed.astimezone(UTC).isoformat()}}
+    assert fingerprint(later) != before
