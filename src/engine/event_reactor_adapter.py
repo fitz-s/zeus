@@ -1716,6 +1716,24 @@ def _global_preflight_sell_temporal_authority_superseded(reason: str) -> bool:
     )
 
 
+def _global_preflight_consumed_proof_invalid(reason: str) -> bool:
+    # The bundle refused the cached witness's own consumed proof, read at the
+    # posterior's cut: permanent for that posterior. A transient read
+    # (``*_read_unavailable``, HWM_READ_DEADLINE) is not here; re-preparing it
+    # would only re-hit the same lock or deadline.
+    prefix = (
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+        "REPLACEMENT_RAW_INPUT_HWM:basis=current_value_serving_"
+    )
+    return reason.startswith(tuple(prefix + basis + ":" for basis in (
+        "consumed_proof_unverifiable",
+        "consumed_physical_proof_invalid",
+        "consumed_input_after_posterior",
+        "raw_row_identity_mismatch",
+    )))
+
+
 def _evict_superseded_global_probability_family_cache(
     namespace: str | None,
     *,
@@ -1736,6 +1754,7 @@ def _evict_superseded_global_probability_family_cache(
     if not (
         reason.endswith("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
         or _global_preflight_sell_temporal_authority_superseded(reason)
+        or _global_preflight_consumed_proof_invalid(reason)
         or "model_identity_drift" in reason
     ):
         return False

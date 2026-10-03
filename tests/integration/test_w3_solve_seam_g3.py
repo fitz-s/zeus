@@ -14021,6 +14021,17 @@ def test_live_adapter_selection_telemetry_isolates_unsupported_family(monkeypatc
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_IDENTITY_SUPERSEDED',
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:mature',
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:immature',
+        *(
+            'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:'
+            'GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:'
+            f'basis=current_value_serving_{basis}:model=icon_global:consumed_raw_id=2'
+            for basis in (
+                'consumed_proof_unverifiable',
+                'consumed_physical_proof_invalid',
+                'consumed_input_after_posterior',
+                'raw_row_identity_mismatch',
+            )
+        ),
     ),
 )
 def test_superseded_preflight_evicts_only_selected_family_probability_cache(
@@ -14102,7 +14113,12 @@ def test_superseded_preflight_evicts_only_selected_family_probability_cache(
     (
         "HWM_READ_DEADLINE",
         "hwm_read_failed",
-        "current_value_serving_raw_row_identity_mismatch",
+        "consumed_physical_proof_read_unavailable:sqlite_error=database is locked",
+        "current_value_serving_read_unavailable",
+        "openmeteo_anchor_artifact_payload_unavailable",
+        "openmeteo_anchor_artifact_table_unavailable",
+        "station_ground_canonical_evidence_unavailable",
+        "anchor_local_proof_cut_unavailable",
         "unknown_superseded",
     ),
 )
@@ -51837,8 +51853,9 @@ def test_partial_current_replay_reads_the_cohort_at_the_frozen_tau(tmp_path,monk
     cohort without the posterior's Day0 tau, chose other rows (HIGH 1/3 for
     recorded 7/9, LOW 2/4 for 8/10), failed model_identity_drift:configured_cohort
     and evicted a lawful posterior. With the tau the recorded cohort re-proves
-    through the real authority wrapper; a deleted recorded cohort row still
-    fails the same way and evicts.
+    through the real authority wrapper; a deleted recorded cohort row is a lost
+    consumed proof, refused before the members (eviction of that refusal:
+    test_actual_consumed_proof_refusal_evicts_both_cached_lanes).
     """
     from src.data import replacement_forecast_bundle_reader as reader
     from src.data import replacement_input_hwm as hwm
@@ -51877,23 +51894,157 @@ def test_partial_current_replay_reads_the_cohort_at_the_frozen_tau(tmp_path,monk
                 # wrapper refuses at the consumed proof before the members.
                 with pytest.raises(ValueError, match="consumed_proof_unverifiable"):
                     era._forecast_authority_payload_and_clock(ro,decision_time=post_cut,**kwargs)
-                members_reason: dict[str,str] = {}
-                assert era._posterior_bound_multimodel_members(ro,family=family,decision_time=post_cut,
-                    source_cycle_time=row["source_cycle_time"],provenance=json.loads(row["provenance_json"]),
-                    posterior_computed_at=row["computed_at"],reason_out=members_reason) is None
-                assert members_reason["reason"].startswith("model_identity_drift:"), members_reason
-                reason = "FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior:" + members_reason["reason"]
-                namespace = "partial-tau-eviction"
-                monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",namespace)
-                monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",
-                    {("family-hk",era._CurrentProbabilityUse.ENTRY.value):("event-1","binding-1",object())})
-                assert era._evict_superseded_global_probability_family_cache(namespace,reason=reason,
-                    actuation=SimpleNamespace(decision=SimpleNamespace(candidate=SimpleNamespace(family_key="family-hk"))))
-                assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
         finally:
             ro.close()
     finally:
         fixture.conn.close()
+
+
+@pytest.mark.parametrize("fault",("recorded_row_deleted","inplace_body_same_mtime","consumed_read_locked"))
+def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeypatch,fault,_noaa_native_sources):
+    """Round-4: a lost consumed proof refused the winner at preflight
+    (BATCH_BLOCKED ...consumed_proof_unverifiable) but evicted nothing, so the
+    next prepare_event/prepare_held_event reissued the dead posterior from the
+    family cache until max_age. The actual receipt's reason now evicts both
+    lanes; a transient consumed-proof read (lock) refuses without eviction.
+    """
+    import os
+    from pathlib import Path
+    from src.data import replacement_current_value_serving as serving
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    from src.state import db as db_module
+    from src.state.db import init_schema_trade_only
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    ro = trade = restore_body = None
+    try:
+        at = fixture.cut
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+        class ReaderClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return at.astimezone(tz) if tz else at.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",ReaderClock)
+        row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone())
+        payload = asdict(ForecastSnapshotReadyPayload(city="Chicago",target_date="2026-10-02",metric="low",
+            source_id="replacement_0_1",source_run_id=row["posterior_identity_hash"],
+            cycle=fixture.request.source_cycle_time.isoformat(),track="replacement_0_1_openmeteo_bayes_fusion",
+            snapshot_id=f"posterior-{row['posterior_id']}",snapshot_hash=row["posterior_identity_hash"],
+            captured_at=at.isoformat(),available_at=at.isoformat(),required_fields_present=True,
+            required_steps_present=True,member_count=51,min_members_floor=51,completeness_status="COMPLETE",
+            required_steps=[],observed_steps=[],expected_members=51,source_run_status="COMPLETE",
+            source_run_completeness_status="COMPLETE",coverage_completeness_status="COMPLETE",
+            coverage_readiness_status="LIVE_ELIGIBLE"))
+        payload["city_timezone"] = fixture.city.timezone
+        event = make_opportunity_event(event_type="EDLI_REDECISION_PENDING",entity_key="Chicago|2026-10-02|low",
+            source="consumed-proof-eviction",observed_at=at.isoformat(),available_at=at.isoformat(),
+            received_at=at.isoformat(),payload=payload,causal_snapshot_id=f"posterior-{row['posterior_id']}")
+        def read_only():
+            conn = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            return conn
+        ro = read_only()
+        trade = sqlite3.connect(":memory:")
+        trade.row_factory = sqlite3.Row
+        init_schema_trade_only(trade)
+        monkeypatch.setattr(db_module,"get_world_connection",read_only)
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",None)
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",{})
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",{})
+        hooks = []
+        with monkeypatch.context() as batch:
+            batch.setattr(global_batch_runtime,"process_current_global_batch",
+                lambda events,**callbacks: hooks.append(callbacks) or SimpleNamespace(
+                    events=tuple(events),winner_event_id=None,receipts={}))
+            era.event_bound_live_adapter_from_trade_conn(trade,get_current_level=lambda: era.RiskLevel.GREEN,
+                forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                executor_submit=lambda *a,**k: pytest.fail("executor must never run"),
+            ).process_global_batch((event,),at)
+        callbacks = hooks[-1]
+        assert era._global_probability_refresh_family_keys((event,)) == frozenset()
+        def clear_memos():
+            hwm.clear_consumed_proof_memo()
+            reader._LIVE_GRADE_MEMO.clear()
+        clear_memos()
+        entry = callbacks["prepare_event"](event,at)
+        held = callbacks["prepare_held_event"](event,at)
+        assert entry.prepared_global_family is not None, entry.reason
+        assert held.prepared_global_family is not None, held.reason
+        witness = entry.prepared_global_family.probability_witness
+        tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
+        selected = universe._rebind_probability_witness_tokens(witness,token_map_by_condition=tokens,
+            required_token_ids=frozenset(t for pair in tokens.values() for t in pair))
+        binding = selected.bindings[1]
+        curve = ExecutableCostCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
+            levels=(BookLevel(price=Decimal(".10"),size=Decimal("100")),),fee_model=FeeModel(fee_rate=Decimal("0")),
+            min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+        candidate = GlobalSingleOrderCandidate(candidate_id="consumed-proof-buy",family_key=selected.family_key,
+            bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
+            probability_witness_identity=selected.witness_identity,book_snapshot_id=curve.snapshot_id,
+            book_captured_at_utc=at,execution_curve_identity=executable_curve_identity(curve),
+            ledger_snapshot_id="ledger",executable_cost_curve=curve,resolution_identity=selected.resolution_identity,
+            neg_risk=False)
+        actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=selected,
+            decision=SimpleNamespace(candidate=candidate),actuation_identity="consumed-proof-actuation")
+        assert era._current_global_actuation_prepared_family(event,global_actuation=actuation,forecast_conn=ro,
+            topology_conn=ro,observation_conn=ro,decision_time=at)[0].probability_witness is selected
+        cached = dict(era._GLOBAL_PROBABILITY_FAMILY_CACHE)
+        assert {use for _family,use in cached} == {"entry","held_monitor"}
+        victim = int(json.loads(row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
+            ["icon_global"]["raw_model_forecast_id"])
+        if fault == "recorded_row_deleted":
+            fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(victim,))
+            fixture.conn.commit()
+        elif fault == "inplace_body_same_mtime":
+            body = Path(fixture.conn.execute("SELECT a.artifact_path FROM raw_model_forecasts r"
+                " JOIN raw_forecast_artifacts a ON a.artifact_id=r.artifact_id WHERE r.raw_model_forecast_id=?",
+                (victim,)).fetchone()[0])
+            assert body.resolve().is_relative_to(Path(os.environ["ZEUS_TEST_STATE_ROOT"]).resolve())
+            original,before = body.read_bytes(),body.stat()
+            body.write_bytes(bytes([original[0]^1])+original[1:])
+            os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns))
+            restore_body = lambda: (body.write_bytes(original),
+                os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns)))
+            after = body.stat()
+            assert (after.st_ino,after.st_size,after.st_mtime_ns) == (before.st_ino,before.st_size,before.st_mtime_ns)
+        else:
+            def locked(*_a,**_k): raise sqlite3.OperationalError("database is locked")
+            monkeypatch.setattr(serving,"read_consumed_instrument_values",locked)
+        evicts = fault != "consumed_read_locked"
+        # A warm verdict memo replays its recorded reads, never the patched reader.
+        for temperature in ("warm","cold") if evicts else ("cold",):
+            era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+            era._GLOBAL_PROBABILITY_FAMILY_CACHE.update(cached)
+            if temperature == "cold":
+                clear_memos()
+            receipt = era._build_event_bound_no_submit_receipt_core(event,trade_conn=trade,decision_time=at,
+                get_current_level=lambda: era.RiskLevel.GREEN,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                global_actuation=actuation,reserve_on_pass=False)
+            assert receipt.proof_accepted is False
+            assert ("basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:" if evicts
+                else "basis=consumed_physical_proof_read_unavailable:") in receipt.reason, receipt.reason
+            result = callbacks["preflight_winner"](event,actuation,at,SimpleNamespace())
+            assert (result.status,result.reason) == ("BATCH_BLOCKED",receipt.reason), result
+            assert bool(era._GLOBAL_PROBABILITY_FAMILY_CACHE) is not evicts
+            for lane in ("prepare_event","prepare_held_event"):
+                replay = callbacks[lane](event,at+_dt.timedelta(seconds=1))
+                served = replay.prepared_global_family
+                if evicts:
+                    assert served is None, (temperature,lane,replay.reason)
+                else:
+                    assert served is not None and served.posterior_id == row["posterior_id"], (lane,replay.reason)
+        assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    finally:
+        if restore_body is not None:
+            restore_body()
+        if ro is not None:
+            ro.close()
+        if trade is not None:
+            trade.close()
+        fixture.conn.close()
+        fixture.builtin.close()
 
 
 @pytest.mark.parametrize("metric",("high","low"))
