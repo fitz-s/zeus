@@ -109,6 +109,9 @@ class _Day0BridgePending:
     lane: bool | str | None = None
     enqueued_monotonic: float = 0.0
     failures: int = 0
+    committed_source_event_ids: frozenset[str] = frozenset()
+    retry_timer: threading.Timer | None = None
+    queued: bool = False
 
 
 _DAY0_BRIDGE_PENDING: dict[tuple[str, str, str], _Day0BridgePending] = {}
@@ -3606,14 +3609,36 @@ def _day0_bridge_status_retryable(status: object) -> bool:
 
 def _requeue_day0_bridge_pending(
     key: tuple[str, str, str],
+    expected_pending: _Day0BridgePending,
+    retry_timer: threading.Timer,
 ) -> None:
     with _DAY0_BRIDGE_CONDITION:
         pending = _DAY0_BRIDGE_PENDING.get(key)
-        if pending is None or pending.running or _DAY0_BRIDGE_CLOSED:
+        if (
+            pending is not expected_pending
+            or pending.retry_timer is not retry_timer
+            or pending.running or pending.queued or _DAY0_BRIDGE_CLOSED
+        ):
             return
+        # Clear only this callback's handle, never a replacement retry/owner.
+        pending.retry_timer = None
+        pending.queued = True
         pending.enqueued_monotonic = time.monotonic()
         _DAY0_BRIDGE_QUEUES[pending.lane].put_nowait(key)
         _DAY0_BRIDGE_CONDITION.notify_all()
+
+
+def _day0_bridge_retry_timer(
+    key: tuple[str, str, str], pending: _Day0BridgePending, delay: float,
+) -> threading.Timer:
+    # Each closure owns an exact timer/incarnation, not mutable worker-loop locals
+    # or task generation (which a generic replay can legitimately update).
+    def replay() -> None:
+        _requeue_day0_bridge_pending(key, pending, timer)
+
+    timer = threading.Timer(delay, replay)
+    timer.daemon = True
+    return timer
 
 
 def _day0_bridge_worker(lane: bool | str) -> None:
@@ -3628,6 +3653,10 @@ def _day0_bridge_worker(lane: bool | str) -> None:
                 pending = _DAY0_BRIDGE_PENDING.get(key)
                 if pending is None or pending.running or pending.lane != lane:
                     continue
+                pending.queued = False
+                if pending.retry_timer is not None:
+                    pending.retry_timer.cancel()
+                    pending.retry_timer = None
                 pending.running = True
                 generation = pending.generation
                 computed_at = pending.computed_at
@@ -3686,12 +3715,8 @@ def _day0_bridge_worker(lane: bool | str) -> None:
                             _DAY0_BRIDGE_RETRY_BASE_SECONDS
                             * (2 ** min(current.failures - 1, 8)),
                         )
-                        retry = threading.Timer(
-                            delay,
-                            _requeue_day0_bridge_pending,
-                            args=(key,),
-                        )
-                        retry.daemon = True
+                        retry = _day0_bridge_retry_timer(key, current, delay)
+                        current.retry_timer = retry
                         retry.start()
                     else:
                         del _DAY0_BRIDGE_PENDING[key]
@@ -3704,6 +3729,7 @@ def _day0_bridge_worker(lane: bool | str) -> None:
                         else current.held_position is not False
                     )
                     current.enqueued_monotonic = time.monotonic()
+                    current.queued = True
                     _DAY0_BRIDGE_QUEUES[current.lane].put_nowait(key)
                 _DAY0_BRIDGE_CONDITION.notify_all()
         finally:
@@ -3748,6 +3774,7 @@ def _day0_bridge_classifier() -> None:
                     pending.held_position = is_held
                     pending.lane = is_held
                     pending.enqueued_monotonic = time.monotonic()
+                    pending.queued = True
                     _DAY0_BRIDGE_QUEUES[is_held].put_nowait(key)
                 _DAY0_BRIDGE_CONDITION.notify_all()
         finally:
@@ -3795,10 +3822,12 @@ def enqueue_day0_extreme_updated_materialization_seed(
     computed_at: datetime | None = None,
     held_position: bool | None = None,
     station_source_clock: bool = False,
+    committed_source_event_ids: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Queue Day0 posterior work without running materialization inline."""
 
     key = (str(city), str(target_date), str(metric))
+    source_event_ids = frozenset(committed_source_event_ids)
     with _DAY0_BRIDGE_CONDITION:
         if _DAY0_BRIDGE_CLOSED:
             return {
@@ -3809,22 +3838,41 @@ def enqueue_day0_extreme_updated_materialization_seed(
             }
         pending = _DAY0_BRIDGE_PENDING.get(key)
         if pending is not None:
-            pending.generation += 1
-            pending.computed_at = computed_at
-            if station_source_clock:
-                pending.station_source_clock = True
-                if not pending.running and pending.lane != _DAY0_STATION_LANE:
-                    pending.lane = _DAY0_STATION_LANE
-                    _DAY0_BRIDGE_QUEUES[_DAY0_STATION_LANE].put_nowait(key)
-            elif held_position is True:
-                pending.held_position = True
-                if not pending.running and pending.lane is not True:
-                    pending.lane = True
-                    _DAY0_BRIDGE_QUEUES[True].put_nowait(key)
-            elif held_position is False and not pending.running and pending.lane is None:
-                pending.held_position = False
-                pending.lane = False
-                _DAY0_BRIDGE_QUEUES[False].put_nowait(key)
+            new_source_event = bool(source_event_ids - pending.committed_source_event_ids)
+            if not source_event_ids or new_source_event:
+                pending.generation += 1
+                pending.computed_at = computed_at
+                pending.committed_source_event_ids |= source_event_ids
+                if station_source_clock:
+                    pending.station_source_clock = True
+                    if not pending.running and pending.lane != _DAY0_STATION_LANE:
+                        pending.lane = _DAY0_STATION_LANE
+                        pending.queued = True
+                        _DAY0_BRIDGE_QUEUES[_DAY0_STATION_LANE].put_nowait(key)
+                elif held_position is True:
+                    pending.held_position = True
+                    if not pending.running and pending.lane is not True:
+                        pending.lane = True
+                        pending.queued = True
+                        _DAY0_BRIDGE_QUEUES[True].put_nowait(key)
+                elif held_position is False and not pending.running and pending.lane is None:
+                    pending.held_position = False
+                    pending.lane = False
+                    pending.queued = True
+                    _DAY0_BRIDGE_QUEUES[False].put_nowait(key)
+                if new_source_event and not pending.running and pending.lane is not None:
+                    # SCOPE: this family's new durable postcommit event only.
+                    # DRAIN: immediately recheck the unchanged source/ENS/owner
+                    # gates; genuine missing dependencies keep their backoff.
+                    # RESET: the recheck admits or renews its typed retry.
+                    # Event IDs are scheduling causes, never source authority.
+                    if pending.retry_timer is not None:
+                        pending.retry_timer.cancel()
+                        pending.retry_timer = None
+                    if not pending.queued:
+                        pending.queued = True
+                        pending.enqueued_monotonic = time.monotonic()
+                        _DAY0_BRIDGE_QUEUES[pending.lane].put_nowait(key)
             return {
                 "status": "DAY0_EXTREME_BRIDGE_COALESCED",
                 "city": key[0],
@@ -3848,6 +3896,8 @@ def enqueue_day0_extreme_updated_materialization_seed(
             station_source_clock=station_source_clock,
             lane=lane,
             enqueued_monotonic=time.monotonic(),
+            committed_source_event_ids=source_event_ids,
+            queued=lane is not None,
         )
         _DAY0_BRIDGE_PENDING[key] = pending
         _start_day0_bridge_workers_locked()
@@ -3884,6 +3934,10 @@ def close_day0_materialization_bridge() -> None:
         if _DAY0_BRIDGE_CLOSED:
             return
         _DAY0_BRIDGE_CLOSED = True
+        for pending in _DAY0_BRIDGE_PENDING.values():
+            if pending.retry_timer is not None:
+                pending.retry_timer.cancel()
+                pending.retry_timer = None
         _DAY0_BRIDGE_PENDING.clear()
         _DAY0_BRIDGE_CONDITION.notify_all()
         if not _DAY0_BRIDGE_THREADS:

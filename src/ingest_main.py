@@ -570,6 +570,7 @@ def _bridge_committed_day0_events(
                     target_date=target_date,
                     metric=metric,
                     station_source_clock=(source == "day0_hko_source_clock"),
+                    committed_source_event_ids=event_ids,
                 )
                 logger.info(
                     "DAY0_SOURCE_MATERIALIZATION_BRIDGE source=%s city=%s "

@@ -1,6 +1,6 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-09-23
-# Lifecycle: created=2026-07-19; last_reviewed=2026-09-23; last_reused=2026-09-23
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-07-19; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
 # Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import importlib
 import multiprocessing
+import queue
 import sqlite3
 import subprocess
 import threading
@@ -5819,6 +5820,278 @@ def test_async_bridge_returns_immediately_and_replays_newer_coalesced_fact(monke
 
     assert cycle_advance._wait_for_day0_materialization_bridge_idle(2.0)
     assert calls == [first_at, second_at]
+
+
+@pytest.fixture
+def committed_source_retry(monkeypatch):
+    """Actual postcommit handler/worker/CAS; only the exact owner probe is controlled.
+
+    Source/ENS admission is not fabricated by this scheduling fixture. Its body
+    stays unchanged, and a separate typed missing-dependency outcome tests that
+    an operational wake grants no admission. No canonical connection is opened.
+    """
+    from src import ingest_main
+    from src.runtime import reactor_wake
+
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.execute("""CREATE TABLE cycle_advance_enqueues (
+        city TEXT,target_date TEXT,metric TEXT,target_cycle_time TEXT,seed_file TEXT,
+        reason TEXT,held_position INTEGER,day0_observed_extreme_observation_time TEXT,
+        enqueued_at TEXT,day0_conditioning_identity_json TEXT)""")
+    station = queue.Queue()
+    entry = queue.Queue()
+    context = SimpleNamespace(conn=conn, metric="high", owner_active=True,
+                              missing_deps=False, calls=[], timers=[], wakes=[],
+                              hold=False, started=threading.Event(), release=threading.Event(),
+                              station=station, entry=entry)
+    monkeypatch.setattr(cycle_advance, "_DAY0_BRIDGE_PENDING", {})
+    monkeypatch.setattr(cycle_advance, "_DAY0_BRIDGE_QUEUES", {"station": station, False: entry})
+    monkeypatch.setattr(cycle_advance, "_DAY0_BRIDGE_CONDITION", threading.Condition())
+    monkeypatch.setattr(cycle_advance, "_DAY0_BRIDGE_CLOSED", False)
+    monkeypatch.setattr(cycle_advance, "_start_day0_bridge_workers_locked", lambda: None)
+    monkeypatch.setattr(reactor_wake, "publish_reactor_wake", lambda **kw: context.wakes.append(kw))
+    monkeypatch.setattr(cycle_advance, "_day0_enqueue_owner_request_check", lambda **kw: SimpleNamespace(
+        state=(cycle_advance._Day0EnqueueOwnerRequestState.ACTIVE if context.owner_active
+               else cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE), reason="PRIVATE_EXACT_OWNER",
+    ))
+
+    class Timer:
+        def __init__(self, delay, callback, args=(), kwargs=None):
+            self.delay, self.callback, self.args, self.kwargs = delay, callback, args, kwargs or {}
+            self.cancelled = False
+            context.timers.append(self)
+
+        def start(self):
+            cycle_advance._DAY0_BRIDGE_CONDITION.notify_all()
+
+        def cancel(self):
+            self.cancelled = True
+
+        def fire(self):
+            # An already dispatched callback may run even after cancel().
+            self.callback(*self.args, **self.kwargs)
+
+    monkeypatch.setattr(cycle_advance.threading, "Timer", Timer)
+
+    def key():
+        return "Hong Kong", "2026-10-03", context.metric
+
+    def marker():
+        identity = cycle_advance._day0_conditioning_identity(
+            source="hko_hourly_accumulator", observation_time="2026-10-03T05:50:00+00:00",
+            observed_extreme_c=28.9 if context.metric == "high" else 25.0, unit="C",
+        )
+        conn.execute("DELETE FROM cycle_advance_enqueues")
+        conn.execute("INSERT INTO cycle_advance_enqueues VALUES(?,?,?,?,?,?,?,?,?,?)", (
+            *key(), "2026-10-02T12:00:00+00:00", "/private/unpublished-old-seed.json",
+            "DAY0", 1, "2026-10-03T05:50:00+00:00", "2026-10-03T05:58:04+00:00", identity,
+        ))
+        conn.commit()
+
+    def materialize(**kw):
+        context.calls.append((kw["city"], kw["target_date"], kw["metric"]))
+        if context.hold:
+            context.started.set()
+            assert context.release.wait(1.0)
+        if context.missing_deps:
+            return {"status": "CYCLE_ADVANCE_NO_MATERIALIZABLE_CYCLE"}
+        decision = cycle_advance._enqueue_decision(
+            conn, city=kw["city"], target_date=kw["target_date"], metric=kw["metric"],
+            target_cycle_iso="2026-10-02T12:00:00+00:00",
+            day0_observed_extreme_source="hko_hourly_accumulator",
+            day0_observed_extreme_observation_time="2026-10-03T06:00:00+00:00",
+            day0_observed_extreme_c=29.3 if kw["metric"] == "high" else 25.0,
+            day0_observed_extreme_unit="C", as_of=datetime(2026, 10, 3, 6, 8, 45, tzinfo=UTC),
+        )
+        return {"status": ("CYCLE_ADVANCE_RETRY_PENDING"
+                           if decision is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
+                           else "DAY0_OBSERVATION_ADVANCE_ENQUEUED")}
+
+    monkeypatch.setattr(cycle_advance, "_materialize_day0_extreme_updated_seed", materialize)
+    original_connect = sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("source retry fixture forbids all non-fixture DB connections")))
+
+    def publish(event_ids, family=None):
+        ingest_main._bridge_committed_day0_events(
+            source="day0_hko_source_clock", event_ids=event_ids, families=(family or key(),),
+        )
+
+    def wait_retry(count):
+        with cycle_advance._DAY0_BRIDGE_CONDITION:
+            assert cycle_advance._DAY0_BRIDGE_CONDITION.wait_for(lambda: (
+                len(context.timers) >= count and not cycle_advance._DAY0_BRIDGE_PENDING[key()].running
+            ), 1.0)
+
+    context.key, context.marker, context.publish, context.wait_retry = key, marker, publish, wait_retry
+    context.pending = lambda: cycle_advance._DAY0_BRIDGE_PENDING[key()]
+    worker = threading.Thread(target=cycle_advance._day0_bridge_worker, args=("station",), daemon=True)
+    worker.start()
+    try:
+        yield context
+    finally:
+        context.release.set()
+        station.put(cycle_advance._DAY0_BRIDGE_STOP)
+        worker.join(1.0)
+        assert not worker.is_alive()
+        conn.close()
+        assert sqlite3.connect is not original_connect  # monkeypatch restores only after cleanup
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_new_committed_source_wake_rechecks_owner_after_reset(committed_source_retry, metric):
+    ctx = committed_source_retry
+    ctx.metric = metric
+    ctx.marker()
+    ctx.publish(("old-raw",))
+    ctx.wait_retry(1)
+    old_timer = ctx.timers[0]
+    ctx.owner_active = False
+    ctx.publish(("new-raw",))
+    assert cycle_advance._wait_for_day0_materialization_bridge_idle(1.0), (
+        "new durable source must recheck the now-INACTIVE owner without firing the old retry timer"
+    )
+    assert ctx.calls == [ctx.key(), ctx.key()]
+    assert ctx.conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
+    assert old_timer.cancelled
+    old_timer.fire()
+    assert ctx.calls == [ctx.key(), ctx.key()]
+    assert not cycle_advance._DAY0_BRIDGE_PENDING
+
+
+@pytest.mark.parametrize("cause", ("generic", "same_event"))
+def test_generic_or_same_event_preserves_existing_retry(committed_source_retry, cause):
+    ctx = committed_source_retry
+    ctx.marker()
+    ctx.publish(("old-raw",))
+    ctx.wait_retry(1)
+    timer = ctx.timers[0]
+    ctx.owner_active = False
+    if cause == "generic":
+        cycle_advance.enqueue_day0_extreme_updated_materialization_seed(
+            city=ctx.key()[0], target_date=ctx.key()[1], metric=ctx.key()[2], station_source_clock=True,
+        )
+    else:
+        ctx.publish(("old-raw",))
+    assert not cycle_advance._wait_for_day0_materialization_bridge_idle(0.02)
+    assert len(ctx.calls) == 1 and not timer.cancelled
+    timer.fire()
+    assert cycle_advance._wait_for_day0_materialization_bridge_idle(1.0)
+    assert len(ctx.calls) == 2
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_old_retry_callback_cannot_erase_new_missing_dependency_retry(committed_source_retry, metric):
+    ctx = committed_source_retry
+    ctx.metric = metric
+    ctx.missing_deps = True
+    ctx.marker()
+    ctx.publish(("old-raw",))
+    ctx.wait_retry(1)
+    old = ctx.timers[0]
+    ctx.publish(("new-raw",))
+    ctx.wait_retry(2)
+    new = ctx.timers[1]
+    assert new.delay == 1.0 and ctx.pending().retry_timer is new
+    old.fire()
+    assert ctx.pending().retry_timer is new and len(ctx.calls) == 2
+    assert ctx.conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 1
+    new.fire()
+    ctx.wait_retry(3)
+    assert len(ctx.calls) == 3 and ctx.timers[2].delay == 2.0
+
+
+def test_old_retry_callback_is_fenced_after_pending_incarnation_changes(committed_source_retry):
+    ctx = committed_source_retry
+    ctx.marker()
+    ctx.publish(("old-raw",))
+    ctx.wait_retry(1)
+    old_pending, old_timer = ctx.pending(), ctx.timers[0]
+    ctx.owner_active = False
+    ctx.publish(("new-raw",))
+    assert cycle_advance._wait_for_day0_materialization_bridge_idle(1.0)
+    ctx.owner_active = True
+    ctx.marker()
+    ctx.publish(("next-raw",))
+    ctx.wait_retry(2)
+    new_pending, new_timer = ctx.pending(), ctx.timers[1]
+    assert new_pending is not old_pending
+    old_timer.fire()
+    assert ctx.pending() is new_pending and new_pending.retry_timer is new_timer
+    assert len(ctx.calls) == 3
+
+
+def test_same_durable_event_does_not_add_running_replay(committed_source_retry):
+    ctx = committed_source_retry
+    ctx.marker()
+    ctx.publish(("old-raw",))
+    ctx.wait_retry(1)
+    ctx.owner_active = False
+    ctx.hold = True
+    ctx.publish(("new-raw",))
+    assert ctx.started.wait(1.0)
+    generation = ctx.pending().generation
+    ctx.publish(("new-raw",))
+    assert ctx.pending().generation == generation
+    ctx.publish(("newest-raw",))
+    assert ctx.pending().generation == generation + 1
+    ctx.release.set()
+    assert cycle_advance._wait_for_day0_materialization_bridge_idle(1.0)
+    assert len(ctx.calls) == 3
+
+
+@pytest.mark.parametrize("family", (("Paris", "2026-10-03", "high"),
+                                   ("Hong Kong", "2026-10-04", "high"),
+                                   ("Hong Kong", "2026-10-03", "low")))
+def test_committed_source_wake_does_not_reset_another_family(committed_source_retry, family):
+    ctx = committed_source_retry
+    ctx.marker()
+    ctx.publish(("old-raw",))
+    ctx.wait_retry(1)
+    pending, timer = ctx.pending(), ctx.timers[0]
+    ctx.publish(("foreign-raw",), family)
+    assert ctx.pending() is pending and not timer.cancelled
+    assert not cycle_advance._wait_for_day0_materialization_bridge_idle(0.02)
+    assert ctx.calls.count(ctx.key()) == 1
+
+
+def test_old_lane_item_cannot_clear_new_station_lane_queued_state(committed_source_retry):
+    ctx = committed_source_retry
+    ctx.marker()
+    with cycle_advance._DAY0_BRIDGE_CONDITION:
+        cycle_advance.enqueue_day0_extreme_updated_materialization_seed(
+            city=ctx.key()[0], target_date=ctx.key()[1], metric=ctx.key()[2], held_position=False,
+        )
+        assert ctx.pending().lane is False and ctx.pending().queued
+        ctx.publish(("new-raw",))
+        assert ctx.pending().lane == "station" and ctx.pending().queued
+        # The old lane dequeues its obsolete item before the station lane can
+        # take the condition lock. It must not clear that lane's queued flag.
+        ctx.entry.put(cycle_advance._DAY0_BRIDGE_STOP)
+        cycle_advance._day0_bridge_worker(False)
+        assert ctx.pending().queued
+    ctx.wait_retry(1)
+    assert ctx.calls == [ctx.key()]
+    ctx.owner_active = False
+    ctx.publish(("latest-raw",))
+    assert cycle_advance._wait_for_day0_materialization_bridge_idle(1.0)
+    assert ctx.calls == [ctx.key(), ctx.key()]
+
+
+def test_new_source_does_not_duplicate_already_queued_retry(committed_source_retry):
+    ctx = committed_source_retry
+    ctx.marker()
+    ctx.publish(("old-raw",))
+    ctx.wait_retry(1)
+    ctx.owner_active = False
+    with cycle_advance._DAY0_BRIDGE_CONDITION:
+        ctx.timers[0].fire()
+        assert ctx.pending().queued
+        ctx.publish(("new-raw",))
+        ctx.publish(("new-raw",))
+        assert ctx.station.unfinished_tasks == 1
+    assert cycle_advance._wait_for_day0_materialization_bridge_idle(1.0)
+    assert len(ctx.calls) == 2
 
 
 def test_held_bridge_lane_is_not_blocked_by_slow_entry_family(monkeypatch) -> None:

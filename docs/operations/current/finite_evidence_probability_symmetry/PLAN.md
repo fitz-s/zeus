@@ -12707,3 +12707,210 @@ proof gaps retain explicit unknown/deferred status. The234PASS/37 baseline
 failures remain reported, not whole-green or presumed harmless. No new software
 fix, live source/DB/venue mutation, forced cycle or appearance-only reload is
 part of this checkpoint. Preserve this pushed unfinished task branch.
+
+### Restored continuation: source-read and event-wake causal proof
+
+Root restored this same managed task tree from3153291e3. Fresh origin/live is
+still0375ec09f; the existing task branch was restored and rebased normally
+(already up to date). No live checkout, process or configuration mutation was
+performed. The preceding checkpoint remains evidence of its checked time,
+not a current source-consumer proof or completion of the original goal.
+
+Three bounded lanes now investigate the remaining causal gaps, read-only
+until a separately approved exact source/test write set exists:
+
+1. Consumer lane: trace actual production source-read/start/read-snapshot
+   through event wake and held consumption. Use a private deterministic
+   injection at the real seam to distinguish a lawful old snapshot from a
+   reproducible source-wake race. Completion time alone is not the source cut;
+   absent telemetry is UNKNOWN, not a demonstrated stale read.
+2. KMA causal lane: bind raw station/target/metric and observed/available/
+   received clocks to source wake, queue owner/claim, materializer snapshot,
+   posterior and held consumer. The prior about21.947s source-to-q trace was
+   HKO, not a KMA timing guarantee. Establish the actual KMA lane independently;
+   distinguish transport, scheduling, preparation and read-cut latency.
+3. Runtime lane: independently bind current loaded SHA, cwd/source paths,
+   config hash, process heartbeat and canonical DB handles to a recent source/
+   event/consumer trace. Loaded identity, retained service and fresh q are
+   separate obligations; no old checkpoint substitutes for current evidence.
+
+Acceptance for a software repair requires a replicable actual-path error,
+before-fails/after-passes evidence and HIGH/LOW plus YES/NO twins where relevant.
+Declare the exact family/request/snapshot SCOPE, normal wake/queue/redecision
+DRAIN and genuine new-input/cut RESET. Do not weaken source/availability clocks,
+price band, probability witness, expected-log action law, budget or ownership.
+The integrator owns only PLAN/registries/branch integration; source writers
+require root's file-level assignment and preserve concurrent work. Only a new
+verified fix may use the normal FF landing/load lane. No venue action, manual
+cycle, source fetch, guard clear, canonical DB copy or new packet is authorized.
+Keep all earlier physical/source-proof and234/37 baseline dispositions open
+until their own proof changes; do not equate an investigative closeout with
+continuous profitable trading or original-goal completion.
+
+### Current causal counterproof and corrected clock vocabulary
+
+The middle pass895997 now has an actual artifact read/start at06:08:26.124869
+and end at06:08:50.261413. New raw became locally available at06:08:43, after
+that pass started; completion after availability is not evidence that the
+original read cut was stale. Private actual-builder before-cut/after-cut twins
+pass (two), alongside three existing cases. The first three harness failures
+were temporary-marker setup errors, corrected privately, not source RED.
+
+The earlier21.947s description is a request/seed-cut interval, not a durable
+posterior-ready interval. Source events received06:08:43.231 passed the bridge
+as QUEUED at06:08:44.794/44.796 and reached the HIGH station worker06:08:45.488;
+the worker runtime was693ms, with no queue-wait evidence on that path. The
+CYCLE_ADVANCE_RETRY_PENDING branch backed off exponentially until ENQUEUED at
+06:09:08.673. Posterior730373's06:09:04.957 clock is its seed/request cut;
+actual FORECAST recorded time is06:09:17, with queue commit/wake around06:09:17.1.
+Thus raw-to-durable-q-ready is about34s, then about51.6s to the last monitor,
+not the previously inferred22s and64s. Recorded/imported timestamps still do
+not establish the exact SQLite transaction commit instant or source-issued
+extremum clock; these remain UNKNOWN.
+
+The remaining named questions are cycle-advance owner/reseed liveness versus
+lawful missing inputs, and reliable new-event wake during an in-flight consumer
+phase. They require an actual replicable counterexample, not completion-time
+inference or a repaired harness being labeled a producer defect. No source
+implementation is authorized by these counterproofs alone.
+
+At the18:31Z read-only refresh, live/loaded remained0375, configurationd7,
+canonical DB handles and guard=None; universe899439 covered242 families with
+held coverage complete. Hong Kong had no lawful executable bid, not a profit
+proof. The traced agent price0.18 was a limit; actual confirmed trade price was
+0.20. Live root's third-party untracked merge-safety artifacts were observed
+and left untouched. The task-only settings link is read-only by workflow,
+owned by the integrator and must be removed before stage/clean/archive.
+This update stays uncommitted/unlanded pending the named counterexamples;
+no probability/action/clock gate, live source, DB or venue is changed.
+
+### Approved new committed-event wake: before-edit bounded repair
+
+Root accepts a private actual source-handler/postcommit-bridge/enqueue-decision
+and CAS counterexample for HIGH/LOW: an ACTIVE owner caused RETRY_PENDING and
+six failures accumulated a30s backoff. When that owner became legitimately
+INACTIVE, a new committed raw event advanced pending generation1 to2, yet the
+same non-running waiting lane queued zero work until its old timer fired.
+The later actual admission was lawful; the demonstrated defect is delayed
+redecision after new durable evidence, not authority to bypass its admission.
+
+The KMA source executor owns only src/data/replacement_cycle_advance_trigger.py,
+src/ingest_main.py and existing
+tests/test_day0_extreme_updated_materialization_bridge.py. The integrator owns
+PLAN and the touched existing source/test registry rows; no other source/test
+ownership is added. Source base remains0375 with the task-only315 checkpoint.
+
+SCOPE is the exact committed event identity and affected waiting worker's
+pending generation/family/metric, not arbitrary duplicate callbacks or all
+reseed debt. DRAIN is immediate wake of that same non-running worker on a NEW
+durable event, through the existing postcommit bridge and actual enqueue/CAS
+predicate. Fence the old timer by generation so it cannot wake or consume the
+new generation incorrectly. RESET is legitimate owner release plus new
+committed evidence followed by normal revalidation/admission; running-worker
+coalescing and duplicate same-fact events preserve existing backoff. Real
+missing/unknown/physical/ENS/source-clock inputs remain typed unavailable with
+the original retry budget and no fabricated zero or READY verdict.
+
+Require before-fails/after-passes actual handler-to-bridge-to-enqueue twins,
+HIGH/LOW identities, timer generation races, duplicate durable events, running
+coalescing, still-active/foreign/unknown owner and invalid/missing source input
+negatives. C independently reviews the timer/new-generation concurrency risk.
+Do not widen budgets/cadence, add workers/schema, weaken source cut/CAS/body
+qualification, price band, probability witness or statistical action law.
+
+After final source/test freeze, run the existing owned bridge suite and the
+required data routes from scoped AGENTS/module_manifest once, plus affected
+trigger/postcommit concurrency checks. Report every prescribed failure by
+actual node/message and baseline comparison if needed; the former234/37 is not
+a substitute or a whole-green claim. Compile touched modules; check touched
+source rationale/test topology coverage, freshness, planning, YAML and diff.
+Only accepted verified code may proceed through fresh-origin task rebase,
+FF push/live FF and one normal loader, with independent natural runtime wake/
+fresh-consumer proof afterward. No manual production drain, cycle, guard
+clear, source fetch or venue action is part of implementation or verification.
+
+### Committed-event wake frozen verification
+
+The source executor froze trigger SHA
+e3688ef96dc8d83109e749e2bfc99b38b21dd6db65043620d8386c815480049b,
+ingest SHA7909b531905bfe74cdd80d1ef9166f84c097ebcc1eab3b7d63d770ac0b760a60
+and bridge-test SHA44e0b69480a5dd4f8db6c1d4ea0f88b15bd72a6dd8fdb79d41bc78dd42a95a59.
+Twenty-two focused cases pass; desired HIGH/LOW actual wake antibodies both
+fail with original source overlaid in memory. Operational causes come only
+from inserted durable event IDs handed off postcommit; no source-clock or
+admission authority is inferred from them. Pending incarnation and exact timer
+identity fence obsolete callbacks; duplicates retain backoff. Independent C
+timer/ABA/source-gate review remains an acceptance dependency at this record.
+
+The integrator ran the current module_manifest data15 and whole owned bridge
+exactly once:722PASS/9FAIL. Only those nine failing nodes were rerun with
+original0375 affected trigger/ingest source in memory and reload-fenced while
+retaining current test context: the same nine fail. Eight failure texts and
+messages are byte-exact; the ninth differs only in the private pytest session,
+failed-seed filename timestamp and PID, with the same missing anchor-local body
+proof. The first baseline harness was rejected before tests because its state
+root was outside the configured private tempfile root; correcting that harness
+does not count as behavioral RED/GREEN. XML/logs and baseline9.py are under
+/tmp/zeus-committed-event-wake-final-20261003.MVkQEV/.
+
+Residual failures are named rather than presumed harmless: registry's removed
+quota_tracker API; TIGGE primary versus experimental expectation; V2 account
+deadline/page-limit two calls versus one (current safety meaning not separately
+closed); V2 placeholder bound-envelope authority rejecting before an expected
+subminimum-price error; one bridge fixture's ended target-local day; and four
+bridge fixtures lacking anchor_local_proof:seed_body_path. No unrelated fixture,
+source, deadline or authority was weakened to make this batch whole-green.
+
+Touched three Python blobs compile; YAML2, test freshness, planning and diff
+checks pass. Existing touched source/test rows were updated without new entities.
+Full source checker reports459 issues; the trigger's unknown hazard badge and
+stale downstream list remain pre-existing, with hazard/downstream fields and
+all import ASTs unchanged versus HEAD. This is changed-surface disposition,
+not a global registry clean pass.
+
+Normal load must prove actual source-owner renewal, not only main's new HEAD.
+ingest_main captures _PROCESS_GIT_HEAD at boot and uses it in its heartbeat;
+forecast-live does likewise. Existing deploy_live restart live-trading includes
+data-ingest and forecast-live prerequisites and bootout/bootstrap on mismatching
+boot SHA. After accepted landing, independently record new owning PIDs/start/
+cwd and boot-SHA heartbeats plus station-bridge/resident ownership/DB handles.
+No load is performed at this verification stage. Natural new durable event
+service, source-to-q-to-consumer closure and the original profit goal remain
+separate postload obligations; no forced observation/claim/cancel is authorized.
+
+Final named C review APPROVES the frozen three blobs: thirteen independent
+cases pass, with additional actual HIGH/LOW same-worker timer interleaving
+through the postcommit handler, worker and CAS. Original trigger/bridge source
+fails the hostile new-durable-event wake antibody by actual waiting behavior,
+not TypeError or harness setup. Root accepts only this actor-liveness repair
+and zero introduced delta, and authorizes the normal FF/load delivery lane.
+
+The nine required residuals have explicit deferred dispositions, not waivers:
+
+- test_ensemble_fetch_result_carries_registry_provenance: removed quota_tracker
+  API baseline-fixture candidate; defer its current-contract migration.
+- test_tigge_registered_in_source_registry: experimental expectation versus
+  current primary policy baseline-fixture candidate; defer policy audit.
+- test_account_truth_deadline_and_page_limit_fail_closed_with_bounded_calls:
+  two page calls versus one remains a named unresolved current safety boundary;
+  baseline equality is not harmlessness, and no deadline law is relaxed.
+- test_final_sdk_boundary_rejects_subminimum_fak_buy_below_one_dollar:
+  placeholder authority rejects earlier than its expected final price error;
+  defer exact valid-envelope fixture/SDK boundary audit, retain both gates.
+- test_single_family_zero_observation_fails_before_null_identity_record:
+  ended local target causes lawful earlier rejection; defer fixture-date audit.
+- test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient:
+  fixture lacks qualified anchor-local body proof; defer fixture qualification.
+- test_queue_revalidates_day0_owner_immediately_before_request_publish:
+  fixture lacks qualified anchor-local body proof; defer fixture qualification.
+- test_queue_scans_past_indeterminate_day0_prefix_without_starving_current_seed:
+  fixture lacks qualified anchor-local body proof; defer fixture qualification.
+- test_queue_rotates_bounded_indeterminate_inspections_across_reload:
+  fixture lacks qualified anchor-local body proof; defer fixture qualification;
+  only generated private failed-file path differs in the baseline comparison.
+
+No residual is silently deleted, marked safe, or converted into source authority.
+Private config linkage is removed before commit; production configuration stays
+d7. Delivery must preserve the three tested source/test hashes and prove actual
+ingest/component boot identity after normal reload. The original probability
+lead-to-profit goal remains incomplete regardless of loader or liveness success.
