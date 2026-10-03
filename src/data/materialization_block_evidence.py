@@ -36,10 +36,13 @@ Covered reasons (``SUPPORTED``) and their exact, required items:
   empty, so the fusion's current shape cannot be built.
 - ZERO_EXTRAS: [CLOCK, ZERO_EXTRAS]. The completed physical/current serving
   and capture selector admitted no non-anchor instrument, at the exact cut.
+- DAY0_REQUIRED: [DAY0_REQUIRED]. The original request's target day has started,
+  but its immutable input has neither an extreme nor a typed zero-observation
+  declaration. Exact-request only; no prospective family fence or DB absence.
 """
 
 # Created: 2026-10-02
-# Last reused/audited: 2026-10-02
+# Last reused/audited: 2026-10-03
 # Authority basis: merge-safety rounds 7-8 (typed evidence, prospective re-decision).
 
 from __future__ import annotations
@@ -56,14 +59,18 @@ CERT_REGRESSION = "READINESS_CERT_CYCLE_REGRESSION"
 CERT_SUPERSEDED = "READINESS_CERT_SUPERSEDED"
 NO_COHERENT_COHORT = "NO_COHERENT_CURRENT_PROVIDER_COHORT"
 ZERO_EXTRAS = "ZERO_MULTI_MODEL_EXTRAS"
+DAY0_REQUIRED = "DAY0_OBSERVED_EXTREME_REQUIRED"
+DAY0_MISSING_INPUT_REVISION = "original_day0_missing_observation_v1"
 EXTRAS_SELECTION_REVISION = "current_capture_extra_selection_v1"
-# reason -> the item kinds it must carry, in order (CLOCK first, each exactly once).
+# reason -> required item kinds, each exactly once. DB-dependent kinds start
+# with CLOCK; the original missing-input predicate depends only on its request.
 SUPPORTED: dict[str, tuple[str, ...]] = {
     STALE_CYCLE: (CLOCK,),
     CERT_REGRESSION: (CLOCK, CERT_REGRESSION),
     CERT_SUPERSEDED: (CLOCK, CERT_SUPERSEDED),
     NO_COHERENT_COHORT: (CLOCK, NO_COHERENT_COHORT),
     ZERO_EXTRAS: (CLOCK, ZERO_EXTRAS),
+    DAY0_REQUIRED: (DAY0_REQUIRED,),
 }
 # clock role -> (request field naming its run, request field of its fallback clock)
 _ROLES = {
@@ -197,8 +204,58 @@ def blocked_evidence(conn: sqlite3.Connection, request, reason: str, items=()) -
             "target_date": target_date.isoformat() if hasattr(target_date, "isoformat") else target_date,
             "temperature_metric": getattr(request, "temperature_metric", None),
         },
-        "items": [clock_item(conn, request), *items],
+        "items": (list(items) if reason == DAY0_REQUIRED else [clock_item(conn, request), *items]),
     }
+
+
+def day0_missing_input_item(request) -> dict[str, object] | None:
+    """The original prewrite predicate on missing request fields, never physical absence.
+
+    Only literal missing inputs are covered. Invalid values/declarations remain
+    unbound, as do dynamic requests altered by possession/frontier materialization.
+    """
+    from src.data.replacement_forecast_materializer import (
+        _day0_observed_extreme_c, _target_local_day_has_started,
+    )
+
+    if (
+        request.day0_observed_extreme_c is not None
+        or request.day0_observation_state not in (None, "")
+        or _day0_observed_extreme_c(request) is not None
+        or not _target_local_day_has_started(request)
+    ):
+        return None
+    return {
+        "kind": DAY0_REQUIRED,
+        "predicate_revision": DAY0_MISSING_INPUT_REVISION,
+        "city_timezone": request.city_timezone,
+        "computed_at": _utc(request.computed_at, "computed_at").isoformat(),
+        "day0_observed_extreme_c": None,
+        "day0_observation_state": None,
+    }
+
+
+def _day0_missing_input_holds(evidence, exact_request) -> bool:
+    from types import SimpleNamespace
+
+    if not isinstance(exact_request, Mapping):
+        return False
+    scope = evidence.get("scope")
+    if (
+        not isinstance(scope, Mapping)
+        or scope.get("temperature_metric") not in ("high", "low")
+        or any(not scope.get(field) or str(scope[field]) != str(exact_request.get(field) or "")
+               for field in _SCOPE_FIELDS)
+    ):
+        return False
+    request = SimpleNamespace(**{
+        field: exact_request.get(field) for field in (
+            "city_timezone", "computed_at", "target_date",
+            "day0_observed_extreme_c", "day0_observation_state",
+        )
+    })
+    current = day0_missing_input_item(request)
+    return current is not None and current == evidence["items"][0]
 
 
 def zero_extras_item(
@@ -297,8 +354,8 @@ def _current_zero_extras_item(conn, scope, *, source_cycle_time_iso, decision_ti
 
 def _well_formed(evidence: object, prospective: Mapping[str, object] | None) -> bool:
     """The discriminated schema: a supported reason, exactly its required items,
-    a clock naming exactly the two roles; with a prospective request, a scope and
-    clock roles equal to that request's."""
+    DB-dependent kinds have a clock naming exactly the two roles; a prospective
+    request must match their scope/roles. Original missing-input proof is exact only."""
     if not isinstance(evidence, Mapping) or evidence.get("revision") != EVIDENCE_REVISION:
         return False
     reason = evidence.get("reason")
@@ -310,6 +367,12 @@ def _well_formed(evidence: object, prospective: Mapping[str, object] | None) -> 
         or tuple(item.get("kind") if isinstance(item, Mapping) else None for item in items) != required
     ):
         return False
+    if reason == DAY0_REQUIRED:
+        # SCOPE: only the exact failed original request and its consumed SHA.
+        # DRAIN: normal terminal queue move releases its owner. RESET: every
+        # prospective request is independently admitted, including new real
+        # observations and existing typed zero input; this proof never fences it.
+        return prospective is None
     runs = items[0].get("source_runs")
     if (
         not isinstance(runs, (list, tuple))
@@ -475,6 +538,11 @@ def evidence_holds(
     """See the module doc. Malformed, unsupported, unbound or unreadable never holds."""
     if not _well_formed(evidence, prospective):
         return False
+    if evidence["reason"] == DAY0_REQUIRED:
+        try:
+            return _day0_missing_input_holds(evidence, exact_request)
+        except (KeyError, TypeError, ValueError, AttributeError, RuntimeError):
+            return False
     owns = not conn.in_transaction
     try:
         if owns:

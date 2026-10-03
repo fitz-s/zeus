@@ -1,5 +1,8 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-10-02
+# Last reused or audited: 2026-10-03
+# Lifecycle: created=2026-06-11; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Purpose: Preserve serving substitution and exact typed queue drain/reset.
+# Reuse: Run for current serving, materialization queue, or typed block evidence.
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -577,6 +580,150 @@ def _consumed_witness(argv) -> dict:
     consumed = _ConsumedInputs(_StageReceipt(request, None).attempt_id)  # the parent's claim id
     consumed.read(request, role="request")
     return consumed.witness()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("reset", ("observed", "typed_zero"))
+def test_queue_original_missing_day0_releases_owner_and_accepts_new_inputs(tmp_path, monkeypatch, metric, reset):
+    from dataclasses import replace
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data import replacement_cycle_advance_trigger as trigger
+    from src.contracts.replacement_pipeline_files import DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS as zero
+    from tests.data.test_day0_tau_frontier_witness import _missing_day0_request, _missing_day0_payload
+
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    request_dir.mkdir(); seed_dir.mkdir()
+    request = _missing_day0_request(metric)
+    payload = {
+        **_missing_day0_payload(request), "source_cycle_time": request.source_cycle_time.isoformat(),
+        "baseline_source_run_id": request.baseline_source_run_id,
+        "baseline_source_available_at": request.baseline_source_available_at.isoformat(),
+        "openmeteo_source_run_id": request.openmeteo_source_run_id,
+        "openmeteo_source_available_at": request.openmeteo_source_available_at.isoformat(),
+        "bins": [{"bin_id": "20C"}],
+    }
+    path = request_dir / f"Shanghai.2026-06-07.{metric}.enqueue-private.json"
+    seed = seed_dir / path.name
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute("""CREATE TABLE cycle_advance_enqueues (
+        enqueued_at TEXT, city TEXT, target_date TEXT, metric TEXT,
+        consumed_cycle_time TEXT, target_cycle_time TEXT, held_position INTEGER,
+        seed_file TEXT, reason TEXT, day0_observed_extreme_observation_time TEXT,
+        day0_conditioning_identity_json TEXT)""")
+    assert trigger._record_enqueue(conn, city=request.city, target_date=str(request.target_date), metric=metric,
+        consumed_cycle_iso=payload["source_cycle_time"], target_cycle_iso=payload["source_cycle_time"],
+        held_position=False, seed_file=str(seed))
+    conn.commit(); conn.close()
+    # Isolate block classification from provider math; keep real request bytes,
+    # consumed witnesses, claim fencing, queue moves and producer owner checks.
+    def fingerprint(*, payload, **_kwargs):
+        import hashlib
+        return hashlib.sha256(json.dumps({k: v for k, v in payload.items()
+                                          if k not in queue._ATTEMPT_CLOCK_FIELDS}, sort_keys=True).encode()).hexdigest()
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", fingerprint)
+    monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
+    seen = []
+    def runner(argv):
+        current = json.loads(Path(argv[argv.index("--input-json") + 1]).read_text())
+        seen.append(current)
+        actual = replace(request, day0_observed_extreme_c=current.get("day0_observed_extreme_c"),
+                         day0_observation_state=current.get("day0_observation_state"))
+        reasons = materializer._prewrite_block_reasons(actual)
+        reason = "REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED"
+        if reason in reasons:
+            result = materializer._prewrite_blocked(sqlite3.connect(":memory:"), actual, reasons, original_request=True)
+            body = {"status": result.status, "reason_codes": result.reason_codes,
+                    "blocked_evidence": result.evidence}
+        else:
+            # Prove new inputs reach the next normal attempt, without claiming
+            # a computed posterior or live probability authority in this fixture.
+            body = {"status": "ERROR", "failure_category": "ENVIRONMENT_RETRY",
+                    "error_type": "TestAfterInputAdmission", "reason_codes": ["TEST_AFTER_INPUT_ADMISSION"]}
+        return subprocess.CompletedProcess(list(argv), 1,
+            json.dumps({**body, "consumed_inputs": _consumed_witness(argv)}) + "\n", "")
+    def process():
+        return queue.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir, processed_dir=tmp_path / "processed", failed_dir=tmp_path / "failed",
+            seed_dir=seed_dir, seed_limit=0, forecast_db=db, discover=False, limit=1, runner=runner)
+
+    path.write_text(json.dumps(payload))
+    assert queue.consumed_seed_request_owned(seed) is True
+    report = process()
+    assert report.processed_count == 1 and report.failed_count == 0
+    assert len(seen) == 1 and not path.exists()
+    assert queue.consumed_seed_request_owned(seed) is False
+    receipt = json.loads(next((tmp_path / "blocked_latest").glob("*.json")).read_text())
+    assert receipt["status"] == "BLOCKED_MISSING_PROBABILITY_AUTHORITY"
+    assert process().status == "NO_REQUESTS" and len(seen) == 1
+    conn = sqlite3.connect(db)
+    assert queue.failed_seed_identity_fenced(seed, conn=conn, decision_at=request.computed_at) is False
+    conn.close()
+    new = ({"day0_observed_extreme_c": 20.0, "day0_observed_extreme_source": "wu_icao_history",
+            "day0_observed_extreme_observation_time": request.computed_at.isoformat(),
+            "day0_observed_extreme_unit": "C"} if reset == "observed" else {"day0_observation_state": zero})
+    conn = sqlite3.connect(db)
+    decision = trigger._enqueue_decision(conn, city=request.city, target_date=str(request.target_date), metric=metric,
+        target_cycle_iso=payload["source_cycle_time"], as_of=request.computed_at,
+        minimum_posterior_computed_at=request.computed_at,
+        day0_observed_extreme_observation_time=new.get("day0_observed_extreme_observation_time"),
+        day0_observed_extreme_source=new.get("day0_observed_extreme_source"),
+        day0_observed_extreme_c=new.get("day0_observed_extreme_c"),
+        day0_observed_extreme_unit=new.get("day0_observed_extreme_unit"))
+    assert decision is trigger._CycleAdvanceEnqueueDecision.ADMIT
+    assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
+    conn.close()
+    path.write_text(json.dumps({**payload, **new}))
+    process()
+    assert len(seen) == 2 and seen[-1] == {**payload, **new}
+    assert path.exists() and queue.consumed_seed_request_owned(seed) is True
+
+
+@pytest.mark.parametrize("fault", ("proof", "items", "bytes", "read", "fingerprint", "dynamic"))
+def test_queue_missing_day0_unbound_proof_keeps_request_owner(tmp_path, monkeypatch, fault):
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from tests.data.test_day0_tau_frontier_witness import _missing_day0_request, _missing_day0_payload
+
+    request = _missing_day0_request()
+    payload = {**_missing_day0_payload(request), "source_cycle_time": request.source_cycle_time.isoformat(),
+               "baseline_source_run_id": request.baseline_source_run_id,
+               "openmeteo_source_run_id": request.openmeteo_source_run_id,
+               "bins": [{"bin_id": "20C"}]}
+    requests = tmp_path / "requests"; requests.mkdir()
+    seeds = tmp_path / "seeds"; seeds.mkdir()
+    path = requests / "Shanghai.high.json"; path.write_text(json.dumps(payload))
+    db = tmp_path / "forecasts.db"; sqlite3.connect(db).close()
+    revision = ["before"]
+    monkeypatch.setattr(queue, "_blocked_attempt_fingerprint", lambda **_k: revision[0])
+    def runner(argv):
+        claimed = Path(argv[argv.index("--input-json") + 1])
+        witness = _consumed_witness(argv)
+        result = materializer._prewrite_blocked(sqlite3.connect(":memory:"), request,
+            ("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED",), original_request=fault != "dynamic")
+        proof = result.evidence
+        if fault == "proof": proof["items"][0]["predicate_revision"] = "foreign"
+        elif fault == "items": proof["items"] = []
+        elif fault == "bytes": claimed.write_text(json.dumps({**payload, "computed_at": "2026-06-06T19:00:00+00:00"}))
+        elif fault == "read":
+            original_read = queue._SEED_INPUT_READER.read
+            def unreadable(path):
+                if Path(path) == claimed: raise PermissionError("private unreadable request")
+                return original_read(path)
+            monkeypatch.setattr(queue._SEED_INPUT_READER, "read", unreadable)
+        elif fault == "fingerprint": revision[0] = "after"
+        return subprocess.CompletedProcess(list(argv), 1, json.dumps({
+            "status": "BLOCKED", "reason_codes": result.reason_codes,
+            "blocked_evidence": proof, "consumed_inputs": witness}) + "\n", "")
+    report = queue.process_replacement_forecast_live_materialization_queue(
+        request_dir=requests, processed_dir=tmp_path / "processed", failed_dir=tmp_path / "failed",
+        forecast_db=db, seed_dir=seeds, seed_limit=0, limit=1, discover=False, runner=runner)
+    assert path.exists() and report.processed_count == 0 and report.failed_count == 0
+    assert queue.consumed_seed_request_owned(seeds / path.name) is True
+    assert queue._UNBOUND_VERDICT_REASON in report.reason_codes
+    assert not (tmp_path / "blocked_latest").exists()
 
 
 def test_queue_preserves_unchanged_blocked_seed_as_terminal_receipt(

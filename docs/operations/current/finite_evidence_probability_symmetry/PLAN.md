@@ -11561,3 +11561,131 @@ origin/live, rebase/reprove affected behavior only if the base moved, FF push an
 live FF; no guard clearing, venue operation or manual queue claim. Record actual
 loader loaded identity and return separately; pending external ground evidence,
 98 DRAIN and the broader continuous-profit goal are not acceptance substitutes.
+
+### 2026-10-03 Immutable Day0 missing-observation input verdict
+
+After3be13f641's normal load, a separate bounded classifier defect is verified:
+the actual Tel Aviv LOW frozen request lacks every Day0 observation field and
+at02:57:16 legitimately returns BLOCKED/OBSERVED_EXTREME_REQUIRED before the
+child timeout (29 seconds early). materialization_block_evidence.SUPPORTED lacks
+that reason, the producer returns no typed evidence, and queue_bound_verdict
+cannot bind it, so the unchanged input is retained for another attempt. This
+one-attempt missing-input classifier gap is not evidence for65/132 families or
+an overall global-starvation/profit cause. Keep the underlying required-observed
+extreme rejection exactly unchanged; stderr is not an INPUT_VERDICT proof.
+
+Source worker ownership is bounded to materialization_block_evidence.py and
+replacement_forecast_materializer.py's real prewrite evidence emitter, with
+existing tests/data/test_day0_tau_frontier_witness.py and the minimum existing
+queue antibody test selected by the leaf's final design. Integration owns this
+PLAN and necessary existing registry updates. No new file/schema/table, queue
+priority, budgets, clock rewrite, source permission or probability law. Data
+scoped law/current-evidence authority is already read; actual gate/source reads
+confirm the two distinct prewrite call sites. Exact test/ownership details and
+independent review must be agreed before expanding beyond this bounded seam.
+
+Only the first _validated_replacement_forecast_request prewrite call, before
+_request_with_materialization_clock and _request_with_day0_physical_frontier,
+may emit the new immutable-input item: original request.computed_at already
+places its target in local Day0, and its actual immutable observation fields
+are missing, so database arrival cannot repair these same bytes. The later
+prewrite check sees dynamic effective-clock/frontier results; do not infer an
+immutable missing-field proof there or fence its potentially repairable input.
+Reuse the actual completed predicate and its exact original inputs/revision,
+not a reason string alone or a coarse empty-source/count approximation.
+
+SCOPE: frozen request SHA plus city/date/metric and the original Day0 decision
+identity; proof item names exactly which immutable fields/predicate blocked it.
+DRAIN: the existing typed bound verdict stops duplicate attempts on that exact
+unchanged missing input, while normal producer/current-observation delivery
+creates a new valid input through the existing queue. RESET: real lawful
+observation fields or an already-supported explicitly typed zero-observation
+state in new request bytes can reopen processing; UNKNOWN is not zero and may
+not become READY or physical/probability authority. Missing/corrupt/unreadable
+evidence, schema drift, identity/fingerprint/configuration/revision mismatch
+bind nothing and retain/reopen by the existing safe path. Old fixed immutable
+bytes remain negative even after a source event; the prospective new bytes may
+not be permanently held to the old proof or old-source identity.
+
+Acceptance: actual HIGH/LOW first-gate RED/GREEN shows typed negative binding
+and one child attempt for unchanged input; real new observation/legitimate zero
+inputs RESET to normal attempts without claiming READY. Cover original computed
+day/calendar/metric/scope identity, tampered proof/hash/missing item, unsupported
+or dynamic-second-gate reason, actual DB/source arrival versus unchanged bytes,
+and unknown-state nonpromotion. Preserve all existing supported negative kinds,
+legal rejection behavior and clock/freshness gates. Private DB/tests only, no
+manual queue/reducer/ingest/venue operation. Parent accepts exact leaf design and
+focused/required evidence before any next commit/load;3be normal loader exit0
+and loaded identity do not complete this new slice or the original global goal.
+
+Final leaf design narrows the proof further before source edits. Exactly four
+owned paths: materialization_block_evidence.py, replacement_forecast_materializer.py,
+existing tests/data/test_day0_tau_frontier_witness.py and existing
+tests/data/test_previous_runs_substitution.py. Its new kind is EXACT-request-only:
+the pure predicate uses original computed_at/timezone/target and the original
+missing-observation/zero-state fields, with consumed-input request SHA binding
+kept independent. No prospective family fence is authorized. In particular a
+new legitimate typed-zero request may lack obs_timestamp and must not be stuck
+behind an old missing-observation family's proof; it goes through its own normal
+gate. The first call explicitly opts into emission; the later clock/frontier
+call does not emit this immutable kind. This design supersedes any broad reading
+of the earlier prospective-proof paragraphs for this new reason only.
+
+The queue antibody must traverse terminal exact-old-request classification and
+owner release, then normal new lawful observation or already-legitimate typed-zero
+bytes reopening, not just a helper Boolean. Other supported evidence kinds retain
+their existing prospective semantics. Independent leaf tests/review and scoped
+registry checks precede the parent's next normal FF/load; do not repeat the
+already completed3be loader or change those four owned paths from integration.
+
+Leaf implementation evidence:31 pure producer/verifier cases plus10 actual
+queue/trigger cases pass, including four HIGH/LOW observation/typed-zero twins
+that traverse one old child -> blocked_latest -> owner released -> actual normal
+trigger ADMIT -> delete only the old marker -> new request enters normal attempt.
+This is RESET evidence, not an assertion that the new attempt reached READY.
+Six tamper/read/fingerprint/dynamic controls retain.13 relevant existing
+materializer/cycle-policy cases pass. Original-emitter in-process restoration
+turns six positive bound-proof cases RED with UNCLASSIFIED logs. The real Tel
+Aviv frozen request SHA591bd...59ab3 gives exact_holds true and prospective false,
+without rewriting its fields or reading current DB absence as the proof.
+
+Independent bounded review reports zero critical/important finding and14 nodes
+passing. Source/test compile, whitespace, YAML parse, scoped freshness/planning
+and source-rationale delta pass. The exact existing
+test_blocked_source_clock_request_retries_only_on_new_provider_family failure
+(spawned2 versus expected1) reproduces with original3be evidence functions in
+memory, so it is not a new classifier source regression. It is nevertheless
+not waived: the owning leaf is correcting its fake STALE/CLOCK fixture that
+does not actually satisfy the stale predicate into a real clock-boundary fixture,
+preserving the only-new-provider-family assertion and original CLOCK source law.
+Any production mismatch would stop that fixture-only correction. Wait for this
+node then one final targeted/required batch before parent acceptance/landing;
+do not repair unrelated test or probability132 findings for appearance.
+
+Final obsolete-node disposition stops that fixture investigation without a
+source change: all three attempted old-fixture edits are restored, and the old
+function segment is byte-identical to3be (SHA
+cbb609c385a1cf3b5753ef0046e6315552e7758a483463035721a44f78d80455).
+Besides its fake STALE declaration not satisfying the real predicate, the
+fixture changes named request bytes that correctly require RESET; its added
+UKMO row is outside configured icon_eu/met_nordic, whose qualified frontiers
+remain absent, so the m5 frontier does not change. It cannot demonstrate its
+claimed only-new-provider-family positive. Defer this named obsolete fixture,
+do not invent qualified physical evidence, weaken CLOCK or reverse the expected
+count for green appearance. The original3be same spawned2/expected1 failure
+is retained separately, not a new missing-input regression or expanded clean pass.
+After restoration the leaf's43 focused cases pass again; only the new accepted
+source/tests/headers remain changed. Independent14 and related13 pass as above.
+
+Final integrator checks after restoration:43PASS/155deselected in2.38s for the
+bounded classifier/queue/tau related selection, and291PASS/0FAIL/0SKIP for the
+single required ten-file run. XML/log anchors are
+/tmp/zeus-immutable-day0-final-focused-20261003 and
+/tmp/zeus-immutable-day0-final-required10-20261003 (each .xml/.log). They do not
+claim the entire previous-runs file clean or conceal the named deferred fixture.
+Compile, whitespace, both touched registry YAML parses and scoped
+freshness/planning-lock pass; source-rationale delta has no undeclared source.
+Remove the read-only test-settings symlink, commit only the four owned source/test
+paths and exact PLAN/registry updates, then the parent's approved normal FF/load.
+One successful new classifier attempt/release does not establish whole132/98
+drain, provider permission, source ground or continuous realized-profit success.

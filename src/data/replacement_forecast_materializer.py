@@ -9185,18 +9185,25 @@ def _prewrite_blocked(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
     reasons: tuple[str, ...],
+    *,
+    original_request: bool = False,
 ) -> ReplacementForecastMaterializeResult:
     """A prewrite BLOCKED. A stale anchor cycle alone suffices for BLOCKED and
     judged only the request plus the materialization clock (the two source_run
     possession rows; a Day0 frontier rewrite never moves computed_at), so its
-    evidence is those rows. Without a stale cycle the verdict binds nothing."""
+    evidence is those rows. The first guard can also prove immutable missing
+    Day0 input; the later possession/frontier guard cannot make that claim."""
     from src.data.materialization_block_evidence import (  # noqa: PLC0415
-        STALE_CYCLE, blocked_evidence,
+        DAY0_REQUIRED, STALE_CYCLE, blocked_evidence, day0_missing_input_item,
     )
 
     evidence = None
     if "REPLACEMENT_MATERIALIZATION_" + STALE_CYCLE in reasons:
         evidence = blocked_evidence(conn, request, STALE_CYCLE)
+    elif original_request and "REPLACEMENT_MATERIALIZATION_" + DAY0_REQUIRED in reasons:
+        item = day0_missing_input_item(request)
+        if item is not None:
+            evidence = blocked_evidence(conn, request, DAY0_REQUIRED, [item])
     return ReplacementForecastMaterializeResult(
         status="BLOCKED",
         reason_codes=reasons,
@@ -9216,7 +9223,7 @@ def _validated_replacement_forecast_request(
     metric = _metric(request.temperature_metric)
     prewrite_reasons = _prewrite_block_reasons(request)
     if prewrite_reasons:
-        return _prewrite_blocked(conn, request, prewrite_reasons)
+        return _prewrite_blocked(conn, request, prewrite_reasons, original_request=True)
     artifact_reasons = _artifact_identity_block_reasons(conn, request)
     if artifact_reasons:
         return ReplacementForecastMaterializeResult(

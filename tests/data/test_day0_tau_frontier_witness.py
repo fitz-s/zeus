@@ -1,5 +1,8 @@
 # Created: 2026-10-02
-# Last reused/audited: 2026-10-02
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-10-02; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Purpose: Preserve Day0 tau parity and exact original missing-input verdicts.
+# Reuse: Run for materialization block-evidence or prewrite emission changes.
 # Authority basis: 7e9dec5ea (Day0 remaining window proven at the last observation tau).
 #   Live 2026-10-02 Chongqing 10-02 high after its deploy: prepare served ecmwf06/ukmo06/icon12
 #   under tau, the final writer's frontier witness re-read without tau, saw a different
@@ -124,3 +127,112 @@ def test_no_cohort_evidence_without_tau_is_unchanged():
         "kind": evidence.NO_COHERENT_COHORT, "window_hours": 6.0, "decision_time_iso": DECISION}
     assert evidence.no_cohort_item(window_hours=6.0, decision_time_iso=DECISION,
                                    day0_remaining_from_iso=TAU)["day0_remaining_from_iso"] == TAU
+
+
+def _missing_day0_request(metric="high"):
+    from dataclasses import replace
+    from tests.test_replacement_forecast_materializer import _request, _dt, _current_baseline_data_version
+
+    return replace(_request(computed_at=_dt(18), expires_at=_dt(2).replace(day=7)),
+                   temperature_metric=metric, baseline_data_version=_current_baseline_data_version(metric))
+
+
+def _missing_day0_payload(request):
+    return {
+        "city": request.city, "city_timezone": request.city_timezone,
+        "target_date": str(request.target_date), "temperature_metric": request.temperature_metric,
+        "computed_at": request.computed_at.isoformat(),
+        "day0_observed_extreme_c": request.day0_observed_extreme_c,
+        "day0_observation_state": request.day0_observation_state,
+    }
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_original_missing_day0_emits_exact_immutable_proof(metric, monkeypatch):
+    from src.data import replacement_forecast_materializer as materializer
+    from tests.test_replacement_forecast_materializer import _conn
+
+    request = _missing_day0_request(metric)
+    conn = _conn()
+    monkeypatch.setattr(materializer, "_request_with_materialization_clock",
+                        lambda *_a: pytest.fail("original refusal precedes clock lift"))
+    monkeypatch.setattr(materializer, "_request_with_day0_physical_frontier",
+                        lambda *_a, **_k: pytest.fail("original refusal precedes dynamic observation lookup"))
+    result = materializer._validated_replacement_forecast_request(conn, request)
+    assert result.reason_codes == ("REPLACEMENT_MATERIALIZATION_" + evidence.DAY0_REQUIRED,)
+    assert result.evidence is not None
+    assert evidence.evidence_holds(conn, result.evidence, exact_request=_missing_day0_payload(request))
+    # A later real source observation does not repair this immutable request.
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    ensure_table(conn)
+    append_print(conn, city=request.city, station_id="ZSPD", source_channel="aviationweather_metar",
+                 publish_ts_utc=request.computed_at.isoformat(), value_native=20.0, unit="C",
+                 fetched_at_utc=request.computed_at.isoformat(), raw_report="METAR ZSPD 062000Z 20/18")
+    assert evidence.evidence_holds(conn, result.evidence, exact_request=_missing_day0_payload(request))
+    assert materializer._validated_replacement_forecast_request(conn, request).evidence == result.evidence
+    assert not evidence.evidence_holds(conn, result.evidence, _missing_day0_payload(request))
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("twin", ("observed", "typed_zero", "unknown", "future_day", "after_day_end"))
+def test_missing_day0_proof_preserves_gate_twins(metric, twin):
+    from dataclasses import replace
+    from datetime import timedelta
+    from src.data import replacement_forecast_materializer as materializer
+    from src.contracts.replacement_pipeline_files import DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS as zero
+    from tests.test_replacement_forecast_materializer import _dt
+
+    request = _missing_day0_request(metric)
+    changes = {
+        "observed": {"day0_observed_extreme_c": 20.0},
+        "typed_zero": {"day0_observation_state": zero},
+        "unknown": {"day0_observation_state": "UNKNOWN"},
+        "future_day": {"computed_at": _dt(4)},
+        "after_day_end": {"computed_at": request.computed_at + timedelta(days=2)},
+    }
+    request = replace(request, **changes[twin])
+    blocks = "REPLACEMENT_MATERIALIZATION_" + evidence.DAY0_REQUIRED in materializer._prewrite_block_reasons(request)
+    assert blocks == (twin in ("unknown", "after_day_end"))
+    assert (evidence.day0_missing_input_item(request) is not None) == (twin == "after_day_end")
+
+
+@pytest.mark.parametrize("fault", ("revision", "predicate", "timezone", "computed_at", "metric", "target_date", "city", "items", "naive_clock", "unknown", "observed", "typed_zero", "missing_request"))
+def test_missing_day0_proof_rejects_tamper_and_new_inputs(fault):
+    from copy import deepcopy
+    from src.data import replacement_forecast_materializer as materializer
+    from src.contracts.replacement_pipeline_files import DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS as zero
+
+    request = _missing_day0_request()
+    conn = sqlite3.connect(":memory:")
+    proof = deepcopy(materializer._prewrite_blocked(
+        conn, request, ("REPLACEMENT_MATERIALIZATION_" + evidence.DAY0_REQUIRED,), original_request=True).evidence)
+    payload = _missing_day0_payload(request)
+    if fault == "revision": proof["revision"] = "foreign"
+    elif fault == "predicate": proof["items"][0]["predicate_revision"] = "foreign"
+    elif fault == "timezone": proof["items"][0]["city_timezone"] = "UTC"
+    elif fault == "computed_at": proof["items"][0]["computed_at"] = "2026-06-06T19:00:00+00:00"
+    elif fault in ("metric", "target_date", "city"):
+        proof["scope"][{"metric": "temperature_metric"}.get(fault, fault)] = "foreign"
+    elif fault == "items": proof["items"] = []
+    elif fault == "naive_clock": payload["computed_at"] = "2026-06-06T18:00:00"
+    elif fault == "unknown": payload["day0_observation_state"] = "UNKNOWN"
+    elif fault == "observed": payload["day0_observed_extreme_c"] = 20.0
+    elif fault == "typed_zero": payload["day0_observation_state"] = zero
+    elif fault == "missing_request": payload = None
+    assert not evidence.evidence_holds(conn, proof, exact_request=payload)
+
+
+def test_dynamic_second_prewrite_cannot_emit_missing_input_proof(monkeypatch):
+    from dataclasses import replace
+    from src.data import replacement_forecast_materializer as materializer
+    from tests.test_replacement_forecast_materializer import _conn, _dt
+
+    original = replace(_missing_day0_request(), computed_at=_dt(4))
+    monkeypatch.setattr(materializer, "_artifact_identity_block_reasons", lambda *_a: ())
+    monkeypatch.setattr(materializer, "_cycle_monotone_block_reasons", lambda *_a, **_k: ())
+    monkeypatch.setattr(materializer, "_precision_guard_block_reason", lambda *_a: ())
+    monkeypatch.setattr(materializer, "_request_with_materialization_clock", lambda *_a: _missing_day0_request())
+    monkeypatch.setattr(materializer, "_request_with_day0_physical_frontier", lambda _c, r, **_k: r)
+    result = materializer._validated_replacement_forecast_request(_conn(), original)
+    assert result.reason_codes == ("REPLACEMENT_MATERIALIZATION_" + evidence.DAY0_REQUIRED,)
+    assert result.evidence is None
