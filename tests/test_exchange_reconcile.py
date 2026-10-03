@@ -13837,7 +13837,7 @@ def test_increment_after_partial_exit_projects_net_base_across_fill_legs(conn):
     assert float(net["filled_cost_basis_usd"]) == pytest.approx(14.158)
 
 
-def test_increment_reobservation_with_exit_after_its_fill_is_typed_and_deferred(conn):
+def test_unprovable_increment_leg_is_local_and_never_global(conn):
     """An exit newer than the increment's first fill is unprovable by the
     linear replacement; the leg is deferred per command, never projected
     or silently counted, and the sweep keeps running."""
@@ -13923,36 +13923,18 @@ def test_increment_reobservation_with_exit_after_its_fill_is_typed_and_deferred(
     assert conn.execute(
         "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id='trade-top-up-2'"
     ).fetchone()[0] == 1
-    # ... and a durable finding keyed by the trade: the latch stays set and
-    # refresh has a subject.  The clocks that made it unprovable are immutable,
-    # so a later sweep keeps it open instead of silently converging.
-    from src.execution.exchange_reconcile import list_unresolved_findings
-
-    unresolved = [
-        f for f in list_unresolved_findings(conn)
-        if f.kind == "unrecorded_trade" and f.subject_id == "trade-top-up-2"
-    ]
-    assert len(unresolved) == 1
-    assert json.loads(unresolved[0].evidence_json)["reason"] == (
-        "entry_increment_unprovable"
+    # ... and no reconcile finding: findings feed global gates, and a stranding
+    # never self-heals.  Safety is per position (admission rule A).
+    _assert_stranding_is_local_and_never_global(
+        conn, stranded_token=YES_TOKEN, stranded_position="pos-m5"
     )
-    run_reconcile_sweep(
-        FakeM5Adapter(trades=[first_leg, second_leg]),
-        conn,
-        context="periodic",
-        observed_at=NOW + timedelta(minutes=3),
-    )
-    assert [
-        f.subject_id for f in list_unresolved_findings(conn)
-        if f.kind == "unrecorded_trade"
-    ].count("trade-top-up-2") == 1
-    _assert_finding_quarantines_only_its_market(conn, "trade-top-up-2")
 
 
-def test_entry_leg_after_reduction_is_preserved_and_recorded_unfolded(conn):
+def test_entry_leg_after_reduction_is_preserved_and_never_global(conn):
     """The post-reduction branch keeps the projection (no resurrection of sold
-    shares) but a cumulative fill beyond the folded execution_fact is a
-    stranded confirmed leg: it must leave a durable finding."""
+    shares).  The later confirmed leg is stranded: it is logged, never turned
+    into a reconcile finding, and admission refuses that position's
+    increments while the rest of the book trades."""
 
     import json
 
@@ -13996,6 +13978,22 @@ def test_entry_leg_after_reduction_is_preserved_and_recorded_unfolded(conn):
     before = conn.execute(
         "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
     ).fetchone()
+    # The later leg is confirmed venue truth (the WS appends it outside any
+    # projection); only its fold is refused after the reduction.
+    from src.state.venue_command_repo import append_trade_fact
+
+    append_trade_fact(
+        conn,
+        trade_id="trade-late-leg",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="4",
+        fill_price="0.67",
+        source="WS_USER",
+        observed_at=NOW + timedelta(minutes=1),
+        raw_payload_hash="b" * 64,
+    )
 
     _ensure_entry_fill_position_event(
         conn,
@@ -14010,34 +14008,69 @@ def test_entry_leg_after_reduction_is_preserved_and_recorded_unfolded(conn):
         "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
     ).fetchone()
     assert dict(after) == dict(before)
-    stranded = [
-        f for f in list_unresolved_findings(conn)
-        if f.kind == "unrecorded_trade" and f.subject_id == "trade-initial"
-    ]
-    assert len(stranded) == 1
-    assert json.loads(stranded[0].evidence_json)["reason"] == (
-        "entry_fill_after_reduction_not_folded"
+    _assert_stranding_is_local_and_never_global(
+        conn, stranded_token=YES_TOKEN, stranded_position="pos-m5"
     )
-    _assert_finding_quarantines_only_its_market(conn, "trade-initial")
 
 
-def _assert_finding_quarantines_only_its_market(conn, subject_id):
-    """A stranding finding scopes to its command market: that market is
-    denied, an unrelated market still admits, and the book is not reduce-only."""
 
+def _assert_stranding_is_local_and_never_global(
+    conn, *, stranded_token, stranded_position
+):
+    """A stranded entry leg leaves no reconcile finding, so neither the M5
+    WS-gap latch nor the governor turns it into a global stop; the stranded
+    position alone refuses a certified increment (admission rule A)."""
+
+    import src.control.ws_gap_guard as ws_gap_guard
+    from src.execution.exchange_reconcile import (
+        FreshReconcileSnapshot,
+        apply_ws_gap_reconcile_snapshot_and_clear,
+        list_unresolved_findings,
+    )
+    from src.execution.executor import _entry_duplicate_same_token_component
     from src.risk_allocator.governor import (
-        AllocationDenied,
         CapPolicy,
         assert_global_allocation_allows,
-        classify_reconcile_finding_scope,
         clear_global_allocator,
         refresh_global_allocator,
     )
     from tests.test_governor_scope_lattice import _intent
 
-    scope = classify_reconcile_finding_scope(conn, CapPolicy())
-    assert YES_TOKEN in scope.scoped_markets
-    assert scope.systemic_count == 0
+    from src.execution.exchange_reconcile import _journal_positions_by_token
+
+    assert [
+        f for f in list_unresolved_findings(conn) if f.kind == "unrecorded_trade"
+    ] == []
+
+    # Routine reconnect: gap -> resubscribe -> M5 sweep clears the latch.  The
+    # venue reports exactly the journaled holdings (the stranded leg included),
+    # so nothing but the stranding itself could keep the latch set.
+    held = _journal_positions_by_token(conn, states=frozenset({"CONFIRMED"}))
+    observed = NOW + timedelta(minutes=10)
+    ws_gap_guard.clear_for_test(observed_at=observed)
+    ws_gap_guard.record_gap("test_reconnect", observed_at=observed)
+    ws_gap_guard.record_message(observed_at=observed, subscription_state="SUBSCRIBED")
+    assert ws_gap_guard.status().m5_reconcile_required is True
+    result = apply_ws_gap_reconcile_snapshot_and_clear(
+        FreshReconcileSnapshot(
+            adapter=FakeM5Adapter(
+                positions=[
+                    position(token_id=token, size=str(size))
+                    for token, size in held.items()
+                ]
+            ),
+            captured_surfaces=("open_orders", "trades", "positions"),
+            unavailable_surfaces=(),
+        ),
+        conn,
+        ws_guard=ws_gap_guard,
+        observed_at=observed,
+        guard_summary={},
+    )
+    assert result["status"] == "cleared", result
+    assert ws_gap_guard.status().m5_reconcile_required is False
+    assert list_unresolved_findings(conn) == []
+
     snap = refresh_global_allocator(
         conn,
         ledger={"current_drawdown_pct": 0.0, "risk_level": "GREEN"},
@@ -14046,12 +14079,31 @@ def _assert_finding_quarantines_only_its_market(conn, subject_id):
         cap_policy=CapPolicy(),
     )
     try:
-        assert snap["state"]["systemic_reconcile_finding_count"] == 0
         assert snap["reduce_only"] is False
-        with pytest.raises(AllocationDenied):
-            assert_global_allocation_allows(_intent(market=YES_TOKEN, size=10))
         assert assert_global_allocation_allows(
             _intent(market="unrelated-market", size=10)
         ).allowed
     finally:
         clear_global_allocator()
+
+    def increment():
+        return _entry_duplicate_same_token_component(
+            conn,
+            token_id=stranded_token,
+            candidate_position_id="fresh-candidate",
+            allow_reconciled_position_increment=True,
+        )
+
+    # The stranded command is still PARTIAL here: the open-command rule
+    # refuses first.  Once it is terminal, rule A alone must keep refusing.
+    refused = increment()
+    assert refused["allowed"] is False
+    assert refused["existing_position_id"] == stranded_position
+    conn.execute(
+        "UPDATE venue_commands SET state='FILLED' WHERE command_id=?",
+        (refused["existing_command_id"],),
+    )
+    refused = increment()
+    assert refused["allowed"] is False
+    assert refused["existing_position_id"] == stranded_position
+    assert refused["reason"] == "entry_command_confirmed_fill_not_folded", refused

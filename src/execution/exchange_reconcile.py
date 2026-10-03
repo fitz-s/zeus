@@ -5171,10 +5171,8 @@ def _resolve_open_trade_findings(
          WHERE kind = 'unrecorded_trade'
            AND subject_id = ?
            AND resolved_at IS NULL
-           AND COALESCE(json_extract(evidence_json, '$.reason'), '')
-               NOT IN (?, ?)
         """,
-        (trade_id, *_ENTRY_FILL_STRANDING_REASONS),
+        (trade_id,),
     ).fetchall()
     for row in rows:
         resolve_finding(
@@ -5797,56 +5795,60 @@ def reconcile_persisted_terminal_late_entry_fills(
     return summary
 
 
-_ENTRY_FILL_STRANDING_REASONS = (
-    "entry_increment_unprovable",
-    "entry_fill_after_reduction_not_folded",
-)
+def _log_entry_fill_stranded(
+    *,
+    position_id: object,
+    command_id: object,
+    trade_id: object,
+    reason: str,
+    detail: object = "",
+) -> None:
+    """Name a confirmed entry leg the projection does not fold.
+
+    Visibility only.  Reconcile findings feed global gates (the M5 latch and
+    the governor), and a stranding never self-heals, so it must not become
+    one.  Safety is per position: admission refuses increments while any
+    confirmed leg is unfolded (``_entry_command_confirmed_fills_folded``).
+    """
+
+    logger.error(
+        "ENTRY_FILL_STRANDED reason=%s position_id=%s command_id=%s "
+        "trade_id=%s detail=%s",
+        reason,
+        position_id,
+        command_id,
+        trade_id,
+        detail,
+    )
 
 
-def _project_entry_fill_or_record_stranding(
+def _project_entry_fill_isolated(
     conn: sqlite3.Connection,
     *,
     trade_id: str,
-    raw: Mapping[str, Any],
-    context: ReconcileContext,
     **projection: Any,
 ) -> None:
     """Fold one entry fill; an unprovable increment rolls back only the fold.
 
-    The venue trade fact and command event are already durable, so the
-    finding's subject (the venue trade id) joins its command market and the
-    governor quarantines that market only.  The clock ordering that made the
-    fold unprovable is immutable: the finding stays open until resolved, and
-    admission refuses increments while the leg is unfolded.
+    The venue trade fact and command event stay durable outside the
+    savepoint; the stranded leg is logged and the sweep continues.  Every
+    other exception still aborts the sweep.
     """
 
     command = projection["command"]
     savepoint = f"sp_entry_fill_projection_{uuid.uuid4().hex[:12]}"
     conn.execute(f"SAVEPOINT {savepoint}")
     try:
-        _ensure_entry_fill_position_event(conn, context=context, **projection)
+        _ensure_entry_fill_position_event(conn, **projection)
     except EntryIncrementUnprovable as exc:
         conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-        logger.error(
-            "exchange_reconcile: entry increment unprovable trade_id=%s "
-            "command_id=%s error=%s",
-            trade_id,
-            command.get("command_id"),
-            exc,
-        )
-        record_finding(
-            conn,
-            kind="unrecorded_trade",
-            subject_id=trade_id,
-            context=context,
-            evidence={
-                "exchange_trade": dict(raw),
-                "local_command": _command_evidence(command),
-                "reason": "entry_increment_unprovable",
-                "error": str(exc),
-            },
-            recorded_at=projection["observed_at"],
+        _log_entry_fill_stranded(
+            position_id=command.get("position_id"),
+            command_id=command.get("command_id"),
+            trade_id=trade_id,
+            reason="entry_increment_unprovable",
+            detail=exc,
         )
         return
     except BaseException:
@@ -6028,10 +6030,9 @@ def _append_linkable_trade_fact_if_missing(
                     existing_event = None
             elif str(command.get("state") or "") == "FILLED" and state == "CONFIRMED":
                 existing_event = "FILL_CONFIRMED"
-            _project_entry_fill_or_record_stranding(
+            _project_entry_fill_isolated(
                 conn,
                 trade_id=trade_id,
-                raw=raw,
                 command=command,
                 venue_order_id=order_id,
                 filled_size=filled_size,
@@ -6184,10 +6185,9 @@ def _append_linkable_trade_fact_if_missing(
         trade_state=state,
     )
     if event is None:
-        _project_entry_fill_or_record_stranding(
+        _project_entry_fill_isolated(
             conn,
             trade_id=trade_id,
-            raw=raw,
             command=latest,
             venue_order_id=order_id,
             filled_size=filled_size,
@@ -6237,10 +6237,9 @@ def _append_linkable_trade_fact_if_missing(
         }:
             return finality_finding
         event = None
-    _project_entry_fill_or_record_stranding(
+    _project_entry_fill_isolated(
         conn,
         trade_id=trade_id,
-        raw=raw,
         command=latest,
         venue_order_id=order_id,
         filled_size=filled_size,
@@ -7029,8 +7028,7 @@ def _ensure_entry_fill_position_event(
             # any late economics revision needs a reduction-aware correction
             # atom instead of an entry projection rewrite.  A cumulative fill
             # beyond the command's execution_fact is a confirmed leg this
-            # projection never folds: record it durably (admission already
-            # refuses increments on the unfolded command).
+            # projection never folds; admission refuses increments on it.
             folded = conn.execute(
                 """
                 SELECT MAX(shares) AS shares
@@ -7048,8 +7046,6 @@ def _ensure_entry_fill_position_event(
             if folded_shares is None or shares_dec > folded_shares + Decimal(
                 "0.000001"
             ):
-                # Subject = the command's newest confirmed venue trade, so the
-                # finding joins its command market and quarantines it alone.
                 latest_trade = conn.execute(
                     """
                     SELECT trade_id
@@ -7061,27 +7057,16 @@ def _ensure_entry_fill_position_event(
                     """,
                     (str(command.get("command_id") or ""),),
                 ).fetchone()
-                record_finding(
-                    conn,
-                    kind="unrecorded_trade",
-                    subject_id=(
-                        str(latest_trade["trade_id"])
-                        if latest_trade is not None
-                        else f"entry_fill_unfolded:{command.get('command_id')}"
+                _log_entry_fill_stranded(
+                    position_id=position_id,
+                    command_id=command.get("command_id"),
+                    trade_id=latest_trade["trade_id"] if latest_trade else None,
+                    reason="entry_fill_after_reduction_not_folded",
+                    detail=(
+                        f"cumulative_shares={_decimal_text(shares_dec)} "
+                        "execution_fact_shares="
+                        f"{_decimal_text(folded_shares) if folded_shares is not None else None}"
                     ),
-                    context=context,
-                    evidence={
-                        "local_command": _command_evidence(command),
-                        "reason": "entry_fill_after_reduction_not_folded",
-                        "position_id": position_id,
-                        "cumulative_shares": _decimal_text(shares_dec),
-                        "execution_fact_shares": (
-                            _decimal_text(folded_shares)
-                            if folded_shares is not None
-                            else None
-                        ),
-                    },
-                    recorded_at=observed_at,
                 )
             logger.info(
                 "exchange_reconcile: preserve post-reduction exposure on "
