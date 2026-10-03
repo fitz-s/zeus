@@ -5872,6 +5872,83 @@ _CLAIM_IDENTITY_LEASED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED
 _CLAIM_LEASE_UNKNOWN_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_LEASE_UNKNOWN"
 
 
+@dataclass(frozen=True)
+class InflightReconcileReport:
+    restored: tuple[str, ...]
+    refused: tuple[tuple[str, str], ...]  # (batch, state) left untouched
+
+    @property
+    def quiescent(self) -> bool:
+        return not self.refused
+
+
+def reconcile_inflight_for_migration(
+    *, request_path: Path, apply: bool = False,
+) -> InflightReconcileReport:
+    """Return every inflight request to ``requests/`` when no owner remains.
+
+    The quiescent ownership transition of canonical_execution_lease.md 2.5,
+    for upgrade and rollback alike. Precondition (the operator's, not checked
+    here): claim acquisition is stopped, i.e. the forecast-live daemon is
+    stopped, and with it its resident worker. A lease-v1 batch is restored only
+    when its leases are acquired here (no owner), and they stay held across the
+    restore; HELD or UNKNOWN is refused. A LEGACY batch has no lease, so it is
+    restored only when no process named by its ``owner_pid`` metadata or
+    ``.pid<N>`` suffix is alive; otherwise it is refused. Refusal is a fact to
+    act on (finish or reap the owner, then rerun), never a wait. No clock.
+    """
+
+    inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
+    restored: list[str] = []
+    refused: list[tuple[str, str]] = []
+    for batch_path in _claim_batches(inflight_path):
+        held: list[_lease.HeldLease] = []
+        try:
+            if _claim_protocol(batch_path) == _lease.LEASE_PROTOCOL:
+                paths = _claim_lease_paths(batch_path)
+                state, held = (
+                    (_lease.LeaseState.UNKNOWN, []) if paths is None else _lease.observe(paths)
+                )
+                if state is not _lease.LeaseState.ACQUIRED_FOR_RECOVERY:
+                    refused.append((batch_path.name, state.value))
+                    continue
+            elif _legacy_owner_alive(batch_path):
+                refused.append((batch_path.name, "LEGACY_OWNER_ALIVE"))
+                continue
+            for path in _claim_request_files(batch_path):
+                restored.append(
+                    str(_restore_claimed_request(path, request_path, batch_path.name))
+                    if apply else str(path)
+                )
+            if apply:
+                _remove_empty_claim_batch(batch_path)
+        finally:
+            _lease.release(held)
+    if apply:
+        _lease.sweep(_lease_dir(inflight_path).glob("*.lease")
+                     if _lease_dir(inflight_path).exists() else ())
+    return InflightReconcileReport(tuple(restored), tuple(refused))
+
+
+def _legacy_owner_alive(batch_path: Path) -> bool:
+    pids: set[int] = set()
+    metadata = _claim_metadata(batch_path) or {}
+    if isinstance(metadata.get("owner_pid"), int):
+        pids.add(int(metadata["owner_pid"]))
+    match = re.search(r"\.pid(\d+)(?:\.\d+)?$", batch_path.name)
+    if match is not None:
+        pids.add(int(match.group(1)))
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            return True  # exists under another uid
+        return True
+    return False
+
+
 def _claim_available_slots(
     inflight_path: Path, selected: Sequence[Path],
 ) -> tuple[Path | None, tuple[Path, ...], tuple[str, ...]]:

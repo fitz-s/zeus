@@ -1,6 +1,6 @@
 # Canonical execution lease for replacement materialization
 
-Status: DESIGN ONLY. Not built. Part B of the claim-wait work; Part A
+Status: BUILT on fix/execution-lease (migration: `canonical_execution_lease_migration.md`). Part B of the claim-wait work; Part A
 (`fix/claim-wait-a`) shipped only the claim-fence relaxation and reason names.
 Owner surface: `src/data/replacement_forecast_live_materialization_queue.py`
 (claim/recovery), `src/runtime/warm_materializer.py` and
