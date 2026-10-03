@@ -11451,7 +11451,7 @@ of observed wrong live temperatures or historical economic loss.
 Correct owner is src/data/observation_instants_writer.py, ObsV2Row._validate
 adjacent to A6. The earlier parent shorthand src/state/writer.py does not exist:
 do not create it or move ownership. Data scoped law/module book and the state
-truth/K0 authority spine have been read; canonical FORECAST observation_instants
+truth/K0 authority spine have been read; canonical WORLD observation_instants
 remains authoritative, with existing transaction/causal write discipline intact.
 In scope are source-role separation, identity/metric spine and scoped fail-closed
 behavior (INV-06/INV-14/INV-37/INV-47); no probability/settlement rounding or
