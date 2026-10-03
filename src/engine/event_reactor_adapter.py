@@ -1718,8 +1718,11 @@ def _global_preflight_sell_temporal_authority_superseded(reason: str) -> bool:
 
 # Every preflight route that carries a consumed-proof refusal of the selected
 # witness's own posterior to _evict_superseded_global_probability_family_cache,
-# as (outer wrapper, inner refusal). Each route's reason is
-# outer + inner + "basis=...".
+# as exact (outer wrapper, inner refusal) prefixes; each reason on a route is
+# outer + inner + "basis=...". The bundle readers return their refusal as
+# REPLACEMENT_RAW_INPUT_HWM: (the ordinary reader and the pinned reader it backs)
+# or REPLACEMENT_PINNED_RAW_INPUT_HWM: (held continuity); the actuation replay
+# wraps it as the current bundle or, for a Day0 SELL, as its pinned carrier.
 _CONSUMED_PROOF_REFUSAL_ROUTES = (
     # BUY: _build_event_bound_no_submit_receipt_core over the actuation replay.
     (
@@ -1732,11 +1735,17 @@ _CONSUMED_PROOF_REFUSAL_ROUTES = (
         "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:",
     ),
     # Day0 SELL: the replay's pinned carrier,
-    # _rehydrate_held_pinned_bundle_for_actuation.
+    # _rehydrate_held_pinned_bundle_for_actuation, refused by held continuity
+    # or by the pinned posterior's own bundle read.
     (
         "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:",
         "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:"
         "REPLACEMENT_PINNED_RAW_INPUT_HWM:",
+    ),
+    (
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:",
+        "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:"
+        "REPLACEMENT_RAW_INPUT_HWM:",
     ),
 )
 # Consumed rows re-read at the posterior's own cut and refused: permanent for

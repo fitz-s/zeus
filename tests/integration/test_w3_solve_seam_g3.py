@@ -14014,6 +14014,24 @@ def test_live_adapter_selection_telemetry_isolates_unsupported_family(monkeypatc
     ]
 
 
+# The actual preflight routes of a consumed-proof refusal, written out rather
+# than read from the adapter's table, so these tests state the contract the
+# table must meet (and import on a source that predates it).
+_CONSUMED_PROOF_ROUTES = (
+    ("GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:",
+     "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"),
+    ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:",
+     "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"),
+    ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:",
+     "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_PINNED_RAW_INPUT_HWM:"),
+    ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:",
+     "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"),
+)
+_CONSUMED_PROOF_INVALID_BASES = tuple(f"basis=current_value_serving_{basis}:" for basis in (
+    "consumed_proof_unverifiable", "consumed_physical_proof_invalid",
+    "consumed_input_after_posterior", "raw_row_identity_mismatch"))
+
+
 @pytest.mark.parametrize(
     "supersession_reason",
     (
@@ -14023,8 +14041,8 @@ def test_live_adapter_selection_telemetry_isolates_unsupported_family(monkeypatc
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:immature',
         *(
             outer + inner + basis + 'model=icon_global:consumed_raw_id=2'
-            for outer, inner in era._CONSUMED_PROOF_REFUSAL_ROUTES
-            for basis in era._CONSUMED_PROOF_INVALID_BASES
+            for outer, inner in _CONSUMED_PROOF_ROUTES
+            for basis in _CONSUMED_PROOF_INVALID_BASES
         ),
     ),
 )
@@ -14141,7 +14159,7 @@ def test_consumed_proof_refusal_evicts_only_under_an_enumerated_route(reason):
         "unknown_superseded",
     ),
 )
-@pytest.mark.parametrize("route", era._CONSUMED_PROOF_REFUSAL_ROUTES)
+@pytest.mark.parametrize("route", _CONSUMED_PROOF_ROUTES)
 def test_unknown_source_clock_preflight_stays_blocked_without_cache_eviction(basis, route):
     outer, inner = route
     reason = outer + inner + "basis=" + basis + ":detail=unavailable"
@@ -51997,36 +52015,41 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
         held = callbacks["prepare_held_event"](event,at)
         assert entry.prepared_global_family is not None, entry.reason
         assert held.prepared_global_family is not None, held.reason
-        # A held SELL is selected from the held lane's witness, a BUY from the entry lane's.
-        witness = (held if action == "SELL" else entry).prepared_global_family.probability_witness
-        tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
-        selected = universe._rebind_probability_witness_tokens(witness,token_map_by_condition=tokens,
-            required_token_ids=frozenset(t for pair in tokens.values() for t in pair))
-        binding = selected.bindings[1]
-        identity = dict(family_key=selected.family_key,bin_id=binding.bin_id,condition_id=binding.condition_id,
-            side="YES",token_id=binding.yes_token_id,probability_witness_identity=selected.witness_identity,
-            book_snapshot_id="book",book_captured_at_utc=at,ledger_snapshot_id="ledger",
-            resolution_identity=selected.resolution_identity,neg_risk=False)
         if action == "BUY":
+            witness = entry.prepared_global_family.probability_witness
+            tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
+            selected = universe._rebind_probability_witness_tokens(witness,token_map_by_condition=tokens,
+                required_token_ids=frozenset(t for pair in tokens.values() for t in pair))
+            binding = selected.bindings[1]
             curve = ExecutableCostCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
                 levels=(BookLevel(price=Decimal(".10"),size=Decimal("100")),),fee_model=FeeModel(fee_rate=Decimal("0")),
                 min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
-            candidate = GlobalSingleOrderCandidate(candidate_id="consumed-proof-buy",executable_cost_curve=curve,
-                execution_curve_identity=executable_curve_identity(curve),**identity)
+            candidate = GlobalSingleOrderCandidate(candidate_id="consumed-proof-buy",family_key=selected.family_key,
+                bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
+                probability_witness_identity=selected.witness_identity,book_snapshot_id="book",book_captured_at_utc=at,
+                execution_curve_identity=executable_curve_identity(curve),ledger_snapshot_id="ledger",
+                executable_cost_curve=curve,resolution_identity=selected.resolution_identity,neg_risk=False)
+            actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=selected,
+                decision=SimpleNamespace(candidate=candidate),actuation_identity="consumed-proof-actuation")
+            winner, authority = event, SimpleNamespace()
+            assert era._current_global_actuation_prepared_family(event,global_actuation=actuation,forecast_conn=ro,
+                topology_conn=ro,observation_conn=ro,decision_time=at)[0].probability_witness is selected
         else:
-            curve = ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
-                levels=(BidBookLevel(price=Decimal(".60"),size=Decimal("10")),),fee_model=FeeModel(fee_rate=Decimal("0")),
-                min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
-            proposal,mode,fill,fill_source,rest = global_sell_execution_terms(curve,capacity=Decimal("10"))
-            candidate = GlobalSingleOrderSellCandidate(candidate_id="consumed-proof-sell",position_id="position-1",
-                held_shares=Decimal("10"),executable_sell_curve=curve,execution_curve_identity=executable_curve_identity(curve),
-                proposal_sell_curve=proposal,execution_mode=mode,fill_probability=fill,fill_probability_source=fill_source,
-                rest_deadline_minutes=rest,probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
-                exit_authority_status="not_applicable",exit_authority_reason="non_day0_family",**identity)
-        actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=selected,
-            decision=SimpleNamespace(candidate=candidate),actuation_identity="consumed-proof-actuation")
-        assert era._current_global_actuation_prepared_family(event,global_actuation=actuation,forecast_conn=ro,
-            topology_conn=ro,observation_conn=ro,decision_time=at)[0].probability_witness is selected
+            # The production SELL: selected by the actual batch over canonical position and
+            # CHAIN collateral rows, so its wealth economic identity is the one preflight
+            # recomputes; only the venue answers at the boundary.
+            winner,actuation,authority,_binding = _held_sell_through_actual_batch(monkeypatch,trade=trade,
+                forecast_conn=ro,event=event,at=at,callbacks=callbacks,held_receipt=held)
+            _install_held_sell_venue(monkeypatch,actuation=actuation)
+            healthy = callbacks["preflight_winner"](winner,actuation,at,authority)
+            assert healthy.status == "STABLE", healthy
+            assert healthy.binding_token.receipt.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
+            assert healthy.binding_token.receipt.proof_accepted is True
+            for use in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
+                era._store_global_probability_family_cache(
+                    inspect.getclosurevars(callbacks["preflight_winner"]).nonlocals["probability_cache_namespace"],
+                    family_key=actuation.decision.candidate.family_key,event_id=event.event_id,
+                    family_binding_hash="binding",prepared=held.prepared_global_family,probability_use=use)
         cached = dict(era._GLOBAL_PROBABILITY_FAMILY_CACHE)
         assert {use for _family,use in cached} == {"entry","held_monitor"}
         victim = int(json.loads(row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
@@ -52061,7 +52084,7 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
                     get_current_level=lambda: era.RiskLevel.GREEN,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
                     global_actuation=actuation,reserve_on_pass=False)
             else:
-                receipt = era._submit_current_global_sell(event,decision_time=at,global_actuation=actuation,
+                receipt = era._submit_current_global_sell(winner,decision_time=at,global_actuation=actuation,
                     trade_conn=trade,global_claim_conn=trade,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
                     preflight_only=True,preflight_receipt=None)
             assert receipt.proof_accepted is False
@@ -52070,7 +52093,7 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
                 + "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
                 + ("basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:" if evicts
                     else "basis=consumed_physical_proof_read_unavailable:")), receipt.reason
-            result = callbacks["preflight_winner"](event,actuation,at,SimpleNamespace())
+            result = callbacks["preflight_winner"](winner,actuation,at,authority)
             assert (result.status,result.reason) == ("BATCH_BLOCKED",receipt.reason), result
             assert bool(era._GLOBAL_PROBABILITY_FAMILY_CACHE) is not evicts
             for lane in ("prepare_event","prepare_held_event"):
@@ -52094,110 +52117,54 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
 
 @pytest.mark.parametrize("fault",("recorded_row_deleted","consumed_read_locked"))
 def test_day0_sell_pinned_carrier_refusal_evicts_the_cached_family(tmp_path,monkeypatch,fault,_hko_clock_native_sources):
-    """Round-4, third route: a Day0 SELL replays through its pinned carrier
-    (_rehydrate_held_pinned_bundle_for_actuation), whose consumed-proof refusal
-    reaches preflight as GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:
+    """Round-4, third route, through the actual preflight closure: a Day0 SELL
+    replays through its pinned carrier (_rehydrate_held_pinned_bundle_for_actuation).
+    Healthy, the full SELL preflight is STABLE. A lost consumed row then reaches
+    preflight as GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:
     GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_PINNED_RAW_INPUT_HWM:
-    basis=... . A lost consumed row evicts the cached family; a locked
-    consumed-proof read refuses without eviction.
-    """
-    from src.contracts.settlement_semantics import SettlementSemantics
+    basis=... and evicts the cached family; a locked consumed-proof read refuses
+    without eviction."""
     from src.data import replacement_current_value_serving as serving
     from src.data import replacement_forecast_bundle_reader as reader
     from src.data import replacement_input_hwm as hwm
-    from src.data.openmeteo_ecmwf_ifs9_anchor import build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest
-    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
-    from src.events.triggers.day0_extreme_updated import (
-        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
-    )
-    from src.state.db import init_schema_trade_only
-    metric = "high"
-    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric,prior_hour=6)
-    trade = sqlite3.connect(":memory:")
+    case = _hko_pinned_day0_sell(tmp_path,monkeypatch)
+    conn, trade, ro = case.fixture.conn, case.trade, case.ro
     try:
-        class ClockType(type):
-            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
-        class DecisionClock(_dt.datetime,metaclass=ClockType):
-            @classmethod
-            def now(cls,tz=None): return fixture.cut.astimezone(tz) if tz else fixture.cut.replace(tzinfo=None)
-        monkeypatch.setattr(reader,"datetime",DecisionClock)
-        # A real newer deterministic wave without its ENS shape: the public reader pins.
-        capture = fixture.cut+_dt.timedelta(minutes=1)
-        fixture.sql_clock[0] = capture
-        write_manifest_to_db(fixture.conn,build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(fixture.artifact_path,
-            request=replace(fixture.anchor_request,run=fixture.request.source_cycle_time+_dt.timedelta(hours=6)),
-            metric=metric,source_available_at=capture,captured_at=capture,
-            product_metadata={"city":"Hong Kong","target_date":"2026-09-30"}))
-        fixture.conn.commit()
-        decision = fixture.cut+_dt.timedelta(minutes=2)
-        pinned = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
-            target_date="2026-09-30",temperature_metric=metric,decision_time=decision,raw_input_hwm_conn=fixture.conn)
-        assert pinned.ok and pinned.bundle.posterior_id == fixture.result.posterior_id, pinned.reason_code
-        observed = dict(fixture.conn.execute("SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone())
-        event = build_day0_extreme_updated_event(
-            observation=observation_instant_row_to_day0_observation(observed,metric=metric),
-            settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=decision,
-            received_at=decision.isoformat())
-        held = era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
-            topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=decision,
-            max_age=_dt.timedelta(seconds=30),allow_unobserved_day0_replacement=False,
-            allow_provisional_day0_replacement=True,probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
-            pinned_complete_bundle=pinned.bundle,raw_input_hwm_conn=fixture.conn)
-        witness = held.probability_witness
-        binding = witness.bindings[0]
-        curve = ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
-            levels=(BidBookLevel(price=Decimal(".60"),size=Decimal("10")),),fee_model=FeeModel(fee_rate=Decimal("0")),
-            min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
-        proposal,mode,fill,fill_source,rest = global_sell_execution_terms(curve,capacity=Decimal("10"))
-        candidate = GlobalSingleOrderSellCandidate(candidate_id="pinned-sell",family_key=witness.family_key,
-            bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
-            position_id="position-1",held_shares=Decimal("10"),probability_witness_identity=witness.witness_identity,
-            book_snapshot_id="book",book_captured_at_utc=decision,execution_curve_identity=executable_curve_identity(curve),
-            ledger_snapshot_id="ledger",executable_sell_curve=curve,resolution_identity=witness.resolution_identity,
-            neg_risk=False,proposal_sell_curve=proposal,execution_mode=mode,fill_probability=fill,
-            fill_probability_source=fill_source,rest_deadline_minutes=rest,
-            probability_functional="LOWER_CVAR_PARAMETER_DRAWS",exit_authority_status="not_applicable",
-            exit_authority_reason="non_day0_family")
-        actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=witness,
-            decision=SimpleNamespace(candidate=candidate),actuation_identity="pinned-sell-actuation")
-        assert era._rehydrate_held_pinned_bundle_for_actuation(event,selected=witness,
-            probability_use=era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,forecast_conn=fixture.conn,
-            decision_time=decision) is not None
-        namespace = "pinned-sell-eviction"
-        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",namespace)
-        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",{})
-        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",{})
+        held_receipt = SimpleNamespace(prepared_global_family=case.held)
+        winner,actuation,authority,_binding = _held_sell_through_actual_batch(monkeypatch,trade=trade,
+            forecast_conn=ro,event=case.event,at=case.decision,callbacks=case.callbacks,held_receipt=held_receipt)
+        assert actuation.decision.candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN"
+        _install_held_sell_venue(monkeypatch,actuation=actuation)
+        def clear():
+            hwm.clear_consumed_proof_memo()
+            reader._LIVE_GRADE_MEMO.clear()
+        clear()
+        healthy = case.callbacks["preflight_winner"](winner,actuation,case.decision,authority)
+        assert healthy.status == "STABLE", healthy
+        assert healthy.binding_token.receipt.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
         for use in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
-            era._store_global_probability_family_cache(namespace,family_key=witness.family_key,
-                event_id=event.event_id,family_binding_hash="binding",prepared=held,probability_use=use)
+            era._store_global_probability_family_cache(case.namespace,family_key=case.witness.family_key,
+                event_id=case.event.event_id,family_binding_hash="binding",prepared=case.held,probability_use=use)
         if fault == "recorded_row_deleted":
-            icon_id = int(json.loads(fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors"
-                " WHERE posterior_id=?",(fixture.result.posterior_id,)).fetchone()[0])
-                ["bayes_precision_fusion"]["current_value_serving"]["icon_global"]["raw_model_forecast_id"])
-            fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(icon_id,))
-            fixture.conn.commit()
+            conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(case.victim,))
+            conn.commit()
             basis = "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:"
         else:
             def locked(*_a,**_k): raise sqlite3.OperationalError("database is locked")
             monkeypatch.setattr(serving,"read_consumed_instrument_values",locked)
             basis = "basis=consumed_physical_proof_read_unavailable:"
-        hwm.clear_consumed_proof_memo()
-        reader._LIVE_GRADE_MEMO.clear()
-        init_schema_trade_only(trade)
-        receipt = era._submit_current_global_sell(event,decision_time=decision,global_actuation=actuation,
-            trade_conn=trade,global_claim_conn=trade,forecast_conn=fixture.conn,topology_conn=fixture.conn,
-            calibration_conn=fixture.conn,preflight_only=True,preflight_receipt=None)
-        assert receipt.proof_accepted is False
-        assert receipt.reason.startswith("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
-            "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_PINNED_RAW_INPUT_HWM:"+basis), receipt.reason
-        assert era._global_preflight_block_status(receipt.reason) == "BATCH_BLOCKED"
+        clear()
+        result = case.callbacks["preflight_winner"](winner,actuation,case.decision,authority)
+        assert result.status == "BATCH_BLOCKED", result
+        assert result.reason.startswith("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+            "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_PINNED_RAW_INPUT_HWM:"+basis), result.reason
         evicts = fault == "recorded_row_deleted"
-        assert era._evict_superseded_global_probability_family_cache(namespace,reason=receipt.reason,
-            actuation=actuation) is evicts
         assert bool(era._GLOBAL_PROBABILITY_FAMILY_CACHE) is not evicts
+        assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
     finally:
+        ro.close()
         trade.close()
-        fixture.conn.close()
+        conn.close()
 
 
 def _chicago_between_cohort_posterior(tmp_path,monkeypatch,*,scheme="partial",before_last_materialization=None):
@@ -52278,9 +52245,10 @@ def _advance_icon_and_rematerialize(fixture,monkeypatch,first,*,hours,minutes):
         (produced.posterior_id,)).fetchone()), cut
 
 
+@pytest.mark.parametrize("action",("BUY","SELL"))
 @pytest.mark.parametrize("scheme",("partial","full"))
 @pytest.mark.parametrize("fault",("cohort_row_deleted","cohort_body_same_mtime"))
-def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkeypatch,fault,scheme,_noaa_native_sources):
+def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkeypatch,fault,scheme,action,_noaa_native_sources):
     """Round-4: the consumed verdict re-proved only current_value_serving. A
     posterior whose between-cohort spread input (the old ICON row, not a serving
     center) was deleted or changed in place kept PREPARED on ENTRY and HELD, and
@@ -52347,24 +52315,41 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
         held = callbacks["prepare_held_event"](event,cut)
         assert entry.prepared_global_family.posterior_id == row["posterior_id"], entry.reason
         assert held.prepared_global_family.posterior_id == row["posterior_id"], held.reason
-        witness = entry.prepared_global_family.probability_witness
-        tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
-        selected = universe._rebind_probability_witness_tokens(witness,token_map_by_condition=tokens,
-            required_token_ids=frozenset(t for pair in tokens.values() for t in pair))
-        binding = selected.bindings[1]
-        curve = ExecutableCostCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
-            levels=(BookLevel(price=Decimal(".10"),size=Decimal("100")),),fee_model=FeeModel(fee_rate=Decimal("0")),
-            min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
-        candidate = GlobalSingleOrderCandidate(candidate_id="between-cohort-buy",family_key=selected.family_key,
-            bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
-            probability_witness_identity=selected.witness_identity,book_snapshot_id=curve.snapshot_id,
-            book_captured_at_utc=cut,execution_curve_identity=executable_curve_identity(curve),
-            ledger_snapshot_id="ledger",executable_cost_curve=curve,resolution_identity=selected.resolution_identity,
-            neg_risk=False)
-        actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=selected,
-            decision=SimpleNamespace(candidate=candidate),actuation_identity="between-cohort-actuation")
-        assert era._current_global_actuation_prepared_family(event,global_actuation=actuation,forecast_conn=ro,
-            topology_conn=ro,observation_conn=ro,decision_time=cut)[0].probability_witness is selected
+        if action == "BUY":
+            witness = entry.prepared_global_family.probability_witness
+            tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
+            selected = universe._rebind_probability_witness_tokens(witness,token_map_by_condition=tokens,
+                required_token_ids=frozenset(t for pair in tokens.values() for t in pair))
+            binding = selected.bindings[1]
+            curve = ExecutableCostCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
+                levels=(BookLevel(price=Decimal(".10"),size=Decimal("100")),),fee_model=FeeModel(fee_rate=Decimal("0")),
+                min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+            candidate = GlobalSingleOrderCandidate(candidate_id="between-cohort-buy",family_key=selected.family_key,
+                bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
+                probability_witness_identity=selected.witness_identity,book_snapshot_id=curve.snapshot_id,
+                book_captured_at_utc=cut,execution_curve_identity=executable_curve_identity(curve),
+                ledger_snapshot_id="ledger",executable_cost_curve=curve,resolution_identity=selected.resolution_identity,
+                neg_risk=False)
+            actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=selected,
+                decision=SimpleNamespace(candidate=candidate),actuation_identity="between-cohort-actuation")
+            winner, authority = event, SimpleNamespace()
+            assert era._current_global_actuation_prepared_family(event,global_actuation=actuation,forecast_conn=ro,
+                topology_conn=ro,observation_conn=ro,decision_time=cut)[0].probability_witness is selected
+        else:
+            # A POSTERIOR_PREDICTIVE_MEAN held SELL selected by the actual batch; healthy,
+            # its full preflight (q revalidation, wealth, position, book, collateral) is STABLE.
+            winner,actuation,authority,_binding = _held_sell_through_actual_batch(monkeypatch,trade=trade,
+                forecast_conn=ro,event=event,at=cut,callbacks=callbacks,held_receipt=held)
+            assert actuation.decision.candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN"
+            _install_held_sell_venue(monkeypatch,actuation=actuation)
+            healthy = callbacks["preflight_winner"](winner,actuation,cut,authority)
+            assert healthy.status == "STABLE", healthy
+            assert healthy.binding_token.receipt.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
+            for use in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
+                era._store_global_probability_family_cache(
+                    inspect.getclosurevars(callbacks["preflight_winner"]).nonlocals["probability_cache_namespace"],
+                    family_key=actuation.decision.candidate.family_key,event_id=event.event_id,
+                    family_binding_hash="binding",prepared=held.prepared_global_family,probability_use=use)
         cached = dict(era._GLOBAL_PROBABILITY_FAMILY_CACHE)
         assert {use for _family,use in cached} == {"entry","held_monitor"}
         if fault == "cohort_row_deleted":
@@ -52395,14 +52380,20 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
             era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
             era._GLOBAL_PROBABILITY_FAMILY_CACHE.update(cached)
             with pytest.raises(ValueError, match=basis):
-                era._current_global_actuation_prepared_family(event,global_actuation=actuation,forecast_conn=ro,
+                era._current_global_actuation_prepared_family(winner,global_actuation=actuation,forecast_conn=ro,
                     topology_conn=ro,observation_conn=ro,decision_time=cut)
-            receipt = era._build_event_bound_no_submit_receipt_core(event,trade_conn=trade,decision_time=cut,
-                get_current_level=lambda: era.RiskLevel.GREEN,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
-                global_actuation=actuation,reserve_on_pass=False)
-            assert receipt.reason.startswith("GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
-                "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"+basis), receipt.reason
-            result = callbacks["preflight_winner"](event,actuation,cut,SimpleNamespace())
+            if action == "BUY":
+                receipt = era._build_event_bound_no_submit_receipt_core(event,trade_conn=trade,decision_time=cut,
+                    get_current_level=lambda: era.RiskLevel.GREEN,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                    global_actuation=actuation,reserve_on_pass=False)
+            else:
+                receipt = era._submit_current_global_sell(winner,decision_time=cut,global_actuation=actuation,
+                    trade_conn=trade,global_claim_conn=trade,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                    preflight_only=True,preflight_receipt=None)
+            assert receipt.reason.startswith({"BUY":"GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:",
+                "SELL":"GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"}[action]
+                +"GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"+basis), receipt.reason
+            result = callbacks["preflight_winner"](winner,actuation,cut,authority)
             assert (result.status,result.reason) == ("BATCH_BLOCKED",receipt.reason), result
             assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
         assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
@@ -52626,6 +52617,315 @@ def test_recorded_serving_claims_refuse_a_row_claimed_two_ways(claim):
         "source_clock_one_scheme":{"between_cohort_value_serving":{"icon_global":item}}}) == {
         7:("icon_global",_dt.datetime(2026,10,1,tzinfo=_dt.timezone.utc),
            _dt.datetime(2026,10,1,0,10,tzinfo=_dt.timezone.utc),None,"current_value_serving")}
+
+
+def _held_sell_through_actual_batch(monkeypatch,*,trade,forecast_conn,event,at,callbacks,held_receipt,bid=".94"):
+    """A held SELL actuation exactly as production builds it.
+
+    Canonical position and CHAIN collateral rows go into the private trade DB;
+    the actual process_current_global_batch then selects the SELL, builds its
+    wealth witness from those rows (so its wealth economic identity is the one
+    preflight recomputes) and stores its auction receipt. Only the venue scan
+    and book capture are explicit inputs. Returns the winner carrier, the
+    actuation and the preflight authority the batch handed to preflight.
+    """
+    witness = held_receipt.prepared_global_family.probability_witness
+    tokens = {b.condition_id:(b.yes_token_id,f"held-sell-no-{i}") for i,b in enumerate(witness.bindings)}
+    required = frozenset(t for pair in tokens.values() for t in pair)
+    rebind = lambda w: universe._rebind_probability_witness_tokens(w,token_map_by_condition=tokens,
+        required_token_ids=required)
+    probability = rebind(witness)
+    binding = min(probability.bindings,key=lambda b: family_payoff_point_q(probability,bin_id=b.bin_id,side="YES"))
+    payload = json.loads(event.payload_json)
+    trade.execute("""INSERT INTO position_current (
+        position_id,trade_id,market_id,phase,city,cluster,target_date,temperature_metric,
+        bin_label,direction,token_id,no_token_id,condition_id,shares,size_usd,cost_basis_usd,
+        entry_price,chain_shares,chain_avg_price,chain_cost_basis_usd,chain_seen_at,
+        chain_state,fill_authority,strategy_key,updated_at,unit)
+        VALUES ('held-sell','held-sell',?,'active',?,?,?,?,?,'buy_yes',?,?,?,10,1,1,.1,10,.1,1,?,
+            'synced','venue_confirmed_full','forecast_qkernel_entry',?,'C')""",
+        (binding.condition_id,payload["city"],payload["city"],payload["target_date"],payload["metric"],
+         binding.bin_id,binding.yes_token_id,binding.no_token_id,binding.condition_id,at.isoformat(),at.isoformat()))
+    trade.execute("""INSERT INTO collateral_ledger_snapshots (
+        pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,ctf_token_balances_json,
+        ctf_token_allowances_json,reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,
+        captured_at,authority_tier,raw_balance_payload_hash) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (1_000_000_000,1_000_000_000,0,json.dumps({binding.yes_token_id:10_000_000}),
+         json.dumps({binding.yes_token_id:10_000_000}),0,"{}",at.isoformat(),"CHAIN","held-sell-wallet"))
+    trade.commit()
+    curve = ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="held-sell-book",
+        book_hash="held-sell-book-hash",levels=(BidBookLevel(price=Decimal(bid),size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),min_tick=Decimal(".01"),min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30))
+    states = tuple((probability.family_key,b.bin_id,b.condition_id,side,token,"NO_ASK",curve.book_hash,
+        event.event_id,f"gamma-{b.condition_id}","False") for b in probability.bindings
+        for side,token in (("YES",b.yes_token_id),("NO",b.no_token_id)))
+    book = CurrentGlobalBookEpoch(assets=(),sell_assets=(CurrentGlobalSellAsset(family_key=probability.family_key,
+        bin_id=binding.bin_id,condition_id=binding.condition_id,gamma_market_id=f"gamma-{binding.condition_id}",
+        market_event_id=event.event_id,side="YES",token_id=binding.yes_token_id,curve=curve,captured_at_utc=at,
+        neg_risk=False),),asset_states=states,captured_at_utc=at,max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(asset_states=states,captured_at_utc=at))
+    scope = current_global_auction_scope_from_events((event,),captured_at_utc=at)
+    seen = []
+    def capture_preflight(winner,actuation,cut,authority):
+        seen.append((winner,actuation,cut,authority))
+        return global_batch_runtime.GlobalWinnerPreflight(status="BATCH_BLOCKED",reason="TEST_CAPTURED_ACTUATION")
+    with monkeypatch.context() as inputs:
+        inputs.setattr(global_batch_runtime,"scan_current_global_auction_scope",lambda **_:scope)
+        inputs.setattr(global_batch_runtime,"current_venue_auction_identity",lambda *_a,**_k:book.witness_identity)
+        result = global_batch_runtime.process_current_global_batch((event,),decision_time=at,world_conn=forecast_conn,
+            forecast_conn=forecast_conn,trade_conn=trade,payload_reader=lambda e: json.loads(e.payload_json),
+            prepare_event=callbacks["prepare_event"],prepare_held_event=callbacks["prepare_held_event"],
+            actuate_winner=lambda *_: pytest.fail("no venue actuation here"),stamp_receipt=lambda r: r,
+            venue_submit_count=lambda: 0,current_execution=lambda c,_: book.execution_authority(c,checked_at_utc=at),
+            current_time_provider=lambda: at,current_book_epoch_provider=lambda probabilities,_cut: (
+                {key: rebind(w) for key,w in probabilities.items()},book),
+            current_capital_limit_resolver=lambda *_: Decimal("100"),preflight_winner=capture_preflight,
+            actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+                lambda *_: pytest.fail("preflight is captured, never actuated")))
+    assert seen, {key: value.reason for key,value in result.receipts.items()}
+    winner,actuation,_cut,authority = seen[-1]
+    assert isinstance(actuation.decision.candidate,GlobalSingleOrderSellCandidate)
+    assert actuation.auction_receipt_ref is not None
+    return winner,actuation,authority,binding
+
+
+def _install_held_sell_venue(monkeypatch,*,actuation,bid=".94"):
+    """The venue boundary only: Gamma/CLOB market metadata, the raw book and the
+    targeted CTF balance, each answering exactly what the selected SELL claims."""
+    candidate = actuation.decision.candidate
+    token = candidate.token_id
+    _install_global_jit_market_authority_fetches(monkeypatch,condition_id=candidate.condition_id,
+        token_id=token,side="YES",tick=".01",min_order_size="1",fee_rate=0.0)
+    class Clob:
+        def __init__(self,**_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self,*_args): return False
+        def get_orderbook_snapshots(self,tokens,*,timeout):
+            assert tokens == [token]
+            return {token:{"asset_id":token,"tick_size":".01","min_order_size":"1",
+                "bids":[{"price":bid,"size":"10"}],"asks":[]}}
+        def get_held_clob_market_info(self,condition_id,*,timeout=None):
+            return {"condition_id":condition_id,"clobTokenIds":[token,f"other-{token}"],"accepting_orders":True,
+                "enable_order_book":True,"archived":False,"closed":False,"active":True,"tick_size":".01",
+                "min_order_size":"1","neg_risk":False}
+        def get_ctf_collateral_payload(self,*,token_ids):
+            assert token_ids == [token]
+            return {"pusd_balance_micro":1_000_000_000,"pusd_allowance_micro":1_000_000_000,
+                "usdc_e_legacy_balance_micro":0,"ctf_token_balances_units":{token:10_000_000},
+                "ctf_token_allowances_units":{token:10_000_000},"authority_tier":"CHAIN","ctf_token_scope":"targeted"}
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient",Clob)
+    monkeypatch.setattr(era,"_GLOBAL_PREFLIGHT_CLOB_CLIENTS",{})
+
+
+def _hko_pinned_day0_sell(tmp_path,monkeypatch):
+    """The real HKO producer, then a newer deterministic wave without its ENS
+    shape so the public reader pins the complete carrier; a Day0 SELL prepared
+    from that pinned carrier (POSTERIOR_PREDICTIVE_MEAN, its own Day0 exit
+    authority) and the actual adapter hooks."""
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+    from src.engine.qkernel_spine_bridge import sell_action_authority_identity
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    from src.state.db import init_schema_trade_only
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high",prior_hour=6)
+    fixture.conn.execute("PRAGMA journal_mode=WAL")
+    capture, decision = fixture.cut+_dt.timedelta(minutes=1), fixture.cut+_dt.timedelta(minutes=2)
+    fixture.sql_clock[0] = capture
+    write_manifest_to_db(fixture.conn,build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(fixture.artifact_path,
+        request=replace(fixture.anchor_request,run=fixture.request.source_cycle_time+_dt.timedelta(hours=6)),
+        metric="high",source_available_at=capture,captured_at=capture,
+        product_metadata={"city":"Hong Kong","target_date":"2026-09-30"}))
+    fixture.conn.commit()
+    class ClockType(type):
+        def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+    class ReaderClock(_dt.datetime,metaclass=ClockType):
+        @classmethod
+        def now(cls,tz=None): return fixture.cut.astimezone(tz) if tz else fixture.cut.replace(tzinfo=None)
+    monkeypatch.setattr(reader,"datetime",ReaderClock)
+    pinned = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
+        target_date="2026-09-30",temperature_metric="high",decision_time=decision,raw_input_hwm_conn=fixture.conn)
+    assert pinned.ok and pinned.bundle.posterior_id == fixture.result.posterior_id, pinned.reason_code
+    observed = dict(fixture.conn.execute("SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone())
+    event = build_day0_extreme_updated_event(observation=observation_instant_row_to_day0_observation(observed,metric="high"),
+        settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=decision,
+        received_at=decision.isoformat())
+    held = era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
+        topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=decision,
+        max_age=_dt.timedelta(seconds=30),allow_unobserved_day0_replacement=False,
+        allow_provisional_day0_replacement=True,probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+        pinned_complete_bundle=pinned.bundle,raw_input_hwm_conn=fixture.conn)
+    witness = held.probability_witness
+    binding = witness.bindings[0]
+    curve = ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
+        levels=(BidBookLevel(price=Decimal(".60"),size=Decimal("10")),),fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+    proposal,mode,fill,fill_source,rest = global_sell_execution_terms(curve,capacity=Decimal("10"))
+    candidate = GlobalSingleOrderSellCandidate(candidate_id="pinned-sell",family_key=witness.family_key,
+        bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
+        position_id="position-1",held_shares=Decimal("10"),probability_witness_identity=witness.witness_identity,
+        book_snapshot_id="book",book_captured_at_utc=decision,execution_curve_identity=executable_curve_identity(curve),
+        ledger_snapshot_id="ledger",executable_sell_curve=curve,resolution_identity=witness.resolution_identity,
+        neg_risk=False,proposal_sell_curve=proposal,execution_mode=mode,fill_probability=fill,
+        fill_probability_source=fill_source,rest_deadline_minutes=rest,
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",exit_authority_status=held.day0_exit_authority_status,
+        exit_authority_reason=held.day0_exit_authority_reason,
+        sell_action_authority_identity=sell_action_authority_identity(family_key=witness.family_key,
+            probability_witness_identity=witness.witness_identity,status=held.day0_exit_authority_status,
+            reason=held.day0_exit_authority_reason))
+    actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=witness,
+        decision=SimpleNamespace(candidate=candidate),actuation_identity="pinned-sell-actuation")
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    init_schema_trade_only(trade)
+    ro = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
+    ro.row_factory = sqlite3.Row
+    ro.execute("PRAGMA query_only=ON")
+    monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",None)
+    monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",{})
+    monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",{})
+    hooks = []
+    with monkeypatch.context() as batch:
+        batch.setattr(global_batch_runtime,"process_current_global_batch",
+            lambda events,**callbacks: hooks.append(callbacks) or SimpleNamespace(
+                events=tuple(events),winner_event_id=None,receipts={}))
+        era.event_bound_live_adapter_from_trade_conn(trade,get_current_level=lambda: era.RiskLevel.GREEN,
+            forecast_conn=ro,topology_conn=ro,calibration_conn=ro,live_cap_conn=trade,
+            executor_submit=lambda *a,**k: pytest.fail("executor must never run"),
+        ).process_global_batch((event,),decision)
+    namespace = inspect.getclosurevars(hooks[-1]["preflight_winner"]).nonlocals["probability_cache_namespace"]
+    victim = int(json.loads(fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+        (fixture.result.posterior_id,)).fetchone()[0])["bayes_precision_fusion"]["current_value_serving"]
+        ["icon_global"]["raw_model_forecast_id"])
+    return SimpleNamespace(fixture=fixture,decision=decision,event=event,held=held,witness=witness,
+        actuation=actuation,trade=trade,ro=ro,callbacks=hooks[-1],namespace=namespace,victim=victim)
+
+
+def test_consumed_proof_refusal_routes_match_every_actual_inner_producer(tmp_path,monkeypatch,_hko_clock_native_sources):
+    """Completeness: the route table's inner prefixes are the reason prefixes the
+    actual bundle readers return for a consumed-proof refusal. Each reader runs
+    against a deleted consumed row; its refusal, under each outer wrapper that
+    carries that reader, must classify as evicting. A new inner reason shape
+    fails here instead of being silently missed by the eviction."""
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    case = _hko_pinned_day0_sell(tmp_path,monkeypatch)
+    conn, decision = case.fixture.conn, case.decision
+    try:
+        conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(case.victim,))
+        conn.commit()
+        hwm.clear_consumed_proof_memo()
+        reader._LIVE_GRADE_MEMO.clear()
+        kwargs = dict(city="Hong Kong",target_date="2026-09-30",temperature_metric="high",decision_time=decision)
+        produced = {
+            # The ordinary current bundle (what GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED wraps).
+            "current": reader.read_replacement_forecast_bundle(conn,baseline_bundle=None,
+                readiness=latest_replacement_readiness(conn,city="Hong Kong",target_date="2026-09-30",
+                    temperature_metric="high",decision_time=decision),
+                require_baseline_bundle=False,enforce_raw_input_hwm=True,raw_input_hwm_conn=conn,
+                authority_purpose=reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION,**kwargs).reason_code,
+            # The pinned carrier: held continuity, then the pinned posterior's own bundle read.
+            "pinned_continuity": reader.read_prior_complete_replacement_forecast_bundle(conn,
+                raw_input_hwm_conn=conn,**kwargs).reason_code,
+            "pinned_bundle": reader.read_pinned_replacement_forecast_bundle(conn,
+                posterior_id=case.fixture.result.posterior_id,raw_input_hwm_conn=conn,**kwargs).reason_code,
+        }
+        wraps = {
+            "current": ("GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:",
+                ("GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:",
+                 "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:")),
+            "pinned_continuity": ("GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:",
+                ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:",)),
+            "pinned_bundle": ("GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:",
+                ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:",)),
+        }
+        covered = set()
+        for producer, inner_reason in produced.items():
+            assert "current_value_serving_consumed_proof_unverifiable" in inner_reason, (producer,inner_reason)
+            wrapper, outers = wraps[producer]
+            for outer in outers:
+                reason = outer + wrapper + inner_reason
+                assert era._global_preflight_consumed_proof_invalid(reason), (producer,reason)
+                covered.add(next(route for route in _CONSUMED_PROOF_ROUTES
+                    if reason.startswith(route[0]+route[1])))
+        assert covered == set(_CONSUMED_PROOF_ROUTES) == set(era._CONSUMED_PROOF_REFUSAL_ROUTES)
+    finally:
+        case.ro.close()
+        case.trade.close()
+        conn.close()
+
+
+@pytest.mark.parametrize("route",("dedicated_sell","actual_nested_preflight"))
+def test_a_consumed_row_lost_between_the_pinned_reads_evicts(tmp_path,monkeypatch,route,_hko_clock_native_sources):
+    """Round-5, fourth route: the pinned carrier re-proves the consumed rows in
+    held continuity and again in the pinned posterior's own bundle read. A row
+    lost between the two reads reaches preflight as GLOBAL_SELL_CURRENT_AUTHORITY_
+    FAILED:ValueError:GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:
+    REPLACEMENT_RAW_INPUT_HWM:basis=... (the plain prefix, not PINNED_RAW). The
+    actual dedicated SELL and the actual nested preflight both evict; restored,
+    the same SELL is healthy again."""
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    case = _hko_pinned_day0_sell(tmp_path,monkeypatch)
+    conn, trade = case.fixture.conn, case.trade
+    columns = [r[1] for r in conn.execute("PRAGMA table_xinfo(raw_model_forecasts)") if r[6] == 0]
+    saved = tuple(conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(case.victim,)).fetchone())
+    ro = case.ro
+    def clear():
+        hwm.clear_consumed_proof_memo()
+        reader._LIVE_GRADE_MEMO.clear()
+    def dedicated():
+        return era._submit_current_global_sell(case.event,decision_time=case.decision,global_actuation=case.actuation,
+            trade_conn=trade,global_claim_conn=trade,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+            preflight_only=True,preflight_receipt=None)
+    try:
+        clear()
+        healthy = dedicated()
+        # The pinned carrier and q replay pass; this SELL then stops at wealth.
+        assert healthy.reason == ("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+            "GLOBAL_PREFLIGHT_WEALTH_ECONOMIC_IDENTITY_MISSING"), healthy.reason
+        for use in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
+            era._store_global_probability_family_cache(case.namespace,family_key=case.witness.family_key,
+                event_id=case.event.event_id,family_binding_hash="binding",prepared=case.held,probability_use=use)
+        fired = []
+        def delete_before_second_read(sql):
+            if not fired and " ".join(sql.upper().split()).startswith(
+                    "SELECT * FROM FORECAST_POSTERIORS WHERE POSTERIOR_ID ="):
+                fired.append(sql)
+                conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(case.victim,))
+                conn.commit()
+        clear()
+        ro.set_trace_callback(delete_before_second_read)
+        try:
+            if route == "dedicated_sell":
+                reason = dedicated().reason
+                assert era._evict_superseded_global_probability_family_cache(case.namespace,reason=reason,
+                    actuation=case.actuation)
+            else:
+                result = case.callbacks["preflight_winner"](case.event,case.actuation,case.decision,SimpleNamespace())
+                assert result.status == "BATCH_BLOCKED", result
+                reason = result.reason
+        finally:
+            ro.set_trace_callback(None)
+        assert fired
+        assert reason.startswith("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+            "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+            "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:"), reason
+        assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
+        conn.execute(f"INSERT INTO raw_model_forecasts ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",saved)
+        conn.commit()
+        clear()
+        assert dedicated().reason == healthy.reason
+        assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    finally:
+        ro.close()
+        trade.close()
+        conn.close()
 
 
 @pytest.mark.parametrize("metric",("high","low"))
