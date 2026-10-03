@@ -12892,8 +12892,8 @@ The nine required residuals have explicit deferred dispositions, not waivers:
 - test_tigge_registered_in_source_registry: experimental expectation versus
   current primary policy baseline-fixture candidate; defer policy audit.
 - test_account_truth_deadline_and_page_limit_fail_closed_with_bounded_calls:
-  two page calls versus one remains a named unresolved current safety boundary;
-  baseline equality is not harmlessness, and no deadline law is relaxed.
+  initially deferred as an unresolved call boundary; the final independent
+  controlled-fake trace below refutes that total-call expectation, not the gates.
 - test_final_sdk_boundary_rejects_subminimum_fak_buy_below_one_dollar:
   placeholder authority rejects earlier than its expected final price error;
   defer exact valid-envelope fixture/SDK boundary audit, retain both gates.
@@ -12914,3 +12914,62 @@ Private config linkage is removed before commit; production configuration stays
 d7. Delivery must preserve the three tested source/test hashes and prove actual
 ingest/component boot identity after normal reload. The original probability
 lead-to-profit goal remains incomplete regardless of loader or liveness success.
+
+### Final task-branch checkpoint: loaded repair and bounded remaining proof
+
+Source fix78e14900203e226a804ff015c0ecbb8af9d9123b landed normally and the one
+normal loader returned rc0. Main35832 started19:17:03 with loaded stamp
+19:17:04.044376Z. Ingest34659 and forecast34706 report fixed boot SHA78e;
+resident34988 is forecast's new child. New cwd/source paths and canonical
+WORLD/FORECAST/TRADE handles were checked; config remainsd7. Independent
+poststamp receipt899690 at19:19:32 (cut19:19:02) has complete universe245/
+scope/held coverage and a matching canonical hash. Hong Kong HIGH rejects
+SELL_BOOK_NO_BID and LOW rejects SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE; fresh
+monitor HOLD and loaded identity do not prove a profitable SELL. Guard reset
+was natural; the selected read-only getter again returned None at19:59:11Z.
+No second loader or appearance-only reload is performed for this checkpoint.
+
+Natural waiting-family plus new committed-source immediate redecision has not
+yet been bound to a production event. That postload proof remains pending;
+private before/after and concurrency acceptance are not relabeled production
+success. The next safe action is observation of the next normal qualifying
+source event through waiting owner/timer, enqueue/CAS and current q/consumer,
+without generating a source event, claim, fetch, cycle or venue action.
+
+The V2 account-truth call boundary is now refuted: max_pages1 applies separately
+to orders and trades, so two total calls are lawful. Three private actual-source
+controlled HTTP-fake checks pass: expired deadline makes zero calls; one page
+per endpoint makes two with typed cap; a response crossing10.1 to10.2 records
+deadline error and prevents the second surface HTTP. sqlite.connect was forbidden.
+This is not a pytest suite PASS: its exact pytest attempts were blocked before
+test bodies by schema-child missing private config. The placeholder-envelope
+minimum-notional branch remains unexercised behind bound-envelope authority.
+V2 is CLOB/account truth, not weather-source clock. Required722PASS/9 baseline
+FAIL remains unchanged; no source/test waiver or global clean claim is made.
+
+Public source semantics were checked for exact Oct3 Gamma market5170437/CID
+0x3d57fc01737f08e7e096ec6b7880a2bb912ea8163f01afcafd9e702d62ab415a:
+YES/NO identities match; question/title28°C and canonical point28 match. The
+description names finalized HKO Daily Extract Absolute Daily Max with0.1°C
+source precision, not WU/VHHH; it supplies no decimal endpoints or floor clause.
+Intraday HKO is provisional and revisable; age alone does not independently
+prove final-source authority. Earlier28.9 floors28 in current code, without a
+threshold crossing; the29 spot fetched06:05:01 followed the last legal06:04:59
+window. Neither observation proves an independent venue rounding rule.
+
+One authorized historical pair checked19:50:26Z preserves HKO official Oct1
+HIGH33.6/LOW28.3 from HTTP200 DailyExtract_202610.xml. Exact Oct1 Gamma CID
+0xa359b4e307d3878fc0a527d102dece6cd91f08d13d7c5b986e25520afed6c3e2
+returned403 once without retry, so independent venue winner/floor remains
+UNKNOWN despite internal33. Existing artifacts are
+/tmp/zeus-hko-oct1-public-pair.yeksWJ/receipt.json and
+hko_dailyExtract_202610_response.json; tool-transcribed body is not wire-byte
+hash proof. No canonical write or forced weather pipeline occurred. The next
+safe semantic step requires an independently accessible resolved venue pair
+and its matching official final source, not inference from internal output.
+
+Physical/source proof unknowns, fresh-consumer gaps and baseline dispositions
+remain explicit. Root does not mark the original goal complete or source-all-
+clear. This checkpoint is committed/pushed only to the unfinished task branch;
+live remains source78 with no new loader. Preserve that remote branch while
+the root-managed temporary tree is archived after clean/handle checks.
