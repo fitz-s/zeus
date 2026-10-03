@@ -589,7 +589,7 @@ def refresh_unresolved_reconcile_findings(
                 )
             )
             continue
-        finding = _append_linkable_trade_fact_if_missing_isolated(
+        finding = _append_linkable_trade_fact_if_missing(
             conn,
             command,
             raw,
@@ -868,7 +868,7 @@ def run_reconcile_sweep(
                 )
             )
             continue
-        finding = _append_linkable_trade_fact_if_missing_isolated(
+        finding = _append_linkable_trade_fact_if_missing(
             conn,
             command,
             raw,
@@ -5171,8 +5171,10 @@ def _resolve_open_trade_findings(
          WHERE kind = 'unrecorded_trade'
            AND subject_id = ?
            AND resolved_at IS NULL
+           AND COALESCE(json_extract(evidence_json, '$.reason'), '')
+               NOT IN (?, ?)
         """,
-        (trade_id,),
+        (trade_id, *_ENTRY_FILL_STRANDING_REASONS),
     ).fetchall()
     for row in rows:
         resolve_finding(
@@ -5795,30 +5797,34 @@ def reconcile_persisted_terminal_late_entry_fills(
     return summary
 
 
-def _append_linkable_trade_fact_if_missing_isolated(
-    conn: sqlite3.Connection,
-    command: Mapping[str, Any],
-    raw: Mapping[str, Any],
-    trade_id: str,
-    observed_at: datetime,
-    **kwargs: Any,
-) -> ReconcileFinding | None:
-    """Append one trade fact; an unprovable increment rolls back only itself.
+_ENTRY_FILL_STRANDING_REASONS = (
+    "entry_increment_unprovable",
+    "entry_fill_after_reduction_not_folded",
+)
 
-    The rollback leaves no projection of the leg, so the unprovable increment
-    is recorded as a durable ``unrecorded_trade`` finding after it: the
-    reconcile latch stays set, refresh has the trade as its subject, and
-    admission refuses increments while the leg is unfolded.  The ordering
-    that made it unprovable is immutable, so this does not self-heal; it
-    stays visible until resolved.  Every other exception aborts the sweep.
+
+def _project_entry_fill_or_record_stranding(
+    conn: sqlite3.Connection,
+    *,
+    trade_id: str,
+    raw: Mapping[str, Any],
+    context: ReconcileContext,
+    **projection: Any,
+) -> None:
+    """Fold one entry fill; an unprovable increment rolls back only the fold.
+
+    The venue trade fact and command event are already durable, so the
+    finding's subject (the venue trade id) joins its command market and the
+    governor quarantines that market only.  The clock ordering that made the
+    fold unprovable is immutable: the finding stays open until resolved, and
+    admission refuses increments while the leg is unfolded.
     """
 
-    savepoint = f"sp_linkable_trade_{uuid.uuid4().hex[:12]}"
+    command = projection["command"]
+    savepoint = f"sp_entry_fill_projection_{uuid.uuid4().hex[:12]}"
     conn.execute(f"SAVEPOINT {savepoint}")
     try:
-        finding = _append_linkable_trade_fact_if_missing(
-            conn, command, raw, trade_id, observed_at, **kwargs
-        )
+        _ensure_entry_fill_position_event(conn, context=context, **projection)
     except EntryIncrementUnprovable as exc:
         conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
@@ -5829,25 +5835,25 @@ def _append_linkable_trade_fact_if_missing_isolated(
             command.get("command_id"),
             exc,
         )
-        return record_finding(
+        record_finding(
             conn,
             kind="unrecorded_trade",
             subject_id=trade_id,
-            context=kwargs.get("context", "periodic"),
+            context=context,
             evidence={
                 "exchange_trade": dict(raw),
                 "local_command": _command_evidence(command),
                 "reason": "entry_increment_unprovable",
                 "error": str(exc),
             },
-            recorded_at=observed_at,
+            recorded_at=projection["observed_at"],
         )
+        return
     except BaseException:
         conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
         raise
     conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-    return finding
 
 
 def _append_linkable_trade_fact_if_missing(
@@ -6022,8 +6028,10 @@ def _append_linkable_trade_fact_if_missing(
                     existing_event = None
             elif str(command.get("state") or "") == "FILLED" and state == "CONFIRMED":
                 existing_event = "FILL_CONFIRMED"
-            _ensure_entry_fill_position_event(
+            _project_entry_fill_or_record_stranding(
                 conn,
+                trade_id=trade_id,
+                raw=raw,
                 command=command,
                 venue_order_id=order_id,
                 filled_size=filled_size,
@@ -6176,8 +6184,10 @@ def _append_linkable_trade_fact_if_missing(
         trade_state=state,
     )
     if event is None:
-        _ensure_entry_fill_position_event(
+        _project_entry_fill_or_record_stranding(
             conn,
+            trade_id=trade_id,
+            raw=raw,
             command=latest,
             venue_order_id=order_id,
             filled_size=filled_size,
@@ -6227,8 +6237,10 @@ def _append_linkable_trade_fact_if_missing(
         }:
             return finality_finding
         event = None
-    _ensure_entry_fill_position_event(
+    _project_entry_fill_or_record_stranding(
         conn,
+        trade_id=trade_id,
+        raw=raw,
         command=latest,
         venue_order_id=order_id,
         filled_size=filled_size,
@@ -7036,11 +7048,26 @@ def _ensure_entry_fill_position_event(
             if folded_shares is None or shares_dec > folded_shares + Decimal(
                 "0.000001"
             ):
+                # Subject = the command's newest confirmed venue trade, so the
+                # finding joins its command market and quarantines it alone.
+                latest_trade = conn.execute(
+                    """
+                    SELECT trade_id
+                      FROM venue_trade_facts
+                     WHERE command_id = ?
+                       AND state = 'CONFIRMED'
+                     ORDER BY trade_fact_id DESC
+                     LIMIT 1
+                    """,
+                    (str(command.get("command_id") or ""),),
+                ).fetchone()
                 record_finding(
                     conn,
                     kind="unrecorded_trade",
                     subject_id=(
-                        f"entry_fill_unfolded:{command.get('command_id')}"
+                        str(latest_trade["trade_id"])
+                        if latest_trade is not None
+                        else f"entry_fill_unfolded:{command.get('command_id')}"
                     ),
                     context=context,
                     evidence={

@@ -3330,6 +3330,47 @@ def _entry_duplicate_same_token_component(
                 "existing_phase": "" if phase is None else str(phase),
             }
 
+    if increment_position_id and _table_exists(conn, "venue_commands"):
+        # A CANCELLED/EXPIRED increment (post-only GTC partial then cancel, or
+        # an expired FAK remainder) is outside the open/FILLED scan above but
+        # still owns its filled legs; they must be folded like any other.
+        from src.state.fill_dedup import economic_trade_facts_for_command
+
+        for row in conn.execute(
+            """
+            SELECT command_id, state
+              FROM venue_commands
+             WHERE position_id = ?
+               AND intent_kind = 'ENTRY'
+               AND side = 'BUY'
+               AND state IN ('CANCELLED', 'EXPIRED')
+            """,
+            (increment_position_id,),
+        ).fetchall():
+            terminal_command_id = str(row[0])
+            if not any(
+                _positive_decimal_or_none(fact.get("filled_size")) is not None
+                for fact in economic_trade_facts_for_command(
+                    conn, terminal_command_id
+                )
+            ):
+                continue
+            folded = _entry_command_confirmed_fills_folded_component(
+                conn,
+                command_id=terminal_command_id,
+                position_id=increment_position_id,
+            )
+            if not folded.get("allowed"):
+                return {
+                    "component": "entry_duplicate_same_token",
+                    "allowed": False,
+                    "reason": "entry_command_confirmed_fill_not_folded",
+                    "existing_command_id": terminal_command_id,
+                    "existing_position_id": increment_position_id,
+                    "existing_command_state": str(row[1]),
+                    "fill_folding": folded,
+                }
+
     return {
         "component": "entry_duplicate_same_token",
         "allowed": True,

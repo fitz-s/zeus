@@ -13918,11 +13918,12 @@ def test_increment_reobservation_with_exit_after_its_fill_is_typed_and_deferred(
         "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
     ).fetchone()
     assert dict(after) == dict(before)
-    # The deferred leg left no partial projection behind ...
+    # Venue truth is kept (the trade fact joins the command market) while the
+    # projection fold is rolled back ...
     assert conn.execute(
         "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id='trade-top-up-2'"
-    ).fetchone()[0] == 0
-    # ... but a durable finding keyed by the trade: the latch stays set and
+    ).fetchone()[0] == 1
+    # ... and a durable finding keyed by the trade: the latch stays set and
     # refresh has a subject.  The clocks that made it unprovable are immutable,
     # so a later sweep keeps it open instead of silently converging.
     from src.execution.exchange_reconcile import list_unresolved_findings
@@ -13945,6 +13946,7 @@ def test_increment_reobservation_with_exit_after_its_fill_is_typed_and_deferred(
         f.subject_id for f in list_unresolved_findings(conn)
         if f.kind == "unrecorded_trade"
     ].count("trade-top-up-2") == 1
+    _assert_finding_quarantines_only_its_market(conn, "trade-top-up-2")
 
 
 def test_entry_leg_after_reduction_is_preserved_and_recorded_unfolded(conn):
@@ -14010,10 +14012,46 @@ def test_entry_leg_after_reduction_is_preserved_and_recorded_unfolded(conn):
     assert dict(after) == dict(before)
     stranded = [
         f for f in list_unresolved_findings(conn)
-        if f.kind == "unrecorded_trade"
-        and f.subject_id == "entry_fill_unfolded:cmd-m5"
+        if f.kind == "unrecorded_trade" and f.subject_id == "trade-initial"
     ]
     assert len(stranded) == 1
     assert json.loads(stranded[0].evidence_json)["reason"] == (
         "entry_fill_after_reduction_not_folded"
     )
+    _assert_finding_quarantines_only_its_market(conn, "trade-initial")
+
+
+def _assert_finding_quarantines_only_its_market(conn, subject_id):
+    """A stranding finding scopes to its command market: that market is
+    denied, an unrelated market still admits, and the book is not reduce-only."""
+
+    from src.risk_allocator.governor import (
+        AllocationDenied,
+        CapPolicy,
+        assert_global_allocation_allows,
+        classify_reconcile_finding_scope,
+        clear_global_allocator,
+        refresh_global_allocator,
+    )
+    from tests.test_governor_scope_lattice import _intent
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+    assert YES_TOKEN in scope.scoped_markets
+    assert scope.systemic_count == 0
+    snap = refresh_global_allocator(
+        conn,
+        ledger={"current_drawdown_pct": 0.0, "risk_level": "GREEN"},
+        heartbeat={"health": "HEALTHY"},
+        ws_status={"m5_reconcile_required": False},
+        cap_policy=CapPolicy(),
+    )
+    try:
+        assert snap["state"]["systemic_reconcile_finding_count"] == 0
+        assert snap["reduce_only"] is False
+        with pytest.raises(AllocationDenied):
+            assert_global_allocation_allows(_intent(market=YES_TOKEN, size=10))
+        assert assert_global_allocation_allows(
+            _intent(market="unrelated-market", size=10)
+        ).allowed
+    finally:
+        clear_global_allocator()

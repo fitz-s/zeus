@@ -2774,3 +2774,49 @@ def test_increment_refused_while_a_confirmed_leg_is_not_folded(mem_db):
     pending = _increment(mem_db)
     assert pending["allowed"] is False
     assert pending["fill_folding"]["reason"] == "entry_command_fill_not_confirmed"
+
+
+def test_cancelled_partial_increment_with_unfolded_leg_refuses_increment(mem_db):
+    """A post-only GTC increment partially filled then CANCELLED (or a FAK
+    remainder EXPIRED) still owns its filled legs: an unfolded confirmed leg
+    keeps increments closed even though the command is terminal."""
+
+    _seed_partially_exited_position(mem_db)
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'exited-position', ?, 'ENTRY', 'BUY',
+                   'order-cmd-cancelled', 'CANCELLED',
+                   '2026-10-02T13:00:00+00:00', '2026-10-02T13:05:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO execution_fact
+           (intent_id, position_id, command_id, order_role, filled_at, posted_at,
+            fill_price, shares, terminal_exec_status, venue_status)
+           VALUES ('exited-position:entry:cmd-cancelled', 'exited-position',
+                   'cmd-cancelled', 'entry', '2026-10-02T13:01:00+00:00',
+                   '2026-10-02T13:00:00+00:00', 0.2, 2.0, 'partial', 'PARTIAL')"""
+    )
+    mem_db.execute(
+        "UPDATE position_current SET shares=2.45, cost_basis_usd=0.4765 "
+        "WHERE position_id='exited-position'"
+    )
+    _confirm_trade(mem_db, "cmd-cancelled", 2.0, trade_id="trade-c-1")
+    mem_db.commit()
+    assert _increment(mem_db)["allowed"] is True
+
+    _confirm_trade(mem_db, "cmd-cancelled", 1.0, trade_id="trade-c-2")
+    mem_db.commit()
+    blocked = _increment(mem_db)
+    assert blocked["allowed"] is False
+    assert blocked["reason"] == "entry_command_confirmed_fill_not_folded"
+    assert blocked["existing_command_id"] == "cmd-cancelled"
+    assert blocked["existing_command_state"] == "CANCELLED"
+
+    mem_db.execute(
+        "UPDATE venue_commands SET state='EXPIRED' WHERE command_id='cmd-cancelled'"
+    )
+    mem_db.commit()
+    assert _increment(mem_db)["reason"] == "entry_command_confirmed_fill_not_folded"
