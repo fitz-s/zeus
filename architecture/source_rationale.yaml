@@ -350,7 +350,8 @@ files:
     zone: K2_runtime
     authority_role: resident_materialization_transport
     why: One resident interpreter executes the existing CLI request pipeline and deadlines. Durable queue and posterior identities remain authority; timeout or reply
-      loss closes the process and leaves retry to the queue.
+      loss closes the process and leaves retry to the queue. Each invocation carries its claim's identity-lease descriptors over SCM_RIGHTS and the worker
+      acknowledges before it computes, so the executor holds the lease for exactly as long as it computes.
     downstream: []
   src/AGENTS.md:
     zone: docs
@@ -1521,6 +1522,12 @@ files:
     - src/data/bayes_precision_fusion_download.py
     - src/data/replacement_current_value_serving.py
     - src/data/replacement_forecast_materializer.py
+  src/data/materialization_execution_lease.py:
+    zone: K2_runtime
+    authority_role: materialization_execution_lease
+    why: "The only exclusion primitive between materialization owners: one flock lease per request identity under inflight/leases, acquired all-or-none in sorted order. Liveness is the lease, never a clock; an unreadable lease is UNKNOWN and never reclaimed. Carries no probability authority."
+    downstream:
+    - src/data/replacement_forecast_live_materialization_queue.py
   src/data/materialization_block_evidence.py:
     zone: K2_runtime
     authority_role: materialization_block_evidence
