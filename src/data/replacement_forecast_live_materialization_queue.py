@@ -5142,15 +5142,20 @@ def _apply_request_claim_read_plan(
             },
         )
         processed.append(str(receipt))
-    batch_path = (
-        _new_claim_batch(
+    batch_path, claimed, lease_reasons = (
+        _claim_available_slots(
             claim.request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME,
             claim.selected_files,
         )
         if claim.selected_files
-        else None
+        else (None, (), ())
     )
-    return replace(claim, batch_path=batch_path, processed_files=tuple(processed))
+    return replace(
+        claim, batch_path=batch_path, processed_files=tuple(processed),
+        claimed_count=len(claimed),
+        skipped_count=claim.skipped_count + len(claim.selected_files) - len(claimed),
+        seed_reasons=(*claim.seed_reasons, *lease_reasons),
+    )
 
 
 def _claim_request_files(batch_path: Path) -> tuple[Path, ...]:
@@ -5559,119 +5564,95 @@ class _ClaimLeaseUnknown(Exception):
     """A lease of the selected identity cannot be read: UNKNOWN, never free."""
 
 
-@dataclass
-class _LeasedSlot:
+@dataclass(frozen=True)
+class _ClaimSlot:
     source: Path
     body: bytes
     row: tuple[str, int, int, str]
     witness: dict[str, tuple[str, ...]]
-    leases: list[_lease.HeldLease]
 
 
-class _ClaimBuilder:
-    """Phase one of ``_claim_construction``: lease each slot, read nothing twice."""
+def _read_claim_slot(
+    source: Path, *, expected: tuple[str, int, int, str] | None,
+) -> _ClaimSlot:
+    """The exact bytes and identity of one selected request.
 
-    def __init__(self, inflight_path: Path) -> None:
-        self.inflight_path = inflight_path
-        self.slots: list[_LeasedSlot] = []
+    ``FileNotFoundError``: it left, changed from ``expected``, or (planned) has
+    no identity. ``ValueError``: an unplanned request without an identity.
+    """
 
-    @property
-    def leases(self) -> list[_lease.HeldLease]:
-        return [lease for slot in self.slots for lease in slot.leases]
-
-    def lease(
-        self, source: Path, *, expected: tuple[str, int, int, str] | None = None,
-    ) -> None:
-        """Hold ``source``'s identity leases, or raise and hold nothing new.
-
-        ``_ClaimIdentityOwned``: a live owner holds the identity.
-        ``FileNotFoundError``: the request left, changed from ``expected``, or
-        has no identity although it was planned. ``_ClaimLeaseUnknown``: a lease
-        cannot be read.
-        """
-
-        body = source.read_bytes()
-        info = source.stat()
-        row = (source.name, info.st_mtime_ns, info.st_size, hashlib.sha256(body).hexdigest())
-        if expected is not None and expected != row:
-            raise FileNotFoundError("planned request changed before its lease")
-        witness = _claim_identity_witness(_load_request_payload_for_coalescing(source) or {})
-        if witness is None:
-            if expected is not None:
-                raise FileNotFoundError("planned request identity changed before its lease")
-            raise ValueError(
-                f"materialization claim requires semantic/coalescing identity: {source.name}"
-            )
-        own = {lease.path for lease in self.leases}
-        try:
-            leases = _lease.acquire_all(
-                path for path in _witness_lease_paths(self.inflight_path, witness)
-                if path not in own
-            )
-        except OSError as exc:
-            raise _ClaimLeaseUnknown(source.name) from exc
-        if leases is None:
-            raise _ClaimIdentityOwned(source.name)
-        self.slots.append(_LeasedSlot(source, body, row, witness, leases))
-
-    def lease_each(
-        self,
-        sources: Sequence[Path],
-        *,
-        expected: Mapping[str, tuple[str, int, int, str]] | None = None,
-    ) -> int:
-        """Lease each slot it can; a slot owned elsewhere or gone is skipped alone."""
-
-        skipped = 0
-        for source in sources:
-            try:
-                self.lease(
-                    source, expected=None if expected is None else expected.get(source.name),
-                )
-            except (_ClaimIdentityOwned, _ClaimLeaseUnknown, FileNotFoundError):
-                skipped += 1
-        return skipped
+    body = source.read_bytes()
+    info = source.stat()
+    row = (source.name, info.st_mtime_ns, info.st_size, hashlib.sha256(body).hexdigest())
+    if expected is not None and expected != row:
+        raise FileNotFoundError("planned request changed before its lease")
+    # A rewrite after ``body`` was read changes the identity read here or fails
+    # the byte check under the lease; it never moves unread bytes.
+    witness = _claim_identity_witness(_load_request_payload_for_coalescing(source) or {})
+    if witness is None:
+        if expected is not None:
+            raise FileNotFoundError("planned request identity changed before its lease")
+        raise ValueError(
+            f"materialization claim requires semantic/coalescing identity: {source.name}"
+        )
+    return _ClaimSlot(source, body, row, witness)
 
 
 @contextmanager
-def _claim_construction(inflight_path: Path, *, prefix: str = ""):
-    """The one owner of a claim from first lease to handoff.
+def _claim_construction(
+    inflight_path: Path,
+    request_files: Sequence[Path],
+    *,
+    expected_records: Mapping[str, tuple[str, int, int, str]] | None = None,
+    prefix: str = "",
+):
+    """The one owner of a claim from its first lease to its handoff; yields the batch.
 
-    The caller leases its slots on the yielded builder (phase one). Then, still
-    inside this boundary: the claim metadata (protocol, leases, ordered
-    records) is written to hidden staging and published by rename, so no
-    scanner sees a claim it cannot type; each request is revalidated under its
-    lease and moved; directories are fsynced. On any exception every moved
-    request is renamed back (its lease is still held, so nobody else can take
-    it; a pathname a publisher re-took keeps our body for lease recovery), the
-    empty batch is removed, and only then are the leases released, in a
-    ``finally`` that no cleanup failure can skip. On success the caller holds
-    the leases (``_HELD_CLAIM_LEASES``) until ``_release_claim_batch``, and the
-    builder's ``batch_path`` names the claim (None when nothing was leased).
+    Every lane's claim goes through here. Steps: read each selected request;
+    acquire every identity lease of every slot in one sorted all-or-none call
+    (``_ClaimIdentityOwned`` when a live owner holds one, ``_ClaimLeaseUnknown``
+    when one cannot be read); create the batch and write its lease-v1 metadata
+    (protocol, leases, ordered records) before any request moves, so a
+    scanner never meets an untyped claim; revalidate each request's bytes under
+    the lease and move it; fsync. On any exception every moved request is
+    renamed back (its lease is still held, so nobody else can take it; a
+    pathname a publisher re-took keeps our body for lease recovery), the empty
+    batch is removed, and only then are the leases released, in a ``finally``
+    that no cleanup failure can skip. After the ``with`` body returns the caller
+    holds the leases (``_HELD_CLAIM_LEASES``) until ``_release_claim_batch``.
     """
 
-    builder = _ClaimBuilder(inflight_path)
-    builder.batch_path = None
-    moved: list[tuple[Path, Path]] = []
-    staging: Path | None = None
+    slots = [
+        _read_claim_slot(
+            source,
+            expected=None if expected_records is None else expected_records.get(source.name),
+        )
+        for source in request_files
+    ]
+    if not slots:
+        raise ValueError("materialization claim requires at least one request")
+    lease_paths = [
+        path for slot in slots for path in _witness_lease_paths(inflight_path, slot.witness)
+    ]
     try:
-        yield builder
-        if not builder.slots:
-            return
-        generation = uuid4().hex
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        name = f"{prefix}{stamp}{_LEASE_BATCH_MARK}{generation[:12]}.pid{os.getpid()}"
-        inflight_path.mkdir(parents=True, exist_ok=True)
-        staging = inflight_path / f".staging.{name}"
-        staging.mkdir()
-        _write_lease_claim_metadata(staging, builder.slots, generation)
-        batch_path = inflight_path / name
-        os.rename(staging, batch_path)
-        staging = None
-        builder.batch_path = batch_path
-        for slot in builder.slots:
+        leases = _lease.acquire_all(lease_paths)
+    except OSError as exc:
+        raise _ClaimLeaseUnknown(str(exc)) from exc
+    if leases is None:
+        raise _ClaimIdentityOwned(", ".join(slot.source.name for slot in slots))
+    generation = uuid4().hex
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    batch_path = inflight_path / (
+        f"{prefix}{stamp}{_LEASE_BATCH_MARK}{generation[:12]}.pid{os.getpid()}"
+    )
+    moved: list[tuple[Path, Path]] = []
+    try:
+        batch_path.mkdir()
+        _write_lease_claim_metadata(batch_path, slots, leases, generation)
+        for slot in slots:
             # Validate under the lease: the bytes moved are the bytes leased.
-            if slot.source.read_bytes() != slot.body or slot.source.stat().st_mtime_ns != slot.row[1]:
+            current = slot.source.read_bytes()
+            if current != slot.body or slot.source.stat().st_mtime_ns != slot.row[1]:
                 raise FileNotFoundError("request changed while its lease was taken")
             claimed = batch_path / slot.source.name
             os.replace(slot.source, claimed)
@@ -5680,8 +5661,10 @@ def _claim_construction(inflight_path: Path, *, prefix: str = ""):
                 raise FileNotFoundError("request changed during its move")
         _fsync_directory(batch_path)
         _fsync_directory(inflight_path)
-        for parent in {slot.source.parent for slot in builder.slots}:
+        for parent in {slot.source.parent for slot in slots}:
             _fsync_directory(parent)
+        with _HELD_CLAIM_LEASES_GUARD:
+            _HELD_CLAIM_LEASES[str(batch_path)] = leases
     except BaseException:
         try:
             for source, claimed in reversed(moved):
@@ -5689,16 +5672,11 @@ def _claim_construction(inflight_path: Path, *, prefix: str = ""):
                     _rename_back(claimed, source)
                 except OSError:
                     pass  # stays in the dead batch; lease recovery restores it
-            if builder.batch_path is not None:
-                _remove_empty_claim_batch(builder.batch_path)
-            if staging is not None:
-                _remove_empty_claim_batch(staging)
+            _remove_empty_claim_batch(batch_path)
         finally:
-            _lease.release(builder.leases)
-        builder.batch_path = None
+            _lease.release(leases)
         raise
-    with _HELD_CLAIM_LEASES_GUARD:
-        _HELD_CLAIM_LEASES[str(builder.batch_path)] = builder.leases
+    yield batch_path
 
 
 def _rename_back(claimed: Path, source: Path) -> None:
@@ -5716,7 +5694,10 @@ def _rename_back(claimed: Path, source: Path) -> None:
 
 
 def _write_lease_claim_metadata(
-    directory: Path, slots: Sequence[_LeasedSlot], generation: str,
+    directory: Path,
+    slots: Sequence[_ClaimSlot],
+    leases: Sequence[_lease.HeldLease],
+    generation: str,
 ) -> None:
     now = datetime.now(timezone.utc)
     records = [
@@ -5734,7 +5715,7 @@ def _write_lease_claim_metadata(
         "owner_generation": generation,
         "claimed_at": now.isoformat(),
         "owner_pid": os.getpid(),
-        "leases": sorted({lease.path.name for slot in slots for lease in slot.leases}),
+        "leases": sorted({lease.path.name for lease in leases}),
         "request_names": [record.name for record in records],
         "records": [
             {"slot": r.slot, "name": r.name, "identity": list(r.identity),
@@ -5831,15 +5812,52 @@ def _new_claim_batch(
     The caller owns the batch until ``_release_claim_batch``.
     """
 
-    with _claim_construction(inflight_path, prefix=prefix) as builder:
-        for source in request_files:
-            builder.lease(
-                source,
-                expected=None if expected_records is None else expected_records.get(source.name),
-            )
-    if builder.batch_path is None:
-        raise ValueError("materialization claim requires at least one request")
-    return builder.batch_path
+    with _claim_construction(
+        inflight_path, request_files, expected_records=expected_records, prefix=prefix,
+    ) as batch_path:
+        return batch_path
+
+
+_CLAIM_IDENTITY_LEASED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_IDENTITY_LEASED"
+_CLAIM_LEASE_UNKNOWN_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_LEASE_UNKNOWN"
+
+
+def _claim_available_slots(
+    inflight_path: Path, selected: Sequence[Path],
+) -> tuple[Path | None, tuple[Path, ...], tuple[str, ...]]:
+    """(batch, claimed sources, deferral reasons) for a flocked lane.
+
+    A slot whose identity a live owner leases, or whose lease is UNKNOWN,
+    defers alone; the rest are claimed in their planned order through the one
+    constructor. SCOPE: those slots. DRAIN: the owner releases (or dies and
+    its lease frees). RESET: the next claim acquires the lease.
+    """
+
+    claimable: list[Path] = []
+    reasons: list[str] = []
+    for source in selected:
+        try:
+            slot = _read_claim_slot(source, expected=None)
+            paths = _witness_lease_paths(inflight_path, slot.witness)
+            state, held = _lease.observe(paths)
+        except (FileNotFoundError, ValueError):
+            continue
+        _lease.release(held)
+        if state is _lease.LeaseState.HELD:
+            reasons.append(_CLAIM_IDENTITY_LEASED_REASON)
+        elif state is _lease.LeaseState.UNKNOWN:
+            reasons.append(_CLAIM_LEASE_UNKNOWN_REASON)
+        else:
+            claimable.append(source)
+    if not claimable:
+        return None, (), tuple(dict.fromkeys(reasons))
+    try:
+        batch = _new_claim_batch(inflight_path, claimable)
+    except _ClaimIdentityOwned:
+        return None, (), tuple(dict.fromkeys((*reasons, _CLAIM_IDENTITY_LEASED_REASON)))
+    except _ClaimLeaseUnknown:
+        return None, (), tuple(dict.fromkeys((*reasons, _CLAIM_LEASE_UNKNOWN_REASON)))
+    return batch, tuple(claimable), tuple(dict.fromkeys(reasons))
 
 
 _PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON = (
@@ -7651,20 +7669,19 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             )
         )
     selected = tuple(claimable[:limit])
-    batch_path = (
-        _new_claim_batch(inflight_path, selected)
-        if selected
-        else None
+    batch_path, claimed, lease_reasons = (
+        _claim_available_slots(inflight_path, selected) if selected else (None, (), ())
     )
+    seed_reasons = [*seed_reasons, *lease_reasons]
     return _MaterializationQueueClaim(
         request_path=request_path,
         batch_path=batch_path,
         processed_path=processed_path,
         failed_path=failed_path,
-        claimed_count=len(selected),
+        claimed_count=len(claimed),
         skipped_count=(
             len(clock_deferred) + identity_deferred + inflight_deferred
-            + timeout_retry_deferred
+            + timeout_retry_deferred + len(selected) - len(claimed)
             + max(len(claimable) - limit, 0)
         ),
         inflight_deferred_count=inflight_deferred,
