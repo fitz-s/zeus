@@ -13387,3 +13387,120 @@ and later audit preserves original temperature clocks. Metadata production and
 test-only timeline reviews remain APPROVE. This authorizes one normal FF/load
 for the bounded evidence repairs, not any source/ground activation, manual
 capture/reseed/action, guard clearing or claim that the original goal is done.
+
+### Landed432, normal pre-restart refusal and pending native drainage
+
+Source repair4328753ae33bca9972a4309298a32cc5af192c6d is normally FF-landed
+at origin/live and the live checkout; the task-only config link was removed,
+and live config SHA remains d7d28bd3. One normal loader starts21:31:41Z and
+returns rc1 before any component stop/restart: open positions31 and one
+nonterminal command5c6345fe3d774595 make continuous monitoring interruption
+unsafe. Log normal-loader.log SHA
+bfd63b15ab28674186fa940b9c87cb2e8a3cf3a8aeaacb6fa36efd65f7ca6879
+is retained in the final evidence directory. The loader itself releases its
+guard with restart_refused;21:38:19 actual getter is None. This is not loaded432:
+main35832/stamp78@19:17:04.044376, ingest34659/forecast34706 fixed boot78 and
+resident34988 continue on the canonical live cwd/DBs. No second loader, allow
+flag, manual guard/source/queue/venue action or forced process manipulation ran.
+
+The gate first rejects any nonterminal command before considering warm handoff;
+otherwise healthy open positions require durable pause and complete recent
+monitor/held-book evidence. Prior78 success proves that different handoff state,
+not an exception for today's normal resting order. The exact Taipei Oct4 HIGH
+ENTRY/GTC is ACKED at21:27:02 after creation21:26:57.105331, price.10/size5.
+C3 uses creation plus original20m, so its boundary is21:46:57.105331; actual
+21:43:40 scan1/cancel_set0 precedes that boundary. Source owner cadences remain
+C3 five minutes, rest screening90s, command recovery60s. No changed-code
+freshness gate was found to prevent CANCEL/reconciliation.
+
+Actual same-token book21:41:41 is bid.11/ask.16, valid through21:44:41. The
+normal rest screen reports one pull/cancel at21:44:17, and canonical command
+seq4 records CANCEL_REQUESTED21:44:17.011619. At21:45:00 it is CANCEL_PENDING,
+not terminal; the actual deploy obligation predicate still returns31/1. This
+proves normal owner progress, not final cancellation or restart permission.
+Next safe action is observe that exact command's native terminal evidence and
+zero-other-nonterminal predicate, then obtain root's decision for a changed-
+condition normal retry. Preserve current monitoring and all existing guards;
+do not infer a deadlock, force TTL, clear debt or claim all source proof loaded.
+
+Changed-condition observation, no mutation: exact command5c naturally reaches
+CANCELLED with seq6 CANCEL_ACKED21:45:14.647702, following the normal book-drift
+screen request, before its20m TTL. At21:48:49 the actual read-only deployment
+obligation predicate returns open positions30/nonterminal commands0/IDs[].
+This refutes an indefinite ACKED-order drain claim and supplies a narrow RESET
+fact for root's decision; it does not establish monitor/book handoff or loaded
+432. No retry has yet run, and the original rc1 remains recorded as refusal.
+
+### Changed-condition normal432 load and bounded remaining proof
+
+checked=2026-W40; basis=normal loader logs, actual component boot identities,
+canonical read-only events and exact cached response hashes;
+until=recheck-on-use. These are observations, not a freshness renewal rule.
+
+After root authorizes the changed-condition retry, a fresh21:50:51 read still
+has open positions30/nonterminal commands0; no other loader owns the path.
+One normal loader starts21:50:59 and returns rc0 (session35607), without allow
+flags, guard clearing, manual source/queue/venue actions or extra reloads.
+The retry log normal-loader-changed-condition-retry.log in the existing final
+evidence directory has SHA256
+0bcdde44917a7f477d4fb413f2df242906d8faf6e49770433ec80e40418c81fb.
+The first21:31 attempt's rc1 remains a real refusal, not retrospectively PASS.
+
+Actual new main28866 starts21:53:23 with loaded432 stamp
+21:53:24.160643; ingest21535 and forecast21547 start21:51:06 with fixed boot432,
+and resident23019/PPID21547 starts21:51:14. Live cwd and canonical DB file
+descriptors match, config remains d7d28bd3, and the old actors are gone.
+Independent21:57:24 proof has guard naturally None and poststamp receipt900389
+at21:56:54/cut21:56:23, explicit universe237 and complete scope/held/native
+coverage with three matching hashes. HK has no executable in-band bids; this
+does not prove trading profit or that every held probability is actionable.
+
+Normal poststamp NBM20Z capture at21:55:38 supplies the new metadata proof.
+The exact sidecar in raw_manifests/20261003T200000Z binds temperature entity
+e35be1335be04a4262aec2d956f4a96d95510aa22150114bdcbc5e1e94c65b2d,
+request9ce7cbf7a3be6126f57a2f11bd2b94f16daff738702d48dda13d01b37ca4ffcb
+and manifest6d0548b24bcd8943d3ea752af9e502615321eb8941a73f6ad2af2873e999a73c.
+Before/after NETWORK200 metadata captures independently rehash the same actual
+961-byte original body17fce5a5df2f0ce7994ffccd42932200c225be41f4193ebfb516c3382f45d2fb,
+fetched21:55:38.719974/.965441. The exact existing response file independently
+rehashes to the temperature SHA above,2039bytes/fetched21:55:38.846387.
+Three-body file relationship is closed without fetch, reconstruction, DB scan
+or copying. HTTP Date/Last-Modified, model modified and local fetched clocks
+remain separate; publisher-issued is UNKNOWN. File presence is not proof of
+canonical raw-artifact/posterior binding, which is not inferred here.
+
+The normal poststart log's eight probability-degraded positions are not eight
+new clock regressions. A22:06:57 actual cadence read still finds eight
+probability-only positions (all fresh quote flags at that cut); indexed
+preload/current MONITOR_REFRESHED comparisons at22:07:20 establish:
+
+- Buenos Aires fbf05ad1-d65 and7ede0ebb-7b8: ICON_GLOBAL consumed2680111
+  physical-proof dependency changed, same named rejection before loading;
+  Denver42ee79aa-0e7: same rejection for consumed2680087 before loading.
+  Current normal monitor retains typed bounded_monitor_reseed_required debt;
+  independent normal producer/new valid certificate must DRAIN, not a stale
+  proof waiver. Actual next7ede record also loses quote freshness, so counts
+  are time-specific rather than a permanent eight-position partition.
+- Amsterdam050ca979-a7a and Paris c88cde8d-55e/95fe0e2b-ec9, targetOct3:
+  POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE after local day ends22Z.
+  Amsterdam/Paris95 were fresh before load; Paris c88 had HWM_READ_DEADLINE.
+  Only valid normal final-source evidence/settlement can clear this reason,
+  not provisional aging or replacing a missing final value with zero.
+- Munich066cd47a-088: current INCOMPLETE_EXIT_CONTEXT(missing=exit_calibration),
+  exit_q:entry_calibration_unavailable; preload21:52 was fresh/HOLD. This is
+  a named unresolved authority gap, not proved a new metadata/phi regression.
+- Guangzhou f6a2da48-7ac: current22:06:26
+  DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH. The same new432 process's
+  immediately preceding22:05:07 seq371 was qfresh/HOLD with a matching causal
+  bundle. Revalidation remains fail-closed; cause and next normal recovery
+  are not established by this narrow read.
+
+The calibration/closed-day/carrier/HWM rejection implementations are byte-
+unchanged between78 and432. This refutes a direct edited-gate explanation,
+not all possible input interaction or broader liveness problems. No reason
+names newly added audit fields; neither unresolved item is silently closed.
+Remaining proof stays separate: natural cached-z capture/acquisition, true
+dynamical native terrain/station MSL/AGL, two cities' ground qualification,
+canonical temperature-artifact/q binding, current held debt drainage and
+realized profitable fills. No further source change or appearance reload is
+authorized by these observations; the original goal is not complete.
