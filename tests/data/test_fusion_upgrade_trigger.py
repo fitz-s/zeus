@@ -1,8 +1,8 @@
 # Created: 2026-06-11
-# Lifecycle: created=2026-06-11; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Lifecycle: created=2026-06-11; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Lock provider-set and exact-input revision reseeding for replacement posteriors.
 # Reuse: Run for fusion upgrade, current-value serving, source callback, or station source changes.
-# Last reused/audited: 2026-10-01 (blocked-seed fence narrowed to build-read inputs; CURRENT_REUSABLE)
+# Last reused/audited: 2026-10-02 (actual weighted input revision reseeding; CURRENT_REUSABLE)
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL-fusion upgrade trigger. Relationship
 #   pins for the SINGLE instrument-set comparison + the idempotency bound:
 #     - a posterior fused from {A,B} with capture later containing {A,B,C} for the SAME cycle ⇒
@@ -35,8 +35,8 @@ from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 UTC = timezone.utc
 
-# Representative model per provider family used in the fixtures. ecmwf_ifs is deliberately NOT
-# a decorrelated provider (anchor/prior) — a fixture using it proves the comparison ignores it.
+# Representative model per provider family used in the fixtures. ecmwf_ifs contributes no
+# decorrelated family; its exact-input revisions still matter when the weighted q uses it.
 # icon_seamless was the alias-dedup probe and was removed from the candidate set entirely on
 # 2026-06-17 (it also contributed no family). 2026-06-17: the NCEP/CMC reps are the high-res
 # nests (gfs_hrrr 3km / gem_hrdps 2.5km) — the coarse globals gfs_global/gem_global AND
@@ -493,6 +493,75 @@ def test_same_provider_family_new_raw_revision_signals_upgrade() -> None:
     assert verdict["input_revision_changed"] is True
     assert verdict["new_families"] == []
     assert verdict["changed_input_sources"] == [_DWD]
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("scheme_bound", (False, True), ids=("fallback", "bound"))
+@pytest.mark.parametrize("actually_used", (False, True), ids=("diagnostic", "weighted"))
+@pytest.mark.parametrize("callback", (None, "ecmwf_ifs", _UKMO), ids=("periodic", "ifs", "unrelated"))
+def test_actual_weighted_input_outside_configured_basket_reseeds_then_resets(
+    metric: str,
+    scheme_bound: bool,
+    actually_used: bool,
+    callback: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Weighted fallback inputs are dependencies; possessed diagnostic rows are not."""
+    conn = _conn()
+    city, target, cycle = "Testville", "2026-10-03", "2026-10-02T00:00:00+00:00"
+    old_ids = {_DWD: 10, _UKMO: 11, "ecmwf_ifs": 12}
+    current_ids = dict(old_ids)
+    weighted = [_DWD, _UKMO, "ecmwf_ifs"] if actually_used else [_DWD, _UKMO]
+
+    def commit_posterior(ids: dict[str, int], computed_at: str) -> None:
+        _insert_posterior(
+            conn, city=city, target_date=target, metric=metric, cycle_iso=cycle,
+            used_models=list(old_ids), current_value_ids=ids,
+            configured_sources=[_DWD, _UKMO], computed_at=computed_at,
+        )
+        row = conn.execute(
+            "SELECT posterior_id, provenance_json FROM forecast_posteriors ORDER BY computed_at DESC LIMIT 1"
+        ).fetchone()
+        provenance = json.loads(row[1])
+        scheme = provenance["bayes_precision_fusion"]["source_clock_one_scheme"]
+        scheme["used_weights"] = {source: 1.0 / len(weighted) for source in weighted}
+        if not scheme_bound:
+            scheme["fallback_to"] = "current_precision_fusion"
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+            (json.dumps(provenance), row[0]),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(trigger, "_capturable_inputs_for_scope", lambda *_a, **_k: current_ids)
+
+    def verdict() -> dict[str, object]:
+        return scope_capture_offers_larger_provider_set(
+            conn, city=city, target_date=target, metric=metric,
+            changed_sources=None if callback is None else [callback],
+        )
+
+    commit_posterior(old_ids, "2026-10-02T01:00:00+00:00")
+    assert verdict()["is_upgrade"] is False
+    current_ids["ecmwf_ifs"] = 13
+    changed = verdict()
+    expected_change = actually_used and callback != _UKMO
+    assert changed["family_upgrade"] is False
+    assert changed["input_revision_changed"] is expected_change
+    assert changed["is_upgrade"] is expected_change
+    assert changed["changed_input_sources"] == (["ecmwf_ifs"] if expected_change else [])
+    assert changed["changed_input_revisions"] == ({"ecmwf_ifs": 13} if expected_change else {})
+    commit_posterior(current_ids, "2026-10-02T01:01:00+00:00")
+    assert verdict()["input_revision_changed"] is False
+    assert verdict()["is_upgrade"] is False
+    if actually_used:
+        # A lawful new bound proposal can retire IFS from the weighted q even
+        # while diagnostic fusion/serving provenance still possesses its old row.
+        weighted.remove("ecmwf_ifs")
+        scheme_bound = True
+        commit_posterior(old_ids, "2026-10-02T01:02:00+00:00")
+        assert verdict()["input_revision_changed"] is False
+        assert verdict()["is_upgrade"] is False
 
 
 def test_day0_hourly_vector_revision_signals_once_then_resets() -> None:

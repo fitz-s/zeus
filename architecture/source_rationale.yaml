@@ -412,6 +412,18 @@ files:
     - src/data/replacement_forecast_live_materialization_queue.py
     - src/data/replacement_forecast_materializer.py
     - src/engine/event_reactor_adapter.py
+  src/data/replacement_fusion_upgrade_trigger.py:
+    zone: K2_runtime
+    authority_role: current_fusion_dependency_reseed
+    why: Detects provider growth and exact current-input revision debt and publishes through the existing durable fusion-upgrade marker and normal seed queue. Relevant scope includes configured inputs plus actual typed weighted q dependencies with consumed serving raw IDs; fallback-used IFS cannot disappear behind configuration, while diagnostic-only serving rows cannot create revision debt. Reuses the current reader's authoritative used-weight decoder without changing probability, proof, source-clock, reader gates or cadence. RESET is a newly consumed current input or a lawful new weighted proposal that no longer depends on the old input.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    - STALE_BELIEF_AUTHORITY
+    downstream:
+    - src/data/replacement_forecast_live_materialization_queue.py
+    - src/data/replacement_forecast_materializer.py
+    gates:
+    - pytest -q tests/data/test_fusion_upgrade_trigger.py
   src/data/day0_hourly_vectors.py:
     zone: K2_runtime
     authority_role: day0_remaining_window_forecast_vectors

@@ -395,6 +395,7 @@ def _latest_posterior_inputs(
     bool,
     bool,
     Mapping[str, object],
+    frozenset[str],
 ]:
     """Return cycle, provider inputs, and committed Day0/source-clock state."""
     try:
@@ -409,14 +410,16 @@ def _latest_posterior_inputs(
             (SOURCE_ID, city, target_date, metric),
         ).fetchone()
     except Exception:
-        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False, {}
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False, {}, frozenset()
     if row is None:
-        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False, {}
+        return None, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False, {}, frozenset()
     source_cycle_iso = str(row[0]) if row[0] is not None else None
     try:
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
-        return source_cycle_iso, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False, {}
+        return source_cycle_iso, frozenset(), {}, frozenset(), frozenset(), None, (), False, False, None, False, False, {}, frozenset()
+    from src.data.replacement_input_hwm import _used_models_from_provenance
+
     fusion = prov.get("bayes_precision_fusion", {}) or {}
     used = fusion.get("used_models") or []
     if not isinstance(used, (list, tuple)):
@@ -483,6 +486,7 @@ def _latest_posterior_inputs(
             == "wu_api+same_station_fast_tail"
         ),
         source_clock if isinstance(source_clock, Mapping) else {},
+        _used_models_from_provenance(prov),
     )
 
 
@@ -694,6 +698,7 @@ def scope_capture_offers_larger_provider_set(
         consumed_current_temperature_carrier,
         legacy_wu_fast_residual,
         source_clock_scheme,
+        actual_used_models,
     ) = _latest_posterior_inputs(conn, city=city, target_date=target_date, metric=metric)
     requested_sources = (
         None if changed_sources is None
@@ -782,7 +787,14 @@ def scope_capture_offers_larger_provider_set(
     # served set with no fusion (empty) is NOT upgraded here — there is no smaller-set posterior
     # to grow (the single-anchor fallback is a separate concern handled by the missing-capture gate).
     family_upgrade = bool(served) and bool(new_families) and served.issubset(capturable_expected)
-    relevant_sources = (configured_sources or frozenset(consumed_inputs)) | station_sources
+    # The configured basket may fall back to a current weighted proposal that
+    # actually uses other sources. Match the reader's weighted dependency set;
+    # diagnostic-only serving rows must not create revision debt.
+    relevant_sources = (
+        (configured_sources or frozenset(consumed_inputs))
+        | (actual_used_models & frozenset(consumed_inputs))
+        | station_sources
+    )
     if requested_sources is not None:
         relevant_sources &= requested_sources
     changed_inputs = sorted(

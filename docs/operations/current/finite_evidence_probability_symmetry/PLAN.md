@@ -11142,3 +11142,102 @@ Exact baseline comparisons including required writer checks are in
 whitespace checks pass. Both independent bounded reviews accept; production
 loading and real normal-cadence cash/next-provider-run evidence remain distinct
 runtime obligations, not proof supplied by these isolated tests.
+
+### 2026-10-03 Munich current-q dependency scope investigation
+
+Post-load position 066cd47a-088 remains probability-unavailable on changed
+physical proof for IFS raw2628936. Initial hypothesis that the exact reader
+checked an unused diagnostic provider is refuted: actual posterior728127's
+fusion.used_models includes UKMO, ICON_D2 and ECMWF_IFS under
+fallback=current_precision_fusion, although the configured scheme lists only
+DWD/UKMO. The existing HWM loop checks actual used_models; its IFS refusal is
+correct and must not be weakened or filtered using configuration alone.
+
+The remaining producer-scope hypothesis is that
+relevant=(configured_sources OR consumed_inputs) prefers configuration and
+therefore omits the typed posterior's actually used fallback IFS input, leaving
+normal current-q repair unreachable. Await the final mathematical/dependency
+proof before source edits. If confirmed, repair only the existing producer's
+dependency/redecision scope from actual typed q inputs, preserving the real
+used provider, anchor/ENS, frozen source clock, geometry, receipt/body/hash and
+configuration contracts. Missing or conflicting dependency proof remains
+unavailable; no diagnostic-to-probability promotion or source-count shortcut.
+
+SCOPE: the exact held family/certificate and its typed actual physical inputs.
+DRAIN: existing normal source/proof maintenance, seed and materialization must
+recompute on a changed actual dependency, even when fallback differs from the
+configured scheme. RESET: a new lawful certificate reproduces those current
+dependencies; reader rejection remains until then. Acceptance requires actual
+HIGH/LOW fallback-used-but-unconfigured changed-input RED/GREEN, stable same
+input idempotence, genuinely unused diagnostic nondependency discrimination,
+missing/ambiguous typed inputs fail-closed, and unchanged actual IFS/ENS proof
+refusals. This plan does not authorize a consumer-gate relaxation; source
+ownership and exact bounded implementation follow the parent’s final proof.
+
+Final bounded source proof confirms the producer defect and authorizes only
+replacement_fusion_upgrade_trigger.py plus existing tests: posterior
+728127 center21.166666 is (IFS20.6 + ICON_D2 23 + UKMO19.9)/3, with authoritative
+scheme.used_weights of one third each and fallback=current_precision_fusion.
+Configured DWD/UKMO is therefore not the actual current-q dependency set.
+Current IFS raw2641048 replaces consumed2628936 while other used inputs remain
+unchanged; the original private real-scope predicate returns false, whereas
+including that actual dependency returns true with IFS input_revision changed.
+Use typed authoritative used_weights before a diagnostic fusion model array;
+never include every served/diagnostic item or relax the exact reader proof.
+
+SCOPE is this family/certificate's actual typed probability inputs. DRAIN is the
+existing source-cycle trigger -> normal queue -> materialization, with no new
+cadence or queue budget. RESET requires a new certificate actually consuming
+the lawful current IFS raw/body/clock, or by a new lawful scheme-bound certificate
+whose reproduced typed mathematical inputs no longer use IFS. Preserve other
+genuine dependencies in either case; do not force the old fallback basket to
+persist. Exact current reader freshness and unchanged actual dependencies,
+not merely a trigger or loaded SHA, prove RESET. Require HIGH/LOW fallback dependence,
+weight-versus-diagnostic precedence, unchanged input/no unnecessary reseed,
+configured ordinary compatibility and malformed/unknown typed dependency
+negatives. Parent owns independent review, exact focused checks and the next
+normal FF/load after the worker delivers; no reader/probability-law source is
+owned by this repair.
+
+Native production receipt remains an external transport blocker, not a proved
+capture-code defect: the normal 18Z collector starting 00:40:54Z reports LOW
+ok0/failed33/not_released15 and HIGH ok0/failed37/not_released11. Existing stderr
+records AWS HTTP503 and Google SSL failure; source_run is FAILED with
+captured_at/imported_at NULL. Collector download early return (ecmwf_open_data.py
+3296–3384) precedes extractor3559, so no native receipt could be produced.
+Mixed real transport failures cannot be described as only not-yet-published.
+The existing minute safe-cycle poll supplies the next normal attempt; a
+successful completed normal download/extraction/ingest and canonical receipt
+are still required, with no new timer, manual huge fetch or fabricated old
+proof. The bounded source lane captures this current blocker separately from
+694's accepted actual-byte tests and running software.
+
+Producer acceptance: eight weighted cases are RED on original HEAD694 while
+16 diagnostic/callback controls remain GREEN; final new24 cases all PASS,
+including both lawful RESET routes. Full trigger file is 72 PASS/19 FAIL;
+original HEAD's 67 cases give48 PASS/the same19 failures, independently
+baseline-reproduced, not a full-file clean pass. Independent reviewer runs
+the new24 cases and accepts the shared reader-decoder semantics, actual-used
+intersect consumed raw IDs, unchanged configuration/station/family/callback
+scope and every early-return tuple/caller update.
+
+Actual tasktree module replay at 00:54:04.107904Z uses canonical FORECAST
+query-only/BEGIN with a proxy selecting immutable posterior728127: original
+HEAD694 two functions return false, corrected module returns true with exact
+input revision IFS2628936 ->2641048. DWD2637348/UKMO2631296 remain unchanged;
+all three actual weights are1/3. Evidence is source-owner tool27bb3c exit0,
+not a rewritten SQL value, forced seed or claim that a new q already committed.
+Final integrator XML/log: /tmp/zeus-actual-q-dependency-final-focused-20261003
+(24PASS) and /tmp/zeus-actual-q-dependency-final-required10-20261003
+(268PASS/four exact prior baseline failures), each .xml/.log. Compile,
+whitespace, scoped freshness and source-rationale delta pass. Register the
+previously uncovered touched producer file only; unrelated registry drift is
+not repaired. Test-only live-settings symlink is removed before commit/load.
+Normal new-code queue consumption and held-reader freshness remain the runtime
+RESET evidence required after the parent's approved normal FF/load.
+
+The earlier cash partial-reduction gap is latent, not demonstrated current
+capital blockage: parent/worker canonical RO at 00:38:44.166653Z finds no OPEN
+obligation joined to FILLED ENTRY BUY (count0/IDs[]). Missing acquisition ENTRY
+after partial SELL/capital reduction still preserves strict refusal and the
+current residual; no historical-completeness claim or expanded repair protocol.
