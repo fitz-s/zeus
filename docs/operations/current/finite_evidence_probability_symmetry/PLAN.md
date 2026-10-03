@@ -11241,3 +11241,140 @@ capital blockage: parent/worker canonical RO at 00:38:44.166653Z finds no OPEN
 obligation joined to FILLED ENTRY BUY (count0/IDs[]). Missing acquisition ENTRY
 after partial SELL/capital reduction still preserves strict refusal and the
 current residual; no historical-completeness claim or expanded repair protocol.
+
+### 2026-10-03 WRH native station source-reference evidence preservation
+
+Bounded architecture/source-evidence slice, based on origin/live69bf2d8fb.
+The parent/source RO lane obtained an actual successful MPMG WRH timeseries
+body at 01:36:47Z (tool701129, body SHA f8f5899e...74b42): native latitude
+8.98330, longitude -79.51670, elevation43.0 with provider elevation unit ft,
+ELEV_DEM42.7, ACTIVE and America/Panama. This is source-reference metadata,
+not evidence of sensor-AGL, a geodetic vertical datum or station ground role.
+No MPMG activation, target-coordinate correction or ground-proof promotion is
+authorized by this response. Existing temperature parsing accepts these bytes
+but WrhProduct/product_from_response discards the metadata; the daily guarded
+writer's provenance does not preserve it. Missing original evidence cannot be
+backfilled with invented metadata or a current response relabeled as old.
+
+Ownership: the source worker owns noaa_wrh_timeseries.py, daily_obs_append.py
+and the minimum existing tests; integration owns this existing PLAN and the
+necessary touched source/test registry rows. Do not revert parallel work.
+Before source edits, preserve this plan on branch
+fix/wrh-native-station-evidence-20261003 in the parent's single managed tree.
+Use optional typed station-reference evidence retaining provider field names,
+values and units, exact response-body SHA and an honest fetched-clock basis.
+Do not conflate fetched time with source-issued time or create a publication
+clock. Preserve explicit UNKNOWN for absent height role/datum; unavailable or
+malformed optional metadata must not manufacture physical verification.
+Temperature values, row selection, metric twins, temperature units, station
+identity validation, explicit-empty predicates and settlement finality remain
+unchanged. Stable content identity must not incorporate arbitrary wallclock.
+
+The first minimum durable path is parser typed reference -> existing guarded
+HIGH/LOW daily provenance. Day0 daily prints/fast station adapters have no
+confirmed metadata carrier yet: observation_prints.raw_report remains original
+METAR text, not replacement JSON. Do not add a schema/table or bypass writer
+ownership to pretend complete Day0 persistence. Inspect an existing canonical
+artifact/receipt interface before authorizing additional minimal binding;
+otherwise retain that concrete carrier gap in the disposition.
+
+SCOPE: one requested station/exact successful response-body identity and its
+existing observation writer scope. DRAIN: ordinary authorized fetch/parser and
+guarded writer retain evidence on future normal captures; no manual ingest,
+bulk download or new cadence. RESET: a later valid response can replace the
+source-reference facts in its own provenance, while unknown datum/height role
+remains unknown until independently evidenced. No new probability/freshness
+gate, admission permission, city routing, ground declaration or q math.
+
+Acceptance: actual-structure MPMG fixture preserves latitude/longitude and
+provider ft elevation separately from ELEV_DEM; typed reference/body hash and
+normal daily HIGH/LOW provenance roundtrip; missing optional metadata remains
+backward compatible; malformed optional data cannot change temperature outputs
+or claim physical authority; source-issued/fetched clock separation and original
+METAR/raw_report semantics remain intact. Add actual-function RED/GREEN and
+the narrow affected tests plus src/data's required ten-file batch, comparing
+the four already established baseline failures rather than weakening them.
+The test-only settings symlink loads live configuration read-only with private
+pytest state/DB fixtures; remove it before commit. No live edits, DB writes,
+credentials output, source activation, stage/land/load before parent acceptance.
+
+Bounded fast-Day0 carrier extension approved before adapter edits: source
+inspection confirms station_temperature_adapters._sample already writes JSON
+metadata into its own raw_report, and valid_station_print independently validates
+value/unit/station/observed-time. This is distinct from the daily WRH print
+writer: _append_noaa_wrh_prints keeps original METAR text because day0_fast_obs
+parses its METAR observation clock. Do not substitute JSON on that daily path.
+The same source worker additionally owns station_temperature_adapters.py and
+existing tests/test_station_temperature_adapters.py: three source files and two
+existing test files, no new table/schema or parallel writer.
+
+The fast _fetch_wrh_batch currently parses .json() then hashes a station subset,
+discarding actual full response bytes. Preserve optional native_station_reference
+in the already-JSON fast raw_report, bound to actual full-batch HTTP body SHA and
+the HTTP-complete fetched clock, not a reconstructed/subset JSON hash presented
+as the original body. Keep existing natural-temperature payload/hash, revision,
+station selection, C/F conversion and current-value semantics stable; the new
+reference hash is a separate evidence binding, not a new temperature identity.
+Provider source-issued metadata clock, geodetic datum and sensor-AGL role remain
+UNKNOWN where absent. Provider latitude/longitude/elevation units remain original
+source-reference values, never a ground certificate or instruction to move query
+coordinates or activate MPMG/Qingdao. No gate or probability authority changes.
+
+Extend acceptance to the actual fast HTTP-bytes -> JSON reference -> normal
+print path, preserving batch-body hash/fetched provenance and existing temperature
+identity on repeated identical data, alongside the daily HIGH/LOW provenance
+roundtrip and daily METAR preservation. Existing daily old-row NOOP stays NOOP;
+do not retrofit metadata into historical rows or claim those old missing receipts
+are repaired. Future normal authorized writes retain the new evidence. Parent
+acceptance remains required before stage/land/load.
+
+Final bounded implementation preserves optional WrhStationReference in the
+typed product and future daily HIGH/LOW guarded provenance. Fast WRH batch
+transport carries the SHA of the actual full HTTP response outside provider
+JSON fields; each selected station's existing JSON raw_report retains its
+reference without changing its natural temperature payload_sha256. Offline
+parser input is explicitly PARSER_INPUT_BYTES with native_body_sha256 null and
+receipt UNKNOWN, not an original HTTP-body witness. Provider-injected hash fields
+cannot impersonate the transport wrapper. Nonfinite optional metadata becomes
+finite-JSON UNKNOWN diagnostics, not a temperature rejection or invented zero.
+No full body archive or reconstruction of deleted source bodies is claimed.
+
+The actual MPMG WRH coordinates 8.98330/-79.51670 differ from the unchanged
+configured airport reference 8.973340/-79.555603. Provider elevation43.0 ft
+and ELEV_DEM42.7 are preserved as reported, not relabeled as ground-MSL or
+sensor-AGL and not grounds to choose either station position. Datum/height role
+and metadata source-issued clock remain UNKNOWN. Temperature observations and
+their own clocks do not gain new authority from these station-reference fields.
+Fast fetched provenance uses the existing millisecond receipt precision rather
+than adding a microsecond nonce. The full raw-report evidence digest changes
+because authentic additional reference evidence exists; current-temperature
+identity, natural temperature hash, hard-fact eligibility/clock fields and q
+authority remain unchanged. No downstream digest comparison is weakened.
+
+Acceptance: source worker's original13 RED cases all turn GREEN and four added
+controls pass. Final integration affected two-file run gives196PASS/1SKIP:
+test_recorded_provider_response_and_ledger_validation[knmi_observations-knmi]
+has the existing missing netCDF4 dependency, not a WRH failure. Actual-function
+tests include C/F and raw reference units, sparse/nonfinite metadata, original
+batch HTTP bytes, provider-fake hash, HTTP versus offline receipt classification,
+SQLite HIGH/LOW provenance, transaction rollback, stable receipt precision and
+legacy-versus-new current-temperature/reader authority identity. Daily prints
+remain original METAR and existing-row NOOP stays untouched: the change does
+not retrofit metadata into historical daily rows. Production proof requires
+future normal authorized fetch/write; it does not activate missing-ground cities.
+
+Final XML/log anchors are /tmp/zeus-wrh-station-final-affected-20261003 and
+/tmp/zeus-wrh-station-final-required10-20261003 (each .xml/.log). The required
+ten-file batch gives268PASS/four failures whose exact testcase identities and
+failure message attributes match the prior final ff5415ea required XML without
+normalization: diagnostic ensemble role blocked; bad target-date regex mismatch;
+two old HK writer fixtures lack required local_hour. No unrelated baseline
+repair, test weakening or global registry sweep. Three source/two test files
+compile; changed-surface source-rationale delta, YAML parse, freshness,
+planning-lock and whitespace checks pass. Independent review accepts the three
+source/two test files with no critical/important finding, independently runs
+eight cases and the actual LOW-consumer twin, and confirms clock/ground/METAR,
+original-body SHA and unchanged current-q/hard-fact authority contracts. The
+test-only settings symlink is removed before commit/landing. SCOPE remains
+the exact station/response, DRAIN is future normal capture and existing guarded
+write, RESET is later authentic reference evidence without ground promotion.

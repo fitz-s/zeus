@@ -1,11 +1,12 @@
 # Created: 2026-09-12
-# Last reused/audited: 2026-10-01
-# Lifecycle: created=2026-09-12; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-09-12; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Pin the weather.gov/wrh/timeseries settlement product — page render law,
 #   per-city view selection, settlement-source precedence, and the backfill report.
 # Reuse: Read src/data/noaa_wrh_timeseries.py's measured facts and
 #   docs/operations/current/noaa_settlement_page_truth/evidence.md first.
 # Authority basis: docs/operations/current/noaa_settlement_page_truth/{PLAN.md,evidence.md}
+#   docs/operations/current/finite_evidence_probability_symmetry/PLAN.md WRH metadata slice
 """The settlement product for NOAA cities must reproduce the page, exactly.
 
 Every expected number here was read off the market's own resolution surface and
@@ -40,6 +41,183 @@ from src.data.noaa_wrh_timeseries import (
 )
 
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "noaa_wrh"
+
+
+def _native_station_body(*, unit="C", metadata=None):
+    station = {
+        "STID": "MPMG", "STATUS": "ACTIVE", "LATITUDE": "8.98330",
+        "LONGITUDE": "-79.51670", "ELEVATION": "43.0", "ELEV_DEM": "42.7",
+        "TIMEZONE": "America/Panama",
+        "OBSERVATIONS": {
+            "date_time": ["2026-10-02T12:00:00-0500", "2026-10-02T13:00:00-0500"],
+            "air_temp_set_1": [28.5, 29.0],
+            "metar_set_1": ["MPMG 021700Z 28/24", "MPMG 021800Z 29/24"],
+        },
+    }
+    if metadata is not None:
+        station.update(metadata)
+    return json.dumps({
+        "SUMMARY": {"RESPONSE_CODE": 1},
+        "UNITS": {"air_temp": {"C": "Celsius", "F": "Fahrenheit"}[unit], "elevation": "ft"},
+        "STATION": [station],
+    }).encode()
+
+
+@pytest.mark.parametrize("unit", ["C", "F"])
+def test_native_station_reference_preserves_raw_metadata_without_physical_promotion(unit):
+    import hashlib
+    from src.data.noaa_wrh_timeseries import product_from_response
+
+    body = _native_station_body(unit=unit)
+    receipt = datetime(2026, 10, 3, 1, 36, 47, 568256, tzinfo=timezone.utc)
+    product = product_from_response(body, "MPMG", unit=unit, fetched_at=receipt,
+                                    source_response_sha256=hashlib.sha256(body).hexdigest())
+    reference = product.station_reference.to_provenance()
+    assert reference["raw_fields"] == {
+        k: v for k, v in json.loads(body)["STATION"][0].items() if k != "OBSERVATIONS"
+    }
+    assert reference["raw_units"]["elevation"] == "ft"
+    assert reference["response_sha256"] == hashlib.sha256(body).hexdigest()
+    assert reference["hash_kind"] == "HTTP_RESPONSE_BODY_BYTES"
+    assert reference["native_body_sha256"] == reference["response_sha256"]
+    assert reference["fetched_at_utc"] == receipt.isoformat()
+    assert reference["evidence_role"] == "provider_reported_station_reference"
+    assert reference["source_issued_at_utc"] is None
+    assert reference["source_issued_at_status"] == "UNKNOWN"
+    assert reference["vertical_datum"] == reference["height_role"] == "UNKNOWN"
+    assert product.rows == rows_from_payload(json.loads(body), "MPMG")
+    assert [r.air_temp for r in product.rows] == [28.5, 29.0]
+    for metric, expected in (("high", 29.0), ("low", 28.5)):
+        assert daily_extreme(product.rows, target_date_local="2026-10-02", view="all", metric=metric).value == expected
+
+
+@pytest.mark.parametrize("metadata", [
+    {"LATITUDE": None, "LONGITUDE": "bad", "ELEVATION": {"unexpected": "shape"}, "ELEV_DEM": False},
+    {"LATITUDE": "0", "LONGITUDE": "0", "ELEVATION": "0", "ELEV_DEM": "0"},
+])
+def test_optional_station_metadata_is_raw_evidence_not_temperature_validation(metadata):
+    from src.data.noaa_wrh_timeseries import product_from_response
+
+    body = _native_station_body(metadata=metadata)
+    product = product_from_response(body, "MPMG", unit="C")
+    reference = product.station_reference.to_provenance()
+    assert all(reference["raw_fields"][key] == value for key, value in metadata.items())
+    assert reference["fetched_at_utc"] is None
+    assert reference["fetched_at_basis"] == "UNKNOWN"
+    assert reference["hash_kind"] == "PARSER_INPUT_BYTES"
+    assert reference["native_body_sha256"] is None
+    assert reference["height_role"] == reference["vertical_datum"] == "UNKNOWN"
+    assert [row.air_temp for row in product.rows] == [28.5, 29.0]
+
+
+def test_sparse_station_metadata_retains_unknowns_and_explicit_empty_semantics():
+    from src.data.noaa_wrh_timeseries import product_from_response
+
+    body = _empty_product_body()
+    product = product_from_response(body, "KHOU", unit="F")
+    reference = product.station_reference.to_provenance()
+    assert reference["raw_fields"] == {"STID": "KHOU"}
+    assert "elevation" not in reference["raw_units"]
+    assert product.confirms_empty(target_date_local="2026-09-11", view="hourly")
+
+
+def test_nonfinite_station_metadata_retains_unknown_diagnostic_without_changing_rows():
+    from src.data.noaa_wrh_timeseries import product_from_response
+
+    body = _native_station_body(metadata={"ELEVATION": "1e999"}).replace(b'"1e999"', b'1e999')
+    product = product_from_response(body, "MPMG", unit="C")
+    reference = product.station_reference.to_provenance()
+    assert reference["raw_fields"]["ELEVATION"] == {
+        "value_status": "UNKNOWN", "raw_type": "float", "raw_value_repr": "inf",
+    }
+    json.dumps(reference, allow_nan=False)
+    assert [row.air_temp for row in product.rows] == [28.5, 29.0]
+
+
+def test_wrh_metadata_receipt_is_http_completion_not_date_header_token_or_row_clock(monkeypatch):
+    from src.data import noaa_wrh_timeseries as wrh
+
+    receipt = datetime(2026, 10, 3, 1, 36, 47, 568256, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return receipt
+
+    class Response:
+        status_code = 200
+        content = _native_station_body()
+        headers = {"Date": "Thu, 01 Jan 1970 00:00:00 GMT"}
+
+    monkeypatch.setattr(wrh, "datetime", Clock)
+    monkeypatch.setattr(wrh.httpx, "get", lambda *a, **k: Response())
+    monkeypatch.setattr(wrh, "_wait_for_request_slot", lambda: None)
+    monkeypatch.setattr(wrh, "_token_fetched_at", datetime(2020, 1, 1, tzinfo=timezone.utc))
+    product = wrh.fetch_wrh_product("MPMG", unit="C", token="fixture-token", recent_minutes=180)
+    reference = product.station_reference.to_provenance()
+    assert reference["fetched_at_utc"] == receipt.isoformat()
+    assert reference["fetched_at_basis"] == "HTTP_RESPONSE_COMPLETION"
+    assert reference["hash_kind"] == "HTTP_RESPONSE_BODY_BYTES"
+    assert reference["source_issued_at_utc"] is None
+    assert reference["fetched_at_utc"] != product.rows[-1].utc.isoformat()
+
+
+def test_daily_high_low_metadata_roundtrip_preserves_temperature_identity_and_raw_metar(tmp_path, monkeypatch):
+    from src.data import daily_obs_append as appender, noaa_wrh_timeseries as wrh
+    from src.state.schema.observation_prints_schema import ensure_table
+
+    body = _native_station_body()
+    receipt = datetime(2026, 10, 3, 1, 36, 47, 568256, tzinfo=timezone.utc)
+    product = wrh.product_from_response(body, "MPMG", unit="C", fetched_at=receipt)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "fixture-token")
+    monkeypatch.setattr(appender, "_fetch_wrh_product_with_token_refresh", lambda *a, **k: product)
+    forecasts_path, world_path = _live_schema_db_pair(tmp_path)
+    world_conn = sqlite3.connect(world_path)
+    ensure_table(world_conn)
+    world_conn.commit()
+    world_conn.close()
+    conn = _attached(forecasts_path, world_path)
+    try:
+        stats = appender.append_noaa_wrh_city("Panama City", [date(2026, 10, 2)], conn, now_utc=receipt)
+        assert stats["inserted"] == 1 and stats["print_errors"] == 0
+        row = conn.execute("SELECT * FROM observations WHERE city='Panama City'").fetchone()
+        high = json.loads(row["high_provenance_metadata"])
+        low = json.loads(row["low_provenance_metadata"])
+        assert high["station_reference"] == low["station_reference"] == product.station_reference.to_provenance()
+        original_hash = high["payload_hash"]
+        assert (row["high_temp"], row["low_temp"], row["unit"]) == (29.0, 28.5, "C")
+        assert [r[0] for r in conn.execute("SELECT raw_report FROM observation_prints ORDER BY publish_ts_utc")] == [r.raw_metar for r in product.rows]
+        changed = wrh.product_from_response(_native_station_body(metadata={"ELEVATION": "999"}), "MPMG", unit="C", fetched_at=receipt + timedelta(seconds=1))
+        monkeypatch.setattr(appender, "_fetch_wrh_product_with_token_refresh", lambda *a, **k: changed)
+        appender.append_noaa_wrh_city("Panama City", [date(2026, 10, 2)], conn, now_utc=receipt)
+        assert conn.execute("SELECT COUNT(*) FROM daily_observation_revisions").fetchone()[0] == 0
+        unchanged = json.loads(conn.execute("SELECT high_provenance_metadata FROM observations").fetchone()[0])
+        assert unchanged["payload_hash"] == original_hash
+        assert unchanged["station_reference"] == high["station_reference"]
+    finally:
+        conn.close()
+
+
+def test_daily_station_metadata_write_rolls_back_with_coverage_failure(tmp_path, monkeypatch):
+    from src.data import daily_obs_append as appender, noaa_wrh_timeseries as wrh
+
+    receipt = datetime(2026, 10, 3, 1, 36, 47, tzinfo=timezone.utc)
+    product = wrh.product_from_response(_native_station_body(), "MPMG", unit="C", fetched_at=receipt)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "fixture-token")
+    monkeypatch.setattr(appender, "_fetch_wrh_product_with_token_refresh", lambda *a, **k: product)
+
+    def fail_coverage(*a, **k):
+        raise RuntimeError("private fixture coverage failure")
+
+    monkeypatch.setattr(appender, "record_written", fail_coverage)
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        stats = appender.append_noaa_wrh_city("Panama City", [date(2026, 10, 2)], conn, now_utc=receipt)
+        assert stats["inserted"] == 0
+        assert conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM daily_observation_revisions").fetchone()[0] == 0
+    finally:
+        conn.close()
 
 #: The exact set of cities whose market descriptions carry the "Show Hourly
 #: Data" clause, from the 2026-09-12 gamma-api census of 270 active events.

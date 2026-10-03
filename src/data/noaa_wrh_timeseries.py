@@ -1,5 +1,5 @@
 # Created: 2026-09-12
-# Last audited: 2026-10-01
+# Last audited: 2026-10-03
 # Authority basis: docs/operations/current/noaa_settlement_page_truth/{PLAN.md,evidence.md};
 #   architecture/city_truth_contract.yaml NOAA rows; AGENTS.md §2 settlement law.
 """The settlement product for NOAA cities: the feed behind weather.gov/wrh/timeseries.
@@ -190,6 +190,44 @@ class WrhRow:
         return self.local_timestamp[:10]
 
 
+def _metadata_provenance_value(value):
+    """Keep malformed raw numbers as UNKNOWN diagnostics in finite JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"value_status": "UNKNOWN", "raw_type": "float", "raw_value_repr": repr(value)}
+    if isinstance(value, dict):
+        return {key: _metadata_provenance_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_metadata_provenance_value(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class WrhStationReference:
+    """Provider-reported metadata, without sensor, ground or datum authority."""
+
+    raw_fields: dict
+    raw_units: dict
+    response_sha256: str
+    fetched_at: Optional[datetime] = None
+    hash_kind: str = "PARSER_INPUT_BYTES"
+
+    def to_provenance(self) -> dict:
+        return {
+            "evidence_role": "provider_reported_station_reference",
+            "raw_fields": _metadata_provenance_value(self.raw_fields),
+            "raw_units": _metadata_provenance_value(self.raw_units),
+            "response_sha256": self.response_sha256,
+            "hash_kind": self.hash_kind,
+            "native_body_sha256": self.response_sha256 if self.hash_kind == "HTTP_RESPONSE_BODY_BYTES" else None,
+            "fetched_at_utc": self.fetched_at.isoformat() if self.fetched_at else None,
+            "fetched_at_basis": "HTTP_RESPONSE_COMPLETION" if self.fetched_at else "UNKNOWN",
+            "source_issued_at_utc": None,
+            "source_issued_at_status": "UNKNOWN",
+            "height_role": "UNKNOWN",
+            "vertical_datum": "UNKNOWN",
+        }
+
+
 @dataclass(frozen=True)
 class WrhProduct:
     """One validated response: rows plus the identity an absence must bind."""
@@ -204,6 +242,7 @@ class WrhProduct:
     """``UNITS.air_temp`` verbatim, or None when the response carries none."""
 
     response_sha256: str
+    station_reference: Optional[WrhStationReference] = None
 
     def confirms_empty(self, *, target_date_local: date | str, view: PageView) -> bool:
         """True iff this response is a valid explicit-empty product for the day.
@@ -520,7 +559,11 @@ def fetch_wrh_product(
                     f"{response.text[:200]}"
                 )
             if response.status_code == 200:
-                return product_from_response(response.content, station, unit=unit)
+                fetched_at = datetime.now(timezone.utc)
+                return product_from_response(
+                    response.content, station, unit=unit, fetched_at=fetched_at,
+                    source_response_sha256=hashlib.sha256(response.content).hexdigest(),
+                )
             last_error = f"HTTP {response.status_code}"
             if response.status_code < 500:
                 raise WrhFetchFailed(f"{station}: {last_error}")
@@ -639,7 +682,35 @@ def rows_from_payload(payload: dict, station: str) -> list[WrhRow]:
     return _parse_rows(payload, station)
 
 
-def product_from_response(body: bytes, station: str, *, unit: Unit) -> WrhProduct:
+def station_reference_from_payload(
+    payload: dict, *, response_sha256: str, fetched_at: Optional[datetime] = None,
+    source_response_sha256: Optional[str] = None,
+) -> WrhStationReference:
+    """Retain metadata after the caller validates its single-station identity.
+
+    Neither provider elevation nor ELEV_DEM identifies a sensor height, ground
+    elevation or vertical datum. Receipt time is independent of row clocks and
+    HTTP Date; offline parsing leaves it unknown unless evidence is supplied.
+    """
+    if source_response_sha256 is None:
+        fetched_at = None
+    elif fetched_at is not None:
+        if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
+            raise ValueError("WRH station metadata receipt must be timezone-aware")
+        fetched_at = fetched_at.astimezone(timezone.utc)
+    return WrhStationReference(
+        raw_fields={key: value for key, value in payload["STATION"][0].items() if key != "OBSERVATIONS"},
+        raw_units=dict(payload.get("UNITS", {})),
+        response_sha256=source_response_sha256 or response_sha256,
+        fetched_at=fetched_at,
+        hash_kind="HTTP_RESPONSE_BODY_BYTES" if source_response_sha256 else "PARSER_INPUT_BYTES",
+    )
+
+
+def product_from_response(
+    body: bytes, station: str, *, unit: Unit, fetched_at: Optional[datetime] = None,
+    source_response_sha256: Optional[str] = None,
+) -> WrhProduct:
     """Validate one raw 200 body into a :class:`WrhProduct`."""
     try:
         payload = json.loads(body)
@@ -658,6 +729,7 @@ def product_from_response(body: bytes, station: str, *, unit: Unit) -> WrhProduc
     if rows and unit_label != _UNIT_LABELS[unit]:
         raise WrhPayloadInvalid(f"{station}: response unit {unit_label!r} is not {unit}")
     code = summary.get("RESPONSE_CODE") if isinstance(summary, dict) else None
+    response_sha256 = hashlib.sha256(body).hexdigest()
     return WrhProduct(
         station=station.strip().upper(),
         unit=unit,
@@ -665,5 +737,9 @@ def product_from_response(body: bytes, station: str, *, unit: Unit) -> WrhProduc
         # JSON ``true`` == 1 in Python; success is the integer 1 only.
         response_ok=type(code) is int and code == 1,
         unit_label=unit_label,
-        response_sha256=hashlib.sha256(body).hexdigest(),
+        response_sha256=response_sha256,
+        station_reference=station_reference_from_payload(
+            payload, response_sha256=response_sha256, fetched_at=fetched_at,
+            source_response_sha256=source_response_sha256,
+        ),
     )

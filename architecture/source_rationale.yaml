@@ -318,8 +318,16 @@ files:
     zone: K1_truth
     authority_role: station_temperature_provider_adapter
     why: Fixed-endpoint station clients preserve native values, QC, observation and actual receipt clocks. Reviewed exact-value equality is registry metadata; no fabricated
-      publisher timestamp or final daily value.
+      publisher timestamp or final daily value. WRH fast JSON references preserve observed station metadata and original full-batch response identity separately from temperature identity; metadata is not ground or sensor-height authority.
     downstream: []
+  src/data/noaa_wrh_timeseries.py:
+    zone: K1_truth
+    authority_role: noaa_wrh_response_parser
+    why: Validates the exact requested station, temperature units and row arrays from WRH timeseries bytes. Optional typed native station references retain provider fields, units and original response hash without promoting elevation, coordinates or missing datum to physical authority.
+    downstream:
+    - src/data/daily_obs_append.py
+    - src/data/station_temperature_adapters.py
+    - src/data/settlement_observation_selection.py
   src/data/settlement_observation_selection.py:
     zone: K1_truth
     authority_role: contract_named_observation_selection
@@ -1335,7 +1343,7 @@ files:
   src/data/daily_obs_append.py:
     zone: K2_runtime
     authority_role: live_daily_observation_append
-    why: Appends live daily observations and coverage facts through ObservationAtom + IngestionGuard. The HKO finalized prior-day writer accepts an optional prefetched Daily Extract payload so retrying source-clock callers can keep provider I/O outside canonical writer flocks while preserving the same guarded atomic write path.
+    why: Appends live daily observations and coverage facts through ObservationAtom + IngestionGuard. The HKO finalized prior-day writer accepts an optional prefetched Daily Extract payload so retrying source-clock callers can keep provider I/O outside canonical writer flocks while preserving the same guarded atomic write path. Future WRH daily provenance retains optional source-reference metadata and response identity; daily print raw_report remains METAR text and existing-row NOOP is not historical evidence repair.
     downstream:
     - src/data/daily_observation_writer.py
     - src/data/wu_hourly_client.py

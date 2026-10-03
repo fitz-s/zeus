@@ -1,6 +1,7 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-01
-# Lifecycle: created=2026-09-29; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-09-29; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md WRH metadata slice
 # Purpose: Pin station adapter parsing and registry source roles, including fast-admission proof law.
 # Reuse: Run when physical_current_sources, station_temperature_adapters, or the registry JSON changes.
 # Authority: REQ-20260929-223929-bf51a2; recorded provider responses, 2026-09-30 UTC.
@@ -17,6 +18,153 @@ from src.data.station_temperature_adapters import parse_station_payload, valid_s
 
 ROOT = Path(__file__).parent / "fixtures" / "station_temperature"
 NOW = datetime(2026, 9, 30, 5, tzinfo=timezone.utc)
+
+
+def _wrh_metadata_payload(station, *, unit="C", metadata=None):
+    return {"UNITS": {"air_temp": {"C": "Celsius", "F": "Fahrenheit"}[unit], "elevation": "ft"},
+            "STATION": [{"STID": station, "LATITUDE": "8.98330", "LONGITUDE": "-79.51670",
+                         "ELEVATION": "43.0", "ELEV_DEM": "42.7", **(metadata or {}),
+                         "OBSERVATIONS": {"date_time": ["2026-09-30T04:00:00+0000"],
+                                          "air_temp_set_1": [28.5], "sea_level_pressure_set_1": [1010]}}]}
+
+
+@pytest.mark.parametrize("unit", ["C", "F"])
+@pytest.mark.parametrize("metadata", [None, {"LATITUDE": None, "ELEVATION": {"invalid": True}}])
+def test_wrh_native_metadata_survives_existing_day0_json_and_sqlite(unit, metadata):
+    import hashlib
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+
+    route = replace(_public_route("noaa_wrh", "MPMG"), unit=unit,
+                    identity={"provider_station": "MPMG", "resolver_view": "all"})
+    body = json.dumps(_wrh_metadata_payload("MPMG", unit=unit, metadata=metadata)).encode()
+    sample, = parse_station_payload(route, body, received_at=NOW)
+    record = json.loads(sample.raw_report)
+    reference = record["station_reference"]
+    assert reference["raw_fields"]["ELEVATION"] == (metadata or {}).get("ELEVATION", "43.0")
+    assert reference["raw_units"]["elevation"] == "ft"
+    assert reference["response_sha256"] == record["payload_sha256"] == hashlib.sha256(body).hexdigest()
+    assert reference["hash_kind"] == "PARSER_INPUT_BYTES"
+    assert reference["native_body_sha256"] is None
+    assert reference["fetched_at_utc"] is None
+    assert reference["source_issued_at_utc"] is None
+    assert reference["height_role"] == reference["vertical_datum"] == "UNKNOWN"
+    assert sample.value_native == 28.5 and sample.unit == unit
+    assert valid_station_print(route, sample.raw_report, observed_at=sample.observed_at, value=28.5)
+    conn = sqlite3.connect(":memory:")
+    try:
+        ensure_table(conn)
+        append_print(conn, city="private fixture", station_id="MPMG", source_channel=route.source_channel,
+                     publish_ts_utc=sample.observed_at.isoformat(), value_native=sample.value_native, unit=unit,
+                     fetched_at_utc=sample.fetched_at.isoformat(), raw_report=sample.raw_report)
+        conn.commit()
+        persisted = json.loads(conn.execute("SELECT raw_report FROM observation_prints").fetchone()[0])
+        assert persisted["station_reference"] == reference
+        assert persisted["provider_observed_at_ms"] == int(sample.observed_at.timestamp() * 1000)
+    finally:
+        conn.close()
+
+
+def test_wrh_batch_reference_binds_original_http_bytes_without_changing_temperature_digest(monkeypatch):
+    import hashlib
+    import httpx
+    from src.data import station_temperature_adapters as adapters, noaa_wrh_timeseries as wrh
+
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh")
+    payload = _wrh_metadata_payload(route.station_id, unit=route.unit)
+    payload["STATION"].append(_wrh_metadata_payload("OTHER", unit=route.unit)["STATION"][0])
+    payload["_wrh_response_sha256"] = payload["response_sha256"] = "provider cannot supply transport proof"
+    body = json.dumps(payload, indent=3).encode()
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "private-fixture-token")
+    adapters._WRH_BATCH_CACHE.clear()
+    try:
+        with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body))) as client:
+            batch, receipt = adapters._fetch_wrh_batch(route, client)
+            assert batch == payload and json.loads(json.dumps(batch)) == payload
+            assert batch.response_sha256 == hashlib.sha256(body).hexdigest()
+            sample, = adapters.fetch_station_temperature(route, start=NOW-timedelta(hours=2), end=NOW, client=client)
+        record = json.loads(sample.raw_report)
+        subset = {"UNITS": payload["UNITS"], "STATION": payload["STATION"][:1]}
+        assert record["payload_sha256"] == hashlib.sha256(json.dumps(subset).encode()).hexdigest()
+        assert record["station_reference"]["response_sha256"] == hashlib.sha256(body).hexdigest()
+        assert record["station_reference"]["native_body_sha256"] == hashlib.sha256(body).hexdigest()
+        assert record["station_reference"]["hash_kind"] == "HTTP_RESPONSE_BODY_BYTES"
+        assert record["station_reference"]["response_sha256"] != record["payload_sha256"]
+        receipt = datetime.fromisoformat(record["station_reference"]["fetched_at_utc"])
+        assert int(receipt.timestamp() * 1000) == record["received_at_ms"]
+        assert receipt.microsecond % 1000 == 0
+        assert record["station_reference"]["fetched_at_precision"] == "millisecond"
+        assert "private-fixture-token" not in sample.raw_report
+        assert len(record["station_reference"]["raw_fields"]) == len(payload["STATION"][0])-1
+        assert sample.value_native == 28.5
+    finally:
+        adapters._WRH_BATCH_CACHE.clear()
+
+
+def test_wrh_nonfinite_optional_metadata_is_unknown_in_standard_json_not_a_temperature_failure():
+    route = replace(_public_route("noaa_wrh", "MPMG"),
+                    identity={"provider_station": "MPMG", "resolver_view": "all"})
+    body = json.dumps(_wrh_metadata_payload("MPMG", metadata={"ELEVATION": "1e999"})).encode().replace(b'"1e999"', b'1e999')
+    sample, = parse_station_payload(route, body, received_at=NOW)
+    record = json.loads(sample.raw_report)
+    assert record["station_reference"]["raw_fields"]["ELEVATION"]["value_status"] == "UNKNOWN"
+    json.dumps(record, allow_nan=False)
+    assert sample.value_native == 28.5
+    assert valid_station_print(route, sample.raw_report, observed_at=sample.observed_at, value=28.5)
+
+
+def test_wrh_reference_receipt_adds_no_microsecond_nonce_to_existing_json():
+    import hashlib
+
+    route = replace(_public_route("noaa_wrh", "MPMG"),
+                    identity={"provider_station": "MPMG", "resolver_view": "all"})
+    body = json.dumps(_wrh_metadata_payload("MPMG")).encode()
+    samples = [parse_station_payload(route, body, received_at=NOW.replace(microsecond=microsecond),
+                                    source_response_sha256=hashlib.sha256(body).hexdigest())[0]
+               for microsecond in (123100, 123900)]
+    assert samples[0].fetched_at != samples[1].fetched_at
+    assert samples[0].raw_report == samples[1].raw_report
+    assert json.loads(samples[0].raw_report)["station_reference"]["fetched_at_utc"].endswith(".123+00:00")
+
+
+def test_wrh_metadata_preserves_current_temperature_identity_with_legacy_json():
+    from src.config import cities_by_name
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from zoneinfo import ZoneInfo
+
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh" and r.station_id == "KORD")
+    body = json.dumps(_wrh_metadata_payload("KORD", unit=route.unit)).encode()
+    sample, = parse_station_payload(route, body, received_at=NOW)
+    record = json.loads(sample.raw_report)
+    legacy_record = {key: value for key, value in record.items() if key != "station_reference"}
+    day = sample.observed_at.astimezone(ZoneInfo(cities_by_name["Chicago"].timezone)).date().isoformat()
+    states = []
+    facts = []
+    for raw in (json.dumps(legacy_record, sort_keys=True, allow_nan=False), sample.raw_report):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            ensure_table(conn)
+            append_print(conn, city="Chicago", station_id="KORD", source_channel=route.source_channel,
+                         publish_ts_utc=sample.observed_at.isoformat(), value_native=sample.value_native,
+                         unit=route.unit, fetched_at_utc=NOW.isoformat(), raw_report=raw)
+            state = read_day0_current_temperature_state(conn=conn, city=cities_by_name["Chicago"], target_date=day, decision_time=NOW)
+            assert state is not None
+            states.append(state)
+            fact = _latest_authorized_day0_fact(conn, city="Chicago", target_date=day,
+                                               temperature_metric="high", decision_time=NOW,
+                                               require_settlement_channel=True)
+            assert fact is not None
+            facts.append(fact)
+        finally:
+            conn.close()
+    assert states[0] == states[1]
+    assert states[0].identity() == states[1].identity()
+    assert {key: value for key, value in facts[0].items() if key != "raw_payload_sha256"} == {
+        key: value for key, value in facts[1].items() if key != "raw_payload_sha256"
+    }
+    assert facts[0]["raw_payload_sha256"] != facts[1]["raw_payload_sha256"]
 
 def _public_route(provider="mgm_metar", station="LTAC"):
     from src.data.physical_current_sources import PhysicalCurrentSource, SourceRole

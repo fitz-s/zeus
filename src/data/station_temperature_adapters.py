@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-03
 """Fixed-endpoint station observations with independent receipt and valid clocks.
 
 Provider names select parsers, never arbitrary URLs or executable config. Native
@@ -150,6 +150,14 @@ def _cached_fetch(cache: dict, key: tuple, fetch, *, prefix: str, retry_floor: f
 _WRH_BATCH_CACHE: dict[tuple, tuple[float, dict | None, datetime, str | None]] = {}
 
 
+class _WrhBatchPayload(dict):
+    """Native JSON with its HTTP-body digest carried outside provider fields."""
+
+    def __init__(self, payload: dict, response_sha256: str):
+        super().__init__(payload)
+        self.response_sha256 = response_sha256
+
+
 def _fetch_wrh_batch(route, client):
     """One bounded request per unit/registered station-set per minute, not per city.
 
@@ -163,11 +171,12 @@ def _fetch_wrh_batch(route, client):
                         if r.provider == "noaa_wrh" and r.unit == route.unit} | {route.station_id}))
 
     def fetch():
-        return json.loads(_bounded_body(
+        body = _bounded_body(
             client, "GET", wrh.WRH_TIMESERIES_URL,
             params=wrh._query_params(",".join(ids), unit=route.unit, start_utc=None, end_utc=None,
                                      recent_minutes=180, token=wrh.fetch_wrh_token()),
-            headers=wrh._page_headers(ids[0]), timeout=6))
+            headers=wrh._page_headers(ids[0]), timeout=6)
+        return _WrhBatchPayload(json.loads(body), hashlib.sha256(body).hexdigest())
 
     return _cached_fetch(_WRH_BATCH_CACHE, (route.unit, ids, id(client)), fetch,
                          prefix="WRH_CURRENT_TRANSPORT_DEFERRED:", retry_floor=60.0)
@@ -343,7 +352,7 @@ def _utc(value: str) -> datetime:
 
 
 def _sample(route, observed: datetime, value, receipt: datetime, digest: str,
-            published: datetime | None = None) -> StationTemperaturePrint | None:
+            published: datetime | None = None, station_reference=None) -> StationTemperaturePrint | None:
     value = float(value)
     if not math.isfinite(value) or value == -999 or observed > receipt:
         return None
@@ -355,26 +364,43 @@ def _sample(route, observed: datetime, value, receipt: datetime, digest: str,
         "provider_published_at_ms": None if published is None else int(published.timestamp() * 1000),
         "received_at_ms": int(receipt.timestamp() * 1000), "payload_sha256": digest,
     }
+    if station_reference is not None:
+        reference = station_reference.to_provenance()
+        if reference["fetched_at_utc"] is not None:
+            receipt_ms = payload["received_at_ms"]
+            reference["fetched_at_utc"] = (
+                datetime.fromtimestamp(receipt_ms // 1000, UTC)
+                + timedelta(milliseconds=receipt_ms % 1000)
+            ).isoformat(timespec="milliseconds")
+            reference["fetched_at_precision"] = "millisecond"
+        payload["station_reference"] = reference
     return StationTemperaturePrint(observed, receipt, value, route.unit,
                                    json.dumps(payload, sort_keys=True, allow_nan=False))
 
 
-def parse_station_payload(route, body: bytes, *, received_at: datetime) -> tuple[StationTemperaturePrint, ...]:
+def parse_station_payload(route, body: bytes, *, received_at: datetime,
+                          source_response_sha256: str | None = None) -> tuple[StationTemperaturePrint, ...]:
     if received_at.tzinfo is None:
         raise ValueError("STATION_RECEIPT_NAIVE")
     provider = route.provider
     expected = str(route.identity["provider_station"])
     digest = hashlib.sha256(body).hexdigest()
     values = []
+    station_reference = None
     if provider in {"mgm_metar", "imd_olbs_metar"}:
         values = _public_metar_values(route, body, received_at)
     elif provider == "noaa_wrh":
-        from src.data.noaa_wrh_timeseries import rows_from_payload
+        from src.data.noaa_wrh_timeseries import rows_from_payload, station_reference_from_payload
         payload = json.loads(body)
         if payload.get("UNITS", {}).get("air_temp") != {"C":"Celsius", "F":"Fahrenheit"}[route.unit]:
             raise ValueError("STATION_UNIT_OR_QC_INVALID")
         view = route.identity["resolver_view"]
-        for row in rows_from_payload(payload, route.station_id):
+        rows = rows_from_payload(payload, route.station_id)
+        station_reference = station_reference_from_payload(
+            payload, response_sha256=digest, fetched_at=received_at,
+            source_response_sha256=source_response_sha256,
+        )
+        for row in rows:
             if view == "all" or row.is_official_report:
                 # air_temp_set_1 is the page's numeric value. Raw METAR body vs
                 # T-group is not an interchangeable reconstruction of that field.
@@ -444,7 +470,7 @@ def parse_station_payload(route, body: bytes, *, received_at: datetime) -> tuple
                     values.append((datetime.fromtimestamp(float(row["valid_time_gmt"]), UTC), row["temp"], None))
     else:
         raise ValueError("STATION_ADAPTER_UNKNOWN")
-    samples = [_sample(route, stamp, value, received_at, digest, publication)
+    samples = [_sample(route, stamp, value, received_at, digest, publication, station_reference)
                for stamp, value, publication in values if value is not None and value != "MSNG"]
     return tuple(sorted((s for s in samples if s is not None), key=lambda s: s.observed_at))
 
@@ -478,7 +504,10 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
         payload, received = _fetch_wrh_batch(route, client)
         stations = [s for s in payload.get("STATION", []) if s.get("STID") == route.station_id]
         station_payload = {"UNITS": payload.get("UNITS", {}), "STATION": stations}
-        return tuple(s for s in parse_station_payload(route,json.dumps(station_payload).encode(),received_at=received)
+        return tuple(s for s in parse_station_payload(
+            route, json.dumps(station_payload).encode(), received_at=received,
+            source_response_sha256=getattr(payload, "response_sha256", None),
+        )
                      if start <= s.observed_at <= min(end,received))
     station = route.identity["provider_station"]
     params, headers = {}, {"User-Agent": "zeus-station-observation/2"}

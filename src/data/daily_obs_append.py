@@ -2233,6 +2233,9 @@ def append_noaa_wrh_city(
             "token_fetched_at": token_at.isoformat() if token_at else None,
             "request_url": request_url,
         }
+        station_reference = getattr(product, "station_reference", None)
+        if station_reference is not None:
+            provenance["station_reference"] = station_reference.to_provenance()
 
         try:
             atom_high, atom_low = _build_atom_pair(
