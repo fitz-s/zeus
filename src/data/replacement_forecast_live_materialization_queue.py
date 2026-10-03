@@ -8502,11 +8502,9 @@ def _process_claimed_materialization_batch(
             item.request_payload is not None
             and _STALE_DAY0_ENQUEUE_OWNER_REASON in result_reason_codes
         ):
-            if item.marker_path is not None:
-                try:
-                    item.marker_path.unlink()
-                except FileNotFoundError:
-                    pass
+            # An envelope verdict: terminal for these publication bytes. It
+            # says nothing about the forecast inputs, so the family's
+            # forecast-input marker is neither written nor removed.
             receipt = _record_latest_terminal_request(
                 input_json,
                 processed_path=processed_path,
