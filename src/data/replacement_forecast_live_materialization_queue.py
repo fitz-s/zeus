@@ -419,6 +419,13 @@ class ReplacementForecastLiveMaterializationQueueReport:
     seed_failed_files: tuple[str, ...] = ()
     reason_codes: tuple[str, ...] = ()
     producer_trace: Mapping[str, object] | None = None
+    # Per-tick execution progress (canonical lease 2.4); "leased" alone is not
+    # progress. held_first: the first child this tick served a held family.
+    leased_count: int = 0
+    started_count: int = 0
+    completed_count: int = 0
+    deferred_count: int = 0
+    held_first: bool = False
 
     @property
     def ok(self) -> bool:
@@ -444,6 +451,11 @@ class ReplacementForecastLiveMaterializationQueueReport:
             "seed_failed_files": list(self.seed_failed_files),
             "reason_codes": list(self.reason_codes),
             "producer_trace": self.producer_trace,
+            "leased_count": self.leased_count,
+            "started_count": self.started_count,
+            "completed_count": self.completed_count,
+            "deferred_count": self.deferred_count,
+            "held_first": self.held_first,
         }
 
 
@@ -8163,6 +8175,11 @@ def process_replacement_forecast_live_materialization_queue(
         seed_processed_files=claim.seed_processed_files,
         seed_failed_files=claim.seed_failed_files,
         reason_codes=tuple(dict.fromkeys(reasons)),
+        leased_count=claim.claimed_count,
+        started_count=batch_report.started_count,
+        completed_count=batch_report.completed_count,
+        deferred_count=batch_report.deferred_count,
+        held_first=batch_report.held_first,
     )
 
 
@@ -8558,6 +8575,7 @@ def _process_claimed_materialization_batch(
 
     committed_posterior_count = 0
     reactor_wake_published_count = 0
+    completed_count = 0
     for item in pending:
         input_json = item.input_json
         completed = completed_by_path[input_json]
@@ -8612,6 +8630,7 @@ def _process_claimed_materialization_batch(
             for reason in result_reason_codes
         )
         if completed.returncode == 0:
+            completed_count += 1
             if item.marker_path is not None:
                 try:
                     item.marker_path.unlink()
@@ -8890,4 +8909,21 @@ def _process_claimed_materialization_batch(
         processed_files=tuple(processed),
         failed_files=tuple(failed),
         reason_codes=tuple(reasons),
+        leased_count=len(request_files),
+        started_count=len(pending),
+        completed_count=completed_count,
+        deferred_count=(
+            len(timed_out_requests) + len(transient_read_retries) + len(write_deferred)
+        ),
+        held_first=bool(pending) and _request_family_scope(
+            pending[0].request_payload
+        ) in _current_money_risk_families_or_empty(),
     )
+
+
+def _current_money_risk_families_or_empty() -> frozenset[tuple[str, str, str]]:
+    """Held families for the progress report only; an unreadable book is empty."""
+    try:
+        return _current_money_risk_families()
+    except _ClaimReadDeadlineExceeded:
+        return frozenset()
