@@ -14022,15 +14022,9 @@ def test_live_adapter_selection_telemetry_isolates_unsupported_family(monkeypatc
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:mature',
         'GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:GLOBAL_SELL_DAY0_STATISTICAL_AUTHORITY_SUPERSEDED:immature',
         *(
-            'GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:'
-            'GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:'
-            f'basis=current_value_serving_{basis}:model=icon_global:consumed_raw_id=2'
-            for basis in (
-                'consumed_proof_unverifiable',
-                'consumed_physical_proof_invalid',
-                'consumed_input_after_posterior',
-                'raw_row_identity_mismatch',
-            )
+            outer + inner + basis + 'model=icon_global:consumed_raw_id=2'
+            for outer, inner in era._CONSUMED_PROOF_REFUSAL_ROUTES
+            for basis in era._CONSUMED_PROOF_INVALID_BASES
         ),
     ),
 )
@@ -14109,6 +14103,31 @@ def test_superseded_preflight_evicts_only_selected_family_probability_cache(
 
 
 @pytest.mark.parametrize(
+    "reason",
+    (
+        # The inner refusal is matched only directly under an enumerated outer wrapper.
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global",
+        "GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global",
+        "GLOBAL_SELL_EXECUTION_FAILED:ValueError:"
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global",
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:wrapped:"
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global",
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=successor_current_value_read_unavailable:"
+        "basis=current_value_serving_consumed_proof_unverifiable:",
+    ),
+)
+def test_consumed_proof_refusal_evicts_only_under_an_enumerated_route(reason):
+    assert era._global_preflight_consumed_proof_invalid(reason) is False
+
+
+@pytest.mark.parametrize(
     "basis",
     (
         "HWM_READ_DEADLINE",
@@ -14122,12 +14141,10 @@ def test_superseded_preflight_evicts_only_selected_family_probability_cache(
         "unknown_superseded",
     ),
 )
-def test_unknown_source_clock_preflight_stays_blocked_without_cache_eviction(basis):
-    reason = (
-        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
-        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
-        "REPLACEMENT_RAW_INPUT_HWM:basis=" + basis + ":detail=unavailable"
-    )
+@pytest.mark.parametrize("route", era._CONSUMED_PROOF_REFUSAL_ROUTES)
+def test_unknown_source_clock_preflight_stays_blocked_without_cache_eviction(basis, route):
+    outer, inner = route
+    reason = outer + inner + "basis=" + basis + ":detail=unavailable"
     assert era._global_preflight_block_status(reason) == "BATCH_BLOCKED"
     assert era._evict_superseded_global_probability_family_cache(
         "unknown-source-clock",
@@ -51900,13 +51917,16 @@ def test_partial_current_replay_reads_the_cohort_at_the_frozen_tau(tmp_path,monk
         fixture.conn.close()
 
 
+@pytest.mark.parametrize("action",("BUY","SELL"))
 @pytest.mark.parametrize("fault",("recorded_row_deleted","inplace_body_same_mtime","consumed_read_locked"))
-def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeypatch,fault,_noaa_native_sources):
+def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeypatch,fault,action,_noaa_native_sources):
     """Round-4: a lost consumed proof refused the winner at preflight
     (BATCH_BLOCKED ...consumed_proof_unverifiable) but evicted nothing, so the
     next prepare_event/prepare_held_event reissued the dead posterior from the
     family cache until max_age. The actual receipt's reason now evicts both
-    lanes; a transient consumed-proof read (lock) refuses without eviction.
+    lanes, for a BUY (generic receipt core) and for a held SELL
+    (_submit_current_global_sell, its own GLOBAL_SELL_CURRENT_AUTHORITY_FAILED
+    wrapper); a transient consumed-proof read (lock) refuses without eviction.
     """
     import os
     from pathlib import Path
@@ -51959,7 +51979,7 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
                 lambda events,**callbacks: hooks.append(callbacks) or SimpleNamespace(
                     events=tuple(events),winner_event_id=None,receipts={}))
             era.event_bound_live_adapter_from_trade_conn(trade,get_current_level=lambda: era.RiskLevel.GREEN,
-                forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                forecast_conn=ro,topology_conn=ro,calibration_conn=ro,live_cap_conn=trade,
                 executor_submit=lambda *a,**k: pytest.fail("executor must never run"),
             ).process_global_batch((event,),at)
         callbacks = hooks[-1]
@@ -51972,20 +51992,32 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
         held = callbacks["prepare_held_event"](event,at)
         assert entry.prepared_global_family is not None, entry.reason
         assert held.prepared_global_family is not None, held.reason
-        witness = entry.prepared_global_family.probability_witness
+        # A held SELL is selected from the held lane's witness, a BUY from the entry lane's.
+        witness = (held if action == "SELL" else entry).prepared_global_family.probability_witness
         tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
         selected = universe._rebind_probability_witness_tokens(witness,token_map_by_condition=tokens,
             required_token_ids=frozenset(t for pair in tokens.values() for t in pair))
         binding = selected.bindings[1]
-        curve = ExecutableCostCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
-            levels=(BookLevel(price=Decimal(".10"),size=Decimal("100")),),fee_model=FeeModel(fee_rate=Decimal("0")),
-            min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
-        candidate = GlobalSingleOrderCandidate(candidate_id="consumed-proof-buy",family_key=selected.family_key,
-            bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
-            probability_witness_identity=selected.witness_identity,book_snapshot_id=curve.snapshot_id,
-            book_captured_at_utc=at,execution_curve_identity=executable_curve_identity(curve),
-            ledger_snapshot_id="ledger",executable_cost_curve=curve,resolution_identity=selected.resolution_identity,
-            neg_risk=False)
+        identity = dict(family_key=selected.family_key,bin_id=binding.bin_id,condition_id=binding.condition_id,
+            side="YES",token_id=binding.yes_token_id,probability_witness_identity=selected.witness_identity,
+            book_snapshot_id="book",book_captured_at_utc=at,ledger_snapshot_id="ledger",
+            resolution_identity=selected.resolution_identity,neg_risk=False)
+        if action == "BUY":
+            curve = ExecutableCostCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
+                levels=(BookLevel(price=Decimal(".10"),size=Decimal("100")),),fee_model=FeeModel(fee_rate=Decimal("0")),
+                min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+            candidate = GlobalSingleOrderCandidate(candidate_id="consumed-proof-buy",executable_cost_curve=curve,
+                execution_curve_identity=executable_curve_identity(curve),**identity)
+        else:
+            curve = ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
+                levels=(BidBookLevel(price=Decimal(".60"),size=Decimal("10")),),fee_model=FeeModel(fee_rate=Decimal("0")),
+                min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+            proposal,mode,fill,fill_source,rest = global_sell_execution_terms(curve,capacity=Decimal("10"))
+            candidate = GlobalSingleOrderSellCandidate(candidate_id="consumed-proof-sell",position_id="position-1",
+                held_shares=Decimal("10"),executable_sell_curve=curve,execution_curve_identity=executable_curve_identity(curve),
+                proposal_sell_curve=proposal,execution_mode=mode,fill_probability=fill,fill_probability_source=fill_source,
+                rest_deadline_minutes=rest,probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
+                exit_authority_status="not_applicable",exit_authority_reason="non_day0_family",**identity)
         actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=selected,
             decision=SimpleNamespace(candidate=candidate),actuation_identity="consumed-proof-actuation")
         assert era._current_global_actuation_prepared_family(event,global_actuation=actuation,forecast_conn=ro,
@@ -52019,12 +52051,20 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
             era._GLOBAL_PROBABILITY_FAMILY_CACHE.update(cached)
             if temperature == "cold":
                 clear_memos()
-            receipt = era._build_event_bound_no_submit_receipt_core(event,trade_conn=trade,decision_time=at,
-                get_current_level=lambda: era.RiskLevel.GREEN,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
-                global_actuation=actuation,reserve_on_pass=False)
+            if action == "BUY":
+                receipt = era._build_event_bound_no_submit_receipt_core(event,trade_conn=trade,decision_time=at,
+                    get_current_level=lambda: era.RiskLevel.GREEN,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                    global_actuation=actuation,reserve_on_pass=False)
+            else:
+                receipt = era._submit_current_global_sell(event,decision_time=at,global_actuation=actuation,
+                    trade_conn=trade,global_claim_conn=trade,forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                    preflight_only=True,preflight_receipt=None)
             assert receipt.proof_accepted is False
-            assert ("basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:" if evicts
-                else "basis=consumed_physical_proof_read_unavailable:") in receipt.reason, receipt.reason
+            assert receipt.reason.startswith({"BUY":"GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:",
+                "SELL":"GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"}[action]
+                + "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+                + ("basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:" if evicts
+                    else "basis=consumed_physical_proof_read_unavailable:")), receipt.reason
             result = callbacks["preflight_winner"](event,actuation,at,SimpleNamespace())
             assert (result.status,result.reason) == ("BATCH_BLOCKED",receipt.reason), result
             assert bool(era._GLOBAL_PROBABILITY_FAMILY_CACHE) is not evicts
@@ -52045,6 +52085,114 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
             trade.close()
         fixture.conn.close()
         fixture.builtin.close()
+
+
+@pytest.mark.parametrize("fault",("recorded_row_deleted","consumed_read_locked"))
+def test_day0_sell_pinned_carrier_refusal_evicts_the_cached_family(tmp_path,monkeypatch,fault,_hko_clock_native_sources):
+    """Round-4, third route: a Day0 SELL replays through its pinned carrier
+    (_rehydrate_held_pinned_bundle_for_actuation), whose consumed-proof refusal
+    reaches preflight as GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:
+    GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_PINNED_RAW_INPUT_HWM:
+    basis=... . A lost consumed row evicts the cached family; a locked
+    consumed-proof read refuses without eviction.
+    """
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data import replacement_current_value_serving as serving
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    from src.state.db import init_schema_trade_only
+    metric = "high"
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric,prior_hour=6)
+    trade = sqlite3.connect(":memory:")
+    try:
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+        class DecisionClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return fixture.cut.astimezone(tz) if tz else fixture.cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",DecisionClock)
+        # A real newer deterministic wave without its ENS shape: the public reader pins.
+        capture = fixture.cut+_dt.timedelta(minutes=1)
+        fixture.sql_clock[0] = capture
+        write_manifest_to_db(fixture.conn,build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(fixture.artifact_path,
+            request=replace(fixture.anchor_request,run=fixture.request.source_cycle_time+_dt.timedelta(hours=6)),
+            metric=metric,source_available_at=capture,captured_at=capture,
+            product_metadata={"city":"Hong Kong","target_date":"2026-09-30"}))
+        fixture.conn.commit()
+        decision = fixture.cut+_dt.timedelta(minutes=2)
+        pinned = reader.read_prior_complete_replacement_forecast_bundle(fixture.conn,city="Hong Kong",
+            target_date="2026-09-30",temperature_metric=metric,decision_time=decision,raw_input_hwm_conn=fixture.conn)
+        assert pinned.ok and pinned.bundle.posterior_id == fixture.result.posterior_id, pinned.reason_code
+        observed = dict(fixture.conn.execute("SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone())
+        event = build_day0_extreme_updated_event(
+            observation=observation_instant_row_to_day0_observation(observed,metric=metric),
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=decision,
+            received_at=decision.isoformat())
+        held = era._prepare_current_global_probability_family(event,forecast_conn=fixture.conn,
+            topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=decision,
+            max_age=_dt.timedelta(seconds=30),allow_unobserved_day0_replacement=False,
+            allow_provisional_day0_replacement=True,probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+            pinned_complete_bundle=pinned.bundle,raw_input_hwm_conn=fixture.conn)
+        witness = held.probability_witness
+        binding = witness.bindings[0]
+        curve = ExecutableSellCurve(token_id=binding.yes_token_id,side="YES",snapshot_id="book",book_hash="book-hash",
+            levels=(BidBookLevel(price=Decimal(".60"),size=Decimal("10")),),fee_model=FeeModel(fee_rate=Decimal("0")),
+            min_tick=Decimal(".01"),min_order_size=Decimal("1"),quote_ttl=_dt.timedelta(seconds=30))
+        proposal,mode,fill,fill_source,rest = global_sell_execution_terms(curve,capacity=Decimal("10"))
+        candidate = GlobalSingleOrderSellCandidate(candidate_id="pinned-sell",family_key=witness.family_key,
+            bin_id=binding.bin_id,condition_id=binding.condition_id,side="YES",token_id=binding.yes_token_id,
+            position_id="position-1",held_shares=Decimal("10"),probability_witness_identity=witness.witness_identity,
+            book_snapshot_id="book",book_captured_at_utc=decision,execution_curve_identity=executable_curve_identity(curve),
+            ledger_snapshot_id="ledger",executable_sell_curve=curve,resolution_identity=witness.resolution_identity,
+            neg_risk=False,proposal_sell_curve=proposal,execution_mode=mode,fill_probability=fill,
+            fill_probability_source=fill_source,rest_deadline_minutes=rest,
+            probability_functional="LOWER_CVAR_PARAMETER_DRAWS",exit_authority_status="not_applicable",
+            exit_authority_reason="non_day0_family")
+        actuation = SimpleNamespace(winner_event_id=event.event_id,probability_witness=witness,
+            decision=SimpleNamespace(candidate=candidate),actuation_identity="pinned-sell-actuation")
+        assert era._rehydrate_held_pinned_bundle_for_actuation(event,selected=witness,
+            probability_use=era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,forecast_conn=fixture.conn,
+            decision_time=decision) is not None
+        namespace = "pinned-sell-eviction"
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE",namespace)
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",{})
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",{})
+        for use in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
+            era._store_global_probability_family_cache(namespace,family_key=witness.family_key,
+                event_id=event.event_id,family_binding_hash="binding",prepared=held,probability_use=use)
+        if fault == "recorded_row_deleted":
+            icon_id = int(json.loads(fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors"
+                " WHERE posterior_id=?",(fixture.result.posterior_id,)).fetchone()[0])
+                ["bayes_precision_fusion"]["current_value_serving"]["icon_global"]["raw_model_forecast_id"])
+            fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(icon_id,))
+            fixture.conn.commit()
+            basis = "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:"
+        else:
+            def locked(*_a,**_k): raise sqlite3.OperationalError("database is locked")
+            monkeypatch.setattr(serving,"read_consumed_instrument_values",locked)
+            basis = "basis=consumed_physical_proof_read_unavailable:"
+        hwm.clear_consumed_proof_memo()
+        reader._LIVE_GRADE_MEMO.clear()
+        init_schema_trade_only(trade)
+        receipt = era._submit_current_global_sell(event,decision_time=decision,global_actuation=actuation,
+            trade_conn=trade,global_claim_conn=trade,forecast_conn=fixture.conn,topology_conn=fixture.conn,
+            calibration_conn=fixture.conn,preflight_only=True,preflight_receipt=None)
+        assert receipt.proof_accepted is False
+        assert receipt.reason.startswith("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+            "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_PINNED_RAW_INPUT_HWM:"+basis), receipt.reason
+        assert era._global_preflight_block_status(receipt.reason) == "BATCH_BLOCKED"
+        evicts = fault == "recorded_row_deleted"
+        assert era._evict_superseded_global_probability_family_cache(namespace,reason=receipt.reason,
+            actuation=actuation) is evicts
+        assert bool(era._GLOBAL_PROBABILITY_FAMILY_CACHE) is not evicts
+    finally:
+        trade.close()
+        fixture.conn.close()
 
 
 @pytest.mark.parametrize("metric",("high","low"))

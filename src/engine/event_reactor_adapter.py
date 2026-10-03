@@ -1716,22 +1716,50 @@ def _global_preflight_sell_temporal_authority_superseded(reason: str) -> bool:
     )
 
 
-def _global_preflight_consumed_proof_invalid(reason: str) -> bool:
-    # The bundle refused the cached witness's own consumed proof, read at the
-    # posterior's cut: permanent for that posterior. A transient read
-    # (``*_read_unavailable``, HWM_READ_DEADLINE) is not here; re-preparing it
-    # would only re-hit the same lock or deadline.
-    prefix = (
-        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
-        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
-        "REPLACEMENT_RAW_INPUT_HWM:basis=current_value_serving_"
-    )
-    return reason.startswith(tuple(prefix + basis + ":" for basis in (
+# Every preflight route that carries a consumed-proof refusal of the selected
+# witness's own posterior to _evict_superseded_global_probability_family_cache,
+# as (outer wrapper, inner refusal). Each route's reason is
+# outer + inner + "basis=...".
+_CONSUMED_PROOF_REFUSAL_ROUTES = (
+    # BUY: _build_event_bound_no_submit_receipt_core over the actuation replay.
+    (
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:",
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:",
+    ),
+    # SELL: _submit_current_global_sell over the same replay.
+    (
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:",
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:",
+    ),
+    # Day0 SELL: the replay's pinned carrier,
+    # _rehydrate_held_pinned_bundle_for_actuation.
+    (
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:",
+        "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:"
+        "REPLACEMENT_PINNED_RAW_INPUT_HWM:",
+    ),
+)
+# Consumed rows re-read at the posterior's own cut and refused: permanent for
+# that posterior. A transient read (``*_read_unavailable``, HWM_READ_DEADLINE)
+# is not here; re-preparing it would only re-hit the same lock or deadline.
+_CONSUMED_PROOF_INVALID_BASES = tuple(
+    f"basis=current_value_serving_{basis}:"
+    for basis in (
         "consumed_proof_unverifiable",
         "consumed_physical_proof_invalid",
         "consumed_input_after_posterior",
         "raw_row_identity_mismatch",
-    )))
+    )
+)
+
+
+def _global_preflight_consumed_proof_invalid(reason: str) -> bool:
+    return any(
+        reason.startswith(outer)
+        and reason[len(outer):].startswith(inner)
+        and reason[len(outer) + len(inner):].startswith(_CONSUMED_PROOF_INVALID_BASES)
+        for outer, inner in _CONSUMED_PROOF_REFUSAL_ROUTES
+    )
 
 
 def _evict_superseded_global_probability_family_cache(
