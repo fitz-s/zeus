@@ -13504,3 +13504,172 @@ dynamical native terrain/station MSL/AGL, two cities' ground qualification,
 canonical temperature-artifact/q binding, current held debt drainage and
 realized profitable fills. No further source change or appearance reload is
 authorized by these observations; the original goal is not complete.
+
+### Bounded repair: typed zero-observation current-q exit authority
+
+Root accepts a new Important consumer defect, independent of the landed432
+metadata/terrain capture changes: actual canonical ENTRY loads an authenticated
+HeldSourceIdentityBinding, but the Day0 zero-observation monitor path returns
+fresh current q=.932621 without its current certificate receipt or confidence
+bounds. Portfolio cannot identify the current revision and declines the
+otherwise valid holding/book context as entry_calibration_unavailable. The
+non-Day0 control accepts the same current source identity; even adding only a
+revision to the incomplete Day0 receipt does not repair the complete contract.
+This is INV-47 authority discontinuity, not proof that historical calibration
+data must be fitted or that the source q is wrong.
+
+Authorized source ownership is the newly assigned executor only:
+src/engine/monitor_refresh.py and src/state/portfolio.py, plus the existing
+tests/engine/test_monitor_held_belief_readthrough.py and
+tests/test_exit_market_anchored_q.py identified by C. Integrator owns this PLAN,
+the existing touched registry rows, private test configuration and delivery;
+no other source/test actor is authorized by this plan. Current task HEAD789f
+preserves the pushed checkpoint; a fresh fetch confirms origin/live432 and
+there is no concurrent code delta. Live is unchanged.
+
+The smallest correction carries the actual immutable current replacement
+certificate, held-side confidence bounds and typed probability/source revision
+through the existing no-observation refresh, then authenticates that current
+source policy against the original ENTRY binding. Reuse existing carriers and
+validators; do not invent a new flag, actor, q regime, historical fit, uniform
+covariance, point-derived confidence/sample vector or alternative book policy.
+Keep observed Day0 on its independent observation authority. Missing receipt,
+invalid confidence, wrong family/metric/side/revision, changed dependencies or
+unknown observation state must remain typed unavailable, never become zero.
+
+SCOPE is exact city/target-local-date/metric/held YES-or-NO identity and the
+current typed source certificate plus immutable ENTRY binding. DRAIN is the
+normal held monitor/redecision loading that complete current carrier, within
+its existing budget and source freshness checks; no manual recompute or live
+state repair. RESET requires a valid current certificate/CI/dependency and
+ENTRY binding, or a legitimately observed Day0 carrier on its existing path.
+A newer diagnostic receipt alone cannot reset the debt or renew source clocks.
+
+Behavioral proof must fail on original432 and pass after correction through
+actual refresh -> ExitContext -> Position.evaluate_exit, not a helper Boolean.
+HIGH/LOW x YES/NO twins preserve q point, bounds/complements, source identity
+and posterior-mean action inputs; observed-Day0 controls remain lawful.
+Malformed/missing receipts and bounds, wrong revision/ENTRY identity, changed
+physical dependencies, stale source/quote and unknown observation remain
+fail-closed. Any sampled expected-wealth carrier must be the existing coherent
+one, not made from a point probability. No action/band/EV/Kelly/RED law changes.
+
+Before delivery, run the two owned relationship files and narrow new RED/GREEN
+antibodies, the engine/state scoped and module-manifest required checks selected
+from their actual routes, syntax/freshness/YAML/touched-registry/diff checks.
+Report original-source exact failing-node comparisons for remaining failures,
+not a wholesale baseline exemption. Independent review targets current source
+revision and complete Day0/ENTRY authority, not historical calibration tuning.
+Only accepted frozen code may use the normal FF/live loader lane;432 remains
+loaded and its rc0/proof history is not rewritten while this repair is pending.
+
+Read-only namespace correction during validation: a tasktree read without TI1
+uses tasktree STATE_DIR, so the frozen ground reader can reject a live raw-parent
+against that different store root. Its None is not a production source-
+qualification gap: writer's actual live-root RO read at22:49:48, with original
+STATE_DIR=live/state and no validator/path rewrite, returns fresh posterior734634,
+qNO=.9985798010901097/CI[that mean,1], computed22:41:24, source/ENS12Z/v6/
+51-members and raw lag reason None. The earlier None was task namespace mismatch,
+not missing live shape or metadata invalidation. No validator, config or physical
+source rule is relaxed to make the test environment pass. The independently
+reproduced missing typed NoObs receipt/CI defect remains the repair scope.
+Guangzhou's subsequent normal seq376/393 returned fresh/HOLD; the old carrier
+window lacks exact actual vector inputs, so it remains an unproven transient
+cause rather than a new confirmed source defect. No queue age policy is called
+the Denver root cause: retained selection is already capital-tier promoted
+before its cap; a separate cursor-combination hypothesis is still read-only.
+
+### Next bounded queue cursor repair (before edit; independent commit)
+
+Root approves a correctness-only retained-window repair after the NoObs
+original432 failing-node comparison finishes. The same appointed executor owns
+only src/data/replacement_forecast_live_materialization_queue.py and the
+existing tests/test_day0_extreme_updated_materialization_bridge.py. No source
+edit begins during the pending NoObs baseline run; NoObs is committed separately
+before this slice, with no intermediate push or loader unless root authorizes.
+
+The real preselector combines a retained held prefix capped at12 with one
+off-scope injection replacing its last member, then records that injected
+member as durable raw cursor. The next reload repeats the same held prefix;
+the thirteenth eligible held member can fail to enter the inspection window.
+A private counterfactual that advances the raw rotation instead reaches that
+member on the next pass. This is INV-47 bounded rotation/slot composition,
+not evidence that age policy, tier order, source clock or the measured16-minute
+delay is the root cause.
+
+When injection occurs, persist the rotated raw window's first member as the
+cursor; without injection preserve the existing rotation. No new field, cap,
+tier, own-clock rule, source gate, budget or priority policy is introduced.
+SCOPE is the exact retained inspection-window family membership/cursor for that
+queue pass. DRAIN is successive normal bounded passes and durable reload under
+the existing writer/lease budget. RESET is actual cursor advancement and new
+legitimate source/queue membership, not forced terminalization of an owner.
+
+Antibodies must exercise the complete real preselector and persistent reload:
+HIGH/LOW with held debt/global/first-q, unowned and superseded duplicates,
+off-scope injection and no-injection control, new-source churn and a previously
+excluded thirteenth held family. Preserve bytes, family/source cut, all gate
+outcomes and no-loss recovery. The existing queue/data scoped manifest and
+actual bridge checks are selected after freeze; independent review targets
+cursor ownership and combined fair slots. No claim of market-speed drainage
+or historical Denver cause is accepted without separate current runtime proof.
+
+NoObs final frozen evidence: monitor_refresh ff11c4850a61b59f5ff6df7fc5358fbe8e3d5e377a725e799eb2d17c7380a4fa;
+portfolio2df962607be050c7321dab3bbd4a419a67ca0eda4901cfbc21dafc31b66f3e1f;
+owned monitor testc933ca7c39280d88de6ba48c6eb5a961f2cd1ad4532fe13558b0daebaa54c46d;
+owned exit test5108e4021265958077404ec56c50c59910625aa956b8b69fdd5693b5e43afc5d.
+Original source eight actual positive antibodies fail, while final45 new focused
+cases PASS and the two owned whole files produce136PASS/26oldFAIL. Independent
+named review APPROVE covers eight nodes plus four non-mirror SQLite-authorizer
+counterexamples: DB read denial cannot become zero, valid read may RESET, and a
+rehash of observed-Day0 semantics cannot mint NoObs authority. No SELL/profit
+conclusion follows from restored statistical redecision.
+
+Integrator's one required batch is exact manifest state24+engine10 minus two
+overlaps, plus owned2 =34unique files. It finishes2931PASS/117FAIL/4SKIP,
+359.63s/rc1, in /tmp/zeus-noobs-final-20261003.fmJUjk/required34.xml and .log.
+All162 final owned cases are present in that batch; no late antibody was missed.
+Only the remaining91 failed nodes are replayed using original432's two complete
+source modules in a fresh private process, with no worktree restore: all91 fail
+with identical IDs and byte-exact failure messages. The owned26 original432
+comparison is25byte-exact plus one private pytest-root path-only difference.
+Their original/current XMLs and the exact baseline harness are retained; there
+is no claimed all-green34 run or wholesale baseline waiver.
+
+The117 remaining failures require separate dispositions: owned26's historical
+entry-fit/seed fixtures remain deferred; W3 integration39 fail mainly at current
+shape coverage/provisional revision authority; snapshot16 and provenance18
+mostly lack current q_version/mode or fake SDK signature; risk allocator5 use
+legacy submission APIs/old schema, observation3 use old source mocks/date;
+DDL2, savepoint structure1, cross-invariant2 and scheduler structure1 are
+governance/static or schema drift; recovery3 are existing boot-lock/review-work
+expectations; collateral1 reaches the current deadline gate before its expected
+inventory gate. Equal original failure proves no new NoObs delta, not harmless
+production behavior or that every old positive reaches its intended seam.
+No unrelated test assertion, gate or API is changed to obtain green counts.
+
+The static linter fails on22 existing violations outside the two touched
+sources. Because import overlay is not static file replacement, integrator also
+checks each changed source with the actual SemanticAnalyzer on original/current
+text: all four results have zero violations.130 engine/state/schema modules
+compile in memory; YAML2, changed test freshness, exact doc coverage and diff
+checks pass. Existing portfolio downstream warning is unchanged from432.
+The touched exit test gains its missing existing-file core-law classification;
+the nested monitor file remains registered, despite the legacy checker's
+top-level-only inventory reporting it absent. Unrelated global459source issues
+are not repaired. Final clean-tree test checker reports540 issues: removal of
+the own test-only config link adds two missing protected-config paths, while
+the touched exit test's missing classification is removed. These environment/
+legacy-inventory distinctions are recorded, not fixed by committing live config.
+Planning CLI reports ok but does not replace
+the explicit before-edit plan and named review. Source4 stay frozen; this permits
+an independent NoObs commit only, not live push/loading or closure of the next
+queue slice, cached-z acquisition or the original profitable-trading goal.
+
+Root accepts NoObs source4 after the exact baseline comparison and named review,
+and separately authorizes its normal FF/live loader lane. Queue design is not
+accepted for implementation: C's constant14-filename churn over54rounds defeats
+the proposed first-raw cursor rotation, so stable-family-frontier design remains
+pending. Do not execute that superseded recipe or delay the verified NoObs repair
+for it. A normal load refusal remains a real refusal until its native blocker
+changes; no blind retry, forced source/venue action or guard clear is authorized.

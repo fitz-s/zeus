@@ -1,6 +1,9 @@
 # Created: 2026-06-21
 # Last reused or audited: 2026-10-03
-# Lifecycle: created=2026-06-21; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Lifecycle: created=2026-06-21; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Purpose: Preserve held belief freshness, current receipt/CI and Day0 source roles.
+# Reuse: Inspect current replacement revision, empty-prefix proof and ENTRY reader.
+# Current authority: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Authority basis: docs/evidence/live_order_pathology/2026-06-21_forward_chain_diagnosis.md
 #   "CHOSEN FIX (consult-validated, two layers)" — LAYER 2 monitor read-through.
 """ANTIBODY: stale held belief must recover without blocking portfolio monitoring.
@@ -34,9 +37,12 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
+
+from tests.test_exit_market_anchored_q import zero_observation_entry_provider
 
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
 
@@ -1196,6 +1202,195 @@ def test_day0_unobserved_prefix_forwards_portfolio_deadline(monkeypatch):
 
     assert is_fresh is False
     assert captured_deadlines == [305.0]
+
+
+@pytest.fixture
+def zero_observation_monitor_case(monkeypatch, zero_observation_entry_provider):
+    """Real empty canonical event query, recorded complete belief, real ENTRY reader."""
+    from src.engine import monitor_refresh as mr, position_belief as pb
+    from src.state import db
+    from src.state.portfolio import Position
+    from src.state.schema import opportunity_events_schema as schema
+    from src.data.replacement_forecast_cycle_policy import CURRENT_EVIDENCE_SEMANTICS_REVISION
+    from src.data.replacement_forecast_readiness import SOURCE_ID
+
+    opened = []
+
+    def build(metric="high", direction="buy_no"):
+        now = datetime.now(timezone.utc)
+        position = Position(
+            trade_id="zero-observation-held", market_id="0x" + "1" * 64,
+            condition_id="0x" + "1" * 64, city="Munich", cluster="europe",
+            target_date=now.astimezone(ZoneInfo("Europe/Berlin")).date().isoformat(), bin_label="23C", unit="C",
+            direction=direction, temperature_metric=metric, state="day0_window",
+            token_id="yes-token", no_token_id="no-token", shares=40, size_usd=34,
+            entry_price=.85, p_posterior=.9995072436735342, chain_state="synced",
+        )
+        trade, _world = zero_observation_entry_provider(position)
+        canonical = sqlite3.connect(":memory:")
+        canonical.row_factory = sqlite3.Row
+        canonical.execute(schema.CREATE_TABLE_SQL)
+        canonical.execute(schema.CREATE_DAY0_FAMILY_EXTREME_INDEX_SQL)
+        canonical.execute("""CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, local_timestamp TEXT, utc_timestamp TEXT,
+            imported_at TEXT, source TEXT, station_id TEXT, temp_unit TEXT,
+            running_max REAL, running_min REAL, authority TEXT, source_role TEXT,
+            training_allowed INTEGER, causality_status TEXT, raw_response TEXT,
+            provenance_json TEXT)
+        """)
+        opened.append(canonical)
+
+        @contextmanager
+        def private_reader(**_kwargs):
+            yield canonical
+
+        monkeypatch.setattr(db, "get_forecasts_connection_with_world_read_only", private_reader)
+        monkeypatch.setattr(mr, "_day0_absorbing_hard_fact_overlay", lambda **_kw: None)
+        monkeypatch.setattr(mr, "_enqueue_single_family_belief_reseed_failsoft", lambda **_kw: None)
+        # Recorded real Munich733934 point and confidence bounds; only their
+        # native YES/NO projection changes. This leaf result does not replace
+        # any revision, observation, ENTRY or exit validator.
+        yes, lo, hi = 1-.932621378, 1-.9973721974, 1-.6702160358
+        held = yes if direction == "buy_yes" else 1-yes
+        held_ci = (lo, hi) if direction == "buy_yes" else (1-hi, 1-lo)
+        belief = pb.ReplacementBelief(
+            held_side_prob=held, held_side_lcb=held_ci[0], held_side_ucb=held_ci[1],
+            q_yes_bin=yes, q_yes_lcb=lo, q_yes_ucb=hi, posterior_id="733934",
+            computed_at=(now-timedelta(minutes=2)).isoformat(), age_hours=2/60,
+            fresh=True, bin_key=position.bin_label, direction=direction,
+            source_cycle_time=(now-timedelta(hours=2)).isoformat(),
+            source_id=SOURCE_ID, posterior_method=SOURCE_ID,
+            probability_semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        )
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **_kw: belief)
+        return position, belief, trade, canonical
+
+    yield build
+    for conn in opened:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_zero_observation_refresh_reaches_real_day0_entry_and_exit(
+    zero_observation_monitor_case, metric, direction,
+):
+    from src.engine import monitor_refresh as mr, cycle_runtime
+    from src.state.portfolio import ExitContext
+
+    position, belief, trade, canonical = zero_observation_monitor_case(metric, direction)
+    assert mr._target_day_has_canonical_observation(canonical, position) is False
+    q, refreshed, fresh = mr.monitor_probability_refresh(
+        position, conn=trade, city=SimpleNamespace(name="Munich", timezone="Europe/Berlin", settlement_source_type="noaa"),
+        target_d=position.target_date,
+    )
+    assert fresh is True
+    assert q == belief.held_side_prob
+    assert getattr(refreshed, "_replacement_current_evidence_held_bounds", None) == (
+        belief.held_side_lcb, belief.held_side_ucb,
+    )
+    receipt = getattr(refreshed, "_monitor_probability_receipt", None)
+    assert receipt is not None
+    assert receipt["day0_zero_observation_proven"] is True
+    assert receipt["probability_authority"] == "forecast_posteriors"
+    assert "q_version" not in receipt
+    assert getattr(refreshed, "_day0_zero_probability_exit_authority", False) is False
+    refreshed.last_monitor_prob = q
+    refreshed.last_monitor_prob_is_fresh = fresh
+    refreshed.last_monitor_market_price = .89
+    refreshed.last_monitor_market_price_is_fresh = True
+    refreshed.last_monitor_best_bid = .87
+    refreshed.last_monitor_best_ask = .91
+    refreshed.last_monitor_min_tick = .01
+    refreshed.last_monitor_bid_ladder = ((.87, 40),)
+    edge = SimpleNamespace(
+        p_posterior=q, p_market=[.89], confidence_band_lower=belief.held_side_lcb-.89,
+        confidence_band_upper=belief.held_side_ucb-.89,
+    )
+    context = cycle_runtime._build_exit_context(
+        refreshed, edge, hours_to_settlement=12, ExitContext=ExitContext,
+        portfolio=SimpleNamespace(bankroll=100, positions=[refreshed]),
+    )
+    assert context.day0_active is True
+    actual_q, valid, source = refreshed._exit_q_mean_and_source(context)
+    assert (float(actual_q), valid, source) == (q, True, "source_identity_baseline")
+    decision = refreshed.evaluate_exit(context)
+    assert decision.trigger != "EVIDENCE_UNAVAILABLE"
+    assert "exit_q:source_identity_baseline" in decision.applied_validations
+    if direction == "buy_no":
+        assert decision.should_exit is False  # q=.9326 > executable .87 is not a SELL proof.
+
+
+@pytest.mark.parametrize("bad_belief", ("missing_ci", "null_ci", "inverted_ci", "outside_ci", "wrong_bin", "old_revision", "stale"))
+def test_zero_observation_refresh_rejects_incomplete_current_belief(
+    zero_observation_monitor_case, monkeypatch, bad_belief,
+):
+    from dataclasses import replace
+    from src.engine import monitor_refresh as mr, position_belief as pb
+
+    position, belief, trade, _canonical = zero_observation_monitor_case()
+    bad = {
+        "missing_ci": {"held_side_lcb": float("nan")},
+        "null_ci": {"held_side_lcb": None},
+        "inverted_ci": {"held_side_lcb": .99, "held_side_ucb": .1},
+        "outside_ci": {"held_side_ucb": .5},
+        "wrong_bin": {"bin_key": "99C"},
+        "old_revision": {"probability_semantics_revision": "ensemble_center_scenarios_v5"},
+        "stale": {"fresh": False},
+    }[bad_belief]
+    monkeypatch.setattr(pb, "load_replacement_belief", lambda **_kw: replace(belief, **bad))
+    _q, refreshed, fresh = mr.monitor_probability_refresh(
+        position, conn=trade, city=SimpleNamespace(name="Munich", timezone="Europe/Berlin", settlement_source_type="noaa"),
+        target_d=position.target_date,
+    )
+    assert fresh is False
+    assert getattr(refreshed, "_monitor_probability_receipt", {}).get("day0_zero_observation_proven") is not True
+
+
+@pytest.mark.parametrize("failure", ("db_unknown", "observed_but_unavailable"))
+def test_unknown_or_observed_day0_cannot_acquire_zero_observation_role(
+    zero_observation_monitor_case, monkeypatch, failure,
+):
+    from src.engine import monitor_refresh as mr
+
+    position, _belief, trade, _canonical = zero_observation_monitor_case()
+    error = (sqlite3.OperationalError("authority read failed") if failure == "db_unknown"
+             else mr.ObservationUnavailableError("canonical observation exists; current carrier unavailable"))
+    monkeypatch.setattr(mr, "_refresh_current_global_day0_probability",
+                        lambda *_a, **_kw: (_ for _ in ()).throw(error))
+    _q, refreshed, fresh = mr.monitor_probability_refresh(
+        position, conn=trade, city=SimpleNamespace(name="Munich", timezone="Europe/Berlin", settlement_source_type="noaa"),
+        target_d=position.target_date,
+    )
+    assert fresh is False
+    assert getattr(refreshed, "_monitor_probability_receipt", {}).get("day0_zero_observation_proven") is not True
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_actual_canonical_observation_prevents_zero_observation_refresh(
+    zero_observation_monitor_case, monkeypatch, metric,
+):
+    from src.engine import monitor_refresh as mr, position_belief as pb
+
+    position, belief, trade, canonical = zero_observation_monitor_case(metric)
+    now = datetime.now(timezone.utc)
+    canonical.execute("INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        "Munich", position.target_date, now.astimezone(ZoneInfo("Europe/Berlin")).isoformat(),
+        now.isoformat(), now.isoformat(), "ogimet_metar_eddm", "EDDM", "C", 23., 12.,
+        "VERIFIED", "historical_hourly", 1, "OK", "EDDM current physical observation", "{}",
+    ))
+    assert mr._target_day_has_canonical_observation(canonical, position) is True
+    reads = []
+    monkeypatch.setattr(pb, "load_replacement_belief", lambda **_kw: reads.append(True) or belief)
+    _q, refreshed, fresh = mr.monitor_probability_refresh(
+        position, conn=trade, city=SimpleNamespace(name="Munich", timezone="Europe/Berlin", settlement_source_type="noaa"),
+        target_d=position.target_date,
+    )
+    assert fresh is False
+    assert reads == []
+    assert any(mr._DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE in value
+               for value in refreshed.applied_validations)
+    assert getattr(refreshed, "_monitor_probability_receipt", {}).get("day0_zero_observation_proven") is not True
 
 
 def test_readthrough_does_not_itself_decide_an_exit(monkeypatch):

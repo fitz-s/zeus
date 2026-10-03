@@ -1,5 +1,9 @@
 # Created: 2026-09-04
-# Last reused or audited: 2026-09-16
+# Last reused or audited: 2026-10-03
+# Lifecycle: created=2026-09-04; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Purpose: Authenticate current held exit q, including typed zero-observation Day0.
+# Reuse: Inspect source revision, canonical ENTRY identity and dated fit fixtures.
+# Current authority: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
 #   (market-anchored calibrator, item 9) + this task's fix — the exit stop was
 #   comparing against the RAW posterior-predictive point (measured +0.170
@@ -14,10 +18,11 @@ compatibility. Evaluating the stop never opens a DB connection of its own.
 """
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -636,3 +641,195 @@ def test_authenticated_identity_cohort_holding_uses_current_source_without_full_
     assert q == raw
     assert valid
     assert source == "source_identity_baseline"
+
+
+@pytest.fixture
+def zero_observation_entry_provider(monkeypatch):
+    """Canonical private ENTRY proof; only the persisted audit read is a leaf double.
+
+    The normal loader authenticates event/attribution, certificate hash, native
+    token/side and baseline-to-receipt equality. Its provider and at_decision
+    revision gate are real, including when the original source is replayed.
+    """
+    from src.calibration import market_anchored_live_fit as live_fit
+    from src.contracts.payoff_q_correction import SourceIdentityBaseline
+    from src.decision_kernel.canonicalization import stable_hash
+
+    opened = []
+
+    def build(position):
+        side = "YES" if position.direction.value == "buy_yes" else "NO"
+        token = position.token_id if side == "YES" else position.no_token_id
+        baseline = SourceIdentityBaseline(
+            family_key=f"{position.city}|{position.target_date}|{position.temperature_metric}",
+            bin_id=position.bin_label, side=side, token_id=token, raw_q=.9995072436735342,
+            p0=.85, raw_probability_revision="entry-revision", q_version="entry-q",
+            probability_witness_identity="entry-witness", probability_content_identity="entry-content",
+            source_truth_identity="entry-source", sample_matrix_identity="entry-samples",
+        )
+        trade, world = sqlite3.connect(":memory:"), sqlite3.connect(":memory:")
+        opened.extend((trade, world))
+        trade.execute("CREATE TABLE position_events (position_id TEXT, event_type TEXT, sequence_no INTEGER, decision_id TEXT, payload_json TEXT, command_id TEXT)")
+        trade.execute("CREATE TABLE position_decision_attribution (position_id TEXT, intent_kind TEXT, resolution TEXT, decision_certificate_hash TEXT, command_id TEXT)")
+        world.execute("CREATE TABLE decision_certificates (certificate_hash TEXT, certificate_type TEXT, mode TEXT, verifier_status TEXT, payload_json TEXT, payload_hash TEXT)")
+        receipt = {
+            "decision_log_id": 7, "decision_log_mode": "global_single_order_auction",
+            "receipt_hash": "b" * 64, "execution_binding_hash": "c" * 64,
+            "artifact_summary_hash": "d" * 64, "schema_version": 22,
+            "winner_event_id": "event-a", "winner_candidate_id": "candidate-a",
+            "winner_actuation_identity": "actuation-a", "selection_epoch_identity": "epoch-a",
+        }
+        certificate = {
+            "global_auction_receipt": receipt, "direction": position.direction.value,
+            "token_id": token, "global_token_id": token,
+            "global_family_key": baseline.family_key, "global_bin_id": baseline.bin_id,
+            "market_anchored_correction": baseline.as_cert_fields(),
+        }
+        trade.execute("INSERT INTO position_events VALUES (?,?,?,?,?,?)", (
+            position.trade_id, "ENTRY_ORDER_FILLED", 1, "cert-a",
+            json.dumps({"decision_log_id": 7}), "command-filled",
+        ))
+        trade.execute("INSERT INTO position_decision_attribution VALUES (?,?,?,?,?)", (
+            position.trade_id, "ENTRY", "ATTRIBUTED", "cert-a", "command-filled",
+        ))
+        world.execute("INSERT INTO decision_certificates VALUES (?,?,?,?,?,?)", (
+            "cert-a", "ActionableTradeCertificate", "LIVE", "VERIFIED",
+            json.dumps(certificate), stable_hash(certificate),
+        ))
+        scope = CalibrationFitScope(
+            position.temperature_metric, "TAKER_LIMIT", "FOK_FULL_OR_ZERO", "entry-revision",
+        )
+        monkeypatch.setattr(live_fit, "_load_held_audit_context", lambda *_a, **_kw: {
+            "market_anchored_fit_artifact_audit": {"source_identity_baselines": {
+                "entry": {"status": "SOURCE_IDENTITY_BASELINE", "scope": scope.as_payload(),
+                          "baseline": baseline.as_payload()},
+            }},
+        })
+        binding = live_fit.load_held_entry_calibration(
+            trade, position_id=position.trade_id, token_id=token, side=side, world_conn=world,
+        )
+        assert isinstance(binding, live_fit.HeldSourceIdentityBinding)
+        provider = live_fit.HeldEntryCalibrationProvider(trade, world_conn=world)
+        register_active_provider(provider)
+        return trade, world
+
+    yield build
+    register_active_provider(None)
+    for conn in opened:
+        conn.close()
+
+
+def _zero_observation_current_receipt(position, *, q=.3, ci=(.2, .4)):
+    from src.engine import monitor_refresh
+    from src.data.replacement_forecast_cycle_policy import CURRENT_EVIDENCE_SEMANTICS_REVISION
+    from src.data.replacement_forecast_readiness import SOURCE_ID
+
+    now = datetime.now(timezone.utc)
+    return monitor_refresh._compact_monitor_probability_receipt({
+        "schema_version": 1, "selected_method": "replacement_posterior",
+        "probability_authority": "forecast_posteriors",
+        "probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        "probability_semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        "posterior_id": "733934", "computed_at": (now - timedelta(minutes=2)).isoformat(),
+        "source_cycle_time": (now - timedelta(hours=2)).isoformat(),
+        "source_id": SOURCE_ID, "posterior_method": SOURCE_ID,
+        "captured_at_utc": now.isoformat(), "city": position.city,
+        "target_date": position.target_date, "temperature_metric": position.temperature_metric,
+        "bin_label": position.bin_label, "bin_key": position.bin_label,
+        "held_direction": position.direction.value, "held_side_probability": q,
+        "held_side_lcb": ci[0], "held_side_ucb": ci[1],
+        "day0_zero_observation_proven": True,
+    })
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_zero_observation_day0_authenticates_current_source_revision(
+    zero_observation_entry_provider, metric, direction,
+):
+    position = _held_position(direction, target_date=datetime.now(timezone.utc).date().isoformat())
+    position.temperature_metric = metric
+    zero_observation_entry_provider(position)
+    ctx = replace(
+        _exit_context(fresh_prob=.3, current_market_price=.5, best_bid=.5),
+        day0_active=True, position_state="day0_window", current_ci=(.2, .4),
+        probability_receipt=_zero_observation_current_receipt(position),
+    )
+    q, valid, source = position._exit_q_mean_and_source(ctx)
+    assert (float(q), valid, source) == (.3, True, "source_identity_baseline")
+    decision = position.evaluate_exit(ctx)
+    assert decision.trigger == "SELL_REVERSAL"
+    assert "exit_q:source_identity_baseline" in decision.applied_validations
+
+
+@pytest.mark.parametrize("mutation", (
+    "missing_receipt", "unknown_observation", "wrong_city", "wrong_date", "wrong_metric",
+    "wrong_direction", "wrong_bin", "wrong_bin_key", "wrong_revision", "wrong_source", "wrong_method",
+    "missing_posterior", "wrong_point", "wrong_ci", "missing_ci", "future_compute",
+    "future_read", "naive_clock", "stale_source", "tampered_hash", "stale_q", "stale_quote", "entry_conflict",
+    "observed_q_version",
+))
+def test_zero_observation_day0_current_receipt_failures_remain_unavailable(
+    zero_observation_entry_provider, mutation,
+):
+    from src.engine import monitor_refresh
+
+    position = _held_position(target_date=datetime.now(timezone.utc).date().isoformat())
+    trade, _world = zero_observation_entry_provider(position)
+    receipt = dict(_zero_observation_current_receipt(position))
+    receipt.pop("evidence_content_hash", None)
+    changes = {
+        "unknown_observation": {"day0_zero_observation_proven": False},
+        "wrong_city": {"city": "Munich"}, "wrong_date": {"target_date": "2026-01-01"},
+        "wrong_metric": {"temperature_metric": "low"},
+        "wrong_direction": {"held_direction": "buy_no"}, "wrong_bin": {"bin_label": "99C"},
+        "wrong_bin_key": {"bin_key": "99C"},
+        "wrong_revision": {"probability_semantics_revision": "ensemble_center_scenarios_v5"},
+        "wrong_source": {"source_id": "legacy"}, "wrong_method": {"posterior_method": "legacy"},
+        "missing_posterior": {"posterior_id": ""}, "wrong_point": {"held_side_probability": .9},
+        "wrong_ci": {"held_side_lcb": .35}, "missing_ci": {"held_side_ucb": None},
+        "future_compute": {"computed_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()},
+        "future_read": {"captured_at_utc": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()},
+        "naive_clock": {"captured_at_utc": datetime.now().isoformat()},
+        "stale_source": {"source_cycle_time": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()},
+        "observed_q_version": {"q_version": "day0-semrev:observed:certificate"},
+    }
+    receipt.update(changes.get(mutation, {}))
+    receipt = monitor_refresh._compact_monitor_probability_receipt(receipt)
+    if mutation == "tampered_hash":
+        receipt["posterior_id"] = "tampered"
+    if mutation == "entry_conflict":
+        trade.execute("UPDATE position_events SET decision_id='conflicting-entry'")
+    ctx = replace(
+        _exit_context(fresh_prob=.3, current_market_price=.5, best_bid=.5),
+        day0_active=True, position_state="day0_window", current_ci=(.2, .4),
+        fresh_prob_is_fresh=mutation != "stale_q",
+        current_market_price_is_fresh=mutation != "stale_quote",
+        probability_receipt=None if mutation == "missing_receipt" else receipt,
+    )
+    _q, valid, _source = position._exit_q_mean_and_source(ctx)
+    assert valid is False
+    assert position.evaluate_exit(ctx).trigger == "EVIDENCE_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("has_day0_revision", (True, False))
+def test_observed_day0_keeps_its_own_revision_without_zero_observation_role(
+    zero_observation_entry_provider, has_day0_revision,
+):
+    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+    position = _held_position(target_date=datetime.now(timezone.utc).date().isoformat())
+    zero_observation_entry_provider(position)
+    receipt = {
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "probability_semantics_revision": "ensemble_center_scenarios_v6",
+    }
+    if has_day0_revision:
+        receipt["q_version"] = f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:observed-current"
+    ctx = replace(
+        _exit_context(fresh_prob=.3, current_market_price=.5, best_bid=.5),
+        day0_active=True, position_state="day0_window", probability_receipt=receipt,
+    )
+    _q, valid, source = position._exit_q_mean_and_source(ctx)
+    assert valid is has_day0_revision
+    assert source == ("source_identity_baseline" if has_day0_revision else "entry_calibration_unavailable")

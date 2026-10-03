@@ -696,6 +696,16 @@ def _compact_monitor_probability_receipt(
             "q_version",
             "source_truth_identity",
             "held_side_probability",
+            "held_side_lcb",
+            "held_side_ucb",
+            "city",
+            "target_date",
+            "temperature_metric",
+            "bin_label",
+            "bin_key",
+            "held_direction",
+            "captured_at_utc",
+            "day0_zero_observation_proven",
             "hard_fact_evidence",
         )
         if payload.get(key) is not None
@@ -4501,6 +4511,8 @@ def _refresh_day0_unobserved_prefix_probability(
 
     metric = resolve_position_metric(position)[0]
     from src.engine.position_belief import (
+        POSTERIOR_PREDICTIVE_MEAN,
+        ReplacementBelief,
         SELECTED_METHOD_REPLACEMENT_POSTERIOR,
         load_replacement_belief,
         monitor_belief_max_age_hours,
@@ -4535,6 +4547,33 @@ def _refresh_day0_unobserved_prefix_probability(
     if belief is None or not belief.fresh:
         return None
 
+    from src.data.replacement_forecast_cycle_policy import CURRENT_EVIDENCE_SEMANTICS_REVISION
+    from src.data.replacement_forecast_readiness import SOURCE_ID
+
+    direction = str(getattr(position.direction, "value", position.direction))
+    if not (
+        isinstance(belief, ReplacementBelief)
+        and belief.probability_functional == POSTERIOR_PREDICTIVE_MEAN
+        and belief.probability_semantics_revision == CURRENT_EVIDENCE_SEMANTICS_REVISION
+        and belief.source_table == "forecast_posteriors"
+        and belief.source_id == SOURCE_ID
+        and belief.posterior_method == SOURCE_ID
+        and belief.direction == direction
+        and all(isinstance(value, str) and value.strip() for value in (
+            belief.posterior_id, belief.computed_at, belief.source_cycle_time, belief.bin_key,
+        ))
+        and " ".join(belief.bin_key.split()).casefold() == " ".join(position.bin_label.split()).casefold()
+        and all(_monitor_receipt_float(value) is not None for value in (
+            belief.held_side_lcb, belief.held_side_prob, belief.held_side_ucb,
+        ))
+        and 0.0 <= float(belief.held_side_lcb) <= float(belief.held_side_prob) <= float(belief.held_side_ucb) <= 1.0
+    ):
+        # SCOPE: this held family/side's current no-observation certificate.
+        # DRAIN: the normal monitor reads its complete current replacement
+        # carrier. RESET: current revision, source identity and coherent CI;
+        # a generic observation failure never establishes the empty prefix.
+        return None
+
     refreshed = _clone_for_probability_refresh(position)
     refreshed.selected_method = SELECTED_METHOD_REPLACEMENT_POSTERIOR
     _append_monitor_validation(
@@ -4558,6 +4597,39 @@ def _refresh_day0_unobserved_prefix_probability(
         ),
     )
     _append_monitor_validation(refreshed, belief.freshness_validation())
+    setattr(refreshed, "_replacement_current_evidence_held_bounds", (
+        belief.held_side_lcb, belief.held_side_ucb,
+    ))
+    setattr(
+        refreshed,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+        _compact_monitor_probability_receipt({
+            "schema_version": 1,
+            "selected_method": SELECTED_METHOD_REPLACEMENT_POSTERIOR,
+            "probability_authority": belief.source_table,
+            "probability_functional": belief.probability_functional,
+            "probability_semantics_revision": belief.probability_semantics_revision,
+            "posterior_id": belief.posterior_id,
+            "computed_at": belief.computed_at,
+            "source_cycle_time": belief.source_cycle_time,
+            "source_id": belief.source_id,
+            "posterior_method": belief.posterior_method,
+            "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+            "city": str(position.city),
+            "target_date": str(position.target_date),
+            "temperature_metric": metric,
+            "bin_label": str(position.bin_label),
+            "bin_key": belief.bin_key,
+            "held_direction": direction,
+            "held_side_probability": float(belief.held_side_prob),
+            "held_side_lcb": float(belief.held_side_lcb),
+            "held_side_ucb": float(belief.held_side_ucb),
+            "day0_zero_observation_proven": zero_observation_proven is True,
+            **({"latest_raw_cycle_time": belief.latest_raw_cycle_time}
+               if belief.latest_raw_cycle_time is not None else {}),
+        }),
+    )
+    _set_day0_zero_probability_exit_authority(refreshed, False)
     _set_monitor_probability_fresh(refreshed, True)
     return float(belief.held_side_prob), refreshed, True
 

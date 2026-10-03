@@ -14,6 +14,7 @@ balance rescue after F1: balance-only rescue writes the chain aggregate into
 Provides exposure queries for risk limit enforcement.
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -1004,6 +1005,59 @@ class Position:
             current_raw_revision = receipt.get("probability_semantics_revision")
 
         now_utc = datetime.now(timezone.utc)
+        if exit_context.day0_active and receipt.get("day0_zero_observation_proven") is True:
+            # SCOPE: the exact no-observation held family/side, not observed
+            # Day0 or a merely missing observation read. DRAIN: normal held
+            # refresh propagates the current source certificate and CI.
+            # RESET: that complete receipt matches this cut and ENTRY remains
+            # authenticated below; midnight does not require a residual fit.
+            from src.data.replacement_forecast_cycle_policy import (
+                CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                cycle_age_outside_bound,
+            )
+            from src.data.replacement_forecast_readiness import SOURCE_ID
+
+            try:
+                clocks = tuple(datetime.fromisoformat(str(receipt[key]).replace("Z", "+00:00"))
+                               for key in ("source_cycle_time", "computed_at", "captured_at_utc"))
+                if any(clock.tzinfo is None or clock.utcoffset() is None for clock in clocks):
+                    raise ValueError("current replacement clocks are not aware")
+                source_clock, computed_at, captured_at = clocks
+                receipt_body = {key: value for key, value in receipt.items() if key != "evidence_content_hash"}
+                receipt_hash = hashlib.sha256(json.dumps(
+                    receipt_body, sort_keys=True, separators=(",", ":"), default=str,
+                ).encode("utf-8")).hexdigest()
+                receipt_ci = (float(receipt["held_side_lcb"]), float(receipt["held_side_ucb"]))
+                if not (
+                    receipt.get("schema_version") == 1
+                    and receipt.get("selected_method") == "replacement_posterior"
+                    and receipt.get("probability_authority") == "forecast_posteriors"
+                    and receipt.get("probability_functional") == "POSTERIOR_PREDICTIVE_MEAN"
+                    and receipt.get("probability_semantics_revision") == CURRENT_EVIDENCE_SEMANTICS_REVISION
+                    and receipt.get("source_id") == SOURCE_ID
+                    and receipt.get("posterior_method") == SOURCE_ID
+                    and receipt.get("city") == self.city
+                    and receipt.get("target_date") == self.target_date
+                    and receipt.get("temperature_metric") == self.temperature_metric
+                    and receipt.get("held_direction") == self.direction.value
+                    and receipt.get("bin_label") == self.bin_label
+                    and all(isinstance(receipt.get(key), str) and receipt[key].strip()
+                            for key in ("posterior_id", "bin_key"))
+                    and " ".join(receipt["bin_key"].split()).casefold()
+                        == " ".join(self.bin_label.split()).casefold()
+                    and not receipt.get("q_version")
+                    and not exit_context.day0_zero_probability_exit_authority
+                    and source_clock <= computed_at <= captured_at <= now_utc
+                    and not cycle_age_outside_bound(now_utc, source_clock)
+                    and receipt.get("evidence_content_hash") == receipt_hash
+                    and float(receipt["held_side_probability"]) == float(q_raw)
+                    and all(math.isclose(value, float(bound), rel_tol=0.0, abs_tol=1e-12)
+                            for value, bound in zip(receipt_ci, exit_context.current_ci))
+                ):
+                    raise ValueError("current zero-observation receipt does not bind this cut")
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return q_raw, False, "entry_calibration_unavailable"
+            current_raw_revision = receipt["probability_semantics_revision"]
         try:
             side = "YES" if self.direction.value == "buy_yes" else "NO"
             token_id = self.token_id if side == "YES" else self.no_token_id
