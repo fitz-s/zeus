@@ -1768,7 +1768,9 @@ def day0_remaining_from_provenance(
         ifs = serving.get("ecmwf_ifs")
         physical = ifs.get("physical_response") if isinstance(ifs, Mapping) else None
         frozen = physical.get("frozen_product_identity") if isinstance(physical, Mapping) else None
-        if isinstance(frozen, Mapping) and (taus or "day0_remaining_from" in frozen):
+        # A frozen body without the key made no remaining-window claim (a full-target
+        # body captured before the local day); it is not a conflict with the posterior tau.
+        if isinstance(frozen, Mapping) and "day0_remaining_from" in frozen:
             frozen_tau = day0_remaining_from_iso_of(frozen.get("day0_remaining_from"))
             if frozen_tau is None or not taus:
                 return invalid

@@ -1377,8 +1377,10 @@ def test_held_continuity_tau_is_immutable_context_consistent_with_frozen_ifs() -
     assert decode(prov({"day0_remaining_from": tau})) == (tau, None)
     assert decode(prov({"day0_remaining_from": "2026-06-07T23:05:00+08:00"})) == (tau, None)
     invalid = (None, "basis=current_value_serving_day0_window_unverifiable")
-    assert decode(prov({})) == invalid
+    # No key: a pre-Day0 full-target body made no remaining-window claim.
+    assert decode(prov({})) == (tau, None)
     assert decode(prov({"day0_remaining_from": None})) == invalid
+    assert decode(prov({"day0_remaining_from": "unknown"})) == invalid
     assert decode(prov({"day0_remaining_from": "2026-06-07T14:00:00+00:00"})) == invalid
     assert decode({}) == (None, None)
     non_ifs = prov({})

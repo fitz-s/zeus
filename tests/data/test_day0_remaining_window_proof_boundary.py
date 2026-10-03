@@ -244,7 +244,7 @@ def test_shared_window_decoder_uses_context_and_checks_frozen_ifs(context_key, i
 @pytest.mark.parametrize("invalid", (
     "missing_time", "naive", "malformed", "context_not_mapping", "wrong_metric",
     "wrong_day", "day_end", "after_cert_cut", "contexts_conflict", "frozen_none",
-    "frozen_missing", "frozen_conflict", "inactive_with_time",
+    "frozen_malformed", "frozen_conflict", "inactive_with_time",
 ))
 def test_declared_invalid_window_never_silently_becomes_fulltarget(invalid):
     tau = "2026-10-02T21:32:17+00:00"
@@ -268,8 +268,8 @@ def test_declared_invalid_window_never_silently_becomes_fulltarget(invalid):
     elif invalid == "inactive_with_time":
         context["active"] = False
     else:
-        frozen = {} if invalid == "frozen_missing" else {"day0_remaining_from":
-            None if invalid == "frozen_none" else "2026-10-02T21:30:00+00:00"}
+        frozen = {"day0_remaining_from": None if invalid == "frozen_none"
+            else "unknown" if invalid == "frozen_malformed" else "2026-10-02T21:30:00+00:00"}
         provenance["bayes_precision_fusion"] = {"current_value_serving": {"ecmwf_ifs": {
             "physical_response": {"frozen_product_identity": frozen},
         }}}
@@ -277,6 +277,25 @@ def test_declared_invalid_window_never_silently_becomes_fulltarget(invalid):
         metric="high", posterior_computed_at=cut) == (
             None, "basis=current_value_serving_day0_window_unverifiable",
         )
+
+
+def test_pre_day0_fulltarget_frozen_body_declares_no_window_and_is_no_conflict():
+    # A full-target body captured before the local day began never had a remaining
+    # window; absence of the key is "no claim", not a conflict with the Day0 tau.
+    tau = "2026-10-02T21:32:17+00:00"
+    provenance = {"day0_provisional_observation": {"active": True, "metric": "high", "observation_time": tau},
+        "bayes_precision_fusion": {"current_value_serving": {"ecmwf_ifs": {
+            "physical_response": {"frozen_product_identity": {"model": "ecmwf_ifs"}}}}}}
+    assert serving.day0_remaining_from_provenance(provenance, city="Paris", target_date="2026-10-02",
+        metric="high", posterior_computed_at="2026-10-02T22:18:20+00:00") == (tau, None)
+
+
+def test_frozen_tau_without_posterior_tau_is_invalid():
+    provenance = {"bayes_precision_fusion": {"current_value_serving": {"ecmwf_ifs": {
+        "physical_response": {"frozen_product_identity": {"day0_remaining_from": "2026-10-02T21:30:00+00:00"}}}}}}
+    assert serving.day0_remaining_from_provenance(provenance, city="Paris", target_date="2026-10-02",
+        metric="high", posterior_computed_at="2026-10-02T22:18:20+00:00") == (
+            None, "basis=current_value_serving_day0_window_unverifiable")
 
 
 def test_no_day0_or_inactive_without_window_keeps_fulltarget():
