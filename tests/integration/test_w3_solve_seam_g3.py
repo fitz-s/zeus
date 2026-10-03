@@ -51795,6 +51795,7 @@ def test_hko_authority_binds_members_from_the_consumed_proof_not_the_latest_run(
 def _hko_partial_current_post_day_posterior(tmp_path,monkeypatch,metric):
     """Round-3 shape: lawful HK scheme ICON+UKMO+HKO+KMA, KMA missing (partial-current),
     re-materialized post-day at 16:30Z with a frozen Day0 tau, by the ordinary producer."""
+    import functools
     from src.data import bayes_precision_fusion_download as dl, day0_hourly_vectors as hourly
     from src.data import openmeteo_ecmwf_ifs9_bucket_transport as transport
     from src.data import replacement_forecast_materializer as materializer
@@ -51806,6 +51807,10 @@ def _hko_partial_current_post_day_posterior(tmp_path,monkeypatch,metric):
         +"Hong Kong,ACTIVE,"+"+".join(configured)+","+"+".join(m+":0.25" for m in configured)+",30,true,GRID_CAP10_LIVE_READY\n")
     monkeypatch.setenv(weights.ENV_CITY_ONE_SCHEME_PATH,str(scheme_path))
     weights.load_city_one_schemes.cache_clear()
+    # The loader caches the env-resolved scheme under key None; undo restores the
+    # env but not that entry, so swap in a fresh cache that dies with this test.
+    monkeypatch.setattr(weights,"load_city_one_schemes",
+        functools.lru_cache(maxsize=8)(weights.load_city_one_schemes.__wrapped__))
     fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric)
     city = fixture.city
     row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
