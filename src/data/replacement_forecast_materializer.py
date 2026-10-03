@@ -3445,6 +3445,10 @@ class _BayesPrecisionFusionFusionOverride:
     # hash, not a duplicated 51-value payload.
     current_evidence_members_c: tuple[float, ...] | None = None
     current_evidence_member_bounds_c: tuple[tuple[float, float], ...] | None = None
+    # The provider rows behind the between-provider spread when no source-clock
+    # scheme payload carries them (the station-augmented center): a consumed
+    # input, recorded like every other serving role.
+    between_cohort_value_serving: Mapping[str, Mapping[str, object]] | None = None
 
 
 @dataclass(frozen=True)
@@ -5008,6 +5012,7 @@ def _replacement_bayes_precision_fusion_override(
         _source_clock_shape_required = True
         _station_live_omitted = False
         _source_clock_current_value_serving: dict[str, Mapping[str, object]] = {}
+        _fallback_coherent_current: Mapping[str, object] = {}
         _source_clock_dep_ids: set[int] = set()
         try:
             from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
@@ -5758,6 +5763,10 @@ def _replacement_bayes_precision_fusion_override(
             ),
             current_evidence_member_bounds_c=getattr(
                 _source_clock_current_shape, "member_bounds_c", None
+            ),
+            between_cohort_value_serving=(
+                {str(model): value.as_provenance() for model, value in _fallback_coherent_current.items()}
+                if _source_clock_payload is None and _fallback_coherent_current else None
             ),
         )
     except (SourceClockSchemeUnavailable, BayesPrecisionFusionDeclined):
@@ -8837,6 +8846,9 @@ def _compute_posterior_payload(
                 if bayes_precision_fusion_override.source_clock_one_scheme
                 else None
             ),
+            **({"between_cohort_value_serving": {
+                m: dict(v) for m, v in bayes_precision_fusion_override.between_cohort_value_serving.items()
+            }} if bayes_precision_fusion_override.between_cohort_value_serving else {}),
             "current_evidence_shape": (
                 dict(bayes_precision_fusion_override.current_evidence_shape)
                 if bayes_precision_fusion_override.current_evidence_shape

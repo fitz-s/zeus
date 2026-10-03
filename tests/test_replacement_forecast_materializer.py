@@ -11476,6 +11476,32 @@ def test_normal_anchor_only_writer_rebuilds_v6_and_public_entry_held_own_proof(t
     _normal_hko_writer_proof_relationship(tmp_path, monkeypatch, include_raw_ifs=False)
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_every_q_input_row_has_one_recorded_role_on_the_anchor_only_branch(tmp_path, monkeypatch):
+    """Structural guard (A/D) on the anchor-only branch: the IFS center is the
+    anchor proof, never a persisted IFS row, and every other row entering q is a
+    recorded serving role."""
+    from tests.integration.test_w3_solve_seam_g3 import (
+        _assert_every_q_input_row_has_one_role, _q_input_rows_spy,
+    )
+    checked = []
+    real = materialize_replacement_forecast_live
+    with _q_input_rows_spy(monkeypatch) as seen:
+        def checked_materialize(conn, request):
+            for key in ("selected", "cohort"):
+                seen[key].clear()
+            seen.pop("shape_models", None)
+            result = real(conn, request)
+            if result.ok:
+                assert seen["selected"] and "shape_models" in seen, seen
+                fusion, _claims = _assert_every_q_input_row_has_one_role(conn, result.posterior_id, seen)
+                checked.append(fusion["current_evidence_shape"]["provider_geometry_audit"]["anchor_ifs9_role"])
+            return result
+        monkeypatch.setattr(sys.modules[__name__], "materialize_replacement_forecast_live", checked_materialize)
+        _normal_hko_writer_proof_relationship(tmp_path, monkeypatch, include_raw_ifs=False)
+    assert checked and set(checked) == {"anchor_only"}, checked
+
+
 def _built_low_revision_request(tmp_path: Path) -> ReplacementForecastMaterializeRequest:
     """Pass a real seed through the production JSON builder and dataclass adapter."""
     from src.data.replacement_forecast_materialization_request_builder import (

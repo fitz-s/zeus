@@ -1837,8 +1837,8 @@ def _recorded_serving_claims(
 ) -> dict[int, tuple[str, datetime, datetime | None, object, str]] | None:
     """Every raw row a posterior records as consumed, by id, across its roles.
 
-    The roles are read from the provenance itself: ``current_value_serving``
-    and every ``*_value_serving`` mapping in ``source_clock_one_scheme``. One
+    The roles are read from the provenance itself: every ``*_value_serving``
+    mapping in the fusion record and in its ``source_clock_one_scheme``. One
     row shared by several roles must claim one identity; a malformed or
     conflicting claim returns None (unverifiable).
     """
@@ -1846,9 +1846,9 @@ def _recorded_serving_claims(
 
     scheme = fusion.get("source_clock_one_scheme")
     roles = [("current_value_serving", fusion.get("current_value_serving"))]
-    if isinstance(scheme, Mapping):
-        roles += [(key, value) for key, value in scheme.items()
-                  if str(key).endswith("_value_serving")]
+    for owner in (fusion, scheme if isinstance(scheme, Mapping) else {}):
+        roles += [(str(key), value) for key, value in owner.items()
+                  if str(key).endswith("_value_serving") and key != "current_value_serving"]
     claims: dict[int, tuple[str, datetime, datetime | None, object, str]] = {}
     for role, serving in roles:
         if serving is None and role != "current_value_serving":
@@ -1872,6 +1872,50 @@ def _recorded_serving_claims(
                                           != physical_source_proof_dependency(claim[3])):
                 return None
     return claims
+
+
+_UNRECORDED_COHORT_ROLE = "unrecorded_cohort"
+
+
+def _unrecorded_cohort_claims(
+    conn: sqlite3.Connection,
+    fusion: Mapping[str, object],
+    claims: Mapping[int, tuple[str, datetime, datetime | None, object, str]],
+) -> dict[int, tuple[str, datetime, datetime | None, object, str]] | str:
+    """Claims for a dependency id no role records, from the row's own identity.
+
+    The anchor proof covers the persisted IFS row only when no role serves IFS
+    (anchor-only); when IFS is served, that row is already a role, so another
+    IFS id is a spread-cohort row and is re-proven like the rest.
+    """
+    from src.forecast.model_selection import ANCHOR_MODEL
+
+    served = fusion.get("current_value_serving")
+    anchor_served = isinstance(served, Mapping) and ANCHOR_MODEL in served
+    try:
+        ids = sorted({int(i) for i in fusion.get("raw_model_forecast_ids") or ()} - set(claims))
+    except (TypeError, ValueError):
+        return "basis=current_value_serving_provenance_unverifiable:dependency_ids"
+    table = _authority_table_ref(conn, "raw_model_forecasts") if ids else None
+    out: dict[int, tuple[str, datetime, datetime | None, object, str]] = {}
+    for raw_id in ids:
+        try:
+            row = None if table is None else conn.execute(
+                f"SELECT model, source_cycle_time, captured_at FROM {table} WHERE raw_model_forecast_id=?",
+                (raw_id,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            _raise_hwm_read_unavailable(exc, basis="consumed_physical_proof_read_unavailable")
+        if row is None:
+            return ("basis=current_value_serving_consumed_proof_unverifiable:"
+                    f"consumed_raw_id={raw_id}:role={_UNRECORDED_COHORT_ROLE}")
+        if str(row[0]) == ANCHOR_MODEL and not anchor_served:
+            continue
+        cycle = _parse_source_cycle_utc(row[1])
+        if cycle is None:
+            return ("basis=current_value_serving_raw_row_identity_mismatch:"
+                    f"model={row[0]}:consumed_raw_id={raw_id}:role={_UNRECORDED_COHORT_ROLE}")
+        out[raw_id] = (str(row[0]), cycle, _parse_source_cycle_utc(row[2]), None, _UNRECORDED_COHORT_ROLE)
+    return out
 
 
 def _exact_current_value_serving_lag(
@@ -2038,6 +2082,18 @@ def _exact_current_value_serving_lag(
     claims = {} if consumed_proof_verified else _recorded_serving_claims(fusion)
     if claims is None:
         return True, "basis=current_value_serving_provenance_unverifiable:role_claim", None
+    if claims and fusion.get("source_clock_one_scheme") is None and not any(
+            str(key).endswith("_value_serving") and key != "current_value_serving" for key in fusion):
+        # A station-augmented posterior written before its spread cohort was
+        # recorded as a role consumed rows that only raw_model_forecast_ids
+        # names. Each unroled non-anchor id there is re-proven by its own row:
+        # it must still exist and verify its own body at the posterior's cut.
+        # Remove once no live posterior lacks a recorded cohort role on this
+        # branch (every such posterior is past its readiness expiry).
+        unrecorded = _unrecorded_cohort_claims(conn, fusion, claims)
+        if isinstance(unrecorded, str):
+            return True, unrecorded, None
+        claims = {**claims, **unrecorded}
     try:
         frozen = read_consumed_instrument_values(
             conn, city=city, metric=metric, target_date=str(target_date),
@@ -2056,6 +2112,8 @@ def _exact_current_value_serving_lag(
             or captured is None or _parse_source_cycle_utc(old.captured_at) != captured):
             return True, ("basis=current_value_serving_raw_row_identity_mismatch:"
                 f"model={model}:consumed_raw_id={raw_id}:role={role}"), None
+        if role == _UNRECORDED_COHORT_ROLE:
+            continue  # No recorded proof to compare; the reader re-verified its body.
         claimed = physical_source_proof_dependency(response)
         if claimed is None or claimed != physical_source_proof_dependency(old.physical_response):
             return True, ("basis=current_value_serving_consumed_physical_proof_invalid:"
