@@ -1,5 +1,5 @@
 # Created: 2026-10-01
-# Last reused/audited: 2026-10-02
+# Last reused/audited: 2026-10-03
 # Authority basis: live auction prepare budget (45 s cut); loader cost is round-trips, not rows.
 """One request-family capture read per snapshot serves every raw row exactly as the per-row query."""
 
@@ -208,3 +208,154 @@ def test_a_single_target_family_is_unchanged(tmp_path):
     row = {**ROWS[0], "request_params_json": json.dumps({"latitude": 40.7, "longitude": -74.0})}
     assert _ids(serving._physical_artifact_candidates(reader, row, deadline=time.monotonic() + 30)) == \
         _ids(serving._physical_artifact_candidates(reader, ROWS[0], deadline=time.monotonic() + 30)) == [4, 2, 1]
+
+
+def _physical_pass_reader(tmp_path, *, factory=sqlite3.Connection):
+    path = tmp_path / "physical-pass.db"
+    writer = sqlite3.connect(path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute(SCHEMA)
+    _catalog(writer)
+    reader = sqlite3.connect(f"file:{path}?mode=ro", uri=True, factory=factory)
+    raw = json.dumps({**ROWS[0], "physical_proof_cutoff": CYCLE,
+                      "city": "Chongqing", "metric": "high", "target_date": "2026-10-01"})
+    return writer, reader, raw
+
+
+def test_physical_only_pass_reuses_exact_read_and_retains_strong_connection(tmp_path, monkeypatch):
+    writer, reader, raw = _physical_pass_reader(tmp_path)
+    original = serving._read_product_identity_at_cutoff_uncached
+    calls = []
+
+    def read(conn, value, **kwargs):
+        calls.append((conn, value))
+        return original(conn, value, **kwargs)
+
+    monkeypatch.setattr(serving, "_read_product_identity_at_cutoff_uncached", read)
+    expected = original(reader, raw)
+    with serving.physical_read_pass(include_model_surface=False):
+        assert [serving._read_product_identity_at_cutoff(reader, raw) for _ in range(3)] == [expected] * 3
+        assert len(calls) == 1
+        assert all(key[0] is reader for key in serving._PHYSICAL_READ_PASS.get())
+    assert serving._PHYSICAL_READ_PASS.get() is None
+    with serving.physical_read_pass(include_model_surface=False):
+        assert serving._read_product_identity_at_cutoff(reader, raw) == expected
+    assert len(calls) == 2
+    reader.close()
+    writer.close()
+
+
+@pytest.mark.parametrize("field,value", [("city", "Karachi"), ("metric", "low"),
+    ("target_date", "2026-10-02"), ("source_id", "gfs_global_single_runs"),
+    ("raw_model_forecast_id", 22), ("model", "gfs_global"),
+    ("request_params_json", '{"start_date":"2026-10-02","end_date":"2026-10-02","hourly":"temperature_2m_previous_day1"}'),
+    ("source_cycle_time", "2026-10-01T06:00:00+00:00"),
+    ("physical_proof_cutoff", "2026-10-01T06:00:00+00:00")])
+def test_physical_pass_never_shares_different_raw_identity(tmp_path, monkeypatch, field, value):
+    writer, reader, raw = _physical_pass_reader(tmp_path)
+    original = serving._read_product_identity_at_cutoff_uncached
+    calls = []
+
+    def read(conn, item, **kwargs):
+        calls.append(item)
+        return original(conn, item, **kwargs)
+
+    monkeypatch.setattr(serving, "_read_product_identity_at_cutoff_uncached", read)
+    changed = json.dumps({**json.loads(raw), field: value})
+    with serving.physical_read_pass(include_model_surface=False):
+        serving._read_product_identity_at_cutoff(reader, raw)
+        assert serving._read_product_identity_at_cutoff(reader, changed) == original(reader, changed)
+    assert calls == [raw, changed]
+    reader.close()
+    writer.close()
+
+
+def test_physical_pass_snapshot_rollover_and_external_commit_replay(tmp_path):
+    writer, reader, raw = _physical_pass_reader(tmp_path)
+    other = sqlite3.connect(f"file:{tmp_path / 'physical-pass.db'}?mode=ro", uri=True)
+    with serving.physical_read_pass(include_model_surface=False):
+        reader.execute("BEGIN")
+        before = serving._read_product_identity_at_cutoff(reader, raw)
+        added = _insert(writer, params={"latitude": 40.7, "longitude": -74.0, "timezone": "America/New_York"})
+        writer.commit()
+        assert serving._read_product_identity_at_cutoff(reader, raw) == before
+        after = serving._read_product_identity_at_cutoff(other, raw)
+        assert json.loads(after)["physical_artifact"]["artifact_id"] == added
+        reader.rollback()
+        reader.execute("BEGIN")
+        assert serving._read_product_identity_at_cutoff(reader, raw) == after
+        reader.commit()
+        # Malformed newer proof is not hidden by a previously successful read.
+        writer.execute("UPDATE raw_forecast_artifacts SET captured_at='malformed' WHERE artifact_id=?", (added,))
+        writer.commit()
+        assert serving._read_product_identity_at_cutoff(reader, raw) == serving._read_product_identity_at_cutoff_uncached(reader, raw)
+        assert serving._read_product_identity_at_cutoff(reader, raw) != after
+    reader.close()
+    other.close()
+    writer.close()
+
+
+def test_physical_pass_own_write_rollback_without_data_version_change(tmp_path):
+    writer, reader, raw = _physical_pass_reader(tmp_path)
+    version = writer.execute("PRAGMA data_version").fetchone()[0]
+    with serving.physical_read_pass(include_model_surface=False):
+        before = serving._read_product_identity_at_cutoff(writer, raw)
+        added = _insert(writer, params={"latitude": 40.7, "longitude": -74.0, "timezone": "America/New_York"})
+        after = serving._read_product_identity_at_cutoff(writer, raw)
+        assert writer.execute("PRAGMA data_version").fetchone()[0] == version
+        assert json.loads(after)["physical_artifact"]["artifact_id"] == added
+        assert after != before
+        writer.rollback()
+        assert serving._read_product_identity_at_cutoff(writer, raw) == before
+        assert not serving._PHYSICAL_READ_PASS.get()
+    reader.close()
+    writer.close()
+
+
+@pytest.mark.parametrize("unhashable", [False, True])
+def test_physical_pass_exception_expired_hit_and_unhashable_connection(tmp_path, monkeypatch, unhashable):
+    class UnhashableConnection(sqlite3.Connection):
+        __hash__ = None
+
+    writer, reader, raw = _physical_pass_reader(tmp_path, factory=UnhashableConnection if unhashable else sqlite3.Connection)
+    original = serving._read_product_identity_at_cutoff_uncached
+    calls = []
+
+    def read(conn, item, **kwargs):
+        calls.append(item)
+        if len(calls) == 1:
+            raise serving.CurrentValueServingReadUnavailable("private failed read")
+        return original(conn, item, **kwargs)
+
+    monkeypatch.setattr(serving, "_read_product_identity_at_cutoff_uncached", read)
+    with serving.physical_read_pass(include_model_surface=False):
+        with pytest.raises(serving.CurrentValueServingReadUnavailable, match="private failed"):
+            serving._read_product_identity_at_cutoff(reader, raw)
+        assert not serving._PHYSICAL_READ_PASS.get()
+        serving._read_product_identity_at_cutoff(reader, raw)
+        serving._read_product_identity_at_cutoff(reader, raw)
+        assert len(calls) == (3 if unhashable else 2)
+        assert bool(serving._PHYSICAL_READ_PASS.get()) is not unhashable
+    assert serving._PHYSICAL_READ_PASS.get() is None
+    ordinary = sqlite3.connect(f"file:{tmp_path / 'physical-pass.db'}?mode=ro", uri=True)
+    with serving.physical_read_pass(include_model_surface=False):
+        serving._read_product_identity_at_cutoff(ordinary, raw)
+        with pytest.raises(serving.CurrentValueServingReadUnavailable, match="scan_budget_exceeded"):
+            serving._read_product_identity_at_cutoff(ordinary, raw, deadline_monotonic=time.monotonic() - 1)
+    ordinary.close()
+    reader.close()
+    writer.close()
+
+
+def test_physical_pass_default_surface_and_nested_scope_compatibility():
+    from src.data import openmeteo_model_surface as surface
+
+    with serving.physical_read_pass():
+        outer = serving._PHYSICAL_READ_PASS.get()
+        assert surface._SURFACE_READ_PASS.get() is not None
+        with serving.physical_read_pass(include_model_surface=False):
+            assert serving._PHYSICAL_READ_PASS.get() is outer
+    assert surface._SURFACE_READ_PASS.get() is None
+    with serving.physical_read_pass(include_model_surface=False):
+        assert surface._SURFACE_READ_PASS.get() is None
+    assert serving._PHYSICAL_READ_PASS.get() is None

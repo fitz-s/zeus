@@ -5294,23 +5294,42 @@ def _recover_stale_claims(
     return frozenset(active_keys), recovered, tuple(sorted(unknown_active_batches))
 
 
-def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path:
+def _new_claim_batch(
+    inflight_path: Path,
+    request_files: Sequence[Path],
+    *,
+    expected_records: Mapping[str, tuple[str, int, int, str]] | None = None,
+) -> Path:
+    def require_unchanged(path: Path) -> None:
+        if expected_records is None:
+            return
+        body = path.read_bytes()
+        info = path.stat()
+        if expected_records.get(path.name) != (
+            path.name, info.st_mtime_ns, info.st_size, hashlib.sha256(body).hexdigest(),
+        ):
+            raise FileNotFoundError("planned priority request changed during claim")
+
     witnesses: dict[str, dict[str, tuple[str, ...]]] = {}
     for path in request_files:
+        require_unchanged(path)
         payload = _load_request_payload_for_coalescing(path)
         witness = None if payload is None else _claim_identity_witness(payload)
         if witness is None:
+            if expected_records is not None:
+                raise FileNotFoundError("planned priority request identity changed during claim")
             raise ValueError(
                 f"materialization claim requires semantic/coalescing identity: {path.name}"
             )
         witnesses[path.name] = witness
     inflight_path.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    batch_path = inflight_path / f"{stamp}.pid{os.getpid()}"
+    prefix = "priority." if expected_records is not None else ""
+    batch_path = inflight_path / f"{prefix}{stamp}.pid{os.getpid()}"
     suffix = 0
     while batch_path.exists():
         suffix += 1
-        batch_path = inflight_path / f"{stamp}.pid{os.getpid()}.{suffix}"
+        batch_path = inflight_path / f"{prefix}{stamp}.pid{os.getpid()}.{suffix}"
     batch_path.mkdir()
     identities = {
         name: {
@@ -5327,6 +5346,13 @@ def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path
                 "owner_pid": os.getpid(),
                 "request_names": [path.name for path in request_files],
                 "identities": identities,
+                **({
+                    "attempt": _timeout_retry_state(request_files[0])[1] + 1,
+                    "stage": "claimed",
+                    "deadline_at": (datetime.now(timezone.utc) + timedelta(
+                        seconds=_materialization_subprocess_timeout_seconds()
+                    )).isoformat(),
+                } if expected_records is not None else {}),
             },
             handle,
             sort_keys=True,
@@ -5337,12 +5363,28 @@ def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path
     moved: list[tuple[Path, Path]] = []
     try:
         for source in request_files:
+            require_unchanged(source)
             claimed = batch_path / source.name
             os.replace(source, claimed)
             moved.append((claimed, source))
+            require_unchanged(claimed)
+        for claimed, _source in moved:
+            require_unchanged(claimed)
     except Exception:
         for claimed, source in reversed(moved):
-            if claimed.exists() and not source.exists():
+            if not claimed.exists():
+                continue
+            if expected_records is not None:
+                try:
+                    os.link(claimed, source)
+                except FileExistsError:
+                    # A concurrent publisher owns this pathname. Keep our
+                    # leased body for the existing no-overwrite stale recovery.
+                    continue
+                _fsync_directory(source.parent)
+                claimed.unlink()
+                _fsync_directory(batch_path)
+            elif not source.exists():
                 os.replace(claimed, source)
         _remove_empty_claim_batch(batch_path)
         raise
@@ -5374,17 +5416,17 @@ _PRIORITY_CLAIM_RACED_OWNER_REASONS = (
 def _try_claim_priority_request(
     plan: _RequestClaimReadPlan,
 ) -> tuple[_MaterializationQueueClaim | None, tuple[str, ...]]:
-    """Atomically lease one already-planned priority identity without the broad flock.
+    """Lease the complete already-planned priority batch without the broad flock.
 
-    SCOPE: one exact semantic request identity, including source cycle and Day0
+    SCOPE: the bounded selected semantic identities, including source cycle and Day0
     conditioning identity. DRAIN: the child completes, or stale-claim recovery
     returns the file after its absolute lease deadline. RESET: the durable batch
     disappears only after the request has a terminal or retry receipt. Returns
     the claim, or None with the deferral observation that explains it.
     """
 
-    source = next(iter(plan.claim.selected_files), None)
-    if source is None:
+    selected = plan.claim.selected_files
+    if not selected:
         return None, ()
     # Revalidate immediately before the atomic move. This is intentionally
     # lock-free: a concurrent writer yields typed debt, never a stale priority
@@ -5423,12 +5465,16 @@ def _try_claim_priority_request(
                     return None, (_CLAIM_STALE_RECOVERY_DEFERRED_REASON,)
                 if (
                     not refreshed.claim.selected_files
-                    or refreshed.claim.selected_files[0] != source
+                    or refreshed.claim.selected_files != selected
                 ):
                     return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-                original = next((row for row in plan.claim.request_snapshot if row[0] == source.name), None)
-                updated = next((row for row in refreshed.claim.request_snapshot if row[0] == source.name), None)
-                if original is None or original != updated:
+                original_records = dict((row[0], row) for row in plan.claim.request_snapshot)
+                updated_records = dict((row[0], row) for row in refreshed.claim.request_snapshot)
+                if any(
+                    original_records.get(path.name) is None
+                    or original_records.get(path.name) != updated_records.get(path.name)
+                    for path in selected
+                ):
                     return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
                 plan = refreshed
             if _queue_files_snapshot(plan.claim.request_path) != plan.claim.request_snapshot:
@@ -5437,26 +5483,17 @@ def _try_claim_priority_request(
         return None, (_CLAIM_READ_DEFERRED_REASON,)
     except sqlite3.Error:
         return None, (_PRIORITY_CLAIM_FENCE_UNREADABLE_REASON,)
-    payload = _load_request_payload_for_coalescing(source)
-    witness = _claim_identity_witness(payload or {})
-    if witness is None:
-        return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-    selected_record = next(
-        (row for row in plan.claim.request_snapshot if row[0] == source.name), None
+    witnesses = tuple(
+        _claim_identity_witness(_load_request_payload_for_coalescing(path) or {})
+        for path in selected
     )
-    try:
-        source_bytes = source.read_bytes()
-        source_stat = source.stat()
-    except FileNotFoundError:
+    if any(witness is None for witness in witnesses):
         return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-    if selected_record != (
-        source.name, source_stat.st_mtime_ns, source_stat.st_size,
-        hashlib.sha256(source_bytes).hexdigest(),
-    ):
-        return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
+    identity_keys = frozenset().union(*(
+        _claim_identity_keys(witness) for witness in witnesses
+    ))
     inflight_path = plan.claim.request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
     if inflight_path.exists():
-        identity_keys = _claim_identity_keys(witness)
         unknown_owner = False
         for existing_batch in (path for path in inflight_path.iterdir() if path.is_dir()):
             existing_files = _claim_request_files(existing_batch)
@@ -5474,55 +5511,20 @@ def _try_claim_priority_request(
                     return None, _PRIORITY_CLAIM_RACED_OWNER_REASONS
         if unknown_owner:
             return None, (_PRIORITY_CLAIM_UNKNOWN_OWNER_REASON,)
-    inflight_path.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    batch_path = inflight_path / f"priority.{stamp}.pid{os.getpid()}"
-    suffix = 0
-    while batch_path.exists():
-        suffix += 1
-        batch_path = inflight_path / f"priority.{stamp}.pid{os.getpid()}.{suffix}"
-    batch_path.mkdir()
-    attempt = _timeout_retry_state(source)[1] + 1
-    deadline_at = datetime.now(timezone.utc) + timedelta(
-        seconds=_materialization_subprocess_timeout_seconds()
-    )
-    metadata_path = batch_path / _CLAIM_METADATA_NAME
-    with metadata_path.open("w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "claimed_at": datetime.now(timezone.utc).isoformat(),
-                "owner_pid": os.getpid(),
-                "request_names": [source.name],
-                "identities": {
-                    source.name: {
-                        kind: list(values) for kind, values in witness.items()
-                    }
-                },
-                "priority_identity": list(witness["semantic"]),
-                "priority_coalescing_identity": list(witness["coalescing"]),
-                "attempt": attempt,
-                "stage": "claimed",
-                "deadline_at": deadline_at.isoformat(),
-            },
-            handle,
-            sort_keys=True,
-            indent=2,
-        )
-        handle.flush()
-        os.fsync(handle.fileno())
     try:
-        os.replace(source, batch_path / source.name)
+        batch_path = _new_claim_batch(
+            inflight_path, selected,
+            expected_records={row[0]: row for row in plan.claim.request_snapshot},
+        )
     except FileNotFoundError:
-        _remove_empty_claim_batch(batch_path)
         return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-    _fsync_directory(batch_path)
-    _fsync_directory(inflight_path)
-    _fsync_directory(source.parent)
+    except OSError:
+        return None, (_PRIORITY_CLAIM_FENCE_UNREADABLE_REASON,)
     return replace(
         plan.claim,
         batch_path=batch_path,
-        claimed_count=1,
-        selected_files=(batch_path / source.name,),
+        claimed_count=len(selected),
+        selected_files=tuple(batch_path / path.name for path in selected),
     ), ()
 
 
@@ -7382,9 +7384,9 @@ def process_replacement_forecast_live_materialization_queue(
         and not read_plan.stale_conflict_batches
         and read_plan.claim.selected_files
     ):
-        # This is the money-path handoff: the single queued filename becomes a
-        # durable identity lease before background discovery/retry can consume
-        # it. It intentionally does not wait on the broad queue flock.
+        # Preserve every reserved slot in the bounded priority plan as one
+        # durable batch before background discovery/retry can consume it.
+        # This handoff intentionally does not wait on the broad queue flock.
         claim, claim_deferral = _try_claim_priority_request(read_plan)
         if claim is None:
             return ReplacementForecastLiveMaterializationQueueReport(

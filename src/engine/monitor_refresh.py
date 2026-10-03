@@ -4014,6 +4014,7 @@ def _build_current_global_day0_family_snapshot(
         get_forecasts_connection_with_world_read_only,
     )
     from src.engine.global_auction_universe import WorkContext
+    from src.data.replacement_current_value_serving import physical_read_pass
 
     hwm_forecasts = None
     try:
@@ -4028,6 +4029,7 @@ def _build_current_global_day0_family_snapshot(
         hwm_deadline: list[float | None] = [None]
         hwm_handoff_started = [False]
         with ExitStack() as prepare_sqlite:
+            prepare_sqlite.enter_context(physical_read_pass(include_model_surface=False))
             try:
                 forecasts_seed = prepare_sqlite.enter_context(
                     get_forecasts_connection_with_world_read_only(

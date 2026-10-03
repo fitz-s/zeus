@@ -1,5 +1,5 @@
 # Created: 2026-06-21
-# Last reused or audited: 2026-09-30
+# Last reused or audited: 2026-10-03
 # Lifecycle: created=2026-06-21; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: docs/evidence/live_order_pathology/2026-06-21_forward_chain_diagnosis.md
 #   "CHOSEN FIX (consult-validated, two layers)" — LAYER 2 monitor read-through.
@@ -1551,6 +1551,120 @@ def _day0_event_connection() -> sqlite3.Connection:
         ),
     )
     return conn
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("fail_prepare", [False, True])
+def test_day0_family_build_uses_physical_only_pass_and_clears_scope(
+    monkeypatch, tmp_path, metric, fail_prepare,
+):
+    """Actual builder scopes repeated canonical capture reads, not surface authority."""
+    from contextlib import nullcontext
+    import src.data.replacement_current_value_serving as serving
+    import src.data.replacement_forecast_bundle_reader as reader
+    import src.data.openmeteo_model_surface as surface
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+    from src.solve.solver import (
+        JointOutcomeProbabilityWitness, OutcomeTokenBinding, joint_probability_witness_identity,
+    )
+    from tests.data.test_current_value_capture_set_query import SCHEMA, CYCLE, ROWS, _catalog
+
+    path = tmp_path / "family-proof.db"
+    world = _day0_event_connection()
+    world.execute("UPDATE opportunity_events SET payload_json=?, available_at=?, received_at=?, created_at=?",
+                  (json.dumps({"city": "Chongqing", "target_date": "2026-10-01", "metric": metric}),
+                   CYCLE, CYCLE, CYCLE))
+    world.commit()
+    with sqlite3.connect(path) as target:
+        world.backup(target)
+        target.execute(SCHEMA)
+        _catalog(target)
+    world.close()
+    cut = datetime.fromisoformat(CYCLE)
+    raw = json.dumps({**ROWS[0], "physical_proof_cutoff": CYCLE,
+                      "city": "Chongqing", "target_date": "2026-10-01", "metric": metric})
+    calls = []
+    original = serving._read_product_identity_at_cutoff_uncached
+
+    def physical_read(conn, value, **kwargs):
+        calls.append(value)
+        return original(conn, value, **kwargs)
+
+    monkeypatch.setattr(serving, "_read_product_identity_at_cutoff_uncached", physical_read)
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _p: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: True)
+    monkeypatch.setattr(mr, "_pinned_complete_bundle_matches_current_day0_event", lambda *_a, **_k: True)
+    monkeypatch.setattr(mr, "_pinned_complete_bundle_has_valid_causal_evidence", lambda *_a: True)
+
+    def open_family(**_kwargs):
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return _monitor_forecast_world_reader(conn)
+
+    monkeypatch.setattr(db, "get_forecasts_connection_with_world_read_only", open_family)
+
+    def prior(conn, **_kwargs):
+        for _ in range(3):
+            serving._read_product_identity_at_cutoff(conn, raw)
+        return SimpleNamespace(status="READY", ok=True, bundle=object())
+
+    monkeypatch.setattr(reader, "read_prior_complete_replacement_forecast_bundle", prior)
+
+    def prepare(_event, *, forecast_conn, day0_payload_out, **_kwargs):
+        assert surface._SURFACE_READ_PASS.get() is None
+        for _ in range(6):
+            proof = serving._read_product_identity_at_cutoff(forecast_conn, raw)
+        if fail_prepare:
+            raise ValueError("private invalid family proof")
+        identity = hashlib.sha256(proof.encode()).hexdigest()
+        day0_payload_out.update(probability_authority="day0_remaining_day_global_probability_v1",
+                                proof_identity=identity)
+        fields = dict(
+            family_key=f"Chongqing|2026-10-01|{metric}",
+            bindings=(OutcomeTokenBinding("only-bin", "condition-1", "yes-1", "no-1"),),
+            yes_point_q=np.ones(1), yes_q_samples=np.ones((500, 1)), q_version=identity,
+            resolution_identity="resolution", topology_identity="topology",
+            posterior_identity_hash=identity, source_truth_identity=identity,
+            authority_certificate_hash=identity, band_alpha=.05, band_basis="fixture",
+            captured_at_utc=cut,
+        )
+        return SimpleNamespace(probability_witness=JointOutcomeProbabilityWitness(
+            **fields, max_age=timedelta(minutes=15),
+            witness_identity=joint_probability_witness_identity(**fields),
+        ))
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+    position = _pos()
+    position.city, position.target_date, position.temperature_metric = "Chongqing", "2026-10-01", metric
+    tokens = SimpleNamespace(execute=lambda *_a: SimpleNamespace(fetchall=lambda: [("condition-1", "yes-1", "no-1")]))
+
+    def build():
+        return mr._build_current_global_day0_family_snapshot(
+            position, trade_conn=tokens, decision_time=cut, cached_snapshots=(),
+            deadline_monotonic=time.monotonic() + 5, hwm_deadline_monotonic=time.monotonic() + 5,
+        )
+
+    if fail_prepare:
+        with pytest.raises(ValueError, match="private invalid"):
+            build()
+        assert len(calls) == 1
+    else:
+        scoped_pass = serving.physical_read_pass
+        monkeypatch.setattr(serving, "physical_read_pass", lambda **_k: nullcontext())
+        baseline = build()
+        assert len(calls) == 9
+        calls.clear()
+        monkeypatch.setattr(serving, "physical_read_pass", scoped_pass)
+        cached = build()
+        assert len(calls) == 1
+        assert cached.witness.witness_identity == baseline.witness.witness_identity
+        assert cached.witness.source_truth_identity == baseline.witness.source_truth_identity
+        assert cached.witness.probability_content_identity == baseline.witness.probability_content_identity
+        assert cached.day0_payload == baseline.day0_payload
+    assert serving._PHYSICAL_READ_PASS.get() is None
+    assert surface._SURFACE_READ_PASS.get() is None
 
 
 def test_day0_monitor_selects_latest_event_as_of_frozen_decision_time(monkeypatch):

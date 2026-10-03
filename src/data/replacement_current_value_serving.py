@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import math
 import sqlite3
@@ -532,7 +532,7 @@ _PHYSICAL_READ_PASS: ContextVar[dict[tuple[object, ...], str] | None] = ContextV
 
 
 @contextmanager
-def physical_read_pass():
+def physical_read_pass(*, include_model_surface: bool = True):
     """One pass's physical-proof reads, each answered once.
 
     A pass (the healer's coverage judgement, one target plan) re-reads the same
@@ -549,7 +549,7 @@ def physical_read_pass():
         return
     token = _PHYSICAL_READ_PASS.set({})
     try:
-        with model_surface_read_pass():
+        with model_surface_read_pass() if include_model_surface else nullcontext():
             yield
     finally:
         _PHYSICAL_READ_PASS.reset(token)
@@ -558,14 +558,18 @@ def physical_read_pass():
 def _read_product_identity_at_cutoff(conn: sqlite3.Connection, raw: object, *, deadline_monotonic: float | None = None) -> str:
     """Complete same-issued scan; an observed repair covers only its old unknown-bad prefix."""
     memo = _PHYSICAL_READ_PASS.get()
-    if memo is None:
+    if memo is None or (deadline_monotonic is not None and time.monotonic() >= deadline_monotonic):
+        return _read_product_identity_at_cutoff_uncached(conn, raw, deadline_monotonic=deadline_monotonic)
+    try:
+        hash(conn)
+    except TypeError:
         return _read_product_identity_at_cutoff_uncached(conn, raw, deadline_monotonic=deadline_monotonic)
     # The visible snapshot of this exact connection, as _snapshot_memo keys it:
     # a written connection or any other connection's commit is a new key.
     snapshot = _snapshot_memo(conn).key
     if snapshot is None:
         return _read_product_identity_at_cutoff_uncached(conn, raw, deadline_monotonic=deadline_monotonic)
-    key = (id(conn), snapshot[1], str(raw))
+    key = (conn, snapshot[1], str(raw))
     hit = memo.get(key)
     if hit is None:
         hit = memo[key] = _read_product_identity_at_cutoff_uncached(

@@ -11968,3 +11968,460 @@ same single address-only repr difference and no new delta. Final XML/log:
 /tmp/zeus-global-source-required-20261003.LTVd8Z/required-data-engine-final.
 Compile and changed-surface freshness/planning/whitespace pass again. No source,
 test assertion or unrelated registry repair is performed by integration.
+
+### 2026-10-03 RED CANCEL execution-mode category repair
+
+Parent admits a newly verified Critical defect into one fresh managed tree,
+red-cancel-source-drain, from origin/live2e3974125; task branch is
+fix/red-cancel-source-drain-20261003. A private real RED sweep constructs its
+nontrading CANCEL envelope with GTC/post_only false, but the durable command
+repository applies the new-trading execution-mode gate to it and rejects it
+before command persistence. The actual route is cycle_runner's existing RED
+sweep -> venue_command_repo insert/envelope validation. A RED label without a
+durable cancel cannot satisfy behavioral risk actuation; no live manual cancel
+is authorized to compensate. This finding is separate from the many unresolved
+baseline failure classes and is not a declaration that all exit/RED failures
+have one cause.
+
+Integration owns setup, this existing PLAN, exact touched registry updates and
+the later authorized landing/loading/cleanup lane only. Dedicated executor owns
+src/state/venue_command_repo.py and the minimum existing target-test files it
+declares before editing. Do not change engine/red sweep, lifecycle enums, venue
+adapter, command recovery or other source files without a new exact approval.
+State/tests/engine scoped AGENTS, K0 kernel/authority-index/zero-context spine,
+state module book, canonical journal owner route and lifecycle/order-mode
+contracts are read. This is a bounded canonical command-validation architecture
+bugfix, not a new risk, probability, price, execution or cancellation law.
+
+Authoritative truth remains the canonical TRADE venue command/event journal
+through venue_command_repo; Chain/CLOB facts remain superior to local command
+status. Protected invariants are INV-01 (intent is not economic closure),
+INV-05/INV-19 (risk must act; RED cancels), INV-28 (durability before venue side
+effects), INV-37 (existing transaction ownership), INV-43 (new BUY/SELL and their
+authorizing quotes retain the absolute price/mode contracts), and INV-47
+(adjacent exact SCOPE/DRAIN/RESET). Preserve existing enum/intent identity,
+idempotency, original order binding, owner/foreign claim checks, transaction and
+append/projection boundaries, duplicate protection and cancellation grammar.
+No schema/table/migration, new durable state, invented phase, direct SQL writer,
+balance change, venue call or risk escalation is admitted.
+
+Minimal design: classify command intent before the new-trading execution-mode
+validation. Only the already typed nontrading CANCEL intent is outside that
+placement-mode predicate. It remains subject to every existing cancellation
+identity, idempotence, owner and foreign-claim guard. Do not blanket-skip envelope
+validation for all non-entry commands or use a source/RED label as authority.
+BUY and SELL continue to enforce their exact mode/post-only/role tuple, finite
+inclusive [0.05,0.95] order and authorizing quote band, current quote/witness and
+all other permission/economic checks. A cancel does not create replacement-order
+authority, release funds on intent alone or prove economic closure.
+
+SCOPE: the exact typed cancel intent and original venue order/command identity,
+not an unscoped RED incident or an arbitrary side string. DRAIN: the existing
+normal RED sweep persists that valid cancel command/event, followed by normal
+dispatch/recovery and authenticated cancellation/fill reconciliation under the
+existing owner protocol. RESET: a correctly bound cancel can complete through
+those normal facts while invalid BUY/SELL modes and identity remain rejected;
+unknown venue outcome/foreign ownership never becomes terminal cancellation or
+new-trade permission. No manual command insert, venue operation or guard clear.
+
+Acceptance: actual real-sweep RED demonstrates old-source rejection/no durable
+cancel versus patched valid durable CANCEL through the normal repository, with
+idempotent retry and original-order binding. Include BUY/SELL mode and post-only
+twins, inclusive-band/out-of-band and quote/witness negatives, invalid cancel
+identity and foreign-owner/claim controls, exact event/transaction ordering and
+no venue I/O before persistence. Private DB/fake venue only; do not copy canonical
+DBs or invoke a live RED sweep. Run the targeted journal/RED antibodies and the
+required state twelve-file suite plus the finally touched module-manifest tests
+and compile/planning/freshness/registry checks. Any remaining failure requires
+exact baseline/semantic classification, not assertion changes for green output.
+Named independent review checks CANCEL versus BUY/SELL category isolation.
+
+Executor declares exact existing tests/write set before source edits; integration
+then records those files. No commit/load yet. After final source/tests/checks
+and parent acceptance, only normal current-origin rebase/FF push/live FF and a
+unique deploy attempt are eligible, with code/live/loaded/return/runtime facts
+reported separately and no bypass. Roll back via the same normal task lane if
+the bounded validation change is rejected; never rewrite canonical history.
+The earlier source-q DRAIN and prepare-latency lanes remain read-only, and the
+overall continuous-profit/current-probability goal remains unfinished.
+
+An independently verified performance candidate is reserved, not implemented:
+on the same read-only cut the current Day0 builder repeats three unique
+connection/raw physical proof reads nine times without its existing
+current_value_serving.physical_read_pass. Installing that existing pass privately
+reduces reads to three and0.342s to0.259s with exact witness/source/posterior/payload
+SHA equality. It is not established as the sole cause of historical timeouts.
+Before any source approval the A investigator must prove connection identity,
+transaction/mutation invalidation and exact read-pass lifetime safety and declare
+its minimal monitor_refresh.py/existing-test write set. No TTL, new cache or
+budget change is reserved; do not couple speculative cache work to the verified
+RED repair or expand source writes by inference. Other source/physical-proof
+lanes stay read-only until a separate root-approved verified fix.
+
+RED executor declares the minimum existing antibody set as
+tests/test_venue_command_repo.py and tests/test_riskguard_red_durable_cmd.py,
+alongside its sole source file src/state/venue_command_repo.py. The journal
+test covers intent-aware validation and preserved binding; the RED test must
+traverse the actual existing sweep into that journal rather than a mocked
+insert. Integration owns only this PLAN and necessary existing registry rows.
+The executor may implement the already approved CANCEL-versus-new-placement
+mode distinction; source/test changes outside these three paths remain forbidden.
+
+Named review has also produced private stale-snapshot/tick/minlot cancellation
+counterexamples. These suggest another distinction between historical original
+order identity and new-trade executable feasibility, but the initial mode-only
+plan does not authorize removing those guards. Escalate their exact evidence
+and minimal contract to root, preserve original-order/snapshot identity, and
+wait for an explicit before-edit scope decision. An engine retry-marker change
+is likewise not assigned by this plan. Do not ship a partial mode repair as a
+claim that every possible RED cancellation now drains or widen cancellation
+authority by a permissive default.
+
+Root now explicitly approves the named RED expansion before edits. This
+supersedes the preceding MODE-only boundary for these exact four worker-owned
+paths: src/state/venue_command_repo.py, src/engine/cycle_runner.py,
+tests/test_venue_command_repo.py and tests/test_riskguard_red_durable_cmd.py.
+State/engine/tests scoped laws and their module/K0/lifecycle routes are already
+read. Integration still owns only PLAN, exact registry changes and the normal
+landing/loading lane. No executor/adapter/recovery/schema source file is added.
+
+Align CANCEL snapshot validation with the existing nontrading identity contract
+used by executor's cancellation path around5072. A cancellation must retain
+historical snapshot ID, exact token/selected token, condition/question and
+envelope consistency, a valid nonempty original target order and all existing
+ownership/idempotence/lease checks. It is not a new trade, so new-placement
+snapshot freshness, tick, minimum lot, order-mode and order-price/quote-band
+validation do not govern removing that prior order. These exclusions apply
+only to the already typed CANCEL intent. BUY, SELL and DERISK keep all their
+existing placement/mode/band/freshness/witness requirements unchanged. A missing
+original-order ownership or binding proof remains a reported gap; do not invent
+a new owner field, alias an unrelated order or silently infer authorization.
+
+The cycle-runner change is confined to the named red_force_exit failed-cancel
+retry marker. Failure must leave the next normal RED sweep able to retry that
+same lawful cancellation, instead of permanently suppressing it with the old
+marker. Do not override another exit reason, revive a terminal/economically
+closed position, manufacture an exit fill/closure or create a replacement
+order. An already queued or durable cancellation continues to deduplicate under
+its exact identity; retry marker repair does not bypass command owner/lease or
+duplicate safety. Non-RED cycles acquire no RED sweep permission.
+
+Additional acceptance uses the actual RED sweep/repository with historical
+snapshot older than31 seconds and tick/minlot placement counterexamples:
+lawful CANCEL persists while matching invalid BUY/SELL/DERISK still reject.
+Cover wrong historical snapshot/envelope/token/condition/question, empty target
+order and existing foreign-owner/idempotence controls. A failure followed by
+normal RED retry must RESET only the failed named marker; two queued/durable
+retries must not duplicate commands. Preserve unrelated reason and lifecycle
+state, prove no fake closure and no venue I/O before durable command creation.
+Compile and the finally touched state/engine required checks follow the final
+frozen source, with exact baseline/semantic dispositions for old failures.
+
+Root's separate physical-read-pass equivalence candidate is verified but is
+not yet write-authorized. Its proposed two-source/two-existing-test scope will
+receive its own before-edit PLAN only after root specifies the safe lifecycle
+and exact write set. It must not block or enlarge the bounded RED cancellation
+repair, and no TTL/cache/budget relaxation is inferred from this expansion.
+
+### 2026-10-03 Independent scoped physical-read-pass equivalence repair
+
+Root approves the separate A performance slice before edits. A worker owns
+exactly src/engine/monitor_refresh.py,
+src/data/replacement_current_value_serving.py,
+tests/engine/test_monitor_held_belief_readthrough.py and
+tests/data/test_current_value_capture_set_query.py. These paths do not overlap
+the RED executor's four paths. Integration owns PLAN and exact existing source/
+test registry rows only. Engine/data/tests scoped laws and their module routes
+are read; no truth writer/schema, source permission, probability/exit math,
+quote policy, new TTL/cache or deadline/budget is added.
+
+Verified private same-cut evidence identifies equivalent duplicate proof reads:
+three unique(connection, raw) identities undergo nine uncached physical reads;
+using the existing physical_read_pass reduces these to three and measured
+0.342s to0.259s while witness, source/provenance, posterior and payload SHA remain
+exactly equal. This is a bounded repeat-work defect, not proof of the unique
+historical2.5-second timeout cause or a general source-freshness problem.
+
+Install the existing physical_read_pass(include_model_surface=False) around
+each individual family build, not a whole cycle or process. Strong connection
+identity, actual snapshot generation and raw identity must isolate memo entries.
+The existing default include_model_surface=True remains compatible for all
+other callers; disabling prewarm here must not skip the real physical/source
+validation or weaken UNKNOWN handling. No lifted TTL, new cache or always-newest
+content identity. Keep the2.5-second cap and every existing source freshness,
+geometry/body/quantity/clock and q-witness comparison unchanged.
+
+Safety acceptance must prove own writes and transaction rollover invalidate or
+bypass memoization even when SQLite data_version does not change. Check the
+existing connection total_changes and actual read-snapshot generation/lifetime;
+do not use data_version alone as a complete authority key. Different connections,
+raw IDs or snapshots never share proof. Exceptions switch memoization off safely
+and all scope exits restore/clear the pass; nesting preserves existing caller
+behavior. Unknown, failed or unreadable proof cannot be cached as VERIFIED.
+
+SCOPE: one family build, exact connection/read snapshot and raw physical proof
+identity. DRAIN: the existing normal monitor preparation uses one repeated-read
+pass within that build while all source checks still execute. RESET: leaving
+the pass, own-write/transaction changes, a new snapshot/raw identity or an
+exception forces fresh authority reads; no certificate remains fresh merely
+because a cache object survives. This is not a persistent gate or memoized
+permission to trade.
+
+Run same-cut cached/uncached true-builder HIGH/LOW equality and measured duplicate
+read-count antibodies plus connection-isolation, own-write/no-data_version-change,
+commit/rollback/snapshot rollover, raw drift, exceptions/scope cleanup and default
+caller compatibility controls. Readthrough/freshness negatives must still fail
+closed. Use only private DB/fixtures, not canonical database copies or forced
+cycles. Required engine/data scoped suites and module checks apply once to final
+frozen combined files; compile/freshness/planning/registry deltas are separate
+from old unrelated failures. Parent's completed physical-proof investigator will
+independently review the final cache lifetime/invalidation risk.
+
+RED cancellation remains the priority deliverable and may land independently if
+A has an unresolved semantic risk. Do not hold a verified RED fix hostage to
+cache redesign, expand its tests into unrelated maintenance or infer write
+permission for other source/physical-evidence lanes. A final equivalence and
+cache-safety acceptance is required before including this slice in a batch.
+
+### 2026-10-03 Classified exit-fixture antibody migration (tests only)
+
+Root separately approves a disjoint test-only writer for
+tests/test_day0_exit_gate.py's thirty-two classified cases and only the existing
+zero-probability case around450/480 in tests/test_cross_module_relationships.py.
+No other tests, source, math, risk, command/venue, schema or probability authority
+changes are allowed. This write set does not overlap RED's two existing tests or
+A's two existing tests. Integration owns exact existing registry/PLAN updates;
+the test writer owns both test bodies and complete freshness headers.
+
+The completed read-only review classifies the old exits as stale diagnostic
+reason assertions, missing current CI/typed statistical evidence, and illegal
+counterparty quotes—not proof that every old failed assertion is harmless.
+Current authority is the native typed probability/exit boundary and immutable
+current witness, not the outdated reference trigger list. Migrate each fixture
+to actually reach the law it claims to test, preserving the positive/negative
+behavioral assertion and meaningful evidence-unavailable diagnosis. A fresh
+point probability alone is not complete statistical authority. Stale/absent q
+must not authorize a SELL; missing/nonfinite bid cannot become executable depth.
+Do not generate dummy confidence/witness proof or substitute a quote proxy.
+
+The terminal-bid fixtures use0.999, outside the absolute action/quote band, and
+their0.833 probability is not a certain winner. Keep those rejection controls
+and add/use legal0.95 twins with the actual current typed evidence: native q0.833
+versus a q0.999 near-certain holding tests the legal action law, not an invented
+blanket settlement hold. The zero-q fixture's0.002 bid is also illegal; preserve
+that negative and use a lawful0.05 positive with complete evidence, including
+the actual directional twin where required. Neither quote nor q changes may
+reverse a protected assertion merely to force all tests green.
+
+Acceptance uses actual Position.evaluate_exit/native boundary behavior with
+legal positive and missing/stale/illegal/CI-negative twins. Retain meaningful
+typed EVIDENCE_UNAVAILABLE/HOLD/SELL_REVERSAL/diagnostic assertions and all venue
+band/authority requirements. No deleting/xfailing cases or relaxing source/q
+gates. If a correctly bound real counterexample contradicts current authority,
+stop that case and report exact inputs/source/result for a new root decision;
+do not edit the source or quietly adopt its output as expected. Header dates
+and trusted existing test rows are updated only to the actual inspected reuse.
+
+This is bounded closure of classified obsolete fixtures, not gaming a baseline
+waiver. The final mandatory state/engine/data batch may therefore have fewer
+such failures, with exact old-versus-corrected node dispositions recorded.
+Unclassified static/API failures, unresolved RED real behavior and current
+source-probability/physical-evidence gaps remain separate; do not declare global
+profit/readiness success from a cleaned exit test file.
+
+A's already owned serving path additionally receives root's approved cache-hit
+deadline-bypass protection: an existing short-circuited proof must still observe
+the normal typed read deadline. Memoization grants no extra time or budget and
+cannot turn an overdue read into fresh authority. This stays within A's exact
+source ownership and needs a cached-hit expired-deadline negative antibody.
+
+The test-only writer's final before-edit signal covers precisely those two
+existing paths. Preserve all original Day0 cases (including the controls that
+already passed) and meaningful current-CI missing/NaN/inconsistent negatives.
+For cross_module_relationships only the zero-q case and its header may change;
+record target-only evidence, not whole-file PASS or a full audit of other old
+observation/discovery assertions. The older execution reference section4.1
+still lists legacy trigger order/reasons; that known reference drift is reported
+but not rewritten here and cannot license legacy fixture expectations. Current
+source/witness/band authority and the read-only classification govern migration.
+
+### 2026-10-03 Reserved global-slot handoff fairness repair
+
+Root approves a third verified bounded source slice before edits, owned only
+by the KMA/fairness executor: src/data/replacement_forecast_live_materialization_queue.py
+and existing tests/test_materialization_queue_stale_lock.py. Its files do not
+overlap RED, A's read-pass or the test-only fixture writer. Integration retains
+PLAN/registry ownership. Data/tests scoped laws and current queue/source-clock
+authority routes are read. No schema, probability/source-clock/age permission,
+writer count, persistent cache or deadline/budget change is admitted.
+
+The actual limit-three plan reserves held/global/expansion work, but its
+lock-free handoff takes only the first selected item, returning claimed_count
+one instead of leasing the complete reserved tuple. The two planned slots
+therefore do not execute through that handoff. An actual old Seoul owner remains
+ACTIVE and the new source cannot ADMIT while that owner is retained; this
+establishes incomplete/slow normal DRAIN, not that all families are frozen or
+that source clocks are wrong. The normal runner already accepts a batch of three
+with one writer and its original shared29/30-second deadline. The fix is to
+honor that existing selected batch, not invent parallel materialization.
+
+Revalidate the full selected tuple (at most the existing limit of three), all
+immutable input bytes and the union of semantic/coalescing keys before handoff.
+Lease/move all selected owners with the existing generation/ownership protocol;
+if any second/third member changes or a move fails, reverse only this attempt's
+partial moves safely without overwriting another owner's files or losing input.
+Use existing recovery/rollback routes, not forced terminalization, name-only
+aliases or an unscoped folder reset. Unknown/unbound old evidence retains its
+existing safe semantics; this slice cannot add a source-age terminal fence.
+
+The sequential single-writer runner shares the original absolute batch deadline.
+Completed members are not rerun if a later member defers/fails; a tail that was
+never lawfully computed because the shared deadline expired is restored/released
+through the existing retry path with exact bytes and ownership intact. No extra
+worker, per-member fresh budget or source timestamp rewrite. SCOPE is the exact
+selected request tuple, bytes/keys and lease generation, not the global queue.
+DRAIN is the existing normal planner -> multi-lease handoff -> sequential runner
+and its recovery cadence. RESET is a lawful new selected-input/owner state and
+normal completed materialization, while malformed/foreign/stale-unbound identity
+never becomes READY or probability authority.
+
+Acceptance traverses actual limit-three plan -> three leases -> normal runner,
+including the reserved global slot, not only a helper list/count. Test second/
+third bytes/key changes, competing ownership, mid-move race/failure and reverse
+rollback without loss/overwrite, queued semantic duplicates, mixed outcomes and
+already-completed members, shared-deadline tail restoration and recovery. Preserve
+all current bound-negative/source HWM predicates and the original single-writer
+timeout semantics. Independent review targets multi-owner handoff/rollback and
+deadline correctness. Old Seoul's actual new posterior DRAIN is not guaranteed
+by private tests and must be measured after an authorized load.
+
+RED final source now passes196 targeted/full journal-plus-RED cases; its earlier
+193 count is not reused as final proof. A's frozen two files pass90 cases with
+four exact original-HEAD failures retained separately, and the fixture-only
+writer passes45 scoped cases (43 Day0 plus two zero-q twins). Those are source
+worker evidence, not acceptance of all current runtime authority. Final combined
+required checks wait for this fairness source to freeze and named reviews; do
+not start a redundant prior-version full batch or repair unrelated failures.
+
+Named RED review establishes one additional same-path blocker before final
+freeze: a nonterminal pending_exit carrying another exit reason causes the
+existing sweep to skip its bound-order cancellation. The scheduled sweep occurs
+before monitoring can change the reason, and no independent same-cycle cancel
+coverage has been proven. Root approves only the original four RED paths for
+this correction. Preserve that other reason, its marker and single-flight state,
+but continue the exact bound-target CANCEL subpath during RED. Economically
+closed positions likewise do not receive an active-exit marker while an existing
+bound venue order can still be cancelled under the previously approved rule;
+the terminal enum/skip set remains unchanged.
+
+The antibody must show one durable cancel with the original other exit reason
+unchanged, followed by zero newly queued duplicates on the next normal sweep.
+Invalid ownership/order identity still blocks cancellation. No new owner gate,
+forced closure, replacement order, reason override, lifecycle reset or non-RED
+sweep is authorized. This closes RED's existing cancel-pending behavior rather
+than expanding exit economics. The earlier196 run is now explicitly a prior
+version result: the RED freeze is released only for this named correction and
+requires a new final affected run and independent C review. Final combined
+checks remain waiting for that freeze and the separate fairness source.
+
+Final39 required checks have started on frozen sources in three independent
+private-fixture processes: state24, data10 and five extra engine files after
+deduplication. The evidence directory is
+/tmp/zeus-red-source-final39-20261003.4KEE7z/ (state/data/engine XML and logs).
+Named read-only reviews do not require killing those processes or rerunning
+unaffected classes. Source review now accepts RED plus fixture migration and
+A read-pass; current source/test outcomes remain separate from whole suites.
+
+B review identifies and root approves two precise corrections within the
+already approved no-overwrite/revalidation contract. Priority rollback's
+exists-then-replace could overwrite a concurrently published new request;
+use atomic no-clobber link/fsync/unlink instead, retaining the old lease on
+EEXIST for the existing recovery path. A body changed between unchanged-check
+and witness load could produce None/ValueError for a second/third member;
+classify it as typed SNAPSHOT_CHANGED/deferred with records intact, not a global
+exception or promoted authority. Do not alter the regular flocked path or give
+an extra source/budget permission.
+
+The earlier B queue hash92774d is no longer final landing evidence. The corrected
+frozen queue hash is
+f22c511a7069c2f3eb5f32d674cabd830bdbd7e67efb263d3188f5b81a8237de;
+the existing test hash is
+97a6b12eb0f9b0b67e8d58bf4ef36a1fbafcf943f0570a5f15d3d804c3f65908.
+Its54 cases pass, including five named race controls; compile/whitespace/
+freshness pass. Independent D is rechecking that final variant. The39 run may
+complete; then reprove only affected B stale-lock/actual-bridge/source gates
+(and the affected required data selection), not all39. The125PASS/five original-
+HEAD bridge failures remain separately reported, not full-bridge GREEN or proof
+that old Seoul already consumed a fresh posterior.
+
+### Final required checks: lawful CANCEL grammar fixture migration
+
+The one final39 run used isolated pytest state and produced state24=1589PASS/
+54FAIL, data10=291PASS, engine-extra5=90PASS/4FAIL/4SKIP. This is not whole-green.
+For the41 state failures without previously proved recovery counterparts, an
+exact original2e five-module in-process overlay produced40 identical failures
+and one PASS. That sole delta is the all-four-intents grammar positive in
+existing tests/test_command_bus_types.py, which supplies no venue_order_id to
+its CANCEL. A cancellation without an original order is not a lawful positive.
+
+Before editing, root authorizes the existing RED executor to own only that
+test's scoped grammar migration, in addition to its prior files. Supply a valid
+target only for CANCEL, preserve ENTRY/EXIT/DERISK positives, and retain new
+empty/whitespace target negatives. No source, ownership rule or cancellation
+identity waiver is authorized. Reprove the exact nodes and the affected whole
+command-bus test file, not all39. Update only its existing topology row.
+
+The other40 state messages are byte-exact old-HEAD matches;13 recovery nodes
+match prior exact-node evidence; the four engine failures match the prior XML
+messages byte-exact. Baseline equality proves no introduced delta, not that
+old failures are harmless. Static savepoint/linter/DDL checks, historical
+q_version/HTTP/deadline fixtures and unresolved recovery cadence coverage
+remain explicit dispositions rather than waived current money proof.
+Evidence: /tmp/zeus-red-source-final39-20261003.4KEE7z/{state,engine,data}.xml
+and state41-head-baseline.xml; prior engine baseline at
+/tmp/zeus-global-source-required-20261003.LTVd8Z/required46-head-baseline.xml.
+
+### Final frozen integration acceptance and residuals
+
+All named reviews accept their final sources: C accepts RED and the exit
+fixture migration; D accepts family physical-pass reuse and the corrected
+multi-lease no-clobber/deferred-witness variant. RED repo/cycle hashes remain
+a1dd6702627d11d2fac425af535a0291bd36b9cec6e2501858f9c8902080b94b and
+c8fc0732dae261b1a7a439ed3e362b0318394f651012f0e0fd99bc62ce8bf313.
+The final queue is f22c511a7069c2f3eb5f32d674cabd830bdbd7e67efb263d3188f5b81a8237de.
+No source changes followed review acceptance.
+
+The newly lawful grammar fixture whole file passes45, with None/empty/space
+target negatives leaving command/event tables empty. Replacing only this
+affected file in the one39 run yields a deduplicated1974PASS/57FAIL/4SKIP,
+not whole-green. The required data10 remains291PASS. Final affected B checks
+pass54 owned cases; the actual bridge passes125 with the same five original-
+HEAD failures. Their logs/XML, final command-bus45 XML and original failure
+comparisons are under /tmp/zeus-red-source-final39-20261003.4KEE7z/.
+The earlier196 RED full-file count precedes the final other-reason correction;
+it is not reused as final evidence. Final39 covers the actual corrected repo
+and RED test files; the separate last26 modified RED nodes also pass.
+
+Residual57 required failures: historical q_version/mode/HTTP/deadline fixture
+prerequisites35, static savepoint/linter/discovery/DDL checks5, prior recovery
+cadence/summary/lock contracts13, old observation-context fixtures3 and a
+scheduler-wrapper observability check1. Their baseline messages are unchanged,
+but this does not prove safe current behavior for those unclosed paths.
+The recovery13 are retained as bounded independent triage, not a gate waiver.
+Four engine skipped tests retain their existing dependency/live-state scope.
+A's90PASS/four old-HEAD failures and the bridge125PASS/five old-HEAD failures
+are separate related checks, not counts added to the required39 aggregate.
+
+Changed Python compile, YAML parsing, whitespace, complete test freshness and
+planning-lock compatibility checks pass. All five changed sources have owner
+registry rows. The full source-registry checker reports459 pre-existing issues;
+three touched downstream-list warnings remain byte-identical in their lists
+to HEAD. This is changed coverage/rationale completion, not a globally clean
+registry. No unrelated drift is repaired.
+
+Before landing, remove only the read-only test settings symlink. Commit/rebase
+and FF landing/load use the normal lane with no guard clear, manual RED/source
+fetch/seed or venue operation. Afterload still must prove natural cancellation
+delivery where needed, the three-slot handoff and actual new source-to-q DRAIN;
+old Seoul/Chicago/Busan claims and historical timeout causes are not certified
+by these private tests. External missing provider/ground evidence stays unknown.

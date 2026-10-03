@@ -1,10 +1,11 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-09-12
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-20; last_reused=2026-09-12
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-04-26; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
 # Authority basis: command-bus INV-28/NC-18 plus schema-21 global receipt closure;
 #                  2026-08-10 typed command creation/adoption/absorption helpers and legal taker persistence.
+#                  RED CANCEL intent-scoped provenance validation (2026-10-03).
 """Tests for src/state/venue_command_repo.py (P1.S1 — INV-28 / NC-18)."""
 from __future__ import annotations
 
@@ -282,6 +283,179 @@ class TestAbsoluteLivePriceBand:
             _insert(conn, intent_kind=intent_kind, side=side, price=price)
 
         assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+
+
+@pytest.fixture
+def cancel_proxy(conn):
+    from src.state.venue_command_repo import insert_submission_envelope
+
+    snapshot_id = _ensure_snapshot(conn, token_id="tok-cancel")
+    envelope = _make_envelope(token_id="tok-cancel", side="SELL").with_updates(
+        order_type="GTC", post_only=False
+    )
+    insert_submission_envelope(conn, envelope, envelope_id="env-cancel")
+    return {
+        "command_id": "cmd-cancel",
+        "snapshot_id": snapshot_id,
+        "envelope_id": "env-cancel",
+        "position_id": "pos-cancel",
+        "decision_id": "dec-cancel",
+        "idempotency_key": "idem-cancel",
+        "intent_kind": "CANCEL",
+        "market_id": "condition-test",
+        "token_id": "tok-cancel",
+        "side": "SELL",
+        "size": 10.0,
+        "price": 0.5,
+        "created_at": _NOW.isoformat(),
+        "snapshot_checked_at": _NOW.isoformat(),
+        "venue_order_id": "order-cancel",
+    }
+
+
+class TestCancelIntentEnvelopeGate:
+    @pytest.mark.parametrize(
+        ("intent_kind", "side", "order_type", "post_only"),
+        [
+            ("ENTRY", "BUY", "GTC", False),
+            ("ENTRY", "BUY", "GTD", False),
+            ("EXIT", "SELL", "GTC", False),
+            ("DERISK", "SELL", "GTD", False),
+            ("ENTRY", "BUY", "FAK", True),
+            ("EXIT", "SELL", "FOK", False),
+        ],
+    )
+    def test_cancel_proxy_mode_does_not_authorize_new_order(
+        self, conn, cancel_proxy, intent_kind, side, order_type, post_only
+    ):
+        from src.state.venue_command_repo import insert_command, insert_submission_envelope
+
+        envelope = _make_envelope(token_id="tok-cancel", side=side).with_updates(
+            order_type=order_type, post_only=post_only
+        )
+        insert_submission_envelope(conn, envelope, envelope_id="env-mode")
+        cancel_proxy["envelope_id"] = "env-mode"
+        cancel_proxy["side"] = side
+        insert_command(conn, **cancel_proxy)
+        assert conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id='cmd-cancel'"
+        ).fetchone()[0] == "INTENT_CREATED"
+
+        with pytest.raises(ValueError, match="not a legal live execution mode"):
+            insert_command(
+                conn,
+                **{
+                    **cancel_proxy,
+                    "command_id": "cmd-trade",
+                    "idempotency_key": "idem-trade",
+                    "intent_kind": intent_kind,
+                },
+            )
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("selected_outcome_token_id", "foreign-token"),
+            ("side", "BUY"),
+            ("price", "0.49"),
+            ("size", "9"),
+            ("condition_id", "foreign-condition"),
+            ("question_id", "foreign-question"),
+            ("yes_token_id", "foreign-yes"),
+            ("no_token_id", "foreign-no"),
+        ],
+    )
+    def test_cancel_proxy_preserves_provenance_binding(
+        self, conn, cancel_proxy, field, value
+    ):
+        from src.state.venue_command_repo import insert_command, insert_submission_envelope
+
+        envelope = _make_envelope(token_id="tok-cancel", side="SELL").with_updates(
+            post_only=False
+        )
+        if field == "selected_outcome_token_id":
+            envelope = _make_envelope(token_id=value, side="SELL").with_updates(
+                post_only=False
+            )
+        elif field == "yes_token_id":
+            envelope = envelope.with_updates(
+                yes_token_id=value, no_token_id="tok-cancel", outcome_label="NO"
+            )
+        else:
+            envelope = envelope.with_updates(
+                **{field: Decimal(value) if field in {"price", "size"} else value}
+            )
+        insert_submission_envelope(conn, envelope, envelope_id="env-mismatch")
+        cancel_proxy["envelope_id"] = "env-mismatch"
+        with pytest.raises(ValueError, match="does not match"):
+            insert_command(conn, **cancel_proxy)
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0] == 0
+
+
+    @pytest.mark.parametrize("venue_order_id", [None, "", "   "])
+    def test_cancel_requires_exact_nonempty_venue_target(
+        self, conn, cancel_proxy, venue_order_id
+    ):
+        from src.state.venue_command_repo import insert_command
+
+        cancel_proxy["venue_order_id"] = venue_order_id
+        with pytest.raises(ValueError, match="venue_order_id"):
+            insert_command(conn, **cancel_proxy)
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+
+    @pytest.mark.parametrize("case", ["missing", "foreign_token", "selected_token"])
+    def test_cancel_requires_historical_snapshot_identity(
+        self, conn, cancel_proxy, case
+    ):
+        from src.state.venue_command_repo import insert_command
+
+        if case == "missing":
+            cancel_proxy["snapshot_id"] = "missing-snapshot"
+        else:
+            cancel_proxy["snapshot_id"] = _ensure_snapshot(
+                conn,
+                token_id="foreign-token",
+                yes_token_id="foreign-token",
+                no_token_id="tok-cancel" if case == "selected_token" else "foreign-no",
+            )
+        with pytest.raises(ValueError, match="snapshot"):
+            insert_command(conn, **cancel_proxy)
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+
+    @pytest.mark.parametrize(
+        "intent_kind,side", [("ENTRY", "BUY"), ("EXIT", "SELL"), ("DERISK", "SELL")]
+    )
+    @pytest.mark.parametrize("case", ["stale", "tick", "minimum"])
+    def test_new_order_keeps_executable_snapshot_gate(
+        self, conn, cancel_proxy, intent_kind, side, case
+    ):
+        from src.state.venue_command_repo import insert_command, insert_submission_envelope
+
+        price = 0.495 if case == "tick" else 0.5
+        size = 0.001 if case == "minimum" else 10.0
+        envelope = _make_envelope(
+            token_id="tok-cancel", side=side, price=price, size=size
+        )
+        insert_submission_envelope(conn, envelope, envelope_id="env-executable")
+        cancel_proxy.update(
+            envelope_id="env-executable", side=side, price=price, size=size,
+            snapshot_checked_at=(
+                (_NOW + timedelta(days=366)).isoformat()
+                if case == "stale" else _NOW.isoformat()
+            ),
+        )
+        insert_command(conn, **cancel_proxy)
+        with pytest.raises(ValueError, match="stale|aligned|below"):
+            insert_command(
+                conn,
+                **{
+                    **cancel_proxy, "intent_kind": intent_kind,
+                    "command_id": "cmd-trade", "idempotency_key": "idem-trade",
+                },
+            )
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
 
 
 def _attribution_row(c, position_id: str):

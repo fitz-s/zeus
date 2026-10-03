@@ -1,6 +1,9 @@
 # Created: 2026-06-09
-# Last reused/audited: 2026-09-30
-# Authority basis: materialization pre-claim deadline hotfix (2026-08-24)
+# Lifecycle: created=2026-06-09; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused/audited: 2026-10-03
+# Purpose: Preserve materialization ownership, fair request slots, and bounded recovery.
+# Reuse: Extend the actual priority read-plan to multi-request lease relationship tests.
+# Authority basis: approved source-drain fairness slice (2026-10-03), INV-47
 """Relationship tests for the persistent flock-backed materialization lock."""
 from __future__ import annotations
 
@@ -10,6 +13,9 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from contextlib import redirect_stdout
+from io import StringIO
+from types import SimpleNamespace
 
 import pytest
 
@@ -310,6 +316,291 @@ def _priority_claim_plan(tmp_path, monkeypatch):
             limit=3, lane=queue.MATERIALIZATION_LANE_PRIORITY,
         )
     return queue, requests, selected, revision, plan
+
+
+def _three_request_priority_plan(tmp_path, monkeypatch, *, held=False):
+    queue, requests, london, revision, plan = _priority_claim_plan(tmp_path, monkeypatch)
+    paths = [london]
+    for city in ("Paris", "Seoul"):
+        path = requests / f"{city}.2026-08-25.high.json"
+        path.write_text(json.dumps(dict(_materialization_request(), city=city)), encoding="utf-8")
+        paths.append(path)
+    money = frozenset({("London", "2026-08-25", "high")}) if held else frozenset()
+    global_scope = frozenset({("Paris", "2026-08-25", "high")})
+    monkeypatch.setattr(queue, "_current_money_risk_families", lambda *_a, **_kw: money)
+    monkeypatch.setattr(queue, "_current_money_risk_scopes", lambda *_a, **_kw: money)
+    monkeypatch.setattr(queue, "_current_probability_debt_families", lambda *_a, **_kw: frozenset())
+    monkeypatch.setattr(queue, "_current_global_auction_scope_families", lambda *_a, **_kw: global_scope)
+    return queue, requests, tuple(paths), revision, plan
+
+
+@pytest.mark.parametrize("held", (False, True))
+def test_priority_claim_preserves_all_planned_fair_slots(tmp_path, monkeypatch, held):
+    queue, requests, paths, _revision, plan = _three_request_priority_plan(
+        tmp_path, monkeypatch, held=held,
+    )
+    prior = plan()
+    before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in paths}
+    assert prior.claim.selected_files == paths
+    claimed, deferral = queue._try_claim_priority_request(prior)
+    assert deferral == ()
+    assert claimed is not None and claimed.claimed_count == 3
+    assert tuple(path.name for path in claimed.selected_files) == tuple(path.name for path in paths)
+    metadata = json.loads((claimed.batch_path / queue._CLAIM_METADATA_NAME).read_text())
+    assert metadata["request_names"] == [path.name for path in paths]
+    assert set(metadata["identities"]) == set(metadata["request_names"])
+    for path in paths:
+        assert not path.exists()
+        leased = claimed.batch_path / path.name
+        assert (leased.stat().st_ino, leased.read_bytes()) == before[path.name]
+    keys, recovered, unknown = queue._recover_stale_claims(
+        request_path=requests, inflight_path=claimed.batch_path.parent,
+    )
+    assert recovered == 0 and not unknown and len(keys) == 3
+
+
+@pytest.mark.parametrize("slot", (1, 2))
+@pytest.mark.parametrize("change", ("rewrite", "missing", "owner"))
+def test_priority_claim_revalidates_every_reserved_slot(tmp_path, monkeypatch, slot, change):
+    queue, requests, paths, _revision, plan = _three_request_priority_plan(tmp_path, monkeypatch)
+    prior = plan()
+    target = paths[slot]
+    before = {path: path.read_bytes() for path in paths}
+    if change == "rewrite":
+        target.write_text(json.dumps(dict(json.loads(before[target]), computed_at="2026-08-24T09:00:00+00:00")))
+    elif change == "missing":
+        target.rename(tmp_path / "other-owner.json")
+    else:
+        duplicate = requests / "other-owner.json"
+        duplicate.write_bytes(before[target])
+        queue._new_claim_batch(requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME, (duplicate,))
+    claimed, reason = queue._try_claim_priority_request(prior)
+    assert claimed is None and reason
+    if change == "owner":
+        assert reason == queue._PRIORITY_CLAIM_RACED_OWNER_REASONS
+    for path in paths:
+        if path != target:
+            assert path.read_bytes() == before[path]
+
+
+@pytest.mark.parametrize("slot", (1, 2))
+@pytest.mark.parametrize("fault", ("move_failure", "rewrite_during_move", "publisher_collision"))
+def test_priority_partial_move_preserves_inputs_and_recovers(
+    tmp_path, monkeypatch, slot, fault,
+):
+    queue, requests, paths, _revision, plan = _three_request_priority_plan(tmp_path, monkeypatch)
+    prior = plan()
+    before = {path: path.read_bytes() for path in paths}
+    replacement = json.dumps(dict(_materialization_request(), computed_at="2026-08-24T10:00:00+00:00")).encode()
+    real_replace = queue.os.replace
+    fired = False
+
+    def race(source, target):
+        nonlocal fired
+        if source == paths[slot] and not fired:
+            fired = True
+            if fault == "rewrite_during_move":
+                source.write_bytes(replacement)
+            else:
+                if fault == "publisher_collision":
+                    paths[0].write_bytes(replacement)
+                raise FileNotFoundError("competing move")
+        real_replace(source, target)
+
+    monkeypatch.setattr(queue.os, "replace", race)
+    claimed, reason = queue._try_claim_priority_request(prior)
+    assert fired and claimed is None
+    assert reason == (queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
+    for path in paths:
+        expected = replacement if (
+            (fault == "rewrite_during_move" and path == paths[slot])
+            or (fault == "publisher_collision" and path == paths[0])
+        ) else before[path]
+        assert path.read_bytes() == expected
+    inflight = requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME
+    leased = tuple(path for batch in inflight.glob("*") for path in queue._claim_request_files(batch))
+    if fault == "publisher_collision":
+        assert len(leased) == 1 and leased[0].read_bytes() == before[paths[0]]
+        queue._write_stage_receipt_payload(leased[0], {"stage": "claimed"})
+        monkeypatch.setattr(queue, "_claim_age_seconds", lambda _batch: 61.0)
+        _keys, recovered, unknown = queue._recover_stale_claims(request_path=requests, inflight_path=inflight)
+        assert recovered == 1 and not unknown
+        assert paths[0].read_bytes() == replacement
+        restored = next(path for path in requests.glob("*.recovered-*.json"))
+        assert restored.read_bytes() == before[paths[0]]
+        assert queue._read_stage_receipt(restored)["stage"] == "claimed"
+    else:
+        assert leased == ()
+
+
+def test_priority_rollback_publication_window_never_overwrites_new_request(tmp_path, monkeypatch):
+    queue, requests, paths, _revision, plan = _three_request_priority_plan(tmp_path, monkeypatch)
+    prior = plan()
+    old_second = paths[1].read_bytes()
+    new_second = json.dumps(dict(json.loads(old_second), computed_at="2026-08-24T10:00:00+00:00")).encode()
+    real_replace, real_link = queue.os.replace, queue.os.link
+    published = False
+
+    def publish_at_rollback(source, target):
+        nonlocal published
+        if target == paths[1] and source.parent != requests:
+            published = True
+            paths[1].write_bytes(new_second)
+
+    def replace(source, target):
+        if source == paths[2]:
+            raise FileNotFoundError("third move raced")
+        publish_at_rollback(source, target)
+        real_replace(source, target)
+
+    def link(source, target):
+        publish_at_rollback(source, target)
+        real_link(source, target)
+
+    monkeypatch.setattr(queue.os, "replace", replace)
+    monkeypatch.setattr(queue.os, "link", link)
+    claimed, reason = queue._try_claim_priority_request(prior)
+    assert claimed is None and reason and published
+    assert paths[1].read_bytes() == new_second
+    assert paths[0].exists() and paths[2].exists()
+    inflight = requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME
+    retained = [path for batch in inflight.iterdir() for path in queue._claim_request_files(batch)]
+    assert len(retained) == 1 and retained[0].read_bytes() == old_second
+    monkeypatch.setattr(queue, "_claim_age_seconds", lambda _batch: 61.0)
+    _keys, recovered, unknown = queue._recover_stale_claims(request_path=requests, inflight_path=inflight)
+    assert recovered == 1 and not unknown
+    assert paths[1].read_bytes() == new_second
+    assert next(requests.glob("*.recovered-*.json")).read_bytes() == old_second
+
+
+@pytest.mark.parametrize("slot", (1, 2))
+@pytest.mark.parametrize("new_body", ("{", "{}"))
+def test_priority_witness_read_race_defers_without_unhandled_error(
+    tmp_path, monkeypatch, slot, new_body,
+):
+    queue, requests, paths, _revision, plan = _three_request_priority_plan(tmp_path, monkeypatch)
+    prior = plan()
+    load = queue._load_request_payload_for_coalescing
+    reads = 0
+
+    def replace_before_witness(path):
+        nonlocal reads
+        if path == paths[slot]:
+            reads += 1
+            if reads == 2:
+                path.write_text(new_body)
+        return load(path)
+
+    monkeypatch.setattr(queue, "_load_request_payload_for_coalescing", replace_before_witness)
+    claimed, reason = queue._try_claim_priority_request(prior)
+    assert claimed is None
+    assert reason == (queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
+    assert all(path.exists() for path in paths)
+    assert paths[slot].read_text() == new_body
+    assert not tuple((requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME).glob("*"))
+
+
+def _run_priority_fixture(queue, requests, tmp_path):
+    return queue.process_replacement_forecast_live_materialization_queue(
+        request_dir=requests, processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed", forecast_db=None,
+        seed_limit=0, limit=3, lane=queue.MATERIALIZATION_LANE_PRIORITY,
+    )
+
+
+@pytest.mark.parametrize("tail", ("environment_error", "missing_envelope"))
+def test_priority_batch_partial_completion_retries_only_unfinished_requests(
+    tmp_path, monkeypatch, tail,
+):
+    queue, requests, paths, _revision, _plan = _three_request_priority_plan(tmp_path, monkeypatch, held=True)
+    monkeypatch.setattr(queue, "_validate_request_payload", lambda _path: (True, "", ""))
+    batches = []
+
+    def batch_command(argv):
+        start = argv.index("--batch-input-json") + 1
+        stop = argv.index("--deadline-utc")
+        names = list(argv[start:stop])
+        batches.append([os.path.basename(path) for path in names])
+        envelopes = []
+        for index, name in enumerate(names):
+            if len(batches) == 1 and index > 0:
+                if tail == "missing_envelope":
+                    continue
+                result = {"status": "ERROR", "failure_category": "ENVIRONMENT_RETRY", "error_type": "PrivateReadFailure"}
+                code = 2
+            else:
+                result, code = {"status": "SUCCEEDED"}, 0
+            envelopes.append(json.dumps({"input_json": name, "returncode": code, "stdout": json.dumps(result), "stderr": ""}))
+        return subprocess.CompletedProcess(argv, 0, stdout="\n".join(envelopes), stderr="")
+
+    monkeypatch.setattr(queue, "_run_command", batch_command)
+    first = _run_priority_fixture(queue, requests, tmp_path)
+    assert first.processed_count == 1 and first.failed_count == 0
+    assert len(batches[0]) == 3
+    assert not paths[0].exists()
+    restored = tuple(requests.glob("*.json"))
+    assert {queue._timeout_retry_state(path)[0] for path in restored} == {path.stem for path in paths[1:]}
+    if tail == "environment_error":
+        assert all(queue._read_stage_receipt(path)["last_failure"]["failure_category"] == "ENVIRONMENT_RETRY" for path in restored)
+    else:
+        assert all(queue._read_stage_receipt(path)["stage"] == "open_read_snapshot" for path in restored)
+        retry_after = max(queue._timeout_retry_state(path)[2] for path in restored)
+        deferred = _run_priority_fixture(queue, requests, tmp_path)
+        assert deferred.processed_count == 0 and len(batches) == 1
+        monkeypatch.setattr(queue.time, "time", lambda: retry_after + 1)
+    second = _run_priority_fixture(queue, requests, tmp_path)
+    assert second.processed_count == 2
+    assert {queue._timeout_retry_state(requests / name)[0] for name in batches[1]} == {path.stem for path in paths[1:]}
+    assert not tuple(requests.glob("*.json"))
+    assert not tuple((requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME).iterdir())
+
+
+def test_priority_batch_uses_one_deadline_and_restores_uncomputed_tail(tmp_path, monkeypatch):
+    from scripts import materialize_replacement_forecast_live as cli
+    from src.state import db
+
+    queue, requests, paths, _revision, _plan = _three_request_priority_plan(tmp_path, monkeypatch, held=True)
+    monkeypatch.setattr(queue, "_validate_request_payload", lambda _path: (True, "", ""))
+    connection = sqlite3.connect(":memory:")
+    monkeypatch.setattr(db, "connect_existing_forecasts_db_without_journal_bootstrap", lambda: connection)
+    monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
+    monkeypatch.setattr(cli, "_prepare_live_schema_and_manifest", lambda *_a, **_kw: SimpleNamespace(schema_ready=True))
+    budget_spent = False
+    computed = []
+    deadlines = []
+    commands = []
+    monkeypatch.setattr(cli._StageReceipt, "deadline_expired", lambda _self: budget_spent)
+
+    def materialize(input_json, *, stage_receipt, **_kwargs):
+        nonlocal budget_spent
+        deadlines.append(stage_receipt.deadline_at)
+        stage_receipt.require_budget()
+        computed.append(input_json.name)
+        budget_spent = True
+        return 0, {"status": "SUCCEEDED"}
+
+    monkeypatch.setattr(cli, "_materialize", materialize)
+
+    def run_command(argv):
+        commands.append(list(argv))
+        output = StringIO()
+        with redirect_stdout(output):
+            code = cli.main(argv[2:])
+        return subprocess.CompletedProcess(argv, code, stdout=output.getvalue(), stderr="")
+
+    monkeypatch.setattr(queue, "_run_command", run_command)
+    report = _run_priority_fixture(queue, requests, tmp_path)
+    assert report.processed_count == 1 and report.failed_count == 0
+    assert computed == [paths[0].name]
+    assert len(commands) == 1 and len(deadlines) == 3 and len(set(deadlines)) == 1
+    assert queue.DEFAULT_MATERIALIZATION_MAX_WORKERS == 1
+    assert not paths[0].exists()
+    restored = tuple(requests.glob("*.json"))
+    assert len(restored) == 2
+    for path in restored:
+        assert queue._read_stage_receipt(path)["stage"] == "open_read_snapshot"
+        assert queue._timeout_retry_state(path)[2] is not None
+    assert not tuple((requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME).iterdir())
 
 
 @pytest.mark.parametrize("unrelated_request", (False, True))

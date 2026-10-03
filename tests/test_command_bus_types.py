@@ -1,12 +1,13 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-08-10
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-04-26; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Lock command-bus type contracts plus U1 executable snapshot gate compatibility.
 # Reuse: Run when venue_commands schema, command bus enums, or snapshot-gated insert semantics change.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S2;
 #                  architecture/invariants.yaml INV-29;
 #                  docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md;
 #                  2026-08-10 creation-only recovered-order adoption and operator-close absorption events.
+#                  2026-10-03 CANCEL requires a nonempty bound venue-order target.
 """P1.S2 command_bus type-contract tests.
 
 Locks the typed surface so P1.S3+ executor work has stable invariants:
@@ -681,9 +682,28 @@ class TestRepoSeamEnumGrammar:
                 market_id="m", token_id="t", side="BUY", size=1.0, price=0.5,
                 created_at="2026-04-26T00:00:00Z",
                 decision_certificate_hash=f"cert-cmd-{i}",
+                venue_order_id="fixture-cancel-order" if kind is IntentKind.CANCEL else None,
             )
         rows = conn.execute("SELECT intent_kind FROM venue_commands").fetchall()
         assert len(rows) == 4
+
+    @pytest.mark.parametrize("venue_order_id", [None, "", "   "])
+    def test_cancel_rejects_missing_or_blank_venue_order_target(self, venue_order_id):
+        from src.state.venue_command_repo import insert_command
+
+        conn = self._conn()
+        snapshot_id = _ensure_snapshot(conn, token_id="t")
+        envelope_id = _ensure_envelope(conn, token_id="t")
+        with pytest.raises(ValueError, match="venue_order_id"):
+            insert_command(
+                conn, command_id="cmd-cancel", snapshot_id=snapshot_id,
+                envelope_id=envelope_id, position_id="p", decision_id="d",
+                idempotency_key="cancel-target".ljust(32, "0"), intent_kind="CANCEL",
+                market_id="m", token_id="t", side="BUY", size=1.0, price=0.5,
+                created_at="2026-04-26T00:00:00Z", venue_order_id=venue_order_id,
+            )
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------

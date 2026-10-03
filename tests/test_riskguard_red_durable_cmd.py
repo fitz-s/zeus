@@ -1,5 +1,6 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-04-27; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: M1 antibodies for RED force-exit durable command proxy and NC-NEW-D function-scope ownership.
 # Reuse: Run when cycle_runner RED sweep, venue command persistence, or riskguard actuation changes.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M1.yaml
@@ -12,12 +13,16 @@ import inspect
 import sqlite3
 import threading
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
+from src.control.freshness_gate import FreshnessVerdict
 from src.engine import cycle_runner
 from src.engine.cycle_runner import _execute_force_exit_sweep
 from src.engine.discovery_mode import DiscoveryMode
@@ -31,12 +36,12 @@ NOW = datetime(2026, 4, 27, 13, 0, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _conn():
+def _conn(snapshot=None):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     init_schema_trade_only(conn)
-    insert_snapshot(conn, _snapshot())
+    insert_snapshot(conn, snapshot or _snapshot())
     return conn
 
 
@@ -123,6 +128,7 @@ def test_red_emits_cancel_command_within_same_cycle():
 
     assert summary["attempted"] == 1
     assert summary["cancel_commands_inserted"] == 1
+    assert summary["cancel_command_errors"] == 0
     row = _red_command(conn)
     assert row is not None
     assert row["state"] == "CANCEL_PENDING"
@@ -130,6 +136,7 @@ def test_red_emits_cancel_command_within_same_cycle():
     assert row["venue_order_id"] == "venue-order-red"
     assert row["envelope_id"].startswith("pre-submit:red-cancel-")
     assert portfolio.positions[0].exit_reason == "red_force_exit"
+    assert portfolio.positions[0].state == "holding"
     assert [event["event_type"] for event in list_events(conn, row["command_id"])] == [
         "INTENT_CREATED",
         "CANCEL_REQUESTED",
@@ -160,6 +167,176 @@ def test_red_emit_grammar_bound_to_cancel_or_derisk_only():
     row = _red_command(conn)
     assert row["intent_kind"] in {"CANCEL", "DERISK"}
     assert row["decision_id"].startswith("red_force_exit_proxy:")
+
+
+@pytest.mark.parametrize(
+    ("snapshot_updates", "position_updates", "now"),
+    [
+        ({}, {}, NOW + timedelta(seconds=31)),
+        ({}, {"last_monitor_best_bid": 0.495}, NOW),
+        ({"min_order_size": Decimal("20")}, {}, NOW),
+        ({"orderbook_top_bid": None}, {}, NOW),
+        ({"accepting_orders": False}, {}, NOW),
+        (
+            {"selected_outcome_token_id": "no-red", "outcome_label": "NO"},
+            {"direction": "buy_no", "last_monitor_best_bid": 0.99},
+            NOW + timedelta(seconds=31),
+        ),
+    ],
+)
+def test_red_cancel_uses_historical_order_identity(
+    snapshot_updates, position_updates, now
+):
+    conn = _conn(replace(_snapshot(), **snapshot_updates))
+    position = _position(**position_updates)
+
+    summary = _execute_force_exit_sweep(
+        PortfolioState(positions=[position]), conn=conn, now=now
+    )
+
+    assert summary["cancel_commands_inserted"] == 1
+    assert summary["cancel_command_errors"] == 0
+    row = _red_command(conn)
+    assert row["venue_order_id"] == "venue-order-red"
+    assert row["state"] == "CANCEL_PENDING"
+    assert position.state == "holding"
+
+
+def test_red_cancel_failure_retries_without_clearing_exit_marker():
+    conn = _conn()
+    position = _position(decision_snapshot_id="missing-snapshot")
+    portfolio = PortfolioState(positions=[position])
+
+    failed = _execute_force_exit_sweep(portfolio, conn=conn, now=NOW)
+    assert failed["cancel_command_errors"] == 1
+    assert _red_command(conn) is None
+    assert position.exit_reason == "red_force_exit"
+
+    position.decision_snapshot_id = "snap-red"
+    recovered = _execute_force_exit_sweep(
+        portfolio, conn=conn, now=NOW + timedelta(seconds=31)
+    )
+    assert recovered["cancel_commands_inserted"] == 1
+    assert recovered["cancel_command_errors"] == 0
+
+    position.last_monitor_best_bid = 0.49
+    position.shares = 9.0
+    repeated = _execute_force_exit_sweep(
+        portfolio, conn=conn, now=NOW + timedelta(seconds=32)
+    )
+    assert repeated["cancel_commands_existing"] == 1
+    row = _red_command(conn)
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
+    assert [event["event_type"] for event in list_events(conn, row["command_id"])] == [
+        "INTENT_CREATED", "CANCEL_REQUESTED"
+    ]
+    assert position.exit_reason == "red_force_exit"
+    assert position.state == "holding"
+
+
+@pytest.mark.parametrize(
+    "position_updates",
+    [
+        {"exit_reason": "other_exit"},
+        {"state": "pending_exit", "exit_reason": "other_exit"},
+        {"state": "settled"},
+    ],
+)
+def test_red_cancel_retry_preserves_other_exit_and_terminal_scope(position_updates):
+    conn = _conn()
+    position = _position(**position_updates)
+    portfolio = PortfolioState(positions=[position])
+    summary = _execute_force_exit_sweep(portfolio, conn=conn, now=NOW)
+    assert summary["attempted"] == 0
+    if position.state == "settled":
+        assert summary["cancel_commands_inserted"] == 0
+        assert _red_command(conn) is None
+    else:
+        assert summary["already_exiting"] == 1
+        assert summary["cancel_commands_inserted"] == 1
+        assert _red_command(conn)["state"] == "CANCEL_PENDING"
+        repeated = _execute_force_exit_sweep(portfolio, conn=conn, now=NOW)
+        assert repeated["cancel_commands_inserted"] == 0
+        assert repeated["cancel_commands_existing"] == 1
+        assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE event_type='CANCEL_REQUESTED'"
+        ).fetchone()[0] == 1
+    for field, value in position_updates.items():
+        assert getattr(position, field) == value
+
+
+@pytest.mark.parametrize(
+    ("state", "exit_reason", "expected_cancels", "expected_reason"),
+    [
+        ("holding", "", 1, "red_force_exit"),
+        ("pending_exit", "other_exit", 1, "other_exit"),
+        ("economically_closed", "", 1, ""),
+        ("settled", "", 0, ""),
+    ],
+)
+def test_red_phase_scope_preserves_closed_order_cancel(
+    state, exit_reason, expected_cancels, expected_reason
+):
+    conn = _conn()
+    position = _position(state=state, exit_reason=exit_reason)
+    summary = _execute_force_exit_sweep(
+        PortfolioState(positions=[position]), conn=conn, now=NOW
+    )
+    assert summary["cancel_commands_inserted"] == expected_cancels
+    assert summary["cancel_command_errors"] == 0
+    assert position.state == state
+    assert position.exit_reason == expected_reason
+    if expected_cancels:
+        assert _red_command(conn)["state"] == "CANCEL_PENDING"
+
+
+def test_red_cancel_retry_repairs_missing_request_without_false_close(monkeypatch):
+    from src.state import venue_command_repo
+
+    conn = _conn()
+    position = _position()
+    portfolio = PortfolioState(positions=[position])
+    append_event = venue_command_repo.append_event
+
+    def fail_request(*args, **kwargs):
+        if kwargs.get("event_type") == "CANCEL_REQUESTED":
+            raise sqlite3.OperationalError("injected request journal failure")
+        return append_event(*args, **kwargs)
+
+    with monkeypatch.context() as failing:
+        failing.setattr(venue_command_repo, "append_event", fail_request)
+        first = _execute_force_exit_sweep(portfolio, conn=conn, now=NOW)
+    assert first["cancel_command_errors"] == 1
+    row = _red_command(conn)
+    assert row["state"] == "INTENT_CREATED"
+
+    second = _execute_force_exit_sweep(portfolio, conn=conn, now=NOW)
+    assert second["cancel_commands_existing"] == 1
+    assert second["cancel_command_errors"] == 0
+    assert _red_command(conn)["state"] == "CANCEL_PENDING"
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
+    assert [event["event_type"] for event in list_events(conn, row["command_id"])] == [
+        "INTENT_CREATED", "CANCEL_REQUESTED"
+    ]
+    assert position.state == "holding"
+
+
+def test_red_cancel_new_venue_target_has_its_own_command():
+    conn = _conn()
+    position = _position()
+    portfolio = PortfolioState(positions=[position])
+    first = _execute_force_exit_sweep(portfolio, conn=conn, now=NOW)
+    position.order_id = "replacement-venue-order"
+    second = _execute_force_exit_sweep(portfolio, conn=conn, now=NOW)
+
+    assert first["cancel_commands_inserted"] == second["cancel_commands_inserted"] == 1
+    rows = conn.execute("SELECT venue_order_id, state FROM venue_commands").fetchall()
+    assert {(row["venue_order_id"], row["state"]) for row in rows} == {
+        ("venue-order-red", "CANCEL_PENDING"),
+        ("replacement-venue-order", "CANCEL_PENDING"),
+    }
+    assert position.state == "holding"
 
 
 def test_red_emit_satisfies_inv_30_persist_before_sdk():
@@ -214,6 +391,10 @@ def test_run_cycle_red_risk_level_triggers_durable_sweep(monkeypatch, tmp_path):
             return 100.0
 
     monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.RED)
+    monkeypatch.setattr(
+        cycle_runner, "evaluate_freshness_mid_run",
+        lambda *_args: FreshnessVerdict(branch="FRESH"),
+    )
     monkeypatch.setattr(cycle_runner, "get_connection", lambda: _file_conn(db_path))
     monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
     monkeypatch.setattr(cycle_runner, "save_portfolio", lambda *args, **kwargs: None)
@@ -275,7 +456,7 @@ def test_run_cycle_red_risk_level_triggers_durable_sweep(monkeypatch, tmp_path):
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
     assert summary["risk_level"] == RiskLevel.RED.value
-    assert summary["force_exit_review_scope"] == "sweep_active_positions"
+    assert summary["risk_sweep_scope"] == "sweep_active_positions"
     assert summary["force_exit_sweep_trigger"] == "risk_level_red"
     assert summary["force_exit_sweep"]["attempted"] == 1
     assert summary["force_exit_sweep"]["cancel_commands_inserted"] == 1
@@ -297,7 +478,6 @@ def test_live_exit_monitor_owns_red_full_book_sweep(monkeypatch):
     """The scheduled EDLI monitor, not only legacy run_cycle, acts on RED."""
     from src.execution import exit_lifecycle
     from src.riskguard import riskguard
-    from src.state import canonical_write, decision_chain
 
     portfolio = PortfolioState(
         positions=[
@@ -334,6 +514,14 @@ def test_live_exit_monitor_owns_red_full_book_sweep(monkeypatch):
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.RED)
     monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: Conn())
     monkeypatch.setattr(cycle_runner, "load_portfolio", load_portfolio)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_load_held_monitor_bootstrap",
+        lambda *, target_families, **kwargs: exit_lifecycle._HeldMonitorBootstrap(
+            portfolio=load_portfolio(target_families=target_families),
+            allocator_snapshot={"configured": False},
+        ),
+    )
     monkeypatch.setattr(cycle_runner, "_execute_force_exit_sweep", sweep)
     monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", monitor)
     monkeypatch.setattr(cycle_runner, "get_tracker", object)
@@ -352,33 +540,27 @@ def test_live_exit_monitor_owns_red_full_book_sweep(monkeypatch):
     )
     monkeypatch.setattr(
         exit_lifecycle,
-        "_refresh_global_allocator_for_held_position_monitor",
-        lambda *_args, **_kwargs: {"configured": False},
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
         "_held_monitor_clob_client",
         lambda: nullcontext(object()),
     )
     monkeypatch.setattr(
         exit_lifecycle,
-        "_full_book_monitor_made_canonical_progress",
+        "_full_book_monitor_completed_canonical_coverage",
         lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
         "src.observability.scheduler_health._write_scheduler_health",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(decision_chain, "store_artifact", lambda *_args, **_kwargs: "artifact-red")
     monkeypatch.setattr(
-        canonical_write,
-        "commit_then_export",
-        lambda _conn, *, db_op, json_exports: (
-            db_op(),
-            [export() for export in json_exports],
-        ),
+        exit_lifecycle, "_persist_exit_monitor_artifact",
+        lambda *_args, **_kwargs: (True, "artifact-red"),
     )
-    monkeypatch.setattr("src.observability.status_summary.write_cycle_pulse", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        exit_lifecycle, "_schedule_exit_monitor_status_pulse",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr("src.state.db.get_held_monitor_read_connection", lambda **_kwargs: None)
 
     active = threading.Event()
     completed = []

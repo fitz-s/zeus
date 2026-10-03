@@ -58,7 +58,7 @@ from src.state.db import (
     record_token_suppression,
     ZEUS_WORLD_DB_PATH,
 )
-from src.state.lifecycle_manager import TERMINAL_STATES, is_terminal_state
+from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES, is_terminal_state
 
 # Alias for dependency injection: fill_tracker.py and tests patch deps.get_connection.
 # Default runtime seam must expose trade truth plus shared world truth.
@@ -219,15 +219,15 @@ def _execute_force_exit_sweep(
     monitor_refresh cycle and posts sell orders through the normal exit lane.
 
     Does NOT post sell orders in-cycle — keeps the sweep low-risk + testable.
-    Already-exiting positions (non-empty `exit_reason` from a prior exit flow)
-    are NOT overridden — we mark only positions that have no exit flow yet.
+    Other exit reasons remain owned by their exit flow. A prior RED marker
+    retries its durable cancel obligation until the journal has recorded it.
 
     Law reference: docs/authority/zeus_current_architecture.md §17 +
     docs/authority/zeus_dual_track_architecture.md §6 DT#2. Pre-P9B behavior
     was entry-block-only (Phase 1 scope); this closes the Phase 2 sweep gap.
 
     When ``conn`` is supplied, M1 additionally emits durable CANCEL proxy
-    commands for swept positions that carry enough executable-market context.
+    commands for swept positions that carry the original order's market identity.
     This remains side-effect-free: it records intent and a CANCEL_REQUESTED
     journal event only; M4/M5 own actual cancel/replace and reconciliation
     runtime.
@@ -273,19 +273,27 @@ def _execute_force_exit_sweep(
         if state_val in _TERMINAL_POSITION_STATES_FOR_SWEEP:
             skipped_terminal += 1
             continue
+        economically_closed = state_val == LifecyclePhase.ECONOMICALLY_CLOSED.value
         existing_reason = str(getattr(pos, "exit_reason", "") or "").strip()
-        if existing_reason:
+        # INV-47 SCOPE: only this nonterminal position's bound order.
+        # DRAIN: each RED sweep retries missing command/request persistence.
+        # RESET: the exact target's durable request is reused without another
+        # cancel command; other exits and terminal positions keep their scope.
+        # Economic close is not active exit exposure; an original resting
+        # order still retains its independent RED cancellation obligation.
+        if existing_reason and existing_reason != "red_force_exit":
             already_exiting += 1
-            continue
-        pos.exit_reason = "red_force_exit"
-        attempted += 1
+        elif not economically_closed:
+            pos.exit_reason = "red_force_exit"
+            attempted += 1
         if conn is not None:
             try:
-                venue_order_id = (
+                venue_order_id = str(
                     getattr(pos, "order_id", None)
                     or getattr(pos, "entry_order_id", None)
                     or getattr(pos, "last_exit_order_id", None)
-                )
+                    or ""
+                ).strip()
                 snapshot_id = str(getattr(pos, "decision_snapshot_id", "") or "").strip()
                 token_id = _held_token_id(pos)
                 price = _red_proxy_price(pos)
@@ -296,14 +304,32 @@ def _execute_force_exit_sweep(
                     decision_id = f"red_force_exit_proxy:{getattr(pos, 'trade_id', '') or token_id}"
                     side = "SELL"
                     idempotency_key = IdempotencyKey.from_inputs(
-                        decision_id=decision_id,
+                        decision_id=f"{decision_id}:{venue_order_id}",
                         token_id=token_id,
                         side=side,
                         price=price,
                         size=size,
                         intent_kind=IntentKind.CANCEL,
                     ).value
-                    if find_command_by_idempotency_key(conn, idempotency_key) is not None:
+                    existing = find_command_by_idempotency_key(conn, idempotency_key)
+                    if existing is None:
+                        existing = conn.execute(
+                            "SELECT command_id, state FROM venue_commands "
+                            "WHERE intent_kind='CANCEL' AND position_id=? "
+                            "AND decision_id=? AND token_id=? AND venue_order_id=? LIMIT 1",
+                            (
+                                str(getattr(pos, "trade_id", "") or token_id),
+                                decision_id,
+                                token_id,
+                                venue_order_id,
+                            ),
+                        ).fetchone()
+                    if existing is not None:
+                        if isinstance(existing, dict):
+                            command_id = existing["command_id"]
+                            command_state = existing["state"]
+                        else:
+                            command_id, command_state = existing
                         outcome = "existing"
                     else:
                         command_id = f"red-cancel-{idempotency_key[:16]}"
@@ -343,6 +369,9 @@ def _execute_force_exit_sweep(
                             venue_order_id=str(venue_order_id),
                             reason="red_force_exit_proxy",
                         )
+                        command_state = "INTENT_CREATED"
+                        outcome = "inserted"
+                    if command_state == "INTENT_CREATED":
                         append_event(
                             conn,
                             command_id=command_id,
@@ -354,7 +383,6 @@ def _execute_force_exit_sweep(
                                 "source": "cycle_runner._execute_force_exit_sweep",
                             },
                         )
-                        outcome = "inserted"
             except Exception as exc:  # fail closed for command truth, preserve sweep mark
                 cancel_command_errors += 1
                 logger.warning(

@@ -1493,7 +1493,10 @@ def insert_command(
     if global_sell_receipt_closure is not None and type(global_sell_receipt_closure) is not GlobalSellReceiptClosure:
         raise ValueError("GLOBAL_SELL_RECEIPT_CLOSURE_TYPE_INVALID")
     if intent_kind == _IntentKind.CANCEL.value:
-        pass
+        # SCOPE: this cancel target only. DRAIN: the originating order owner
+        # supplies its venue identity on a later cancel attempt. RESET: an
+        # exact nonempty target passes; no failed command is persisted.
+        venue_order_id = _require_nonempty("venue_order_id", venue_order_id)
     elif intent_kind in {
         _IntentKind.ENTRY.value,
         _IntentKind.EXIT.value,
@@ -1543,6 +1546,7 @@ def insert_command(
     # before any insertion; unknown execution context keeps the book floor.
     _assert_snapshot_gate(
         conn,
+        intent_kind=intent_kind,
         snapshot_id=snapshot_id_value,
         token_id=token_id,
         side=side,
@@ -1560,6 +1564,7 @@ def insert_command(
         if submission_envelope is not None
         else _assert_envelope_gate(
             conn,
+            intent_kind=intent_kind,
             envelope_id=envelope_id,
             snapshot_id=snapshot_id_value,
             token_id=token_id,
@@ -2231,6 +2236,7 @@ def rehome_mixed_token_entry_command(
 def _assert_envelope_gate(
     conn: sqlite3.Connection,
     *,
+    intent_kind: str,
     envelope_id: str | None,
     snapshot_id: str | None,
     token_id: str,
@@ -2277,7 +2283,9 @@ def _assert_envelope_gate(
             or (envelope_side == "SELL" and order_type == "FAK")
         )
     )
-    if not (maker or marketable_taker):
+    # CANCEL binds the original order's provenance without creating a fill.
+    # Its proxy mode cannot authorize a new BUY/SELL submission.
+    if intent_kind != "CANCEL" and not (maker or marketable_taker):
         # INV-47 SCOPE: only this token/side command is rejected.
         # DRAIN: the next decision may persist a certified execution envelope.
         # RESET: no latch is stored; a legal maker or role-scoped taker passes.
@@ -2285,7 +2293,7 @@ def _assert_envelope_gate(
             "persisted taker-capable order is not a legal live execution mode: "
             f"order_type={order_type or 'ABSENT'}:post_only={bool(row['post_only'])}"
         )
-    if marketable_taker and envelope_side == "BUY":
+    if intent_kind != "CANCEL" and marketable_taker and envelope_side == "BUY":
         from src.contracts.execution_intent import (
             POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
         )
@@ -2577,6 +2585,7 @@ def _decimal(value: Any) -> Decimal:
 def _assert_snapshot_gate(
     conn: sqlite3.Connection,
     *,
+    intent_kind: str,
     snapshot_id: str | None,
     token_id: str,
     side: str,
@@ -2589,9 +2598,10 @@ def _assert_snapshot_gate(
     order_type: str | None = None,
     post_only: bool | None = None,
 ) -> None:
-    """U1 single insertion-point freshness/tradability gate."""
+    """Bind CANCEL provenance; require executable truth for new orders."""
 
     from src.contracts.executable_market_snapshot import (
+        MarketSnapshotMismatchError,
         StaleMarketSnapshotError,
         assert_snapshot_executable,
     )
@@ -2606,6 +2616,25 @@ def _assert_snapshot_gate(
         raise StaleMarketSnapshotError(
             "executable_market_snapshots table is unavailable; cannot validate venue command"
         ) from exc
+    if intent_kind == "CANCEL":
+        # SCOPE: the original order's snapshot/token only. DRAIN: its owner
+        # restores missing or mismatched historical identity before retry.
+        # RESET: bound identity passes regardless of current book eligibility;
+        # cancellation creates no new fill, price, size, or probability risk.
+        if snapshot is None:
+            raise StaleMarketSnapshotError(
+                "CANCEL requires a persisted historical market snapshot"
+            )
+        token = str(token_id or "")
+        if token not in {snapshot.yes_token_id, snapshot.no_token_id}:
+            raise MarketSnapshotMismatchError(
+                f"token_id {token!r} is not in cancel snapshot token map"
+            )
+        if snapshot.selected_outcome_token_id and token != snapshot.selected_outcome_token_id:
+            raise MarketSnapshotMismatchError(
+                "token_id does not match selected_outcome_token_id from cancel snapshot"
+            )
+        return
     checked_at = _coerce_snapshot_checked_at(checked_at)
     if snapshot is not None and snapshot_is_invalidated(conn, snapshot, checked_at=checked_at):
         raise StaleMarketSnapshotError(

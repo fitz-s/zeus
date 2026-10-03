@@ -1,9 +1,9 @@
 # Created: 2026-04-07
-# Lifecycle: created=2026-04-07; last_reviewed=2026-05-06; last_reused=2026-05-06
+# Lifecycle: created=2026-04-07; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Protect cross-module invariants where one module output becomes another module input.
 # Reuse: Run for finality, lifecycle, replay, truth-surface, and relationship-boundary changes.
-# Last reused/audited: 2026-07-02
-# Authority basis: first-principles MATCHED/MINED finality cleanup 2026-04-30; Wave17 outcome_fact non-authority repair 2026-05-06
+# Last reused/audited: 2026-10-03 (zero-q boundary only)
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md; zero-q boundary only
 """Cross-module relationship tests.
 
 These tests verify that when Module A's output flows to Module B,
@@ -413,11 +413,18 @@ def test_monitor_refresh_updates_exit_context_freshness():
     assert exit_ctx_stale.day0_zero_probability_exit_authority is False
 
 
-def test_monitor_zero_probability_overrides_stale_edge_context_at_exit_boundary():
+@pytest.mark.parametrize(
+    ("best_bid", "expected_exit", "expected_trigger"),
+    [(0.05, True, "SELL_REVERSAL"), (0.002, False, "HOLD")],
+)
+def test_monitor_zero_probability_overrides_stale_edge_context_at_exit_boundary(
+    best_bid, expected_exit, expected_trigger
+):
     """Paris 15C regression: monitor-refresh authority must be the single exit
     boundary source. If the Day0 monitor stamps a fresh held-side probability of
-    exactly zero, stale edge_ctx probability/price values cannot turn that into
-    a CI-overlap hold or a misleading monitor artifact.
+    exactly zero, stale edge_ctx probability/price values cannot replace it.
+    The lawful bid must SELL; the old illegal dust bid must not be used as a
+    positive exit fixture. Local stopping and final submit band are separate.
     """
     from types import SimpleNamespace
 
@@ -445,11 +452,11 @@ def test_monitor_zero_probability_overrides_stale_edge_context_at_exit_boundary(
         chain_state="synced",
         last_monitor_prob=0.0,
         last_monitor_prob_is_fresh=True,
-        last_monitor_market_price=0.002,
+        last_monitor_market_price=best_bid,
         last_monitor_market_price_is_fresh=True,
-        last_monitor_best_bid=0.002,
-        last_monitor_best_ask=0.013,
-        last_monitor_edge=-0.002,
+        last_monitor_best_bid=best_bid,
+        last_monitor_best_ask=best_bid + 0.01,
+        last_monitor_edge=-best_bid,
     )
     setattr(pos, "_day0_zero_probability_exit_authority", True)
 
@@ -459,8 +466,10 @@ def test_monitor_zero_probability_overrides_stale_edge_context_at_exit_boundary(
         divergence_score=0.0,
         market_velocity_1h=0.0,
         forward_edge=0.3209,
-        confidence_band_lower=-0.02,
-        confidence_band_upper=0.02,
+        # Current confidence is edge-space and shifts back to held-side [0, .02].
+        # It authenticates the fresh zero mean, rather than replacing it.
+        confidence_band_lower=-best_bid,
+        confidence_band_upper=0.02 - best_bid,
     )
 
     exit_ctx = _build_exit_context(
@@ -470,15 +479,19 @@ def test_monitor_zero_probability_overrides_stale_edge_context_at_exit_boundary(
         ExitContext=ExitContext,
     )
     assert exit_ctx.fresh_prob == 0.0
-    assert exit_ctx.current_market_price == 0.002
+    assert exit_ctx.current_market_price == best_bid
+    assert exit_ctx.best_bid == best_bid
+    assert exit_ctx.current_ci == pytest.approx((0.0, 0.02))
+    assert exit_ctx.missing_authority_fields() == []
 
     monitor_prob, monitor_edge = _current_monitor_result_probability_and_edge(pos)
     assert monitor_prob == 0.0
-    assert monitor_edge == -0.002
+    assert monitor_edge == -best_bid
 
     decision = pos.evaluate_exit(exit_ctx)
-    assert decision.should_exit is True
-    assert decision.trigger == "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES"
+    assert decision.should_exit is expected_exit
+    assert decision.reason == decision.trigger == expected_trigger
+    assert "predicted_bin_exit_law" in decision.applied_validations
     assert "ci_overlap_hold" not in decision.applied_validations
 
 
