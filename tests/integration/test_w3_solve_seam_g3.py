@@ -51512,6 +51512,167 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         fixture.conn.close()
 
 
+@pytest.mark.parametrize("fault",("raw_none","ens_none","raw_sql_locked","ens_sql_locked"))
+def test_hko_held_pin_serves_on_its_consumed_proof_whatever_the_successor_frontier(
+        tmp_path,monkeypatch,fault,_hko_clock_native_sources):
+    """Round-2 blocker 2 on real writers: the frontier is witness, never exclusion.
+
+    The normal HKO producer certifies a complete carrier; a newer owned anchor
+    then lands at the next cycle. Negating the raw or ENS frontier, or locking
+    only its SQL, left the prior-complete carrier BLOCKED
+    (REPLACEMENT_PINNED_RAW_FRONTIER_UNAVAILABLE, ..._ELIGIBLE_ENS_HWM_UNAVAILABLE,
+    raw_model_input_hwm_read_unavailable, ensemble_snapshot_hwm_read_unavailable)
+    while its consumed proof stayed valid. Now each serves the same posterior;
+    a lock on the consumed-proof read still blocks.
+    """
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    from tests.test_replacement_forecast_bundle_reader import _reader_anchor_from_provider_body
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high")
+    try:
+        row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                                        (fixture.result.posterior_id,)).fetchone())
+        cut = fixture.cut
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+        class ReaderClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",ReaderClock)
+        new_cycle = _dt.datetime.fromisoformat(row["source_cycle_time"])+_dt.timedelta(hours=6)
+        fixture.write_provider_cohort(new_cycle,cut-_dt.timedelta(minutes=5))
+        fixture.row = row
+        _reader_anchor_from_provider_body(fixture,json.loads(fixture.request.openmeteo_raw_payload_bytes),
+            target=fixture.request.target_date,cycle=new_cycle,captured=cut-_dt.timedelta(minutes=5))
+        fixture.conn.commit()
+        ro = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
+        ro.row_factory = sqlite3.Row
+        kwargs = dict(city=row["city"],target_date=row["target_date"],temperature_metric=row["temperature_metric"],
+            decision_time=cut,current_bin_topology_hash=row["bin_topology_hash"])
+        try:
+            healthy = reader.read_prior_complete_replacement_forecast_bundle(ro,raw_input_hwm_conn=ro,**kwargs)
+            assert healthy.ok and healthy.bundle.posterior_id == row["posterior_id"], healthy.reason_code
+            def faulted(needle):
+                class Fault:
+                    def execute(self,sql,parameters=()):
+                        if needle in " ".join(sql.upper().split()):
+                            raise sqlite3.OperationalError("database is locked")
+                        return ro.execute(sql,parameters)
+                    def __getattr__(self,name): return getattr(ro,name)
+                return Fault()
+            hwm_conn = ro
+            if fault == "raw_none":
+                monkeypatch.setattr(reader,"latest_live_input_cycle",lambda *a,**k:(None,None))
+            elif fault == "ens_none":
+                monkeypatch.setattr(hwm,"latest_eligible_ensemble_input_cycle",lambda *a,**k:None)
+                monkeypatch.setattr(hwm,"_latest_eligible_ensemble_input_mark",lambda *a,**k:None)
+            elif fault == "raw_sql_locked":
+                hwm_conn = faulted("HAVING COUNT(DISTINCT MODEL)")
+            else:
+                hwm_conn = faulted("SELECT SNAPSHOT_ID, COALESCE(SOURCE_CYCLE_TIME, ISSUE_TIME) AS SOURCE_CYCLE_TIME")
+            hwm.clear_consumed_proof_memo()
+            reader._LIVE_GRADE_MEMO.clear()
+            served = reader.read_prior_complete_replacement_forecast_bundle(ro,raw_input_hwm_conn=hwm_conn,**kwargs)
+            assert served.ok, served.reason_code
+            assert served.bundle.posterior_identity_hash == healthy.bundle.posterior_identity_hash
+            # Unknown consumed authority stays fail-closed.
+            hwm.clear_consumed_proof_memo()
+            reader._LIVE_GRADE_MEMO.clear()
+            locked = reader.read_prior_complete_replacement_forecast_bundle(
+                ro,raw_input_hwm_conn=faulted("RAW_MODEL_FORECAST_ID IN ("),**kwargs)
+            assert not locked.ok and "consumed_physical_proof_read_unavailable" in locked.reason_code, locked.reason_code
+        finally:
+            ro.close()
+    finally:
+        fixture.conn.close()
+
+
+def test_hko_held_refresh_is_not_hard_blocked_when_the_raw_frontier_is_unknown(
+        tmp_path,monkeypatch,_hko_clock_native_sources):
+    """Round-2 blocker 2 at the held monitor (monitor_refresh ~4180).
+
+    REPLACEMENT_PINNED_RAW_FRONTIER_UNAVAILABLE is not on the current-Day0
+    deferrable allowlist, so an unknown raw frontier hard-raised
+    GLOBAL_HELD_PINNED_COMPLETE_POSTERIOR_BLOCKED and the held position lost its
+    refresh. With the consumed proof valid the pinned carrier now reaches the
+    current-family prepare.
+    """
+    from contextlib import contextmanager
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.engine import monitor_refresh as mr
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    from src.state import db as state_db
+    from src.state.portfolio import Position
+    from tests.test_replacement_forecast_bundle_reader import _reader_anchor_from_provider_body
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high")
+    try:
+        row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                                        (fixture.result.posterior_id,)).fetchone())
+        cut = fixture.cut
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+        class ReaderClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",ReaderClock)
+        new_cycle = _dt.datetime.fromisoformat(row["source_cycle_time"])+_dt.timedelta(hours=6)
+        fixture.write_provider_cohort(new_cycle,cut-_dt.timedelta(minutes=5))
+        fixture.row = row
+        _reader_anchor_from_provider_body(fixture,json.loads(fixture.request.openmeteo_raw_payload_bytes),
+            target=fixture.request.target_date,cycle=new_cycle,captured=cut-_dt.timedelta(minutes=5))
+        observation = observation_instant_row_to_day0_observation(dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone()),metric="high")
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=cut,
+            received_at=cut.isoformat())
+        fixture.conn.execute("CREATE TABLE IF NOT EXISTS opportunity_events (event_id TEXT, event_type TEXT,"
+            " entity_key TEXT, source TEXT, observed_at TEXT, available_at TEXT, received_at TEXT,"
+            " causal_snapshot_id TEXT, payload_hash TEXT, idempotency_key TEXT, priority INTEGER,"
+            " expires_at TEXT, payload_json TEXT, schema_version INTEGER, created_at TEXT)")
+        fixture.conn.execute("CREATE INDEX IF NOT EXISTS idx_opportunity_events_day0_family_extreme"
+            " ON opportunity_events(event_type)")
+        fixture.conn.execute("INSERT INTO opportunity_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            tuple(getattr(event,name) for name in ("event_id","event_type","entity_key","source",
+                "observed_at","available_at","received_at","causal_snapshot_id","payload_hash",
+                "idempotency_key","priority","expires_at","payload_json","schema_version","created_at")))
+        fixture.conn.commit()
+        def reader_conn(**_kwargs):
+            ro = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
+            ro.row_factory = sqlite3.Row
+            return ro
+        @contextmanager
+        def forecast_world(**_kwargs):
+            ro = reader_conn()
+            try:
+                yield ro
+            finally:
+                ro.close()
+        monkeypatch.setattr(state_db,"get_forecasts_connection_with_world_read_only",forecast_world)
+        monkeypatch.setattr(state_db,"get_forecasts_connection_read_only",reader_conn)
+        monkeypatch.setattr(mr,"_canonical_condition_id",lambda _position: "condition-held")
+        monkeypatch.setattr(reader,"latest_live_input_cycle",lambda *a,**k:(None,None))
+        class Prepared(RuntimeError):
+            pass
+        seen = {}
+        def prepare(*_a,**kwargs):
+            seen["pinned"] = kwargs["pinned_complete_bundle"]
+            raise Prepared
+        monkeypatch.setattr(era,"_prepare_current_global_probability_family",prepare)
+        position = Position(trade_id="held-hko",market_id="m-hko",city=row["city"],cluster=row["city"],
+            target_date=row["target_date"],bin_label="bin",direction="buy_yes",unit="C",
+            temperature_metric="high",entry_method="ens_member_counting",entry_price=0.5,p_posterior=0.5)
+        with pytest.raises(Prepared):
+            mr._build_current_global_day0_family_snapshot(position,trade_conn=sqlite3.connect(":memory:"),
+                decision_time=cut,cached_snapshots=(),deadline_monotonic=time.monotonic()+30,
+                hwm_deadline_monotonic=time.monotonic()+30)
+        assert seen["pinned"] is not None and seen["pinned"].posterior_id == row["posterior_id"]
+    finally:
+        fixture.conn.close()
+
+
 @pytest.mark.parametrize("metric",("high","low"))
 def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tmp_path,monkeypatch,metric,_hko_clock_native_sources):
     """Actual source tick and seed transport, with only private routing/HTTP clocks.

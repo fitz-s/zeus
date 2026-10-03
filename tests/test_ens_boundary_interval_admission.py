@@ -1362,7 +1362,9 @@ def test_every_hwm_caller_threads_the_same_tau_parser() -> None:
     assert "day0_remaining_from_iso_of(current_state.get(\"observed_at_utc\"))" in inspect.getsource(upgrade)
     held_source = inspect.getsource(reader._latest_complete_held_continuity)
     assert "day0_remaining_from_provenance(" in held_source
-    assert "day0_remaining_from_iso=day0_tau" in held_source
+    # The ENS successor is refresh debt, never read by held continuity, so
+    # there is no ENS frontier call left to carry the window.
+    assert "latest_eligible_ensemble_input_cycle" not in held_source
 
 
 def test_held_continuity_tau_is_immutable_context_consistent_with_frozen_ifs() -> None:

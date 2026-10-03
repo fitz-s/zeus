@@ -368,7 +368,11 @@ def _readiness(
 
 
 def _bind_test_hwm(monkeypatch, *, frontier: datetime, eligible: datetime) -> None:
-    """Provide the typed raw-frontier/ENS HWM for in-memory reader fixtures."""
+    """Provide the typed raw frontier for in-memory reader fixtures.
+
+    ``eligible`` (the ENS frontier) is successor witness the held reader no
+    longer reads; it stays a parameter so each case still names its world.
+    """
 
     from src.data import replacement_forecast_bundle_reader as reader
 
@@ -376,11 +380,6 @@ def _bind_test_hwm(monkeypatch, *, frontier: datetime, eligible: datetime) -> No
         reader,
         "latest_live_input_cycle",
         lambda *args, **kwargs: (frontier, "test-raw-frontier"),
-    )
-    monkeypatch.setattr(
-        reader,
-        "latest_eligible_ensemble_input_cycle",
-        lambda *args, **kwargs: eligible,
     )
     monkeypatch.setattr(
         reader,

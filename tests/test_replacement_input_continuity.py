@@ -424,8 +424,6 @@ def test_pinned_held_continuity_keeps_a_carrier_whose_consumed_proof_verifies(_s
         decision_time=normal.request.computed_at)
     later=normal.request.source_cycle_time+timedelta(hours=6)
     monkeypatch.setattr(B,"latest_live_input_cycle",lambda *a,**k:(later,"newer-icon"))
-    monkeypatch.setattr(B,"latest_eligible_ensemble_input_cycle",
-        lambda *a,**k:datetime.fromisoformat(normal.row["source_cycle_time"]))
     assert "current_value_serving_physical_proof_dependency_changed" in H.replacement_input_refresh_reason(
         normal.conn,city=normal.row["city"],target_date=normal.row["target_date"],metric="high",
         decision_time=normal.request.computed_at,posterior_source_cycle_time=normal.row["source_cycle_time"],
@@ -438,6 +436,56 @@ def test_pinned_held_continuity_keeps_a_carrier_whose_consumed_proof_verifies(_s
     status,reason=B._latest_complete_held_continuity(normal.conn,**context)
     assert status is B._HeldContinuityStatus.BLOCKED
     assert reason.startswith("REPLACEMENT_PINNED_RAW_INPUT_HWM:basis=current_value_serving_consumed_proof_unverifiable")
+
+def _locked(needle):
+    def raise_locked(*a,**k):
+        raise H.ReplacementInputHwmReadUnavailable("database is locked",basis=needle)
+    return raise_locked
+
+@pytest.mark.parametrize("frontier",["absent","raw_read_locked","ens_newer"])
+def test_pinned_held_continuity_unknown_successor_frontier_keeps_the_carrier(
+        _shanghai_reader_current_certificate,monkeypatch,frontier):
+    """Round-2 blocker 2: the successor frontier is witness, never exclusion.
+
+    An absent or unreadable raw frontier is unknown successor state and a newer
+    ENS cycle is refresh debt; with the consumed proof valid the carrier stays
+    READY. Each case was BLOCKED before (RAW_FRONTIER_UNAVAILABLE,
+    raw_model_input_hwm_read_unavailable, ELIGIBLE_ENS_HWM_UNAVAILABLE).
+    """
+    normal=_shanghai_reader_current_certificate
+    provenance=json.loads(normal.row["provenance_json"])
+    context=dict(row=normal.row,provenance=provenance,city=normal.row["city"],
+        target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],
+        decision_time=normal.request.computed_at)
+    later=normal.request.source_cycle_time+timedelta(hours=6)
+    if frontier=="absent":
+        monkeypatch.setattr(B,"latest_live_input_cycle",lambda *a,**k:(None,None))
+    elif frontier=="raw_read_locked":
+        monkeypatch.setattr(B,"latest_live_input_cycle",_locked("raw_model_input_hwm_read_unavailable"))
+    else:
+        monkeypatch.setattr(B,"latest_live_input_cycle",lambda *a,**k:(later,"newer-raw"))
+        monkeypatch.setattr(H,"latest_eligible_ensemble_input_cycle",lambda *a,**k:later)
+        monkeypatch.setattr(H,"_latest_eligible_ensemble_input_mark",lambda *a,**k:(999,later))
+    H.clear_consumed_proof_memo()
+    assert B._latest_complete_held_continuity(normal.conn,**context)==(B._HeldContinuityStatus.READY,None)
+    # The serving projection carries no successor reason for a held carrier.
+    assert H.replacement_live_input_lag_reason(normal.conn,city=normal.row["city"],
+        target_date=normal.row["target_date"],metric="high",decision_time=normal.request.computed_at,
+        posterior_source_cycle_time=normal.row["source_cycle_time"],posterior_computed_at=normal.row["computed_at"],
+        posterior_provenance=provenance,held_redecision=True,use_memo=False) is None
+    # A known frontier at the posterior's own cycle resets to the ordinary path.
+    monkeypatch.setattr(B,"latest_live_input_cycle",
+        lambda *a,**k:(normal.request.source_cycle_time,"same-cycle"))
+    assert B._latest_complete_held_continuity(normal.conn,**context)==(
+        B._HeldContinuityStatus.RESET,"REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET")
+    # Unknown consumed authority still fails closed, before any frontier read.
+    monkeypatch.setattr(B,"latest_live_input_cycle",lambda *a,**k:pytest.fail("frontier read before consumed proof"))
+    H.clear_consumed_proof_memo()
+    monkeypatch.setattr(C,"read_consumed_instrument_values",
+        lambda *a,**k:(_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),raising=False)
+    status,reason=B._latest_complete_held_continuity(normal.conn,**context)
+    assert status is B._HeldContinuityStatus.BLOCKED
+    assert "consumed_physical_proof_read_unavailable" in reason
 
 def test_input_continuity_unknown_consumed_proof_always_fails_closed(monkeypatch):
     conn,context=_component(monkeypatch)

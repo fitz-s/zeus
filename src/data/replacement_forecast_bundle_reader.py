@@ -64,7 +64,6 @@ from src.data.replacement_input_hwm import (
     reads_hold,
     recorded_reads,
     ensemble_source_authority_predicate,
-    latest_eligible_ensemble_input_cycle,
     latest_live_input_cycle,
     replacement_live_input_lag_reason,
 )
@@ -878,45 +877,21 @@ def _latest_complete_held_continuity(
     metric: str,
     decision_time: datetime,
 ) -> tuple[_HeldContinuityStatus, str | None]:
-    """Retain the whole certified carrier while its successor is being prepared."""
+    """Retain the whole certified carrier while its successor is being prepared.
+
+    The carrier's own Day0 window and consumed proof alone decide exclusion.
+    The raw frontier is successor witness: a known frontier at or before the
+    posterior's cycle resets to the ordinary path, which serves this same
+    posterior; an absent or unreadable frontier is unknown successor state and
+    keeps the carrier. ENS successors are refresh debt, never read here.
+    """
     from src.data.replacement_current_value_serving import day0_remaining_from_provenance
-    day0_tau, window_reason = day0_remaining_from_provenance(
+    _tau, window_reason = day0_remaining_from_provenance(
         provenance, city=city, target_date=target_date, metric=metric,
         posterior_computed_at=row.get("computed_at"),
     )
     if window_reason is not None:
         return _HeldContinuityStatus.BLOCKED, f"REPLACEMENT_PINNED_RAW_INPUT_HWM:{window_reason}"
-    posterior_cycle = _parse_utc(str(row.get("source_cycle_time") or ""), field_name="source_cycle_time")
-    raw_frontier = latest_live_input_cycle(
-        conn,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        decision_time=decision_time,
-    )
-    eligible_cycle = latest_eligible_ensemble_input_cycle(
-        conn,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        decision_time=decision_time,
-        day0_remaining_from_iso=day0_tau,
-    )
-    if raw_frontier is None or raw_frontier[0] is None:
-        return _HeldContinuityStatus.BLOCKED, "REPLACEMENT_PINNED_RAW_FRONTIER_UNAVAILABLE"
-    if raw_frontier[0] <= posterior_cycle:
-        return _HeldContinuityStatus.RESET, "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET"
-    fusion = provenance.get("bayes_precision_fusion")
-    shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
-    consumed_cycle = (
-        current_evidence_shape_source_cycle_time(provenance)
-        if isinstance(shape, Mapping)
-        else None
-    )
-    if eligible_cycle is None or consumed_cycle is None:
-        return _HeldContinuityStatus.BLOCKED, "REPLACEMENT_PINNED_ELIGIBLE_ENS_HWM_UNAVAILABLE"
-    # A new ENS frontier requests a successor; only consumed-proof invalidity
-    # below can remove the whole last-complete carrier from serving.
     lag_reason = replacement_live_input_lag_reason(
         conn,
         city=city,
@@ -930,6 +905,19 @@ def _latest_complete_held_continuity(
     )
     if lag_reason is not None:
         return _HeldContinuityStatus.BLOCKED, f"REPLACEMENT_PINNED_RAW_INPUT_HWM:{lag_reason}"
+    posterior_cycle = _parse_utc(str(row.get("source_cycle_time") or ""), field_name="source_cycle_time")
+    try:
+        raw_frontier, _basis = latest_live_input_cycle(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+        )
+    except ReplacementInputHwmReadUnavailable:
+        raw_frontier = None
+    if raw_frontier is not None and raw_frontier <= posterior_cycle:
+        return _HeldContinuityStatus.RESET, "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET"
     return _HeldContinuityStatus.READY, None
 
 
