@@ -1780,6 +1780,7 @@ def portfolio_wealth_identity(
     collateral_authority: str,
     strategy_capital_allocation_identity: str,
     captured_at_utc: datetime,
+    buy_cash_unavailable_reason: str | None = None,
 ) -> str:
     """Bind every capital number to one reconciled ledger/position generation."""
 
@@ -1795,7 +1796,13 @@ def portfolio_wealth_identity(
         collateral_authority,
         strategy_capital_allocation_identity,
         captured_at_utc.isoformat(),
+        *_buy_cash_state_parts(buy_cash_unavailable_reason),
     )
+
+
+def _buy_cash_state_parts(reason: str | None) -> tuple[str, ...]:
+    # Available BUY cash adds no part, so every pre-existing identity is unchanged.
+    return () if reason is None else ("BUY_CASH_UNAVAILABLE", reason)
 
 
 def portfolio_wealth_economic_identity(
@@ -1807,6 +1814,7 @@ def portfolio_wealth_economic_identity(
     reservations_usd: Decimal,
     collateral_authority: str,
     strategy_capital_allocation_identity: str,
+    buy_cash_unavailable_reason: str | None = None,
 ) -> str:
     """Bind the economic endowment independently of evidence refresh time.
 
@@ -1825,6 +1833,7 @@ def portfolio_wealth_economic_identity(
         str(reservations_usd),
         collateral_authority,
         strategy_capital_allocation_identity,
+        *_buy_cash_state_parts(buy_cash_unavailable_reason),
     )
 
 
@@ -1846,6 +1855,9 @@ class PortfolioWealthWitness:
     native_holdings_micro: tuple[tuple[str, int], ...] = ()
     pending_entry_endowments_micro: tuple[tuple[str, str, int], ...] = ()
     native_commitments_micro: tuple[tuple[str, int], ...] = ()
+    # Typed BUY-side cash verdict. When set, spendable cash is 0 and no BUY
+    # may be generated, selected or submitted; SELL/HOLD still use this witness.
+    buy_cash_unavailable_reason: str | None = None
 
     @property
     def economic_identity(self) -> str:
@@ -1859,11 +1871,17 @@ class PortfolioWealthWitness:
             strategy_capital_allocation_identity=(
                 self.strategy_capital_allocation.witness_identity
             ),
+            buy_cash_unavailable_reason=self.buy_cash_unavailable_reason,
         )
 
     def __post_init__(self) -> None:
         if self.captured_at_utc.tzinfo is None:
             raise ValueError("PortfolioWealthWitness.captured_at_utc must be timezone-aware")
+        if self.buy_cash_unavailable_reason is not None and (
+            not str(self.buy_cash_unavailable_reason).strip()
+            or self.spendable_cash_usd != 0
+        ):
+            raise ValueError("BUY cash unavailability requires zero spendable cash")
         if self.max_age <= timedelta(0):
             raise ValueError("PortfolioWealthWitness.max_age must be positive")
         if (
@@ -1934,6 +1952,7 @@ class PortfolioWealthWitness:
             collateral_authority=self.collateral_authority,
             strategy_capital_allocation_identity=allocation.witness_identity,
             captured_at_utc=self.captured_at_utc,
+            buy_cash_unavailable_reason=self.buy_cash_unavailable_reason,
         )
         if self.witness_identity != expected:
             raise ValueError("PortfolioWealthWitness identity does not bind its values")
@@ -8151,6 +8170,14 @@ def select_global_single_order(
             reason = _maker_witness_rejection(
                 candidate, decision_at_utc=decision_at_utc
             )
+        if (
+            reason is None
+            and wealth_witness.buy_cash_unavailable_reason is not None
+            and not isinstance(candidate, GlobalSingleOrderSellCandidate)
+        ):
+            # SCOPE: every BUY in this cut. DRAIN: SELL/HOLD still rank on
+            # the same witness. RESET: a witness with coherent spendable cash.
+            reason = wealth_witness.buy_cash_unavailable_reason
         if reason is None and candidate_policy_rejection_resolver is not None:
             try:
                 policy_reason = candidate_policy_rejection_resolver(candidate)

@@ -669,6 +669,7 @@ def _wealth_reauction_changed_fields(
         "pending_entry_endowments_micro",
         "native_commitments_micro",
         "strategy_capital_allocation",
+        "buy_cash_unavailable_reason",
     )
     return tuple(
         field

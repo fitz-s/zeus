@@ -3876,7 +3876,8 @@ def test_global_actuation_submit_revalidates_current_wealth_economics(monkeypatc
         global_auction_universe,
         "current_portfolio_wealth_witness",
         lambda *_args, **_kwargs: SimpleNamespace(
-            economic_identity="wealth-economics-1"
+            economic_identity="wealth-economics-1",
+            buy_cash_unavailable_reason=None,
         ),
     )
     actuation = SimpleNamespace(wealth_economic_identity="wealth-economics-1")

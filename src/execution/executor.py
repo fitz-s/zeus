@@ -1526,6 +1526,12 @@ def _current_global_increment_wealth_component(
             reason="current_wealth_unavailable",
             error=f"{type(exc).__name__}:{exc}",
         )
+    if current.buy_cash_unavailable_reason is not None:
+        return _capability_component(
+            "global_increment_wealth_binding",
+            allowed=False,
+            reason=current.buy_cash_unavailable_reason,
+        )
     if current.economic_identity != expected:
         return _capability_component(
             "global_increment_wealth_binding",
@@ -1539,6 +1545,30 @@ def _current_global_increment_wealth_component(
         expected=expected,
         current=current.economic_identity,
     )
+
+
+def _current_wealth_buy_cash_unavailable_reason(
+    conn: sqlite3.Connection,
+) -> str | None:
+    """Return the typed BUY-cash veto of the current wealth witness, if any.
+
+    Only the typed verdict vetoes here; a witness that cannot be built keeps
+    its existing owners (global preflight, increment binding, collateral
+    preflight) so this check adds no new failure mode to unrelated BUYs.
+    """
+
+    try:
+        from src.engine.global_auction_universe import current_portfolio_wealth_witness
+        from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+
+        current = current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=datetime.now(timezone.utc),
+            max_age=timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)),
+        )
+    except Exception:  # noqa: BLE001 - see docstring
+        return None
+    return current.buy_cash_unavailable_reason
 
 
 def _abort_global_increment_admission(conn: sqlite3.Connection) -> None:
@@ -9699,6 +9729,18 @@ def _live_order(
                 trade_id=trade_id,
                 status="rejected",
                 reason=f"pre_submit_collateral_refresh_failed: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+            )
+
+        buy_cash_reason = _current_wealth_buy_cash_unavailable_reason(conn)
+        if buy_cash_reason is not None:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"pre_submit_buy_cash_unavailable:{buy_cash_reason}",
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",

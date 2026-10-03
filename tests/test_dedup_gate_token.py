@@ -1101,7 +1101,10 @@ def test_global_increment_locked_wealth_recheck_matches_exact_economic_identity(
     monkeypatch.setattr(
         universe,
         "current_portfolio_wealth_witness",
-        lambda *_args, **_kwargs: SimpleNamespace(economic_identity="wealth-economics"),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            economic_identity="wealth-economics",
+            buy_cash_unavailable_reason=None,
+        ),
     )
     matched = _current_global_increment_wealth_component(
         mem_db,

@@ -19097,6 +19097,12 @@ def _global_actuation_current_wealth_block_reason(
         )
     except Exception as exc:  # noqa: BLE001 - capital ambiguity is a submit veto.
         return f"GLOBAL_PREFLIGHT_WEALTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+    candidate = getattr(getattr(global_actuation, "decision", None), "candidate", None)
+    if (
+        current.buy_cash_unavailable_reason is not None
+        and str(getattr(candidate, "action", "BUY") or "BUY").strip().upper() == "BUY"
+    ):
+        return f"GLOBAL_PREFLIGHT_{current.buy_cash_unavailable_reason}"
     current_identity = str(current.economic_identity or "").strip()
     if current_identity != expected:
         return (

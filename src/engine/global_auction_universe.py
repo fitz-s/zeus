@@ -4030,14 +4030,24 @@ def current_portfolio_wealth_witness(
         legacy_micro = int(row.get("usdc_e_legacy_balance_micro") or 0)
         cash_at_risk_micro = inflight_cash_micro + uncovered_pending_cash_micro
         spendable_micro = pusd_micro - cash_at_risk_micro
+        buy_cash_unavailable_reason = None
+        floor_cash_micro = spendable_micro
         if spendable_micro < 0:
-            raise ValueError("CURRENT_WEALTH_SPENDABLE_CASH_INVALID")
+            # Reservations exceed the chain balance, so at least one of them
+            # is already absorbed by it (e.g. a stale OPEN obligation for a
+            # filled BUY). BUY cash is unprovable: spendable is 0 and every BUY
+            # consumer refuses on the typed reason. SELL/HOLD never spend cash;
+            # they value the cut against the observed chain balance instead of
+            # aborting every family's exit decision.
+            buy_cash_unavailable_reason = "CURRENT_WEALTH_SPENDABLE_CASH_INVALID"
+            spendable_micro = 0
+            floor_cash_micro = pusd_micro
         # Allowance is submit-time permission, not owned cash.  The executor
         # refreshes and checks it against the exact order notional immediately
         # before persistence or SDK contact; selection keeps the wallet's pUSD
         # balance as its cash endowment instead of erasing every BUY on one
         # transient zero-allowance snapshot.
-        floor = (Decimal(spendable_micro) + Decimal(legacy_micro)) / Decimal(
+        floor = (Decimal(floor_cash_micro) + Decimal(legacy_micro)) / Decimal(
             "1000000"
         )
         ceiling = floor + sum(
@@ -4126,6 +4136,7 @@ def current_portfolio_wealth_witness(
                 strategy_capital_allocation.witness_identity
             ),
             captured_at_utc=captured_at,
+            buy_cash_unavailable_reason=buy_cash_unavailable_reason,
         )
         return PortfolioWealthWitness(
             ledger_snapshot_id=ledger_snapshot_id,
@@ -4144,6 +4155,7 @@ def current_portfolio_wealth_witness(
             native_commitments_micro=tuple(
                 sorted(native_commitments_micro.items())
             ),
+            buy_cash_unavailable_reason=buy_cash_unavailable_reason,
         )
     finally:
         if owns_txn and trade_conn.in_transaction:

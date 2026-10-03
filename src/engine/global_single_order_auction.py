@@ -1085,7 +1085,12 @@ def select_prepared_global_auction(
             probability = probability_witnesses.get(asset.family_key)
             if probability is None:
                 return _no_trade("GLOBAL_BOOK_FAMILY_PROBABILITY_MISSING")
-            if asset.family_key in excluded:
+            if (
+                asset.family_key in excluded
+                or wealth_witness.buy_cash_unavailable_reason is not None
+            ):
+                # Book assets mint BUY candidates only; held SELLs come from
+                # the holdings loop below and stay in the cut.
                 continue
             native = SimpleNamespace(
                 no_trade_reason=None,
