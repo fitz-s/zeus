@@ -354,10 +354,9 @@ def _edli_held_snapshot_refresh_report(
             except (TypeError, ValueError):
                 captured_at = None
                 deadline = None
-            if int(row[0] or 0) != 1:
-                reason = "terminal_disposition_required: snapshot_inactive"
-                terminal = True
-            elif int(row[1] or 0) != 0:
+            # ``active`` (row[0]) is a routing label, not tradeability: only a
+            # closed market is terminal; accepting/orderbook gate refreshability.
+            if int(row[1] or 0) != 0:
                 reason = "terminal_disposition_required: snapshot_closed"
                 terminal = True
             elif int(row[2] if row[2] is not None else 1) != 1:
@@ -427,6 +426,7 @@ def _edli_held_snapshot_refresh_report(
                     reason="held_snapshot_due",
                     condition_id=condition_id,
                     token_id=token_id,
+                    invalidates_snapshot=False,
                 )
                 proactive_actions.append(action)
                 proactive_pairs.append(
@@ -450,6 +450,7 @@ def _edli_held_snapshot_refresh_report(
             reason="held_snapshot_due",
             condition_id=condition_id,
             token_id=token_id,
+            invalidates_snapshot=False,
         )
         hard_actions.append(action)
         hard_pairs.append(_edli_held_snapshot_debt_payload(action, reason=reason))
@@ -489,7 +490,7 @@ def _edli_exact_snapshot_refresh_completed(
 
     SCOPE: the action's exact condition/token pair. DRAIN: a false result is a
     typed queue defer, so the persistent retry and scheduler re-observation
-    retain the pair. RESET: only this read observing active/open/accepting,
+    retain the pair. RESET: only this read observing open/accepting,
     orderbook-enabled, unexpired evidence captured by this attempt completes
     the action; a due refresh leaves the prior snapshot valid, so a projection
     older than ``captured_not_before`` is that prior snapshot, not the refresh.
@@ -517,7 +518,7 @@ def _edli_exact_snapshot_refresh_completed(
             """,
             (condition_id, token_id),
         ).fetchone()
-        if row is None or int(row[0] or 0) != 1 or int(row[1] or 0) != 0:
+        if row is None or int(row[1] or 0) != 0:
             return False
         if int(row[2] if row[2] is not None else 1) != 1 or int(row[5] or 0) != 1:
             return False
@@ -5607,6 +5608,9 @@ def _edli_refresh_held_position_quote_evidence(
                         reason="held_rest_refresh",
                         token_id=token_id,
                         condition_id=metadata.condition_id,
+                        # Fires on every committed held REST quote, changed or
+                        # not: a schedule, not executable-authority evidence.
+                        invalidates_snapshot=False,
                     )
                 )
             if actions:

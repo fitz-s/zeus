@@ -115,12 +115,10 @@ class MarketChannelAction:
     reason: str = ""
     token_id: str | None = None
     condition_id: str | None = None
-
-    @property
-    def invalidates_snapshot(self) -> bool:
-        # A due held refresh is a schedule, not venue evidence: the current
-        # snapshot stays valid to its own deadline and the refresh supersedes it.
-        return self.refresh_snapshot and self.reason != "held_snapshot_due"
+    # Venue evidence that the current snapshot no longer holds. A schedule-only
+    # refresh sets False: the current snapshot stays valid to its own deadline
+    # and the refresh supersedes it on arrival.
+    invalidates_snapshot: bool = True
 
 
 @dataclass(frozen=True)
@@ -141,7 +139,8 @@ class _PendingRefreshAction:
 
         if self.absorbed_evidence is not None:
             return self.absorbed_evidence
-        return self.action if self.action.invalidates_snapshot else None
+        action = self.action
+        return action if action.refresh_snapshot and action.invalidates_snapshot else None
 
 
 @dataclass(frozen=True)
@@ -1842,7 +1841,7 @@ def invalidate_executable_snapshots_for_market_channel_action(
     never an UPDATE to historical rows.
     """
 
-    if not action.refresh_snapshot:
+    if not action.refresh_snapshot or not action.invalidates_snapshot:
         return 0
 
     from src.state.snapshot_repo import record_snapshot_invalidation
@@ -3524,9 +3523,9 @@ class MarketChannelOnlineService:
         with self._refresh_worker_lock:
             queued = self._pending_refresh_actions.get(key)
             inflight = self._inflight_refresh_actions.get(key)
-            previous = queued or inflight
             if queued is not None:
                 self.refresh_action_coalesced_count += 1
+                unrecorded = action.invalidates_snapshot and not queued.invalidated
                 # Held priority and venue evidence each survive the merge: a
                 # schedule-only held action keeps the invalidation it absorbs.
                 self._pending_refresh_actions[key] = replace(
@@ -3539,6 +3538,11 @@ class MarketChannelOnlineService:
                     ),
                     absorbed_evidence=queued.evidence
                     or (action if action.invalidates_snapshot else None),
+                    # Evidence is recorded now, not after a deferred refresh's
+                    # window; the refresh itself still waits for its window.
+                    not_before_monotonic=(
+                        0.0 if unrecorded else queued.not_before_monotonic
+                    ),
                 )
                 return
             # Evidence arriving behind a schedule-only in-flight refresh is not
@@ -3552,12 +3556,6 @@ class MarketChannelOnlineService:
             self._pending_refresh_actions[key] = _PendingRefreshAction(
                 action=action,
                 generation=self._refresh_action_generation,
-                invalidated=(
-                    previous.invalidated
-                    if previous is not None
-                    and previous.action.reason == action.reason
-                    else False
-                ),
             )
             if not self._refresh_worker_running:
                 self._refresh_worker_running = True

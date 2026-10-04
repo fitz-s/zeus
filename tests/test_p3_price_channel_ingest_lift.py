@@ -5535,7 +5535,9 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
     assert [(action.condition_id, action.token_id, action.reason) for action in refreshed] == [
         ("0xcondition", "no-token", "held_rest_refresh")
     ]
-    assert invalidated == refreshed
+    # Committed on every held REST quote, changed or not: the refresh is a
+    # schedule, so the current snapshot stays valid until it is superseded.
+    assert invalidated == []
     check = sqlite3.connect(trade_path)
     try:
         assert (
@@ -6469,6 +6471,24 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
     ]
 
     conn = sqlite3.connect(trade_path)
+    # ``active`` is a routing label: an open, accepting held book whose label
+    # reads inactive is still refreshable, never a terminal disposition.
+    conn.execute(
+        "UPDATE executable_market_snapshot_latest SET active = 0, closed = 0 "
+        "WHERE condition_id = 'condition-held' AND selected_outcome_token_id = 'held-token'"
+    )
+    conn.commit()
+    actions.clear()
+    routing_inactive = lane._edli_held_snapshot_refresh_report(
+        conn,
+        {("condition-held", "held-token")},
+        checked_at=datetime.now(timezone.utc),
+    )
+    assert routing_inactive["held_snapshot_terminal_disposition_required"] == []
+    assert [(action.condition_id, action.token_id) for action in actions] == [
+        ("condition-held", "held-token")
+    ]
+
     conn.execute(
         "UPDATE executable_market_snapshot_latest SET active = 0, closed = 1 "
         "WHERE condition_id = 'condition-held' AND selected_outcome_token_id = 'held-token'"
@@ -6486,7 +6506,7 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
         {
             "condition_id": "condition-held",
             "token_id": "held-token",
-            "reason": "terminal_disposition_required: snapshot_inactive",
+            "reason": "terminal_disposition_required: snapshot_closed",
         }
     ]
     assert actions == []
