@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Lifecycle: created=2026-04-26; last_reviewed=2026-10-04; last_reused=2026-10-04
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-10-03
+# Last reused/audited: 2026-10-04
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -26,6 +26,184 @@ from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
     stable_hash,
 )
+
+
+def _seed_closed_exit_journal_debt(conn, *, direction="buy_yes", metric="high", defect=None):
+    """Real projection first, lost command acknowledgement second; no live DB."""
+    from src.execution import command_recovery as recovery
+    command_id, position_id, order_id = "cmd-journal", "pos-journal", "ord-journal"
+    selected = "tok-001-no" if direction == "buy_no" else "tok-001"
+    _insert(conn, command_id=command_id, position_id=position_id, intent_kind="EXIT",
+            side="SELL", order_type="FAK", size=0.05, price=0.92,
+            selected_token_id=selected, created_at="2026-04-26T00:05:00Z")
+    _advance_to_unknown_side_effect(conn, command_id=command_id, venue_order_id=order_id)
+    _seed_pending_entry_projection(conn, position_id=position_id, command_id="entry-journal")
+    conn.execute("""UPDATE position_current SET phase='pending_exit', direction=?,
+        temperature_metric=?, shares=.05, chain_shares=.05, cost_basis_usd=.0425,
+        entry_price=.85, chain_state='synced' WHERE position_id=?""",
+        (direction, metric, position_id))
+    _seed_full_exit_intent(conn, position_id=position_id, shares=.05,
+                          order_id=order_id, command_id=command_id)
+    from src.state.venue_command_repo import append_trade_fact
+    fact_order = "other-order" if defect == "wrong_order" else order_id
+    fact_size = "0.05"
+    fact_state = "MINED" if defect == "mined" else "CONFIRMED"
+    append_trade_fact(conn, command_id=command_id, venue_order_id=fact_order,
+        trade_id="trade-journal", state=fact_state, filled_size=fact_size,
+        fill_price="0.92", source="REST", observed_at="2026-04-26T00:06:00Z",
+        raw_payload_hash=hashlib.sha256(f"journal:{defect}".encode()).hexdigest(),
+        raw_payload_json={"id": "trade-journal", "status": fact_state,
+            "asset_id": selected, "side": "SELL", "taker_order_id": fact_order,
+            "size": fact_size, "price": "0.92", "trader_side": "TAKER"})
+    command = dict(conn.execute("SELECT * FROM venue_commands WHERE command_id=?",
+                                (command_id,)).fetchone())
+    if defect == "sibling_closure":
+        _insert(conn, command_id="sibling-sell", position_id=position_id,
+                intent_kind="EXIT", side="SELL", size=.05, price=.92,
+                created_at="2026-04-26T00:05:00Z")
+        command = dict(conn.execute("SELECT * FROM venue_commands WHERE command_id='sibling-sell'").fetchone())
+    if defect != "missing_event":
+        projected = recovery._append_exit_order_fill_projection(
+            conn, command=command, venue_order_id=order_id, matched_size="0.05",
+            fill_price="0.92", observed_at="2026-04-26T00:06:00Z",
+            event_type="FILL_CONFIRMED", raise_on_error=True)
+        assert projected is True
+    if defect == "short_fill":
+        # An immutable later correction must not borrow the old complete
+        # projection, nor the generic reducer's one-cent completion tolerance.
+        append_trade_fact(conn, command_id=command_id, venue_order_id=order_id,
+            trade_id="trade-journal", state="CONFIRMED", filled_size="0.04",
+            fill_price="0.92", source="REST", observed_at="2026-04-26T00:08:00Z",
+            raw_payload_hash=hashlib.sha256(b"journal:corrected-short-fill").hexdigest(),
+            raw_payload_json={"id": "trade-journal", "status": "CONFIRMED",
+                "asset_id": selected, "side": "SELL", "taker_order_id": order_id,
+                "size": "0.04", "price": "0.92", "trader_side": "TAKER"})
+    return command_id, position_id, order_id, selected
+
+
+def _journal_economics_snapshot(conn):
+    return tuple(tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table}"))
+                 for table in ("position_current", "position_events", "execution_fact"))
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_confirmed_closed_exit_journal_identity_fast_drains_without_rebooking(conn, direction, metric):
+    from src.execution import command_recovery as recovery
+    command_id, _, order_id, token = _seed_closed_exit_journal_debt(
+        conn, direction=direction, metric=metric)
+    before = _journal_economics_snapshot(conn)
+    summary = recovery._reconcile_identity_bound_submitting_commands(
+        conn, command_ids={command_id}, point_orders={order_id: {
+            "id": order_id, "asset_id": token, "side": "SELL", "status": "MATCHED",
+            "original_size": "0.05", "size_matched": "0.05", "price": "0.92",
+            "associate_trades": ["trade-journal"],
+        }})
+    assert summary["errors"] == 0
+    assert _get_state(conn, command_id) == "FILLED"
+    assert _journal_economics_snapshot(conn) == before
+    assert recovery.capital_blocking_command_scope(conn).total_count == 0
+
+
+@pytest.mark.parametrize("defect", (None, "short_fill", "mined", "wrong_token", "wrong_side",
+    "wrong_order", "missing_execution", "missing_event", "sibling_closure", "ordinary_partial",
+    "review", "wrong_execution_quantity"))
+def test_confirmed_closed_exit_journal_capital_scope_is_exact(conn, defect):
+    from src.execution import command_recovery as recovery
+    from src.state.venue_command_repo import append_event
+    command_id, position_id, order_id, _ = _seed_closed_exit_journal_debt(conn, defect=defect)
+    append_event(conn, command_id=command_id, event_type="PARTIAL_FILL_OBSERVED",
+                 occurred_at="2026-04-26T00:07:00Z", payload={"venue_order_id": order_id})
+    updates = {
+        "wrong_token": "UPDATE venue_commands SET token_id='foreign-token'",
+        "wrong_side": "UPDATE venue_commands SET side='BUY'",
+        "missing_execution": "DELETE FROM execution_fact",
+        "ordinary_partial": "UPDATE position_current SET phase='pending_exit'",
+        "wrong_execution_quantity": "UPDATE execution_fact SET shares=.04 WHERE order_role='exit'",
+    }
+    if defect in updates:
+        conn.execute(updates[defect])
+    if defect == "review":
+        append_event(conn, command_id=command_id, event_type="REVIEW_REQUIRED",
+                     occurred_at="2026-04-26T00:08:00Z", payload={"reason": "unresolved-review"})
+    before = _journal_economics_snapshot(conn)
+    scope = recovery.capital_blocking_command_scope(conn)
+    assert scope.total_count == int(defect is None)
+    if defect is None:
+        assert scope.scoped_markets == ("mkt-001",)
+    assert _journal_economics_snapshot(conn) == before
+
+
+def test_known_order_unknown_side_effect_is_capital_lookup_not_fill_authority(conn):
+    from src.execution import command_recovery as recovery
+    _insert(conn, command_id="cmd-unknown-journal", intent_kind="EXIT", side="SELL")
+    _advance_to_unknown_side_effect(conn, command_id="cmd-unknown-journal", venue_order_id="ord-unknown")
+    assert recovery.capital_blocking_command_scope(conn).total_count == 1
+    recovery._reconcile_identity_bound_submitting_commands(
+        conn, command_ids={"cmd-unknown-journal"}, point_orders={})
+    assert _get_state(conn, "cmd-unknown-journal") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+
+
+def test_confirmed_closed_exit_journal_normal_scheduler_drains_before_monitor_yield(
+    conn, tmp_path, monkeypatch,
+):
+    """Normal scheduler, real selectors and short-connection DB-only reducer."""
+    from threading import Event
+    from src import main
+    from src.execution import command_recovery as recovery, venue_sync_contract
+    from src.state import db
+    from src.state.venue_command_repo import append_event
+    command_id, _, order_id, _ = _seed_closed_exit_journal_debt(conn)
+    append_event(conn, command_id=command_id, event_type="PARTIAL_FILL_OBSERVED",
+                 occurred_at="2026-04-26T00:07:00Z", payload={"venue_order_id": order_id})
+    before = _journal_economics_snapshot(conn)
+    conn.commit()
+    private_path = tmp_path / "closed-exit-journal.db"
+    with sqlite3.connect(private_path) as target:
+        conn.backup(target)
+
+    def factory(**_kwargs):
+        connection = sqlite3.connect(private_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(db, "get_trade_connection_read_only", factory)
+    active = Event()
+    active.set()
+    monkeypatch.setattr(main, "_held_position_monitor_active", active)
+    monkeypatch.setattr(main, "_held_position_monitor_canonical_debt", Event())
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: True)
+    monkeypatch.setattr(main, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main, "get_mode", lambda: "live")
+    monkeypatch.setattr(main, "_settings_section", lambda *_args: {})
+    monkeypatch.setattr(main, "_venue_order_truth_adapter_ready", lambda: False)
+    monkeypatch.setattr(main, "_start_venue_order_truth_prewarm_async", lambda: "private-no-http")
+    monkeypatch.setattr(main, "_edli_command_recovery_full_bucket", lambda: 7)
+    monkeypatch.setattr(main, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 7)
+    monkeypatch.setattr(main, "_consume_edli_command_recovery_summary", lambda *_args, **_kwargs: True)
+    original = recovery.reconcile_unresolved_commands
+    results = []
+
+    def recover(*, scope, deadline_monotonic):
+        # Empty account-read leaf is not an absence certificate. This test's
+        # already-booked closure needs neither new HTTP nor a new venue action.
+        result = original(client=SimpleNamespace(), scope=scope,
+                          deadline_monotonic=deadline_monotonic)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(recovery, "reconcile_unresolved_commands", recover)
+    main._edli_command_recovery_cycle.__wrapped__()
+    assert len(results) == 1
+    assert results[0]["confirmed_closed_exit_journal_fast"]["advanced"] == 1
+    with factory() as verified:
+        assert _get_state(verified, command_id) == "FILLED"
+        assert _journal_economics_snapshot(verified) == before
+        assert recovery.capital_blocking_command_scope(verified).total_count == 0
+    main._edli_command_recovery_cycle.__wrapped__()
+    assert len(results) == 1  # FILLED restores ordinary monitor yield.
 
 
 # ---------------------------------------------------------------------------

@@ -14960,3 +14960,199 @@ d7 link, commit only these paths and follow normal fresh-origin FF/loading gates
 Actual new loader rc/stamp and next natural per-lane request/seed phase report
 remain separate required evidence; no source/cycle/venue/guard action may be
 forced. Instrumentation is not the causal latency repair or goal completion.
+
+Diagnostics landed72502817c7aa1b6b81970007701819ba0398bfca by normal FF push;
+live checkout FF is tracked-clean/configd7, with all unrelated untracked inputs
+preserved. The single normal loader starts08:21:40Z, session59611, log
+/tmp/zeus-producer-trace-loader-20261004.mfYoME/normal-loader.log and actually
+exits1 (LOADER_RC=1). After its normal pause initializer, capital handoff refuses
+open_positions28/nonterminal_commands1, exact command8198af0cd1b644a3. The script
+releases its restart guard with restart_refused; no manual guard action occurs.
+Loaded main remains1da1c914/stamp04:56:34.297452 and original forecast5377, so
+new diagnostics have not been loaded or runtime-validated. Do not substitute
+checkout HEAD for process code or collect old callbacks as new trace proof.
+Normal exact-command drainage and root's changed-condition decision are required
+before another loader attempt; no blind retry/source/cycle/venue action. This
+uncommitted PLAN checkpoint preserves the refusal, not a deployment PASS.
+
+Root-relayed bounded runtime GET08:29:26–27 finds original venue order
+0x36af...9edb7 present/MATCHED, SELL FAK with matched/original .05/.05 and
+remaining0. Reported order price.92 is not proven fill price; chain confirmation
+is UNKNOWN. This venue read is not a canonical transition or authority to amend
+execution records. Canonical command8198af0cd1b644a3 at08:30:40 remains
+SUBMIT_UNKNOWN/seq3 updated08:21:26 with no bound venue facts. The normal60s
+recovery08:30:37–38 reports healthOK/guardNone but has not drained this exact debt.
+Thus it is not safely characterized as an ordinary resting order merely awaiting
+a fill. Root assigns a bounded read-only investigation of exact recovery
+filter/reader/apply and confirmation dependencies; confirmed defect versus
+legitimate confirmation waiting remains pending that evidence. No source writer
+or recovery change is authorized by this checkpoint. Preserve725 landed versus
+1da loaded, loader rc1 and the runtime gap. No second loader, manual canonical
+write, cancel/resubmit/terminal setting or guard clear occurs. Source-physics
+design stays read-only while current exit recovery/diagnostic loading takes
+priority; the original physical/timeliness/profit goal remains incomplete.
+
+### Lifecycle recovery preparation — exact confirmed EXIT journal debt
+
+Root's newer08:33:45 canonical observation supersedes the earlier unbound
+SUBMIT_UNKNOWN snapshot for command8198af0cd1b644a3: it is now PARTIAL.
+Original order fact49427 is MATCHED/remaining0; confirmed trade fact7066
+observed08:21:52, inserted08:22:07 binds the exact original order/tradea503... and
+.05 at.92. EXIT_ORDER_FILLED3159 plus its bound execution fact projects the
+position economically_closed. The earlier order-price-only/chain-confirmation
+UNKNOWN statement was valid only for the earlier narrow GET evidence, not this
+later exact canonical association. This is confirmed realized execution, not a
+new action authorization or profitable-total-cashflow proof. Independent cashflow
+reconciliation remains read-only; last-leg proceeds and total acquisition cost
+cannot be substituted for each other or manually rewritten.
+
+Preparation follows current architecture sections8/10, kernel lifecycle/event
+grammar, zero-context authority index, exact trade-class ownership and REVIEW.
+Tables venue_commands/venue_command_events, venue_order_facts/venue_trade_facts,
+execution_fact and position_events/position_current are canonical TRADE truth;
+projection/event writes remain append-first and transaction-bound. Existing
+kernel enums/schema/financial/action/source law are immutable in this candidate.
+The prospective implementation is K2 command recovery consuming K0 contracts,
+not a K0 grammar/schema rewrite. Relevant obligations are INV-01/02/03/08/28/30/
+31/37/47: no intent-as-close, settlement inference, torn write, duplicate venue
+side effect, abandoned unresolved journal or unresettable broad gate.
+
+Root-relayed narrow mechanism is the capital-priority selector selecting only
+SUBMITTING, scheduled main yielding the full sweep to held monitoring, and the
+identity fast path treating an existing fill fact as stayed rather than finishing
+the remaining journal projection. A minimum proposal is expected in existing
+src/execution/command_recovery.py plus tests/test_command_recovery.py, but exact
+writer ownership/design and BEFOREEDIT READY await noobs/root confirmation.
+Selection may admit typed unknown debt and exact confirmed economically-closed
+partial EXIT projection debt, never all PARTIAL rows or phase-only closure.
+Reuse authenticated command/order/trade/execution association and existing typed
+closure machinery; no duplicate P&L, execution fact or position event, synthetic
+history, direct _set_terminal/SQL repair, state schema edit, venue action or
+capital-budget/lease/capability waiver. Already-projected economic truth must
+remain byte/quantity conserved when only command journal debt drains.
+
+SCOPE is the exact command/original order and authenticated projection debt.
+DRAIN is the existing normal60s recovery owner finalizing that debt through the
+sanctioned writer. RESET is its real grammar-valid terminal transition removing
+only that scope, not an aggregate open-position count, arbitrary age or matching
+an always-newest fact. Required antibodies must reach the actual scheduled
+selector→reader/apply seam, preserve HIGH/LOW and YES/NO identity, prove once-only
+closure/replay/rollback, and reject foreign order/trade, ambiguous/missing or
+unconfirmed facts, partial residual and phase-only false positives. Freeze and
+named review precede scoped execution module/manifest required checks and any
+separately authorized landing/loading; existing baseline failures stay explicit.
+
+An existing operator full-sweep entry point, if proved to drain already-confirmed
+facts without new venue side effects, still requires a distinct root operational
+authorization. Main does not invoke it, retry loader, terminalize the command or
+clear guard here. Only PLAN preparation is authorized now; task/code725 remains
+landed while actual main is1da. Source pre-extract physics remains read-only.
+
+### BEFOREEDIT READY — strict confirmed-EXIT journal-debt recovery
+
+Root authorizes the noobs writer's exact two existing paths only:
+src/execution/command_recovery.py and tests/test_command_recovery.py. Baseline
+task/origin HEAD is72502817c7aa1b6b81970007701819ba0398bfca; source SHA256
+b3820894af1ab51d4d74af538fa8e0d46e70d529307c94177e51431f29fc470f and test
+c1ca408d0a5f37d79b8d9da440e8bd47480cfb98e44dee96f8b2212d902ec508.
+Main owns PLAN/test linkage and later existing registry/integration only; after
+READY main pauses all project writes until writer freeze. All other source,
+tests, config targets, captured physics and user/third-party artifacts stay intact.
+
+C's pre-audit identifies that the existing helper tolerates a SELL residual at
+most.01 and does not independently revalidate raw token/side/economics. That
+helper is not sufficient authority for the new priority/fast-debt classifier.
+New qualification must prove strict complete quantity equality (no epsilon/dust
+upgrade), exact primary token/side/original order/command binding and already
+complete absorption of the authenticated economic closure. Any absent, malformed,
+foreign, mismatched, unconfirmed or ambiguous evidence cannot qualify. Ordinary
+PARTIAL/REVIEW/MINED facts and local phase alone never become terminal authority.
+This is not permission to rewrite the existing generic helper tolerance or
+upgrade all partial commands; preserve its unrelated behavior and current law.
+
+Only the scoped typed unknown/current confirmed journal debt enters the existing
+normal recovery priority/fast path. Reuse authenticated recorded facts and
+grammar-valid idempotent closure to finish the remaining command journal, not
+venue re-submit/cancel or duplicate P&L/execution/position events. Preserve original
+budget/deadline/lease/capability/defer and transaction boundaries. SCOPE remains
+exact command/order debt, DRAIN the normal60s owner, RESET verified terminal debt
+removal. No manual reducer, _set_terminal SQL, canonical fact amendment or loader
+retry is authorized by this implementation READY.
+
+Required before/after private antibodies reach the actual selector/fast apply and
+assert exact full-absorption success and replay idempotence, HIGH/LOW and YES/NO,
+alongside tiny positive residual, wrong primary token/side/order/command,
+price/economic mismatch, missing/unconfirmed/REVIEW/MINED and ordinary partial
+negatives. Include rollback/interruption and no duplicated economics/event tests;
+do not relabel a helper mock as complete canonical proof. Tests use private TI1
+temporary state only; main's d7 settings link is import-only, never a daemon or
+canonical write route. Frozen hashes, named review and required affected checks
+precede separate normal landing/loading acceptance. Diagnosis725 remains landed
+but not loaded; current exact command debt must not be declared drained from
+READY or tests. Source physics and the overall goal remain OPEN.
+
+### Root-authorized narrow canonical DRAIN — existing live reducer only
+
+Root explicitly permits one existing live-code journal reducer invocation scoped
+to frozenset({'8198af0cd1b644a3'}), not the writer's uncommitted recovery module.
+Use the existing registered pure-TRADE recovery writer lease/transaction and
+grammar-valid append API, never a new transaction/cross-DB route, raw SQL terminal
+setter, broad/full/restart recovery sweep, HTTP or venue action. Candidate API is
+reconcile_complete_exit_trade_fact_commands via run_db_only_pass and the normal
+trade-only recovery coordinator/factory; require the C-recognized route to match
+before execution. Terminal command already drained by its normal owner is a skip.
+
+Inside that transaction re-read strict exact command/original-order/primary-token/
+SELL binding, authenticated CONFIRMED facts, Decimal.05 complete equality, already
+absorbed FILLED intent/economically-closed position/execution/event and no unresolved
+review. Root/C's evidence associates confirmed trade7066 and cash88757 PROVEN,
+fee180/net45820 with the original order; no missing fee or receipt becomes zero.
+Any changed/missing/ambiguous proof aborts with no write. The existing CTF_SELL
+conversion consumes50000 token reservation and writes gross incoming46000, not
+new spendable cash. No cash/P&L/execution/position projection alteration is allowed.
+
+Capture narrow before/after command/events/reservation/outbox/mutex/cash/execution/
+position snapshots, prove a single normal terminal append and only the intended
+command/collateral write set; any extra write aborts. Preserve proof artifacts
+outside the repo without copying DBs. This operational authority is independent
+from the pending two-path source repair and grants no loader attempt. Main may
+update only PLAN during the writer window; all worker/source/registry files stay
+untouched. Missing exact sanctioned wrapper or a need for broader/network work
+requires reporting rather than expanding this action.
+
+Root/C's exact sanctioned wrapper is default_trade_only_conn_factory→existing
+_recovery_priority_conn_factory/_recovery_apply_conn_factory live_tick with the
+same normal1.5s absolute deadline and capital monitor_preemptible=False→
+run_db_only_pass(label=recovery.complete_exit_trade_fact_exact). First attempt
+rolls back before the helper at an unlogged cash-precheck assertion; its reason
+is UNKNOWN, not retroactively invented. RO same input cash is PROVEN. Second
+attempt cash is PROVEN and helper advances1/errors0, but main's postcheck uses
+wrong INCOMING enum and rolls back. Correct canonical enum is INCOMING_PROCEEDS;
+this is a harness error, not evidence of a source/cash defect. Preserve both
+failure artifacts. C reviews final harness896cabb and root explicitly authorizes
+the third exact invocation; no script/source or scope expansion is implied.
+
+Third session90343 actually exits0/committedTrue. Locked indexed prechecks,
+primary cash proof and reducer/postchecks finish85.979ms within the unchanged
+1.5s budget. FreshRO09:25:38 independently verifies commandFILLED, journal4→5
+with one FILL_CONFIRMED, reservation converted50000/released and exact mutex
+released. Cash88757, execution intent and position remain unchanged. Incoming
+CTF_SELL exact token/gross46000/directionINCOMING_PROCEEDS persists; its later
+09:24:29 settled_at/BALANCE_REFRESH_OBSERVED change belongs to the normal balance
+owner, not the reducer or a rollback. Net proven cash45820/fee180 stays separate
+from gross incoming and never grants additional spendable cash. Evidence lives
+in /tmp/zeus-exit-journal-drain-20261004.qO47HW (first/second/third results plus
+postcommit.json). No HTTP, venue action, new canonical SQL setter or loader ran
+as part of this exact DRAIN.
+
+Repair two-path final freeze is source406cf2a6f182ab7b9652e76338a7008956abeaa3394f2ae4bad3979084c2d4db
+and teste951bee13984698c551ad9d8c49aea1c6cd64a333a3d7ffbb40135996c2c67a3.
+Actual original725 seven positive RED/eleven negative controls PASS precede
+38 targeted PASS6.97s in /tmp/zeus-exit-journal-targeted-20261004.xml. C final
+APPROVE adds17 independent nodes and one non-mirror foreign-intent rejection→
+exact once-only/no-op journal recovery with unchanged economic bytes. This closes
+the narrow recovery selection/journal defect, not all historical failures or
+profit/timeliness/physical source gaps. Root authorizes the expected five-path
+normal FF lane after narrow checks; new runtime identity/loader rc and diagnostic
+phase evidence remain separate proof. Source capture4, inventory trigger, cfgd7
+and unrelated files stay unchanged; no appearance-only source/physics edits.

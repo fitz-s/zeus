@@ -2367,6 +2367,7 @@ files:
       lane. Review work uses the existing re-anchored general maintenance slice;
       FULL/BOOT/RESTART order, all budgets, defer flags, leases and conservative
       pending exposure are unchanged. Terminal truth, not ordering, clears debt.
+      Capital-priority recovery admits known-order typed submit-unknown debt and strictly bound, fully absorbed economically-closed EXIT journal debt before generic maintenance. Primary token/SELL/order/command, exact complete quantity, confirmed trades, canonical fill-event columns and exact FILLED execution intent must agree; ordinary partial, review, missing or foreign evidence never qualifies by phase or dust tolerance. Existing grammar-valid terminal append conserves recorded economics and runs through the normal bounded recovery transaction, without duplicate execution/position facts, venue actions, extra budget or new entry authority.
     cancel_fill_race: >-
       A CANCEL_PENDING entry whose current point/order fact proves a terminal
       full match crosses the existing REVIEW_REQUIRED proof boundary before

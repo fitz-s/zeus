@@ -32534,6 +32534,81 @@ def _recovery_result_has_errors(result: Mapping[str, object]) -> bool:
     )
 
 
+def _confirmed_closed_exit_journal_debt_command_ids(
+    conn: sqlite3.Connection,
+    *,
+    command_ids: Collection[str] | None = None,
+) -> frozenset[str]:
+    """Exact already-booked full SELLs whose command journal still says PARTIAL."""
+    required = ("venue_commands", "venue_trade_facts", "position_current",
+                "position_events", "execution_fact")
+    if not all(_table_exists(conn, table) for table in required):
+        return frozenset()
+    if command_ids is not None and not command_ids:
+        return frozenset()
+    scoped = tuple(sorted(command_ids or ()))
+    scope_sql = (f" AND command.command_id IN ({','.join('?' for _ in scoped)})"
+                 if command_ids is not None else "")
+    rows = conn.execute("""
+        SELECT command.* FROM venue_commands command
+        JOIN position_current position ON position.position_id=command.position_id
+        WHERE command.intent_kind='EXIT' AND command.side='SELL'
+          AND command.state='PARTIAL' AND COALESCE(command.venue_order_id,'') != ''
+          AND position.phase='economically_closed'
+          AND EXISTS (SELECT 1 FROM position_events event
+              WHERE event.position_id=command.position_id
+                AND event.command_id=command.command_id
+                AND event.order_id=command.venue_order_id
+                AND event.event_type='EXIT_ORDER_FILLED')
+    """ + scope_sql, scoped).fetchall()
+    proved: set[str] = set()
+    for raw in rows:
+        command = _dict_row(raw)
+        command_id = str(command["command_id"])
+        position_id = str(command["position_id"])
+        current = _dict_row(conn.execute(
+            "SELECT * FROM position_current WHERE position_id=?", (position_id,),
+        ).fetchone())
+        if not _exchange_reconcile._exit_fill_identity_matches_position(
+            conn, command=command, position=current, venue_order_payload=None,
+        ):
+            continue
+        fills = _confirmed_bound_trade_fact_summary(
+            conn, command_id=command_id, venue_order_id=str(command["venue_order_id"]),
+            limit_price=command["price"], side=command["side"],
+        )
+        requested = _positive_decimal_or_none(command["size"])
+        price = _positive_decimal_or_none(fills.get("fill_price"))
+        if not (
+            requested is not None and price is not None
+            and _positive_decimal_or_none(fills.get("filled_size")) == requested
+            and fills.get("authenticated_confirmed") is True
+            and fills.get("fill_prices_respect_limit") is True
+            and _positive_decimal_or_none(current.get("exit_price")) == price
+            and _decimal_or_none(current.get("realized_pnl_usd")) is not None
+        ):
+            continue
+        executions = conn.execute("""
+            SELECT * FROM execution_fact WHERE position_id=? AND command_id=?
+              AND order_role='exit' AND voided_at IS NULL AND filled_at IS NOT NULL
+              AND lower(COALESCE(terminal_exec_status,'')) IN ('filled','confirmed')
+        """, (position_id, command_id)).fetchall()
+        if len(executions) != 1:
+            continue
+        execution = _dict_row(executions[0])
+        if not (
+            str(execution.get("intent_id") or "") in {
+                f"{position_id}:exit", f"{position_id}:exit:{command_id}",
+            }
+            and _positive_decimal_or_none(execution.get("shares")) == requested
+            and _positive_decimal_or_none(execution.get("fill_price")) == price
+            and _parse_ts(execution.get("filled_at")) is not None
+        ):
+            continue
+        proved.add(command_id)
+    return frozenset(proved)
+
+
 def capital_blocking_command_scope(
     conn: sqlite3.Connection,
 ) -> CapitalBlockingCommandScope:
@@ -32553,13 +32628,19 @@ def capital_blocking_command_scope(
                 """
                 SELECT command_id, market_id
                   FROM venue_commands
-                 WHERE state = ?
+                 WHERE state IN (?, ?)
                    AND intent_kind IN ('ENTRY', 'EXIT')
                    AND COALESCE(venue_order_id, '') != ''
                 """,
-                (CommandState.SUBMITTING.value,),
+                (CommandState.SUBMITTING.value, CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value),
             ).fetchall()
         )
+        journal_ids = _confirmed_closed_exit_journal_debt_command_ids(conn)
+        if journal_ids:
+            command_rows.extend(_dict_row(row) for row in conn.execute(
+                f"SELECT command_id, market_id FROM venue_commands WHERE command_id IN "
+                f"({','.join('?' for _ in journal_ids)})", tuple(sorted(journal_ids)),
+            ).fetchall())
     command_rows.extend(_post_ack_persistence_review_candidates(conn))
     if all(
         _table_exists(conn, table)
@@ -32963,6 +33044,19 @@ def _reconcile_identity_bound_submitting_commands(
             summary["advanced"] += fill_summary["advanced"]
             summary["stayed"] += fill_summary["stayed"]
             summary["errors"] += fill_summary["errors"]
+            # Existing trade facts may already have booked the close, while the
+            # matched-order recovery deliberately stays. Finish only that exact
+            # proven journal debt; never re-project the position or its P&L.
+            journal_ids = _confirmed_closed_exit_journal_debt_command_ids(
+                conn, command_ids={command_id},
+            )
+            if journal_ids:
+                closed = reconcile_complete_exit_trade_fact_commands(
+                    conn, command_ids=journal_ids,
+                )
+                summary["advanced"] += closed["advanced"]
+                summary["stayed"] += closed["stayed"]
+                summary["errors"] += closed["errors"]
         except Exception as exc:  # noqa: BLE001 - one command must not block peers.
             logger.error(
                 "recovery: identity-bound submit command %s failed: %s",
@@ -34197,11 +34291,35 @@ def _reconcile_passes_short_conn(
                 _recorded_exit_fill_projection_candidates(conn)
             )
             cancel_candidates = _capital_blocking_cancel_commands(conn)
+            closed_exit_journal_ids = _confirmed_closed_exit_journal_debt_command_ids(conn)
             terminal_late_fill_command_ids = (
                 _exchange_reconcile.persisted_terminal_late_entry_fill_command_ids(
                     conn
                 )
             )
+        if closed_exit_journal_ids:
+            # SCOPE: exact confirmed full SELLs already economically absorbed.
+            # DRAIN: this DB-only capital lane precedes general venue reads.
+            # RESET: the existing journal/collateral reducer emits FILLED.
+            journal_deadline = _capital_deadline()
+            journal_factory = _capital_apply_conn_factory(journal_deadline)
+            journal_result = _run_capital_pass(
+                "confirmed_closed_exit_journal_fast",
+                lambda: run_db_only_pass(
+                    lambda conn: reconcile_complete_exit_trade_fact_commands(
+                        conn, command_ids=_confirmed_closed_exit_journal_debt_command_ids(
+                            conn, command_ids=closed_exit_journal_ids,
+                        ),
+                    ),
+                    conn_factory=journal_factory,
+                    label="recovery.confirmed_closed_exit_journal_fast",
+                ),
+                deadline_monotonic=journal_deadline,
+            )
+            if journal_result is not None:
+                _accumulate(summary, "confirmed_closed_exit_journal_fast", journal_result)
+                if journal_result.get("advanced"):
+                    return journal_result
         terminal_fill_review_result = None
         if terminal_fill_review_command_ids:
             # This is already-authenticated current exposure, not historical
@@ -35396,6 +35514,13 @@ def _reconcile_passes_short_conn(
 
     if scope == "live_tick":
         _capital_recovery_fast_pass()
+        if (summary.get("confirmed_closed_exit_journal_fast") or {}).get("advanced"):
+            # The exact DB-only close needs no account-wide absence read.
+            # Other durable work remains owned by the next normal cadence.
+            summary["scope"] = scope
+            summary["venue_snapshot_deferred"] = True
+            summary["deferred_full_sweep"] = True
+            return
         if not (
             summary.get("post_ack_review_snapshot_deferred")
             and scheduler_deadline is not None
