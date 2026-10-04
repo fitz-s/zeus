@@ -6,9 +6,11 @@ import hashlib
 import json
 import logging
 import math
+import errno
 import os
 import fcntl
 import re
+import stat as _stat_mode
 import sqlite3
 import subprocess
 import sys
@@ -274,10 +276,16 @@ def _queue_files_snapshot(directory: Path) -> tuple[tuple[str, int, int, str], .
         return ()
     snapshot: list[tuple[str, int, int, str]] = []
     for path in sorted(directory.glob("*.json"), key=lambda item: item.name):
-        if not path.is_file():
+        try:
+            payload, stat = read_regular_request(path)
+        except RequestNotRegular:
+            # A symlink/non-regular entry still changes the snapshot (by name
+            # and link identity), but its target is never followed.
+            link = os.lstat(path)
+            snapshot.append((path.name, link.st_mtime_ns, link.st_size, "not-regular"))
             continue
-        payload = path.read_bytes()
-        stat = path.stat()
+        except (FileNotFoundError, IsADirectoryError):
+            continue
         snapshot.append((path.name, stat.st_mtime_ns, stat.st_size, hashlib.sha256(payload).hexdigest()))
     return tuple(snapshot)
 
@@ -3764,6 +3772,36 @@ def _load_request_payload_for_coalescing(path: Path) -> Mapping[str, object] | N
         return None
 
 
+class RequestNotRegular(OSError):
+    """A request path that is a symlink or any non-regular file: a mutable alias.
+
+    Its bytes can change without its pathname changing, so no lease can bind
+    it to one identity. It is quarantined, never claimed or executed.
+    """
+
+
+def read_regular_request(path: Path) -> tuple[bytes, os.stat_result]:
+    """(bytes, fstat) of the regular file ``path`` names, never following a link.
+
+    Opened O_NOFOLLOW and checked S_ISREG on the opened descriptor, so the
+    bytes, their hash and the identity parsed from them all describe one
+    regular-file object. ``RequestNotRegular`` for a symlink or non-regular
+    file; any other OSError (absent, permission) propagates.
+    """
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RequestNotRegular(errno.ELOOP, "request is a symlink", str(path)) from exc
+        raise
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not _stat_mode.S_ISREG(info.st_mode):
+            raise RequestNotRegular(errno.EINVAL, "request is not a regular file", str(path))
+        return handle.read(), info
+
+
 def _parse_request_payload(body: bytes) -> Mapping[str, object] | None:
     """The request object these exact bytes encode; None when malformed."""
     try:
@@ -5578,10 +5616,11 @@ def _read_claim_slot(
 
     ``FileNotFoundError``: it left, changed from ``expected``, or (planned) has
     no identity. ``ValueError``: an unplanned request without an identity.
+    ``RequestNotRegular``: a symlink or non-regular file (quarantined by the
+    constructor, never claimed).
     """
 
-    body = source.read_bytes()
-    info = source.stat()
+    body, info = read_regular_request(source)
     row = (source.name, info.st_mtime_ns, info.st_size, hashlib.sha256(body).hexdigest())
     if expected is not None and expected != row:
         raise FileNotFoundError("planned request changed before its lease")
@@ -5599,6 +5638,42 @@ def _read_claim_slot(
 
 
 _STAGING_PREFIX = ".staging."
+_REQUEST_ALIAS_QUARANTINED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_ALIAS_QUARANTINED"
+_REQUEST_ALIAS_DIR = "quarantined_request_aliases"
+
+
+def _quarantine_request_alias(source: Path) -> Path | None:
+    """Move a symlink/non-regular request aside and record why; never follow it.
+
+    SCOPE: this publication's pathname only. ``os.rename`` renames the link
+    itself, so the alias target is neither read nor touched, and no
+    forecast-input marker is written (a mutable alias says nothing about any
+    forecast input). DRAIN: terminal now. RESET: a producer that republishes a
+    regular file is judged on its own. Returns the quarantined path, or None
+    when the pathname already left (another process quarantined or replaced it).
+    """
+
+    root = source.parent.parent / _REQUEST_ALIAS_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / f"{source.name}.{uuid4().hex[:12]}"
+    try:
+        kind = "symlink" if os.lstat(source).st_mode & 0o170000 == 0o120000 else "non_regular"
+        os.rename(source, target)
+    except FileNotFoundError:
+        return None
+    receipt = root / f"{target.name}.receipt.json"
+    receipt.write_text(json.dumps({
+        "status": "QUARANTINED_REQUEST_ALIAS",
+        "reason_codes": [_REQUEST_ALIAS_QUARANTINED_REASON],
+        "request_name": source.name,
+        "kind": kind,
+        "quarantined_at": datetime.now(timezone.utc).isoformat(),
+        "forecast_input_fence": False,
+    }, sort_keys=True), encoding="utf-8")
+    _fsync_directory(root)
+    _fsync_directory(source.parent)
+    _LOG.warning("materialization request %s is a %s; quarantined at %s", source.name, kind, target)
+    return target
 _CLAIM_IDENTITY_LEASED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_IDENTITY_LEASED"
 _CLAIM_LEASE_UNKNOWN_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_LEASE_UNKNOWN"
 _CLAIM_SLOT_CHANGED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_SLOT_CHANGED"
@@ -5652,6 +5727,12 @@ def _claim_construction(
             expected = None if expected_records is None else expected_records.get(source.name)
             try:
                 slot = _read_claim_slot(source, expected=expected)
+            except RequestNotRegular:
+                _quarantine_request_alias(source)
+                reasons.append(_REQUEST_ALIAS_QUARANTINED_REASON)
+                if admission != CLAIM_EACH:
+                    break
+                continue
             except FileNotFoundError:
                 reasons.append(_CLAIM_SLOT_CHANGED_REASON)
                 if admission != CLAIM_EACH:
@@ -5687,19 +5768,35 @@ def _claim_construction(
         staging = inflight_path / f"{_STAGING_PREFIX}{name}"
         staging.mkdir()
         staging_fd = os.open(staging, os.O_RDONLY)
-        fcntl.flock(staging_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # A scanner may see the directory between mkdir and this flock. It can
+        # only delete what it holds the flock on, through the deletion: either
+        # it holds it now (this flock fails) or it already deleted the
+        # directory (the path no longer names this inode). Both abort the
+        # claim here, before any request moves.
+        try:
+            fcntl.flock(staging_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            reclaimed = not os.path.samestat(os.fstat(staging_fd), os.stat(staging))
+        except (BlockingIOError, FileNotFoundError):
+            reclaimed = True
+        if reclaimed:
+            # Lost the race to a scanner: abort like any changed slot (the
+            # handler below releases every lease; nothing moved yet).
+            raise FileNotFoundError("staging directory was reclaimed before its flock")
         _write_lease_claim_metadata(staging, slots, leases, generation)
         os.rename(staging, inflight_path / name)
         staging, batch_path = None, inflight_path / name
         for slot in slots:
-            # Validate under the lease: the bytes moved are the bytes leased.
-            current = slot.source.read_bytes()
-            if current != slot.body or slot.source.stat().st_mtime_ns != slot.row[1]:
+            # Validate under the lease: the bytes moved are the bytes leased,
+            # read no-follow from a regular file before and after the rename,
+            # and the moved object is the very inode that was read.
+            current, before = read_regular_request(slot.source)
+            if current != slot.body or before.st_mtime_ns != slot.row[1]:
                 raise FileNotFoundError("request changed while its lease was taken")
             claimed = batch_path / slot.source.name
             os.replace(slot.source, claimed)
             moved.append((slot.source, claimed))
-            if claimed.read_bytes() != slot.body:
+            after_body, after = read_regular_request(claimed)
+            if after_body != slot.body or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
                 raise FileNotFoundError("request changed during its move")
         _fsync_directory(batch_path)
         _fsync_directory(inflight_path)
@@ -5733,7 +5830,8 @@ def _abandoned_staging(inflight_path: Path) -> tuple[Path, ...]:
 
     A live constructor holds its staging directory's flock from creation to
     publication, so a free one is crash debris (no request ever moved into
-    it). Yields each with its flock taken by this process; the caller removes it.
+    it). An observation only: the flock is released before returning, and
+    ``_drain_abandoned_staging`` re-acquires and holds it through deletion.
     """
 
     if not inflight_path.exists():
@@ -5750,19 +5848,40 @@ def _abandoned_staging(inflight_path: Path) -> tuple[Path, ...]:
             os.close(fd)
             continue  # a live constructor: never touched
         found.append(path)
-        os.close(fd)  # rmdir below cannot race a constructor: it never reuses a name
+        os.close(fd)
     return tuple(found)
 
 
 def _drain_abandoned_staging(inflight_path: Path) -> int:
-    """Remove crash debris left before a claim was published; no request is lost."""
+    """Remove crash debris left before a claim was published; no request is lost.
+
+    Each candidate is re-locked here and the flock is held continuously
+    through the deletion, so an earlier observation is never trusted: a
+    constructor that took the flock since then is never deleted.
+    """
 
     drained = 0
     for path in _abandoned_staging(inflight_path):
-        if _claim_request_files(path):
-            continue  # cannot happen (requests move only after publication)
-        _remove_empty_claim_batch(path)
-        drained += not path.exists()
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue  # a live constructor holds it now
+            try:
+                if not os.path.samestat(os.fstat(fd), os.stat(path)):
+                    continue
+            except FileNotFoundError:
+                continue
+            if _claim_request_files(path):
+                continue  # cannot happen (requests move only after publication)
+            _remove_empty_claim_batch(path)
+            drained += not path.exists()
+        finally:
+            os.close(fd)
     return drained
 
 
@@ -5918,6 +6037,8 @@ def _new_claim_batch(
 
 
 def _claim_failure(reasons: Sequence[str]) -> Exception:
+    if _REQUEST_ALIAS_QUARANTINED_REASON in reasons:
+        return RequestNotRegular(errno.EINVAL, "request alias quarantined", ", ".join(reasons))
     if _CLAIM_LEASE_UNKNOWN_REASON in reasons:
         return _ClaimLeaseUnknown(", ".join(reasons))
     if _CLAIM_IDENTITY_LEASED_REASON in reasons:
@@ -6045,6 +6166,8 @@ def _claim_available_slots(
     for source in selected:
         try:
             _read_claim_slot(source, expected=None)
+        except RequestNotRegular:
+            pass  # the constructor quarantines it
         except (FileNotFoundError, ValueError):
             continue  # left, or no identity: the plan already deferred it
         readable.append(source)

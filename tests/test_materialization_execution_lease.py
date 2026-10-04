@@ -358,3 +358,28 @@ def test_reconcile_restores_only_ownerless_claims_and_refuses_live_ones(tmp_path
     assert report.quiescent
     assert {p.name for p in requests.glob("*.json")} == {"Dead.json", "Live.json", "Legacy.json"}
     assert not list(inflight.iterdir())
+
+
+# --- mutable request aliases --------------------------------------------------
+
+
+def test_symlinked_request_is_quarantined_without_touching_its_target(tmp_path):
+    requests, inflight, (regular,) = _queued(tmp_path, "London.json")
+    target = tmp_path / "publisher-latest.json"
+    target.write_text(json.dumps(_request(city="Paris")), encoding="utf-8")
+    target_bytes = target.read_bytes()
+    alias = requests / "Paris.alias.json"
+    alias.symlink_to(target)
+    batch, claimed, reasons = queue._claim_available_slots(inflight, (alias, regular))
+    assert claimed == (regular,) and queue._REQUEST_ALIAS_QUARANTINED_REASON in reasons
+    assert not alias.exists() and not alias.is_symlink()
+    assert target.read_bytes() == target_bytes  # never followed or mutated
+    quarantined = list((tmp_path / queue._REQUEST_ALIAS_DIR).glob("Paris.alias.json.*"))
+    links = [p for p in quarantined if p.is_symlink()]
+    receipts = [p for p in quarantined if p.name.endswith(".receipt.json")]
+    assert len(links) == 1 and len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["kind"] == "symlink" and receipt["forecast_input_fence"] is False
+    assert not (tmp_path / "blocked_attempts").exists()
+    with pytest.raises(queue.RequestNotRegular):
+        queue._new_claim_batch(inflight, (links[0],))

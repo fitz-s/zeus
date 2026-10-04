@@ -168,8 +168,16 @@ def receive_leases(message: dict, write: Callable[[str], None]) -> list[int]:
                 break
             if not sys.stdin.buffer.peek(1):
                 raise RuntimeError("parent closed before sending the announced leases")
-        # Exactly one frame: its id length bounds the read.
+        # Exactly one frame of len(expected) bytes. A stream may deliver it in
+        # several legal short reads; the descriptors ride the first. Accumulate
+        # to the full length; EOF mid-frame or descriptors arriving on a later
+        # read are framing errors.
         data,fds,_flags,_address=socket.recv_fds(lease_socket,len(expected),count)
+        while data and len(data)<len(expected):
+            more,extra,_flags,_address=socket.recv_fds(lease_socket,len(expected)-len(data),count)
+            fds+=extra
+            if not more:break
+            data+=more
     finally:
         lease_socket.close()
     if data!=expected or len(fds)!=count:
