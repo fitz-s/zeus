@@ -13821,3 +13821,184 @@ The finalized HKO DailyExtract0.1C role remains distinct from intraday source,
 private fc surface audit and exact sensor-ground authority. Original profitable
 trading goal, production terrain acquisition and unresolved physical proof are
 not declared complete.
+
+### Queue faea delivery and owned read-only book lease drain (before edit)
+
+Queue faea46e3dc89ee8757d884a5919ef4d6af28e96c is FF-landed and the first
+normal loader23:36:56/session97182 refuses rc1 for an actual ACKED ENTRY
+a6b2c572a9c940d4; it releases only its unused deployment guard and leaves469
+main running. That exact order naturally fills5@.10 at23:39:28 and becomes
+Taipei548966c0-997 real holding, not a cancel/intent closure. A whole28-position
+precheck at23:48:49 has zero nonterminal commands but mixed monitor freshness.
+An unarmed external pause=false helper is not proof that normal loader admission
+will fail: root explicitly authorizes its complete normal initializer and gates.
+The changed-condition loader starts23:50:27/session68134 and returns actual rc0.
+Main711 has faea stamp23:52:16.534108; ingest93971/forecast94018/resident94055
+restart normally, cwd live/canonical DB FDs/configd7 unchanged. Its real armed
+capital handoff admits the current typed partition and post-start proves full
+book27fresh/28open/one probability-degraded. Shared proof-driven CAS clears the
+guard, getter23:56:12 confirms None. Logs remain in
+/tmp/zeus-queue-frontier-final-20261003.AjIzKI/{normal-loader,changedretry}.log.
+Independent full900902@23:55:28 has218families, complete scope/held/native and
+three matching coverage hashes; the scope-one loader progress receipt is not
+substituted for that whole-universe proof. Actual priority cursor Seattle→
+Shanghai advances normally, and new Munich73499623:53:22→write23:53:40→SUCCESS
+23:53:42→monitor2328@23:56:17 freshqNO/HOLD is a post-load consumer chain.
+This closes the bounded queue delivery, not all source/physics/profit gaps.
+
+Root approves a separate INV-47 money-consumer liveness repair after a private
+actual hard-deadline parent→worker→real governor→MockTransport reproduction.
+A dead and OS-reaped worker can leave its exact public-books60s lease, denying
+the next identical request; partial eight-success/one-hang and a non-HTTP
+RuntimeError also leave ownership. Real HTTPReadTimeout correctly creates an
+embargo and must not be cleared. Four historical Atlanta RequestInFlight
+artifacts match mechanism/expiry telemetry but lack historical PID/nonce proof;
+do not claim each was an orphan or that this explains every monitor delay.
+
+The appointed writer alone owns src/data/polymarket_client.py,
+src/data/polymarket_request_governor.py, existing tests/test_live_safety_invariants.py
+and tests/test_polymarket_request_governor.py. Integrator owns this PLAN and only
+the two existing source-rationale/test-topology rows and delivery integration.
+No new file, canonical DB column/table, config flag or control protocol is
+introduced. Optional noncanonical governor-state ownership metadata belongs to
+the same existing atomic state mutation and must be backward-compatible.
+
+Parent generates one unique ownership/generation token for this public-book
+worker before spawn. Child acquisition atomically persists that token, actual
+child PID and original exact request hash/lease nonce before any IPC progress;
+cleanup cannot infer ownership from the latest row or require an IPC receipt.
+Only after the OS proves that exact child was reaped may parent CAS-neutralize
+matching owned read-only book leases with the same token/PID/request/nonce and
+endpoint role. POST /books is a read-only public batch transport, not permission
+to clean POST order mutations. Legacy/foreign/live-child/new-nonce leases,
+real429/transport embargoes and all mutation requests remain unchanged. A
+non-HTTP public-read error may neutrally release only its own exact nonce;
+unknown mutation side effects do not inherit this rule. Keep original exception
+types/messages, endpoint/route generations, retry limits, partial progress,
+deadline/startup/reap accounting, prices, fresh quote role and fallback count.
+
+SCOPE: exact owned public-book worker generation and acquired request lease,
+not a host or governor-wide incident. DRAIN: normal scoped exception cleanup or
+post-reap parent cleanup, followed by the next normal fresh-book attempt. RESET:
+nonce/token/PID CAS succeeds only on the original owned lease; any successor,
+unknown owner, cleanup failure or embargo stays DATA_DEGRADED until its existing
+TTL/normal recovery. No global clear, shorter TTL, extra HTTP/fallback fan-out,
+new budget, observer bypass, source-clock refresh or fake quote is authorized.
+
+Before/after antibodies must run actual spawn, not relabel the existing fork
+RED as spawn PASS: acquisition persisted then kill before IPC, zero/partial
+success+hang, normal error/success, next normal same-request admission; foreign
+lease, successor nonce, live child, legacy metadata, true HTTPReadTimeout/429
+embargo and POST-order negatives; one existing fallback/no extra HTTP and exact
+exception/progress preservation. All durable tests use private temp governor
+state and mocked HTTP; no canonical DB copy/write or production venue/source
+request. Main alone supplies a read-only live-settings symlink for imports,
+removes it before stage/cleanup, and uses TMPDIR=/tmp with validated unique
+ZEUS_TEST_STATE_ROOT and unchanged TI1/schema checking.
+
+Full src/data/tests/operations/architecture scoped law and data module book have
+been read. Required integration is the data manifest15 plus both owned whole
+tests,17unique: audit_city_data_readiness, cities_config_authoritative,
+ensemble_client, backfill_openmeteo_previous_runs, forecast_source_registry,
+tigge_ingest, backfill_scripts_match_live_config, tier_resolver, obs_v2_writer,
+hk_rejects_vhhh_source, hourly_clients_parse, v2_adapter, release_calendar,
+data/test_openmeteo_model_updates, data/test_source_run_arrived_event,
+live_safety_invariants and polymarket_request_governor (all under tests/ with
+test_ prefix). Data §20 compilation includes src/data/*.py and existing
+scripts/backfill_obs.py/scripts/audit_observation_instants.py. This owned broad
+live-safety suite is not omitted; no unrelated state/engine/NoObs34 or queue16
+repeat is selected. New failures need exact original-faea affected-source
+private comparison, never gate waivers or harmlessness inferred from counts.
+Named independent review must close acquisition-before-IPC, reaping/nonce ABA,
+HTTP-embargo and mutation-role risks before root accepts any normal FF/load.
+Runtime natural next-book recovery remains separately required; implementation
+does not itself prove Atlanta history, every held quote or the original goal.
+
+Lease final worker freeze: client
+efaec75d5f04046548d8939d97512a4675c38618ae9c3f54a490bea8a860b790;
+governor c73d61061323c367e9e239fcb8581de41e8b2e3a0af48d57f5cc4c4a3e70919c;
+live-safety test a41c2bf93189d0ba2d0a4a152112c1cf236fac972a1f082b80170b91a3bfb591;
+governor test394603ea18f276c7c58f72d399eb9d02cd654b6adfdb72e1236ada3c14c16736.
+Original actual-spawn antibodies yield four RED and one control; final new39
+PASS. Original source comparison is an import overlay in a private process,
+not a fork substitute, worktree replacement or canonical DB copy. Worker whole
+owned687nodes gives618PASS/69FAIL; original-faea648nodes gives579PASS/the same
+69FAIL. Their exact XMLs are /tmp/zeus-book-lease-owned-{final,original-faea}-20261004.xml,
+and original spawn RED is /tmp/zeus-book-lease-spawn-red-20261004.xml.
+
+Integrator's sole required17 finishes1202PASS/73FAIL/69.94s/rc1, in
+/tmp/zeus-book-lease-final-20261004.woDtri/required17.xml and .log. All69 owned
+failure IDs match original-faea;61 messages are byte-exact and eight differ
+only in verified generator/function/Event/connection repr addresses. Provider
+clocks, payload hashes, order identity, amounts and assertion values are never
+normalized. Only four additional data failures are replayed with the original
+two full source modules in a fresh private process: all four fail with byte-exact
+messages, recorded in baseline-data4.xml/.log in that directory. No whole17/
+owned baseline repetition is needed and no whole-green result is claimed.
+
+Disposition: defer the existing removed quota_tracker API and TIGGE policy
+fixtures for their owners; the bounded account-truth orders/trades two-call
+counterexample refutes a total-one assertion but is not a weather source-clock
+claim. The placeholder submission-envelope minimum-notional test still fails
+before its intended branch, leaving that branch-evidence gap. The69 safety
+failures include seven obsolete-signature TypeErrors, nine missing-summary/
+probability-content KeyErrors, one incomplete connection-double AttributeError,
+three static source-substring mismatches and a missing portfolio receipt hash;
+their affected source paths are not relaxed here. Remaining monitor/reauction/
+reservation/action assertions retain named unknown-current-risk disposition:
+identical baseline establishes no new lease delta, not harmlessness or closure.
+Exact nodes/messages remain in XML rather than being removed, xfailed or
+rewritten. This bounded lease repair does not claim all old safety assertions
+reach the intended current authority seam.
+
+Data module plus the two §20 scripts compile in memory120PASS; YAML2 and both
+changed test freshness checks PASS, planning compatibility CLI and diffcheck
+PASS. Actual source-rationale existing fields/downstream/authority remain equal
+to original, with their prior why text preserved as a prefix; existing trusted
+test rows only update actual reuse and scoped ownership antibodies. No global
+registry drift is repaired. Independent named review and root delivery decision
+are pending; the four frozen source/test hashes are rechecked before any stage.
+Current faea runtime/rc0/guardNone remains the prior loaded state, not proof that
+the new owned-lease protocol is running. Private config link remains main-owned
+until final cleanup before stage. No production lease, HTTP request or guard is
+manually modified for implementation verification.
+
+Delivery acceptance for the preceding four-path owner-token candidate is
+WITHDRAWN, not pending paper approval: independent actual private-flock review
+finds its parent post-reap cleanup enters unbounded LOCK_EX. The source hashes
+and17-file results above apply only to that unlanded candidate and cannot prove
+its hard-deadline cleanup safe or validate any later source combination. No
+candidate commit/rebase/live FF/load occurs. Preserve the owned patch/registry
+changes for root disposition rather than overwriting third-party work.
+
+Meanwhile origin/live20b98dd9725160f831b5ba6acc1c9e517b049152 independently lands
+a smaller held-book read-deadline lease fix touching client and the two existing
+tests. Its explicit read deadline is not a governor-wide TTL weakening and is
+not rejected merely by the old candidate's no-shorter-default-TTL requirement.
+Root selects read-only independent review plus actual-spawn original antibodies
+against that exact tip before deciding whether the owner-token candidate should
+be withdrawn. Do not combine protocols, add nonblocking cleanup or repeat whole
+17/state/engine checks before that decision; live loading is not authorized.
+
+Root subsequently accepts the already-landed20b read-deadline solution instead
+of the owner-token candidate. Independent C semantic review APPROVE and actual
+spawn overlay of the four original failures show the next retry GREEN after
+the scoped read-budget lease naturally expires. Reap has1.27–2.74s remaining
+lease and non-HTTP error2.88s, so this is bounded expiry, not immediate orphan
+cleanup. Deterministic429 protection PASS; default/mutation60s and governor
+bytes are unchanged. This avoids the candidate's unbounded parent cleanup and
+extra owner-state protocol. Source gates/HTTP failure circuits remain cumulative.
+
+Only our unlanded four-file candidate and two registry deltas are withdrawn
+with apply_patch after preserving their exact patch in
+/tmp/zeus-book-lease-final-20261004.woDtri/withdrawn-owner-protocol.patch,
+SHA b22db0db981656bef14bd400d92ec1e45a96cd6978d5176b567308fa23e53295.
+No checkout/reset, live source edit or third-party overwrite occurs. The old
+17/73 baseline audit remains valid for the rejected candidate, not a test claim
+for20b. Rebase the task branch safely to the accepted origin tip and reprove only
+20b's changed owned tests/required affected seams before its normal loader.
+The private cfg link remains import-only and is removed before any stage/clean
+handoff. No new owner metadata, protocol file or registry fiction is landed.
+Default provider DEM is not exact physical sensor-location/AGL proof; MPMG/ZSQD
+ground remains unknown and unactivated. Terrain/source authority and realized
+profit gaps remain separate from this book-read liveness repair.
