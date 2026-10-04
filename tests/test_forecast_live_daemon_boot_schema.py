@@ -196,7 +196,10 @@ def test_replacement_recovery_discovery_resumes_after_hot_queue_drains(
         lambda **kwargs: calls.append(int(kwargs["limit"])) or _Report(),
     )
     try:
-        assert daemon._replacement_forecast_discovery_job.__wrapped__() is None
+        # The job now reports what it did instead of returning None.
+        assert daemon._replacement_forecast_discovery_job.__wrapped__() == {
+            "status": "NO_ELIGIBLE_TARGETS",
+        }
         assert calls == [10]
         assert daemon._replacement_forecast_last_discovery_revision == revision
     finally:

@@ -5437,16 +5437,33 @@ def _claim_lease_paths(batch_path: Path) -> tuple[Path, ...] | None:
 
 
 _LEASE_BATCH_MARK = "." + _lease.LEASE_PROTOCOL + "."
+_PROTOCOL_NAME_RE = re.compile(r"\.(lease-v[^.]+)\.")
+
+
+def _claim_state_class(batch_path: Path) -> str:
+    """"lease-v1", "legacy" (positively protocol-less), or "unknown".
+
+    A lease protocol named by the batch name or metadata types the batch even
+    when its metadata is unreadable. Only a batch with neither a protocol in
+    its name nor a ``protocol`` key in readable metadata is LEGACY; a batch
+    naming any other protocol, or a malformed one, is UNKNOWN and is never
+    restored by age.
+    """
+
+    match = _PROTOCOL_NAME_RE.search(batch_path.name)
+    if match is not None:
+        return _lease.LEASE_PROTOCOL if match.group(1) == _lease.LEASE_PROTOCOL else "unknown"
+    metadata = _claim_metadata(batch_path)
+    if metadata is None:
+        return "legacy"  # pre-lease batches wrote no protocol; unreadable is legacy debt
+    if "protocol" not in metadata:
+        return "legacy"
+    return _lease.LEASE_PROTOCOL if metadata.get("protocol") == _lease.LEASE_PROTOCOL else "unknown"
 
 
 def _claim_protocol(batch_path: Path) -> str | None:
-    """A lease-v1 batch is typed by its name, so unreadable metadata is never legacy."""
-
-    if _LEASE_BATCH_MARK in batch_path.name:
-        return _lease.LEASE_PROTOCOL
-    metadata = _claim_metadata(batch_path)
-    protocol = None if metadata is None else metadata.get("protocol")
-    return protocol if isinstance(protocol, str) else None
+    state = _claim_state_class(batch_path)
+    return None if state == "legacy" else state
 
 
 def _observe_claim(
@@ -5456,12 +5473,16 @@ def _observe_claim(
 
     lease-v1: liveness is the lease alone. HELD is a live owner, never stolen;
     ACQUIRED_FOR_RECOVERY is dead, and the caller holds its leases across the
-    restore; UNKNOWN is neither, whatever its age. LEGACY (no protocol) is the
-    only state whose ``claimed_at`` age still decides, during migration only.
+    restore; UNKNOWN (unreadable leases, or an unsupported protocol) is
+    neither, whatever its age. LEGACY (positively protocol-less) is the only
+    state whose ``claimed_at`` age still decides, during migration only.
     """
 
-    if _claim_protocol(batch_path) != _lease.LEASE_PROTOCOL:
+    kind = _claim_state_class(batch_path)
+    if kind == "legacy":
         return _lease.LeaseState.LEGACY, [], _claim_age_seconds(batch_path) >= stale_after
+    if kind != _lease.LEASE_PROTOCOL:
+        return _lease.LeaseState.UNKNOWN, [], False
     paths = _claim_lease_paths(batch_path)
     if paths is None:
         return _lease.LeaseState.UNKNOWN, [], False
@@ -5490,8 +5511,10 @@ def _recover_stale_claims(
         _materialization_subprocess_timeout_seconds()
         + _STALE_CLAIM_GRACE_SECONDS
     )
+    # A constructor that died before publishing left only metadata: drain it.
+    _drain_abandoned_staging(inflight_path)
     for batch_path in _claim_batches(inflight_path):
-        if lease_only and _claim_protocol(batch_path) != _lease.LEASE_PROTOCOL:
+        if lease_only and _claim_state_class(batch_path) == "legacy":
             continue
         state, held, dead = _observe_claim(batch_path, stale_after=stale_after)
         live = state in (_lease.LeaseState.HELD, _lease.LeaseState.UNKNOWN)
@@ -5573,6 +5596,14 @@ def _read_claim_slot(
     return _ClaimSlot(source, body, row, witness)
 
 
+_STAGING_PREFIX = ".staging."
+_CLAIM_IDENTITY_LEASED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_IDENTITY_LEASED"
+_CLAIM_LEASE_UNKNOWN_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_LEASE_UNKNOWN"
+_CLAIM_SLOT_CHANGED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_SLOT_CHANGED"
+# Admission modes: every slot or none; the stable planned prefix; each slot alone.
+CLAIM_ALL, CLAIM_PREFIX, CLAIM_EACH = "all", "prefix", "each"
+
+
 @contextmanager
 def _claim_construction(
     inflight_path: Path,
@@ -5580,56 +5611,84 @@ def _claim_construction(
     *,
     expected_records: Mapping[str, tuple[str, int, int, str]] | None = None,
     prefix: str = "",
+    admission: str = CLAIM_ALL,
 ):
-    """The one owner of a claim from its first lease to its handoff; yields the batch.
+    """The one owner of a claim from its first lease to its handoff.
 
-    Every lane's claim goes through here. Steps: read each selected request;
-    acquire every identity lease of every slot in one sorted all-or-none call
-    (``_ClaimIdentityOwned`` when a live owner holds one, ``_ClaimLeaseUnknown``
-    when one cannot be read); create the batch and write its lease-v1 metadata
-    (protocol, leases, ordered records) before any request moves, so a
-    scanner never meets an untyped claim; revalidate each request's bytes under
-    the lease and move it; fsync. On any exception every moved request is
-    renamed back (its lease is still held, so nobody else can take it; a
-    pathname a publisher re-took keeps our body for lease recovery), the empty
-    batch is removed, and only then are the leases released, in a ``finally``
-    that no cleanup failure can skip. After the ``with`` body returns the caller
-    holds the leases (``_HELD_CLAIM_LEASES``) until ``_release_claim_batch``.
+    Yields ``(batch_path, admitted sources, deferral reasons)``; ``batch_path``
+    is None when no slot was admitted. Every lane's claim goes through here.
+
+    Admission is per slot: each slot's request is read once and its identity
+    parsed from those bytes; all of that slot's identity views are acquired in
+    one sorted all-or-none call. A slot that changed or left (SNAPSHOT_CHANGED),
+    is held by a live owner (IDENTITY_LEASED) or whose lease cannot be read
+    (LEASE_UNKNOWN) is not admitted. ``admission`` decides the rest: CLAIM_ALL
+    claims every slot or raises before anything is published; CLAIM_PREFIX (the
+    priority lane) stops at the first unadmitted slot, keeping the stable
+    planned prefix in order; CLAIM_EACH skips it and admits later slots. Under
+    either partial mode a changing lower slot never blocks a stable one above.
+
+    Construction runs in a hidden staging directory whose own flock this
+    process holds until handoff, so recovery can tell a live constructor's
+    staging (held) from a crashed one's (free) by fact, never by age. The
+    lease-v1 metadata is written in staging and published by rename before any
+    request moves; each request is revalidated under its lease and moved. On
+    any exception every moved request is renamed back, the batch removed, and
+    only then are the leases released, in a ``finally`` no cleanup failure can
+    skip. On success the caller holds the leases (``_HELD_CLAIM_LEASES``) until
+    ``_release_claim_batch``.
     """
 
-    slots = [
-        _read_claim_slot(
-            source,
-            expected=None if expected_records is None else expected_records.get(source.name),
-        )
-        for source in request_files
-    ]
-    if not slots:
-        raise ValueError("materialization claim requires at least one request")
-    lease_paths = [
-        path for slot in slots for path in _witness_lease_paths(inflight_path, slot.witness)
-    ]
-    try:
-        leases = _lease.acquire_all(lease_paths)
-    except OSError as exc:
-        raise _ClaimLeaseUnknown(str(exc)) from exc
-    if leases is None:
-        raise _ClaimIdentityOwned(", ".join(slot.source.name for slot in slots))
-    generation = uuid4().hex
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    batch_path = inflight_path / (
-        f"{prefix}{stamp}{_LEASE_BATCH_MARK}{generation[:12]}.pid{os.getpid()}"
-    )
+    admitted: list[tuple[_ClaimSlot, list[_lease.HeldLease]]] = []
+    reasons: list[str] = []
+    staging_fd: int | None = None
+    staging: Path | None = None
+    batch_path: Path | None = None
     moved: list[tuple[Path, Path]] = []
-    staging = inflight_path / f".staging.{batch_path.name}"
-    published = False
     try:
-        # Metadata first, published by rename: a visible lease-v1 batch always
-        # names its leases, so UNKNOWN means unreadable state, never a gap.
-        staging.mkdir(parents=True)
+        for source in request_files:
+            expected = None if expected_records is None else expected_records.get(source.name)
+            try:
+                slot = _read_claim_slot(source, expected=expected)
+            except FileNotFoundError:
+                reasons.append(_CLAIM_SLOT_CHANGED_REASON)
+                if admission != CLAIM_EACH:
+                    break
+                continue
+            own = {lease.path for _slot, held in admitted for lease in held}
+            try:
+                leases = _lease.acquire_all(
+                    path for path in _witness_lease_paths(inflight_path, slot.witness)
+                    if path not in own
+                )
+            except OSError:
+                leases, reason = None, _CLAIM_LEASE_UNKNOWN_REASON
+            else:
+                reason = _CLAIM_IDENTITY_LEASED_REASON
+            if leases is None:
+                reasons.append(reason)
+                if admission != CLAIM_EACH:
+                    break
+                continue
+            admitted.append((slot, leases))
+        if admission == CLAIM_ALL and len(admitted) < len(request_files):
+            raise _claim_failure(reasons)
+        if not admitted:
+            yield None, (), tuple(dict.fromkeys(reasons))
+            return
+        slots = [slot for slot, _held in admitted]
+        leases = [lease for _slot, held in admitted for lease in held]
+        generation = uuid4().hex
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        name = f"{prefix}{stamp}{_LEASE_BATCH_MARK}{generation[:12]}.pid{os.getpid()}"
+        inflight_path.mkdir(parents=True, exist_ok=True)
+        staging = inflight_path / f"{_STAGING_PREFIX}{name}"
+        staging.mkdir()
+        staging_fd = os.open(staging, os.O_RDONLY)
+        fcntl.flock(staging_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         _write_lease_claim_metadata(staging, slots, leases, generation)
-        os.rename(staging, batch_path)
-        published = True
+        os.rename(staging, inflight_path / name)
+        staging, batch_path = None, inflight_path / name
         for slot in slots:
             # Validate under the lease: the bytes moved are the bytes leased.
             current = slot.source.read_bytes()
@@ -5653,11 +5712,66 @@ def _claim_construction(
                     _rename_back(claimed, source)
                 except OSError:
                     pass  # stays in the dead batch; lease recovery restores it
-            _remove_empty_claim_batch(batch_path if published else staging)
+            for leftover in (batch_path, staging):
+                if leftover is not None:
+                    _remove_empty_claim_batch(leftover)
         finally:
-            _lease.release(leases)
+            try:
+                if staging_fd is not None:
+                    os.close(staging_fd)
+            finally:
+                _lease.release(lease for _slot, held in admitted for lease in held)
         raise
-    yield batch_path
+    os.close(staging_fd)
+    yield batch_path, tuple(slot.source for slot in slots), tuple(dict.fromkeys(reasons))
+
+
+def _abandoned_staging(inflight_path: Path) -> tuple[Path, ...]:
+    """Staging directories whose constructor is gone (its flock is free).
+
+    A live constructor holds its staging directory's flock from creation to
+    publication, so a free one is crash debris (no request ever moved into
+    it). Yields each with its flock taken by this process; the caller removes it.
+    """
+
+    if not inflight_path.exists():
+        return ()
+    found: list[Path] = []
+    for path in sorted(inflight_path.glob(f"{_STAGING_PREFIX}*")):
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            continue  # a live constructor: never touched
+        found.append(path)
+        os.close(fd)  # rmdir below cannot race a constructor: it never reuses a name
+    return tuple(found)
+
+
+def _drain_abandoned_staging(inflight_path: Path) -> int:
+    """Remove crash debris left before a claim was published; no request is lost."""
+
+    drained = 0
+    for path in _abandoned_staging(inflight_path):
+        if _claim_request_files(path):
+            continue  # cannot happen (requests move only after publication)
+        _remove_empty_claim_batch(path)
+        drained += not path.exists()
+    return drained
+
+
+def inflight_requests_pending(inflight_path: Path) -> bool:
+    """Whether any published claim batch holds an authority-carrying request.
+
+    The one definition of unfinished inflight work, shared by recovery and the
+    daemon's discovery gate: staging debris and lease files are not work.
+    """
+
+    return any(_claim_request_files(batch) for batch in _claim_batches(inflight_path))
 
 
 def _rename_back(claimed: Path, source: Path) -> None:
@@ -5793,24 +5907,38 @@ def _new_claim_batch(
     The caller owns the batch until ``_release_claim_batch``.
     """
 
+    if not request_files:
+        raise ValueError("materialization claim requires at least one request")
     with _claim_construction(
         inflight_path, request_files, expected_records=expected_records, prefix=prefix,
-    ) as batch_path:
+    ) as (batch_path, _admitted, _reasons):
         return batch_path
 
 
-_CLAIM_IDENTITY_LEASED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_IDENTITY_LEASED"
-_CLAIM_LEASE_UNKNOWN_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_LEASE_UNKNOWN"
+def _claim_failure(reasons: Sequence[str]) -> Exception:
+    if _CLAIM_LEASE_UNKNOWN_REASON in reasons:
+        return _ClaimLeaseUnknown(", ".join(reasons))
+    if _CLAIM_IDENTITY_LEASED_REASON in reasons:
+        return _ClaimIdentityOwned(", ".join(reasons))
+    return FileNotFoundError(", ".join(reasons) or "no request admitted")
+
+
 
 
 @dataclass(frozen=True)
 class InflightReconcileReport:
     restored: tuple[str, ...]
     refused: tuple[tuple[str, str], ...]  # (batch, state) left untouched
+    # Residue outside any published batch that still names an owner: a held
+    # lease or a live constructor's staging directory. Either one means a
+    # claimant is still running, so the queue is not quiescent.
+    held_leases: tuple[str, ...] = ()
+    live_staging: tuple[str, ...] = ()
+    drained_staging: int = 0
 
     @property
     def quiescent(self) -> bool:
-        return not self.refused
+        return not (self.refused or self.held_leases or self.live_staging)
 
 
 def reconcile_inflight_for_migration(
@@ -5819,32 +5947,35 @@ def reconcile_inflight_for_migration(
     """Return every inflight request to ``requests/`` when no owner remains.
 
     The quiescent ownership transition of canonical_execution_lease.md 2.5,
-    for upgrade and rollback alike. Precondition (the operator's, not checked
-    here): claim acquisition is stopped, i.e. the forecast-live daemon is
-    stopped, and with it its resident worker. A lease-v1 batch is restored only
-    when its leases are acquired here (no owner), and they stay held across the
-    restore; HELD or UNKNOWN is refused. A LEGACY batch has no lease, so it is
-    restored only when no process named by its ``owner_pid`` metadata or
-    ``.pid<N>`` suffix is alive; otherwise it is refused. Refusal is a fact to
-    act on (finish or reap the owner, then rerun), never a wait. No clock.
+    for upgrade and rollback alike. Precondition (the operator's; this report
+    is evidence for it, not a substitute): claim acquisition is stopped, i.e.
+    the forecast-live daemon and its resident worker are stopped.
+
+    A lease-v1 batch is restored only while its leases are held here (no
+    owner); HELD or UNKNOWN (unreadable, or an unsupported protocol) is
+    refused. A LEGACY batch is restored only when no process named by its
+    ``owner_pid`` or ``.pid<N>`` is alive. Abandoned staging (its constructor's
+    flock is free) is drained; live staging and any lease still held after
+    every batch is accounted for are reported. ``quiescent`` is True only when
+    nothing was refused and no live residue remains. Refusal is a fact to act
+    on (finish or reap the owner, then rerun), never a wait. No clock.
     """
 
     inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
     restored: list[str] = []
     refused: list[tuple[str, str]] = []
+    drained = _drain_abandoned_staging(inflight_path) if apply else len(
+        _abandoned_staging(inflight_path)
+    )
     for batch_path in _claim_batches(inflight_path):
-        held: list[_lease.HeldLease] = []
+        state, held, dead = _observe_claim(batch_path, stale_after=float("inf"))
         try:
-            if _claim_protocol(batch_path) == _lease.LEASE_PROTOCOL:
-                paths = _claim_lease_paths(batch_path)
-                state, held = (
-                    (_lease.LeaseState.UNKNOWN, []) if paths is None else _lease.observe(paths)
-                )
-                if state is not _lease.LeaseState.ACQUIRED_FOR_RECOVERY:
-                    refused.append((batch_path.name, state.value))
+            if state is _lease.LeaseState.LEGACY:
+                if _legacy_owner_alive(batch_path):
+                    refused.append((batch_path.name, "LEGACY_OWNER_ALIVE"))
                     continue
-            elif _legacy_owner_alive(batch_path):
-                refused.append((batch_path.name, "LEGACY_OWNER_ALIVE"))
+            elif not dead:
+                refused.append((batch_path.name, state.value))
                 continue
             for path in _claim_request_files(batch_path):
                 restored.append(
@@ -5855,10 +5986,27 @@ def reconcile_inflight_for_migration(
                 _remove_empty_claim_batch(batch_path)
         finally:
             _lease.release(held)
-    if apply:
-        _lease.sweep(_lease_dir(inflight_path).glob("*.lease")
-                     if _lease_dir(inflight_path).exists() else ())
-    return InflightReconcileReport(tuple(restored), tuple(refused))
+    lease_dir = _lease_dir(inflight_path)
+    lease_files = sorted(lease_dir.glob("*.lease")) if lease_dir.exists() else []
+    held_leases: list[str] = []
+    for path in lease_files:
+        state, taken = _lease.observe([path])
+        _lease.release(taken) if apply else _release_without_sweep(taken)
+        if state is not _lease.LeaseState.ACQUIRED_FOR_RECOVERY:
+            held_leases.append(f"{path.name}:{state.value}")
+    abandoned = set(_abandoned_staging(inflight_path))
+    live_staging = sorted(
+        path.name for path in inflight_path.glob(f"{_STAGING_PREFIX}*")
+        if path not in abandoned
+    ) if inflight_path.exists() else []
+    return InflightReconcileReport(
+        tuple(restored), tuple(refused), tuple(held_leases), tuple(live_staging), drained,
+    )
+
+
+def _release_without_sweep(leases: Sequence[_lease.HeldLease]) -> None:
+    for lease in leases:
+        os.close(lease.fd)
 
 
 def _legacy_owner_alive(batch_path: Path) -> bool:
@@ -5885,37 +6033,29 @@ def _claim_available_slots(
 ) -> tuple[Path | None, tuple[Path, ...], tuple[str, ...]]:
     """(batch, claimed sources, deferral reasons) for a flocked lane.
 
-    A slot whose identity a live owner leases, or whose lease is UNKNOWN,
-    defers alone; the rest are claimed in their planned order through the one
-    constructor. SCOPE: those slots. DRAIN: the owner releases (or dies and
-    its lease frees). RESET: the next claim acquires the lease.
+    Each slot is admitted alone (CLAIM_EACH): one whose identity a live owner
+    leases, whose lease is UNKNOWN, or which changed or left defers alone; the
+    rest are claimed in planned order. SCOPE: those slots. DRAIN: the owner
+    releases (or dies and its lease frees). RESET: the next claim acquires it.
     """
 
-    claimable: list[Path] = []
-    reasons: list[str] = []
+    readable: list[Path] = []
     for source in selected:
         try:
-            slot = _read_claim_slot(source, expected=None)
-            paths = _witness_lease_paths(inflight_path, slot.witness)
-            state, held = _lease.observe(paths)
+            _read_claim_slot(source, expected=None)
         except (FileNotFoundError, ValueError):
-            continue
-        _lease.release(held)
-        if state is _lease.LeaseState.HELD:
-            reasons.append(_CLAIM_IDENTITY_LEASED_REASON)
-        elif state is _lease.LeaseState.UNKNOWN:
-            reasons.append(_CLAIM_LEASE_UNKNOWN_REASON)
-        else:
-            claimable.append(source)
-    if not claimable:
-        return None, (), tuple(dict.fromkeys(reasons))
+            continue  # left, or no identity: the plan already deferred it
+        readable.append(source)
+    if not readable:
+        return None, (), ()
     try:
-        batch = _new_claim_batch(inflight_path, claimable)
-    except _ClaimIdentityOwned:
-        return None, (), tuple(dict.fromkeys((*reasons, _CLAIM_IDENTITY_LEASED_REASON)))
-    except _ClaimLeaseUnknown:
-        return None, (), tuple(dict.fromkeys((*reasons, _CLAIM_LEASE_UNKNOWN_REASON)))
-    return batch, tuple(claimable), tuple(dict.fromkeys(reasons))
+        with _claim_construction(inflight_path, readable, admission=CLAIM_EACH) as (
+            batch, claimed, reasons,
+        ):
+            return batch, claimed, reasons
+    except FileNotFoundError:
+        # Changed or left during its move; the constructor unwound the claim.
+        return None, (), (_CLAIM_SLOT_CHANGED_REASON,)
 
 
 _PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON = (
@@ -5936,10 +6076,18 @@ _PRIORITY_CLAIM_RACED_OWNER_REASONS = (
 )
 
 
+# Constructor deferral reasons, in the priority lane's vocabulary.
+_PRIORITY_DEFERRAL_FOR = {
+    _CLAIM_IDENTITY_LEASED_REASON: _PRIORITY_CLAIM_RACED_OWNER_REASONS,
+    _CLAIM_LEASE_UNKNOWN_REASON: (_PRIORITY_CLAIM_UNKNOWN_OWNER_REASON,),
+    _CLAIM_SLOT_CHANGED_REASON: (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,),
+}
+
+
 def _try_claim_priority_request(
     plan: _RequestClaimReadPlan,
 ) -> tuple[_MaterializationQueueClaim | None, tuple[str, ...]]:
-    """Lease the complete already-planned priority batch without the broad flock.
+    """Lease the stable prefix of the already-planned priority batch, lock-free.
 
     SCOPE: the bounded selected semantic identities, including source cycle and Day0
     conditioning identity. DRAIN: the child completes, or stale-claim recovery
@@ -5958,10 +6106,17 @@ def _try_claim_priority_request(
     # re-rank. The DB feeds ranking here, while the child re-proves the
     # target's dependency witness under its final writer transaction. Unrelated
     # forecast writes therefore never revoke the planned request.
+    #
+    # Progress: the plan's slots are an ordered contract. The stable prefix of
+    # that order is claimed; the first slot that changed, left, or was
+    # outranked by newly planned work ends the prefix, and only that slot and
+    # those behind it defer. A churning lower slot never blocks a stable one.
+    deferred: list[str] = []
     try:
         with _claim_read_deadline_guard():
             current_fingerprint = _claim_db_fingerprint(plan.claim.forecast_db_path)
             current_snapshot = _queue_files_snapshot(plan.claim.request_path)
+            stable = len(selected)
             if (
                 current_snapshot != plan.claim.request_snapshot
                 or current_fingerprint != plan.claim.forecast_db_fingerprint
@@ -5986,61 +6141,74 @@ def _try_claim_priority_request(
                     return None, (_PRIORITY_CLAIM_UNKNOWN_OWNER_REASON,)
                 if refreshed.stale_conflict_batches:
                     return None, (_CLAIM_STALE_RECOVERY_DEFERRED_REASON,)
-                if (
-                    not refreshed.claim.selected_files
-                    or refreshed.claim.selected_files != selected
-                ):
-                    return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
                 original_records = dict((row[0], row) for row in plan.claim.request_snapshot)
                 updated_records = dict((row[0], row) for row in refreshed.claim.request_snapshot)
-                if any(
-                    original_records.get(path.name) is None
-                    or original_records.get(path.name) != updated_records.get(path.name)
-                    for path in selected
-                ):
+                replanned = refreshed.claim.selected_files
+                stable = 0
+                for index, path in enumerate(selected):
+                    if (
+                        index >= len(replanned)
+                        or replanned[index] != path
+                        or original_records.get(path.name) is None
+                        or original_records.get(path.name) != updated_records.get(path.name)
+                    ):
+                        break
+                    stable += 1
+                if stable == 0:
                     return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
+                if stable < len(selected):
+                    deferred.append(_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON)
                 plan = refreshed
-            if _queue_files_snapshot(plan.claim.request_path) != plan.claim.request_snapshot:
-                return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
     except _ClaimReadDeadlineExceeded:
         return None, (_CLAIM_READ_DEFERRED_REASON,)
     except sqlite3.Error:
         return None, (_PRIORITY_CLAIM_FENCE_UNREADABLE_REASON,)
-    witnesses = tuple(
-        _claim_identity_witness(_load_request_payload_for_coalescing(path) or {})
-        for path in selected
-    )
-    if any(witness is None for witness in witnesses):
-        return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-    identity_keys = frozenset().union(*(
-        _claim_identity_keys(witness) for witness in witnesses
-    ))
+    prefix_slots = selected[:stable]
     inflight_path = plan.claim.request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
-    # Advisory only: names an owner already visible in inflight. Exclusion is
-    # the identity lease below, which no scan-to-move interleaving can bypass.
-    observed = _priority_slot_owner_observed(inflight_path, identity_keys)
-    if observed is not None:
-        return None, observed
-    try:
-        batch_path = _new_claim_batch(
-            inflight_path, selected,
-            expected_records={row[0]: row for row in plan.claim.request_snapshot},
-            prefix="priority.",
+    # Advisory only: names an owner already visible in inflight, slot by slot
+    # from the top. Exclusion is the identity lease, which no scan-to-move
+    # interleaving can bypass.
+    for index, path in enumerate(prefix_slots):
+        witness = _claim_identity_witness(_load_request_payload_for_coalescing(path) or {})
+        observed = (
+            (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,) if witness is None
+            else _priority_slot_owner_observed(inflight_path, _claim_identity_keys(witness))
         )
-    except _ClaimIdentityOwned:
-        return None, _PRIORITY_CLAIM_RACED_OWNER_REASONS
-    except _ClaimLeaseUnknown:
-        return None, (_PRIORITY_CLAIM_UNKNOWN_OWNER_REASON,)
+        if observed is not None:
+            if index == 0:
+                return None, observed
+            prefix_slots = prefix_slots[:index]
+            deferred.extend(observed)
+            break
+    # The stable planned prefix is admitted in order (CLAIM_PREFIX): a slot
+    # that changed, left or is owned stops admission there, so it never blocks
+    # the unchanged held slot planned ahead of it. Any other I/O fault
+    # propagates: the constructor already restored every moved request and
+    # released every lease, so nothing is left owned.
+    try:
+        with _claim_construction(
+            inflight_path, prefix_slots,
+            expected_records={row[0]: row for row in plan.claim.request_snapshot},
+            prefix="priority.", admission=CLAIM_PREFIX,
+        ) as (batch_path, admitted, lease_reasons):
+            pass
     except FileNotFoundError:
+        # A request changed or left while it moved: the constructor unwound
+        # the whole claim (every move restored, every lease released).
         return None, (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-    # Any other I/O fault propagates: the constructor already restored every
-    # moved request and released every lease, so nothing is left owned.
+    deferral = tuple(dict.fromkeys(
+        reason
+        for raw in (*deferred, *lease_reasons)
+        for reason in _PRIORITY_DEFERRAL_FOR.get(raw, (raw,))
+    ))
+    if batch_path is None:
+        return None, deferral or (_PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
     return replace(
         plan.claim,
         batch_path=batch_path,
-        claimed_count=len(selected),
-        selected_files=tuple(batch_path / path.name for path in selected),
-    ), ()
+        claimed_count=len(admitted),
+        selected_files=tuple(batch_path / path.name for path in admitted),
+    ), deferral
 
 
 def _priority_slot_owner_observed(

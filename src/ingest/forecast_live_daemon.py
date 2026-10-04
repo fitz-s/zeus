@@ -2418,13 +2418,22 @@ def _replacement_forecast_queue_pending(
 
 
 def _replacement_forecast_inflight_pending(cfg: dict[str, object]) -> bool:
+    """Whether a published claim batch still holds a request.
+
+    Shares the queue's own classifier, so construction debris (crash-left
+    staging metadata) and lease files are never mistaken for pending work.
+    """
+    from src.data.replacement_forecast_live_materialization_queue import (
+        inflight_requests_pending,
+    )
+
     configured = cfg.get("inflight_dir")
     path = (
         Path(str(configured))
         if configured not in (None, "")
         else Path(str(cfg["request_dir"])).parent / "inflight"
     )
-    return path.exists() and next(path.glob("*/*.json"), None) is not None
+    return inflight_requests_pending(path)
 
 
 def _replacement_forecast_discovery_revision(
@@ -2551,7 +2560,7 @@ def _replacement_forecast_discovery_job() -> dict[str, object] | None:
         }
     revision = _replacement_forecast_discovery_revision(cfg)
     if revision is not None and revision == _replacement_forecast_last_discovery_revision:
-        return
+        return {"status": "unchanged_discovery_revision"}
     discovery_limit = int(cfg["seed_discovery_limit"])
     report = discover_replacement_forecast_materialization_seeds(
         forecast_db=cfg["forecast_db"],
@@ -2573,6 +2582,7 @@ def _replacement_forecast_discovery_job() -> dict[str, object] | None:
         _replacement_forecast_last_discovery_revision = revision
     if report.status != "NO_ELIGIBLE_TARGETS":
         logger.info("replacement forecast recovery discovery: %s", report.as_dict())
+    return report.as_dict()
 
 
 def _publish_replacement_forecast_boot_wake() -> object | None:
