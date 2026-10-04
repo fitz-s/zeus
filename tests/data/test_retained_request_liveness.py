@@ -1,5 +1,8 @@
 # Created: 2026-10-03
 # Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-10-03; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Purpose: Defend strict retained-request asset absence and causal materialization clocks.
+# Reuse: Run after changing request retirement, current-consumer reads, or bound anchor clocks.
 # Authority basis: production incident 2026-10-03 (London 2026-10-02 low retained
 #   643x; Atlanta 2026-10-03 high CURRENT_EVIDENCE_NOT_LIVE retained 51x).
 """Retained requests must reach a terminal outcome their own facts decide.
@@ -153,8 +156,46 @@ def _london_request(**overrides):
     return body
 
 
-def _drive(tmp_path, monkeypatch, body, *, held=frozenset(), held_error=False):
+def _drive(tmp_path, monkeypatch, body, *, held=frozenset(), held_error=False, position=None, review_status=None):
     import src.data.replacement_forecast_live_materialization_queue as queue
+    import src.state.db as db
+
+    trade_path = tmp_path / "trade.db"
+    with sqlite3.connect(trade_path) as conn:
+        conn.execute(
+            "CREATE TABLE position_current(position_id TEXT, city TEXT, target_date TEXT, "
+            "temperature_metric TEXT, phase TEXT, chain_state TEXT, chain_shares REAL, "
+            "chain_cost_basis_usd REAL, fill_authority TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE review_work_items(owner_table TEXT, subject_id TEXT, family_city TEXT, "
+            "family_target_date TEXT, family_temperature_metric TEXT, status TEXT)"
+        )
+        for city, target, metric in held:
+            conn.execute("INSERT INTO position_current VALUES (?, ?, ?, ?, 'active', 'synced', 5, 1, 'venue_position_observed')",
+                         ("held", city, target, metric))
+        if position is not None:
+            conn.execute("INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         ("probe", body["city"], body["target_date"], body["temperature_metric"], *position))
+        if review_status == "MISSING_TABLE":
+            conn.execute("DROP TABLE review_work_items")
+        elif review_status is not None:
+            family = (body["city"], body["target_date"], body["temperature_metric"])
+            subject = "probe"
+            if review_status == "SUBJECT_OPEN":
+                family = (None, None, None)
+                review_status = "OPEN"
+            elif review_status == "UNRELATED_OPEN":
+                family = ("Tokyo", "2026-10-01", "high")
+                subject = "other-position"
+                review_status = "OPEN"
+            conn.execute("INSERT INTO review_work_items VALUES ('position_current', 'probe', ?, ?, ?, ?)",
+                         (*family, review_status))
+            if subject != "probe":
+                conn.execute("UPDATE review_work_items SET subject_id = ?", (subject,))
+        if held_error:
+            conn.execute("DROP TABLE position_current")
+    monkeypatch.setattr(db, "_zeus_trade_db_path", lambda: trade_path)
 
     root = tmp_path / "replacement_forecast_live"
     requests = root / "requests"
@@ -176,13 +217,21 @@ def _drive(tmp_path, monkeypatch, body, *, held=frozenset(), held_error=False):
     monkeypatch.setattr(queue, "_instrument_set_expansion_already_applied", lambda **_k: False)
     reads = []
 
+    real_exposure = queue._current_money_risk_scopes_for_exact_seeds
+
     def exposure(scopes, *, trade_conn=None, strict=False):
         reads.append((set(scopes), strict))
-        if held_error:
-            raise sqlite3.OperationalError("trade db unavailable")
-        return frozenset(scopes) & held
+        return real_exposure(scopes, trade_conn=trade_conn, strict=strict)
 
     monkeypatch.setattr(queue, "_current_money_risk_scopes_for_exact_seeds", exposure)
+    if hasattr(queue, "_retirement_has_current_consumer"):
+        retirement_reader = queue._retirement_has_current_consumer
+
+        def observe_retirement(scope):
+            reads.append(({scope}, True))
+            return retirement_reader(scope)
+
+        monkeypatch.setattr(queue, "_retirement_has_current_consumer", observe_retirement)
     spawned = []
 
     def runner(argv):
@@ -201,6 +250,49 @@ def _drive(tmp_path, monkeypatch, body, *, held=frozenset(), held_error=False):
     receipts = ([json.loads(p.read_text()) for p in receipt_dir.glob("*.json")]
                 if receipt_dir.is_dir() else [])
     return queue, report, spawned, receipts, path, reads
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("position,review_status,keep", (
+    (("active", "synced", 5, 0, "venue_position_observed"), None, True),
+    (("active", "synced", 5, None, "venue_position_observed"), None, True),
+    (("settled", "closed_redeemed", 5, 0, "settled"), None, True),
+    (("active", "chain_absent_confirmed_position_unattributed", 0, 0, "venue_confirmed_full"), None, True),
+    (("voided", "chain_confirmed_zero", 0, 0, "venue_confirmed_full"), None, True),
+    (("voided", "chain_confirmed_zero", 0, 0, "cancelled_remainder"), None, True),
+    (("voided", "unknown", 0, 0, "none"), None, True),
+    (("voided", "synced", None, 0, "none"), None, True),
+    (("pending_entry", "chain_confirmed_zero", 0, 0, "none"), None, True),
+    (("voided", "chain_confirmed_zero", 0, 0, "none"), "OPEN", True),
+    (("voided", "chain_confirmed_zero", 0, 0, "none"), "SUBJECT_OPEN", True),
+    (("voided", "chain_confirmed_zero", 0, 0, "none"), "UNRELATED_OPEN", False),
+    (("voided", "chain_confirmed_zero", 0, 0, "none"), "MISSING_TABLE", True),
+    (("voided", "chain_confirmed_zero", 0, 0, "none"), "RESOLVED", False),
+    (("voided", "synced", 0, None, "none"), None, False),
+    (("settled", "closed_redeemed", 0, 0, "settled"), None, False),
+))
+def test_retirement_uses_real_asset_absence_not_positive_cost(
+    tmp_path, monkeypatch, metric, position, review_status, keep,
+):
+    body = _london_request(temperature_metric=metric)
+    _q, _r, spawned, receipts, _path, reads = _drive(
+        tmp_path, monkeypatch, body, position=position, review_status=review_status,
+    )
+    assert reads
+    assert bool(spawned) is keep
+    assert bool(receipts) is not keep
+
+
+def test_expired_nonheld_urgent_metadata_cannot_prevent_retirement(tmp_path, monkeypatch):
+    body = _london_request(
+        upgrade_trigger="day0_observation_advanced",
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time="2026-10-02T23:40:00+00:00",
+        day0_observed_extreme_c=8.0, day0_observed_extreme_unit="C",
+        capital_protection_retry_tier="urgent",
+    )
+    _q, _r, spawned, receipts, _path, reads = _drive(tmp_path, monkeypatch, body)
+    assert reads and spawned == [] and len(receipts) == 1
 
 
 def test_london_incident_request_is_retired_with_a_truthful_receipt(tmp_path, monkeypatch):

@@ -14348,3 +14348,84 @@ Normal maintenance after a new loaded stamp must separately prove real bytes,
 headers/grid and clock roles; no manual kick or guaranteed current receipt
 consumption is permitted. Production0/756, two station-ground gaps, native
 representativeness and full prediction/profit readiness remain OPEN.
+
+### Peer retirement negative-proof repair — before edit (2026-10-04)
+
+The capture commit b83d26e5c push is rejected non-fast-forward, with no remote or
+live mutation: origin/live advances fac→3ecd7dbbb69149c2cfe1895f2eb7c82c2e1c14bb
+through four materializer/retirement commits. Pure merge preview is clean but
+does not authorize that money-path baseline. Private exact gitobjects overlay
+of three peer modules plus their retained-request file has12PASS/2.88s, evidence
+/tmp/zeus-peer3ec-proof-20261004.5ULOzA/{peer.xml,peer.log,run_peer_overlay.py}.
+Those controls omit a critical real-SQL negative-proof case: C's active/synced
+position with chain_shares5 and cost0 is wrongly declared absent/EXPIRED, while
+cost1 is retained. Normal chain reconciliation permits positive-chain recovery
+with zero cost. C REQUESTCHANGES blocks deployment of3ec despite those12 passes.
+
+Root authorizes development-only rebase onto3ec, not live adoption. The task's
+capture commit is now3f08eb44413b656c514f01bc0d34f02f765975b1; all approved
+capture four hashes5cf74/848/7d38/777 remain exact. No force push, origin rewind,
+live FF or loader is run to evade the upstream defect.
+
+Before edit, root assigns the NoObs writer only
+src/data/replacement_forecast_live_materialization_queue.py and
+tests/data/test_retained_request_liveness.py. Introduce the narrow retirement
+absence-negative-proof read, not a change to the existing capital-risk/sizing
+reader: retirement must not omit positive chain shares because cost is0/NULL,
+phase is terminal/transient or reconciliation/review state is unresolved.
+Confirmed-fill or otherwise unknown/review exposure is not proven flat; failed
+reads or incomplete identity stay unknown/retain. Exact known-zero NONHELD
+families may still retire on their own expired/ended contract. Current valid
+requests, source clocks, readiness/probability gates, caps/budgets, capital
+sizing and ordinary priority behavior are unchanged.
+
+SCOPE: this exact request's city/target-date/HIGH-or-LOW family and canonical
+exposure proof. DRAIN: ordinary chain/CLOB reconciliation, confirmed-fill and
+review resolution, or the normal replacement request for a genuinely held
+family; no manual trade or age-forced closure. RESET: known-flat canonical
+absence, never cost-basis zero or an unreadable book. Antibodies must exercise
+real private SQL through retirement and include HIGH/LOW cost0/NULL, positive
+chain terminal/unknown states and confirmed-fill/review preservation; known-zero
+NONHELD expiry retirement and current/day0 controls remain positive. Actual
+reconciliation law and consumer requirements win over a risk-sizing shortcut.
+
+Main owns PLAN/registry/git only and pauses all project writes after this entry
+until that two-file writer freezes. Capture four remain reviewed/frozen, without
+adding new source ownership. After named C approval and exact narrow tests,
+integrate capture plus peer-negative-proof repair in the normal FF lane; do not
+load unsafe3ec alone. No whole118/data15 repeat is implied by this two-file
+retirement delta. Additional peer changes require a fresh bounded report.
+
+Peer negative-proof two-file refreeze is queue SHA256
+10a799118d08a83df77a2e6f0b40f3a1f60a1b764cc97f22f8409f7af7ae9d0f
+and retained-liveness test889cc5e1162da99bf1013575139762b1c678277d1e4da82d9cc445ffe6a944e9.
+The dedicated retirement reader uses one exact canonical read snapshot and does
+not modify the original cost/phase-sensitive capital-risk reader. Positive or
+unknown chain quantity, nonterminal lifecycle, unresolved/unknown fill authority,
+family/position review and missing/unreadable schema retain. Known-zero terminal
+inventory with NONE/SETTLED fill authority and no unresolved review is the narrow
+negative proof. A request without a proven lapse never calls that reader.
+
+Actual private SQL before-original3ec16FAIL/6controls→owned45PASS (33 new plus
+the original12); queue current/debt/local-calendar/fairness twins51PASS. XMLs:
+/tmp/zeus-retirement-absence-final-20261004.xml and
+/tmp/zeus-retirement-absence-red-20261004.xml; the intermediate green XML is
+/tmp/zeus-retirement-absence-green-20261004.xml. Queue twins51PASS are worker
+tool evidence, not an invented extra XML. Compile2/diff PASS.
+Approved capture hashes5cf74/848/7d38/777 are unchanged and118 owned capture
+cases are not repeated. The earlier12 peer controls were insufficient to prove
+real SQL absence, which this new matrix covers; no count is relabeled whole-repo
+green. Final C named negative-proof delta review is pending before combined
+source landing/loading. Main resumes only these existing registry rows and PLAN
+plus hash/compile/YAML/freshness/diff checks, without worker source edits.
+
+C final APPROVE of exact10a79911/889cc5e1 closes the peer zero-cost HIGH finding:
+36 independent real-SQL HIGH/LOW/unknown/review/NONHELD controls PASS/1.73s,
+hash/diff PASS, no remaining named blocker. Root accepts capture plus follow-on
+retirement repair, not unsafe3ec alone, and authorizes normal combined FF/load.
+Main hash6/compile6, YAML2 parse with only exact queue-why and retained-test-note
+fields changed, test freshness ok=true/issues=[], diff PASS. Approved capture
+118 and required delta11 are not repeated. Live is observed already on peer3ec
+under another completed normal load before this delivery; this does not negate
+the verified negative-proof defect or constitute our newtip loading evidence.
+No SDK/source/cycle/guard mutation is used to force runtime acceptance.

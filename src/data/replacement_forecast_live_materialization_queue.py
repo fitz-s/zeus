@@ -2847,6 +2847,55 @@ _REQUEST_TARGET_DAY_ENDED_REASON = (
 )
 
 
+def _retirement_has_current_consumer(scope: tuple[str, str, str]) -> bool:
+    """Strict absence proof for retirement, not a cost/sizing risk classifier.
+
+    SCOPE: this exact family and its position-linked review debt. DRAIN: normal
+    reconciliation resolves inventory/phase/review truth. RESET: known zero,
+    terminal lifecycle and no unresolved review; unknown reads raise to retain.
+    """
+    from src.contracts.canonical_lifecycle import PositionPhase  # noqa: PLC0415
+    from src.contracts.position_truth import (  # noqa: PLC0415
+        FillAuthority, TERMINAL_NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+    )
+    from src.contracts.review_work_item import WorkItemStatus  # noqa: PLC0415
+    from src.state.db import _zeus_trade_db_path  # noqa: PLC0415
+
+    conn = _queue_read_only_connection(_zeus_trade_db_path())
+    try:
+        conn.execute("BEGIN")
+        rows = conn.execute(
+            "SELECT position_id, phase, chain_state, chain_shares, fill_authority "
+            "FROM position_current WHERE city = ? AND target_date = ? "
+            "AND LOWER(temperature_metric) = ?", scope,
+        ).fetchall()
+        terminal = {PositionPhase.VOIDED, PositionPhase.SETTLED, PositionPhase.ADMIN_CLOSED}
+        flat = TERMINAL_NO_CURRENT_MONEY_RISK_CHAIN_STATES | {"chain_confirmed_zero", "synced"}
+        for _position_id, phase, chain_state, shares, fill_authority in rows:
+            try:
+                quantity = float(shares)
+                lifecycle = PositionPhase(phase)
+                authority = FillAuthority(fill_authority)
+            except (TypeError, ValueError):
+                return True
+            if not math.isfinite(quantity) or quantity != 0 or lifecycle not in terminal or chain_state not in flat:
+                return True
+            if authority not in {FillAuthority.NONE, FillAuthority.SETTLED}:
+                return True
+        unresolved = conn.execute(
+            "SELECT 1 FROM review_work_items AS r "
+            "WHERE COALESCE(r.status, '') NOT IN (?, ?) AND ("
+            "(r.family_city = ? AND r.family_target_date = ? AND LOWER(r.family_temperature_metric) = ?) "
+            "OR (r.owner_table = 'position_current' AND r.subject_id IN ("
+            "SELECT position_id FROM position_current WHERE city = ? AND target_date = ? "
+            "AND LOWER(temperature_metric) = ?))) LIMIT 1",
+            (WorkItemStatus.RESOLVED.value, WorkItemStatus.SUPERSEDED.value, *scope, *scope),
+        ).fetchone()
+        return unresolved is not None
+    finally:
+        conn.close()
+
+
 def _request_contract_lapse_reason(
     payload: Mapping[str, object],
     *,
@@ -7664,9 +7713,7 @@ def _process_claimed_materialization_batch(
                 lapse_reason = _request_contract_lapse_reason(
                     request_payload,
                     now_utc=lapse_clock,
-                    held=lambda scope: bool(_current_money_risk_scopes_for_exact_seeds(
-                        frozenset({scope}), strict=True,
-                    )),
+                    held=_retirement_has_current_consumer,
                 )
             except _ClaimReadDeadlineExceeded:
                 raise
