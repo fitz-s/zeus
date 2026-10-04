@@ -14,6 +14,7 @@ import stat as _stat_mode
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -2413,8 +2414,31 @@ def _seed_source_cycle_boundary(
 
 
 def _write_request(path: Path, payload: dict[str, object]) -> None:
+    _publish_request_bytes(path, json.dumps(payload, sort_keys=True, indent=2).encode("utf-8"))
+
+
+def _publish_request_bytes(path: Path, body: bytes) -> None:
+    """Publish request bytes as a fresh inode atomically replacing ``path``.
+
+    Invariant: a published request inode is immutable. No writer opens an
+    existing published name for writing or truncates it; every publication is
+    a new file in the same directory, fsynced, then ``os.replace``d over the
+    name. A claim, a hardlink or any other name still referring to the old
+    inode therefore keeps exactly the bytes it was leased with.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".publish")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    _fsync_directory(path.parent)
 
 
 def _cycle_advance_never_priced_scopes(
@@ -3836,8 +3860,9 @@ def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
 
 
 def _load_request_payload_for_coalescing(path: Path) -> Mapping[str, object] | None:
+    """The request a pathname names, read no-follow; None when not a readable regular file."""
     try:
-        return _parse_request_payload(path.read_bytes())
+        return _parse_request_payload(read_regular_request(path)[0])
     except OSError:
         return None
 
@@ -3859,16 +3884,24 @@ def read_regular_request(path: Path) -> tuple[bytes, os.stat_result]:
     file; any other OSError (absent, permission) propagates.
     """
 
+    # O_NONBLOCK: a FIFO opens at once instead of waiting for a writer, so
+    # fstat classifies it before any read. It is cleared before reading a
+    # regular file (where it has no effect anyway).
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise RequestNotRegular(errno.ELOOP, "request is a symlink", str(path)) from exc
         raise
-    with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
+    try:
+        info = os.fstat(fd)
         if not _stat_mode.S_ISREG(info.st_mode):
             raise RequestNotRegular(errno.EINVAL, "request is not a regular file", str(path))
+        os.set_blocking(fd, True)
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as handle:
         return handle.read(), info
 
 
@@ -5279,6 +5312,16 @@ def _claim_age_seconds(batch_path: Path) -> float:
 
 
 def _restore_claimed_request(path: Path, request_path: Path, batch_name: str) -> Path:
+    """Move a claimed request back to ``request_path``, never over another name.
+
+    Link-then-unlink keeps the request durable at every instant; a newer
+    publication holding the original name keeps it and ours takes a
+    ``.recovered-`` name. An interrupted restore can leave two names for one
+    inode; that is safe because a published request inode is immutable
+    (``_publish_request_bytes`` always replaces, never writes in place), so a
+    republish of either name is a new inode and cannot change the other.
+    """
+
     request_path.mkdir(parents=True, exist_ok=True)
     attempt = 0
     while True:
@@ -5688,7 +5731,7 @@ class _ClaimSlot:
 
 
 def _read_claim_slot(
-    source: Path, *, expected: tuple[str, int, int, str] | None,
+    source: Path, *, expected: tuple[str, int, int, str] | None, name: Path | None = None,
 ) -> _ClaimSlot:
     """The exact bytes and identity of one selected request.
 
@@ -5698,7 +5741,10 @@ def _read_claim_slot(
     constructor, never claimed).
     """
 
+    # ``source`` is what is read (the captured entry); ``name`` is the queue
+    # pathname it was captured from, which the slot and its record carry.
     body, info = read_regular_request(source)
+    source = source if name is None else name
     row = (source.name, info.st_mtime_ns, info.st_size, hashlib.sha256(body).hexdigest())
     if expected is not None and expected != row:
         raise FileNotFoundError("planned request changed before its lease")
@@ -5720,38 +5766,149 @@ _REQUEST_ALIAS_QUARANTINED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_AL
 _REQUEST_ALIAS_DIR = "quarantined_request_aliases"
 
 
-def _quarantine_request_alias(source: Path) -> Path | None:
-    """Move a symlink/non-regular request aside and record why; never follow it.
+_CAPTURE_PREFIX = ".capture."
+_ALIAS_RECEIPT_NAME = "receipt.json"
 
-    SCOPE: this publication's pathname only. ``os.rename`` renames the link
-    itself, so the alias target is neither read nor touched, and no
-    forecast-input marker is written (a mutable alias says nothing about any
-    forecast input). DRAIN: terminal now. RESET: a producer that republishes a
-    regular file is judged on its own. Returns the quarantined path, or None
-    when the pathname already left (another process quarantined or replaced it).
+
+def _quarantine_request_alias(source: Path) -> Path | None:
+    """Quarantine the queue pathname ``source`` (capture, then classify)."""
+    return _capture_and_settle(source, source.parent)
+
+
+def _quarantine_captured_entry(entry: Path, request_dir: Path) -> Path | None:
+    """Quarantine an entry this process already captured (staging, dead batch)."""
+    return _capture_and_settle(entry, request_dir)
+
+
+def _capture_and_settle(source: Path, restore_dir: Path) -> Path | None:
+    """Capture ``source``, then classify what was captured; never follow it.
+
+    Capture is ``os.rename`` of the pathname into a fresh, exclusive capture
+    directory (``tempfile.mkdtemp``: a unique name no other quarantine can
+    reuse) that this process flocks before the rename. Only the captured entry
+    is classified, with the shared no-follow nonblocking reader:
+
+    - regular: a publication repaired the name after it was seen as an alias.
+      It is a request, not an alias: restored collision-safe to ``request_dir``
+      (default: its own directory) and the capture directory removed.
+    - anything else (symlink, dangling link, FIFO, directory): it stays in its
+      capture directory with an exclusively created terminal receipt. Its
+      target is never read or touched and no forecast-input marker is written.
+
+    A crash between capture and receipt leaves an unreceipted capture
+    directory whose flock is free; ``_settle_abandoned_captures`` classifies it
+    the same way. Returns the quarantined entry, or None when nothing was
+    quarantined (the name left, or the captured entry was a regular request).
     """
 
-    root = source.parent.parent / _REQUEST_ALIAS_DIR
+    root = restore_dir.parent / _REQUEST_ALIAS_DIR
     root.mkdir(parents=True, exist_ok=True)
-    target = root / f"{source.name}.{uuid4().hex[:12]}"
+    # Created under a name settlers never scan, flocked, then renamed into the
+    # scanned namespace: a capture directory is never visible unlocked.
+    private = Path(tempfile.mkdtemp(dir=root, prefix=".private."))
+    fd = os.open(private, os.O_RDONLY)
     try:
-        kind = "symlink" if os.lstat(source).st_mode & 0o170000 == 0o120000 else "non_regular"
-        os.rename(source, target)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        capture = root / f"{_CAPTURE_PREFIX}{source.name}.{private.name.rsplit('.', 1)[-1]}"
+        os.rename(private, capture)
+        captured = capture / source.name
+        try:
+            os.rename(source, captured)
+        except FileNotFoundError:
+            capture.rmdir()
+            return None
+        _fsync_directory(capture)
+        _fsync_directory(source.parent)
+        return _settle_capture(capture, restore_dir)
+    finally:
+        os.close(fd)
+
+
+def _settle_capture(capture: Path, restore_dir: Path) -> Path | None:
+    """Classify a capture directory's entry (caller holds its flock)."""
+
+    if (capture / _ALIAS_RECEIPT_NAME).exists():
+        return None  # already settled: terminal evidence, never touched again
+    entries = [p for p in capture.iterdir() if p.name != _ALIAS_RECEIPT_NAME]
+    if not entries:
+        capture.rmdir()
+        return None
+    captured = entries[0]
+    try:
+        read_regular_request(captured)
+    except RequestNotRegular:
+        pass
     except FileNotFoundError:
         return None
-    receipt = root / f"{target.name}.receipt.json"
-    receipt.write_text(json.dumps({
-        "status": "QUARANTINED_REQUEST_ALIAS",
-        "reason_codes": [_REQUEST_ALIAS_QUARANTINED_REASON],
-        "request_name": source.name,
-        "kind": kind,
-        "quarantined_at": datetime.now(timezone.utc).isoformat(),
-        "forecast_input_fence": False,
-    }, sort_keys=True), encoding="utf-8")
-    _fsync_directory(root)
-    _fsync_directory(source.parent)
-    _LOG.warning("materialization request %s is a %s; quarantined at %s", source.name, kind, target)
-    return target
+    else:
+        _return_captured_request(captured, restore_dir, capture.name)
+        capture.rmdir()
+        return None
+    kind = "symlink" if _stat_mode.S_ISLNK(os.lstat(captured).st_mode) else "non_regular"
+    with open(capture / _ALIAS_RECEIPT_NAME, "x", encoding="utf-8") as handle:
+        json.dump({
+            "status": "QUARANTINED_REQUEST_ALIAS",
+            "reason_codes": [_REQUEST_ALIAS_QUARANTINED_REASON],
+            "request_name": captured.name,
+            "kind": kind,
+            "quarantined_at": datetime.now(timezone.utc).isoformat(),
+            "forecast_input_fence": False,
+        }, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    _fsync_directory(capture)
+    _LOG.warning("materialization request %s is a %s; quarantined at %s",
+                 captured.name, kind, captured)
+    return captured
+
+
+def _settle_abandoned_captures(request_dir: Path) -> int:
+    """Finish quarantines a crashed process left mid-way (their flock is free)."""
+
+    root = request_dir.parent / _REQUEST_ALIAS_DIR
+    if not root.exists():
+        return 0
+    settled = 0
+    for capture in sorted(root.glob(f"{_CAPTURE_PREFIX}*")):
+        if (capture / _ALIAS_RECEIPT_NAME).exists():
+            continue
+        try:
+            fd = os.open(capture, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if not os.path.samestat(os.fstat(fd), os.lstat(capture)):
+                    continue
+            except OSError:
+                continue  # a live quarantine holds it
+            _settle_capture(capture, request_dir)
+            settled += 1
+        finally:
+            os.close(fd)
+    return settled
+
+
+def _return_captured_request(captured: Path, request_dir: Path, owner_name: str) -> Path | None:
+    """Return one captured entry: a regular request is restored, anything else quarantined.
+
+    The single classifier for every captured entry (dead batch, rollback,
+    reconcile, abandoned quarantine capture). Restore is collision-safe: a
+    newer publication at the original name is never replaced; ours takes a
+    ``.recovered-`` name.
+    """
+
+    try:
+        read_regular_request(captured)
+    except RequestNotRegular:
+        _quarantine_captured_entry(captured, request_dir)
+        return None
+    except FileNotFoundError:
+        return None
+    return _restore_claimed_request(captured, request_dir, owner_name)
+
+
 _CLAIM_IDENTITY_LEASED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_IDENTITY_LEASED"
 _CLAIM_LEASE_UNKNOWN_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_LEASE_UNKNOWN"
 _CLAIM_SLOT_CHANGED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_SLOT_CHANGED"
@@ -5768,77 +5925,49 @@ def _claim_construction(
     prefix: str = "",
     admission: str = CLAIM_ALL,
 ):
-    """The one owner of a claim from its first lease to its handoff.
+    """The one owner of a claim from its first capture to its handoff.
 
     Yields ``(batch_path, admitted sources, deferral reasons)``; ``batch_path``
     is None when no slot was admitted. Every lane's claim goes through here.
 
-    Admission is per slot: each slot's request is read once and its identity
-    parsed from those bytes; all of that slot's identity views are acquired in
-    one sorted all-or-none call. A slot that changed or left (SNAPSHOT_CHANGED),
-    is held by a live owner (IDENTITY_LEASED) or whose lease cannot be read
-    (LEASE_UNKNOWN) is not admitted. ``admission`` decides the rest: CLAIM_ALL
-    claims every slot or raises before anything is published; CLAIM_PREFIX (the
-    priority lane) stops at the first unadmitted slot, keeping the stable
-    planned prefix in order; CLAIM_EACH skips it and admits later slots. Under
-    either partial mode a changing lower slot never blocks a stable one above.
+    Capture, then classify. The constructor first creates its staging
+    directory and holds its flock (so recovery tells a live constructor from a
+    crashed one by fact, never by age). Each slot's pathname is then
+    atomically renamed into staging (the capture), and only the captured entry
+    is classified, with the one no-follow nonblocking reader:
 
-    Construction runs in a hidden staging directory whose own flock this
-    process holds until handoff, so recovery can tell a live constructor's
-    staging (held) from a crashed one's (free) by fact, never by age. The
-    lease-v1 metadata is written in staging and published by rename before any
-    request moves; each request is revalidated under its lease and moved. On
-    any exception every moved request is renamed back, the batch removed, and
-    only then are the leases released, in a ``finally`` no cleanup failure can
-    skip. On success the caller holds the leases (``_HELD_CLAIM_LEASES``) until
-    ``_release_claim_batch``.
+    - not a regular file (symlink, dangling link, FIFO, directory): the
+      captured entry is quarantined (exclusive name, terminal receipt, no
+      forecast-input fence). A regular file published at the original name
+      after the capture is a new request and is never consumed by this one.
+    - regular, but not the planned bytes (``expected``) or without identity:
+      returned to the queue collision-safe; the slot defers.
+    - regular with identity: every identity view of the slot is acquired in
+      one sorted all-or-none call; the identity and the recorded hash come
+      from the captured bytes. Held by a live owner or unreadable: returned to
+      the queue; the slot defers.
+
+    ``admission`` decides what an unadmitted slot does to the rest: CLAIM_ALL
+    raises before anything is published; CLAIM_PREFIX (the priority lane)
+    stops there, keeping the stable planned prefix in order; CLAIM_EACH skips
+    it. The lease-v1 metadata is then written and staging published by rename.
+
+    On any exception every captured entry is returned through the classifier,
+    staging is removed, and only then are the leases released, in a
+    ``finally`` no cleanup failure can skip. A crash leaves captured entries in
+    a staging directory whose flock is free; ``_drain_abandoned_staging``
+    returns them through the same classifier. On success the caller holds the
+    leases (``_HELD_CLAIM_LEASES``) until ``_release_claim_batch``.
     """
 
     admitted: list[tuple[_ClaimSlot, list[_lease.HeldLease]]] = []
     reasons: list[str] = []
+    captured: list[tuple[Path, Path]] = []  # (original pathname, captured entry)
     staging_fd: int | None = None
     staging: Path | None = None
     batch_path: Path | None = None
-    moved: list[tuple[Path, Path]] = []
+    request_dir = request_files[0].parent if request_files else None
     try:
-        for source in request_files:
-            expected = None if expected_records is None else expected_records.get(source.name)
-            try:
-                slot = _read_claim_slot(source, expected=expected)
-            except RequestNotRegular:
-                _quarantine_request_alias(source)
-                reasons.append(_REQUEST_ALIAS_QUARANTINED_REASON)
-                if admission != CLAIM_EACH:
-                    break
-                continue
-            except FileNotFoundError:
-                reasons.append(_CLAIM_SLOT_CHANGED_REASON)
-                if admission != CLAIM_EACH:
-                    break
-                continue
-            own = {lease.path for _slot, held in admitted for lease in held}
-            try:
-                leases = _lease.acquire_all(
-                    path for path in _witness_lease_paths(inflight_path, slot.witness)
-                    if path not in own
-                )
-            except OSError:
-                leases, reason = None, _CLAIM_LEASE_UNKNOWN_REASON
-            else:
-                reason = _CLAIM_IDENTITY_LEASED_REASON
-            if leases is None:
-                reasons.append(reason)
-                if admission != CLAIM_EACH:
-                    break
-                continue
-            admitted.append((slot, leases))
-        if admission == CLAIM_ALL and len(admitted) < len(request_files):
-            raise _claim_failure(reasons)
-        if not admitted:
-            yield None, (), tuple(dict.fromkeys(reasons))
-            return
-        slots = [slot for slot, _held in admitted]
-        leases = [lease for _slot, held in admitted for lease in held]
         generation = uuid4().hex
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         name = f"{prefix}{stamp}{_LEASE_BATCH_MARK}{generation[:12]}.pid{os.getpid()}"
@@ -5849,46 +5978,101 @@ def _claim_construction(
         # A scanner may see the directory between mkdir and this flock. It can
         # only delete what it holds the flock on, through the deletion: either
         # it holds it now (this flock fails) or it already deleted the
-        # directory (the path no longer names this inode). Both abort the
-        # claim here, before any request moves.
+        # directory (the path no longer names this inode). Both abort here,
+        # before anything is captured.
         try:
             fcntl.flock(staging_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             reclaimed = not os.path.samestat(os.fstat(staging_fd), os.stat(staging))
         except (BlockingIOError, FileNotFoundError):
             reclaimed = True
         if reclaimed:
-            # Lost the race to a scanner: abort like any changed slot (the
-            # handler below releases every lease; nothing moved yet).
+            staging = None
             raise FileNotFoundError("staging directory was reclaimed before its flock")
+        for source in request_files:
+            expected = None if expected_records is None else expected_records.get(source.name)
+            reason = None
+            # Peek (routing only): a pathname that is not a regular file is
+            # quarantined by capture-then-classify, so a regular repair landing
+            # first is restored, never discarded. A regular one is captured
+            # into staging and every decision below is made on the captured
+            # entry, which must be the very inode the peek saw.
+            try:
+                _peek, peeked = read_regular_request(source)
+            except RequestNotRegular:
+                _quarantine_request_alias(source)
+                reason = _REQUEST_ALIAS_QUARANTINED_REASON
+            except FileNotFoundError:
+                reason = _CLAIM_SLOT_CHANGED_REASON
+            if reason is None:
+                entry = staging / source.name
+                try:
+                    os.replace(source, entry)  # capture: staging is fresh, nothing is replaced
+                except FileNotFoundError:
+                    reason = _CLAIM_SLOT_CHANGED_REASON
+            if reason is None:
+                captured.append((source, entry))
+                try:
+                    slot = _read_claim_slot(entry, expected=expected, name=source)
+                    current = os.lstat(entry)
+                    if (current.st_dev, current.st_ino) != (peeked.st_dev, peeked.st_ino):
+                        raise FileNotFoundError("request name changed between peek and capture")
+                except RequestNotRegular:
+                    captured.pop()
+                    _quarantine_captured_entry(entry, source.parent)
+                    reason = _REQUEST_ALIAS_QUARANTINED_REASON
+                except (FileNotFoundError, ValueError) as exc:
+                    captured.pop()
+                    _return_captured_request(entry, source.parent, staging.name)
+                    if isinstance(exc, ValueError) and admission == CLAIM_ALL:
+                        raise  # an explicit single claim of an identity-less request
+                    reason = _CLAIM_SLOT_CHANGED_REASON
+                else:
+                    own = {lease.path for _slot, held in admitted for lease in held}
+                    try:
+                        leases = _lease.acquire_all(
+                            path for path in _witness_lease_paths(inflight_path, slot.witness)
+                            if path not in own
+                        )
+                    except OSError:
+                        leases, reason = None, _CLAIM_LEASE_UNKNOWN_REASON
+                    else:
+                        reason = None if leases is not None else _CLAIM_IDENTITY_LEASED_REASON
+                    if leases is None:
+                        captured.pop()
+                        _return_captured_request(entry, source.parent, staging.name)
+                    else:
+                        admitted.append((slot, leases))
+            if reason is not None:
+                reasons.append(reason)
+                if admission != CLAIM_EACH:
+                    break
+        if admission == CLAIM_ALL and len(admitted) < len(request_files):
+            raise _claim_failure(reasons)
+        if not admitted:
+            staging_path, staging = staging, None
+            _remove_empty_claim_batch(staging_path)
+            yield None, (), tuple(dict.fromkeys(reasons))
+            return
+        slots = [slot for slot, _held in admitted]
+        leases = [lease for _slot, held in admitted for lease in held]
         _write_lease_claim_metadata(staging, slots, leases, generation)
-        os.rename(staging, inflight_path / name)
-        staging, batch_path = None, inflight_path / name
-        for slot in slots:
-            # Validate under the lease: the bytes moved are the bytes leased,
-            # read no-follow from a regular file before and after the rename,
-            # and the moved object is the very inode that was read.
-            current, before = read_regular_request(slot.source)
-            if current != slot.body or before.st_mtime_ns != slot.row[1]:
-                raise FileNotFoundError("request changed while its lease was taken")
-            claimed = batch_path / slot.source.name
-            os.replace(slot.source, claimed)
-            moved.append((slot.source, claimed))
-            after_body, after = read_regular_request(claimed)
-            if after_body != slot.body or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-                raise FileNotFoundError("request changed during its move")
-        _fsync_directory(batch_path)
-        _fsync_directory(inflight_path)
+        _fsync_directory(staging)
         for parent in {slot.source.parent for slot in slots}:
             _fsync_directory(parent)
+        os.rename(staging, inflight_path / name)
+        staging, batch_path = None, inflight_path / name
+        _fsync_directory(inflight_path)
         with _HELD_CLAIM_LEASES_GUARD:
             _HELD_CLAIM_LEASES[str(batch_path)] = leases
     except BaseException:
         try:
-            for source, claimed in reversed(moved):
+            home = batch_path if batch_path is not None else staging
+            for source, entry in reversed(captured):
+                current = (home / entry.name) if home is not None else entry
                 try:
-                    _rename_back(claimed, source)
+                    _rename_back(current, source)
                 except OSError:
-                    pass  # stays in the dead batch; lease recovery restores it
+                    pass  # stays captured; recovery returns it through the classifier
             for leftover in (batch_path, staging):
                 if leftover is not None:
                     _remove_empty_claim_batch(leftover)
@@ -5974,17 +6158,20 @@ def inflight_requests_pending(inflight_path: Path) -> bool:
 
 
 def _rename_back(claimed: Path, source: Path) -> None:
-    """Return a claimed request, never over a newer publication of its pathname."""
+    """Return a captured entry to its queue, through the one classifier.
 
-    if not claimed.exists():
-        return
+    Regular: restored collision-safe (a newer publication at the original name
+    keeps it; ours takes a ``.recovered-`` name). Anything else (a dangling or
+    live symlink, FIFO, directory substituted at capture): quarantined. Uses
+    lstat, never exists()/is_file(), so a dangling link is not mistaken for
+    absent.
+    """
+
     try:
-        os.link(claimed, source)
-    except FileExistsError:
-        return  # a publisher re-took the pathname; lease recovery restores ours
-    _fsync_directory(source.parent)
-    claimed.unlink()
-    _fsync_directory(claimed.parent)
+        os.lstat(claimed)
+    except FileNotFoundError:
+        return
+    _return_captured_request(claimed, source.parent, claimed.parent.name)
 
 
 def _write_lease_claim_metadata(
@@ -6240,19 +6427,10 @@ def _claim_available_slots(
     releases (or dies and its lease frees). RESET: the next claim acquires it.
     """
 
-    readable: list[Path] = []
-    for source in selected:
-        try:
-            _read_claim_slot(source, expected=None)
-        except RequestNotRegular:
-            pass  # the constructor quarantines it
-        except (FileNotFoundError, ValueError):
-            continue  # left, or no identity: the plan already deferred it
-        readable.append(source)
-    if not readable:
+    if not selected:
         return None, (), ()
     try:
-        with _claim_construction(inflight_path, readable, admission=CLAIM_EACH) as (
+        with _claim_construction(inflight_path, selected, admission=CLAIM_EACH) as (
             batch, claimed, reasons,
         ):
             return batch, claimed, reasons
