@@ -16423,3 +16423,64 @@ Re-land requirements: provider-real ENS acquisition (an unpinned latest-run
 body bound to its run by identical before/after metadata under its own typed
 authority; WIP on branch exit-chain-ens-bracket-wip), and a domain law that
 never leaves a held Day0 position without a serving belief.
+
+### Offline/native + bool delivery: refused own attempt, peer runtime readback
+
+checked=2026-W40; basis=actual CLI session67828/log and current process/guard
+readback; until=recheck-on-use. Batch fdfff4501bfa2957ceda33770aef8bfa716125fb
+landed by normal FF push and live FF. Its one registered normal loader attempt
+started19:02:54Z and ended19:04:49Z with actualrc1: warm restart preflight
+refused before stopping the old MAIN. Artifact:
+/tmp/zeus-offline-native-bool-loader-20261004.DmOU2F/normal-loader.log.
+The normal generation-matched helper released its own fdfff guard. This is not
+a successful task loader, and no retry or manual guard/SQL/source action followed.
+
+The failed preflight wrapper retains only the final80 output lines. Its stored
+19:04:49 JSON tail omits the decisive blocking checks; the visible failed
+held_position_belief_coverage has restart_blocking=false and cannot explain the
+refusal. No complete original-cut attestation was located. Peer landing near
+that time is temporal context, not an established cause of the warm failure.
+
+Another normal owner subsequently held the restart lock (PID90129), armed
+expected4403702f01fe35c7f4d9b8f284db51a0aabac281 at19:04:50.649551Z, and loaded
+that peer tip. fdfff is its ancestor (actual ancestor check rc0). The approved
+extractor/collect-test/adapter/adapter-test hashes remain ec2481/b299237/adcf70/
+54f8ccc on current live440; the peer did not change these four frozen files.
+At19:10:43.939479Z the actual guard getter returned None; PID90129 was gone and
+lsof found no restart-lock holder. We observed this owner, not started or stopped
+it. Its actual CLI rc is unknown to this task and is not substituted by a stamp.
+
+Actual loaded MAIN440 stamp19:06:45.103269Z/PID68295, HB19:10:03.472855Z;
+INGEST26876 fixedboot440/HB19:10:00.511904Z and FORECAST28470 fixedboot440/
+HB19:10:34.540456Z. All three cwd are /Users/leofitz/zeus; MAIN has actual
+canonical WORLD/FORECAST/TRADE handles. Config file SHA remains
+d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae;
+this is file-only proof, not independent in-process config evidence. No new
+current q/whole-held/full-universe receipt was claimed from this identity check.
+
+Source goal remains unfinished: native future2t acquisition budget has no human
+answer, no new collection or live bridge was enabled, and offline decode tests
+do not prove real future bodies, station representativeness or profitable fills.
+Preserve the old HK-target evidence and typed UNKNOWN gaps; next action is ROOT's
+decision based on the actual peer-loaded state, not a blind task loader retry.
+
+Closeout preserves this unfinished source route on the named task branch, not
+by another live push or restart. Parent task was cleanly fast-forwarded to
+origin/live440 with only this PLAN checkpoint preserved; no task-source change
+or peer overwrite occurred. The completed native child two-file bytes are
+identical to current origin/live; cherry-picked commit identity is distinct
+from child119a/05abd, so byte equality, not a false SHA-ancestor claim, proves
+that child work was integrated. Both trees had no open handles (lsof +D rc1).
+Own child config symlink alone was unlinked; the live config target stayed d7.
+
+Necessary ignored test residue is separately preserved in the existing loader
+artifact: child-ignored-test-evidence.tgz SHA
+9de11bdc4ea2f67150490e83f6205895a33ce29abe27d4f65c09efded2cc0d3e,
+parent-ignored-test-evidence.tgz SHA
+06dd6c243a66846f2599fec730a0ac96fd8b7d536f6046b394779e6bdfda575f.
+Both contain only pytest diagnostics and two18-byte synthetic extractor stderr
+files; no live DB/raw source was copied. Bytecode is regenerable. Recoverable
+managed archive identities are exact native-ens-point-decoder and
+red-cancel-source-drain, not other tasks or old source children. Preserve the
+unfinished parent branch and external XML/log artifacts for the next authorized
+native-budget/physical-proof slice; no full-goal completion is recorded.
