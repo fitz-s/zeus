@@ -9009,25 +9009,28 @@ def process_replacement_forecast_live_materialization_queue(
                 and exc.args != ("DB_CONNECTION_DEADLINE_EXPIRED",)
             ):
                 raise
-            if (
-                claim is not None and claim.batch_path is None
-                and (claim.seed_processed_files or claim.seed_failed_files)
-            ):
-                # The deadline cannot erase an already completed file handoff.
-                # Remaining seeds stay queued; terminal sidecar policy is unchanged.
-                return _claim_only_report(replace(
-                    claim, seed_reasons=(*claim.seed_reasons, _CLAIM_READ_DEFERRED_REASON),
-                ))
-            return ReplacementForecastLiveMaterializationQueueReport(
-                status="DEFERRED",
-                request_dir=str(request_path),
-                processed_dir=str(processed_path),
-                failed_dir=str(failed_path),
-                processed_count=0,
-                failed_count=0,
-                skipped_count=0,
-                reason_codes=(_CLAIM_READ_DEFERRED_REASON,),
-            )
+            if claim is None or claim.batch_path is None:
+                if claim is not None and (
+                    claim.seed_processed_files or claim.seed_failed_files
+                ):
+                    # The deadline cannot erase an already completed file handoff.
+                    # Remaining seeds stay queued; terminal sidecar policy is unchanged.
+                    return _claim_only_report(replace(
+                        claim, seed_reasons=(*claim.seed_reasons, _CLAIM_READ_DEFERRED_REASON),
+                    ))
+                return ReplacementForecastLiveMaterializationQueueReport(
+                    status="DEFERRED",
+                    request_dir=str(request_path),
+                    processed_dir=str(processed_path),
+                    failed_dir=str(failed_path),
+                    processed_count=0,
+                    failed_count=0,
+                    skipped_count=0,
+                    reason_codes=(_CLAIM_READ_DEFERRED_REASON,),
+                )
+            # The deadline bounds pre-claim reads only. A published batch holds
+            # its identity leases in this process: dropping it here strands the
+            # requests behind a live owner. It is processed below like any claim.
     if claim.batch_path is None:
         return _claim_only_report(claim)
     try:
