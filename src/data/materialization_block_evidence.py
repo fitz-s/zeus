@@ -43,6 +43,14 @@ Covered reasons (``SUPPORTED``) and their exact, required items:
 - DAY0_REQUIRED: [DAY0_REQUIRED]. The original request's target day has started,
   but its immutable input has neither an extreme nor a typed zero-observation
   declaration. Exact-request only; no prospective family fence or DB absence.
+- DAY0_ENSEMBLE: [CLOCK, DAY0_ENSEMBLE]. The request routes to the Day0 carrier
+  and the strict 51-member ENS bundle read at its effective clock and coverage
+  cut returns fewer members, so no conditional shape (no posterior) can exist.
+  Metric-generic: the bundle is per city/date, the scope per city/date/metric.
+- OM9_INVALID: [OM9_INVALID]. The request's own OM9 response bytes refuse the
+  full/remaining local-day extraction at its own cut; a pure function of the
+  request and those bytes (bound by the consumed witness and fingerprint). A
+  prospective request holds only at the very recorded cut.
 """
 
 # Created: 2026-10-02
@@ -65,6 +73,10 @@ NO_COHERENT_COHORT = "NO_COHERENT_CURRENT_PROVIDER_COHORT"
 ZERO_EXTRAS = "ZERO_MULTI_MODEL_EXTRAS"
 DAY0_REQUIRED = "DAY0_OBSERVED_EXTREME_REQUIRED"
 DAY0_MISSING_INPUT_REVISION = "original_day0_missing_observation_v1"
+DAY0_ENSEMBLE = "DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE"
+DAY0_ENSEMBLE_REVISION = "day0_conditional_ensemble_bundle_v1"
+OM9_INVALID = "OM9_SOURCE_RESPONSE_INVALID"
+OM9_INVALID_REVISION = "om9_localday_extraction_refusal_v1"
 EXTRAS_SELECTION_REVISION = "current_capture_extra_selection_v1"
 # reason -> required item kinds, each exactly once. DB-dependent kinds start
 # with CLOCK; the original missing-input predicate depends only on its request.
@@ -75,7 +87,11 @@ SUPPORTED: dict[str, tuple[str, ...]] = {
     NO_COHERENT_COHORT: (CLOCK, NO_COHERENT_COHORT),
     ZERO_EXTRAS: (CLOCK, ZERO_EXTRAS),
     DAY0_REQUIRED: (DAY0_REQUIRED,),
+    DAY0_ENSEMBLE: (CLOCK, DAY0_ENSEMBLE),
+    OM9_INVALID: (OM9_INVALID,),
 }
+# Kinds decided by the request (and its witnessed bytes) alone: no CLOCK item.
+_REQUEST_ONLY = frozenset({DAY0_REQUIRED, OM9_INVALID})
 # clock role -> (request field naming its run, request field of its fallback clock)
 _ROLES = {
     "baseline_b0": ("baseline_source_run_id", "baseline_source_available_at"),
@@ -227,8 +243,190 @@ def blocked_evidence(conn: sqlite3.Connection, request, reason: str, items=()) -
             "target_date": target_date.isoformat() if hasattr(target_date, "isoformat") else target_date,
             "temperature_metric": getattr(request, "temperature_metric", None),
         },
-        "items": (list(items) if reason == DAY0_REQUIRED else [clock_item(conn, request), *items]),
+        "items": (list(items) if reason in _REQUEST_ONLY else [clock_item(conn, request), *items]),
     }
+
+
+def day0_ensemble_unavailable_item(conn: sqlite3.Connection, request) -> dict[str, object] | None:
+    """The strict ENS bundle read ``day0_conditional_remaining_shape`` decides by.
+
+    ``request`` is normalized (clock lifted, Day0 frontier applied), as the
+    materializer judged it. None unless it routes to the carrier and the read
+    (same arguments as the shape's) returns fewer than 51 members. The member
+    rows are bound as the superset the read filters (every ENS row of the
+    city/date captured by the cut), plus the run pin and cycle-age law that
+    decide run currency. An unreadable store raises: never evidence.
+    """
+    import hashlib
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES, DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,
+        DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX, DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL,
+        _day0_provider_run_hwm_pin_path, day0_source_clock_ensemble_member_models,
+        read_freshest_day0_hourly_vectors,
+    )
+    from src.data.replacement_forecast_cycle_policy import replacement_source_cycle_max_age_hours
+    from src.data.replacement_forecast_materializer import (
+        _date_text, _day0_carrier_extreme_c, _day0_measurement_domain,
+    )
+
+    if _day0_carrier_extreme_c(request) is None:
+        return None
+    target = _date_text(request.target_date)
+    cut = _utc(request.computed_at, "computed_at")
+    coverage = _utc(_day0_measurement_domain(
+        conn, request, metric=str(request.temperature_metric))["coverage_cut_utc"], "coverage_cut")
+    selected = read_freshest_day0_hourly_vectors(
+        city=str(request.city), target_date=target, now=cut, conn=conn,
+        expected_models=day0_source_clock_ensemble_member_models(), require_expected=True,
+        max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=coverage, require_complete_remaining_window=True,
+        raise_on_db_error=True,
+    )
+    if len(selected) == DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
+        return None
+    rows = conn.execute(
+        "SELECT model, captured_at, timezone_name, times_json, temps_c_json, source_run_meta_json"
+        " FROM day0_hourly_vectors WHERE city = ? AND target_date = ?"
+        " AND julianday(captured_at) <= julianday(?) AND substr(model, 1, ?) = ?"
+        " ORDER BY model, captured_at",
+        (str(request.city), target, cut.isoformat(),
+         len(DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX), DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX),
+    ).fetchall()
+    try:
+        pin = json.loads(_day0_provider_run_hwm_pin_path().read_text(encoding="utf-8"))
+        run_pin = pin["entries"][DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL]
+    except (OSError, KeyError, TypeError, ValueError):
+        run_pin = None  # the run refusal reads the same absence as "no causal pin"
+    return json.loads(json.dumps({
+        "kind": DAY0_ENSEMBLE, "predicate_revision": DAY0_ENSEMBLE_REVISION,
+        "decision_time_iso": cut.isoformat(), "coverage_cut_utc": coverage.isoformat(),
+        "routing": {
+            "source": request.day0_observed_extreme_source,
+            "observed_extreme_c": request.day0_observed_extreme_c,
+            "observation_time": (None if request.day0_observed_extreme_observation_time is None
+                                 else str(request.day0_observed_extreme_observation_time)),
+        },
+        "cycle_max_age_hours": replacement_source_cycle_max_age_hours(),
+        "run_pin": run_pin,
+        "member_rows": {
+            "count": len(rows),
+            "sha256": hashlib.sha256(json.dumps(
+                [list(row) for row in rows], separators=(",", ":"), default=str,
+            ).encode()).hexdigest(),
+        },
+        "selected_member_count": len(selected),
+    }, allow_nan=False))
+
+
+def _current_day0_ensemble_item(conn, payload: Mapping[str, object], anchor_artifact_id) -> dict[str, object] | None:
+    """Re-decide the ENS predicate for a request payload at its effective clock,
+    through the materializer's own Day0 frontier normalization."""
+    from datetime import date
+    from src.data.replacement_forecast_materializer import (
+        ReplacementForecastMaterializeRequest, ReplacementForecastMaterializeResult,
+        _request_with_day0_physical_frontier,
+    )
+
+    def optional(field, cast):
+        value = payload.get(field)
+        return None if value in (None, "") else cast(value)
+
+    request = ReplacementForecastMaterializeRequest(
+        city=str(payload["city"]), city_id=str(payload.get("city_id") or payload["city"]),
+        city_timezone=str(payload["city_timezone"]),
+        target_date=date.fromisoformat(str(payload["target_date"])),
+        temperature_metric=str(payload["temperature_metric"]),
+        baseline_source_run_id=str(payload.get("baseline_source_run_id") or ""),
+        baseline_data_version=str(payload.get("baseline_data_version") or ""),
+        baseline_source_available_at=payload["baseline_source_available_at"],
+        openmeteo_anchor=None, openmeteo_source_run_id=payload.get("openmeteo_source_run_id"),
+        openmeteo_source_available_at=payload["openmeteo_source_available_at"],
+        bins=(), source_cycle_time=payload["source_cycle_time"],
+        computed_at=effective_computed_at(conn, payload, anchor_artifact_id=anchor_artifact_id),
+        anchor_artifact_id=anchor_artifact_id,
+        day0_observed_extreme_c=optional("day0_observed_extreme_c", float),
+        day0_observed_extreme_source=optional("day0_observed_extreme_source", str),
+        day0_observed_extreme_observation_time=optional("day0_observed_extreme_observation_time", str),
+        day0_observed_extreme_sample_count=optional("day0_observed_extreme_sample_count", int),
+        day0_observed_extreme_unit=optional("day0_observed_extreme_unit", str),
+        day0_observation_state=optional("day0_observation_state", str),
+    )
+    normalized = _request_with_day0_physical_frontier(conn, request, metric=request.temperature_metric)
+    if isinstance(normalized, ReplacementForecastMaterializeResult):
+        return None
+    return day0_ensemble_unavailable_item(conn, normalized)
+
+
+def _om9_request_fields(*, city_timezone, target_date, anchor_cycle, computed_at) -> dict[str, object]:
+    return {
+        "city_timezone": str(city_timezone),
+        "target_date": str(target_date),
+        "openmeteo_source_cycle_time": _utc(anchor_cycle, "openmeteo_source_cycle_time").isoformat(),
+        "computed_at": _utc(computed_at, "computed_at").isoformat(),
+    }
+
+
+def om9_response_invalid_item(request) -> dict[str, object] | None:
+    """The guard's local-day extraction of the request's own OM9 bytes, at its cut.
+
+    None unless that pure extraction refuses. Whatever else the guard reads
+    first (station ground), a refused extraction leaves no passing outcome, so
+    the verdict is a function of these fields, the bytes and the code alone.
+    """
+    import hashlib
+    from datetime import date
+    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+    from src.data.replacement_forecast_materializer import _date_text
+
+    raw = request.openmeteo_raw_payload_bytes
+    anchor_cycle = getattr(request.openmeteo_anchor, "source_cycle_time", None)
+    if not isinstance(raw, bytes) or anchor_cycle is None:
+        return None
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, Mapping):
+            raise ValueError("Open-Meteo response must be an object")
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            payload, city_timezone=request.city_timezone,
+            target_local_date=date.fromisoformat(_date_text(request.target_date)),
+            source_cycle_time=_utc(anchor_cycle, "openmeteo_source_cycle_time"),
+            require_full_localday=True,
+            remaining_from_utc=_utc(request.computed_at, "computed_at"),
+        )
+    except (TypeError, ValueError, KeyError, AttributeError, UnicodeDecodeError) as exc:
+        refusal = f"{type(exc).__name__}: {exc}"
+    else:
+        return None
+    return {
+        "kind": OM9_INVALID, "predicate_revision": OM9_INVALID_REVISION,
+        **_om9_request_fields(city_timezone=request.city_timezone,
+                              target_date=_date_text(request.target_date),
+                              anchor_cycle=anchor_cycle, computed_at=request.computed_at),
+        "payload_sha256": hashlib.sha256(raw).hexdigest(),
+        "refusal": refusal,
+    }
+
+
+def _om9_invalid_holds(evidence, request: Mapping[str, object] | None) -> bool:
+    """The request carries the same scope and extraction fields; its bytes are the
+    caller's to bind (consumed witness, or the attempt fingerprint's record)."""
+    if not isinstance(request, Mapping):
+        return False
+    scope = evidence.get("scope")
+    if not isinstance(scope, Mapping) or any(
+        not scope.get(field) or str(scope[field]) != str(request.get(field) or "")
+        for field in _SCOPE_FIELDS
+    ):
+        return False
+    item = evidence["items"][0]
+    current = _om9_request_fields(
+        city_timezone=request["city_timezone"], target_date=request["target_date"],
+        anchor_cycle=request.get("openmeteo_source_cycle_time") or request["source_cycle_time"],
+        computed_at=request["computed_at"],
+    )
+    return item.get("predicate_revision") == OM9_INVALID_REVISION and all(
+        item.get(key) == value for key, value in current.items()
+    )
 
 
 def day0_missing_input_item(request) -> dict[str, object] | None:
@@ -396,6 +594,12 @@ def _well_formed(evidence: object, prospective: Mapping[str, object] | None) -> 
         # prospective request is independently admitted, including new real
         # observations and existing typed zero input; this proof never fences it.
         return prospective is None
+    if reason == OM9_INVALID:
+        # SCOPE: the request's bytes, bound by the caller's witness or attempt
+        # fingerprint (which hashes every field but the clock). A prospective
+        # request holds only with the recorded extraction fields, its cut
+        # included; any other cut is re-decided by a fresh attempt.
+        return True
     runs = items[0].get("source_runs")
     if (
         not isinstance(runs, (list, tuple))
@@ -524,7 +728,7 @@ def _recorded_facts_hold(conn, evidence: Mapping[str, object]) -> bool:
             decision_time_iso=item["decision_time_iso"],
             day0_remaining_from_iso=item["day0_remaining_from_iso"],
         ) == dict(item)
-    return True  # STALE_CYCLE: a function of the request and the unchanged clock
+    return True  # STALE_CYCLE, DAY0_ENSEMBLE: the clock facts; the reason item is re-decided by its caller
 
 
 def _prospective_blocks(conn, evidence: Mapping[str, object], payload: Mapping[str, object]) -> bool:
@@ -568,9 +772,11 @@ def evidence_holds(
     """See the module doc. Malformed, unsupported, unbound or unreadable never holds."""
     if not _well_formed(evidence, prospective):
         return False
-    if evidence["reason"] == DAY0_REQUIRED:
+    if evidence["reason"] in _REQUEST_ONLY:
         try:
-            return _day0_missing_input_holds(evidence, exact_request)
+            if evidence["reason"] == DAY0_REQUIRED:
+                return _day0_missing_input_holds(evidence, exact_request)
+            return _om9_invalid_holds(evidence, exact_request if prospective is None else prospective)
         except (KeyError, TypeError, ValueError, AttributeError, RuntimeError):
             return False
     owns = not conn.in_transaction
@@ -591,6 +797,17 @@ def evidence_holds(
                                                  anchor_artifact_id=_clock_anchor_id(evidence)))
             incoming = tuple(_utc(value, "incoming_key") for value in evidence["items"][-1]["incoming_key"])
             return request_key == incoming and _recorded_facts_hold(conn, evidence)
+        if evidence["reason"] == DAY0_ENSEMBLE:
+            # The exact request must re-decide to the very recorded item (every
+            # row, pin and normalized input it judged); a prospective request
+            # only has to re-decide to an unavailable bundle at its own clock.
+            request = exact_request if prospective is None else prospective
+            if request is None or not _well_formed(evidence, request):
+                return False
+            current = _current_day0_ensemble_item(conn, request, _clock_anchor_id(evidence))
+            if prospective is not None:
+                return current is not None
+            return current == dict(evidence["items"][-1]) and _recorded_facts_hold(conn, evidence)
         if prospective is None:
             if evidence["reason"] == ZERO_EXTRAS:
                 if exact_request is None or not _well_formed(evidence, exact_request):
