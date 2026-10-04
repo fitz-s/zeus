@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-03
+# Last reused/audited: 2026-10-04
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -28129,6 +28129,34 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q(invalidated_
     assert stale_identity.bindings == original.bindings
     assert stale_identity.sample_matrix_identity == missing.sample_matrix_identity
     unbound = original.bindings[0].condition_id
+    from src.state.snapshot_repo import record_snapshot_invalidation
+
+    for reason in ("tick_size_change", "market_resolved"):
+        invalidated_identity = _global_book_metadata_conn(
+            original,
+            captured_at="2026-07-10T07:59:00+00:00",
+            freshness_deadline="2026-07-10T08:00:30+00:00",
+        )
+        binding = original.bindings[0]
+        invalidated_token = (
+            binding.yes_token_id if invalidated_held_side == "YES" else binding.no_token_id
+        )
+        assert record_snapshot_invalidation(
+            invalidated_identity, condition_id=unbound,
+            token_id=invalidated_token if reason == "tick_size_change" else None,
+            reason=reason, invalidated_at=at - _dt.timedelta(seconds=30),
+        ) == 1
+        rows = universe._global_book_snapshot_rows(
+            invalidated_identity, condition_ids=(unbound,), checked_at_utc=at,
+        )
+        assert rows and all(row["snapshot_invalidated"] for row in rows)
+        assert all(_dt.datetime.fromisoformat(row["freshness_deadline"]) > at for row in rows)
+        rebound = _bind_identity_only(invalidated_identity)
+        assert rebound.bindings == original.bindings
+        assert rebound.sample_matrix_identity == missing.sample_matrix_identity
+        np.testing.assert_array_equal(rebound.yes_point_q, missing.yes_point_q)
+        np.testing.assert_array_equal(rebound.yes_q_samples, missing.yes_q_samples)
+
     ambiguous = _stale_identity_conn()
     ambiguous.execute(
         "UPDATE executable_market_snapshots SET no_token_id = 'conflicting-no' "

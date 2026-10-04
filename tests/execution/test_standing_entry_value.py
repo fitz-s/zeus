@@ -1,5 +1,5 @@
 # Created: 2026-10-01
-# Last reused/audited: 2026-10-02
+# Last reused/audited: 2026-10-04
 # Authority basis: standing ENTRY keep-by-value law (operator, 2026-09-30): an open ENTRY
 #   rest keeps working toward its current fractional-Kelly target R* (the selector's own
 #   mean-q sizer at the rest's limit); a posterior identity change only triggers
@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from types import SimpleNamespace
@@ -539,18 +540,25 @@ def _seed_early_rest(conn):
 
 
 class TestStandingEntryTrace:
-    def _cycle(self, monkeypatch, *, q, posterior):
+    def _cycle(self, monkeypatch, *, q, posterior, identity=None):
+        import src.risk_allocator as risk_allocator
         from src.engine import event_reactor_adapter as adapter
         from src.engine import global_auction_universe as universe
         from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
         from src.execution import day0_hard_fact_exit
-        from src.risk_allocator import governor
         from src.state import portfolio as portfolio_module
+        from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
         conn = _trade_db()
         _seed_early_rest(conn)
+        submission = get_snapshot(conn, "snap-cmd")
         monkeypatch.setattr(C, "resolve_order_families", lambda *_a: {"cmd": FAMILY})
-        monkeypatch.setattr(C, "_snapshot_row", lambda _c, _sid: _snapshot())
+        monkeypatch.setattr(
+            C, "_snapshot_row", lambda _c, _sid: {
+                **_snapshot(), "condition_id": submission.condition_id,
+                "no_token_id": submission.no_token_id,
+            },
+        )
         event = SimpleNamespace(
             event_id="evt",
             payload_json=json.dumps({"city": FAMILY[0], "target_date": FAMILY[1], "metric": FAMILY[2]}),
@@ -562,6 +570,48 @@ class TestStandingEntryTrace:
             ),
         )
         witness = _witness(q=q, posterior=posterior)
+        witness = S.rebind_family_payoff_witness(witness, bindings=(
+            replace(
+                witness.bindings[0], condition_id=submission.condition_id,
+                no_token_id=submission.no_token_id,
+            ),
+            witness.bindings[1],
+        ))
+        if identity is not None:
+            for binding in witness.bindings:
+                for side, token in (("YES", binding.yes_token_id), ("NO", binding.no_token_id)):
+                    insert_snapshot(conn, replace(
+                        submission, snapshot_id=f"stale-{binding.condition_id}-{side}",
+                        condition_id=binding.condition_id,
+                        yes_token_id=binding.yes_token_id, no_token_id=binding.no_token_id,
+                        selected_outcome_token_id=token, outcome_label=side,
+                        token_map_raw={"YES": binding.yes_token_id, "NO": binding.no_token_id},
+                        captured_at=NOW - timedelta(minutes=5),
+                        freshness_deadline=NOW - timedelta(minutes=4),
+                    ))
+            sibling = witness.bindings[1]
+            if identity == "ambiguous":
+                insert_snapshot(conn, replace(
+                    submission, snapshot_id="conflicting-sibling",
+                    condition_id=sibling.condition_id,
+                    yes_token_id=sibling.yes_token_id, no_token_id="conflicting-no",
+                    selected_outcome_token_id=sibling.yes_token_id, outcome_label="YES",
+                    token_map_raw={"YES": sibling.yes_token_id, "NO": "conflicting-no"},
+                    captured_at=NOW - timedelta(minutes=4),
+                    freshness_deadline=NOW - timedelta(minutes=3),
+                ))
+            conn.commit()
+            witness = S.rebind_family_payoff_witness(witness, bindings=(
+                witness.bindings[0], replace(sibling, no_token_id=None),
+            ))
+        forecast = sqlite3.connect(":memory:")
+        forecast.execute(
+            "CREATE TABLE market_events (condition_id TEXT, market_slug TEXT, created_at TEXT)"
+        )
+        forecast.executemany(
+            "INSERT INTO market_events VALUES (?,?,?)",
+            [(b.condition_id, "current-family-slug", NOW.isoformat()) for b in witness.bindings],
+        )
         monkeypatch.setattr(
             adapter, "_prepare_current_global_probability_family",
             lambda *_a, **_k: PreparedGlobalFamily(
@@ -587,7 +637,7 @@ class TestStandingEntryTrace:
         )
         monkeypatch.setattr(universe, "entry_obligation_rows", lambda _conn: rows)
         monkeypatch.setattr(
-            governor, "snapshot_global_auction_capital_authority",
+            risk_allocator, "snapshot_global_auction_capital_authority",
             lambda: SimpleNamespace(capacity_usd=lambda **_k: D("1000")),
         )
         monkeypatch.setattr(
@@ -605,7 +655,7 @@ class TestStandingEntryTrace:
 
         venue = Venue()
         result = C.run_c3_staleness_cancel_cycle(
-            conn, conn, sqlite3.connect(":memory:"), venue,
+            conn, conn, forecast, venue,
             world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: NOW,
         )
         return conn, venue, result
@@ -627,6 +677,53 @@ class TestStandingEntryTrace:
         assert artifact["venue_order_id"] == "venue-1"
         assert artifact["evidence"]["posterior_identity_hash"] == "posterior-NEW"
         assert artifact["evidence"]["submission_q_version"] == "q-submitted"
+
+    @pytest.mark.parametrize("identity", ("stale", "ambiguous"))
+    def test_partial_witness_uses_persisted_stale_sibling_identity(self, monkeypatch, identity):
+        conn, venue, result = self._cycle(
+            monkeypatch, q=0.75, posterior="posterior-NEW", identity=identity,
+        )
+        valuation, = result["valuations"]
+        artifact = json.loads(conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE mode='standing_entry_revaluation'"
+        ).fetchone()[0])
+        persisted = conn.execute(
+            "SELECT yes_token_id, no_token_id, freshness_deadline "
+            "FROM executable_market_snapshot_latest WHERE condition_id='cond-other'"
+        ).fetchall()
+        assert len(persisted) == 2
+        assert all(datetime.fromisoformat(row["freshness_deadline"]) < NOW for row in persisted)
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id='cmd'"
+        ).fetchone()[0]
+        if identity == "stale":
+            assert {(row["yes_token_id"], row["no_token_id"]) for row in persisted} == {
+                ("yes-other", "no-other"),
+            }
+            assert valuation.action == artifact["action"] == "KEEP", valuation.reason
+            assert valuation.reason == "CURRENT_ENTRY_REST_VALUE_POSITIVE"
+            assert valuation.evidence["authority_valid"] is True
+            assert artifact["evidence"]["authority_valid"] is True
+            assert artifact["evidence"]["posterior_identity_hash"] == "posterior-NEW"
+            assert result["cancel_set_size"] == 0
+            assert state == "ACKED"
+            assert venue.calls == []
+        else:
+            assert valuation.action == artifact["action"] == "CANCEL"
+            assert valuation.reason == (
+                "ENTRY_REST_TOKEN_IDENTITY_UNAVAILABLE:ValueError:"
+                "GLOBAL_LOCAL_TOKEN_IDENTITY_AMBIGUOUS:cond-other"
+            )
+            assert valuation.evidence["authority_valid"] is False
+            assert artifact["evidence"]["authority_valid"] is False
+            assert result["cancel_set_size"] == 1
+            assert state == "CANCELLED"
+            assert venue.calls == [(["venue-1"], "CANCEL_PENDING")]
+            payload = json.loads(conn.execute(
+                "SELECT payload_json FROM venue_command_events "
+                "WHERE command_id='cmd' AND event_type='CANCEL_REQUESTED'"
+            ).fetchone()[0])
+            assert payload["cancel_reason"] == valuation.reason
 
     def test_same_rest_with_q_below_its_limit_value_cancels(self, monkeypatch):
         conn, venue, result = self._cycle(monkeypatch, q=0.45, posterior="posterior-NEW")
