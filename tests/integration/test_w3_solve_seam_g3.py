@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-04
+# Last reused/audited: 2026-10-03
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -6588,8 +6588,8 @@ def test_global_day0_binding_freezes_the_persisted_carrier_identity_inputs():
         "source": "durable_observation_instants", "unit": "C",
         "day0_remaining_carrier_content_identity": "carrier-identity",
         "day0_current_temperature_state": state,
-        "day0_conditional_remaining_shape_identity": "shape-identity",
-        "day0_conditional_remaining_shape_witness": witness,
+        "day0_conditional_high_shape_identity": "shape-identity",
+        "day0_conditional_high_shape_witness": witness,
         "day0_remaining_variance_basis": "conditional_ens_within_plus_provider_center_delta_v1",
     }
     rebound = era._global_day0_execution_payload(
@@ -6603,15 +6603,14 @@ def test_global_day0_binding_freezes_the_persisted_carrier_identity_inputs():
     )
     conn.close()
     written = {
-        "measurement_domain_witness": None,
         "current_path_state": state,
-        "conditional_remaining_shape_identity": "shape-identity",
-        "conditional_remaining_shape_witness": witness,
+        "conditional_high_shape_identity": "shape-identity",
+        "conditional_high_shape_witness": witness,
         "remaining_variance_basis": "conditional_ens_within_plus_provider_center_delta_v1",
     }
     assert rebound["_edli_day0_carrier_written_inputs"] == written
     # A later fresh-decision recompute overwrites only the top-level keys.
-    rebound["_edli_day0_conditional_remaining_shape_identity"] = "recomputed-later"
+    rebound["_edli_day0_conditional_high_shape_identity"] = "recomputed-later"
     rebound["_edli_day0_current_temperature_observed_at_utc"] = "2026-07-10T20:30:00+00:00"
     assert era._day0_carrier_written_inputs(rebound) == written
 
@@ -8627,14 +8626,14 @@ def test_day0_partial_exact_fallback_rebuilds_when_remaining_vectors_are_unavail
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
 
-    fixture = _day0_qualified_exact_fixture()
+    fixture = _day0_partial_exact_fixture()
     bundle = _day0_ready_bundle(fixture)
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {fixture.city_name: fixture.city})
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
     monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
     monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
-        "metric": "high", "source": fixture.fact["observation_source"],
+        "metric": "high", "source": "ogimet_metar_ltfm",
         "observation_time": fixture.fact["observation_time"],
         "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
     })
@@ -9010,7 +9009,7 @@ def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exist
     from tests.solve.test_solver_properties import _global_candidate, _global_sell_candidate
     from src.solve.solver import executable_curve_identity, rebind_family_payoff_witness
 
-    fixture = _day0_qualified_exact_fixture(metric=metric)
+    fixture = _day0_partial_exact_fixture(metric=metric)
     bundle = _day0_ready_bundle(fixture)
     fixture.observations.execute(
         "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -9019,12 +9018,12 @@ def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exist
          30.0, 30.0, "C", fixture.fact["observation_available_at"],
          "live", "causal", "settlement", 1, "{}"),
     )
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {fixture.city_name: fixture.city})
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
     monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
     monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
-        "metric": metric, "source": fixture.fact["observation_source"],
+        "metric": metric, "source": "ogimet_metar_ltfm",
         "observation_time": fixture.fact["observation_time"],
         "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
     })
@@ -10853,7 +10852,7 @@ def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
     observation_time = "2026-07-11T07:00:00+00:00"
     residual_weights = ((0.0, 0.9),)
     likelihood_identity = {
-        "semantics_revision": "same_station_causal_product_minus_fast_residual_v2",
+        "semantics_revision": "same_station_causal_residual_v1",
         "station_id": "ZBAA",
         "settlement_channel": "wu_icao_history",
         "fast_channel": "aviationweather_metar",
@@ -10928,7 +10927,7 @@ def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
             ],
             "day0_provisional_observation": conditioning,
         },
-        source_cycle_time="2026-07-11T06:00:00+00:00",
+        source_cycle_time="2026-07-11T12:00:00+00:00",
         source_available_at="2026-07-11T07:01:00+00:00",
     )
     monkeypatch.setattr(
@@ -11451,8 +11450,8 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
             body = {"timezone": "Asia/Hong_Kong", "utc_offset_seconds": 28800,
                 "hourly_units": {"temperature_2m": "°C"}, "hourly": {
                     "time": [f"2026-09-30T{hour:02d}:00"
-                             for hour in range(run_hour + 8, 24)] + ["2026-10-01T00:00"],
-                    "temperature_2m": [29.0] * (25 - run_hour - 8)}}
+                             for hour in range(run_hour + 8, 24)],
+                    "temperature_2m": [29.0] * (24 - run_hour - 8)}}
             params = {"endpoint": endpoint, "models": api,
                       "timezone": "Asia/Hong_Kong", "hourly": "temperature_2m"}
             request_hash = hourly.build_request_hash(endpoint=endpoint, params=params,
@@ -12174,6 +12173,7 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
         "bin_rows",
         "peak",
         "baseline",
+        "expected_q",
     ),
     (
         (
@@ -12185,6 +12185,7 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
             (("69F or below", None, 69.0), ("70-71F", 70.0, 71.0), ("72F or above", 72.0, None)),
             72.4,
             68.0,
+            np.asarray([0.0, 0.0, 1.0]),
         ),
         (
             "Istanbul",
@@ -12195,11 +12196,12 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
             (("28C or below", None, 28.0), ("29C", 29.0, 29.0), ("30C or above", 30.0, None)),
             29.4,
             26.0,
+            np.asarray([0.0, 1.0, 0.0]),
         ),
     ),
     ids=("wu", "noaa-ogimet"),
 )
-def test_post_day_hourly_observation_cannot_build_exact_global_simplex(
+def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
     monkeypatch,
     city,
     source,
@@ -12209,6 +12211,7 @@ def test_post_day_hourly_observation_cannot_build_exact_global_simplex(
     bin_rows,
     peak,
     baseline,
+    expected_q,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_readiness as readiness_reader
@@ -12440,27 +12443,28 @@ def test_post_day_hourly_observation_cannot_build_exact_global_simplex(
     )
 
     incomplete_payload: dict[str, object] = {}
-    missing_authority = (
-        "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE"
-        if source == "wu_icao_history"
-        else "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"
+    incomplete = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=decision_time,
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=incomplete_payload,
+        allow_provisional_day0_replacement=True,
+        probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
-    # A WU spot bound needs prior causal retraction history; an Ogimet hourly
-    # bucket is not an official final WRH daily product. Neither fixture owns
-    # the physical evidence needed for an exact post-day probability.
-    with pytest.raises(ValueError, match=missing_authority):
-        era._prepare_current_global_probability_family(
-            event,
-            forecast_conn=forecast,
-            topology_conn=forecast,
-            observation_conn=observations,
-            decision_time=decision_time,
-            max_age=_dt.timedelta(seconds=30),
-            day0_payload_out=incomplete_payload,
-            allow_provisional_day0_replacement=True,
-            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
-        )
-    assert tail_calls == 0
+    assert incomplete.probability_witness.yes_point_q.tolist() == pytest.approx(
+        [0.2, 0.5, 0.3]
+    )
+    assert incomplete_payload["probability_authority"] == (
+        "day0_remaining_day_global_probability_v1"
+    )
+    assert incomplete_payload["q_source"] == "day0_remaining_day"
+    assert incomplete_payload["_edli_day0_q_mode"] == (
+        "post_local_incomplete_settlement_tail"
+    )
+    assert tail_calls == 1
 
     with pytest.raises(
         ValueError,
@@ -12548,24 +12552,27 @@ def test_post_day_hourly_observation_cannot_build_exact_global_simplex(
     )
 
     day0_payload: dict[str, object] = {}
-    # Filling every hour and adding tomorrow's first spot observation does
-    # not manufacture the official daily archive or complete-product proof.
-    with pytest.raises(ValueError, match="POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"):
-        era._prepare_current_global_probability_family(
-            event,
-            forecast_conn=forecast,
-            topology_conn=forecast,
-            observation_conn=observations,
-            decision_time=decision_time,
-            max_age=_dt.timedelta(seconds=30),
-            day0_payload_out=day0_payload,
-            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
-        )
-    assert day0_payload.get("probability_authority") != (
+    prepared = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=decision_time,
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=day0_payload,
+        probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+    )
+
+    witness = prepared.probability_witness
+    assert witness.band_basis == (
+        "final_daily_observation_exact_settlement_simplex_v1"
+    )
+    assert np.all(witness.yes_q_samples == expected_q)
+    assert day0_payload["probability_authority"] == (
         "final_daily_observation_exact_global_probability_v1"
     )
-    assert not day0_payload.get("_edli_global_day0_binding", {}).get("final_daily")
-    assert tail_calls == 0
+    assert day0_payload["_edli_global_day0_binding"]["final_daily"] is True
+    assert tail_calls == 1
     assert snapshot_calls == 0
     observations.close()
     forecast.close()
@@ -37594,7 +37601,7 @@ def _chained(outer: BaseException, inner: BaseException) -> BaseException:
     ),
 )
 def test_family_prepare_fault_scope_is_decided_by_construction(
-    monkeypatch, tmp_path, fault, family_scoped,
+    monkeypatch, fault, family_scoped,
 ):
     """One family's prepare fault excludes that family; a global fault stops the cut.
 
@@ -37664,11 +37671,9 @@ def test_family_prepare_fault_scope_is_decided_by_construction(
     adapter = era.event_bound_live_adapter_from_trade_conn(
         sqlite3.connect(":memory:"),
         get_current_level=lambda: era.RiskLevel.GREEN,
-        # Distinct physical read namespaces keep each injected fault independent
-        # of prior fixtures whose synthetic family/event identities are identical.
-        forecast_conn=sqlite3.connect(tmp_path / "fault-forecast.db"),
-        topology_conn=sqlite3.connect(tmp_path / "fault-topology.db"),
-        calibration_conn=sqlite3.connect(tmp_path / "fault-calibration.db"),
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
     )
     adapter.process_global_batch((event_a, event_b), decision_at)
     monkeypatch.setattr(
@@ -46245,7 +46250,7 @@ def test_global_auction_receipt_delta_component_uses_byte_minimal_exact_encoding
     )
 
 
-def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatch, tmp_path):
+def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatch):
     from src.events.day0_authority import bind_day0_probability_semantics
     from src.state.schema.no_trade_regret_events_schema import ensure_table
 
@@ -46504,118 +46509,58 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatc
         )
         for family_key, q in ((family_a, 0.90), (family_b, 0.80))
     }
-    # The shadow's no-money proof still needs a licensed physical certificate.
-    # Reuse the normal collector/materializer world, including canonical typed
-    # columns and retained native ENS/ground/grid evidence; flags alone cannot
-    # grant the positive control authority.
-    from tests.test_replacement_forecast_bundle_reader import (
-        _shanghai_reader_current_certificate,
+    semantics_conn = sqlite3.connect(":memory:")
+    semantics_conn.execute(
+        "CREATE TABLE forecast_posteriors ("
+        "posterior_identity_hash TEXT PRIMARY KEY, provenance_json TEXT)"
     )
-    with monkeypatch.context() as physical:
-        world = _shanghai_reader_current_certificate.__wrapped__(tmp_path, physical)
-        normal = next(world)
-        try:
-            from src.data.station_ground_evidence import forecast_db_from_connection
-            authority_scope = dict(materialized_at=normal.row["computed_at"],
-                city=normal.row["city"], target_date=normal.row["target_date"],
-                metric=normal.row["temperature_metric"], anchor_id=normal.row["openmeteo_anchor_id"],
-                forecast_db=forecast_db_from_connection(normal.conn))
-            assert global_batch_runtime.current_evidence_shape_has_entry_authority(
-                json.loads(normal.row["provenance_json"]), **authority_scope)
-            assert not global_batch_runtime.current_evidence_shape_has_entry_authority(
-                normal.row["provenance_json"], **authority_scope)
-            qkernel_witnesses[family_a].posterior_identity_hash = normal.row[
-                "posterior_identity_hash"
-            ]
-            stale_row = dict(normal.row)
-            stale_row["posterior_id"] = None
-            stale_row["posterior_identity_hash"] = f"posterior-{family_b}"
-            stale_provenance = json.loads(stale_row["provenance_json"])
-            stale_provenance["bayes_precision_fusion"]["current_evidence_shape"].update(
-                semantics_revision="stale_ensemble_absolute_disagreement_v2",
-                shape_lag_hours=6.0,
-                stale_shape_reused=True,
-            )
-            stale_row["provenance_json"] = json.dumps(stale_provenance)
-            columns = tuple(row[1] for row in normal.conn.execute(
-                "PRAGMA table_xinfo(forecast_posteriors)"
-            ) if row[6] == 0)
-            normal.conn.execute(
-                f"INSERT INTO forecast_posteriors ({','.join(columns)}) "
-                f"VALUES ({','.join('?' for _ in columns)})",
-                tuple(stale_row[column] for column in columns),
-            )
-            semantics_by_posterior = (
-                global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
-                    normal.conn,
-                    qkernel_witnesses,
-                )
-            )
-            missing_snapshot_id = normal.conn.execute(
-                "SELECT COALESCE(MAX(snapshot_id),0)+1 FROM ensemble_snapshots"
-            ).fetchone()[0]
-            assert normal.conn.execute(
-                "SELECT 1 FROM ensemble_snapshots WHERE snapshot_id=?",
-                (missing_snapshot_id,),
-            ).fetchone() is None
-            tampered_provenance = json.loads(normal.row["provenance_json"])
-            tampered_provenance["bayes_precision_fusion"]["current_evidence_shape"][
-                "snapshot_id"
-            ] = missing_snapshot_id
-            # Canonical generated JSON columns cannot store malformed JSON.
-            # Inject corruption only in a negative read projection of this
-            # same private DB; no positive authority or validator is mocked.
-            class MalformedJsonRows:
-                def __init__(self, cursor):
-                    self.cursor = cursor
-                def fetchall(self):
-                    return [tuple("{" if index == 1 and row[0] == normal.row[
-                        "posterior_identity_hash"] else value
-                        for index, value in enumerate(row))
-                        for row in self.cursor.fetchall()]
-            class MalformedJsonConnection(sqlite3.Connection):
-                def execute(self, sql, parameters=()):
-                    cursor = super().execute(sql, parameters)
-                    if sql.startswith("SELECT posterior_identity_hash,provenance_json,"):
-                        return MalformedJsonRows(cursor)
-                    return cursor
-            corrupt_read = sqlite3.connect(
-                authority_scope["forecast_db"].as_uri()+"?mode=ro",
-                uri=True, factory=MalformedJsonConnection,
-            )
-            try:
-                assert global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
-                    corrupt_read, {family_a: qkernel_witnesses[family_a]}
-                ) == {}
-            finally:
-                corrupt_read.close()
-            for fault, invalid_provenance in (
-                ("non-object-json", "[]"),
-                ("missing-native-snapshot", json.dumps(tampered_provenance)),
-            ):
-                invalid_row = {**normal.row, "posterior_id": None,
-                    "posterior_identity_hash": f"posterior-{fault}",
-                    "provenance_json": invalid_provenance}
-                normal.conn.execute(
-                    f"INSERT INTO forecast_posteriors ({','.join(columns)}) "
-                    f"VALUES ({','.join('?' for _ in columns)})",
-                    tuple(invalid_row[column] for column in columns),
-                )
-                invalid_witness = SimpleNamespace(
-                    posterior_identity_hash=invalid_row["posterior_identity_hash"]
-                )
-                assert global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
-                    normal.conn, {fault: invalid_witness}
-                ) == {}
-                # Malformed or physically unlicensed siblings cannot erase
-                # the independently licensed no-money shadow control.
-                assert global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
-                    normal.conn, {**qkernel_witnesses, fault: invalid_witness}
-                ) == semantics_by_posterior
-        finally:
-            next(world, None)
+    for family_key, revision, lag, reused in (
+        (
+            family_a,
+            global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            0.0,
+            False,
+        ),
+        (
+            family_b,
+            "stale_ensemble_absolute_disagreement_v2",
+            6.0,
+            True,
+        ),
+    ):
+        semantics_conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (?,?)",
+            (
+                f"posterior-{family_key}",
+                json.dumps(
+                    {
+                        "bayes_precision_fusion": {
+                            "current_evidence_shape": {
+                                "semantics_revision": revision,
+                                "translation_applied": False,
+                                "shape_lag_hours": lag,
+                                "stale_shape_reused": reused,
+                                "source_cycle_time": (
+                                    "2026-08-11T00:00:00+00:00"
+                                ),
+                                "between_cohort_status": (
+                                    "SIMULTANEOUS_PROVEN"
+                                ),
+                            }
+                        }
+                    }
+                ),
+            ),
+        )
+    semantics_by_posterior = (
+        global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
+            semantics_conn,
+            qkernel_witnesses,
+        )
+    )
+    semantics_conn.close()
     assert semantics_by_posterior == {
-        qkernel_witnesses[family_a].posterior_identity_hash: (
+        f"posterior-{family_a}": (
             global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
         ),
     }
@@ -46699,8 +46644,8 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatc
         selection_cut_at_utc=at,
         decision_at_utc=at,
         qkernel_semantics_by_posterior={
-            witness.posterior_identity_hash: "stale_ensemble_absolute_disagreement_v2"
-            for witness in qkernel_witnesses.values()
+            f"posterior-{family_key}": "stale_ensemble_absolute_disagreement_v2"
+            for family_key in (family_a, family_b)
         },
         strategy_keys=("forecast_qkernel_entry",),
     )
@@ -46899,7 +46844,11 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatc
             wealth_witness=wealth,
             book_epoch=exit_epoch(price="0.30"),
             decision_at_utc=exit_at,
-            qkernel_semantics_by_posterior=semantics_by_posterior,
+            qkernel_semantics_by_posterior={
+                f"posterior-{family_a}": (
+                    global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
+                )
+            },
         )
     )
     assert len(qkernel_exits) == 1
@@ -47357,12 +47306,12 @@ def test_ankara_post_local_vector_witness_accepts_exact_complete_bundle():
         "expected_models": ["ecmwf_ifs", "icon_global"],
         "actual_models": ["ecmwf_ifs", "icon_global"],
         "capture_times_utc": [
-            "2026-08-23T20:45:03+00:00",
-            "2026-08-23T20:45:03+00:00",
+            "2026-08-23T20:44:52.810807+00:00",
+            "2026-08-23T20:44:52.810807+00:00",
         ],
         "capture_times_by_model_utc": {
-            "ecmwf_ifs": "2026-08-23T20:45:03+00:00",
-            "icon_global": "2026-08-23T20:45:03+00:00",
+            "ecmwf_ifs": "2026-08-23T20:44:52.810807+00:00",
+            "icon_global": "2026-08-23T20:44:52.810807+00:00",
         },
         "fetch_started_times_by_model_utc": {
             "ecmwf_ifs": "2026-08-23T20:44:53+00:00",
@@ -47417,7 +47366,7 @@ def test_ankara_post_local_vector_witness_accepts_exact_complete_bundle():
             "icon_global": "single_runs",
         },
         "provider_source_cycle_time_utc": "2026-08-23T20:00:00+00:00",
-        "local_capture_clock_utc": "2026-08-23T20:45:03+00:00",
+        "local_capture_clock_utc": "2026-08-23T20:44:52.810807+00:00",
         "source_available_at_utc": "2026-08-23T20:45:03+00:00",
         "causal_as_of_utc": "2026-08-23T21:48:05+00:00",
         "target_end_utc": "2026-08-23T21:00:00+00:00",
@@ -50020,14 +49969,6 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     captured = datetime(2026,9,29,23,10,tzinfo=utc)
     cut = datetime(2026, 9, 30, 6, 20, tzinfo=utc)
     target = date(2026, 9, 30)
-    class DecisionClockMeta(type):
-        def __instancecheck__(cls,value):
-            return isinstance(value,datetime)
-    class DecisionClock(datetime,metaclass=DecisionClockMeta):
-        @classmethod
-        def now(cls,tz=None):
-            return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
-    monkeypatch.setattr("src.data.replacement_forecast_bundle_reader.datetime",DecisionClock)
     city = runtime_cities_by_name()["Hong Kong"]
     if observed_extreme_native is None:
         observed_extreme_native = 32.9 if metric == "high" else 27.0
@@ -50187,44 +50128,29 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
         csv_body = ("Date time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),"
                     "Minimum Air Temperature Since Midnight(degree Celsius)\n"
                     f"{stamp.astimezone(ZoneInfo(city.timezone)).strftime('%Y%m%d%H%M')},HK Observatory,{high},{low}\n")
-        snapshot = hko_ingest_tick._parse_hko_extrema_csv(
-            csv_body, fetched_at_utc=fetched, entity_body=csv_body.encode("utf-8"),
-        )
+        snapshot = hko_ingest_tick._parse_hko_extrema_csv(csv_body,fetched_at_utc=fetched)
         row = hko_ingest_tick._build_hko_extrema_row(snapshot,temperature_c=33 if stamp>=available else None,
             accumulator_fetched_at=available.isoformat() if stamp>=available else None,
             data_version="v1.wu-native",imported_at=fetched)
         assert insert_rows(conn,[row]) == 1
         conn.commit()
-    times = [f"2026-09-30T{hour:02d}:00" for hour in range(24)] + ["2026-10-01T00:00"]
+    times = [f"2026-09-30T{hour:02d}:00" for hour in range(24)]
     vector_at = cut-timedelta(minutes=2)
     vector_cycle = cut.replace(hour=0,minute=0)
     provider_models = hourly.day0_hourly_models_for_city(city)
     for i, model in enumerate(provider_models):
         api_model = OPENMETEO_MODEL_IDS.get(model,model)
-        values = [32.0+(i%5)*.05+(1.0 if 14<=h<=18 else -.5) for h in range(25)]
-        payload = {"latitude":city.lat,"longitude":city.lon,"elevation":station["elevation_m"],
-            "timezone":city.timezone,"utc_offset_seconds":28800,
+        values = [32.0+(i%5)*.05+(1.0 if 14<=h<=18 else -.5) for h in range(24)]
+        payload = {"timezone":city.timezone,"utc_offset_seconds":28800,
             "hourly":{"time":times,"temperature_2m":values},"hourly_units":{"temperature_2m":"°C"}}
-        if model == "ecmwf_ifs":
-            from src.data.openmeteo_ecmwf_ifs9_bucket_transport import HSURF_LOCAL_CACHE
-            from tests.test_replacement_forecast_materializer import _REAL_SOURCE_CELL_GEOMETRY_PROOF
-            actual_cell = _REAL_SOURCE_CELL_GEOMETRY_PROOF(
-                latitude=city.lat,longitude=city.lon,target_elevation_m=station["elevation_m"],
-                local_cache=HSURF_LOCAL_CACHE,
-            )
-            payload["latitude"],payload["longitude"] = actual_cell["selected_grid_lat"],actual_cell["selected_grid_lon"]
         endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
-        params = {"endpoint":endpoint,"models":api_model,"timezone":city.timezone,"hourly":"temperature_2m",
-                  "latitude":city.lat,"longitude":city.lon,"run":vector_cycle.strftime("%Y-%m-%dT%H:%M")}
+        params = {"endpoint":endpoint,"models":api_model,"timezone":city.timezone,"hourly":"temperature_2m"}
         request_hash = hourly.build_request_hash(endpoint=endpoint,params=params,models=[model],
                                                 captured_at=vector_at.isoformat(),payload=payload)
         meta = hourly._day0_provider_run_meta(model=model,model_api_id=api_model,run=vector_cycle,
             available_at=vector_cycle+timedelta(hours=1),modified_at=vector_cycle+timedelta(hours=1),
             authority="run_pinned_single_runs",endpoint_mode="single_runs",request_params=params,
             request_hash=request_hash,fetch_started_at=vector_at,fetch_finished_at=vector_at)
-        body_bytes = json.dumps(payload).encode("utf-8")
-        payload = dl._bind_physical_response(payload,model=model,url=endpoint,params=params,run=vector_cycle,
-            captures=((body_bytes,vector_at.timestamp()),))
         vectors = hourly.parse_openmeteo_hourly_payload(payload,city=city,models=[model],
             captured_at=vector_at.isoformat(),source_run_meta_json=json.dumps(meta))
         assert len(vectors) == 1
@@ -50237,8 +50163,8 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     for member in range(51):
         key = "temperature_2m" if member == 0 else f"temperature_2m_member{member:02d}"
         ensemble_hourly[key] = [32.0+((member+len(provider_models))%5)*.05+
-            (1.0 if 14<=hour<=18 else -.5) for hour in range(25)]
-    ensemble_body = json.dumps({"latitude":city.lat,"longitude":city.lon,"elevation":station["elevation_m"],
+            (1.0 if 14<=hour<=18 else -.5) for hour in range(24)]
+    ensemble_body = json.dumps({"latitude":city.lat,"longitude":city.lon,
         "timezone":city.timezone,"utc_offset_seconds":28800,"hourly":ensemble_hourly,
         "hourly_units":{key:"°C" for key in ensemble_hourly if key != "time"}}).encode()
     ensemble_meta = {"last_run_initialisation_time":vector_cycle.isoformat(),
@@ -50265,7 +50191,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
         target_elevation_m=station["elevation_m"])
     raw = {"latitude":cell["selected_grid_lat"],"longitude":cell["selected_grid_lon"],"elevation":station["elevation_m"],
         "timezone":city.timezone,"utc_offset_seconds":28800,"hourly_units":{"temperature_2m":"°C"},
-        "hourly":{"time":times,"temperature_2m":[27.0 if h<6 else 33.0 for h in range(25)]},
+        "hourly":{"time":times,"temperature_2m":[27.0 if h<6 else 33.0 for h in range(24)]},
         "_zeus_current_target_scope":{"city":city.name,"target_date":target.isoformat(),"metric":metric}}
     raw_bytes = (json.dumps(raw,indent=2,sort_keys=True)+"\n").encode()
     artifact_path = tmp_path / f"hko-anchor-{metric}.json"
@@ -50995,16 +50921,14 @@ def _kord_causal_fast_inputs(fixture,monkeypatch):
         writer_at[0] = current_fetch
         assert fast._append_metar_prints_to_ledger(conn,((city,source,fixture.request.target_date),),
             fixture.current_reports)
-    times = [f"{fixture.request.target_date}T{hour:02d}:00" for hour in range(24)] + [
-        f"{fixture.request.target_date + timedelta(days=1)}T00:00"]
-    common = {"latitude":city.lat,"longitude":city.lon,"elevation":204.8,
-        "timezone":city.timezone,"utc_offset_seconds":-18000}
-    deterministic = {**common,"hourly":{"time":times,"temperature_2m":[19.0]*25},
+    times = [f"{fixture.request.target_date}T{hour:02d}:00" for hour in range(24)]
+    common = {"latitude":city.lat,"longitude":city.lon,"timezone":city.timezone,"utc_offset_seconds":-18000}
+    deterministic = {**common,"hourly":{"time":times,"temperature_2m":[19.0]*24},
         "hourly_units":{"temperature_2m":"°C"}}
     ensemble_hourly = {"time":times}
     for index in range(51):
         key = "temperature_2m" if index==0 else f"temperature_2m_member{index:02d}"
-        ensemble_hourly[key] = [19.0+(index-25)*.02]*25
+        ensemble_hourly[key] = [19.0+(index-25)*.02]*24
     ensemble = {**common,"hourly":ensemble_hourly,
         "hourly_units":{key:"°C" for key in ensemble_hourly if key!="time"}}
     meta = {"last_run_initialisation_time":cycle.isoformat(),
@@ -51487,7 +51411,7 @@ def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_pat
                     WHERE selection_epoch_identity=? AND candidate_id=? LIMIT 1""",
                     (actual_selected.actuation.selection_epoch_identity,winner.candidate_id)).fetchone()
                 if native is not None:
-                    assert tuple(native) == (winner.token_id,selected_point)
+                    assert native == (winner.token_id,selected_point)
                 else:
                     mode = trade.execute("SELECT mode FROM decision_log WHERE rowid=?",(row[5],)).fetchone()[0]
                     assert mode == "global_single_order_auction_delta"
@@ -52005,25 +51929,16 @@ def _hko_partial_current_post_day_posterior(tmp_path,monkeypatch,metric):
     post_cut = _dt.datetime(2026,9,30,16,30,tzinfo=_dt.timezone.utc)
     vector_at = _dt.datetime(2026,9,30,15,58,tzinfo=_dt.timezone.utc)
     for index,model in enumerate(hourly.day0_hourly_models_for_city(city)):
-        selected_lat, selected_lon = cells.get(model, (city.lat, city.lon))
-        # Midnight is an interpolation support knot, not a next-day sample in X.
-        support_end = (_dt.date.fromisoformat(row["target_date"])+_dt.timedelta(days=1)).isoformat()+"T00:00"
-        payload = {"latitude":selected_lat,"longitude":selected_lon,"elevation":32.,
-            "timezone":city.timezone,"utc_offset_seconds":28800,
-            "hourly":{"time":[f"{row['target_date']}T{hour:02d}:00" for hour in range(24)]+[support_end],
-                "temperature_2m":[32.+index*.05+(1. if 14<=hour<=18 else -.5) for hour in range(25)]},
+        payload = {"timezone":city.timezone,"utc_offset_seconds":28800,
+            "hourly":{"time":[f"{row['target_date']}T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m":[32.+index*.05+(1. if 14<=hour<=18 else -.5) for hour in range(24)]},
             "hourly_units":{"temperature_2m":"°C"}}
         endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
-        params = {"endpoint":endpoint,"models":OPENMETEO_MODEL_IDS.get(model,model),
-            "timezone":city.timezone,"hourly":"temperature_2m","latitude":city.lat,"longitude":city.lon,
-            "run":cycle.strftime("%Y-%m-%dT%H:%M")}
+        params = {"endpoint":endpoint,"models":OPENMETEO_MODEL_IDS.get(model,model),"timezone":city.timezone,"hourly":"temperature_2m"}
         request_hash = hourly.build_request_hash(endpoint=endpoint,params=params,models=[model],captured_at=vector_at.isoformat(),payload=payload)
         meta = hourly._day0_provider_run_meta(model=model,model_api_id=OPENMETEO_MODEL_IDS.get(model,model),run=cycle,
             available_at=cycle+_dt.timedelta(hours=1),modified_at=cycle+_dt.timedelta(hours=1),authority="run_pinned_single_runs",
             endpoint_mode="single_runs",request_params=params,request_hash=request_hash,fetch_started_at=vector_at,fetch_finished_at=vector_at)
-        body_bytes = json.dumps(payload).encode("utf-8")
-        payload = dl._bind_physical_response(payload,model=model,url=endpoint,params=params,run=cycle,
-            captures=((body_bytes,vector_at.timestamp()),))
         vectors = hourly.parse_openmeteo_hourly_payload(payload,city=city,models=[model],captured_at=vector_at.isoformat(),source_run_meta_json=json.dumps(meta))
         assert hourly.persist_day0_hourly_vectors(vectors,target_date=row["target_date"],conn=fixture.conn,
             request_hash=request_hash,endpoint=endpoint,now=post_cut) == 1
@@ -53323,17 +53238,10 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
                     timezone_name=fixture.city.timezone,lead_days=0)],models=models,
                 frozen_source_runs={model:(remaining_run,remaining_run+_dt.timedelta(minutes=5)) for model in models},
                 include_previous_runs=False,prune_after=False)
-            assert scoped["written_row_count"] == 3
-        current_raw_rows = [tuple(row) for row in fixture.conn.execute(
+            assert scoped["written_row_count"] == 0
+        assert [tuple(row) for row in fixture.conn.execute(
             "SELECT raw_model_forecast_id,model,metric,source_cycle_time,source_available_at,captured_at,recorded_at,artifact_id,raw_sha256 "
-            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
-        assert set(prior_rows).issubset(current_raw_rows)
-        appended_raw_rows = [row for row in current_raw_rows if row not in prior_rows]
-        assert len(appended_raw_rows) == 3
-        assert {row[1] for row in appended_raw_rows} == set(models)
-        assert all(row[2] == metric and row[3] == remaining_run.isoformat()
-            and row[4] == (remaining_run+_dt.timedelta(minutes=5)).isoformat()
-            and row[5] == remaining_capture.isoformat() for row in appended_raw_rows)
+            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == prior_rows
         value = 31.8 if metric == "high" else 25.8
         body = ("Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
             f"{observed.astimezone(ZoneInfo('Asia/Hong_Kong')).strftime('%Y%m%d%H%M')},HK Observatory,{value}\n").encode()
@@ -53517,7 +53425,7 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
             assert latest[field] == original[field]
         assert [tuple(row) for row in fixture.conn.execute(
             "SELECT raw_model_forecast_id,model,metric,source_cycle_time,source_available_at,captured_at,recorded_at,artifact_id,raw_sha256 "
-            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == current_raw_rows
+            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == prior_rows
         from src.data.replacement_forecast_readiness import latest_replacement_readiness
         readiness = latest_replacement_readiness(fixture.conn,city=fixture.city.name,target_date="2026-09-30",
             temperature_metric=metric,decision_time=written)
@@ -53619,6 +53527,7 @@ def test_hko_normal_kernel_uses_the_producers_instrument_variance(tmp_path, monk
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize("basis", ("source_clock", "baseline", "latency", "source_clock_latency"))
 def test_day0_variance_decomposition_uses_city_delta_owner(monkeypatch, city_name, unit, expected, metric, basis):
+    from src.data.day0_hourly_vectors import day0_effective_path_sigma_c
     from src.signal.day0_obs_latency import stale_extreme_uncertainty_margin, staleness_budget_minutes
     from src.signal.ensemble_signal import sigma_instrument_for_city
     city = era.runtime_cities_by_name()[city_name]
@@ -53633,18 +53542,13 @@ def test_day0_variance_decomposition_uses_city_delta_owner(monkeypatch, city_nam
     centers = (31., 32., 33.)
     margin = stale_extreme_uncertainty_margin(unit=unit, obs_age_minutes=age,
         budget_minutes=staleness_budget_minutes(city_name))
-    # This is an adapter component-width unit test, not source qualification.
-    # W/D are declared on one X; B is already in its provider centers. The
-    # obsolete whole-day scalar remains present as a non-authorizing control.
-    within, delta = ((.4, .3) if basis.startswith("source_clock") else (0., 0.))
-    extra_native = math.hypot(within, delta, margin/2)
-    total = math.hypot(expected, extra_native)
-    scale = 1. if unit == "C" else 1.8
-    payload["_edli_day0_conditional_remaining_shape"] = SimpleNamespace(
-        witness={"metric":metric}, effective_sigma_c=total/scale,
-        extra_sigma_c=extra_native/scale, identity="private-X-width-component",
-        provider_between_sigma_c=float(np.std(centers))/scale,
-    )
+    if basis == "latency":
+        payload.pop("_edli_day0_source_clock_predictive_sigma_native")
+        total = math.hypot(expected, margin/2)
+    else:
+        total = day0_effective_path_sigma_c(source_clock_predictive_sigma_c=payload[
+            "_edli_day0_source_clock_predictive_sigma_native"], centers_c=centers,
+            instrument_sigma_c=expected, observation_margin_c=margin)
     process = era._day0_process_sigma_native(payload=payload, family=family, unit=unit,
         decision_time=cut, members_native=centers)
     extra = era._day0_extra_member_sigma_native(payload=payload, family=family, unit=unit,
@@ -53663,15 +53567,13 @@ def test_day0_missing_instrument_identity_cannot_fall_back_to_zero(city_name, un
 
 
 @pytest.mark.parametrize("unit,scale", (("C", 1.), ("F", 1.8)))
-@pytest.mark.parametrize("metric", ("high", "low"))
-def test_day0_conditional_high_keeps_its_existing_extra_variance(unit, scale, metric):
-    total = math.hypot(.6,.1)
-    shape = SimpleNamespace(effective_sigma_c=total, extra_sigma_c=.6,
-        provider_between_sigma_c=.2, identity="private-conditional-component", witness={"metric":metric})
-    payload = {"_edli_day0_conditional_remaining_shape": shape}
-    family = SimpleNamespace(city="Hong Kong", metric=metric)
+def test_day0_conditional_high_keeps_its_existing_extra_variance(unit, scale):
+    shape = SimpleNamespace(effective_sigma_c=.8, extra_sigma_c=.6,
+        provider_between_sigma_c=.2, identity="qualified-conditional-shape")
+    payload = {"_edli_day0_conditional_high_shape": shape}
+    family = SimpleNamespace(city="Hong Kong", metric="high")
     assert era._day0_process_sigma_native(payload=payload, family=family, unit=unit,
-        decision_time=None) == pytest.approx(total*scale, abs=1e-12)
+        decision_time=None) == pytest.approx(.8*scale, abs=1e-12)
     assert era._day0_extra_member_sigma_native(payload=payload, family=family, unit=unit,
         decision_time=None) == pytest.approx(.6*scale, abs=1e-12)
 
@@ -53705,7 +53607,7 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
         producer, producer_result = calls[-1]
         source_calls = len(calls)
         assert producer["boundary_scenarios"][0][0] == raw
-        assert producer["final_extreme_centers_c"] == ()  # Whole FND has no native mapping to X.
+        assert producer["final_extreme_centers_c"] == (33.0 if metric == "high" else 27.0,)
         assert producer["identity_inputs"]["city"] == "Hong Kong"
         assert producer["identity_inputs"]["unit"] == "C"
         observed = dict(fixture.conn.execute(
@@ -53720,8 +53622,6 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
             (fixture.result.posterior_id,),
         ).fetchone()
         q, provenance = json.loads(q_json), json.loads(provenance_json)
-        whole = provenance["day0_remaining_carrier_station_extreme_providers"]
-        assert whole and all(row["remaining_variable_mapping"] == "UNKNOWN" for row in whole)
         prepared_by_use = []
         for use in (era._CurrentProbabilityUse.ENTRY, era._CurrentProbabilityUse.HELD_MONITOR):
             payload = {}
@@ -53918,53 +53818,10 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
                         if min(points)+.001 < net < max(points)-.001:
                             possibilities.append((abs(points[0]-points[1]),binding,bid,points))
                 if not possibilities:
-                    # Moving a continuous bound within the same discrete
-                    # preimage need not change q. Prove that case, then still
-                    # exercise both fixed cash laws on the actual source q.
+                    # This LOW fixture's zero unresolved width is clamped on
+                    # both implementations; a sigma-only fix is no action flip.
+                    assert metric == "low" and name == "instrument"
                     np.testing.assert_array_equal(legacy.yes_point_q,current.yes_point_q)
-                    binding = current.bindings[1]
-                    token = binding.yes_token_id if side=="YES" else binding.no_token_id
-                    point = family_payoff_point_q(current,bin_id=binding.bin_id,side=side)
-                    holding = SimpleNamespace(position_id="counterfactual-held",family_key=current.family_key,
-                        bin_id=binding.bin_id,side=side,token_id=token,shares=Decimal("10"))
-                    same_q_outcomes = []
-                    for bid,admitted in ((Decimal(".05"),False),(Decimal(".95"),True)):
-                        curve = ExecutableSellCurve(token_id=token,side=side,snapshot_id="same-q-book",
-                            book_hash="same-q-private-book",levels=(BidBookLevel(price=bid,size=Decimal("10")),),
-                            fee_model=fee,min_tick=Decimal(".001"),min_order_size=Decimal("1"),
-                            quote_ttl=_dt.timedelta(seconds=30))
-                        for witness in (legacy,current):
-                            proposal = global_sell_candidate_from_holding(holding,probability_witness=witness,
-                                ledger_snapshot_id=endowment.ledger_snapshot_id,executable_sell_curve=curve,
-                                book_captured_at_utc=fixture.cut,neg_risk=False,execution_mode="TAKER_LIMIT",
-                                probability_functional="POSTERIOR_PREDICTIVE_MEAN",
-                                exit_authority_status=prepared.day0_exit_authority_status,
-                                exit_authority_reason=prepared.day0_exit_authority_reason,
-                                sell_action_authority_identity=prepared.sell_action_authority_identity)
-                            assert proposal is not None
-                            score = _score_global_single_order_sell_expected(proposal,held_probability_mean=point,
-                                sample_count=witness.yes_q_samples.shape[0],band_alpha=witness.band_alpha,endowment=endowment)
-                            ev = float(score.shares*(bid-fee.fee_per_share(bid)-Decimal(str(point))))
-                            assert score.expected_terminal_wealth.expected_ev_usd == pytest.approx(ev,abs=1e-5)
-                            assert (score.candidate is not None and not score.rejection_reasons) is admitted
-                            position = Position(trade_id="same-q-held",market_id=binding.condition_id,
-                                city=fixture.city.name,cluster=fixture.city.name,target_date="2026-09-30",
-                                bin_label=binding.bin_id,direction=direction,unit="C",temperature_metric=metric,
-                                shares=10,shares_filled=10,filled_cost_basis_usd=5,cost_basis_usd=5,
-                                token_id=binding.yes_token_id,no_token_id=binding.no_token_id,condition_id=binding.condition_id)
-                            samples = family_payoff_q_samples(witness,bin_id=binding.bin_id,side=side)
-                            context = ExitContext(fresh_prob=point,fresh_prob_is_fresh=True,current_market_price=float(bid),
-                                current_market_price_is_fresh=True,best_bid=float(bid),bid_size=10,bid_ladder=((float(bid),10),),
-                                hours_to_settlement=9,position_state="active",day0_active=True,
-                                day0_exit_authority_status=prepared.day0_exit_authority_status,
-                                day0_exit_authority_reason=prepared.day0_exit_authority_reason,
-                                current_ci=(min(point,float(samples.min())),max(point,float(samples.max()))),
-                                probability_receipt={"q_version":witness.q_version},bankroll=1000)
-                            assert position.evaluate_exit(context).should_exit is admitted
-                            assert position.evaluate_exit(replace(context,best_bid=None,bid_ladder=())).reason == "HOLD"
-                        same_q_outcomes.append({"bid":str(bid),"admitted":admitted})
-                    outcomes.append({"recipe":name,"side":side,"same_discrete_q":True,
-                        "point":point,"fixed_cash_laws":same_q_outcomes})
                     continue
                 _,binding,bid,points = max(possibilities,key=lambda item:(item[0],
                     -abs(float(item[2]-fee.fee_per_share(item[2]))-sum(item[3])/2)))
@@ -54013,7 +53870,7 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
                 assert scores[good].expected_terminal_wealth.expected_delta_log_wealth > 0
                 assert scores[bad].expected_terminal_wealth.expected_ev_usd < 0
                 assert not decisions[bad].should_exit
-                if name in {"instrument", "both"}:
+                if name == "instrument":
                     # The sigma-only difference in this real kernel is below
                     # the lawful submitted-floor safety margin: positive cash
                     # EV alone cannot waive that cumulative execution gate.
@@ -54031,11 +53888,8 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
                     "fixed_sell_admitted":admitted,
                     "rejections":[list(score.rejection_reasons.values()) for score in scores]})
                 changed.add((name,side))
-        # Probability repair is not an action-flip guarantee. Every variant
-        # above either proved exact q equality with both cash laws, or scored
-        # its actual mean-probability difference under cumulative sell gates.
-        assert {(item["recipe"],item["side"]) for item in outcomes} == {
-            (name,side) for name in variants for side in ("YES","NO")}
+        assert {("boundary",side) for side in ("YES","NO")} <= changed
+        assert {("both",side) for side in ("YES","NO")} <= changed
         if metric == "high":
             assert {("instrument",side) for side in ("YES","NO")} <= changed
         record_property("counterfactual_action_law",json.dumps(outcomes,sort_keys=True))
@@ -54932,8 +54786,7 @@ def test_optional_universe_hint_cannot_consume_normal_claim_window(
     monkeypatch.setattr(queue, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
     clock = [100.0]
     import time as real_time
-    monkeypatch.setattr(queue, "time", SimpleNamespace(monotonic=lambda: clock[0], time=real_time.time,
-        sleep=real_time.sleep, perf_counter=real_time.perf_counter, thread_time=real_time.thread_time))
+    monkeypatch.setattr(queue, "time", SimpleNamespace(monotonic=lambda: clock[0], time=real_time.time, sleep=real_time.sleep))
     inspections = []
     caller_progress = []
     conn.set_progress_handler(lambda: caller_progress.append(True) or 0, 1)

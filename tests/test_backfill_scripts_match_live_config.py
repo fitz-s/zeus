@@ -645,8 +645,7 @@ def test_hko_ingest_repeated_provider_snapshot_is_idempotent(hko_ingest_tick_mod
         fetched_at_utc="2026-07-13T15:51:00+00:00",
     )
 
-    # Legacy parsed-only rows cannot suppress acquisition of native evidence.
-    assert not hko_ingest_tick_module._same_extrema_already_materialized(conn, snapshot)
+    assert hko_ingest_tick_module._same_extrema_already_materialized(conn, snapshot)
     assert not hko_ingest_tick_module._same_extrema_already_materialized(
         conn,
         hko_ingest_tick_module.HkoExtremaSnapshot(

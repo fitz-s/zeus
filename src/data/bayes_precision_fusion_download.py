@@ -446,7 +446,6 @@ class _SourceClockSingleRunsRequest:
     # The provider's last_run_modification_time for this run: the marker that
     # its bytes can change. None when no matching metadata pins it.
     modification_time: datetime | None = None
-    metadata_entity: Mapping[str, object] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -599,7 +598,6 @@ def _read_source_clock_single_runs_requests(
                 source_available_at=update.last_run_availability_time.astimezone(UTC).isoformat(),
                 data_end_time=_metadata_data_end_time(update.raw, run),
                 modification_time=_utc_or_none(update.last_run_modification_time),
-                metadata_entity=_model_metadata_entity(update),
             )
         except Exception:
             continue
@@ -608,7 +606,6 @@ def _read_source_clock_single_runs_requests(
 
 def _read_matching_frozen_metadata(
     requests: Mapping[str, _SourceClockSingleRunsRequest],
-    *, metadata_entities: dict[str, Mapping[str, object]] | None = None,
 ) -> tuple[dict[str, datetime], dict[str, datetime]]:
     """Supplement a frozen tuple only with unambiguous matching current metadata.
 
@@ -652,8 +649,6 @@ def _read_matching_frozen_metadata(
             )
             if published.astimezone(UTC) != available.astimezone(UTC):
                 continue
-            if metadata_entities is not None:
-                metadata_entities[model] = _model_metadata_entity(update)
             ends.setdefault(model, set()).add(
                 _metadata_data_end_time(update.raw, request.run)
             )
@@ -668,19 +663,6 @@ def _read_matching_frozen_metadata(
         }
 
     return _unique(ends), _unique(modifications)
-
-
-def _model_metadata_entity(update: object) -> dict[str, object]:
-    """Metadata evidence has its own source clocks; it never renews temperature."""
-    from src.data.openmeteo_model_updates import NATIVE_METADATA_ENTITY_KEY
-    native = (update.raw or {}).get(NATIVE_METADATA_ENTITY_KEY)
-    return {"input_role": "MODEL_UPDATE_METADATA", "publisher_issue_time": "UNKNOWN",
-        "model_reference_time_utc": update.last_run_initialisation_time.astimezone(UTC).isoformat(),
-        "provider_modification_time_utc": (update.last_run_modification_time.astimezone(UTC).isoformat()
-            if update.last_run_modification_time is not None else "UNKNOWN"),
-        "api_availability_time_utc": update.last_run_availability_time.astimezone(UTC).isoformat(),
-        **(dict(native) if isinstance(native, Mapping) else
-            {"status": "UNKNOWN", "reason": "native_capture_missing", "response_role": "UNKNOWN"})}
 
 # Open-Meteo PREVIOUS-RUNS model ids keyed by the STORED model identity. The previous-runs API
 # model id can differ from both the stored identity AND the single-runs id: the anchor is stored
@@ -1801,35 +1783,49 @@ def _utc_datetime(value: datetime | str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _standard_metadata_bracket(
+def _persist_standard_metadata_bracket(
     *, model: str, run: datetime, modified: datetime, params: Mapping[str, object],
-    before: Sequence[Mapping[str, object]], after: Sequence[Mapping[str, object]],
+    before: Sequence[tuple], after: Sequence[tuple],
     temperature: Sequence[tuple[bytes, float]],
     temperature_network: Sequence[tuple[bytes, float, Mapping[str, str]]],
 ) -> dict[str, object]:
-    """Inline metadata in the existing registered temperature parent, without a writer."""
+    """Append diagnostic native evidence without changing forecast authority."""
     if not before or not after or not temperature:
         _LOG.warning("OPENMETEO_METADATA_BRACKET_UNKNOWN model=%s reason=native_capture_missing", model)
         return {"status": "UNKNOWN", "reason": "native_capture_missing"}
     try:
+        from src.config import state_path
         from src.data.openmeteo_ecmwf_ifs9_anchor import STANDARD_FORECAST_URL
         from src.data.openmeteo_model_updates import parse_model_update
-        import base64
-        manifest: dict[str, object] = {"status": "CAPTURED", "revision": "openmeteo_standard_metadata_bracket_v1",
+
+        directory = state_path(str(Path("replacement_forecast_live") / "raw_manifests" / run.strftime("%Y%m%dT%H%M%SZ")))
+        directory.mkdir(parents=True, exist_ok=True)
+
+        def append(path: Path, body: bytes) -> None:
+            try:
+                with path.open("xb") as handle:
+                    handle.write(body)
+            except FileExistsError:
+                if path.read_bytes() != body:
+                    raise ValueError("immutable metadata evidence changed")
+
+        manifest: dict[str, object] = {"revision": "openmeteo_standard_metadata_bracket_v1",
             "model": model, "model_reference_time_utc": run.isoformat(),
             "provider_modification_time_utc": modified.isoformat(),
             "publisher_issue_time": "UNKNOWN"}
         for name, readings in (("before", before), ("after", after)):
-            native = dict(readings[-1])
-            if native.get("status") != "CAPTURED":
-                raise ValueError("native metadata entity missing")
-            body = base64.b64decode(str(native["body_base64"]), validate=True)
-            if hashlib.sha256(body).hexdigest() != native["body_sha256"] or len(body) != native["byte_size"]:
-                raise ValueError("native metadata entity digest differs")
+            url, request_params, body, fetched_at, headers = readings[-1]
             update = parse_model_update(model, json.loads(body))
             if update.model != model or update.last_run_initialisation_time != run or update.last_run_modification_time != modified:
                 raise ValueError("native metadata differs from accepted bracket")
-            manifest[name] = native
+            digest = hashlib.sha256(body).hexdigest()
+            path = directory / f"openmeteo_model_metadata_{digest}.json"
+            append(path, body)
+            manifest[name] = {"artifact_path": str(path), "body_sha256": digest, "byte_size": len(body),
+                "request_url": url, "request_params": request_params,
+                "fetched_at_utc": datetime.fromtimestamp(fetched_at, UTC).isoformat(),
+                "clock_role": "LOCAL_HTTP_ENTITY_POSSESSION", "response_role": "NETWORK_200_ENTITY",
+                "http_response_headers": dict(headers)}
         body, fetched_at = temperature[-1]
         digest = hashlib.sha256(body).hexdigest()
         request_hash = hashlib.sha256(json.dumps({"url": STANDARD_FORECAST_URL, "params": params},
@@ -1844,7 +1840,11 @@ def _standard_metadata_bracket(
             if network_body != body or network_at != fetched_at:
                 raise ValueError("temperature entity and network capture differ")
             manifest["temperature"]["http_response_headers"] = dict(headers)
-        return manifest
+        encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        manifest_hash = hashlib.sha256(encoded).hexdigest()
+        path = directory / f"openmeteo_bpf_metadata_bracket_{digest}_{request_hash}_{manifest_hash}.json"
+        append(path, encoded)
+        return {"status": "CAPTURED", "manifest_path": str(path), "sha256": manifest_hash}
     except (OSError, KeyError, TypeError, ValueError, OverflowError):
         # SCOPE: this diagnostic bracket. DRAIN/RESET: the next normal producer
         # captures both native metadata bodies. No inferred clock or q gate.
@@ -1862,16 +1862,19 @@ def _fetch_standard_meta_stamped_payloads(
     deadline_monotonic: float | None,
     past_hours: int = 0,
 ) -> tuple[tuple[Mapping[str, object], ...], _StandardMetaStampedTransport]:
-    """Preserve a standard-API audit capture, never authorize current-run q.
+    """Fetch one current model from the standard API under an atomic metadata window.
 
     Run identity is (model, last_run_initialisation_time) only: replicas behind Open-Meteo's
     meta.json endpoint disagree on last_run_availability_time for the same run, so availability
     is recorded as evidence (earliest of before/after) but never gates the refuse/discard checks.
 
-    Stable metadata cannot prove a rolling response's run, and the ordinary
-    forecast endpoint forbids the explicit ``run`` parameter. Original bodies
-    remain audit evidence; only the existing pinned Single Runs transport may
-    produce quantitative current evidence.
+    ``run=None`` means "prove whatever run the provider's own meta bracket
+    reports" instead of refusing unless it matches a frozen run -- the
+    transport-fallback invariant (same run, different endpoint) only applies
+    when the caller passes a concrete ``run``; a caller that already knows the
+    pinned run is disqualified (not yet usable, or starting after the causal
+    boundary) has nothing to freeze against and accepts the reported run
+    instead.
     """
 
     if source_available_at is None:
@@ -1882,20 +1885,21 @@ def _fetch_standard_meta_stamped_payloads(
 
     expected_run = _utc_datetime(run) if run is not None else None
 
-    def _meta() -> tuple[object, list[Mapping[str, object]]]:
+    def _meta() -> tuple[object, list[tuple]]:
+        native: list[tuple] = []
         deadline_kwargs = _deadline_fetch_kwargs(deadline_monotonic)
         timeout_seconds = float(deadline_kwargs.get("timeout", 30.0))
         updates = fetch_model_updates(
             (model,),
             timeout_seconds=timeout_seconds,
             max_workers=1,
+            capture_metadata_response=lambda url, params, body, at, headers: native.append((url, params, body, at, headers)),
         )
         if len(updates) != 1:
             raise ValueError(f"{model} metadata response count must be 1, got {len(updates)}")
         if str(updates[0].model) != model:
             raise ValueError(f"{model} metadata identity mismatch: {updates[0].model!r}")
-        native = _model_metadata_entity(updates[0])
-        return updates[0], [native] if native.get("status") == "CAPTURED" else []
+        return updates[0], native
 
     meta_before, native_before = _meta()
     before_run = meta_before.last_run_initialisation_time.astimezone(UTC)
@@ -1953,18 +1957,16 @@ def _fetch_standard_meta_stamped_payloads(
         or after_modified.astimezone(UTC) != before_modified
     ):
         raise ValueError(f"{model} standard fallback discarded: provider metadata changed mid-fetch")
-    bracket = _standard_metadata_bracket(
-        model=model, run=before_run, modified=before_modified, params=params,
-        before=native_before, after=native_after, temperature=captures,
-        temperature_network=network_captures)
-    for item in payloads:
-        capture = item.get(_BATCH_PHYSICAL_RESPONSE_KEY)
-        if isinstance(capture, dict):
-            capture["metadata_bracket_evidence"] = bracket
-    # Metadata is inline audit evidence, not proof of a rolling body's run.
-    # SCOPE: this provider/run/location audit response. DRAIN: normal pinned
-    # Single Runs capture. RESET: actual same-run body, never a metadata label.
-    raise ValueError(f"SOURCE_RUN_UNPROVEN:{model}:standard_rolling_body_audit_only")
+    return tuple(payloads), _StandardMetaStampedTransport(
+        run=before_run,
+        source_available_at=min(before_available, after_available),
+        modification_time=before_modified,
+        forecast_hours=int(forecast_hours),
+        metadata_bracket_evidence=_persist_standard_metadata_bracket(
+            model=model, run=before_run, modified=before_modified, params=params,
+            before=native_before, after=native_after, temperature=captures,
+            temperature_network=network_captures),
+    )
 
 
 # ── BATCHED FETCH HELPERS (R1+R2 collapse, 2026-06-13) ──────────────────────────────────
@@ -3816,9 +3818,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid frozen source run for {model!r}") from exc
         if not _use_legacy_per_model:
-            matched_metadata_entities: dict[str, Mapping[str, object]] = {}
             matched_ends, matched_modifications = _read_matching_frozen_metadata(
-                source_clock_single_runs, metadata_entities=matched_metadata_entities,
+                source_clock_single_runs
             )
             source_clock_single_runs = {
                 model: _SourceClockSingleRunsRequest(
@@ -3827,7 +3828,6 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     availability_from_successful_possession=request.availability_from_successful_possession,
                     data_end_time=matched_ends.get(model),
                     modification_time=matched_modifications.get(model),
-                    metadata_entity=matched_metadata_entities.get(model),
                 )
                 for model, request in source_clock_single_runs.items()
             }
@@ -4551,11 +4551,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             "source_available_at": source_available_at, "captured_at": row_captured_at,
                             "lead_days": int(t.lead_days), "forecast_value_c": float(val),
                             "endpoint": "single_runs",
-                            "_physical_response": ({**single_physical_responses[model],
-                                "model_update_metadata": dict(request.metadata_entity or {
-                                    "status": "UNKNOWN", "reason": "matching_metadata_missing",
-                                    "input_role": "MODEL_UPDATE_METADATA", "response_role": "UNKNOWN"})}
-                                if isinstance(single_physical_responses.get(model), Mapping) else None),
+                            "_physical_response": single_physical_responses.get(model),
                             **_bayes_precision_fusion_product_identity(
                                 model,
                                 "single_runs",

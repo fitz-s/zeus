@@ -10,8 +10,6 @@ the repository.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import logging
 import os
@@ -37,7 +35,6 @@ ENV_MODEL_UPDATES_ENDPOINT = "ZEUS_OPENMETEO_MODEL_UPDATES_URL"
 ENV_MODEL_UPDATES_MAX_WORKERS = "ZEUS_OPENMETEO_MODEL_UPDATES_MAX_WORKERS"
 DEFAULT_MODEL_UPDATES_ENDPOINT = "https://api.open-meteo.com/data/{model}/static/meta.json"
 DEFAULT_MODEL_UPDATES_MAX_WORKERS = 8
-NATIVE_METADATA_ENTITY_KEY = "_native_http_entity"
 
 OPENMETEO_MODEL_METADATA_IDS: Mapping[str, str] = {
     "dmi_harmonie_europe": "dmi_harmonie_arome_europe",
@@ -85,9 +82,6 @@ class OpenMeteoModelUpdate:
             value = payload.get(key)
             if isinstance(value, datetime):
                 payload[key] = value.isoformat()
-        native = (payload.get("raw") or {}).get(NATIVE_METADATA_ENTITY_KEY)
-        if isinstance(native, dict) and native.get("status") == "CAPTURED":
-            native["recorded_at"] = datetime.now(UTC).isoformat()
         return payload
 
 
@@ -248,50 +242,26 @@ def fetch_model_updates(
     priority: bool = False,
     capture_metadata_response: Callable[[str, dict, bytes, float, Mapping[str, str]], None] | None = None,
 ) -> tuple[OpenMeteoModelUpdate, ...]:
-    def _fetch_metadata(url: str, **kwargs: object) -> tuple[object, dict[str, object]]:
-        # Transport callbacks supply original entity bytes and possession clocks.
+    def _fetch_metadata(url: str, **kwargs: object) -> object:
+        # Only the shared transport's actual 200 callback can supply evidence.
         # Parsed payload fields and JSONL caches never manufacture native bytes.
-        entities: list[tuple[bytes, float]] = []
         responses: list[tuple[bytes, float, Mapping[str, str]]] = []
-        kwargs["capture_entity_body"] = lambda body, at: entities.append((body, at))
-        kwargs["capture_network_response"] = lambda body, at, headers: responses.append((body, at, headers))
+        if capture_metadata_response is not None:
+            kwargs["capture_network_response"] = lambda body, at, headers: responses.append((body, at, headers))
         payload = _fetch_openmeteo(url, {}, **kwargs)
-        native: dict[str, object] = {"status": "UNKNOWN", "reason": "native_capture_missing", "response_role": "UNKNOWN"}
-        if entities or responses:
+        if capture_metadata_response is not None and responses:
             try:
-                body, fetched_at = entities[-1] if entities else responses[-1][:2]
-                headers: Mapping[str, str] = {}
-                if responses:
-                    network_body, network_at, headers = responses[-1]
-                    if network_body != body or network_at != fetched_at:
-                        raise ValueError("metadata entity and network capture differ")
+                body, fetched_at, headers = responses[-1]
                 if json.loads(body) != payload:
                     raise ValueError("metadata native body differs from parsed response")
                 parts = urlsplit(url)
                 query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
                          if not any(secret in key.lower() for secret in ("key", "token", "auth", "password"))]
                 clean_url = urlunsplit((parts.scheme, parts.netloc.split("@")[-1], parts.path, urlencode(query), ""))
-                safe_headers = {str(key).lower(): str(value) for key, value in headers.items()
-                    if str(key).lower() in {"date", "etag", "last-modified", "content-type"}}
-                native = {"status": "CAPTURED", "revision": "openmeteo_model_metadata_entity_v1",
-                    "body_base64": base64.b64encode(body).decode("ascii"),
-                    "body_sha256": hashlib.sha256(body).hexdigest(), "byte_size": len(body),
-                    "request_url": clean_url, "request_params": {},
-                    "captured_at": datetime.fromtimestamp(fetched_at, UTC).isoformat(),
-                    "clock_role": "LOCAL_HTTP_ENTITY_POSSESSION", "publisher_issue_time": "UNKNOWN",
-                    "response_role": "NETWORK_200_ENTITY" if responses else "CACHE_ENTITY",
-                    "origin_response_role": "NETWORK_200_ENTITY" if responses else "UNKNOWN",
-                    "headers_status": "CAPTURED" if responses else "UNKNOWN",
-                    "http_response_headers": safe_headers}
-                if capture_metadata_response is not None and responses:
-                    capture_metadata_response(clean_url, {}, body, fetched_at, safe_headers)
-            except (OSError, TypeError, ValueError, OverflowError):
-                native = {"status": "UNKNOWN", "reason": "native_capture_invalid", "response_role": "UNKNOWN"}
+                capture_metadata_response(clean_url, {}, body, fetched_at, dict(headers))
+            except (OSError, TypeError, ValueError):
                 logging.getLogger(__name__).warning("OPENMETEO_METADATA_CAPTURE_UNKNOWN", exc_info=True)
-        return payload, native
-
-    def _attach(update: OpenMeteoModelUpdate, native: Mapping[str, object]) -> OpenMeteoModelUpdate:
-        return replace(update, raw={**dict(update.raw or {}), NATIVE_METADATA_ENTITY_KEY: dict(native)})
+        return payload
 
     base = endpoint_url or os.environ.get(ENV_MODEL_UPDATES_ENDPOINT) or DEFAULT_MODEL_UPDATES_ENDPOINT
     if "{model}" in base:
@@ -301,7 +271,7 @@ def fetch_model_updates(
             url = _metadata_url(base, clean_model)
             quota_lane = quota_tracker.priority_lane() if priority else nullcontext()
             with quota_lane:
-                payload, native = _fetch_metadata(
+                payload = _fetch_metadata(
                     url,
                     timeout=timeout_seconds,
                     max_retries=1,
@@ -309,7 +279,7 @@ def fetch_model_updates(
                     client=session,
                     count_toward_quota=not _official_metadata_api_url(url),
                 )
-            return _attach(parse_model_update(clean_model, payload), native)
+            return parse_model_update(clean_model, payload)
 
         workers = _model_update_worker_count(
             clean_models,
@@ -324,14 +294,14 @@ def fetch_model_updates(
     url = _endpoint_url(base, models)
     quota_lane = quota_tracker.priority_lane() if priority else nullcontext()
     with quota_lane:
-        payload, native = _fetch_metadata(
+        payload = _fetch_metadata(
             url,
             timeout=timeout_seconds,
             max_retries=1,
             endpoint_label="source_clock_model_meta_batch",
             client=session,
         )
-    return tuple(_attach(update, native) for update in parse_model_updates_payload(payload))
+    return parse_model_updates_payload(payload)
 
 
 def write_model_updates_jsonl(path: str | Path, updates: Sequence[OpenMeteoModelUpdate]) -> None:

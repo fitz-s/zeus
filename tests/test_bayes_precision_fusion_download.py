@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-10-04; last_reused=2026-10-04 (registered parent native metadata entity)
+# Lifecycle: created=2026-06-08; last_reviewed=2026-10-03; last_reused=2026-10-03 (native metadata bracket evidence)
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -870,11 +870,12 @@ def test_nbm_hourly_run_falls_back_to_atomic_meta_stamped_standard_api(
     assert len(fetches) == 2
     assert fetches[1][0].endswith("/v1/forecast")
     assert "run" not in fetches[1][1]
-    for location in got:
-        result = location[date(2026, 7, 28)]
-        assert "ncep_nbm_conus" not in result
-        assert dl._BATCH_TRANSPORT_PROVENANCE_KEY not in result
-        assert "SOURCE_RUN_UNPROVEN:ncep_nbm_conus" in result[dl._BATCH_TRANSPORT_ERROR_KEY][0]
+    assert got[0][date(2026, 7, 28)]["ncep_nbm_conus"] == (32.0, 29.0)
+    stamp = got[0][date(2026, 7, 28)][dl._BATCH_TRANSPORT_PROVENANCE_KEY][
+        "ncep_nbm_conus"
+    ]
+    assert stamp.run == run
+    assert stamp.modification_time == modified
 
 
 def test_single_runs_quota_uses_atomic_meta_stamped_standard_api_for_same_model(
@@ -915,10 +916,8 @@ def test_single_runs_quota_uses_atomic_meta_stamped_standard_api_for_same_model(
     )
 
     result = got[0][date(2026, 8, 19)]
-    assert model not in result
-    assert dl._BATCH_TRANSPORT_PROVENANCE_KEY not in result
-    assert "429 Too Many Requests" in result[dl._BATCH_TRANSPORT_ERROR_KEY][0]
-    assert f"SOURCE_RUN_UNPROVEN:{model}" in result[dl._BATCH_TRANSPORT_ERROR_KEY][0]
+    assert result[model] == (31.0, 20.0)
+    assert result[dl._BATCH_TRANSPORT_PROVENANCE_KEY][model].run == run
     assert len(fetches) == 2
     assert "single-runs" in fetches[0][0]
     assert fetches[1][0].endswith("/v1/forecast")
@@ -1092,19 +1091,19 @@ def test_standard_fallback_accepts_availability_skew_across_meta_replicas(
         }
 
     monkeypatch.setattr(client, "fetch", _fetch)
-    audit = _capture_standard_audit_refusal(monkeypatch, lambda: dl._fetch_standard_meta_stamped_payloads(
+    payloads, stamp = dl._fetch_standard_meta_stamped_payloads(
         model=model,
         locations=((30.267, -97.743, "America/Chicago", (date(2026, 7, 28),)),),
         run=run,
         source_available_at=expected_available,
         forecast_hours=120,
         deadline_monotonic=None,
-    ))
+    )
 
-    assert audit["bracket_inputs"]["run"] == run
-    assert audit["bracket_inputs"]["modified"] == modified
-    assert audit["payload"]["hourly"]["temperature_2m"] == [20.0, 30.0]
-    assert "run" not in audit["params"]
+    assert len(payloads) == 1
+    assert stamp.run == run
+    assert stamp.modification_time == modified
+    assert stamp.source_available_at == before_available
 
 
 def _native_standard_metadata_http(tmp_path, monkeypatch):
@@ -1155,138 +1154,25 @@ def _normal_standard_metadata_call(fixture):
         forecast_hours=120, deadline_monotonic=None)
 
 
-def _capture_standard_audit_refusal(monkeypatch, call):
-    """Observe the real audit capture while the producer refuses quantitative use."""
-    from src.data import bayes_precision_fusion_download as dl
-    audit = {}
-    bracket = dl._standard_metadata_bracket
-    bind = dl._bind_physical_response
-    def observe_bracket(**kwargs):
-        audit["bracket_inputs"] = kwargs
-        audit["bracket"] = bracket(**kwargs)
-        return audit["bracket"]
-    def observe_bind(payload, **kwargs):
-        audit["params"] = kwargs["params"]
-        audit["payload"] = bind(payload, **kwargs)
-        return audit["payload"]
-    with monkeypatch.context() as observe:
-        observe.setattr(dl, "_standard_metadata_bracket", observe_bracket)
-        observe.setattr(dl, "_bind_physical_response", observe_bind)
-        with pytest.raises(ValueError, match="SOURCE_RUN_UNPROVEN:.*:standard_rolling_body_audit_only"):
-            call()
-    assert "run" not in audit["params"]
-    return audit
-
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-def test_normal_metadata_frozen_request_registered_parent_roundtrip(tmp_path, monkeypatch, metric):
-    import base64
-    from src.data import bayes_precision_fusion_download as dl
-    from src.data import openmeteo_model_updates as metadata, source_clock_update_probe as probe
-    fixture = _native_standard_metadata_http(tmp_path, monkeypatch)
-    updates = metadata.fetch_model_updates(["ncep_nbm_conus"])
-    cache = tmp_path / "updates.jsonl"
-    metadata.write_model_updates_jsonl(cache, updates)
-    monkeypatch.setattr(probe, "DEFAULT_MODEL_UPDATES_JSONL", cache)
-    frozen = dl._read_source_clock_single_runs_requests(decision_time=fixture["available"] + timedelta(hours=1))["ncep_nbm_conus"]
-    assert base64.b64decode(frozen.metadata_entity["body_base64"], validate=True) == fixture["before"]
-    assert frozen == dl._SourceClockSingleRunsRequest(frozen.run, frozen.source_available_at,
-        data_end_time=frozen.data_end_time, modification_time=frozen.modification_time)
-    db = _forecast_db(tmp_path)
-    _fresh_single_runs_cache_process(dl)
-    target = dl.BayesPrecisionFusionDownloadTarget(city="Chicago", metric=metric,
-        target_date="2026-10-04", lead_days=1, latitude=30.25, longitude=-97.75, timezone_name="America/Chicago")
-    report = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db, cycle=fixture["run"],
-        models=("ncep_nbm_conus",), targets=[target], include_previous_runs=False,
-        prune_after=False, allow_single_runs_fallback=False,
-        frozen_source_runs={"ncep_nbm_conus": (fixture["run"], fixture["available"])})
-    assert report["written_row_count"] == 1
-    with sqlite3.connect(db) as conn:
-        stored = conn.execute("SELECT a.artifact_metadata_json,a.captured_at FROM raw_forecast_artifacts a "
-            "JOIN raw_model_forecasts r ON r.artifact_id=a.artifact_id").fetchone()
-    parent = json.loads(stored[0])["physical_response"]
-    evidence = parent["model_update_metadata"]
-    assert evidence == frozen.metadata_entity
-    assert base64.b64decode(evidence["body_base64"], validate=True) == fixture["before"]
-    assert evidence["captured_at"] == updates[0].raw["_native_http_entity"]["captured_at"]
-    assert evidence["api_availability_time_utc"] == fixture["available"].isoformat()
-    assert evidence["publisher_issue_time"] == "UNKNOWN"
-    assert parent["captured_at"] == stored[1]
-    assert len(fixture["calls"]) == 2  # Existing metadata poll and one temperature response.
-    assert not list((tmp_path / "state").rglob("openmeteo_model_metadata_*"))
-
-
-def test_same_temperature_body_new_metadata_is_sealed_in_new_receipt(tmp_path, monkeypatch):
-    import base64
-    from src.data import bayes_precision_fusion_download as dl, replacement_current_value_serving as serving
-    from src.data import openmeteo_model_updates as metadata, source_clock_update_probe as probe
-    fixture = _native_standard_metadata_http(tmp_path, monkeypatch)
-    cache = tmp_path / "updates.jsonl"
-    metadata.write_model_updates_jsonl(cache, [metadata.parse_model_update("ncep_nbm_conus", json.loads(fixture["before"]))])
-    monkeypatch.setattr(probe, "DEFAULT_MODEL_UPDATES_JSONL", cache)
-    monkeypatch.setattr(dl, "_single_runs_payload_cache_persistence_enabled", lambda: False)
-    db = _forecast_db(tmp_path)
-    def download(metric):
-        _fresh_single_runs_cache_process(dl)
-        target = dl.BayesPrecisionFusionDownloadTarget(city="Chicago", metric=metric,
-            target_date="2026-10-04", lead_days=1, latitude=30.25, longitude=-97.75, timezone_name="America/Chicago")
-        return dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db, cycle=fixture["run"],
-            models=("ncep_nbm_conus",), targets=[target], include_previous_runs=False,
-            prune_after=False, allow_single_runs_fallback=False,
-            frozen_source_runs={"ncep_nbm_conus": (fixture["run"], fixture["available"])})
-    assert download("high")["written_row_count"] == 1
-    with sqlite3.connect(db) as conn:
-        old = conn.execute("SELECT artifact_id,artifact_metadata_json,captured_at FROM raw_forecast_artifacts "
-            "WHERE data_version='openmeteo_single_model_entity_body_v1'").fetchone()
-    assert json.loads(old[1])["physical_response"]["model_update_metadata"]["status"] == "UNKNOWN"
-    updates = metadata.fetch_model_updates(["ncep_nbm_conus"])
-    metadata.write_model_updates_jsonl(cache, updates)
-    assert download("low")["written_row_count"] == 1
-    with sqlite3.connect(db) as conn:
-        conn.row_factory = sqlite3.Row
-        assert tuple(conn.execute("SELECT artifact_id,artifact_metadata_json,captured_at FROM raw_forecast_artifacts "
-            "WHERE data_version='openmeteo_single_model_entity_body_v1'").fetchone()) == old
-        raw = dict(conn.execute("SELECT * FROM raw_model_forecasts WHERE metric='high'").fetchone())
-        raw["physical_proof_cutoff"] = datetime.now(UTC).isoformat()
-        candidates = list(serving._physical_artifact_candidates(conn, raw, deadline=time.monotonic() + 5))
-        selected = serving._physical_artifact_at_cutoff(raw, candidates)
-        resolved = serving._resolve_http_capture_receipt(selected)
-        assert resolved is not None
-        artifact = resolved["physical_artifact"]
-        evidence = json.loads(artifact["metadata"])["physical_response"]["model_update_metadata"]
-        assert evidence["status"] == "CAPTURED"
-        assert base64.b64decode(evidence["body_base64"], validate=True) == fixture["before"]
-        receipt_id = artifact["capture_receipt_artifact_id"]
-        receipt = conn.execute("SELECT sha256,artifact_path,artifact_metadata_json FROM raw_forecast_artifacts WHERE artifact_id=?", (receipt_id,)).fetchone()
-        assert artifact["capture_receipt_sha256"] == receipt[0]
-        assert json.loads(Path(receipt[1]).read_bytes())["physical_response"]["model_update_metadata"] == evidence
-        assert json.loads(receipt[2])["physical_http_capture_receipt"]["physical_response"]["model_update_metadata"] == evidence
-        dependencies = serving.physical_source_proof_dependency(artifact)
-        assert dependencies["capture_receipt_artifact_id"] == receipt_id
-        assert dependencies["capture_receipt_sha256"] == receipt[0]
-        assert raw["artifact_id"] == old[0]
-        assert raw["captured_at"] == old[2]
-    assert len(fixture["calls"]) == 3  # Two normal temperature calls and the normal metadata poll.
-
-
 @pytest.mark.parametrize("metric,expected", (("high", 27.0), ("low", 24.0)))
 def test_standard_metadata_bracket_preserves_native_origin_bytes(tmp_path, monkeypatch, metric, expected):
     import hashlib
-    import base64
     from src.data import bayes_precision_fusion_download as dl
 
     fixture = _native_standard_metadata_http(tmp_path, monkeypatch)
-    audit = _capture_standard_audit_refusal(monkeypatch, lambda: _normal_standard_metadata_call(fixture))
-    payloads = (audit["payload"],)
-    evidence = audit["bracket"]
+    payloads, transport = _normal_standard_metadata_call(fixture)
+    evidence = getattr(transport, "metadata_bracket_evidence", None)
     assert evidence and evidence["status"] == "CAPTURED", "native metadata bracket evidence missing"
-    manifest = evidence
+    manifest_path = Path(evidence["manifest_path"])
+    manifest_body = manifest_path.read_bytes()
+    assert hashlib.sha256(manifest_body).hexdigest() == evidence["sha256"]
+    manifest = json.loads(manifest_body)
     assert manifest["temperature"]["body_sha256"] == hashlib.sha256(fixture["temperature_body"]).hexdigest()
     assert manifest["temperature"]["request_params"] == fixture["calls"][1][1]
     assert manifest["temperature"]["response_role"] == "NETWORK_200_ENTITY"
     for name in ("before", "after"):
         proof = manifest[name]
-        assert base64.b64decode(proof["body_base64"], validate=True) == fixture[name]
+        assert Path(proof["artifact_path"]).read_bytes() == fixture[name]
         assert proof["body_sha256"] == hashlib.sha256(fixture[name]).hexdigest()
         assert proof["response_role"] == "NETWORK_200_ENTITY"
         assert proof["request_url"] == fixture["calls"][0][0]
@@ -1295,17 +1181,16 @@ def test_standard_metadata_bracket_preserves_native_origin_bytes(tmp_path, monke
         assert proof["http_response_headers"]["date"] == "Sat, 03 Oct 2026 19:00:00 GMT"
         assert "issued_at" not in proof
     assert manifest["model_reference_time_utc"] == fixture["run"].isoformat()
-    assert audit["bracket_inputs"]["run"] == fixture["run"]
-    assert audit["bracket_inputs"]["modified"] == fixture["modified"]
+    assert transport.run == fixture["run"] and transport.modification_time == fixture["modified"]
+    assert transport.source_available_at == fixture["available"]
     assert len(fixture["calls"]) == 3  # Two existing metadata probes and one temperature request.
     values = dl._parse_batched_single_runs_payload(payloads[0], ["ncep_nbm_conus"],
         date(2026, 10, 4), "America/Chicago")["ncep_nbm_conus"]
     assert values[0 if metric == "high" else 1] == expected
     temperature_proof = payloads[0][dl._BATCH_PHYSICAL_RESPONSE_KEY]
     assert temperature_proof["sha256"] == manifest["temperature"]["body_sha256"]
-    assert temperature_proof["metadata_bracket_evidence"] == evidence
-    assert not list((tmp_path / "state").rglob("openmeteo_model_metadata_*"))
-    assert not list((tmp_path / "state").rglob("openmeteo_bpf_metadata_bracket_*"))
+    assert "metadata_bracket_evidence" not in temperature_proof
+    assert manifest_path.name.startswith("openmeteo_bpf_metadata_bracket_" + temperature_proof["sha256"] + "_")
 
 
 @pytest.mark.parametrize("field", ("last_run_initialisation_time", "last_run_modification_time"))
@@ -1327,28 +1212,29 @@ def test_standard_metadata_injected_parsed_evidence_remains_unknown(tmp_path, mo
         "body_base64": "aW52ZW50ZWQ=", "fetched_at": "2026-10-03T19:00:00Z"}}
     update = metadata.parse_model_update("ncep_nbm_conus", raw)
     monkeypatch.setattr(metadata, "fetch_model_updates", lambda *_a, **_k: (update,))
-    audit = _capture_standard_audit_refusal(monkeypatch, lambda: _normal_standard_metadata_call(fixture))
-    assert audit["bracket"] == {"status": "UNKNOWN", "reason": "native_capture_missing"}
+    payloads, transport = _normal_standard_metadata_call(fixture)
+    assert transport.metadata_bracket_evidence == {"status": "UNKNOWN", "reason": "native_capture_missing"}
+    assert transport.source_available_at == fixture["available"]
     assert len(fixture["calls"]) == 1  # Only temperature; injection supplies no HTTP metadata evidence.
-    assert audit["payload"]["hourly"] == fixture["temperature"]["hourly"]
+    assert payloads[0]["hourly"] == fixture["temperature"]["hourly"]
     assert "OPENMETEO_METADATA_BRACKET_UNKNOWN" in caplog.text
     assert not list((tmp_path / "state").rglob("openmeteo_bpf_metadata_bracket_*"))
 
 
-def test_standard_metadata_invalid_entity_is_unknown_not_forecast_failure(tmp_path, monkeypatch, caplog):
-    from src.data import openmeteo_model_updates as metadata
+def test_standard_metadata_evidence_write_failure_is_unknown_not_forecast_failure(tmp_path, monkeypatch, caplog):
     fixture = _native_standard_metadata_http(tmp_path, monkeypatch)
-    original_fetch = metadata.fetch_model_updates
-    def fetch(*args, **kwargs):
-        updates = original_fetch(*args, **kwargs)
-        updates[0].raw["_native_http_entity"]["body_sha256"] = "invalid"
-        return updates
-    monkeypatch.setattr(metadata, "fetch_model_updates", fetch)
-    audit = _capture_standard_audit_refusal(monkeypatch, lambda: _normal_standard_metadata_call(fixture))
-    assert audit["bracket"] == {"status": "UNKNOWN", "reason": "capture_unavailable"}
-    assert audit["bracket_inputs"]["run"] == fixture["run"]
-    assert audit["bracket_inputs"]["modified"] == fixture["modified"]
-    assert audit["payload"]["hourly"] == fixture["temperature"]["hourly"]
+    original_open = Path.open
+
+    def open_path(path, *args, **kwargs):
+        if path.name.startswith("openmeteo_model_metadata_"):
+            raise OSError("private evidence write unavailable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_path)
+    payloads, transport = _normal_standard_metadata_call(fixture)
+    assert transport.metadata_bracket_evidence == {"status": "UNKNOWN", "reason": "capture_unavailable"}
+    assert transport.run == fixture["run"] and transport.modification_time == fixture["modified"]
+    assert payloads[0]["hourly"] == fixture["temperature"]["hourly"]
     assert len(fixture["calls"]) == 3
     assert "OPENMETEO_METADATA_BRACKET_UNKNOWN" in caplog.text
 
@@ -1366,14 +1252,14 @@ def test_standard_metadata_temperature_cache_keeps_original_possession(tmp_path,
         return original_fetch(url, params, **kwargs)
 
     monkeypatch.setattr(client, "fetch", fetch)
-    audit = _capture_standard_audit_refusal(monkeypatch, lambda: _normal_standard_metadata_call(fixture))
-    assert audit["bracket"]["status"] == "CAPTURED"
-    manifest = audit["bracket"]
+    payloads, transport = _normal_standard_metadata_call(fixture)
+    assert transport.metadata_bracket_evidence["status"] == "CAPTURED"
+    manifest = json.loads(Path(transport.metadata_bracket_evidence["manifest_path"]).read_bytes())
     assert manifest["temperature"]["response_role"] == "HELD_ENTITY_REPLAY"
     assert manifest["temperature"]["fetched_at_utc"] == fixture["available"].isoformat()
     assert "http_response_headers" not in manifest["temperature"]
     from src.data import bayes_precision_fusion_download as dl
-    assert audit["payload"][dl._BATCH_PHYSICAL_RESPONSE_KEY]["captured_at"] == fixture["available"].isoformat()
+    assert payloads[0][dl._BATCH_PHYSICAL_RESPONSE_KEY]["captured_at"] == fixture["available"].isoformat()
     assert len(fixture["calls"]) == 2  # Metadata only; evidence never forces a temperature re-fetch.
 
 
@@ -1471,7 +1357,7 @@ def test_hourly_transports_forward_real_provider_past_hour_anchor(monkeypatch) -
             ),
         ),
     )
-    audit = _capture_standard_audit_refusal(monkeypatch, lambda: dl._fetch_standard_meta_stamped_payloads(
+    dl._fetch_standard_meta_stamped_payloads(
         model="ncep_nbm_conus",
         locations=((41.9, -87.6, "America/Chicago", (date(2026, 9, 3),)),),
         run=run,
@@ -1479,12 +1365,9 @@ def test_hourly_transports_forward_real_provider_past_hour_anchor(monkeypatch) -
         forecast_hours=72,
         deadline_monotonic=None,
         past_hours=1,
-    ))
+    )
 
     assert [params["past_hours"] for params in seen] == [1, 1]
-    assert audit["params"]["past_hours"] == 1
-    assert seen[0]["run"] == run.strftime("%Y-%m-%dT%H:%M")
-    assert "run" not in seen[1]
 
 
 def test_source_clock_download_reuses_one_multi_location_response(
@@ -5546,52 +5429,6 @@ def _served_in_world(conn, world, target, cut=None):
     return read_current_instrument_values(conn, city=target.city, metric=target.metric,
         target_date=target.target_date, source_cycle_time_iso=world.run.isoformat(),
         decision_time_iso=(cut or world.clock[0]).isoformat())
-
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-def test_legacy_standard_original_remains_audit_only_while_pinned_source_serves(tmp_path, monkeypatch, metric):
-    from src.data import bayes_precision_fusion_download as dl
-    from src.data.bayes_precision_fusion_history_provider import raw_product_matches_live_source
-    from src.config import runtime_cities_by_name
-    world = _real_capture_world(tmp_path, monkeypatch, "single", metric, private_sql_clock=True)
-    target = world.targets[1]
-    with world.open_forecast(world.db) as conn:
-        assert "icon_global" in _served_in_world(conn, world, target)
-        conn.row_factory = sqlite3.Row
-        pinned = dict(conn.execute("SELECT * FROM raw_model_forecasts WHERE city=? AND metric=?",
-            (target.city, metric)).fetchone())
-    audit = _capture_standard_audit_refusal(monkeypatch, lambda: dl._fetch_standard_meta_stamped_payloads(
-        model="icon_global", locations=((target.latitude, target.longitude, target.timezone_name,
-            (date.fromisoformat(target.target_date),)),), run=world.run.isoformat(),
-        source_available_at=world.run.replace(hour=16), forecast_hours=120, deadline_monotonic=None))
-    assert audit["bracket"]["status"] == "CAPTURED"
-    capture = audit["payload"][dl._BATCH_PHYSICAL_RESPONSE_KEY]
-    legacy = {**pinned, **dl._bayes_precision_fusion_product_identity("icon_global", "single_runs", target,
-        standard_meta_stamp=dl._StandardMetaStampedTransport(run=world.run,
-            source_available_at=world.run.replace(hour=16), modification_time=world.run.replace(hour=16),
-            forecast_hours=120)), "_physical_response": capture,
-        "captured_at": capture["captured_at"], "recorded_at": world.clock[0].isoformat()}
-    legacy.pop("raw_model_forecast_id")
-    directory = tmp_path / "legacy_audit"
-    directory.mkdir()
-    db = _forecast_db(directory)
-    with world.open_forecast(db) as conn:
-        assert dl._persist_rows(conn, [legacy]) == 1
-        conn.commit()
-        row = conn.execute("SELECT endpoint_mode,artifact_id,raw_sha256 FROM raw_model_forecasts").fetchone()
-        assert row[0] == "standard_api_meta_stamped" and row[1] is not None and row[2] == capture["sha256"]
-        assert "icon_global" not in _served_in_world(conn, world, target)
-    # Even a pinned-looking row identity cannot authorize the ordinary URL's
-    # original entity. The label predicate passes; the physical gate rejects.
-    alias = {**legacy, **dl._bayes_precision_fusion_product_identity("icon_global", "single_runs", target)}
-    assert raw_product_matches_live_source(alias, runtime_cities_by_name()[target.city], lead_days=target.lead_days)
-    alias_directory = tmp_path / "standard_alias"
-    alias_directory.mkdir()
-    with world.open_forecast(_forecast_db(alias_directory)) as conn:
-        assert dl._persist_rows(conn, [alias]) == 1
-        conn.commit()
-        assert conn.execute("SELECT COUNT(*) FROM raw_model_forecasts").fetchone()[0] == 1
-        assert "icon_global" not in _served_in_world(conn, world, target)
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))

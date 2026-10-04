@@ -683,7 +683,7 @@ def _day0_canonical_vector_row_snapshot(
         field_name="provider_source_modified_at_utc",
     )
     if not (
-        fetch_started <= capture <= fetch_finished <= decision_bound_utc
+        capture <= fetch_started <= fetch_finished <= decision_bound_utc
         and provider_cycle <= provider_available <= fetch_finished
         and provider_modified <= fetch_finished
         and provider_cycle <= decision_bound_utc
@@ -1022,10 +1022,8 @@ def day0_remaining_carrier_identity_inputs(
         or not normalized_likelihood
     ):
         raise ValueError("DAY0_REMAINING_CARRIER_IDENTITY_INPUT_INVALID")
-    from src.events.day0_authority import DAY0_MEASUREMENT_DOMAIN_REVISION
     return {
         "city": normalized_city,
-        "measurement_domain_revision": DAY0_MEASUREMENT_DOMAIN_REVISION,
         "unit": normalized_unit,
         "probability_cutoff_utc": normalized_decision,
         "decision_time_utc": normalized_decision,
@@ -2441,7 +2439,7 @@ def _current_provider_bundle_already_persisted(
                         expected_model=model,
                     )
                     hwm = required_hwm[model]
-                    if actual is None or not _day0_hourly_response_role_valid(payload):
+                    if actual is None:
                         return False
                     # QUOTA (round 3): a persisted bundle proves the SAME run as the
                     # current HWM by run_initialisation_time alone. Open-Meteo's
@@ -2512,7 +2510,7 @@ def _current_ensemble_bundle_already_persisted(
                         payload if isinstance(payload, Mapping) else None,
                         expected_model=model,
                     )
-                    if actual is None or not _day0_hourly_response_role_valid(payload):
+                    if actual is None:
                         return False
                     # QUOTA (round 3): run identity is (model, run_initialisation_time)
                     # only -- see _current_provider_bundle_already_persisted above.
@@ -2603,7 +2601,7 @@ def _new_ensemble_run_due_for_refresh(
                     and params.get("metadata_model") == DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL
                     and identity[0] < hwm.run_initialisation_time
                     and identity[0] <= identity[1] <= finished <= decision_time
-                    and started <= captured <= finished
+                    and captured <= started <= finished
                 ):
                     return True
         return False
@@ -2791,10 +2789,12 @@ def _day0_exact_run_payloads(
     """Fetch one exact provider run per model, preserving the raw hourly payload.
 
     Model metadata is read directly, never from the stale source-clock JSONL cache. The
-    raw Single Runs request is delegated to the existing BPF transport adapter.
-    A failed usability gate or pinned transport has no rolling-body fallback:
-    metadata labels cannot prove that body's run. The normal pinned-source
-    refresh can RESET this model/run/city/date family after actual capture.
+    raw Single Runs request is delegated to the existing BPF transport adapter. When the
+    freshest run fails either usability gate (see ``_select_day0_run_endpoint``), the
+    standard endpoint is used instead and whatever run its own metadata bracket reports
+    is accepted -- it is never asked to prove the disqualified freshest run. A genuine
+    transport failure on an otherwise-selected single-runs attempt still falls back to
+    proving that SAME frozen run via the standard endpoint, unchanged from before.
     ``causal_boundary_utc`` is the latest same-station observation instant already known
     to the caller (``read_day0_current_temperature_state(...).observed_at``); ``None``
     means the caller has no such boundary in hand, so only gate (a) can be evaluated here.
@@ -2804,6 +2804,7 @@ def _day0_exact_run_payloads(
     from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
     from src.data.bayes_precision_fusion_download import (
         _fetch_single_runs_hourly_payloads_batched,
+        _fetch_standard_meta_stamped_payloads,
     )
     from src.data.openmeteo_ecmwf_ifs9_anchor import (
         SINGLE_RUNS_FORECAST_URL,
@@ -2901,13 +2902,25 @@ def _day0_exact_run_payloads(
                 )
                 payload = payloads[0]
             except Exception as single_exc:
-                # SCOPE: this model/run/city/date shape. DRAIN: the normal
-                # pinned-source refresh; RESET requires successful actual run
-                # capture. Never substitute a metadata-labelled rolling body.
-                raise ValueError(
-                    f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
-                    f"single={type(single_exc).__name__}"
-                ) from single_exc
+                try:
+                    payloads, transport = _fetch_standard_meta_stamped_payloads(
+                        model=model, locations=[location], run=run,
+                        source_available_at=available_at,
+                        forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
+                        deadline_monotonic=deadline_monotonic,
+                        past_hours=past_hours,
+                    )
+                    payload = payloads[0]
+                    run = transport.run.astimezone(UTC)
+                    available_at = transport.source_available_at.astimezone(UTC)
+                    modified_at = transport.modification_time.astimezone(UTC)
+                    authority = "provider_meta_declared"
+                    endpoint_mode = "standard_meta_stamped"
+                except Exception as standard_exc:
+                    raise ValueError(
+                        f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
+                        f"single={type(single_exc).__name__}:standard={type(standard_exc).__name__}"
+                    ) from standard_exc
         else:
             logger.info(
                 "DAY0_RUN_ENDPOINT_SELECTED model=%s run=%s usable_at=%s "
@@ -2918,10 +2931,25 @@ def _day0_exact_run_payloads(
                 "unknown" if causal_boundary_utc is None else causal_boundary_utc.isoformat(),
                 selection.reason,
             )
-            raise ValueError(
-                f"DAY0_PROVIDER_SOURCE_RUN_UNPROVEN:{model}:"
-                f"run_pinned_source_required:{selection.reason}"
-            )
+            authority = "provider_meta_declared"
+            endpoint_mode = "standard_meta_stamped"
+            try:
+                payloads, transport = _fetch_standard_meta_stamped_payloads(
+                    model=model, locations=[location], run=None,
+                    source_available_at=available_at,
+                    forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
+                    deadline_monotonic=deadline_monotonic,
+                    past_hours=past_hours,
+                )
+                payload = payloads[0]
+                run = transport.run.astimezone(UTC)
+                available_at = transport.source_available_at.astimezone(UTC)
+                modified_at = transport.modification_time.astimezone(UTC)
+            except Exception as standard_exc:
+                raise ValueError(
+                    f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
+                    f"single=skipped:standard={type(standard_exc).__name__}"
+                ) from standard_exc
         fetch_finished = _day0_utc_now()
         # Set after any run/endpoint substitution above -- this must name the
         # run actually used, never the originally-selected freshest run.
@@ -3010,7 +3038,7 @@ def fetch_day0_hourly_vectors(
     vectors: list[Day0HourlyVector] = []
     for model, payload, source_meta in fetched:
         vectors.extend(parse_openmeteo_hourly_payload(
-            payload, city=city, models=[model], captured_at=str(source_meta["fetch_finished_at"]),
+            payload, city=city, models=[model], captured_at=captured_at,
             source_run_meta_json=json.dumps(
                 source_meta, sort_keys=True, separators=(",", ":")
             ),
@@ -3038,47 +3066,6 @@ def _same_model_update(left: Any, right: Any) -> bool:
         and left.last_run_initialisation_time == right.last_run_initialisation_time
         and left.last_run_modification_time == right.last_run_modification_time
     )
-
-
-def _day0_hourly_response_role(payload: Mapping[str, object], meta: Mapping[str, object], variable_key: str = "temperature_2m") -> Mapping[str, object]:
-    """Bind actual response geometry/units; native step/aggregation stay unknown."""
-    physical = payload.get("__physical_response_capture_v1")
-    units = payload.get("hourly_units")
-    request = physical.get("request_params") if isinstance(physical, Mapping) else None
-    if not isinstance(request, Mapping) and meta.get("source_run_authority") == "run_pinned_ensemble_api":
-        request = json.loads(str(meta.get("request_params_json") or "{}"))
-    return {"quantity": "provider_served_hourly_2m_temperature_samples",
-            "interval_model": "piecewise_linear_between_acquired_knots_v1",
-            "native_timestep": "UNKNOWN", "native_aggregation": "UNKNOWN",
-            "variable_key": variable_key,
-            "temperature_unit": units.get(variable_key) if isinstance(units, Mapping) else None,
-            "selected_latitude": payload.get("latitude"), "selected_longitude": payload.get("longitude"),
-            "response_elevation_m": payload.get("elevation"),
-            "entity_body_sha256": (physical.get("sha256") if isinstance(physical, Mapping)
-                                   else meta.get("entity_body_sha256")),
-            "run_selector": request.get("run") if isinstance(request, Mapping) else None,
-            "body_hash_role": "decoded_http_entity_bytes_sha256",
-            "representativeness_status": "UNPROVEN"}
-
-
-def _day0_hourly_response_role_valid(meta: Mapping[str, object]) -> bool:
-    role = meta.get("hourly_response_role")
-    if (meta.get("source_run_authority") == "provider_meta_declared"
-            or meta.get("endpoint_mode") == "standard_meta_stamped"):
-        return False  # A rolling body is audit-only, even if metadata labels a run.
-    try:
-        return (isinstance(role, Mapping)
-                and role["quantity"] == "provider_served_hourly_2m_temperature_samples"
-                and role["interval_model"] == "piecewise_linear_between_acquired_knots_v1"
-                and role["temperature_unit"] in {"°C", "celsius"}
-                and role["body_hash_role"] == "decoded_http_entity_bytes_sha256"
-                and len(str(role["entity_body_sha256"])) == 64
-                and isinstance(role.get("run_selector"), str) and bool(role["run_selector"])
-                and -90 <= float(role["selected_latitude"]) <= 90
-                and -180 <= float(role["selected_longitude"]) <= 180
-                and math.isfinite(float(role["response_elevation_m"])))
-    except (KeyError, TypeError, ValueError):
-        return False
 
 
 def parse_openmeteo_ensemble_hourly_payload(
@@ -3133,7 +3120,7 @@ def parse_openmeteo_ensemble_hourly_payload(
                 times=tuple(timestamp for timestamp, _value in pairs),
                 temps_c=tuple(value for _timestamp, value in pairs),
                 source_run_meta_json=json.dumps(
-                    {**source_meta_by_member[model], "hourly_response_role": _day0_hourly_response_role(payload, source_meta_by_member[model], key)},
+                    source_meta_by_member[model],
                     sort_keys=True,
                     separators=(",", ":"),
                 ),
@@ -3241,26 +3228,20 @@ def fetch_day0_source_clock_ensemble_vectors(
             ),
             "temperature_unit": "celsius",
             "cell_selection": "land",
-            "run": before.last_run_initialisation_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M"),
         }
         metadata_params = {
             **params,
             "metadata_model": DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL,
         }
         fetch_started = _day0_utc_now()
-        entity_captures: list[bytes] = []
         payload = fetch_openmeteo(
             OPENMETEO_ENSEMBLE_URL,
             params,
             timeout=max(0.25, float(timeout_s)),
             max_retries=1,
             endpoint_label="day0_source_clock_ensemble",
-            capture_entity_body=lambda body, _at: entity_captures.append(body),
         )
         fetch_finished = _day0_utc_now()
-        if not entity_captures or json.loads(entity_captures[-1]) != payload:
-            return [], ""
-        captured_at = fetch_finished.isoformat()
         after_rows = fetch_model_updates(
             [DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL],
             timeout_seconds=max(0.25, float(timeout_s)),
@@ -3292,18 +3273,17 @@ def fetch_day0_source_clock_ensemble_vectors(
                 run=before.last_run_initialisation_time.astimezone(UTC),
                 available_at=before.last_run_availability_time.astimezone(UTC),
                 modified_at=before.last_run_modification_time.astimezone(UTC),
-                authority="run_pinned_ensemble_api",
-                endpoint_mode="ensemble_single_run",
+                authority="provider_meta_declared",
+                endpoint_mode="ensemble_meta_stamped",
                 request_params={
                     **metadata_params,
                     "endpoint": OPENMETEO_ENSEMBLE_URL,
-                    "run": params["run"],
+                    "run": before.last_run_initialisation_time.isoformat(),
                 },
                 request_hash=request_hash,
                 fetch_started_at=fetch_started,
                 fetch_finished_at=fetch_finished,
             )
-            member_meta[model] = {**member_meta[model], "entity_body_sha256": hashlib.sha256(entity_captures[-1]).hexdigest()}
         vectors = parse_openmeteo_ensemble_hourly_payload(
             payload,
             city=city,
@@ -3340,8 +3320,7 @@ def parse_openmeteo_hourly_payload(
     tz_name = str(getattr(city, "timezone"))
     city_name = str(getattr(city, "name", "") or "")
 
-    def _vector_from(entry: dict, model: str, temp_key: str) -> Optional[Day0HourlyVector]:
-        hourly = entry["hourly"]
+    def _vector_from(hourly: dict, model: str, temp_key: str) -> Optional[Day0HourlyVector]:
         times = hourly.get("time")
         temps = hourly.get(temp_key)
         if not isinstance(times, (list, tuple)) or not isinstance(temps, (list, tuple)):
@@ -3361,27 +3340,24 @@ def parse_openmeteo_hourly_payload(
             captured_at=captured_at,
             times=tuple(t for t, _ in pairs),
             temps_c=tuple(v for _, v in pairs),
-            source_run_meta_json=json.dumps({
-                **json.loads(source_run_meta_json or "{}"),
-                "hourly_response_role": _day0_hourly_response_role(entry, json.loads(source_run_meta_json or "{}"), temp_key),
-            }, sort_keys=True, separators=(",", ":")),
+            source_run_meta_json=source_run_meta_json,
         )
 
     out: list[Day0HourlyVector] = []
     if isinstance(payload, list):
         for model, entry in zip(models, payload):
             if isinstance(entry, dict) and isinstance(entry.get("hourly"), dict):
-                vector = _vector_from(entry, model, "temperature_2m")
+                vector = _vector_from(entry["hourly"], model, "temperature_2m")
                 if vector is not None:
                     out.append(vector)
         return out
     if isinstance(payload, dict) and isinstance(payload.get("hourly"), dict):
         hourly = payload["hourly"]
         for model in models:
-            vector = _vector_from(payload, model, f"temperature_2m_{model}")
+            vector = _vector_from(hourly, model, f"temperature_2m_{model}")
             if vector is None and len(models) == 1:
                 # single-model responses may omit the model suffix
-                vector = _vector_from(payload, model, "temperature_2m")
+                vector = _vector_from(hourly, model, "temperature_2m")
             if vector is not None:
                 out.append(vector)
     return out
@@ -3724,7 +3700,7 @@ def select_ready_day0_hourly_vectors(
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 continue
             if not (
-                fetch_started <= captured <= fetch_finished <= moment
+                captured <= fetch_started <= fetch_finished <= moment
             ):
                 continue
         if (
@@ -3963,15 +3939,12 @@ def day0_hourly_vector_target_values_utc(
     *,
     target: date,
     tz: ZoneInfo,
-    include_support: bool = False,
 ) -> tuple[tuple[datetime, float], ...] | None:
     """Map one provider-local target-day vector to exact UTC instants."""
 
     grid = _vector_target_day_hour_grid_utc(vector, target=target, tz=tz)
     if not grid or len(vector.times) != len(vector.temps_c):
         return None
-    if include_support:
-        grid = (grid[0] - timedelta(hours=1), *grid, grid[-1] + timedelta(hours=1))
     by_label: dict[str, list[datetime]] = {}
     for instant in grid:
         label = instant.astimezone(tz).strftime("%Y-%m-%dT%H:%M")
@@ -3990,10 +3963,7 @@ def day0_hourly_vector_target_values_utc(
             if parsed.tzinfo is None
             else parsed.astimezone(tz)
         )
-        if local.date() != target and not (
-            include_support
-            and grid[0] <= local.astimezone(UTC) <= grid[-1]
-        ):
+        if local.date() != target:
             continue
         if (
             not math.isfinite(value)
@@ -4071,7 +4041,6 @@ def align_day0_hourly_vectors_on_common_causal_grid(
     )
     if not target_grid:
         return None
-    target_grid = (target_grid[0] - timedelta(hours=1), *target_grid, target_grid[-1] + timedelta(hours=1))
     boundary_utc = window_start.astimezone(UTC)
     anchor_candidates = [instant for instant in target_grid if instant <= boundary_utc]
     if not anchor_candidates:
@@ -4086,7 +4055,7 @@ def align_day0_hourly_vectors_on_common_causal_grid(
     aligned_rows: list[tuple[float, ...]] = []
     for vector in bundle:
         values = day0_hourly_vector_target_values_utc(
-            vector, target=target, tz=timezone_obj, include_support=True
+            vector, target=target, tz=timezone_obj
         )
         if values is None:
             return None
@@ -4139,9 +4108,8 @@ def day0_hourly_vectors_cover_remaining_window(
         if boundary_local.date() != target:
             return False
         grid = _vector_target_day_hour_grid_utc(vector, target=target, tz=tz)
-        if not grid or boundary_utc < grid[0] - timedelta(hours=1):
+        if not grid or boundary_utc < grid[0]:
             return False
-        grid = (grid[0] - timedelta(hours=1), *grid, grid[-1] + timedelta(hours=1))
         if common_grid is not None and grid != common_grid:
             return False
         common_grid = grid
@@ -4149,15 +4117,15 @@ def day0_hourly_vectors_cover_remaining_window(
             vector,
             target=target,
             tz=tz,
-            include_support=True,
         )
         if not grid or values is None:
             return False
         counts = Counter(instant for instant, _value in values)
-        anchor = max(instant for instant in grid if instant <= boundary_utc)
-        if counts[anchor] != 1:
-            return False
-        required = tuple(instant for instant in grid if instant > anchor)
+        if grid != _target_day_hour_grid_utc(target=target, tz=tz):
+            anchor = max(instant for instant in grid if instant <= boundary_utc)
+            if counts[anchor] != 1:
+                return False
+        required = tuple(instant for instant in grid if instant >= boundary_utc)
         if required:
             if any(counts[instant] != 1 for instant in required):
                 return False
@@ -4198,53 +4166,60 @@ def remaining_day_extremes_c(
     if start.astimezone(UTC) > now.astimezone(UTC):
         raise ValueError("window_start cannot be after now")
     target = date.fromisoformat(str(target_date)[:10])
-    aligned = align_day0_hourly_vectors_on_common_causal_grid(
-        vectors, target_date=target_date, window_start=start,
-    )
-    if aligned is None:
+    if not day0_hourly_vectors_cover_remaining_window(
+        vectors,
+        target_date=target_date,
+        window_start=start,
+    ):
         return []
-    grid, rows = aligned
-    day_end = datetime.combine(
-        target + timedelta(days=1), datetime_time.min,
-        tzinfo=ZoneInfo(vectors[0].timezone_name),
-    ).astimezone(UTC)
-    values = _day0_supported_interval_values(
-        np.asarray(rows, dtype=float), grid, start.astimezone(UTC), day_end,
-    )
-    if values is None:
-        return []
-    return [float(value) for value in (
-        values.max(axis=1) if metric == "high" else values.min(axis=1)
-    )]
-
-
-def _day0_supported_interval_values(
-    rows: np.ndarray, grid: tuple[datetime, ...], start: datetime, end: datetime,
-) -> np.ndarray | None:
-    """Piecewise-linear values on [start,end), using acquired endpoint support.
-
-    The right knot belongs only to interpolation. Its left limit is part of
-    the interval's supremum/infimum, not a next-day temperature observation.
-    SCOPE: this exact path interval. DRAIN: normal vector refresh. RESET:
-    finite issued knots bracketing both boundaries; no extrapolation.
-    """
-    if not grid or not start < end or not grid[0] <= start < end <= grid[-1]:
-        return None
-    if rows.ndim != 2 or rows.shape[1] != len(grid) or not np.isfinite(rows).all():
-        return None
-
-    def at(instant: datetime) -> np.ndarray:
-        left = max(index for index, value in enumerate(grid) if value <= instant)
-        if grid[left] == instant:
-            return rows[:, left]
-        right = left + 1
-        fraction = (instant - grid[left]).total_seconds() / (grid[right] - grid[left]).total_seconds()
-        return rows[:, left] + fraction * (rows[:, right] - rows[:, left])
-
-    columns = [at(start)]
-    columns.extend(rows[:, index] for index, instant in enumerate(grid) if start < instant < end)
-    columns.append(at(end))
-    return np.column_stack(columns)
+    out: list[float] = []
+    start_utc = start.astimezone(UTC)
+    for vector in vectors:
+        try:
+            tz = ZoneInfo(vector.timezone_name)
+        except Exception:
+            continue
+        start_local = start.astimezone(tz)
+        if start_local.date() != target:
+            continue
+        target_values = day0_hourly_vector_target_values_utc(
+            vector,
+            target=target,
+            tz=tz,
+        )
+        if target_values is None:
+            return []
+        values: list[float] = []
+        elapsed_target_points: list[tuple[datetime, float]] = []
+        for instant, temp in target_values:
+            if instant < start_utc:
+                elapsed_target_points.append((instant, float(temp)))
+                continue
+            values.append(float(temp))
+        if (
+            not values
+            and elapsed_target_points
+        ):
+            local_day_end = datetime.combine(
+                target + timedelta(days=1),
+                datetime.min.time(),
+                tzinfo=tz,
+            )
+            anchor_time, anchor_temp = max(
+                elapsed_target_points,
+                key=lambda item: item[0],
+            )
+            anchor_age = start_utc - anchor_time
+            time_to_day_end = local_day_end.astimezone(UTC) - start_utc
+            if (
+                timedelta(0) < time_to_day_end <= timedelta(hours=1)
+                and timedelta(0) <= anchor_age <= timedelta(hours=1)
+            ):
+                values.append(anchor_temp)
+        if not values:
+            continue
+        out.append(max(values) if metric == "high" else min(values))
+    return out
 
 
 HKO_CURRENT_TEMPERATURE_URL = (
@@ -4630,13 +4605,10 @@ def remaining_day_extremes_c_with_current_state(
     from src.signal.day0_window import condition_day0_hourly_members_on_current_state
 
     observed_utc = current_state.observed_at.astimezone(UTC)
-    if fallback_window_start.tzinfo is None or current_state.observed_at.tzinfo is None:
-        return [], {}
-    coverage_cut = fallback_window_start.astimezone(UTC)
-    if max(observed_utc, coverage_cut) > decision_time.astimezone(UTC):
+    if observed_utc > decision_time.astimezone(UTC):
         return [], {}
     aligned = align_day0_hourly_vectors_on_common_causal_grid(
-        vectors, target_date=target_date, window_start=min(coverage_cut, observed_utc)
+        vectors, target_date=target_date, window_start=observed_utc
     )
     if aligned is None:
         return [], {}
@@ -4656,28 +4628,28 @@ def remaining_day_extremes_c_with_current_state(
     if conditioned is None:
         return [], {}
     conditioned_members, innovation_values = conditioned
-    # The current instant conditions the future, but does not certify the
-    # unpublished interval between aggregate coverage and this instant.
-    original = np.asarray(aligned_rows, dtype=float)
-    for index, instant in enumerate(causal_grid):
-        if instant < observed_utc:
-            conditioned_members[:, index] = original[:, index]
-    if observed_utc not in causal_grid:
-        insertion = next((index for index, instant in enumerate(causal_grid) if instant > observed_utc), None)
-        if insertion is None:
+    remaining_indices = [
+        index for index, instant in enumerate(causal_grid) if instant > observed_utc
+    ]
+    if not remaining_indices:
+        target = date.fromisoformat(str(target_date)[:10])
+        try:
+            timezone_obj = ZoneInfo(str(vectors[0].timezone_name))
+        except (IndexError, ZoneInfoNotFoundError):
             return [], {}
-        conditioned_members = np.insert(conditioned_members, insertion, current_c, axis=1)
-        causal_grid = (*causal_grid[:insertion], observed_utc, *causal_grid[insertion:])
-    target = date.fromisoformat(str(target_date)[:10])
-    day_end = datetime.combine(
-        target + timedelta(days=1), datetime_time.min,
-        tzinfo=ZoneInfo(str(vectors[0].timezone_name)),
-    ).astimezone(UTC)
-    remaining = _day0_supported_interval_values(
-        conditioned_members, causal_grid, coverage_cut, day_end,
-    )
-    if remaining is None:
-        return [], {}
+        day_end = datetime.combine(
+            target + timedelta(days=1),
+            datetime_time.min,
+            tzinfo=timezone_obj,
+        ).astimezone(UTC)
+        if (
+            causal_grid[0] != causal_grid[-1]
+            or not timedelta(0) < day_end - observed_utc <= timedelta(hours=1)
+            or not timedelta(0) <= observed_utc - causal_grid[0] <= timedelta(hours=1)
+        ):
+            return [], {}
+        remaining_indices = [0]
+    remaining = conditioned_members[:, remaining_indices]
     values = remaining.min(axis=1) if metric == "low" else remaining.max(axis=1)
     return (
         [float(value) for value in values.tolist()],
@@ -4718,7 +4690,7 @@ def day0_effective_path_sigma_c(
 
 
 @dataclass(frozen=True)
-class Day0ConditionalRemainingShape:
+class Day0ConditionalHighShape:
     """Conditional variance of the existing equal-weight hourly-provider carrier."""
 
     provider_centers_c: tuple[float, ...]
@@ -4744,21 +4716,10 @@ def day0_conditional_high_run_proof(
 
     def run_meta(vector: Day0HourlyVector) -> tuple[datetime, str, str]:
         try:
-            role_meta = json.loads(str(vector.source_run_meta_json or ""))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            role_meta = {}
-        if not _day0_hourly_response_role_valid(role_meta):
-            raise ValueError("DAY0_CONDITIONAL_REMAINING_HOURLY_ROLE_UNPROVEN")
-        try:
             meta = json.loads(str(vector.source_run_meta_json or ""))
             run = _day0_parse_aware_clock(
                 meta["provider_source_cycle_time_utc"], field_name="provider_cycle"
             )
-            selector = datetime.fromisoformat(str(meta["hourly_response_role"]["run_selector"]).replace("Z", "+00:00"))
-            if selector.tzinfo is None:
-                selector = selector.replace(tzinfo=UTC)  # wire run's declared UTC format
-            if selector.astimezone(UTC) != run:
-                raise ValueError("entity request run and provider init differ")
             available = _day0_parse_aware_clock(
                 meta["provider_source_available_at_utc"], field_name="provider_available"
             )
@@ -4776,7 +4737,7 @@ def day0_conditional_high_run_proof(
                 raise ValueError("invalid clocks or identity")
             return run, request_hash, provider_run_id
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError("DAY0_CONDITIONAL_REMAINING_SOURCE_CLOCK_UNPROVEN") from exc
+            raise ValueError("DAY0_CONDITIONAL_HIGH_RUN_PROOF_INVALID") from exc
 
     provider_meta = {vector.model: run_meta(vector) for vector in providers}
     ecm_run = provider_meta.get("ecmwf_ifs", (None, "", ""))[0]
@@ -4787,9 +4748,9 @@ def day0_conditional_high_run_proof(
         raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE")
     ensemble_run = ens_meta[0][0]
     if any(run != ensemble_run for run, _hash, _id in ens_meta):
-        raise ValueError("DAY0_CONDITIONAL_REMAINING_ENSEMBLE_RUN_UNPROVEN")
+        raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_CYCLE_MISMATCH")
     if len({(request_hash, provider_run_id) for _run, request_hash, provider_run_id in ens_meta}) != 1:
-        raise ValueError("DAY0_CONDITIONAL_REMAINING_ENSEMBLE_CAPTURE_UNPROVEN")
+        raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_CAPTURE_MISMATCH")
     # The deterministic IFS and Ensemble API have independent release clocks.
     # The ENS bundle is current by its own run identity, never capture age.
     refusal = day0_ensemble_run_refusal(ensemble_run, decision_time=cutoff)
@@ -4814,30 +4775,26 @@ def day0_hourly_provider_representatives(
     return representatives
 
 
-def day0_conditional_remaining_shape(
+def day0_conditional_high_shape(
     *,
     conn: sqlite3.Connection,
     city: Any,
     target_date: str,
     decision_time: datetime,
     current_state: Day0CurrentTemperatureState,
-    metric: str,
-    coverage_cut: datetime,
     provider_vectors: list[Day0HourlyVector] | None = None,
-) -> Day0ConditionalRemainingShape:
+) -> Day0ConditionalHighShape:
     """Condition providers and 51 ENS members on the same observed hour/run.
 
     The 51 members measure within-IFS uncertainty; they are not additional
     provider scenarios in the existing equal-weight remaining-path mixture.
     """
 
-    if (metric not in {"high", "low"} or coverage_cut.tzinfo is None
-            or decision_time.tzinfo is None or current_state.observed_at.tzinfo is None):
+    if decision_time.tzinfo is None or current_state.observed_at.tzinfo is None:
         raise ValueError("DAY0_CONDITIONAL_HIGH_OBSERVATION_CLOCK_INVALID")
     observed = current_state.observed_at.astimezone(UTC)
     cutoff = decision_time.astimezone(UTC)
-    coverage = coverage_cut.astimezone(UTC)
-    if max(observed, coverage) > cutoff:
+    if observed > cutoff:
         raise ValueError("DAY0_CONDITIONAL_HIGH_OBSERVATION_AFTER_DECISION")
     unit = str(getattr(city, "settlement_unit", "") or "").upper()
     if unit not in {"C", "F"}:
@@ -4854,13 +4811,13 @@ def day0_conditional_remaining_shape(
             city=str(city.name), target_date=target_date, now=cutoff, conn=conn,
             expected_models=expected, require_expected=True,
             max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-            remaining_window_start=coverage, require_complete_remaining_window=True,
+            remaining_window_start=observed, require_complete_remaining_window=True,
         )
     elif provider_vectors != select_ready_day0_hourly_vectors(
         provider_vectors, target_date=target_date, now=cutoff,
         expected_models=expected, require_expected=True,
         max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-        remaining_window_start=coverage, require_complete_remaining_window=True,
+        remaining_window_start=observed, require_complete_remaining_window=True,
     ):
         raise ValueError("DAY0_CONDITIONAL_HIGH_PROVIDER_BUNDLE_INVALID")
     if tuple(vector.model for vector in provider_vectors) != expected or len(expected) < 2:
@@ -4876,7 +4833,7 @@ def day0_conditional_remaining_shape(
         city=str(city.name), target_date=target_date, now=cutoff, conn=conn,
         expected_models=ensemble_models, require_expected=True,
         max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-        remaining_window_start=coverage, require_complete_remaining_window=True,
+        remaining_window_start=observed, require_complete_remaining_window=True,
     )
     if len(ensemble) != DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
         raise ValueError("DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE")
@@ -4884,24 +4841,16 @@ def day0_conditional_remaining_shape(
     provider_meta, ensemble_run = day0_conditional_high_run_proof(
         provider_vectors, ensemble, decision_time=cutoff
     )
-    for vector in (*provider_vectors, *ensemble):
-        points = day0_hourly_vector_target_values_utc(
-            vector, target=date.fromisoformat(target_date), tz=ZoneInfo(str(city.timezone)), include_support=True,
-        )
-        anchors = [point for point, _value in (points or ()) if point <= min(coverage, observed)]
-        run = ensemble_run if vector in ensemble else provider_meta[vector.model][0]
-        if not anchors or max(anchors) < run:
-            raise ValueError("DAY0_CONDITIONAL_REMAINING_NEGATIVE_LEAD_SUPPORT_UNPROVEN")
     provider_vectors = day0_hourly_provider_representatives(provider_vectors)
     provider_centers, _ = remaining_day_extremes_c_with_current_state(
         provider_vectors, target_date=target_date, decision_time=cutoff,
-        metric=metric, current_state=current_state, settlement_unit=unit,
-        fallback_window_start=coverage,
+        metric="high", current_state=current_state, settlement_unit=unit,
+        fallback_window_start=observed,
     )
     ensemble_centers, _ = remaining_day_extremes_c_with_current_state(
         ensemble, target_date=target_date, decision_time=cutoff,
-        metric=metric, current_state=current_state, settlement_unit=unit,
-        fallback_window_start=coverage,
+        metric="high", current_state=current_state, settlement_unit=unit,
+        fallback_window_start=observed,
     )
     if len(provider_centers) != len(provider_vectors) or len(ensemble_centers) != len(ensemble_models):
         raise ValueError("DAY0_CONDITIONAL_HIGH_OBSERVATION_ANCHOR_UNAVAILABLE")
@@ -4927,22 +4876,10 @@ def day0_conditional_remaining_shape(
 
     instrument_c = float(sigma_instrument_for_city(city).to("C").value)
     model_residual = math.hypot(within, delta)
-    extra = math.hypot(model_residual, margin / 2.0)
-    effective = math.hypot(extra, instrument_c)
+    effective = max(model_residual, math.hypot(instrument_c, margin / 2.0))
+    extra = math.sqrt(max(effective**2 - instrument_c**2, 0.0))
     witness = {
-        "semantics": "day0_conditional_remaining_equal_provider_v2",
-        "hourly_response_roles": {
-            vector.model: json.loads(str(vector.source_run_meta_json or "{}")).get("hourly_response_role")
-            for vector in (*provider_vectors, *ensemble)
-        },
-        "metric": metric,
-        "physical_quantity": "unresolved_temperature_max" if metric == "high" else "unresolved_temperature_min",
-        "coverage_cut_utc": coverage.isoformat(),
-        "window_end_utc": datetime.combine(
-            date.fromisoformat(target_date) + timedelta(days=1), datetime_time.min,
-            tzinfo=ZoneInfo(str(city.timezone)),
-        ).astimezone(UTC).isoformat(),
-        "window_policy": "aggregate_coverage_to_local_end_half_open_linear_support_v1",
+        "semantics": "day0_conditional_high_equal_provider_v1",
         "city": str(city.name), "target_date": target_date,
         "observed_at": observed.isoformat(),
         "observed_native": float(current_state.value_native),
@@ -4970,7 +4907,7 @@ def day0_conditional_remaining_shape(
     identity = hashlib.sha256(json.dumps(
         witness, sort_keys=True, separators=(",", ":"),
     ).encode()).hexdigest()
-    return Day0ConditionalRemainingShape(
+    return Day0ConditionalHighShape(
         provider_centers_c=tuple(float(value) for value in provider_values),
         ensemble_centers_c=tuple(float(value) for value in ensemble_values),
         ensemble_within_sigma_c=within,
@@ -4981,19 +4918,6 @@ def day0_conditional_remaining_shape(
         extra_sigma_c=extra,
         identity=identity,
         witness=witness,
-    )
-
-
-def day0_conditional_high_shape(
-    *, conn: sqlite3.Connection, city: Any, target_date: str,
-    decision_time: datetime, current_state: Day0CurrentTemperatureState,
-    provider_vectors: list[Day0HourlyVector] | None = None,
-) -> Day0ConditionalRemainingShape:
-    """HIGH mathematical compatibility seam; live callers bind aggregate coverage explicitly."""
-    return day0_conditional_remaining_shape(
-        conn=conn, city=city, target_date=target_date, decision_time=decision_time,
-        current_state=current_state, metric="high", coverage_cut=current_state.observed_at,
-        provider_vectors=provider_vectors,
     )
 
 
@@ -5232,8 +5156,10 @@ def maybe_refresh_day0_hourly_vectors(
         explicit = (remaining_window_starts or {}).get(
             (str(getattr(city, "name", "") or ""), target_date)
         )
-        if explicit is not None and (explicit.tzinfo is None or explicit > decision_time):
-            return None
+        if explicit is not None:
+            if explicit.tzinfo is None or explicit > decision_time:
+                return None
+            return explicit.astimezone(UTC)
         try:
             tz = ZoneInfo(str(getattr(city, "timezone")))
             target = date.fromisoformat(target_date)
@@ -5243,10 +5169,7 @@ def maybe_refresh_day0_hourly_vectors(
         if target < local_day:
             return None
         if target == local_day:
-            # Until native prefix qualification is available here, acquire
-            # the whole unresolved window. Acquisition does not certify any
-            # pre-initialisation knot as a same-run forecast (consumer gate).
-            return datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
+            return decision_time.astimezone(UTC)
         return datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
 
     def mark_incomplete(
@@ -5362,7 +5285,6 @@ def maybe_refresh_day0_hourly_vectors(
             causal_boundary = (causal_run_boundaries or {}).get(
                 (name, target_dates[0])
             )
-            causal_boundary = window_starts.get(target_dates[0]) or causal_boundary
             deterministic_ready = (
                 not release_due
                 and _current_provider_bundle_already_persisted(

@@ -1,10 +1,7 @@
 # Created: 2026-06-25
-# Last reused/audited: 2026-10-04 (native metadata HTTP entity and cache provenance)
-# Authority basis: ENS geography and source clock native evidence repair
+# Last reused/audited: 2026-10-02 (listing frontier joins the source route identity)
 
 import json
-import base64
-import hashlib
 from datetime import UTC, datetime
 
 from src.data.openmeteo_model_updates import (
@@ -27,115 +24,6 @@ from src.data.source_clock_update_probe import (
     source_clock_scoped_download_allows_cursor_advance,
     source_clock_scoped_download_cursor_sources,
 )
-
-
-def test_normal_metadata_native_entity_survives_cache_without_new_capture(tmp_path, monkeypatch):
-    from src.data import openmeteo_model_updates as metadata
-
-    body = b' {"last_run_initialisation_time":"2026-10-03T12:00:00Z",\n"last_run_availability_time":"2026-10-03T18:30:00Z"}\n'
-    captured = datetime(2026, 10, 3, 19, tzinfo=UTC).timestamp()
-    calls = []
-    def fetch(url, params, **kwargs):
-        calls.append(url)
-        kwargs["capture_entity_body"](body, captured)
-        if len(calls) == 1:
-            kwargs["capture_network_response"](body, captured, {"Date": "origin-date", "Set-Cookie": "secret"})
-        return json.loads(body)
-    monkeypatch.setattr(metadata, "_fetch_openmeteo", fetch)
-    first = metadata.fetch_model_updates(["icon_global"])[0]
-    proof = first.raw["_native_http_entity"]
-    assert base64.b64decode(proof["body_base64"], validate=True) == body
-    assert proof["body_sha256"] == hashlib.sha256(body).hexdigest()
-    assert proof["response_role"] == "NETWORK_200_ENTITY"
-    assert proof["captured_at"] == datetime.fromtimestamp(captured, UTC).isoformat()
-    assert proof["http_response_headers"] == {"date": "origin-date"}
-    path = tmp_path / "metadata.jsonl"
-    write_model_updates_jsonl(path, [first])
-    stored = read_model_updates_jsonl(path)[0].raw["_native_http_entity"]
-    assert stored["body_base64"] == proof["body_base64"]
-    assert stored["captured_at"] == proof["captured_at"]
-    assert stored["recorded_at"] != stored["captured_at"]
-    second = metadata.fetch_model_updates(["icon_global"])[0].raw["_native_http_entity"]
-    assert second["response_role"] == "CACHE_ENTITY"
-    assert second["captured_at"] == proof["captured_at"]
-    assert second["body_base64"] == proof["body_base64"]
-    assert second["http_response_headers"] == {}
-    assert len(calls) == 2
-
-
-def test_normal_metadata_parsed_only_has_typed_missing_original(monkeypatch):
-    from src.data import openmeteo_model_updates as metadata
-    monkeypatch.setattr(metadata, "_fetch_openmeteo", lambda *_a, **_k: {
-        "last_run_initialisation_time": "2026-10-03T12:00:00Z",
-        "last_run_availability_time": "2026-10-03T18:30:00Z"})
-    proof = metadata.fetch_model_updates(["icon_global"])[0].raw["_native_http_entity"]
-    assert proof == {"status": "UNKNOWN", "reason": "native_capture_missing", "response_role": "UNKNOWN"}
-
-
-def test_probe_cache_retains_only_exact_original_receipt_and_next_200_resets(tmp_path, monkeypatch):
-    from src.data import openmeteo_model_updates as metadata, source_clock_update_probe as probe
-    body = b' {"last_run_initialisation_time":"2026-10-03T12:00:00Z","last_run_availability_time":"2026-10-03T18:30:00Z"}\n'
-    at = datetime(2026, 10, 3, 19, tzinfo=UTC).timestamp()
-    step = {"value": 0}
-    def fetch(_url, _params, **kwargs):
-        index = step["value"]
-        entity = body if index < 2 else body + b" "
-        kwargs["capture_entity_body"](entity, at)
-        if index in (0, 3):
-            kwargs["capture_network_response"](entity, at, {"etag": "original" if index == 0 else "reset"})
-        step["value"] += 1
-        return json.loads(entity)
-    monkeypatch.setattr(metadata, "_fetch_openmeteo", fetch)
-    monkeypatch.setattr(probe, "all_configured_source_ids", lambda: ("icon_global",))
-    monkeypatch.setattr(probe, "_model_update_due_models", lambda *_a, **_k: ("icon_global",))
-    path = tmp_path / "updates.jsonl"
-    def poll():
-        probe.probe_openmeteo_source_clock_updates(model_updates_path=path,
-            cursor_path=tmp_path / "cursor.json", market_db=None,
-            decision_time=datetime(2026, 10, 4, tzinfo=UTC))
-        return read_model_updates_jsonl(path)[0].raw["_native_http_entity"]
-    origin = poll()
-    cached = poll()
-    assert cached["response_role"] == "CACHE_ENTITY"
-    assert cached["origin_response_role"] == "NETWORK_200_ENTITY"
-    assert cached["http_response_headers"] == origin["http_response_headers"] == {"etag": "original"}
-    assert cached["captured_at"] == origin["captured_at"]
-    changed = poll()
-    assert changed["response_role"] == "CACHE_ENTITY"
-    assert changed["headers_status"] == changed["origin_response_role"] == "UNKNOWN"
-    assert changed["http_response_headers"] == {}
-    reset = poll()
-    assert reset["response_role"] == reset["origin_response_role"] == "NETWORK_200_ENTITY"
-    assert reset["http_response_headers"] == {"etag": "reset"}
-    assert reset["publisher_issue_time"] == "UNKNOWN"
-
-
-def test_probe_timeout_cannot_invent_original_or_renew_cached_clock(tmp_path, monkeypatch):
-    from src.data import openmeteo_model_updates as metadata, source_clock_update_probe as probe
-    from src.data import bayes_precision_fusion_download as dl
-    path = tmp_path / "updates.jsonl"
-    metadata.write_model_updates_jsonl(path, [metadata.parse_model_update("icon_global", {
-        "last_run_initialisation_time": "2026-10-03T12:00:00Z",
-        "last_run_availability_time": "2026-10-03T18:30:00Z"})])
-    original = path.read_bytes()
-    calls = []
-    def timeout(*_a, **_k):
-        calls.append(1)
-        raise TimeoutError("controlled metadata timeout")
-    monkeypatch.setattr(metadata, "_fetch_openmeteo", timeout)
-    monkeypatch.setattr(probe, "all_configured_source_ids", lambda: ("icon_global",))
-    monkeypatch.setattr(probe, "_model_update_due_models", lambda *_a, **_k: ("icon_global",))
-    monkeypatch.setattr(probe, "DEFAULT_MODEL_UPDATES_JSONL", path)
-    now = datetime(2026, 10, 4, tzinfo=UTC)
-    report = probe.probe_openmeteo_source_clock_updates(model_updates_path=path,
-        cursor_path=tmp_path / "cursor.json", market_db=None, decision_time=now)
-    assert report.error == "controlled metadata timeout"
-    assert path.read_bytes() == original
-    proof = dl._read_source_clock_single_runs_requests(decision_time=now)["icon_global"].metadata_entity
-    assert proof["status"] == "UNKNOWN" and proof["response_role"] == "UNKNOWN"
-    assert "body_base64" not in proof and "captured_at" not in proof
-    assert proof["api_availability_time_utc"] == "2026-10-03T18:30:00+00:00"
-    assert calls == [1]
 from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at
 
 
@@ -629,8 +517,7 @@ def test_fetch_model_updates_uses_static_metadata_urls() -> None:
         def __init__(self, payload):
             self._payload = payload
             self.status_code = 200
-            self.content = json.dumps(payload).encode()
-            self.headers = {}
+            self.content = b"{}"
 
         def raise_for_status(self) -> None:
             return None
@@ -719,8 +606,6 @@ def test_fetch_model_updates_aggregate_endpoint_is_quota_tracked(monkeypatch) ->
     )
 
     assert [update.model for update in updates] == ["icon_global"]
-    assert callable(calls[0][2].pop("capture_entity_body"))
-    assert callable(calls[0][2].pop("capture_network_response"))
     assert calls == [
         (
             "https://metadata.example.test/updates?models=icon_global",

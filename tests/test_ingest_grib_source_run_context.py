@@ -1,6 +1,6 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-10-04
-# Lifecycle: created=2026-05-03; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-05-03; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Purpose: Protect native snapshot linkage, land-cell proof and HIGH/LOW local-day boundary semantics.
 # Reuse: Inspect collector/ingester SourceRunContext and current grid/clock contracts before relying on this component suite.
 # Authority basis: LOW local-day-min interval provenance contract plus the original SourceRunContext contract.
@@ -272,8 +272,6 @@ def test_real_native_capture_survives_typed_ingest_and_raw_prune(tmp_path, monke
     result = extractor.extract_open_ens_localday(
         grib_path=raw, track_name=track_name, manifest_path=manifest,
         output_root=tmp_path / "extracted", mask_grib_path=mask, mask_proof_path=proof,
-        surface_geopotential_grib_path=mask.with_suffix(".z.grib2"),
-        surface_geopotential_proof_path=mask.with_suffix(".z.proof.json"),
     )
     assert result["written"] == 1, result
     path = Path(result["sample_outputs"][0])
@@ -289,8 +287,6 @@ def test_real_native_capture_survives_typed_ingest_and_raw_prune(tmp_path, monke
     repeated = extractor.extract_open_ens_localday(
         grib_path=raw, track_name=track_name, manifest_path=manifest,
         output_root=tmp_path / "replayed", mask_grib_path=mask, mask_proof_path=proof,
-        surface_geopotential_grib_path=mask.with_suffix(".z.grib2"),
-        surface_geopotential_proof_path=mask.with_suffix(".z.proof.json"),
     )
     replayed = json.loads(Path(repeated["sample_outputs"][0]).read_text())
     stable_receipt = json.loads(json.dumps(receipt))
@@ -361,7 +357,7 @@ def test_real_native_capture_survives_typed_ingest_and_raw_prune(tmp_path, monke
 
 
 @pytest.mark.parametrize("track_name", ("mx2t6_high", "mn2t6_low"))
-@pytest.mark.parametrize("fault", ("missing", "hash", "gh_pl", "unit", "cycle", "grid", "identity", "clock", "not_supplied"))
+@pytest.mark.parametrize("fault", ("missing", "hash", "gh_pl", "unit", "cycle", "grid", "identity", "clock"))
 def test_surface_geopotential_unknown_preserves_temperature_contract(tmp_path, monkeypatch, track_name, fault):
     import eccodes as ec
     from scripts import extract_open_ens_localday as extractor
@@ -375,9 +371,7 @@ def test_surface_geopotential_unknown_preserves_temperature_contract(tmp_path, m
         "timezone": "Europe/London", "unit": "C", "station_geometry": station,
     }]}))
     kwargs = dict(grib_path=raw, track_name=track_name, manifest_path=manifest,
-                  mask_grib_path=mask, mask_proof_path=proof,
-                  surface_geopotential_grib_path=mask.with_suffix(".z.grib2"),
-                  surface_geopotential_proof_path=mask.with_suffix(".z.proof.json"))
+                  mask_grib_path=mask, mask_proof_path=proof)
     before = extractor.extract_open_ens_localday(output_root=tmp_path / "before", **kwargs)
     observed = json.loads(Path(before["sample_outputs"][0]).read_text())
     surface = mask.with_suffix(".z.grib2")
@@ -391,9 +385,6 @@ def test_surface_geopotential_unknown_preserves_temperature_contract(tmp_path, m
         envelope["source"] = "invented_surface"
     elif fault == "clock":
         envelope["source_fetched_at"] = "2026-01-01T01:00:00"
-    elif fault == "not_supplied":
-        kwargs.pop("surface_geopotential_grib_path")
-        kwargs.pop("surface_geopotential_proof_path")
     elif fault == "unit":
         original_get = extractor.codes_get
         monkeypatch.setattr(extractor, "codes_get", lambda gid, key: "K"
@@ -447,9 +438,7 @@ def test_surface_geopotential_audit_clock_is_not_temperature_possession(tmp_path
         "timezone": "Europe/London", "unit": "C", "station_geometry": station,
     }]}))
     kwargs = dict(grib_path=raw, track_name=track_name, manifest_path=manifest,
-                  mask_grib_path=mask, mask_proof_path=proof,
-                  surface_geopotential_grib_path=mask.with_suffix(".z.grib2"),
-                  surface_geopotential_proof_path=mask.with_suffix(".z.proof.json"))
+                  mask_grib_path=mask, mask_proof_path=proof)
     before = extractor.extract_open_ens_localday(output_root=tmp_path / "before", **kwargs)
     original = json.loads(Path(before["sample_outputs"][0]).read_text())
     surface_proof = mask.with_suffix(".z.proof.json")
