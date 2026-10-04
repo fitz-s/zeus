@@ -164,7 +164,14 @@ def _held_orderbook_read_worker(
                     }
                     _send_held_orderbook_event(send_conn, terminal)
                     return
-                books = client.get_orderbook_snapshots(chunk, timeout=remaining)
+                # The parent terminates this child at its deadline, so a
+                # governor lease may not outlive ``remaining``: a 60s default
+                # orphaned by that kill denies the next identical held batch.
+                books = client.get_orderbook_snapshots(
+                    chunk,
+                    timeout=remaining,
+                    lease_seconds=remaining,
+                )
                 complete: _HeldOrderbookChunkComplete = {
                     "type": "chunk_complete",
                     "token_ids": chunk,
@@ -624,6 +631,7 @@ class PolymarketClient:
         json_body: Any,
         timeout: "float | httpx.Timeout | None" = None,
         endpoint_class_override: EndpointClass | None = None,
+        lease_seconds: float | None = None,
     ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
@@ -641,6 +649,7 @@ class PolymarketClient:
             json_body=json_body,
             priority=getattr(self, "_public_request_priority", RequestPriority.SCAN),
             endpoint_class_override=endpoint_class_override,
+            **({} if lease_seconds is None else {"lease_seconds": lease_seconds}),
         )
 
     def _held_risk_endpoint_class(self) -> EndpointClass | None:
@@ -823,6 +832,7 @@ class PolymarketClient:
         token_ids: list[str],
         *,
         timeout: "float | httpx.Timeout | None" = None,
+        lease_seconds: float | None = None,
     ) -> dict[str, dict]:
         """Batch-fetch raw CLOB orderbook facts for many tokens in ONE request.
 
@@ -868,11 +878,13 @@ class PolymarketClient:
             if timeout is not None
             else None
         )
+        lease = {} if lease_seconds is None else {"lease_seconds": lease_seconds}
         if request_timeout is None:
             resp = self._public_post(
                 "/books",
                 json_body=body,
                 endpoint_class_override=self._held_risk_endpoint_class(),
+                **lease,
             )
         else:
             resp = self._public_post(
@@ -880,6 +892,7 @@ class PolymarketClient:
                 json_body=body,
                 timeout=request_timeout,
                 endpoint_class_override=self._held_risk_endpoint_class(),
+                **lease,
             )
         resp.raise_for_status()
         payload = resp.json()

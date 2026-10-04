@@ -15424,7 +15424,9 @@ def test_held_book_worker_chunks_large_scope_within_one_deadline(monkeypatch):
         def __exit__(self, *_args):
             return False
 
-        def get_orderbook_snapshots(self, token_ids, *, timeout):
+        def get_orderbook_snapshots(self, token_ids, *, timeout, lease_seconds):
+            # The child's governor lease must die with the child's deadline.
+            assert lease_seconds == timeout
             calls.append(("books", list(token_ids), timeout))
             clock[0] += 0.1
             return {

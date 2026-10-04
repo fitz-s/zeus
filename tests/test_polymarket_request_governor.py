@@ -1419,3 +1419,65 @@ def test_legacy_global_governor_rollback_flag_restores_host_only_keying(
     payload = json.loads(state.read_text())
     assert "clob.polymarket.com" in payload["endpoints"]
     assert "clob.polymarket.com:clob-market-data" not in payload["endpoints"]
+
+
+def test_killed_held_book_batch_lease_expires_with_its_read_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A held /books child killed at its deadline never releases its lease.
+
+    The lease must therefore expire with that deadline; the 60s default turned
+    every killed held batch into ~60s of REQUEST_IN_FLIGHT denials for the next
+    identical held batch, starving exit context of a current best bid.
+    """
+
+    from src.data import polymarket_client as client_module
+
+    clock = _Clock()
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json", clock=clock)
+    monkeypatch.setattr(client_module, "polymarket_request_governor", governor)
+
+    def killed_send() -> httpx.Response:
+        # Lease is admitted, then the parent terminates the child mid-read.
+        raise SystemExit("terminated at held read deadline")
+
+    monkeypatch.setattr(client_module.httpx, "post", lambda *_a, **_k: killed_send())
+    client = object.__new__(client_module.PolymarketClient)
+    client._public_request_priority = RequestPriority.HELD_REDUCE_ONLY
+    with pytest.raises(SystemExit):
+        client.get_orderbook_snapshots(["held-token"], lease_seconds=2.3)
+
+    clock.advance(2.4)
+    monkeypatch.setattr(
+        client_module.httpx,
+        "post",
+        lambda *_a, **_k: httpx.Response(
+            200,
+            json=[{"asset_id": "held-token", "bids": [], "asks": []}],
+            request=httpx.Request("POST", "https://clob.polymarket.com/books"),
+        ),
+    )
+    books = client.get_orderbook_snapshots(["held-token"], lease_seconds=2.3)
+    assert set(books) == {"held-token"}
+
+
+def test_unbounded_book_lease_keeps_default_in_flight_dedupe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.data import polymarket_client as client_module
+
+    clock = _Clock()
+    governor = PolymarketRequestGovernor(state_file=tmp_path / "governor.json", clock=clock)
+    monkeypatch.setattr(client_module, "polymarket_request_governor", governor)
+    monkeypatch.setattr(
+        client_module.httpx,
+        "post",
+        lambda *_a, **_k: (_ for _ in ()).throw(SystemExit("killed")),
+    )
+    client = object.__new__(client_module.PolymarketClient)
+    client._public_request_priority = RequestPriority.HELD_REDUCE_ONLY
+    with pytest.raises(SystemExit):
+        client.get_orderbook_snapshots(["held-token"])
+    clock.advance(2.4)
+    with pytest.raises(RequestAdmissionDenied, match="REQUEST_IN_FLIGHT"):
+        client.get_orderbook_snapshots(["held-token"])
