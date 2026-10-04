@@ -20,6 +20,11 @@ import sqlite3
 import hashlib
 import json
 import time
+import multiprocessing
+import os
+import struct
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +34,534 @@ import pytest
 from src.state.db import init_schema, init_schema_forecasts
 from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.source_run_repo import write_source_run
+
+
+def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t6_low")):
+    """Real GRIB + immutable private snapshot identities; only transport is fake."""
+    from scripts import extract_open_ens_localday as extractor
+    from src.data import ecmwf_open_data as module
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+
+    issue = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    raw, mask, mask_proof, _ = _tiny_native_grib(tmp_path, "mx2t6_high", member_count=1)
+    z_bytes = mask.with_suffix(".z.grib2").read_bytes()
+    decoded = extractor._read_land_mask(mask, mask_proof)
+    grid_hash = decoded["grid_identity_hash"]
+    root = tmp_path / "audit_source"
+    paths = module._resolve_opendata_paths(source_root=root, environ={})
+    folder = root / "raw" / "ecmwf_open_ens" / "ecmwf" / "20260101"
+    folder.mkdir(parents=True)
+    surface_paths = {}
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE source_run (source_run_id TEXT, source_id TEXT, track TEXT,
+          source_cycle_time TEXT, status TEXT, completeness_status TEXT, partial_run INTEGER);
+        CREATE TABLE ensemble_snapshots (snapshot_id INTEGER PRIMARY KEY, source_run_id TEXT,
+          source_id TEXT, temperature_metric TEXT, source_cycle_time TEXT, source_available_at TEXT,
+          authority TEXT, provenance_json TEXT);
+        CREATE TABLE forecast_posteriors (posterior_id INTEGER PRIMARY KEY, probability REAL, computed_at TEXT);
+        INSERT INTO forecast_posteriors VALUES (1, 0.42, '2026-01-01T02:00:00+00:00');
+    """)
+    for idx, track in enumerate(tracks, 1):
+        metric = "high" if track == "mx2t6_high" else "low"
+        run_id = f"ecmwf_open_data:{track}:2026-01-01T00Z:test"
+        conn.execute("INSERT INTO source_run VALUES (?,?,?,?,?,?,?)",
+                     (run_id, "ecmwf_open_data", track, issue.isoformat(), "SUCCESS", "COMPLETE", 0))
+        provenance = {"grid_surface_evidence": {
+            "mask_grid_identity_hash": grid_hash, "temperature_grid_identity_hash": grid_hash,
+            "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
+            "mask_source_cycle_time": issue.isoformat(),
+            "request_lat": 51.6, "request_lon": .1,
+            "selected_flat_index": 2, "selected_lat": 51.5, "selected_lon": 0.0,
+            "selected_land_fraction": float(decoded["values"][2]),
+        }}
+        conn.execute("INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?,?,?)", (
+            idx, run_id, "ecmwf_open_data", metric, issue.isoformat(),
+            (issue + timedelta(hours=2)).isoformat(), "VERIFIED", json.dumps(provenance),
+        ))
+        dest = folder / f".{track}_20260101_00z_lsm.grib2"
+        dest.write_bytes(mask.read_bytes())
+        dest.with_suffix(".proof.json").write_bytes(mask_proof.read_bytes())
+        surface_paths[track] = dest.with_suffix(".z.grib2")
+    conn.commit()
+    before = tuple(conn.iterdump())
+    closed = []
+
+    class ReadConnection:
+        def execute(self, *args):
+            return conn.execute(*args)
+
+        def close(self):
+            closed.append(True)
+
+    class Response:
+        def __init__(self, body, *, range_response=False):
+            self.body = body
+            self.status_code = 206 if range_response else 200
+            self.headers = {"Content-Length": str(len(body)), "Date": "Wed, 01 Jan 2100 00:00:00 GMT",
+                            "Last-Modified": "Wed, 01 Jan 2099 00:00:00 GMT"}
+            if range_response:
+                self.headers["Content-Range"] = f"bytes 0-{len(body)-1}/{len(body)}"
+
+        def iter_content(self, chunk_size):
+            yield self.body
+
+        def close(self):
+            pass
+
+        def raise_for_status(self):
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+            self.before_get = lambda: closed == [True]
+            self.failure = None
+            self.z_bytes = z_bytes
+            self.index_overrides = {}
+
+        def get(self, url, **kwargs):
+            assert self.before_get(), "all snapshot reads must close before HTTP"
+            self.calls.append((url, kwargs))
+            assert 0 < kwargs["timeout"] <= 10
+            assert kwargs["allow_redirects"] is False
+            if self.failure:
+                raise self.failure
+            if url.endswith(".index"):
+                row = dict(param="z", levtype="sfc", step="0", type="fc", stream="oper",
+                           date="20260101", time="0000", _offset=0, _length=len(self.z_bytes), **{"class": "od"})
+                row.update(self.index_overrides)
+                return Response(json.dumps(row).encode())
+            return Response(self.z_bytes, range_response=True)
+
+        def close(self):
+            pass
+
+    session = Session()
+    monkeypatch.setattr(module, "get_connection", ReadConnection)
+    monkeypatch.setattr(module, "_resolve_opendata_paths", lambda: paths)
+    monkeypatch.setattr(module.requests, "Session", lambda: session)
+    # Parser/cache unit tests stay in-process. Actual wall-bound transport has
+    # separate real spawn/loopback antibodies, not an inherited monkeypatch.
+    def fake_transport(cycle, url, index_url, *, deadline):
+        index_body, index_http = module._surface_audit_http(session, index_url, deadline=deadline)
+        offset, length = module._surface_z_index_entry(index_body, cycle)
+        body, range_http = module._surface_audit_http(session, url, deadline=deadline,
+                                                     offset=offset, length=length)
+        return index_body, body, {"source_fetched_at": datetime.now(timezone.utc).isoformat(),
+                                 "index_http": index_http, "range_http": range_http}
+    monkeypatch.setattr(module, "_fetch_surface_audit_bytes", fake_transport)
+    return dict(db=conn, before=before, paths=paths, surface_paths=surface_paths,
+                session=session, closed=closed, grid_hash=grid_hash, issue=issue,
+                z_bytes=z_bytes, raw=raw)
+
+
+def test_normal_surface_audit_actual_bytes_shared_hl_and_clock_identity(tmp_path, monkeypatch):
+    from scripts.extract_open_ens_localday import _read_surface_geopotential
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    result = module.capture_open_ens_surface_audit()
+    assert result["capture_status"] == "OBSERVED", result
+    assert result["captured_tracks"] == ["mx2t6_high", "mn2t6_low"]
+    assert len(fixture["session"].calls) == 2
+    proofs = []
+    for track, path in fixture["surface_paths"].items():
+        assert path.read_bytes() == fixture["z_bytes"]
+        proof_path = path.with_suffix(".proof.json")
+        decoded = _read_surface_geopotential(path, proof_path)
+        proof = decoded["proof"]
+        proofs.append(proof)
+        assert decoded["grid_identity_hash"] == fixture["grid_hash"]
+        assert float(decoded["values"][2]) == 313.75
+        assert proof["source_issued_at"] is None
+        assert proof["index_http"]["headers"]["Date"].startswith("Wed, 01 Jan 2100")
+        assert fixture["issue"] <= datetime.fromisoformat(proof["source_fetched_at"]) <= datetime.fromisoformat(proof["source_written_at"]) <= datetime.now(timezone.utc)
+        index_body = path.with_suffix(".index.body").read_bytes()
+        assert hashlib.sha256(index_body).hexdigest() == proof["source_index_sha256"]
+        assert proof["range_http"]["headers"]["Content-Range"] == f"bytes 0-{len(fixture['z_bytes'])-1}/{len(fixture['z_bytes'])}"
+        assert track in proof["source_run_id"]
+    assert proofs[0]["source_fetched_at"] == proofs[1]["source_fetched_at"]
+    before_cache = {str(p): p.read_bytes() for p in fixture["surface_paths"].values()}
+    before_proofs = {str(p): p.with_suffix(".proof.json").read_bytes() for p in fixture["surface_paths"].values()}
+    again = module.capture_open_ens_surface_audit()
+    assert again["cache_reused"] is True
+    assert len(fixture["session"].calls) == 2
+    assert before_cache == {str(p): p.read_bytes() for p in fixture["surface_paths"].values()}
+    assert before_proofs == {str(p): p.with_suffix(".proof.json").read_bytes() for p in fixture["surface_paths"].values()}
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]  # no q/old receipt/source clock write
+
+
+@pytest.mark.parametrize("field,value", (("dataDate", 20260102), ("dataType", "cf"),
+                                         ("scanningMode", 64), ("paramId", 130)))
+def test_normal_surface_audit_real_wrong_cycle_grid_type_unit_unknown(tmp_path, monkeypatch, field, value):
+    import eccodes as ec
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    gid = ec.codes_new_from_message(fixture["z_bytes"])
+    try:
+        ec.codes_set(gid, field, value)
+        fixture["session"].z_bytes = ec.codes_get_message(gid)
+    finally:
+        ec.codes_release(gid)
+    result = module.capture_open_ens_surface_audit()
+    assert result["capture_status"] == "UNKNOWN", result
+    assert all(not p.exists() for p in fixture["surface_paths"].values())
+    assert len(fixture["session"].calls) == 2
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]
+
+
+@pytest.mark.parametrize("overrides", ({"date": "20260102"}, {"step": "3"}, {"levtype": "pl"},
+                                     {"param": "gh"}, {"_length": 1024 * 1024 + 1}))
+def test_normal_surface_audit_index_rejection_has_no_range_retry(tmp_path, monkeypatch, overrides):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    fixture["session"].index_overrides = overrides
+    result = module.capture_open_ens_surface_audit()
+    assert result["capture_status"] == "UNKNOWN", result
+    assert len(fixture["session"].calls) == 1
+    assert all(not p.exists() for p in fixture["surface_paths"].values())
+
+
+@pytest.mark.parametrize("failure", ("timeout", "deadline"))
+def test_normal_surface_audit_slow_fail_no_publish_or_forecast_write(tmp_path, monkeypatch, failure):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    if failure == "timeout":
+        fixture["session"].failure = module.requests.Timeout("slow optional index")
+    else:
+        clock = [100.0]
+        monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+        original = fixture["session"].get
+        def slow_get(url, **kwargs):
+            response = original(url, **kwargs)
+            clock[0] += 41
+            return response
+        monkeypatch.setattr(fixture["session"], "get", slow_get)
+    result = module.capture_open_ens_surface_audit()
+    assert result["capture_status"] == "UNKNOWN", result
+    assert len(fixture["session"].calls) == 1
+    assert all(not p.exists() for p in fixture["surface_paths"].values())
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]
+
+
+def test_normal_surface_audit_changed_mask_and_publish_race_never_overwrite(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    before_link = module.os.link
+    raced = fixture["surface_paths"]["mx2t6_high"]
+    sentinel = b"other publisher's immutable generation"
+    def publish_race(source, target):
+        if Path(target) == raced and not raced.exists():
+            raced.write_bytes(sentinel)
+        return before_link(source, target)
+    monkeypatch.setattr(module.os, "link", publish_race)
+    result = module.capture_open_ens_surface_audit()
+    assert result["captured_tracks"] == ["mn2t6_low"], result
+    assert raced.read_bytes() == sentinel
+    assert "mx2t6_high" in result["track_gaps"]
+    assert fixture["surface_paths"]["mn2t6_low"].read_bytes() == fixture["z_bytes"]
+
+
+def test_normal_surface_audit_changed_source_generation_stays_unknown(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    original = fixture["session"].get
+    mask = fixture["surface_paths"]["mx2t6_high"].with_name(".mx2t6_high_20260101_00z_lsm.grib2")
+    def change_after_read(url, **kwargs):
+        response = original(url, **kwargs)
+        if not url.endswith(".index"):
+            mask.write_bytes(b"new-generation")
+        return response
+    monkeypatch.setattr(fixture["session"], "get", change_after_read)
+    result = module.capture_open_ens_surface_audit()
+    assert result["captured_tracks"] == ["mn2t6_low"], result
+    assert "SURFACE_AUDIT_MASK_GENERATION_CHANGED" in result["track_gaps"]["mx2t6_high"]
+    assert not fixture["surface_paths"]["mx2t6_high"].exists()
+
+
+def test_normal_surface_audit_existing_corrupt_cache_kept_sibling_can_capture(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    old = fixture["surface_paths"]["mx2t6_high"]
+    old.write_bytes(b"immutable malformed prior cache")
+    result = module.capture_open_ens_surface_audit()
+    assert result["captured_tracks"] == ["mn2t6_low"], result
+    assert old.read_bytes() == b"immutable malformed prior cache"
+    assert result["track_gaps"]["mx2t6_high"] == "SURFACE_AUDIT_CACHE_PUBLISH_CONFLICT"
+
+
+def test_normal_surface_audit_partial_publish_recovers_by_new_real_capture(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    original = module.os.link
+    lost = [False]
+    proof = fixture["surface_paths"]["mx2t6_high"].with_suffix(".proof.json")
+    def interrupted(source, target):
+        if Path(target) == proof and not lost[0]:
+            lost[0] = True
+            raise OSError("temporary publisher interruption")
+        return original(source, target)
+    monkeypatch.setattr(module.os, "link", interrupted)
+    first = module.capture_open_ens_surface_audit()
+    assert first["captured_tracks"] == ["mn2t6_low"], first
+    assert not proof.exists()
+    old_low_proof = fixture["surface_paths"]["mn2t6_low"].with_suffix(".proof.json").read_bytes()
+    second = module.capture_open_ens_surface_audit()
+    assert second["captured_tracks"] == ["mx2t6_high", "mn2t6_low"], second
+    assert proof.exists()
+    assert len(fixture["session"].calls) == 2  # existing valid sibling supplies actual bytes/old fetched clock
+    assert old_low_proof == fixture["surface_paths"]["mn2t6_low"].with_suffix(".proof.json").read_bytes()
+
+
+@pytest.mark.parametrize("fault", ("index_oversized", "range_oversized", "range_200", "range_header"))
+def test_normal_surface_audit_stream_bounds_and_range_proof(tmp_path, monkeypatch, fault):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    original = fixture["session"].get
+    consumed = []
+    def hostile(url, **kwargs):
+        response = original(url, **kwargs)
+        if url.endswith(".index") and fault == "index_oversized":
+            def chunks(chunk_size):
+                for _ in range(100):
+                    consumed.append(1)
+                    yield b"x" * 65536
+            response.iter_content = chunks
+        elif not url.endswith(".index"):
+            if fault == "range_200":
+                response.status_code = 200
+            elif fault == "range_header":
+                response.headers["Content-Range"] = "bytes 1-999/1000"
+            elif fault == "range_oversized":
+                response.body += b"x"
+        return response
+    monkeypatch.setattr(fixture["session"], "get", hostile)
+    result = module.capture_open_ens_surface_audit()
+    assert result["capture_status"] == "UNKNOWN", result
+    assert all(not p.exists() for p in fixture["surface_paths"].values())
+    assert len(fixture["session"].calls) == (1 if fault == "index_oversized" else 2)
+    if fault == "index_oversized":
+        assert len(consumed) == 17  # refuse during streaming, never drain all 100 chunks
+
+
+@pytest.mark.parametrize("fault", ("future_cycle", "future_available", "running", "wrong_temp_grid"))
+def test_normal_surface_audit_no_future_or_uncommitted_decision_input(tmp_path, monkeypatch, fault):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    conn = fixture["db"]
+    if fault == "future_cycle":
+        conn.execute("UPDATE source_run SET source_cycle_time='2100-01-01T00:00:00+00:00'")
+    elif fault == "future_available":
+        conn.execute("UPDATE ensemble_snapshots SET source_available_at='2100-01-01T00:00:00+00:00'")
+    elif fault == "running":
+        conn.execute("UPDATE source_run SET status='RUNNING'")
+    else:
+        conn.execute("UPDATE ensemble_snapshots SET provenance_json=json_set(provenance_json,'$.grid_surface_evidence.temperature_grid_identity_hash',?)", ("f" * 64,))
+    before = tuple(conn.iterdump())
+    result = module.capture_open_ens_surface_audit()
+    assert result["capture_status"] == "UNKNOWN", result
+    assert not fixture["session"].calls
+    assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("field", ("raw_phi_m2_s2", "selected_point", "mask_sha256", "snapshot_id",
+                                   "source_run_id", "source_issued_at"))
+def test_cached_surface_own_reference_tamper_keeps_bad_track_unknown(tmp_path, monkeypatch, track, field):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    assert module.capture_open_ens_surface_audit()["capture_status"] == "OBSERVED"
+    proof_path = fixture["surface_paths"][track].with_suffix(".proof.json")
+    proof = json.loads(proof_path.read_bytes())
+    mutations = {"raw_phi_m2_s2": 123456, "selected_point": {"flat_index": 1, "lat": 51.75, "lon": .25},
+                 "mask_sha256": "a" * 64, "snapshot_id": 999999,
+                 "source_run_id": "foreign-world-run", "source_issued_at": "2026-01-01T00:00:00Z"}
+    proof[field] = mutations[field]
+    proof_path.write_text(json.dumps(proof))
+    bad_bytes = proof_path.read_bytes()
+    result = module.capture_open_ens_surface_audit()
+    sibling = "mn2t6_low" if track == "mx2t6_high" else "mx2t6_high"
+    assert result["captured_tracks"] == [sibling], result
+    assert track in result["track_gaps"]
+    assert proof_path.read_bytes() == bad_bytes
+    assert len(fixture["session"].calls) == 2
+
+
+@pytest.mark.parametrize("change", ("new_row", "pruned_original", "changed_original", "foreign_source"))
+def test_cached_surface_binds_original_not_always_latest(tmp_path, monkeypatch, change):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    assert module.capture_open_ens_surface_audit()["capture_status"] == "OBSERVED"
+    cache = {t: p.with_suffix(".proof.json").read_bytes() for t, p in fixture["surface_paths"].items()}
+    conn = fixture["db"]
+    conn.execute("INSERT INTO ensemble_snapshots SELECT snapshot_id+100, source_run_id, source_id, temperature_metric, source_cycle_time, source_available_at, authority, provenance_json FROM ensemble_snapshots")
+    if change == "pruned_original":
+        conn.execute("DELETE FROM ensemble_snapshots WHERE snapshot_id=1")
+    elif change == "changed_original":
+        conn.execute("UPDATE ensemble_snapshots SET provenance_json=json_set(provenance_json,'$.grid_surface_evidence.selected_lat',50) WHERE snapshot_id=1")
+    elif change == "foreign_source":
+        conn.execute("UPDATE ensemble_snapshots SET source_id='foreign_world_source' WHERE snapshot_id=1")
+    before = tuple(conn.iterdump())
+    result = module.capture_open_ens_surface_audit()
+    assert result["captured_tracks"] == (["mx2t6_high", "mn2t6_low"] if change == "new_row" else ["mn2t6_low"]), result
+    assert result["cache_binding_role"] == "ORIGINAL_IMMUTABLE_SNAPSHOT_NOT_CURRENT_TARGET"
+    assert cache == {t: p.with_suffix(".proof.json").read_bytes() for t, p in fixture["surface_paths"].items()}
+    assert tuple(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("change", ("absent_id", "foreign_id_run", "stable_aba"))
+def test_cached_surface_original_lookup_proof_race_is_one_epoch(tmp_path, monkeypatch, track, change):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    assert module.capture_open_ens_surface_audit()["capture_status"] == "OBSERVED"
+    proof_path = fixture["surface_paths"][track].with_suffix(".proof.json")
+    original_bytes = proof_path.read_bytes()
+    original = json.loads(original_bytes)
+    foreign_track = "mn2t6_low" if track == "mx2t6_high" else "mx2t6_high"
+    foreign = json.loads(fixture["surface_paths"][foreign_track].with_suffix(".proof.json").read_bytes())
+    raced = []
+
+    class RacingConnection:
+        def execute(self, query, parameters=()):
+            cursor = fixture["db"].execute(query, parameters)
+            if "e.snapshot_id=?" in query and parameters[0] == original["snapshot_id"] and not raced:
+                replacement = dict(original)
+                if change == "absent_id":
+                    replacement["snapshot_id"] = 999999
+                else:
+                    replacement["snapshot_id"] = foreign["snapshot_id"]
+                    replacement["source_run_id"] = foreign["source_run_id"]
+                proof_path.write_text(json.dumps(replacement))
+                raced.append(proof_path.read_bytes())
+                if change == "stable_aba":
+                    proof_path.write_bytes(original_bytes)
+            return cursor
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module, "get_connection", RacingConnection)
+    result = module.capture_open_ens_surface_audit()
+    assert raced
+    if change == "stable_aba":
+        assert result["captured_tracks"] == ["mx2t6_high", "mn2t6_low"], result
+        assert proof_path.read_bytes() == original_bytes
+    else:
+        assert result["captured_tracks"] == [foreign_track], result
+        assert "SURFACE_AUDIT_SOURCE_PROOF_GENERATION_CHANGED" in result["track_gaps"][track]
+        assert proof_path.read_bytes() == raced[0]  # preserve the publisher, never overwrite with A
+    assert len(fixture["session"].calls) == 2
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]
+
+
+def _surface_test_half_packet(cycle, url, index_url, deadline, writer):
+    os.write(writer.fileno(), struct.pack("!III", 100, 100, 100) + b"partial")
+    time.sleep(30)
+
+
+def _surface_test_oversized_packet(cycle, url, index_url, deadline, writer):
+    os.write(writer.fileno(), struct.pack("!III", 1, 1024 * 1024 + 1, 1))
+    time.sleep(30)
+
+
+@pytest.mark.parametrize("worker", (_surface_test_half_packet, _surface_test_oversized_packet))
+def test_surface_spawn_capped_partial_ipc_is_nonblocking_and_reaped(worker):
+    from src.data import ecmwf_open_data as module
+
+    before = {p.pid for p in multiprocessing.active_children()}
+    start = time.monotonic()
+    with pytest.raises((ValueError, module.requests.Timeout)):
+        module._fetch_surface_audit_bytes(datetime(2026, 1, 1, tzinfo=timezone.utc),
+            "unused", "unused", deadline=start + 3, _worker=worker)
+    assert time.monotonic() - start < 3.7
+    assert {p.pid for p in multiprocessing.active_children()} == before
+
+
+@pytest.mark.parametrize("mode", ("good", "headers", "body", "silent"))
+def test_surface_actual_spawn_loopback_has_global_wall_bound(tmp_path, mode):
+    """Real production spawn wrapper, including get/header and body stalls."""
+    from src.data import ecmwf_open_data as module
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+
+    _, mask, _, _ = _tiny_native_grib(tmp_path, "mx2t6_high", member_count=1)
+    body = mask.with_suffix(".z.grib2").read_bytes()
+    index = json.dumps(dict(param="z", levtype="sfc", step="0", type="fc", stream="oper",
+                           date="20260101", time="0000", _offset=0, _length=len(body), **{"class": "od"})).encode()
+    seen = threading.Event()
+    stop = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            seen.set()
+            try:
+                if mode == "silent":
+                    stop.wait(10)
+                    return
+                if mode == "headers":
+                    self.connection.sendall(b"HTTP/1.1 200 OK\r\nX-Trickle: ")
+                    while not stop.wait(.05):
+                        self.connection.sendall(b"x")
+                    return
+                is_index = self.path.endswith(".index")
+                payload = index if is_index else body
+                self.send_response(200 if is_index else 206)
+                self.send_header("Content-Length", str(len(payload)))
+                if not is_index:
+                    self.send_header("Content-Range", f"bytes 0-{len(body)-1}/{len(body)}")
+                self.end_headers()
+                if mode == "body":
+                    for byte in payload:
+                        if stop.wait(.05):
+                            return
+                        self.wfile.write(bytes((byte,)))
+                        self.wfile.flush()
+                else:
+                    self.wfile.write(payload)
+            except (OSError, ConnectionError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    before = {p.pid for p in multiprocessing.active_children()}
+    base = f"http://127.0.0.1:{server.server_port}/surface"
+    start = time.monotonic()
+    try:
+        if mode == "good":
+            raw_index, raw_body, metadata = module._fetch_surface_audit_bytes(
+                datetime(2026, 1, 1, tzinfo=timezone.utc), base + ".grib2", base + ".index", deadline=start + 5)
+            assert raw_index == index and raw_body == body and metadata["status"] == "ok"
+        else:
+            with pytest.raises(module.requests.Timeout):
+                module._fetch_surface_audit_bytes(datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    base + ".grib2", base + ".index", deadline=start + 3)
+            assert time.monotonic() - start < 3.7
+        assert seen.is_set(), "must exercise the HTTP phase, not merely time out during spawn startup"
+        assert {p.pid for p in multiprocessing.active_children()} == before
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
 
 
 def test_hong_kong_selects_nearest_land_of_four_not_water_class_cell() -> None:

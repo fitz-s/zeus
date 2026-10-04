@@ -49,9 +49,12 @@ from __future__ import annotations
 import json
 import logging
 import math
+import multiprocessing
 import os
 import re
 import shutil
+import selectors
+import struct
 import subprocess
 import sys
 import hashlib
@@ -1239,6 +1242,455 @@ def _fetch_cycle_land_mask(
         except (OSError, ValueError, requests.RequestException) as exc:
             last_error = exc
     raise ValueError(f"ENS_LAND_MASK_UNAVAILABLE:{type(last_error).__name__ if last_error else 'NO_MIRROR'}")
+
+
+def _surface_audit_http(session: Any, url: str, *, deadline: float,
+                        offset: int | None = None, length: int | None = None) -> tuple[bytes, dict]:
+    """One bounded, non-retrying audit request, isolated from forecast transports."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise requests.Timeout("SURFACE_AUDIT_DEADLINE_EXCEEDED")
+    headers = {} if offset is None else {"Range": f"bytes={offset}-{offset + length - 1}"}
+    if offset is not None and (offset < 0 or length is None or not 100 <= length <= 1024 * 1024):
+        raise ValueError("SURFACE_AUDIT_RANGE_BOUNDS_INVALID")
+    response = session.get(url, headers=headers, stream=True,
+                           timeout=min(10.0, remaining), allow_redirects=False)
+    try:
+        if offset is None:
+            if response.status_code != 200:
+                raise ValueError(f"SURFACE_AUDIT_INDEX_HTTP_{response.status_code}")
+        else:
+            _validate_range_response(response, offset=offset, length=length)
+        limit = 1024 * 1024 if length is None else length
+        chunks, total = [], 0
+        for chunk in response.iter_content(chunk_size=65536):
+            if time.monotonic() >= deadline:
+                raise requests.Timeout("SURFACE_AUDIT_DEADLINE_EXCEEDED")
+            total += len(chunk)
+            if total > limit:
+                raise ValueError("SURFACE_AUDIT_RESPONSE_OVERSIZED")
+            chunks.append(chunk)
+        body = b"".join(chunks)
+        if time.monotonic() >= deadline:
+            raise requests.Timeout("SURFACE_AUDIT_DEADLINE_EXCEEDED")
+        if length is not None and (len(body) != length or not body.startswith(b"GRIB") or not body.endswith(b"7777")):
+            raise ValueError("SURFACE_AUDIT_MESSAGE_INVALID")
+        observed_headers = {str(k): str(v) for k, v in response.headers.items()}
+        if len(json.dumps(observed_headers)) > 16384:
+            raise ValueError("SURFACE_AUDIT_HTTP_HEADERS_OVERSIZED")
+        return body, {"status": response.status_code, "headers": observed_headers}
+    finally:
+        response.close()
+
+
+def _surface_z_index_entry(body: bytes, cycle: datetime) -> tuple[int, int]:
+    matches = []
+    for line in body.splitlines():
+        item = json.loads(line)
+        if all(str(item.get(k)) == v for k, v in {
+            "param": "z", "levtype": "sfc", "step": "0", "type": "fc", "stream": "oper",
+            "class": "od", "date": cycle.strftime("%Y%m%d"), "time": f"{cycle.hour:02d}00",
+        }.items()):
+            matches.append(item)
+    if len(matches) != 1:
+        raise ValueError("SURFACE_AUDIT_INDEX_NOT_SINGLE_Z")
+    offset, length = matches[0]["_offset"], matches[0]["_length"]
+    if type(offset) is not int or type(length) is not int or offset < 0 or not 100 <= length <= 1024 * 1024:
+        raise ValueError("SURFACE_AUDIT_INDEX_BOUNDS_INVALID")
+    return offset, length
+
+
+def _surface_audit_worker(cycle_iso: str, url: str, index_url: str, deadline: float, writer: Any) -> None:
+    """Spawn-only transport: no connection, cache path, decoder or publication."""
+    session = requests.Session()
+    index_bytes = body = b""
+    try:
+        index_bytes, index_http = _surface_audit_http(session, index_url, deadline=deadline)
+        offset, length = _surface_z_index_entry(index_bytes, datetime.fromisoformat(cycle_iso))
+        body, range_http = _surface_audit_http(session, url, deadline=deadline, offset=offset, length=length)
+        metadata = {"status": "ok", "index_http": index_http, "range_http": range_http,
+                    "source_index_offset": offset, "source_index_length": length,
+                    "source_fetched_at": datetime.now(timezone.utc).isoformat()}
+    except Exception as exc:
+        index_bytes = body = b""
+        metadata = {"status": "UNKNOWN", "reason": str(exc)[:200] or type(exc).__name__}
+    try:
+        encoded = json.dumps(metadata).encode()
+        if len(encoded) > 65536 or len(index_bytes) > 1024 * 1024 or len(body) > 1024 * 1024:
+            return
+        packet = struct.pack("!III", len(encoded), len(index_bytes), len(body)) + encoded + index_bytes + body
+        view = memoryview(packet)
+        while view:
+            written = os.write(writer.fileno(), view[:65536])
+            view = view[written:]
+    finally:
+        writer.close()
+        session.close()
+
+
+def _fetch_surface_audit_bytes(cycle: datetime, url: str, index_url: str, *, deadline: float,
+                               _worker: Any = None) -> tuple[bytes, bytes, dict]:
+    """Wall-bounded spawn + capped nonblocking IPC; only the parent may publish."""
+    context = multiprocessing.get_context("spawn")
+    reader, writer = context.Pipe(duplex=False)
+    process = context.Process(target=_worker or _surface_audit_worker,
+                              args=(cycle.isoformat(), url, index_url, deadline, writer))
+    started = False
+    try:
+        if time.monotonic() >= deadline:
+            raise requests.Timeout("SURFACE_AUDIT_DEADLINE_EXCEEDED")
+        process.start()
+        started = True
+        writer.close()
+        os.set_blocking(reader.fileno(), False)
+        received = bytearray()
+        expected = None
+        with selectors.DefaultSelector() as selector:
+            selector.register(reader.fileno(), selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise requests.Timeout("SURFACE_AUDIT_DEADLINE_EXCEEDED")
+                if not selector.select(remaining):
+                    raise requests.Timeout("SURFACE_AUDIT_DEADLINE_EXCEEDED")
+                try:
+                    chunk = os.read(reader.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    raise ValueError("SURFACE_AUDIT_WORKER_INCOMPLETE_FRAME")
+                received.extend(chunk)
+                if expected is None and len(received) >= 12:
+                    meta_len, index_len, body_len = struct.unpack("!III", received[:12])
+                    if not 0 < meta_len <= 65536 or index_len > 1024 * 1024 or body_len > 1024 * 1024:
+                        raise ValueError("SURFACE_AUDIT_IPC_BOUNDS_INVALID")
+                    expected = 12 + meta_len + index_len + body_len
+                if len(received) > 12 + 65536 + 2 * 1024 * 1024 or (expected is not None and len(received) > expected):
+                    raise ValueError("SURFACE_AUDIT_IPC_BOUNDS_INVALID")
+                if expected is not None and len(received) == expected:
+                    if time.monotonic() >= deadline:
+                        raise requests.Timeout("SURFACE_AUDIT_DEADLINE_EXCEEDED")
+                    metadata = json.loads(received[12:12 + meta_len])
+                    if metadata.get("status") != "ok":
+                        raise ValueError(str(metadata.get("reason") or "SURFACE_AUDIT_WORKER_FAILED"))
+                    index_bytes = bytes(received[12 + meta_len:12 + meta_len + index_len])
+                    body = bytes(received[12 + meta_len + index_len:])
+                    return index_bytes, body, metadata
+    finally:
+        reader.close()
+        writer.close()
+        if started:
+            if process.is_alive():
+                process.kill()
+            # Bounded cleanup grace is separate from the acceptance deadline.
+            process.join(timeout=0.5)
+            if process.is_alive():
+                raise RuntimeError("SURFACE_AUDIT_WORKER_REAP_UNCONFIRMED")
+        process.close()
+
+
+def _surface_audit_snapshot_binding(row: Mapping[str, object]) -> str:
+    fields = {key: row[key] for key in ("snapshot_id", "source_run_id", "temperature_metric",
+                                       "source_cycle_time", "source_available_at", "surface_json")}
+    return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def capture_open_ens_surface_audit() -> dict[str, object]:
+    """Retention-lane-only fc reference capture; never refresh old ENS/q truth.
+
+    SCOPE: one already committed cycle, exact LSM/temperature grid and track.
+    DRAIN: existing hourly retention cadence retries UNKNOWN without pass retries.
+    RESET: genuine matching bytes/cache receipt. No source-run or snapshot write.
+    """
+    from scripts.extract_open_ens_localday import (
+        _read_land_mask, _read_surface_geopotential, _select_land_grid_points,
+    )
+
+    deadline = time.monotonic() + 40.0
+    now = datetime.now(timezone.utc)
+    report: dict[str, object] = {"capture_status": "UNKNOWN", "audit_scope": "AUDIT_ONLY_NOT_DECISION_INPUT"}
+    try:
+        paths = _resolve_opendata_paths()
+        conn = get_connection()
+        try:
+            # Pin operational identities in a short read, then close before any HTTP.
+            newest = conn.execute("""
+                SELECT sr.source_cycle_time FROM source_run sr
+                WHERE sr.source_id=? AND sr.status='SUCCESS'
+                  AND sr.completeness_status='COMPLETE' AND sr.partial_run=0
+                  AND julianday(sr.source_cycle_time)<=julianday(?)
+                  AND EXISTS (SELECT 1 FROM ensemble_snapshots e WHERE e.source_run_id=sr.source_run_id
+                    AND e.source_id=sr.source_id AND e.authority='VERIFIED'
+                    AND e.source_cycle_time=sr.source_cycle_time
+                    AND julianday(e.source_available_at)<=julianday(?))
+                ORDER BY julianday(sr.source_cycle_time) DESC LIMIT 1
+            """, (SOURCE_ID, now.isoformat(), now.isoformat())).fetchone()
+            if newest is None:
+                return {**report, "unavailable_reason": "SURFACE_AUDIT_NO_COMMITTED_CYCLE"}
+            cycle = datetime.fromisoformat(newest["source_cycle_time"])
+            if cycle.tzinfo is None or cycle.utcoffset() != timedelta(0) or cycle.hour not in (0, 6, 12, 18) or cycle.minute or cycle.second or cycle.microsecond:
+                raise ValueError("SURFACE_AUDIT_CYCLE_INVALID")
+            pinned = []
+            for track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
+                row = conn.execute("""
+                    SELECT e.snapshot_id, e.source_run_id, e.temperature_metric,
+                      e.source_cycle_time, e.source_available_at,
+                      json_extract(e.provenance_json,'$.grid_surface_evidence') AS surface_json
+                    FROM ensemble_snapshots e JOIN source_run sr ON sr.source_run_id=e.source_run_id
+                    WHERE e.source_id=? AND sr.source_id=e.source_id AND sr.track=?
+                      AND sr.status='SUCCESS' AND sr.completeness_status='COMPLETE' AND sr.partial_run=0
+                      AND sr.source_cycle_time=? AND e.source_cycle_time=sr.source_cycle_time
+                      AND e.temperature_metric=? AND e.authority='VERIFIED'
+                      AND julianday(e.source_available_at)<=julianday(?)
+                    ORDER BY e.snapshot_id DESC LIMIT 1
+                """, (SOURCE_ID, track, cycle.isoformat(), metric, now.isoformat())).fetchone()
+                if row is not None:
+                    pinned.append((track, dict(row)))
+            original_refs = {}
+            for track, _row in pinned:
+                folder = _download_output_path(run_date=cycle.date(), run_hour=cycle.hour,
+                    param=TRACKS[track]["open_data_param"], raw_root=paths.raw_root).parent
+                cached_proof = folder / f".{track}_{cycle:%Y%m%d}_{cycle.hour:02d}z_lsm.z.proof.json"
+                try:
+                    if cached_proof.is_symlink() or cached_proof.stat().st_size > 65536:
+                        continue
+                    original_proof_bytes = cached_proof.read_bytes()
+                    original = json.loads(original_proof_bytes)
+                    reference = conn.execute("""
+                        SELECT e.snapshot_id, e.source_run_id, e.temperature_metric,
+                          e.source_cycle_time, e.source_available_at,
+                          json_extract(e.provenance_json,'$.grid_surface_evidence') AS surface_json
+                        FROM ensemble_snapshots e JOIN source_run sr ON sr.source_run_id=e.source_run_id
+                        WHERE e.snapshot_id=? AND e.source_run_id=? AND e.source_id=?
+                          AND sr.source_id=e.source_id AND sr.track=? AND e.authority='VERIFIED'
+                          AND sr.source_cycle_time=e.source_cycle_time
+                          AND sr.status='SUCCESS' AND sr.completeness_status='COMPLETE'
+                          AND sr.partial_run=0 AND julianday(e.source_available_at)<=julianday(?)
+                    """, (original.get("snapshot_id"), original.get("source_run_id"), SOURCE_ID, track, now.isoformat())).fetchone()
+                    if reference is not None:
+                        original_refs[track] = (dict(reference), original_proof_bytes)
+                except (OSError, ValueError, TypeError):
+                    pass  # missing original proof remains a narrow cache gap below
+        finally:
+            conn.close()
+        report["source_cycle_time"] = cycle.isoformat()
+        candidates, gaps = [], {}
+        for track, row in pinned:
+            try:
+                surface = json.loads(row["surface_json"])
+                mask_path = _download_output_path(run_date=cycle.date(), run_hour=cycle.hour,
+                    param=TRACKS[track]["open_data_param"], raw_root=paths.raw_root).with_name(
+                        f".{track}_{cycle:%Y%m%d}_{cycle.hour:02d}z_lsm.grib2")
+                proof_path = mask_path.with_suffix(".proof.json")
+                if mask_path.is_symlink() or proof_path.is_symlink():
+                    raise ValueError("SURFACE_AUDIT_MASK_SYMLINK")
+                if not 100 <= mask_path.stat().st_size <= 1024 * 1024 or proof_path.stat().st_size > 65536:
+                    raise ValueError("SURFACE_AUDIT_MASK_BOUNDS_INVALID")
+                mask_bytes, mask_proof_bytes = mask_path.read_bytes(), proof_path.read_bytes()
+                mask = _read_land_mask(mask_path, proof_path)
+                fetched = datetime.fromisoformat(str(mask["proof"]["source_fetched_at"]))
+                if (mask_path.read_bytes() != mask_bytes or proof_path.read_bytes() != mask_proof_bytes
+                        or mask["proof"]["source_cycle_time"] != cycle.isoformat()
+                        or fetched.tzinfo is None or not cycle <= fetched <= now
+                        or surface["mask_sha256"] != hashlib.sha256(mask_bytes).hexdigest()
+                        or surface["mask_source_cycle_time"] != cycle.isoformat()
+                        or surface["mask_grid_identity_hash"] != mask["grid_identity_hash"]
+                        or surface["temperature_grid_identity_hash"] != mask["grid_identity_hash"]):
+                    raise ValueError("SURFACE_AUDIT_MASK_TEMPERATURE_BINDING_INVALID")
+                selected = _select_land_grid_points(mask["fields"], [{
+                    "city": "audit", "lat": surface["request_lat"], "lon": surface["request_lon"],
+                }], mask["values"].__getitem__)["audit"]
+                if any(selected[key] != surface[key] for key in (
+                    "selected_flat_index", "selected_lat", "selected_lon", "selected_land_fraction",
+                )):
+                    raise ValueError("SURFACE_AUDIT_SELECTED_POINT_INVALID")
+                row["selected_point"] = {"flat_index": selected["selected_flat_index"],
+                                         "lat": selected["selected_lat"], "lon": selected["selected_lon"]}
+                candidates.append((track, row, mask_path, mask_bytes, mask_proof_bytes, mask))
+            except Exception as exc:  # optional audit isolates malformed/missing track inputs
+                gaps[track] = str(exc)[:200] or type(exc).__name__
+        report["track_gaps"] = gaps
+        if not candidates:
+            return {**report, "unavailable_reason": "SURFACE_AUDIT_NO_MATCHING_MASK"}
+        grid_hashes = {c[5]["grid_identity_hash"] for c in candidates}
+        if len(grid_hashes) != 1:
+            raise ValueError("SURFACE_AUDIT_TRACK_GRID_MISMATCH")
+        grid_hash = next(iter(grid_hashes))
+        url = (f"https://data.ecmwf.int/forecasts/{cycle:%Y%m%d}/{cycle.hour:02d}z/ifs/0p25/oper/"
+               f"{cycle:%Y%m%d}{cycle.hour:02d}0000-0h-oper-fc.grib2")
+        index_url = url.rsplit(".", 1)[0] + ".index"
+
+        # Reuse only complete, independently decoded cache proof; existence is not proof.
+        cached = None
+        cache_fences = {}
+        for track, row, mask_path, mask_bytes, mask_proof_bytes, mask in candidates:
+            path = mask_path.with_suffix(".z.grib2")
+            proof_path = path.with_suffix(".proof.json")
+            index_path = path.with_suffix(".index.body")
+            if path.exists() or proof_path.exists() or index_path.exists():
+                try:
+                    if any(p.is_symlink() for p in (path, proof_path, index_path)):
+                        raise ValueError("SURFACE_AUDIT_CACHE_SYMLINK")
+                    if index_path.stat().st_size > 1024 * 1024 or proof_path.stat().st_size > 65536:
+                        raise ValueError("SURFACE_AUDIT_CACHE_BOUNDS_INVALID")
+                    proof_bytes = proof_path.read_bytes()
+                    observed = _read_surface_geopotential(path, proof_path)
+                    if track not in original_refs:
+                        raise ValueError("SURFACE_AUDIT_ORIGINAL_REFERENCE_UNAVAILABLE")
+                    reference, pinned_proof = original_refs[track]
+                    if (pinned_proof != proof_bytes or proof_path.read_bytes() != pinned_proof
+                            or observed["proof"] != json.loads(pinned_proof)):
+                        raise ValueError("SURFACE_AUDIT_SOURCE_PROOF_GENERATION_CHANGED")
+                    original_surface = json.loads(reference["surface_json"])
+                    original_point = {"flat_index": original_surface["selected_flat_index"],
+                                      "lat": original_surface["selected_lat"], "lon": original_surface["selected_lon"]}
+                    original_selected = _select_land_grid_points(mask["fields"], [{
+                        "city": "original", "lat": original_surface["request_lat"], "lon": original_surface["request_lon"],
+                    }], mask["values"].__getitem__)["original"]
+                    phi = float(observed["values"][original_point["flat_index"]])
+                    if (observed["proof"]["snapshot_id"] != reference["snapshot_id"]
+                            or observed["proof"]["source_run_id"] != reference["source_run_id"]
+                            or reference["temperature_metric"] != row["temperature_metric"]
+                            or reference["source_cycle_time"] != cycle.isoformat()
+                            or observed["proof"]["snapshot_binding_sha256"] != _surface_audit_snapshot_binding(reference)
+                            or observed["proof"]["selected_point"] != original_point
+                            or observed["proof"]["raw_phi_m2_s2"] != phi or not math.isfinite(phi)
+                            or observed["proof"]["mask_sha256"] != original_surface["mask_sha256"]
+                            or observed["proof"]["mask_grid_identity_hash"] != original_surface["mask_grid_identity_hash"]
+                            or observed["proof"]["temperature_grid_identity_hash"] != original_surface["temperature_grid_identity_hash"]
+                            or original_surface["mask_grid_identity_hash"] != grid_hash
+                            or original_surface["temperature_grid_identity_hash"] != grid_hash
+                            or original_surface["mask_sha256"] != hashlib.sha256(mask_bytes).hexdigest()
+                            or any(original_selected[key] != original_surface[key] for key in (
+                                "selected_flat_index", "selected_lat", "selected_lon", "selected_land_fraction"))
+                            or observed["proof"]["source_issued_at"] is not None
+                            or observed["proof"]["source_fetched_at_role"] != "PUBLIC_HTTP_BODY_POSSESSION"
+                            or observed["proof"]["source_written_at_role"] != "LOCAL_AUDIT_DURABLE_PUBLICATION"
+                            or observed["proof"]["audit_scope"] != "AUDIT_ONLY_NOT_DECISION_INPUT"):
+                        raise ValueError("SURFACE_AUDIT_ORIGINAL_REFERENCE_MISMATCH")
+                    index_bytes = index_path.read_bytes()
+                    offset, length = _surface_z_index_entry(index_bytes, cycle)
+                    written = datetime.fromisoformat(str(observed["proof"]["source_written_at"]))
+                    if (observed["grid_identity_hash"] != grid_hash
+                            or observed["proof"]["source_cycle_time"] != cycle.isoformat()
+                            or hashlib.sha256(index_bytes).hexdigest() != observed["proof"]["source_index_sha256"]
+                            or observed["proof"]["source_url"] != url
+                            or observed["proof"]["source_index_url"] != index_url
+                            or (observed["proof"]["source_index_offset"], observed["proof"]["source_index_length"]) != (offset, length)
+                            or observed["proof"]["index_http"]["status"] != 200
+                            or observed["proof"]["range_http"]["status"] != 206
+                            or not re.fullmatch(rf"bytes {offset}-{offset + length - 1}/(?:\d+|\*)",
+                                               str(observed["proof"]["range_http"]["headers"].get("Content-Range", "")))
+                            or written.tzinfo is None
+                            or datetime.fromisoformat(reference["source_available_at"]) > written
+                            or not datetime.fromisoformat(observed["proof"]["source_fetched_at"]) <= written <= now):
+                        raise ValueError("SURFACE_AUDIT_CACHE_IDENTITY_INVALID")
+                    if proof_path.read_bytes() != pinned_proof:
+                        raise ValueError("SURFACE_AUDIT_SOURCE_PROOF_GENERATION_CHANGED")
+                    cached = (path.read_bytes(), index_bytes, observed["proof"])
+                    cache_fences[track] = (cached[0], index_bytes, proof_bytes)
+                except FileNotFoundError:
+                    # Interrupted publication may leave a body but no commit
+                    # marker. A new real HTTP capture can complete it only if
+                    # every already-present byte still matches (no overwrite).
+                    pass
+                except Exception as exc:
+                    gaps[track] = f"SURFACE_AUDIT_CACHE_CONFLICT:{str(exc)[:160]}"
+        active = [c for c in candidates if c[0] not in gaps]
+        if not active:
+            return {**report, "unavailable_reason": "SURFACE_AUDIT_CACHE_CONFLICT"}
+        with tempfile.TemporaryDirectory(prefix=".surface_audit_", dir=active[0][2].parent) as temp:
+            staging = Path(temp)
+            if cached is None:
+                index_bytes, body, metadata = _fetch_surface_audit_bytes(cycle, url, index_url, deadline=deadline)
+                offset, length = _surface_z_index_entry(index_bytes, cycle)
+                if len(body) != length:
+                    raise ValueError("SURFACE_AUDIT_IPC_MESSAGE_LENGTH_INVALID")
+                proof = {"source": "ecmwf_open_data_ifs_oper_fc_step0_z", "source_url": url,
+                         "source_index_url": index_url, "source_cycle_time": cycle.isoformat(),
+                         "source_index_offset": offset, "source_index_length": length,
+                         "source_index_sha256": hashlib.sha256(index_bytes).hexdigest(),
+                         "raw_message_sha256": hashlib.sha256(body).hexdigest(),
+                         "source_fetched_at": metadata["source_fetched_at"],
+                         "source_fetched_at_role": "PUBLIC_HTTP_BODY_POSSESSION",
+                         "source_issued_at": None, "index_http": metadata["index_http"], "range_http": metadata["range_http"],
+                         "audit_scope": "AUDIT_ONLY_NOT_DECISION_INPUT",
+                         "quantity_role": "model_surface_geopotential_on_wire_distribution_grid"}
+            else:
+                body, index_bytes, proof = cached
+            staged_body, staged_index, staged_proof = staging / "z.grib2", staging / "z.index", staging / "z.proof.json"
+            for path, content in ((staged_body, body), (staged_index, index_bytes)):
+                with path.open("wb") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            staged_proof.write_text(json.dumps(proof), encoding="utf-8")
+            observed = _read_surface_geopotential(staged_body, staged_proof)
+            if observed["grid_identity_hash"] != grid_hash or observed["fields"] != active[0][5]["fields"]:
+                raise ValueError("SURFACE_AUDIT_Z_GRID_MISMATCH")
+            captured = []
+            for track, row, mask_path, mask_bytes, mask_proof_bytes, mask in active:
+                try:
+                    if time.monotonic() >= deadline:
+                        raise requests.Timeout("SURFACE_AUDIT_DEADLINE_EXCEEDED")
+                    if mask_path.read_bytes() != mask_bytes or mask_path.with_suffix(".proof.json").read_bytes() != mask_proof_bytes:
+                        raise ValueError("SURFACE_AUDIT_MASK_GENERATION_CHANGED")
+                    dest = mask_path.with_suffix(".z.grib2")
+                    if track in cache_fences:
+                        actual_cache = (dest.read_bytes(), dest.with_suffix(".index.body").read_bytes(),
+                                        dest.with_suffix(".proof.json").read_bytes())
+                        if actual_cache != cache_fences[track]:
+                            raise ValueError("SURFACE_AUDIT_SOURCE_PROOF_GENERATION_CHANGED")
+                        captured.append(track)
+                        continue
+                    phi = float(observed["values"][row["selected_point"]["flat_index"]])
+                    if not math.isfinite(phi) or abs(phi) >= 1e10:
+                        raise ValueError("SURFACE_AUDIT_PHI_INVALID")
+                    # Atomic no-overwrite hard links; proof is the final commit marker.
+                    for source, target in ((staged_body, dest), (staged_index, dest.with_suffix(".index.body"))):
+                        try:
+                            os.link(source, target)
+                        except FileExistsError:
+                            if target.is_symlink() or target.read_bytes() != source.read_bytes():
+                                raise ValueError("SURFACE_AUDIT_CACHE_PUBLISH_CONFLICT")
+                    directory_fd = os.open(dest.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                    track_proof = {**proof, "source_written_at": datetime.now(timezone.utc).isoformat(),
+                                   "source_written_at_role": "LOCAL_AUDIT_DURABLE_PUBLICATION",
+                                   "mask_sha256": hashlib.sha256(mask_bytes).hexdigest(),
+                                   "mask_grid_identity_hash": grid_hash,
+                                   "temperature_grid_identity_hash": grid_hash,
+                                   "snapshot_id": row["snapshot_id"], "source_run_id": row["source_run_id"],
+                                   "snapshot_binding_sha256": _surface_audit_snapshot_binding(row),
+                                   "selected_point": row["selected_point"], "raw_phi_m2_s2": phi}
+                    proof_dest = dest.with_suffix(".proof.json")
+                    track_proof_file = staging / f"{track}.proof.json"
+                    with track_proof_file.open("w") as handle:
+                        json.dump(track_proof, handle, sort_keys=True)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    try:
+                        os.link(track_proof_file, proof_dest)
+                    except FileExistsError:
+                        if proof_dest.is_symlink() or proof_dest.read_bytes() != track_proof_file.read_bytes():
+                            raise ValueError("SURFACE_AUDIT_CACHE_PROOF_CONFLICT")
+                    directory_fd = os.open(dest.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                    captured.append(track)
+                except Exception as exc:
+                    gaps[track] = str(exc)[:200] or type(exc).__name__
+            return {**report, "capture_status": "OBSERVED" if captured else "UNKNOWN",
+                    "captured_tracks": captured, "grid_identity_hash": grid_hash,
+                    "raw_message_sha256": proof["raw_message_sha256"], "cache_reused": cached is not None,
+                    "cache_binding_role": "ORIGINAL_IMMUTABLE_SNAPSHOT_NOT_CURRENT_TARGET"}
+    except Exception as exc:  # failures never modify the mandatory forecast result
+        return {**report, "unavailable_reason": str(exc)[:200] or type(exc).__name__}
 
 
 def _probe_index_member_count(

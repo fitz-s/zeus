@@ -2099,6 +2099,15 @@ def _forecast_retention_job() -> dict:
 
     summary = run_forecast_retention(apply=True)
     logger.info("forecast_retention=%s", json.dumps(summary, default=str))
+    # Independent audit after retention releases its DB locks. Never put optional
+    # HTTP in the collector/track-lock/commit->reseed probability update chain.
+    try:
+        from src.data.ecmwf_open_data import capture_open_ens_surface_audit
+
+        audit = capture_open_ens_surface_audit()
+        logger.info("opendata_surface_audit=%s", json.dumps(audit, default=str))
+    except Exception as exc:  # optional evidence cannot change retention health
+        logger.warning("opendata_surface_audit UNKNOWN: %s", exc)
     if summary.get("status") == "REACHABILITY_UNAVAILABLE":
         return {"status": "failed", "error": summary.get("error")}
     return summary

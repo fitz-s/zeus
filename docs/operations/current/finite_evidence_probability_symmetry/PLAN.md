@@ -14244,3 +14244,107 @@ remint and no prefetch this round: surface capture stays AUDIT_ONLY and current
 snapshot consumption remains DEFER. KMA's next sole four-path writer window
 starts only after main queue git integration; main then performs only live
 normal-loader/RO actions, without concurrent project editing.
+
+### Terrain I1/I2 final correction and bounded integration (2026-10-04)
+
+checked=2026-W40; basis=final frozen source/tests and private hostile transport;
+until=recheck-on-use. The initial 90-pass audit candidate was not land-ready:
+independent C found trickling HTTP could overrun the wall deadline (I1), and
+tampered cached selected phi could remain OBSERVED (I2). Neither finding is
+waived by the original tests. Final source is ecmwf_open_data SHA256
+f45167997595306fd72c0dafc9eb39402672ea66423f807086d6253fb298e477;
+daemon8482c647335dcf3cc599dbd577c29fbc42d1812f48d11c7b6811e72ce15d1e41
+is unchanged. Collect testc590a9a9d9d83b91b23c7fe837c2bb4fabc31b58a265c8d9913684d54fb683d4
+and retention test77777af7c1924f3d47c27c9a42717fe1cdaccedb1f1250b1e3d985d41997c24c
+are frozen; whole owned files have112PASS/25.39s, XML
+/tmp/zeus-terrain-spawn-owned-tests.xml, compile/freshness/diff PASS. Formal
+independent I1/I2 delta review remains pending at this checkpoint; no staging,
+landing or new loading is authorized by these counts alone.
+
+I1 uses a DB-free ephemeral SPAWN/new-session child for only the two HTTP
+requests. Parent closes its source read unit before launching, enforces one
+40-second monotonic wall bound across start/header/body/IPC, reads capped
+frames through a nonblocking selector, and bounds reap by0.5s. Parent alone
+decodes, verifies and publishes. Actual spawn loopback/trickle/header/body,
+silent/half-frame/oversize IPC and cleanup controls are included, not a fork or
+mock-only timing claim. I2 binds cached evidence to its own original immutable
+snapshot_id/source_run_id, full-grid/LSM and independently decoded selected phi;
+it does not require an old proof to equal an always-newest candidate. Candidate
+same-cycle/grid/LSM qualification is separate. A pruned original reference is
+UNKNOWN, healthy siblings continue, and old fetch/audit clocks cannot be renewed.
+
+SCOPE/DRAIN/RESET remain the exact completed-cycle audit bytes/grid/cell and
+bounded read; normal retention acquisition or valid immutable-cache reread;
+new genuine verified audit body/receipt respectively. This is AUDIT_ONLY late
+evidence, not a probability or station-ground authority. No prefetch, sourceRun,
+temperature clock, old756 receipt, current q or lapse correction is changed.
+Current/old snapshot consumption and production terrain coverage remain OPEN;
+regular distribution-grid geopotential is not the dynamical native or sensor
+MSL/AGL. MPMG/ZSQD stay ground-UNPROVEN and unactivated.
+
+Prior required data/ingest batch691PASS/26FAIL/70ERROR and original20b overlay
+remain version-specific baseline evidence:26 same nodes/messages (20byteexact,
+six only repr addresses),70 shared q_version setup errors reproduced by their
+original representative; they are not all harmless or completed tests. Daemon
+has not changed since that batch. Final integration rechecks only affected
+required producer/scheduler readiness, exact ENS commit→scope wake and source
+identity/coordinate-event relationships, plus compile/YAML/freshness/changed
+registry checks; it does not re-run the unchanged whole data/ingest catalog or
+the accepted112 owned cases. New failures require exact original-source
+comparison before delivery. The fac queue fix's actual rc0/loaded process is a
+separate result, not a loaded claim for this pending terrain source.
+
+Final incremental required relationships finish11PASS/1.11s: active OpenData
+producer registration; scheduler-ready before optional boot wake; exact ENS
+commit/scope wake; HIGH/LOW source-run/dataset coordinate identities and LOW
+uncertified-coordinate refusal; source_run_arrived event identity/idempotence.
+XML/log: /tmp/zeus-terrain-delta-20261004.udw9fB/required-delta-fixed.{xml,log}.
+The first command was collection-only rc4 from two misspelled node names and
+executed no test body; it is not a source RED. Corrected exact node names ran
+once. Compile4, YAML2 parse and changed-row field preservation, freshness2
+ok=true/issues=[], and git diff --check PASS. Source4 hashes are unchanged.
+The docs/source/tests mesh exits1 with59 existing issues (docs classification,
+archive path/non-Markdown residue and stale current_state pointer). An in-memory
+HEAD-original two-registry load of the same checker reproduces all59 exact
+issue objects; changed-surface issues are zero. Evidence JSONs are
+changed-mesh.json and changed-mesh-original-registry.json in the same folder.
+Do not repair that unrelated drift or label the repository globally clean.
+Remote live remains fac65a6c34c94654cbe57e3e904a47c698452cb7 on this check.
+
+The f451/c590 112-pass candidate above is subsequently BLOCKED, not final
+approved source: C closes I1 but reproduces I2 proof-generation race. After
+canonical lookup of proof A, a second read can pin B with a nonexistent
+snapshot_id999999, yet binding hash A still allowed OBSERVED without explicit
+snapshot/run comparison. Only KMA's same two source/test paths are reopened;
+main stops project writes until that short correction freezes. No f451 is
+staged, landed or loaded.
+
+Final refreeze is ecmwf source5cf74f548eb239a2a59b6949f4d2dc4467245432d8f90f7ee9fda9f9fc370ff1
+and collect test7d38d27c97668410f5c5aadd45263ae77be0e58dcd55f27e95c5b823587ee6a7;
+daemon848/retention777 remain byte-identical. First proof bytes now supply both
+canonical lookup and pin; explicit snapshot_id/source_run_id match the original
+canonical reference, and path/proof/raw-byte generations remain fenced through
+decoder return. A generation change is SOURCE_PROOF_GENERATION_CHANGED/UNKNOWN,
+preserves the changed cache and lets healthy siblings continue. It neither
+renews clocks nor requires equality to a newer unrelated snapshot.
+
+Actual six HIGH/LOW absent-SID, foreign-SID/run and stable-ABA controls are
+before4FAIL/2PASS→after6PASS. Whole owned files118PASS/25.87s/zero skip, XML
+/tmp/zeus-terrain-proof-generation-owned-tests.xml; compile2/diff PASS. Normal
+latest-new-row/original-immutable controls remain valid. Reuse required11PASS
+and scheduler/readiness evidence: this last cache generation fence does not
+change scheduler, mandatory collector or action behavior, and the unchanged
+daemon does not require another whole catalog run. Governance records and final
+hash lock are refreshed without source edits. C's final named I2 race review
+is still pending at this checkpoint; no source delivery claim precedes it.
+
+Final C APPROVE closes the named I2 race with7 independent cases/1.99s,
+absent/foreign-ID/run HIGH/LOW plus ABA/new-row controls; exact four hashes and
+AST/diff PASS. Previously verified I1 wall bound and phi re-decode controls are
+reused. Root accepts this bounded audit-capture slice and authorizes only normal
+seven-path commit/FF landing/loading. Final source5cf74/test7d38 and unchanged
+daemon848/retention777 are the delivery identities, not earlier112-pass f451.
+Normal maintenance after a new loaded stamp must separately prove real bytes,
+headers/grid and clock roles; no manual kick or guaranteed current receipt
+consumption is permitted. Production0/756, two station-ground gaps, native
+representativeness and full prediction/profit readiness remain OPEN.

@@ -1,5 +1,8 @@
 # Created: 2026-09-29
-# Last audited: 2026-09-29
+# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-09-29; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Purpose: Protect reachability retention and isolated optional OpenData surface audit scheduling.
+# Reuse: Use private databases/files and fake HTTP; never execute a live retention pass.
 # Authority basis: docs/operations/current/plans/edge_program_2026-09-25.md goal 4
 #   (retention by reachability, one rule for every forecast store).
 from __future__ import annotations
@@ -311,6 +314,45 @@ def test_forecast_live_daemon_registers_retention_job(monkeypatch):
     assert job[0] is daemon._forecast_retention_job
     assert job[2]["executor"] == daemon.FORECAST_RETENTION_EXECUTOR_LANE
     assert job[2]["max_instances"] == 1
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_retention_normal_lane_captures_real_surface_after_return(tmp_path, monkeypatch, track):
+    from src.ingest import forecast_live_daemon as daemon
+    from tests.test_ecmwf_open_data_collect_cycle import _terrain_audit_fixture
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch, tracks=(track,))
+    returned = []
+    summary = {"status": "ok", "evicted": 0}
+
+    def retention(**kwargs):
+        assert kwargs == {"apply": True}
+        returned.append(True)
+        return summary
+
+    monkeypatch.setattr(fr, "run_forecast_retention", retention)
+    fixture["session"].before_get = lambda: (returned == [True] and fixture["closed"] == [True])
+    result = daemon._forecast_retention_job.__wrapped__()
+    assert result is summary
+    assert fixture["surface_paths"][track].exists(), "normal retention must capture genuine optional z bytes"
+    assert len(fixture["session"].calls) == 2
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]
+
+
+@pytest.mark.parametrize("status", ("ok", "REACHABILITY_UNAVAILABLE"))
+def test_retention_result_unchanged_by_slow_or_failed_surface_audit(tmp_path, monkeypatch, status):
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import ecmwf_open_data
+    from tests.test_ecmwf_open_data_collect_cycle import _terrain_audit_fixture
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    fixture["session"].failure = ecmwf_open_data.requests.Timeout("slow optional z")
+    summary = {"status": status, "error": "retention reachability gap"}
+    monkeypatch.setattr(fr, "run_forecast_retention", lambda **kwargs: summary)
+    result = daemon._forecast_retention_job.__wrapped__()
+    assert result == (summary if status == "ok" else {"status": "failed", "error": summary["error"]})
+    assert len(fixture["session"].calls) == 1
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]
 
 
 def _add_position(trade: Path, pid: str, phase: str, city, date, metric) -> None:
