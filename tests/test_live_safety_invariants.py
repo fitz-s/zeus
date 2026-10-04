@@ -15312,8 +15312,17 @@ def test_held_monitor_production_book_reads_receive_sealed_quote_budget(
     assert quote is not None
     assert hard_deadline_calls == [
         (["shared-deadline-token"], pytest.approx(7.0)),
-        (["shared-deadline-token"], pytest.approx(1.0)),
+        (
+            ["shared-deadline-token"],
+            pytest.approx(monitor_refresh.HELD_MONITOR_NETWORK_QUOTE_READ_MAX_SECONDS),
+        ),
     ]
+    # The singular read can never outlive the position's own deadline.
+    clock[0] = 8.5
+    hard_deadline_calls.clear()
+    monitor_refresh.install_monitor_orderbook_prefetch(clob, {})
+    assert monitor_refresh.monitor_quote_refresh(None, clob, position) is not None
+    assert hard_deadline_calls == [(["shared-deadline-token"], pytest.approx(1.5))]
 
 
 def test_held_monitor_deadline_book_miss_never_falls_back_to_unbounded_quote(
