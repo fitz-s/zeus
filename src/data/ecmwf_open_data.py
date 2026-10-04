@@ -54,6 +54,7 @@ import os
 import re
 import shutil
 import selectors
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -98,6 +99,7 @@ from src.state.db import (
     ZEUS_FORECASTS_DB_PATH,
     assert_schema_current_forecasts,
     get_forecasts_connection as get_connection,
+    get_forecasts_connection_read_only,
 )
 from src.state.db_writer_lock import WriteClass, db_writer_lock
 from src.state.source_run_coverage_repo import write_source_run_coverage
@@ -1395,7 +1397,7 @@ def _surface_audit_snapshot_binding(row: Mapping[str, object]) -> str:
     return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def capture_open_ens_surface_audit() -> dict[str, object]:
+def capture_open_ens_surface_audit(*, deadline_monotonic: float | None = None) -> dict[str, object]:
     """Retention-lane-only fc reference capture; never refresh old ENS/q truth.
 
     SCOPE: one already committed cycle, exact LSM/temperature grid and track.
@@ -1403,51 +1405,119 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
     RESET: genuine matching bytes/cache receipt. No source-run or snapshot write.
     """
     from scripts.extract_open_ens_localday import (
-        _read_land_mask, _read_surface_geopotential, _select_land_grid_points,
+        _GRID_KEYS, _grid_identity, _read_land_mask, _read_surface_geopotential, _select_land_grid_points,
     )
 
-    deadline = time.monotonic() + 40.0
+    started = time.monotonic()
+    deadline = min(started + 40.0, deadline_monotonic) if deadline_monotonic is not None else started + 40.0
     now = datetime.now(timezone.utc)
     report: dict[str, object] = {"capture_status": "UNKNOWN", "audit_scope": "AUDIT_ONLY_NOT_DECISION_INPUT"}
-    try:
-        paths = _resolve_opendata_paths()
-        conn = get_connection()
+    gaps = {}
+    report["track_gaps"] = gaps
+    elapsed = {}
+    report["stage_elapsed_seconds"] = elapsed
+    stage, stage_started = "source_read", started
+
+    def checkpoint(next_stage=None):
+        nonlocal stage, stage_started
+        current = time.monotonic()
+        elapsed[stage] = round(current - stage_started, 6)
+        report["elapsed_seconds"] = round(current - started, 6)
+        report["stage"] = stage
+        if current >= deadline:
+            raise requests.Timeout(f"SURFACE_AUDIT_DEADLINE_EXCEEDED:{stage}")
+        if next_stage is not None:
+            stage, stage_started = next_stage, current
+
+    def check_grid_header(raw, expected_hash):
+        # A small compressed GRIB can declare a huge decoded field. Inspect
+        # headers before the extractor allocates values; OpenData is 0.25deg.
+        import eccodes as ec
+        checkpoint()
+        gid = ec.codes_new_from_message(raw)
         try:
-            # Pin operational identities in a short read, then close before any HTTP.
-            newest = conn.execute("""
-                SELECT sr.source_cycle_time FROM source_run sr
-                WHERE sr.source_id=? AND sr.status='SUCCESS'
-                  AND sr.completeness_status='COMPLETE' AND sr.partial_run=0
-                  AND julianday(sr.source_cycle_time)<=julianday(?)
-                  AND EXISTS (SELECT 1 FROM ensemble_snapshots e WHERE e.source_run_id=sr.source_run_id
-                    AND e.source_id=sr.source_id AND e.authority='VERIFIED'
-                    AND e.source_cycle_time=sr.source_cycle_time
-                    AND julianday(e.source_available_at)<=julianday(?))
-                ORDER BY julianday(sr.source_cycle_time) DESC LIMIT 1
-            """, (SOURCE_ID, now.isoformat(), now.isoformat())).fetchone()
-            if newest is None:
+            fields = {key: ec.codes_get(gid, key) for key in _GRID_KEYS}
+            ni, nj = fields["Ni"], fields["Nj"]
+            if (fields["gridType"] != "regular_ll" or not 0 < ni <= 1440 or not 0 < nj <= 721
+                    or ec.codes_get(gid, "numberOfPoints") != ni * nj
+                    or _grid_identity(fields) != expected_hash):
+                raise ValueError("SURFACE_AUDIT_DECODE_GRID_BOUNDS_OR_IDENTITY_INVALID")
+        finally:
+            ec.codes_release(gid)
+        checkpoint()
+
+    try:
+        checkpoint()
+        paths = _resolve_opendata_paths()
+        conn = get_forecasts_connection_read_only(deadline_monotonic=deadline)
+        try:
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            # Registered producer profiles, not guessed metric prefixes or base cache stems.
+            runs = []
+            for base, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
+                for profile in ("full", "short"):
+                    checkpoint()
+                    registered = _forecast_track_for_profile(ingest_track=base, horizon_profile=profile)
+                    run = conn.execute("""
+                        SELECT source_run_id, source_cycle_time, track FROM source_run
+                        WHERE source_id=? AND track=? AND status='SUCCESS'
+                          AND completeness_status='COMPLETE' AND partial_run=0
+                          AND source_cycle_time<=?
+                        ORDER BY source_cycle_time DESC LIMIT 1
+                    """, (SOURCE_ID, registered, now.isoformat())).fetchone()
+                    if run is not None:
+                        run_cycle = datetime.fromisoformat(run["source_cycle_time"])
+                        if run_cycle.tzinfo is None or run_cycle.utcoffset() != timedelta(0) or run_cycle > now:
+                            raise ValueError("SURFACE_AUDIT_CYCLE_INVALID")
+                        runs.append((base, metric, dict(run), run_cycle))
+            if not runs:
                 return {**report, "unavailable_reason": "SURFACE_AUDIT_NO_COMMITTED_CYCLE"}
-            cycle = datetime.fromisoformat(newest["source_cycle_time"])
+            cycle = max(r[3] for r in runs)
             if cycle.tzinfo is None or cycle.utcoffset() != timedelta(0) or cycle.hour not in (0, 6, 12, 18) or cycle.minute or cycle.second or cycle.microsecond:
                 raise ValueError("SURFACE_AUDIT_CYCLE_INVALID")
             pinned = []
-            for track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
-                row = conn.execute("""
-                    SELECT e.snapshot_id, e.source_run_id, e.temperature_metric,
-                      e.source_cycle_time, e.source_available_at,
-                      json_extract(e.provenance_json,'$.grid_surface_evidence') AS surface_json
-                    FROM ensemble_snapshots e JOIN source_run sr ON sr.source_run_id=e.source_run_id
-                    WHERE e.source_id=? AND sr.source_id=e.source_id AND sr.track=?
-                      AND sr.status='SUCCESS' AND sr.completeness_status='COMPLETE' AND sr.partial_run=0
-                      AND sr.source_cycle_time=? AND e.source_cycle_time=sr.source_cycle_time
-                      AND e.temperature_metric=? AND e.authority='VERIFIED'
-                      AND julianday(e.source_available_at)<=julianday(?)
-                    ORDER BY e.snapshot_id DESC LIMIT 1
-                """, (SOURCE_ID, track, cycle.isoformat(), metric, now.isoformat())).fetchone()
-                if row is not None:
-                    pinned.append((track, dict(row)))
+            for track, metric, run, run_cycle in runs:
+                if run_cycle != cycle:
+                    continue
+                checkpoint()
+                # Indexed run -> finite coverage references -> snapshot INTEGER PRIMARY KEY.
+                coverages = conn.execute("""
+                    SELECT snapshot_ids_json FROM source_run_coverage
+                    WHERE source_run_id=? AND source_id=? AND track=? AND temperature_metric=?
+                      AND completeness_status='COMPLETE' AND readiness_status='LIVE_ELIGIBLE'
+                    ORDER BY coverage_id LIMIT 16
+                """, (run["source_run_id"], SOURCE_ID, run["track"], metric)).fetchall()
+                selected = None
+                for coverage in coverages:
+                    checkpoint()
+                    try:
+                        ids = json.loads(coverage["snapshot_ids_json"])
+                    except (ValueError, TypeError):
+                        gaps[track] = "SURFACE_AUDIT_COVERAGE_REFERENCE_INVALID"
+                        continue
+                    if not isinstance(ids, list) or len(ids) > 64 or any(type(sid) is not int or sid <= 0 for sid in ids):
+                        gaps[track] = "SURFACE_AUDIT_COVERAGE_REFERENCE_INVALID"
+                        continue
+                    for sid in ids:
+                        checkpoint()
+                        row = conn.execute("""
+                            SELECT e.snapshot_id, e.source_run_id, e.temperature_metric,
+                              e.source_cycle_time, e.source_available_at,
+                              json_extract(e.provenance_json,'$.grid_surface_evidence') AS surface_json
+                            FROM ensemble_snapshots e WHERE e.snapshot_id=? AND e.source_run_id=?
+                              AND e.source_id=? AND e.temperature_metric=? AND e.authority='VERIFIED'
+                              AND e.source_cycle_time=? AND julianday(e.source_available_at)<=julianday(?)
+                        """, (sid, run["source_run_id"], SOURCE_ID, metric, cycle.isoformat(), now.isoformat())).fetchone()
+                        if row is not None and (selected is None or row["snapshot_id"] > selected["snapshot_id"]):
+                            selected = dict(row)
+                if selected is not None:
+                    gaps.pop(track, None)
+                    pinned.append((track, selected))
+                else:
+                    gaps.setdefault(track, "SURFACE_AUDIT_COVERAGE_SNAPSHOT_UNAVAILABLE")
             original_refs = {}
             for track, _row in pinned:
+                checkpoint()
                 folder = _download_output_path(run_date=cycle.date(), run_hour=cycle.hour,
                     param=TRACKS[track]["open_data_param"], raw_root=paths.raw_root).parent
                 cached_proof = folder / f".{track}_{cycle:%Y%m%d}_{cycle.hour:02d}z_lsm.z.proof.json"
@@ -1462,21 +1532,26 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                           json_extract(e.provenance_json,'$.grid_surface_evidence') AS surface_json
                         FROM ensemble_snapshots e JOIN source_run sr ON sr.source_run_id=e.source_run_id
                         WHERE e.snapshot_id=? AND e.source_run_id=? AND e.source_id=?
-                          AND sr.source_id=e.source_id AND sr.track=? AND e.authority='VERIFIED'
+                          AND sr.source_id=e.source_id AND sr.track IN (?,?) AND e.authority='VERIFIED'
                           AND sr.source_cycle_time=e.source_cycle_time
                           AND sr.status='SUCCESS' AND sr.completeness_status='COMPLETE'
                           AND sr.partial_run=0 AND julianday(e.source_available_at)<=julianday(?)
-                    """, (original.get("snapshot_id"), original.get("source_run_id"), SOURCE_ID, track, now.isoformat())).fetchone()
+                    """, (original.get("snapshot_id"), original.get("source_run_id"), SOURCE_ID,
+                          _forecast_track_for_profile(ingest_track=track, horizon_profile="full"),
+                          _forecast_track_for_profile(ingest_track=track, horizon_profile="short"), now.isoformat())).fetchone()
                     if reference is not None:
                         original_refs[track] = (dict(reference), original_proof_bytes)
                 except (OSError, ValueError, TypeError):
                     pass  # missing original proof remains a narrow cache gap below
         finally:
+            conn.set_progress_handler(None, 0)
             conn.close()
+        checkpoint("mask_decode")
         report["source_cycle_time"] = cycle.isoformat()
-        candidates, gaps = [], {}
+        candidates = []
         for track, row in pinned:
             try:
+                checkpoint()
                 surface = json.loads(row["surface_json"])
                 mask_path = _download_output_path(run_date=cycle.date(), run_hour=cycle.hour,
                     param=TRACKS[track]["open_data_param"], raw_root=paths.raw_root).with_name(
@@ -1487,7 +1562,9 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                 if not 100 <= mask_path.stat().st_size <= 1024 * 1024 or proof_path.stat().st_size > 65536:
                     raise ValueError("SURFACE_AUDIT_MASK_BOUNDS_INVALID")
                 mask_bytes, mask_proof_bytes = mask_path.read_bytes(), proof_path.read_bytes()
+                check_grid_header(mask_bytes, surface["temperature_grid_identity_hash"])
                 mask = _read_land_mask(mask_path, proof_path)
+                checkpoint()
                 fetched = datetime.fromisoformat(str(mask["proof"]["source_fetched_at"]))
                 if (mask_path.read_bytes() != mask_bytes or proof_path.read_bytes() != mask_proof_bytes
                         or mask["proof"]["source_cycle_time"] != cycle.isoformat()
@@ -1507,6 +1584,8 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                 row["selected_point"] = {"flat_index": selected["selected_flat_index"],
                                          "lat": selected["selected_lat"], "lon": selected["selected_lon"]}
                 candidates.append((track, row, mask_path, mask_bytes, mask_proof_bytes, mask))
+            except requests.Timeout:
+                raise
             except Exception as exc:  # optional audit isolates malformed/missing track inputs
                 gaps[track] = str(exc)[:200] or type(exc).__name__
         report["track_gaps"] = gaps
@@ -1522,6 +1601,7 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
 
         # Reuse only complete, independently decoded cache proof; existence is not proof.
         cached = None
+        checkpoint("cache_decode")
         cache_fences = {}
         for track, row, mask_path, mask_bytes, mask_proof_bytes, mask in candidates:
             path = mask_path.with_suffix(".z.grib2")
@@ -1529,12 +1609,16 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
             index_path = path.with_suffix(".index.body")
             if path.exists() or proof_path.exists() or index_path.exists():
                 try:
+                    checkpoint()
                     if any(p.is_symlink() for p in (path, proof_path, index_path)):
                         raise ValueError("SURFACE_AUDIT_CACHE_SYMLINK")
-                    if index_path.stat().st_size > 1024 * 1024 or proof_path.stat().st_size > 65536:
+                    if (not 100 <= path.stat().st_size <= 1024 * 1024
+                            or index_path.stat().st_size > 1024 * 1024 or proof_path.stat().st_size > 65536):
                         raise ValueError("SURFACE_AUDIT_CACHE_BOUNDS_INVALID")
                     proof_bytes = proof_path.read_bytes()
+                    check_grid_header(path.read_bytes(), grid_hash)
                     observed = _read_surface_geopotential(path, proof_path)
+                    checkpoint()
                     if track not in original_refs:
                         raise ValueError("SURFACE_AUDIT_ORIGINAL_REFERENCE_UNAVAILABLE")
                     reference, pinned_proof = original_refs[track]
@@ -1589,6 +1673,8 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                         raise ValueError("SURFACE_AUDIT_SOURCE_PROOF_GENERATION_CHANGED")
                     cached = (path.read_bytes(), index_bytes, observed["proof"])
                     cache_fences[track] = (cached[0], index_bytes, proof_bytes)
+                except requests.Timeout:
+                    raise
                 except FileNotFoundError:
                     # Interrupted publication may leave a body but no commit
                     # marker. A new real HTTP capture can complete it only if
@@ -1602,7 +1688,9 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".surface_audit_", dir=active[0][2].parent) as temp:
             staging = Path(temp)
             if cached is None:
+                checkpoint("http")
                 index_bytes, body, metadata = _fetch_surface_audit_bytes(cycle, url, index_url, deadline=deadline)
+                checkpoint()
                 offset, length = _surface_z_index_entry(index_bytes, cycle)
                 if len(body) != length:
                     raise ValueError("SURFACE_AUDIT_IPC_MESSAGE_LENGTH_INVALID")
@@ -1618,6 +1706,7 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                          "quantity_role": "model_surface_geopotential_on_wire_distribution_grid"}
             else:
                 body, index_bytes, proof = cached
+            checkpoint("z_decode")
             staged_body, staged_index, staged_proof = staging / "z.grib2", staging / "z.index", staging / "z.proof.json"
             for path, content in ((staged_body, body), (staged_index, index_bytes)):
                 with path.open("wb") as handle:
@@ -1625,14 +1714,15 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                     handle.flush()
                     os.fsync(handle.fileno())
             staged_proof.write_text(json.dumps(proof), encoding="utf-8")
+            check_grid_header(body, grid_hash)
             observed = _read_surface_geopotential(staged_body, staged_proof)
+            checkpoint("publish")
             if observed["grid_identity_hash"] != grid_hash or observed["fields"] != active[0][5]["fields"]:
                 raise ValueError("SURFACE_AUDIT_Z_GRID_MISMATCH")
             captured = []
             for track, row, mask_path, mask_bytes, mask_proof_bytes, mask in active:
                 try:
-                    if time.monotonic() >= deadline:
-                        raise requests.Timeout("SURFACE_AUDIT_DEADLINE_EXCEEDED")
+                    checkpoint()
                     if mask_path.read_bytes() != mask_bytes or mask_path.with_suffix(".proof.json").read_bytes() != mask_proof_bytes:
                         raise ValueError("SURFACE_AUDIT_MASK_GENERATION_CHANGED")
                     dest = mask_path.with_suffix(".z.grib2")
@@ -1648,6 +1738,7 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                         raise ValueError("SURFACE_AUDIT_PHI_INVALID")
                     # Atomic no-overwrite hard links; proof is the final commit marker.
                     for source, target in ((staged_body, dest), (staged_index, dest.with_suffix(".index.body"))):
+                        checkpoint()
                         try:
                             os.link(source, target)
                         except FileExistsError:
@@ -1672,6 +1763,7 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                         json.dump(track_proof, handle, sort_keys=True)
                         handle.flush()
                         os.fsync(handle.fileno())
+                    checkpoint()
                     try:
                         os.link(track_proof_file, proof_dest)
                     except FileExistsError:
@@ -1682,7 +1774,16 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                         os.fsync(directory_fd)
                     finally:
                         os.close(directory_fd)
+                    if time.monotonic() >= deadline:
+                        # Expired durability is not a committed audit receipt.
+                        # Remove only our own inode, never a concurrent publisher.
+                        if os.path.samestat(proof_dest.stat(), track_proof_file.stat()):
+                            proof_dest.unlink()
+                        checkpoint()
+                    checkpoint()
                     captured.append(track)
+                except requests.Timeout:
+                    raise
                 except Exception as exc:
                     gaps[track] = str(exc)[:200] or type(exc).__name__
             return {**report, "capture_status": "OBSERVED" if captured else "UNKNOWN",
@@ -1690,6 +1791,12 @@ def capture_open_ens_surface_audit() -> dict[str, object]:
                     "raw_message_sha256": proof["raw_message_sha256"], "cache_reused": cached is not None,
                     "cache_binding_role": "ORIGINAL_IMMUTABLE_SNAPSHOT_NOT_CURRENT_TARGET"}
     except Exception as exc:  # failures never modify the mandatory forecast result
+        elapsed[stage] = round(time.monotonic() - stage_started, 6)
+        report["stage"] = stage
+        report["elapsed_seconds"] = round(time.monotonic() - started, 6)
+        if isinstance(exc, sqlite3.OperationalError):
+            reason = "SURFACE_AUDIT_DB_DEADLINE_EXCEEDED" if time.monotonic() >= deadline else "SURFACE_AUDIT_DB_READ_FAILED"
+            return {**report, "unavailable_reason": reason}
         return {**report, "unavailable_reason": str(exc)[:200] or type(exc).__name__}
 
 

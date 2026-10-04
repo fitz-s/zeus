@@ -317,11 +317,13 @@ def test_forecast_live_daemon_registers_retention_job(monkeypatch):
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
-def test_retention_normal_lane_captures_real_surface_after_return(tmp_path, monkeypatch, track):
+@pytest.mark.parametrize("hour", (0, 18))
+def test_retention_normal_lane_captures_real_surface_after_return(tmp_path, monkeypatch, track, hour):
     from src.ingest import forecast_live_daemon as daemon
     from tests.test_ecmwf_open_data_collect_cycle import _terrain_audit_fixture
 
-    fixture = _terrain_audit_fixture(tmp_path, monkeypatch, tracks=(track,))
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch, tracks=(track,),
+        issue=datetime(2026, 10, 3, hour, tzinfo=timezone.utc))
     returned = []
     summary = {"status": "ok", "evicted": 0}
 

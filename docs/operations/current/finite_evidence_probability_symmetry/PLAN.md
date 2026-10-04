@@ -14429,3 +14429,168 @@ fields changed, test freshness ok=true/issues=[], diff PASS. Approved capture
 under another completed normal load before this delivery; this does not negate
 the verified negative-proof defect or constitute our newtip loading evidence.
 No SDK/source/cycle/guard mutation is used to force runtime acceptance.
+
+### Normal terrain audit reachability and whole-budget repair — before edit
+
+checked=2026-W40; basis=actual normal maintenance plus exact source-run track;
+until=recheck-on-use. Combined capture/retirement tip
+3f563236e2e0db462d48b0202ad34b419f46b027 is landed and genuinely loaded. Our
+sole normal loader starts03:08:51Z, returns rc0, log
+/tmp/zeus-terrain-retirement-loader-20261004.2Skskt/normal-loader.log. New main6569
+stamp03:11:16.873283Z, ingest611/forecast717 fixed-boot3f563 and resident881 are
+separate actor proof; cwd/canonical three DB FDs/configd7 are verified. This is
+not proof that normal surface acquisition or all probability scopes are ready.
+
+Actual normal maintenance begins03:19:06, retention APPLIED03:19:51, then audit
+returns03:22:34 UNKNOWN/SURFACE_AUDIT_NO_MATCHING_MASK with18Z gaps{}. The exact
+latest complete nonpartial18Z SUCCESS runs are registered
+mx2t6_high_short_horizon/mn2t6_low_short_horizon, while the helper queries only
+mx2t6_high/mn2t6_low. Base cache stems remain unchanged. This is a proved normal
+selection mismatch before mask/z HTTP, not evidence of external z unavailability.
+The optional audit portion lasts about163s despite its40s transport budget; the
+whole-audit path is not bounded yet. No sampled stack establishes which query,
+connection or decoder consumed that time, and historical PID cause is unknown.
+
+Before edit, root assigns KMA alone the same four existing paths:
+src/data/ecmwf_open_data.py, src/ingest/forecast_live_daemon.py,
+tests/test_ecmwf_open_data_collect_cycle.py and tests/test_forecast_retention.py.
+Use an explicit registered full/short-track mapping to base cache stem and
+HIGH/LOW metric; no arbitrary suffix/provider inference or activation. Read the
+exact selected complete source-run's existing indexed coverage identities, then
+resolve snapshot primary keys with explicit run/cycle/source/metric/grid proof,
+instead of broad snapshot enumeration. Missing/foreign/incomplete coverage or
+snapshot identities remain UNKNOWN; do not forge old receipts or upgrade q.
+
+One monotonic whole-audit deadline starts before connection acquisition and is
+propagated through the read-only connect/busy wait, SQLite VM progress deadline,
+exact source-run/coverage/PK reads and existing HTTP/spawn/decode/publish checks.
+Keep a real bounded read budget and restoration/close discipline; expired work
+must stop before more HTTP or publication. Retain the prior spawn40s maximum and
+0.5s cleanup bound without granting a new independent40s after slow discovery.
+Record stage elapsed evidence to distinguish discovery, transport and decoding
+rather than attributing the observed163s by guess. No persistent actor, schema,
+config flag, extra retry or prefetch is introduced.
+
+Retain same-first-proof bytes/canonical SID-run generation fence, fullgrid/LSM/
+selected-phi reproduction, healthy sibling preservation and immutable cache
+clocks. SCOPE: exact completed-cycle full-or-short run and its audit body/grid/
+cell within that invocation budget. DRAIN: next ordinary retention callback or
+valid immutable cache read; RESET: new real bounded capture or valid existing
+evidence under those exact identities. Acquisition remains AUDIT_ONLY, without
+q/ENS/sourceRun changes, old756 retrofit, lapse correction or manual capture,
+weather GET, reseed, cycle or guard action.
+
+Acceptance requires actual18Z short-run structure HIGH/LOW RED→GREEN, full/short
+twins, exact indexed-coverage/PK controls and wrong run/metric/cycle/grid negatives;
+RO connection/busy/progress interruption and slow discovery must exhaust the
+single budget before HTTP/publish, while healthy bounded cases preserve source
+clocks and identity. Existing spawn wallbound, proof-generation/phi controls and
+normal scheduling remain covered. Whole scope/outcome is not declared complete:
+production terrain0/756/current receipt consumption, station ground and prediction
+representativeness remain OPEN until genuine normal evidence closes each role.
+
+Main has verified a clean tasktree/currentremote3f563 and unchanged approved
+four hashes. It owns only this PLAN, private test linkage and later registries/
+integration. After BEFOREEDIT READY it pauses all project writes until KMA's
+four-path freeze; no commit/load authorization is inferred from this plan.
+
+Normal-audit repair final four-path freeze is ecmwf
+bdd281b1e0bde85589590c7c65f7490781ff994f1e5733971cdf8c1369724f14,
+daemon20cb14799a226a8e1489f1bba867ecf381d26bf893240c55848eb556c593eba9,
+collecttesteff731fdbeff16370c003ceba32a42efebf366f1bc959880c1cb9bcf3fbe74b9,
+retentiontest46778f8d1afee18aace0783a20131cdcba4552397c0490144ac2efcdf1c81e10.
+The exact profile defect is not unique to short horizon: registered full runs
+also use *_full_horizon, not the base cache name. Actual original-source
+registered00/06/12/18 cases4FAIL/1.995s are recorded in
+/tmp/zeus-terrain-registered-track-red.xml; final owned files137PASS/26.578s,
+zero skip, /tmp/zeus-terrain-profile-budget-owned.xml. Compile4/freshness2/diff
+PASS are worker evidence and main re-locks hashes without changing source.
+No previous118-pass approval substitutes for the observed first normal job
+failure; production capture/consumption is not retrospectively declared closed.
+
+Final selection uses registered profile mapping to base cache/metric and exact
+source_run_coverage IDs before bounded snapshot primary-key verification. The
+daemon creates the absolute deadline before invoking capture; RO connection,
+busy/progress, discovery and existing transport honor that same deadline rather
+than granting another40s after SQL. Reports expose source_read/mask_decode/
+cache_decode/http/z_decode/publish elapsed stages and expired DB read versus
+non-expired read failure. Bounded raw<=1MiB and declared regular-grid dimensions
+<=1440x721 precede value allocation, with decode/publication checkpoints and no
+late proof publication. Native/OS work is not forcibly preemptible: this is not
+a universal hard whole-call40s guarantee. Existing spawn cleanup and immutable
+generation/phi/clock fences remain; source truth/q/old receipts are untouched.
+C's independent final four-path review is pending before commit or loading.
+
+Current residual source-physics RO at03:43Z is separate: targetOct4 latest108
+ENS rows all18Z have LSM shallow fields108/108 and zero grid/cycle mismatches;
+that is not a full validator PASS. Phi108/108 remains UNKNOWN with no same-cycle
+cache. Normal extract precedes retention audit; a later same-cycle extract may
+consume cache but is not guaranteed, and a new cycle cannot borrow old phi.
+Materializer's LSM use is not proof that phi is required q input or that a lapse
+shift should be applied. IFS current HIGH/LOW coverage45/54 and42/54, native
+geometry41/54 and38/54 include lawful Seoul SEA; Chicago/Qingdao/TelAviv/Tokyo
+existing rows lack geometry. Existing-artifact representativeness stays UNPROVEN.
+Ground fields52/54 are not all validated; MPMG/ZSQD missing remains
+DATA_DEGRADED/unactivated. Capture code/tests/load cannot stand in for these
+remaining physical quantities, genuine source authority or prediction accuracy.
+
+STOP: final bdd/eff candidate is not accepted for landing. C REQUESTCHANGES
+demonstrates a HIGH publication/cleanup race: own-inode check at ecmwf1780 sees
+proof A, a legitimate publisher replaces the pathname after that check, then
+unlink1781 deletes the foreign proof B while this audit returns deadline UNKNOWN.
+The actual private GRIB/SQLite bug-demonstration case is1PASS/1.81s, tool83dec2;
+it proves the defect, not desired-behavior GREEN. Nine other independent controls
+pass, but neither those nor137 owned cases waive this race. This is not the
+native/OS non-preemption boundary. No commit/push/load of this candidate occurs.
+
+Before edit, root reopens only KMA's existing ecmwf_open_data.py and collect-cycle
+test inside the original four-file scope. Publication and deadline cleanup must
+use real generation mutual exclusion around their short filesystem critical
+section (never held across HTTP), or an equivalent construction that cannot
+delete a foreign publisher's generation. Re-stat/re-read before unlink is not
+an accepted fix. Preserve prior valid/foreign cache and original immutable
+snapshot/run/bytes identity; deadline failure remains UNKNOWN and must not create
+late usable proof. SCOPE is exactly this invocation's publication generation;
+DRAIN is its safe bounded publication/cleanup or a later normal valid capture;
+RESET never clears another generation. No broad cache sweep, clock renewal,
+new q/sourceRun/old-receipt mutation, persistent actor or extra network retry.
+
+Real concurrent-publication controls must force replacement between the old
+check and cleanup, retain the foreign proof/body, preserve healthy siblings and
+exercise success, deadline, unchanged-owned-generation and exception paths.
+Existing registered-profile/coverage-PK/single-budget/spawn/phi/generation controls
+remain required. After this BEFOREEDIT READY, main again pauses all project
+writes until the short source/test correction freezes. Governance/137 evidence
+is retained only for that superseded source version, not a delivery approval.
+
+Root immediately pauses that new code authorization pending reachability:
+C's demonstrated replacement uses fixture os.replace, not two normal
+hardlink-only capture publishers. KMA identifies capture as the sole normal z
+publisher and collector/extractor as readers. Whether any sanctioned publisher
+or retention cleanup can produce the dangerous interleaving is under a bounded
+read-only check; it is not established as a historical runtime event. Do not
+add a sidecar lock merely from an unproven foreign-writer protocol. Four source
+files remain frozen and no new source/test edit is authorized until root decides
+refute, narrower supported claim or a reachable defect with its actual actor.
+
+Root/C final disposition REFUTED that cleanup HIGH under the current normal
+protocol, not a runtime incident or implemented extra-lock fix. The83dec2 fixture
+uses off-protocol os.replace. Normal capture body/index and proof publication
+uses only no-clobber os.link; a second capture cannot replace the first owned
+inode or acquire cleanup ownership of an existing one. Collector/extractor only
+read z proof. Forecast reachability retention owns raw_manifests, not ENS cache;
+OpenData retention recognizes temperature step/concat names, not z/LSM proof,
+and nonrecursive parent rmdir cannot remove a directory retaining those files.
+No reachable sanctioned writer/retention actor produces the asserted swap.
+This does not grant protection against arbitrary off-protocol foreign mutation.
+No sidecar lock or source/test delta is added.
+
+Final C APPROVE retains exact bdd281b1/20cb1479/eff731fd/46778f8d four identities
+with9 independent controls PASS, hash/diff PASS. Root accepts this registered
+profile plus audit-budget repair and authorizes normal seven-path FF delivery
+and one normal loader. Main reuse137 owned PASS and four original registered
+REDs, compile/freshness and prior unrelated-baseline dispositions; current
+source-physics108phiUNKNOWN, provider representativeness and two station-ground
+gaps remain OPEN. Genuine next normal maintenance evidence, not forced capture,
+must establish source acquisition/bytes/clock/identity under the new loaded tip.
+Code/test/review acceptance is not whole-task completion or prediction accuracy.

@@ -36,20 +36,20 @@ from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.source_run_repo import write_source_run
 
 
-def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t6_low")):
+def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t6_low"), issue=None):
     """Real GRIB + immutable private snapshot identities; only transport is fake."""
     from scripts import extract_open_ens_localday as extractor
     from src.data import ecmwf_open_data as module
     from tests.test_ingest_grib_source_run_context import _tiny_native_grib
 
-    issue = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    raw, mask, mask_proof, _ = _tiny_native_grib(tmp_path, "mx2t6_high", member_count=1)
+    issue = issue or datetime(2026, 1, 1, tzinfo=timezone.utc)
+    raw, mask, mask_proof, _ = _tiny_native_grib(tmp_path, "mx2t6_high", member_count=1, issue=issue)
     z_bytes = mask.with_suffix(".z.grib2").read_bytes()
     decoded = extractor._read_land_mask(mask, mask_proof)
     grid_hash = decoded["grid_identity_hash"]
     root = tmp_path / "audit_source"
     paths = module._resolve_opendata_paths(source_root=root, environ={})
-    folder = root / "raw" / "ecmwf_open_ens" / "ecmwf" / "20260101"
+    folder = root / "raw" / "ecmwf_open_ens" / "ecmwf" / issue.strftime("%Y%m%d")
     folder.mkdir(parents=True)
     surface_paths = {}
     conn = sqlite3.connect(":memory:")
@@ -61,13 +61,25 @@ def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t
           source_id TEXT, temperature_metric TEXT, source_cycle_time TEXT, source_available_at TEXT,
           authority TEXT, provenance_json TEXT);
         CREATE TABLE forecast_posteriors (posterior_id INTEGER PRIMARY KEY, probability REAL, computed_at TEXT);
+        CREATE INDEX source_run_cycle ON source_run(source_id,track,source_cycle_time);
+        CREATE TABLE source_run_coverage (coverage_id TEXT PRIMARY KEY, source_run_id TEXT,
+          source_id TEXT, track TEXT, temperature_metric TEXT, completeness_status TEXT,
+          readiness_status TEXT, snapshot_ids_json TEXT);
+        CREATE INDEX coverage_run ON source_run_coverage(source_run_id);
         INSERT INTO forecast_posteriors VALUES (1, 0.42, '2026-01-01T02:00:00+00:00');
     """)
     for idx, track in enumerate(tracks, 1):
         metric = "high" if track == "mx2t6_high" else "low"
-        run_id = f"ecmwf_open_data:{track}:2026-01-01T00Z:test"
+        run_id = f"ecmwf_open_data:{track}:{issue:%Y-%m-%dT%H}Z:test"
         conn.execute("INSERT INTO source_run VALUES (?,?,?,?,?,?,?)",
-                     (run_id, "ecmwf_open_data", track, issue.isoformat(), "SUCCESS", "COMPLETE", 0))
+                     (run_id, "ecmwf_open_data", module._forecast_track_for_profile(
+                         ingest_track=track, horizon_profile="full" if issue.hour in (0,12) else "short"),
+                      issue.isoformat(), "SUCCESS", "COMPLETE", 0))
+        conn.execute("INSERT INTO source_run_coverage VALUES (?,?,?,?,?,?,?,?)", (
+            f"coverage:{idx}", run_id, "ecmwf_open_data", module._forecast_track_for_profile(
+                ingest_track=track, horizon_profile="full" if issue.hour in (0,12) else "short"),
+            metric, "COMPLETE", "LIVE_ELIGIBLE", json.dumps([idx]),
+        ))
         provenance = {"grid_surface_evidence": {
             "mask_grid_identity_hash": grid_hash, "temperature_grid_identity_hash": grid_hash,
             "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
@@ -80,7 +92,7 @@ def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t
             idx, run_id, "ecmwf_open_data", metric, issue.isoformat(),
             (issue + timedelta(hours=2)).isoformat(), "VERIFIED", json.dumps(provenance),
         ))
-        dest = folder / f".{track}_20260101_00z_lsm.grib2"
+        dest = folder / f".{track}_{issue:%Y%m%d}_{issue.hour:02d}z_lsm.grib2"
         dest.write_bytes(mask.read_bytes())
         dest.with_suffix(".proof.json").write_bytes(mask_proof.read_bytes())
         surface_paths[track] = dest.with_suffix(".z.grib2")
@@ -89,6 +101,9 @@ def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t
     closed = []
 
     class ReadConnection:
+        def set_progress_handler(self, *args):
+            return conn.set_progress_handler(*args)
+
         def execute(self, *args):
             return conn.execute(*args)
 
@@ -130,7 +145,7 @@ def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t
                 raise self.failure
             if url.endswith(".index"):
                 row = dict(param="z", levtype="sfc", step="0", type="fc", stream="oper",
-                           date="20260101", time="0000", _offset=0, _length=len(self.z_bytes), **{"class": "od"})
+                           date=issue.strftime("%Y%m%d"), time=f"{issue.hour:02d}00", _offset=0, _length=len(self.z_bytes), **{"class": "od"})
                 row.update(self.index_overrides)
                 return Response(json.dumps(row).encode())
             return Response(self.z_bytes, range_response=True)
@@ -140,6 +155,7 @@ def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t
 
     session = Session()
     monkeypatch.setattr(module, "get_connection", ReadConnection)
+    monkeypatch.setattr(module, "get_forecasts_connection_read_only", lambda **kw: ReadConnection(), raising=False)
     monkeypatch.setattr(module, "_resolve_opendata_paths", lambda: paths)
     monkeypatch.setattr(module.requests, "Session", lambda: session)
     # Parser/cache unit tests stay in-process. Actual wall-bound transport has
@@ -155,6 +171,162 @@ def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t
     return dict(db=conn, before=before, paths=paths, surface_paths=surface_paths,
                 session=session, closed=closed, grid_hash=grid_hash, issue=issue,
                 z_bytes=z_bytes, raw=raw)
+
+
+@pytest.mark.parametrize("hour", (0, 6, 12, 18))
+def test_surface_audit_registered_full_short_coverage_pk_real_bytes(tmp_path, monkeypatch, hour):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch,
+        issue=datetime(2026, 10, 3, hour, tzinfo=timezone.utc))
+    result = module.capture_open_ens_surface_audit()
+    assert result["capture_status"] == "OBSERVED", result
+    assert result["captured_tracks"] == ["mx2t6_high", "mn2t6_low"]
+    assert len(fixture["session"].calls) == 2
+    assert f"/{hour:02d}z/" in fixture["session"].calls[0][0]
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]
+
+
+@pytest.mark.parametrize("field,value", (("source_run_id", "foreign-run"), ("source_id", "foreign-source"),
+    ("temperature_metric", "low"), ("source_cycle_time", "2026-01-02T00:00:00+00:00")))
+def test_surface_audit_coverage_pk_identity_is_not_borrowed(tmp_path, monkeypatch, field, value):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    fixture["db"].execute(f"UPDATE ensemble_snapshots SET {field}=? WHERE snapshot_id=1", (value,))
+    before = tuple(fixture["db"].iterdump())
+    result = module.capture_open_ens_surface_audit()
+    assert result["captured_tracks"] == ["mn2t6_low"], result
+    assert "mx2t6_high" in result["track_gaps"]
+    assert tuple(fixture["db"].iterdump()) == before
+
+
+def test_surface_audit_whole_deadline_precedes_ro_open(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    def forbidden(**kwargs):
+        pytest.fail("expired audit must not open DB")
+    monkeypatch.setattr(module, "get_forecasts_connection_read_only", forbidden)
+    result = module.capture_open_ens_surface_audit(deadline_monotonic=time.monotonic()-1)
+    assert result["capture_status"] == "UNKNOWN"
+    assert "DEADLINE" in result["unavailable_reason"]
+    assert not fixture["session"].calls
+
+
+@pytest.mark.parametrize("body_kind", ("mask", "z"))
+def test_surface_audit_declared_grid_bound_is_checked_before_values(tmp_path, monkeypatch, body_kind):
+    import eccodes as ec
+    from scripts import extract_open_ens_localday as extractor
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    path = next(iter(fixture["surface_paths"].values())).with_suffix(".grib2")
+    # surface_paths stores .lsm.z.grib2; the mandatory LSM is .lsm.grib2.
+    path = path.with_name(path.name.replace("_lsm.z.grib2", "_lsm.grib2"))
+    raw = path.read_bytes() if body_kind == "mask" else fixture["z_bytes"]
+    gid = ec.codes_new_from_message(raw)
+    try:
+        ec.codes_set(gid, "Ni", 1441)
+        malicious = ec.codes_get_message(gid)
+    finally:
+        ec.codes_release(gid)
+    if body_kind == "mask":
+        path.write_bytes(malicious)
+        def forbidden(*args, **kwargs):
+            pytest.fail("oversized declared mask must not decode values")
+        monkeypatch.setattr(extractor, "_read_land_mask", forbidden)
+        # Isolate to the malformed track so a healthy sibling's decode is lawful.
+        fixture["db"].execute("DELETE FROM source_run WHERE track LIKE 'mn2t6_low%'")
+    else:
+        fixture["session"].z_bytes = malicious
+        def forbidden(*args, **kwargs):
+            pytest.fail("oversized declared z must not decode values")
+        monkeypatch.setattr(extractor, "_read_surface_geopotential", forbidden)
+    result = module.capture_open_ens_surface_audit()
+    assert result["capture_status"] == "UNKNOWN", result
+    assert "DECODE_GRID_BOUNDS" in str(result)
+    assert all(not p.with_suffix(".proof.json").exists() for p in fixture["surface_paths"].values())
+
+
+@pytest.mark.parametrize("fault", ("busy", "vm"))
+def test_surface_audit_real_sqlite_budget_closes_before_http(tmp_path, monkeypatch, fault):
+    from src.data import ecmwf_open_data as module
+    from src.state.db import get_connection_read_only
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    if fault == "busy":
+        path = tmp_path / "locked.db"
+        locked = sqlite3.connect(path)
+        locked.execute("CREATE TABLE source_run (source_id TEXT)")
+        locked.commit()
+        locked.execute("BEGIN EXCLUSIVE")
+        monkeypatch.setattr(module, "get_forecasts_connection_read_only",
+            lambda **kw: get_connection_read_only(path, **kw))
+    else:
+        class VMConnection:
+            def set_progress_handler(self, *args):
+                fixture["db"].set_progress_handler(*args)
+            def execute(self, query, parameters=()):
+                return fixture["db"].execute("""WITH RECURSIVE n(x) AS
+                    (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000000)
+                    SELECT sum(x) FROM n""")
+            def close(self):
+                fixture["closed"].append(True)
+        monkeypatch.setattr(module, "get_forecasts_connection_read_only", lambda **kw: VMConnection())
+    started = time.monotonic()
+    try:
+        result = module.capture_open_ens_surface_audit(deadline_monotonic=started+.06)
+    finally:
+        if fault == "busy":
+            locked.rollback()
+            locked.close()
+    assert time.monotonic()-started < .8
+    assert result["capture_status"] == "UNKNOWN", result
+    assert result["unavailable_reason"] == "SURFACE_AUDIT_DB_DEADLINE_EXCEEDED", result
+    assert result["stage"] == "source_read"
+    assert not fixture["session"].calls
+    assert all(not p.exists() for p in fixture["surface_paths"].values())
+
+
+@pytest.mark.parametrize("phase", ("mask_decode", "z_decode", "staging_fsync", "proof_fsync"))
+def test_surface_audit_expired_native_phase_never_commits_late_proof(tmp_path, monkeypatch, phase):
+    from src.data import ecmwf_open_data as module
+    from scripts import extract_open_ens_localday as extractor
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    triggered = []
+    if phase in ("mask_decode", "z_decode"):
+        name = "_read_land_mask" if phase == "mask_decode" else "_read_surface_geopotential"
+        original = getattr(extractor, name)
+        def slow_decode(*args, **kwargs):
+            result = original(*args, **kwargs)
+            time.sleep(.25)
+            triggered.append(True)
+            return result
+        monkeypatch.setattr(extractor, name, slow_decode)
+    else:
+        original_sync, original_link = module.os.fsync, module.os.link
+        committed = []
+        def link(source, target):
+            original_link(source, target)
+            if str(target).endswith(".proof.json"):
+                committed.append(True)
+        def slow_sync(fd):
+            original_sync(fd)
+            if not triggered and (phase == "staging_fsync" or committed):
+                time.sleep(.25)
+                triggered.append(True)
+        monkeypatch.setattr(module.os, "link", link)
+        monkeypatch.setattr(module.os, "fsync", slow_sync)
+    result = module.capture_open_ens_surface_audit(deadline_monotonic=time.monotonic()+.2)
+    assert triggered
+    assert result["capture_status"] == "UNKNOWN", result
+    assert "DEADLINE" in result["unavailable_reason"], result
+    assert all(not p.with_suffix(".proof.json").exists() for p in fixture["surface_paths"].values())
+    if phase == "mask_decode":
+        assert not fixture["session"].calls
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]
 
 
 def test_normal_surface_audit_actual_bytes_shared_hl_and_clock_identity(tmp_path, monkeypatch):
@@ -295,7 +467,7 @@ def test_normal_surface_audit_existing_corrupt_cache_kept_sibling_can_capture(tm
     result = module.capture_open_ens_surface_audit()
     assert result["captured_tracks"] == ["mn2t6_low"], result
     assert old.read_bytes() == b"immutable malformed prior cache"
-    assert result["track_gaps"]["mx2t6_high"] == "SURFACE_AUDIT_CACHE_PUBLISH_CONFLICT"
+    assert result["track_gaps"]["mx2t6_high"] == "SURFACE_AUDIT_CACHE_CONFLICT:SURFACE_AUDIT_CACHE_BOUNDS_INVALID"
 
 
 def test_normal_surface_audit_partial_publish_recovers_by_new_real_capture(tmp_path, monkeypatch):
@@ -408,6 +580,7 @@ def test_cached_surface_binds_original_not_always_latest(tmp_path, monkeypatch, 
     cache = {t: p.with_suffix(".proof.json").read_bytes() for t, p in fixture["surface_paths"].items()}
     conn = fixture["db"]
     conn.execute("INSERT INTO ensemble_snapshots SELECT snapshot_id+100, source_run_id, source_id, temperature_metric, source_cycle_time, source_available_at, authority, provenance_json FROM ensemble_snapshots")
+    conn.execute("UPDATE source_run_coverage SET snapshot_ids_json=json_array(json_extract(snapshot_ids_json,'$[0]')+100)")
     if change == "pruned_original":
         conn.execute("DELETE FROM ensemble_snapshots WHERE snapshot_id=1")
     elif change == "changed_original":
@@ -437,9 +610,12 @@ def test_cached_surface_original_lookup_proof_race_is_one_epoch(tmp_path, monkey
     raced = []
 
     class RacingConnection:
+        def set_progress_handler(self, *args):
+            return fixture["db"].set_progress_handler(*args)
+
         def execute(self, query, parameters=()):
             cursor = fixture["db"].execute(query, parameters)
-            if "e.snapshot_id=?" in query and parameters[0] == original["snapshot_id"] and not raced:
+            if "JOIN source_run" in query and "e.snapshot_id=?" in query and parameters[0] == original["snapshot_id"] and not raced:
                 replacement = dict(original)
                 if change == "absent_id":
                     replacement["snapshot_id"] = 999999
@@ -455,7 +631,7 @@ def test_cached_surface_original_lookup_proof_race_is_one_epoch(tmp_path, monkey
         def close(self):
             pass
 
-    monkeypatch.setattr(module, "get_connection", RacingConnection)
+    monkeypatch.setattr(module, "get_forecasts_connection_read_only", lambda **kw: RacingConnection())
     result = module.capture_open_ens_surface_audit()
     assert raced
     if change == "stable_aba":
