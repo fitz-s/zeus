@@ -374,9 +374,12 @@ def test_symlinked_request_is_quarantined_without_touching_its_target(tmp_path):
     assert claimed == (regular,) and queue._REQUEST_ALIAS_QUARANTINED_REASON in reasons
     assert not alias.exists() and not alias.is_symlink()
     assert target.read_bytes() == target_bytes  # never followed or mutated
-    quarantined = list((tmp_path / queue._REQUEST_ALIAS_DIR).glob("Paris.alias.json.*"))
-    links = [p for p in quarantined if p.is_symlink()]
-    receipts = [p for p in quarantined if p.name.endswith(".receipt.json")]
+    # Capture-then-classify: one exclusive capture directory per quarantine,
+    # holding the captured link and its exclusively created receipt.
+    captures = list((tmp_path / queue._REQUEST_ALIAS_DIR).glob(".capture.Paris.alias.json.*"))
+    assert len(captures) == 1
+    links = [p for p in captures[0].iterdir() if p.is_symlink()]
+    receipts = [p for p in captures[0].iterdir() if p.name == queue._ALIAS_RECEIPT_NAME]
     assert len(links) == 1 and len(receipts) == 1
     receipt = json.loads(receipts[0].read_text())
     assert receipt["kind"] == "symlink" and receipt["forecast_input_fence"] is False
