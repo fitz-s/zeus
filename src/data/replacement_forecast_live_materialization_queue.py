@@ -6408,6 +6408,23 @@ def claim_record_sha256(input_json: Path) -> str | None:
     raise FileNotFoundError(f"{Path(input_json).name}: no claim record in {batch.name}")
 
 
+def claim_required_lease_paths(input_json: Path) -> tuple[Path, ...] | None:
+    """The lease paths a claimed request's identity requires; None outside a claim.
+
+    Derived from the request's recorded identity witness (semantic and
+    coalescing views), the same derivation the constructor leased with.
+    Inside a lease-v1 batch a request without a readable witness raises.
+    """
+
+    batch = Path(input_json).parent
+    if _claim_state_class(batch) != _lease.LEASE_PROTOCOL:
+        return None
+    witness = _read_claim_identity_witnesses(batch).get(Path(input_json).name)
+    if not witness:
+        raise FileNotFoundError(f"{Path(input_json).name}: no identity witness in {batch.name}")
+    return _witness_lease_paths(batch.parent, witness)
+
+
 def _claim_records(batch_path: Path) -> tuple[ClaimRecord, ...]:
     """The claim's ordered records; empty for a claim that predates them."""
 
