@@ -14783,3 +14783,180 @@ record actual new SHA/PID/config/canonical DB/rc and fresh full receipt; absent 
 natural zero-cost case, do not claim the private counterexample triggered in
 production. Physical representativeness/ground, first new-cycle phi binding and
 current redecision/exit timeliness remain OPEN; no appearance docs-only reload.
+
+### Held-inventory runtime checkpoint — PLAN only, task remains open
+
+checked=2026-W40; basis=actual loader session plus independent poststamp canonical
+full receipt and read-only inventory comparison; until=recheck-on-use. Landed/
+live/loaded1da1c914f7c7bac7756001bbc51631f7bc54ab60 is verified. Our one normal
+loader session23901 starts04:54:30Z and actually exits0 (LOADER_RC=0), not inferred
+from a receipt; full log
+/tmp/zeus-held-inventory-loader-20261004.TF1g72/normal-loader.log. Main12876
+stamp04:56:34.297452Z, ingest5305/forecast5377 fixed-boot1da and resident6067,
+cwd/live canonical three DBs/configd7 are current identity evidence. Private
+config symlink is removed, source-capture four eaf blobs are unchanged.
+
+Independent poststamp fullcut20001/receipt902298 at04:59:07.147409 covers
+universe208 with scope/held/book freshness/native candidate coverage allTrue;
+canonical hash chain902292→902293→902298 is True. Of26 held,14 are EVALUATED,
+six NO_BID, four NO_EXECUTABLE_UNIT_PRICE/out-of-band, and two
+GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE. HK's three are NO_BID,
+bookdeadline05:02:05 covers decision; no profitable execution is inferred.
+The loader's later902302 receipt has scope1 and is not a substitute for that
+full-universe proof. Independent05:00:14 active-guard getter is naturally None,
+which supersedes the historical loader log's restart_guard_not_selected/retained
+posture without a manual clear or second restart.
+
+Same read-only snapshot shared held helper, queue exact classification and old
+cost-qualified control all return the same18 families. No natural zero-cost
+position occurs here: behavioral proof is private actual SQL, not a falsely
+claimed production trigger. Targeted82PASS includes80 new matrix PASS, C40
+independent cases PASS; whole owned349PASS/19 unchanged original-eaf failures
+remains explicitly not all-green. Nomination is not financial/action/ENTRY
+authority. Legal held-inventory qualification and running-version proof close
+this bounded slice, not the original source/continuous-profit goal.
+
+Normal source capture on eaf remains OBSERVED with original bytes/GRIB/reference
+proof, while derived physics is not current q receipt consumption. Publisher
+clock roles not supplied remain UNKNOWN; station/model representativeness,
+MPMG/ZSQD ground and first new-cycle phi binding stay separate OPEN obligations.
+Current Wuhan localwrite→fresh consumer25m50 and Denver5m40 are observed timing,
+with their seed→READY stages recorded above; rank/inspection/CPU-start is not
+persisted and no scheduler root cause is established. No source/registry edit,
+new commit/load, forced source/cycle/reseed/venue/guard action or cleanup occurs
+for this uncommitted PLAN-only checkpoint. Task remains active and incomplete.
+
+### Continuation readiness — two read-only candidates, no implementation grant
+
+checked=2026-W40; basis=07:50Z git/process/config/canonical-FD restoration and
+the existing checkpoint above; until=recheck-on-use. Task branch
+fix/red-cancel-source-drain-20261003, task HEAD, remote live, live checkout and
+loaded identity agree on1da1c914f7c7bac7756001bbc51631f7bc54ab60. Main12876 and
+fixed-boot ingest5305/forecast5377 have fresh heartbeats; config remains d7 and
+canonical DB ownership/path evidence is unchanged. Only this PLAN is dirty in
+the tasktree. No other tasktree writer/normal loader or deploy-lock FD was found.
+Live tracked files are clean;13 merge_safety untracked directory groups contain
+289 files, all preserved without inferring their ownership or historical delta.
+The old current-state pointer is navigation, not current runtime authority.
+
+Candidate A is the root-assigned current-probability read-only lane's bounded
+held-seed wait/phase-clock investigation. It must distinguish source availability,
+input cut, inspection/claim, producer start, recorded insert and consumer clocks.
+If absent phase evidence prevents a causal finding, propose the smallest existing
+report instrumentation surface; do not invent source clocks or a schema, change
+budgets/priority, or infer a scheduler defect from elapsed totals. Exact owned
+source/test paths and any BEFOREEDIT implementation authorization remain pending
+root acceptance of a reproducible defect or necessary instrumentation proposal.
+
+Candidate B is the root-assigned city-physics read-only lane's current new-extract
+phi receipt timing and minimum normal acquisition/binding investigation. Separate
+normal audit acquisition from exact-cycle/target/metric capture, posterior and
+consumer evidence. Existing OBSERVED raw audit does not retrofit old receipts,
+prove sensor/model representativeness, validate every ground field, or justify
+lapse/bias/variance changes. MPMG/ZSQD ground remains fail-closed; unknown physical
+or publisher evidence remains UNKNOWN. Any proposed normal-producer fix requires
+exact ownership, dependencies, before-fail/after-pass antibodies and SCOPE/DRAIN/
+RESET acceptance; no manual HTTP/capture/seed/cycle or renewed old possession clock.
+
+Main owns only this PLAN preparation and later approved integration/registries;
+the two lanes currently read only and no source writer is authorized here. Keep
+the restored shared tasktree and pending checkpoint; do not commit/load/cleanup
+for documentation appearance. No new schema, probability regime, action law,
+venue authority or production-state mutation is introduced. Both candidates and
+the overall physical-source/timely-redecision/profit goal remain OPEN.
+
+### BEFOREEDIT — bounded normal-callback phase diagnostics, not a causal repair
+
+Root accepts only two existing writer-owned paths:
+src/data/replacement_forecast_live_materialization_queue.py and
+tests/test_day0_extreme_updated_materialization_bridge.py. The current-probability
+lane is the sole source/test writer; main owns this PLAN and private test linkage,
+then pauses all project writes until that writer freezes. Base is1da1c914; source
+capture four eaf blobs, city-physics and source-clock semantics remain unchanged.
+
+Reuse the existing materialization report dataclass/as_dict diagnostic surface
+and normal daemon report.as_dict logging. Add bounded diagnostics (at most12
+candidate/outcome records) for phase wall time, parent-thread CPU time, flock
+wait, request planning/apply/runner and seed cursor/window/selected typed outcomes.
+Parent-thread CPU is explicitly not worker-process CPU; wall time, operational
+cursor/inspection evidence and provider issued/fetched/written clocks are distinct.
+Reuse already-read candidate/metadata/stat values only: no new full queue scan,
+SQL/JSON read, schema, files, flags, actor or scheduling mechanism. Do not change
+sort/cursor/claim, budgets/deadlines, held/global/first-q/offscope selection or
+existing rejection/terminal criteria. An uninspected candidate is not a gate
+rejection. Report each pass independently; early DEFERRED/LOCKED paths preserve a
+bounded partial trace rather than silently recycling the preceding pass's clocks.
+
+SCOPE is one normal callback/pass and its actually inspected request/seed window.
+DRAIN is the existing normal callback emitting that report through the existing
+daemon log; this does not force a callback or cure delayed service. RESET is a
+fresh per-pass diagnostic accumulator, including error/early-return paths, with
+no renewal of frozen source evidence. Acceptance requires private tests for
+bounded12/reset/partial traces, unchanged order/cursor/claim/outcome/clock behavior,
+and truthful phase/CPU labeling; named review and narrow affected checks precede
+any separately accepted normal deployment. Fresh normal postload phase evidence
+must inform the next verified causal fix, not turn instrumentation into a
+timeliness or profit completion claim.
+
+The current07:50:42→51 sample has request pass8.829s/commit0, seed2.410s/three
+QUEUE_LIMIT, another callback15.787s and DEFERRED6.510s without entering seed.
+These observations do not reconstruct the unpersisted internal phases of the
+earlier Wuhan25m delay or establish its root cause. No manual cycle/seed/claim,
+source fetch, venue or guard action is allowed. Private tests use temporary TI1
+state and fake/in-memory inputs, never a tasktree daemon or canonical DB write.
+Main-owned config/settings.json may point read-only to live's unchanged d7
+configuration solely for imports; remove that ignored link before staging/cleanup.
+
+City-physics remains read-only: a pre-extract phi acquisition proposal is not
+authorized to edit source here. The source-clock lane's selected06 bracket
+supersedes its old previous-cycle hypothesis; only the remaining bracket-coverage
+gap is recorded, without treating UNKNOWN issued clocks as a universal defect.
+This BEFOREEDIT authorizes the bounded writer scope only, not commit/load or a
+new causal scheduling repair; overall physical/timely-redecision goal stays OPEN.
+
+Diagnostics two-path freeze is queue
+f4e4a9bea0a7f02fd09ac79c3a6d49f1d8d5e2e8b9d1c642e517d725c0f73c83 and bridge test
+75cb4be0bb9b44dbd45f388efafe1de12a07ae59ecb897c8e3760098411d8aaf. Worker focused22
+PASS is /tmp/zeus-producer-trace-tests.xml; exact original1da existing14 controls
+PASS is /tmp/zeus-producer-trace-1da-control.xml. Four reload/new-source-dependent
+nodes are excluded from that original-source control run, not silently declared
+baseline passes. Existing normal daemon2370–2398 already logs report.as_dict;
+no daemon source edit or standalone diagnostic artifact is required. Capture4
+and inventory trigger hashes remain unchanged, and remote live still matches1da.
+Main updates only the existing queue rationale and existing test lifecycle/note
+for this diagnostic surface, with INV-47 scope/reset and source/financial/action
+authority unchanged. Independent review and narrow integration checks remain
+pending here; no commit/load is authorized by this freeze record. Normal callback
+phase evidence and any ensuing verified causal repair are still OPEN obligations.
+
+Narrow final integration independently runs the four new producer_trace nodes:
+4PASS/226deselected1.88s, errors/failures/skips0, XML
+/tmp/zeus-producer-trace-integration-20261004.xml. Two AST/compile checks, two YAML
+loads, changed-test freshness (issues[]) and diff check PASS; both frozen hashes
+still match. A private synthetic12-record report is2604bytes;1000 wrapper-plus-
+serialization iterations have median21.58us/max83.04us with SQLite opens forbidden.
+This is only that synthetic report's measured overhead, not actual callback
+latency, a worst-case bound, or evidence that every daemon log retains all phases.
+
+Source/test/docs registry checkers are explicitly not whole-green:459/538/59
+issues respectively match the original HEAD registry signatures exactly, with no
+new issue signatures. The touched queue row still has its existing
+source_downstream_drift warning (four importers missing); that same warning is
+present with original registry YAML and is not repaired or waived as harmless by
+this diagnostic-only delta. Changed test/PLAN/docs surfaces have no checker
+issues. Existing unrelated catalog drift remains out of scope. Main retains only
+the expected five changed paths; the ignored d7 test symlink is temporary and must
+be removed before staging. C review/root delivery verdict remain pending: no
+stage/commit/push/load occurs from these results, and normal phase causality still
+requires postload evidence followed by any verified defect's actual repair.
+
+C final APPROVE exactf4e4/75cb has no named blocker: four independent behavior
+controls and a real12-slot strict-JSON report (about6.5KB) across three rounds
+PASS, with no q/attempt/receipt identity or extra SQL/stat/deadline reads. This
+real fixture is distinct from the smaller synthetic overhead sample above.
+Root accepts the bounded five-path diagnostic delivery, preserving baseline
+registry warnings, capture4 and inventory trigger. Remove the main-owned ignored
+d7 link, commit only these paths and follow normal fresh-origin FF/loading gates.
+Actual new loader rc/stamp and next natural per-lane request/seed phase report
+remain separate required evidence; no source/cycle/venue/guard action may be
+forced. Instrumentation is not the causal latency repair or goal completion.

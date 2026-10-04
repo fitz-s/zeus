@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from functools import wraps
 from glob import escape as glob_escape
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -144,6 +145,62 @@ class _ClaimReadDeadline:
 
 
 _claim_read_local = threading.local()
+
+
+def _producer_trace() -> dict[str, object] | None:
+    return getattr(_claim_read_local, "producer_trace", None)
+
+
+def _trace_phase_finished(name: str, started: tuple[float, float]) -> None:
+    trace = _producer_trace()
+    if trace is not None:
+        wall = max(0.0, time.perf_counter() - started[0])
+        cpu = max(0.0, time.thread_time() - started[1])
+        previous = next((item for item in trace["phases"] if item["phase"] == name), None)
+        if previous is None:
+            trace["phases"].append({"phase": name, "wall_seconds": wall, "parent_thread_cpu_seconds": cpu})
+        else:
+            previous["wall_seconds"] += wall
+            previous["parent_thread_cpu_seconds"] += cpu
+
+
+def _producer_phase(name: str):
+    """Diagnostic only: no deadline reads, additional I/O or authority inputs."""
+    def decorate(fn):
+        @wraps(fn)
+        def measured(*args, **kwargs):
+            if _producer_trace() is None:
+                return fn(*args, **kwargs)
+            started = (time.perf_counter(), time.thread_time())
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _trace_phase_finished(name, started)
+        return measured
+    return decorate
+
+
+def _producer_report(fn):
+    @wraps(fn)
+    def measured(*args, **kwargs):
+        previous = _producer_trace()
+        trace = {
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "clock_role": "producer_invocation_not_source_issue_or_input_cut",
+            "cpu_role": "parent_thread_only_not_child_cpu_or_io_evidence",
+            "phase_role": "inclusive_nested_durations_not_additive",
+            "phases": [], "seed_window": [],
+        }
+        _claim_read_local.producer_trace = trace
+        started = (time.perf_counter(), time.thread_time())
+        try:
+            report = fn(*args, **kwargs)
+            return replace(report, producer_trace=trace)
+        finally:
+            _trace_phase_finished("invocation", started)
+            trace["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _claim_read_local.producer_trace = previous
+    return measured
 
 
 def _active_claim_read_deadline() -> _ClaimReadDeadline | None:
@@ -359,6 +416,7 @@ class ReplacementForecastLiveMaterializationQueueReport:
     seed_processed_files: tuple[str, ...] = ()
     seed_failed_files: tuple[str, ...] = ()
     reason_codes: tuple[str, ...] = ()
+    producer_trace: Mapping[str, object] | None = None
 
     @property
     def ok(self) -> bool:
@@ -383,6 +441,7 @@ class ReplacementForecastLiveMaterializationQueueReport:
             "seed_processed_files": list(self.seed_processed_files),
             "seed_failed_files": list(self.seed_failed_files),
             "reason_codes": list(self.reason_codes),
+            "producer_trace": self.producer_trace,
         }
 
 
@@ -682,6 +741,7 @@ def _batch_missing_envelope_result(
     )
 
 
+@_producer_phase("runner_wait")
 def _run_materialization_batch(
     pending: Sequence[_PendingMaterialization],
 ) -> dict[Path, subprocess.CompletedProcess[str]]:
@@ -1483,6 +1543,12 @@ def _write_sidecar(path: Path, payload: dict[str, object]) -> None:
         json.dumps(payload, sort_keys=True, indent=2),
         encoding="utf-8",
     )
+    trace = _producer_trace()
+    if trace is not None:
+        for entry in trace["seed_window"]:
+            if path.name == entry["name"] or path.name.startswith(entry["name"].removesuffix(".json") + "."):
+                entry["outcome"] = str(payload.get("status", "SIDECAR_WRITTEN"))
+                entry["reason_codes"] = list(payload.get("reason_codes", ()))
 
 
 @contextmanager
@@ -1491,6 +1557,7 @@ def _queue_lock(lock_path: Path, *, wait_seconds: float = 0.0):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
     deadline = time.monotonic() + max(0.0, float(wait_seconds))
+    wait_started = (time.perf_counter(), time.thread_time()) if _producer_trace() is not None else None
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
         while True:
@@ -1499,9 +1566,13 @@ def _queue_lock(lock_path: Path, *, wait_seconds: float = 0.0):
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
+                    if wait_started is not None:
+                        _trace_phase_finished("flock_wait", wait_started)
                     yield False
                     return
                 time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        if wait_started is not None:
+            _trace_phase_finished("flock_wait", wait_started)
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
         os.write(
@@ -3895,6 +3966,12 @@ def _request_freshness_key(path: Path, payload: Mapping[str, object]) -> tuple[d
         mtime_ns = path.stat().st_mtime_ns
     except OSError:
         mtime_ns = 0
+    trace = _producer_trace()
+    if trace is not None:
+        for entry in trace["seed_window"]:
+            if entry["name"] == path.name:
+                entry["original_seed_mtime_ns"] = mtime_ns or None
+                entry["mtime_role"] = "file_write_clock_not_input_cut" if mtime_ns else "UNAVAILABLE"
     return computed_at, mtime_ns, path.name
 
 
@@ -4831,6 +4908,7 @@ def _plan_superseded_materialization_requests(
     return tuple(remaining), tuple(superseded)
 
 
+@_producer_phase("request_planning")
 def _build_request_claim_read_plan(
     *,
     request_path: Path,
@@ -5022,6 +5100,7 @@ def _build_request_claim_read_plan(
     )
 
 
+@_producer_phase("request_apply")
 def _apply_request_claim_read_plan(
     plan: _RequestClaimReadPlan,
 ) -> _MaterializationQueueClaim:
@@ -5475,6 +5554,7 @@ _PRIORITY_CLAIM_RACED_OWNER_REASONS = (
 )
 
 
+@_producer_phase("priority_claim_apply")
 def _try_claim_priority_request(
     plan: _RequestClaimReadPlan,
 ) -> tuple[_MaterializationQueueClaim | None, tuple[str, ...]]:
@@ -6141,6 +6221,7 @@ def _coalesce_superseded_materialization_seeds(
     )
 
 
+@_producer_phase("seed_transport")
 def _prepare_seed_requests(
     *,
     seed_dir: Path | str | None,
@@ -6349,6 +6430,7 @@ def process_own_clock_station_revision_fast_path(
     )
 
 
+@_producer_phase("seed_selection_and_prepare")
 def _prepare_seed_requests_with_connection(
     *,
     seed_dir: Path | str | None,
@@ -6387,6 +6469,8 @@ def _prepare_seed_requests_with_connection(
     processed: list[str] = []
     failed: list[str] = []
     reasons: list[str] = []
+    trace = _producer_trace()
+    selection_started = (time.perf_counter(), time.thread_time()) if trace is not None else None
     cursor_path = _day0_enqueue_ownership_cursor_path(request_dir, lane=lane)
     raw_snapshot = tuple(sorted(seed_files, key=lambda path: path.name))
     if fast_own_clock_station_revision:
@@ -6429,9 +6513,12 @@ def _prepare_seed_requests_with_connection(
             )
         )
     else:
+        cursor_before = _read_day0_enqueue_ownership_cursor(cursor_path)
+        if trace is not None:
+            trace["seed_cursor_before"] = cursor_before
         rotated_raw_snapshot = _rotate_seed_snapshot_after_cursor(
             raw_snapshot,
-            _read_day0_enqueue_ownership_cursor(cursor_path),
+            cursor_before,
             family_frontier=lane == MATERIALIZATION_LANE_PRIORITY,
         )
         try:
@@ -6527,6 +6614,15 @@ def _prepare_seed_requests_with_connection(
             lane=lane,
         )
     )
+    if trace is not None:
+        trace.update(seed_snapshot_count=len(raw_snapshot), seed_window_count=len(raw_window),
+                     seed_inspection_cap=inspection_cap, seed_actionable_limit=actionable_limit,
+                     fast_own_clock_station_revision=fast_own_clock_station_revision)
+        trace["seed_window"] = [
+            {"name": path.name, "window_rank": rank, "outcome": "UNINSPECTED",
+             "original_seed_mtime_ns": None, "mtime_role": "NOT_READ_BY_SELECTOR"}
+            for rank, path in enumerate(raw_window[:_OWN_CLOCK_STATION_REVISION_CANDIDATE_LIMIT])
+        ]
     (
         coalesced_window,
         superseded_seeds,
@@ -6595,6 +6691,17 @@ def _prepare_seed_requests_with_connection(
         seeds[:inspection_cap],
         seed_payloads,
     )
+    if trace is not None:
+        selected_names = {path.name for path in seeds[:inspection_cap]}
+        for entry in trace["seed_window"]:
+            path = next(path for path in raw_window if path.name == entry["name"])
+            payload = seed_payloads.get(path) or {}
+            entry.update(selected=path.name in selected_names,
+                         tier=priority.get(path.name, (None, ""))[0],
+                         held=_request_family_scope(payload) in current_money_risk,
+                         input_cut=payload.get("computed_at"),
+                         input_cut_role="frozen_input_cut_not_algorithm_start")
+        _trace_phase_finished("seed_selection", selection_started)
     actionable_count = 0
     inspected_count = 0
     indeterminate_count = 0
@@ -6602,6 +6709,11 @@ def _prepare_seed_requests_with_connection(
         if actionable_count >= actionable_limit or inspected_count >= inspection_cap:
             break
         inspected_count += 1
+        entry = None if trace is None else next(
+            (item for item in trace["seed_window"] if item["name"] == seed_json.name), None)
+        if entry is not None:
+            entry["outcome"] = "INSPECTED_RETAINED"
+        seed_started = (time.perf_counter(), time.thread_time()) if entry is not None else None
         seed = None
         deps = None
         try:
@@ -6632,6 +6744,8 @@ def _prepare_seed_requests_with_connection(
                     forecast_conn=forecast_conn,
                 )
             ownership = ownership_check.ownership
+            if entry is not None:
+                entry["ownership"] = ownership.value
             if ownership is _Day0EnqueueOwnership.STALE:
                 moved = _move_request(seed_json, processed_path)
                 _write_sidecar(
@@ -6969,6 +7083,10 @@ def _prepare_seed_requests_with_connection(
                 _write_sidecar(moved, receipt)
             failed.append(str(moved))
             actionable_count += 1
+        finally:
+            if seed_started is not None:
+                entry["wall_seconds"] = max(0.0, time.perf_counter() - seed_started[0])
+                entry["parent_thread_cpu_seconds"] = max(0.0, time.thread_time() - seed_started[1])
     if not fast_own_clock_station_revision and raw_window:
         cursor_seed = raw_window[-1]
         if (
@@ -6980,6 +7098,8 @@ def _prepare_seed_requests_with_connection(
             cursor_seed = rotated_raw_snapshot[0]
         if not _write_day0_enqueue_ownership_cursor(cursor_path, cursor_seed.name):
             reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_CURSOR_WRITE_FAILED")
+        elif trace is not None:
+            trace["seed_cursor_after"] = cursor_seed.name
     if indeterminate_count:
         reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE")
     if processed:
@@ -6991,6 +7111,7 @@ def _prepare_seed_requests_with_connection(
     return processed, failed, reasons
 
 
+@_producer_phase("claim_locked_apply")
 def _claim_replacement_forecast_live_materialization_queue_locked(
     *,
     request_path: Path,
@@ -7285,6 +7406,7 @@ def _claim_only_report(
     )
 
 
+@_producer_report
 def process_replacement_forecast_live_materialization_queue(
     *,
     request_dir: Path | str,
@@ -7609,6 +7731,7 @@ def process_replacement_forecast_live_materialization_queue(
     )
 
 
+@_producer_phase("request_batch")
 def _process_claimed_materialization_batch(
     *,
     request_path: Path,
@@ -7977,10 +8100,14 @@ def _process_claimed_materialization_batch(
     else:
         completed_by_path = {}
         for item in pending:
+            runner_started = (time.perf_counter(), time.thread_time()) if _producer_trace() is not None else None
             try:
                 completed_by_path[item.input_json] = runner(item.command)
             except subprocess.TimeoutExpired as exc:
                 completed_by_path[item.input_json] = _timeout_result(item.command, exc)
+            finally:
+                if runner_started is not None:
+                    _trace_phase_finished("runner_wait", runner_started)
 
     committed_posterior_count = 0
     reactor_wake_published_count = 0

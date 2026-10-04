@@ -1,6 +1,6 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-10-03
-# Lifecycle: created=2026-07-19; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused/audited: 2026-10-04
+# Lifecycle: created=2026-07-19; last_reviewed=2026-10-04; last_reused=2026-10-04
 # Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
 # Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
@@ -2992,6 +2992,141 @@ def test_priority_seed_family_frontier_drains_retained_churn_across_reload(
         check.ownership.value == materialization_queue._Day0EnqueueOwnership.INDETERMINATE.value
         for snapshot in harness.ownership for check in snapshot.values()
     )
+
+
+def test_producer_trace_real_seed_window_preserves_cursor_and_inspection(tmp_path, monkeypatch):
+    held = frozenset((f"H{i:03}", "2026-10-04", "high") for i in range(13))
+    harness = _retained_priority_seed_queue(tmp_path, monkeypatch, held=held)
+    for scope in sorted(held):
+        harness.write(*scope)
+    harness.write("Z_tail", "2026-10-04", "low")
+    windows = []
+    for turn in range(3):
+        @materialization_queue._producer_report
+        def run():
+            processed, failed, reasons = harness.tick()
+            return materialization_queue.ReplacementForecastLiveMaterializationQueueReport(
+                status="PROCESSED", request_dir=str(harness.requests), processed_dir="", failed_dir="",
+                processed_count=0, failed_count=0, skipped_count=0,
+                seed_processed_files=tuple(processed), seed_failed_files=tuple(failed),
+                reason_codes=tuple(reasons),
+            )
+        report = run()
+        trace = report.as_dict()["producer_trace"]
+        window = harness.windows[-1]
+        windows.append(window)
+        assert [item["name"] for item in trace["seed_window"]] == [path.name for path in window]
+        assert len(trace["seed_window"]) == 12
+        assert all(item["ownership"] == "INDETERMINATE" for item in trace["seed_window"])
+        assert all(item["outcome"] == "INSPECTED_RETAINED" for item in trace["seed_window"])
+        assert all(item["original_seed_mtime_ns"] is None for item in trace["seed_window"])
+        assert trace["seed_cursor_after"] == harness.cursor.read_text().strip()
+        assert not report.seed_processed_files and not report.seed_failed_files
+        assert materialization_queue._producer_trace() is None
+    assert len({path for window in windows for path in window}) == 14
+    assert not list(harness.requests.glob("*.json"))
+
+
+def test_producer_trace_partial_deadline_and_nested_exception_cleanup(tmp_path, monkeypatch):
+    clocks = {"wall": 1.0, "cpu": 2.0}
+    monkeypatch.setattr(materialization_queue.time, "perf_counter", lambda: clocks["wall"])
+    monkeypatch.setattr(materialization_queue.time, "thread_time", lambda: clocks["cpu"])
+    real_plan = materialization_queue._build_request_claim_read_plan
+
+    @materialization_queue._producer_phase("request_planning")
+    def expired(**kwargs):
+        clocks["wall"] += 4.0
+        clocks["cpu"] += .5
+        raise materialization_queue._ClaimReadDeadlineExceeded()
+
+    monkeypatch.setattr(materialization_queue, "_build_request_claim_read_plan", expired)
+    report = materialization_queue.process_replacement_forecast_live_materialization_queue(
+        request_dir=tmp_path / "requests", processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed", discover=False, seed_limit=0, lane="priority",
+    )
+    assert report.status == "DEFERRED"
+    phase = report.producer_trace["phases"][0]
+    assert phase == {"phase": "request_planning", "wall_seconds": 4.0, "parent_thread_cpu_seconds": .5}
+    assert report.producer_trace["seed_window"] == []
+    assert materialization_queue._producer_trace() is None
+    monkeypatch.setattr(materialization_queue, "_build_request_claim_read_plan", real_plan)
+
+    @materialization_queue._producer_report
+    def broken():
+        raise KeyboardInterrupt()
+
+    @materialization_queue._producer_report
+    def outer():
+        before = materialization_queue._producer_trace()
+        with pytest.raises(KeyboardInterrupt):
+            broken()
+        assert materialization_queue._producer_trace() is before
+        return report
+
+    result = outer()
+    assert result.producer_trace is not report.producer_trace
+    assert result.producer_trace["seed_window"] == []
+    assert materialization_queue._producer_trace() is None
+
+
+def test_producer_trace_locked_preserves_monotonic_reads_and_old_fields(tmp_path, monkeypatch):
+    def busy(*args):
+        raise BlockingIOError()
+    monkeypatch.setattr(materialization_queue.fcntl, "flock", busy)
+    reads = []
+    def clock():
+        reads.append(len(reads))
+        return float(len(reads) - 1)
+    monkeypatch.setattr(materialization_queue.time, "monotonic", clock)
+    seeds = tmp_path / "seeds"
+    seeds.mkdir()
+    (seeds / "queued.json").write_text("{}")
+    kwargs = dict(request_dir=tmp_path / "requests", processed_dir=tmp_path / "processed",
+                  failed_dir=tmp_path / "failed", seed_dir=seeds, discover=False, seed_limit=3, lane="priority")
+    traced = materialization_queue.process_replacement_forecast_live_materialization_queue(**kwargs)
+    traced_reads = len(reads)
+    reads.clear()
+    control = materialization_queue.process_replacement_forecast_live_materialization_queue.__wrapped__(**kwargs)
+    assert traced.status == control.status == "LOCKED"
+    assert len(reads) == traced_reads
+    observed = traced.as_dict(); expected = control.as_dict()
+    observed.pop("producer_trace"); expected.pop("producer_trace")
+    assert observed == expected
+    assert [phase["phase"] for phase in traced.producer_trace["phases"]] == ["flock_wait", "invocation"]
+    assert traced.producer_trace["seed_window"] == []
+    assert materialization_queue._producer_trace() is None
+
+
+def test_producer_trace_marks_real_action_cap_uninspected(tmp_path, monkeypatch):
+    held = frozenset((f"H{i:03}", "2026-10-04", "high") for i in range(12))
+    harness = _retained_priority_seed_queue(tmp_path, monkeypatch, held=held)
+    paths = sorted(harness.write(*scope) for scope in held)
+    with sqlite3.connect(harness.db) as conn:
+        conn.row_factory = sqlite3.Row
+        for path in paths[:3]:
+            payload = json.loads(path.read_text())
+            assert cycle_advance._record_enqueue(
+                conn, city=payload["city"], target_date=payload["target_date"], metric="high",
+                consumed_cycle_iso=payload["source_cycle_time"], target_cycle_iso=payload["source_cycle_time"],
+                held_position=True, seed_file=str(path.with_name(path.stem + ".new-owner.json")),
+                day0_observed_extreme_source=payload["day0_observed_extreme_source"],
+                day0_observed_extreme_observation_time=payload["day0_observed_extreme_observation_time"],
+                day0_observed_extreme_c=21.0, day0_observed_extreme_unit="C",
+            )
+    @materialization_queue._producer_report
+    def run():
+        processed, failed, reasons = harness.tick()
+        return materialization_queue.ReplacementForecastLiveMaterializationQueueReport(
+            status="PROCESSED", request_dir=str(harness.requests), processed_dir="", failed_dir="",
+            processed_count=0, failed_count=0, skipped_count=0,
+            seed_processed_files=tuple(processed), seed_failed_files=tuple(failed), reason_codes=tuple(reasons),
+        )
+    report = run()
+    entries = report.producer_trace["seed_window"]
+    assert [item["outcome"] for item in entries[:3]] == ["SKIPPED_STALE_DAY0_ENQUEUE_OWNER"] * 3
+    assert all(item["outcome"] == "UNINSPECTED" for item in entries[3:])
+    assert len(report.seed_processed_files) == 3
+    assert harness.cursor.read_text().strip() == paths[-1].name
 
 
 def test_priority_seed_family_frontier_keeps_full_capital_preselector(
