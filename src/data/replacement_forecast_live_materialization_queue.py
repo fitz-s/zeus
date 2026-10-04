@@ -70,7 +70,19 @@ MATERIALIZATION_LANE_ALL = "all"
 MATERIALIZATION_LANE_PRIORITY = "priority"
 MATERIALIZATION_LANE_BACKGROUND = "background"
 MATERIALIZATION_INFLIGHT_DIR_NAME = "inflight"
-_CLAIM_METADATA_NAME = "_claim.json"
+# Batch metadata takes a non-``.json`` control name, so no request (``*.json``)
+# can collide with it. Batches written before this layout keep
+# ``_claim.json``; a batch is in that layout only when ``claim.control`` is
+# absent (new metadata is written before any request is captured).
+_CLAIM_METADATA_NAME = "claim.control"
+_LEGACY_CLAIM_METADATA_NAME = "_claim.json"
+
+
+def _claim_metadata_path(batch_path: Path) -> Path:
+    current = batch_path / _CLAIM_METADATA_NAME
+    if os.path.lexists(current):
+        return current
+    return batch_path / _LEGACY_CLAIM_METADATA_NAME
 # Only LEGACY (protocol-less) batches age out; see _observe_claim.
 _STALE_CLAIM_GRACE_SECONDS = 30.0
 _TIMEOUT_RETRY_MARKER = ".timeout-retry-"
@@ -4047,7 +4059,7 @@ def _read_claim_identity_witnesses(
 
     try:
         metadata = json.loads(
-            (batch_path / _CLAIM_METADATA_NAME).read_text(encoding="utf-8")
+            _claim_metadata_path(batch_path).read_text(encoding="utf-8")
         )
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
@@ -5311,9 +5323,10 @@ def _captured_entries(batch_path: Path) -> tuple[Path, ...]:
         names = sorted(os.listdir(batch_path))
     except FileNotFoundError:
         return ()
+    control = _claim_metadata_path(batch_path).name
     return tuple(
         batch_path / name for name in names
-        if name.endswith(".json") and name != _CLAIM_METADATA_NAME
+        if name.endswith(".json") and name != control
     )
 
 
@@ -5321,7 +5334,7 @@ def _claim_age_seconds(batch_path: Path) -> float:
     claimed_at: datetime | None = None
     try:
         payload = json.loads(
-            (batch_path / _CLAIM_METADATA_NAME).read_text(encoding="utf-8")
+            _claim_metadata_path(batch_path).read_text(encoding="utf-8")
         )
         claimed_at = _parse_utc_iso(payload.get("claimed_at"))
     except (AttributeError, OSError, json.JSONDecodeError):
@@ -5519,10 +5532,11 @@ def _remove_empty_claim_batch(batch_path: Path) -> None:
 
     if _captured_entries(batch_path):
         return  # a captured entry of any type keeps its batch until classified
-    try:
-        (batch_path / _CLAIM_METADATA_NAME).unlink()
-    except FileNotFoundError:
-        pass
+    for control in (_CLAIM_METADATA_NAME, _LEGACY_CLAIM_METADATA_NAME):
+        try:
+            (batch_path / control).unlink()
+        except FileNotFoundError:
+            pass
     for stage_receipt in batch_path.glob(
         f"*.json{_MATERIALIZATION_STAGE_RECEIPT_SUFFIX}"
     ):
@@ -5604,7 +5618,7 @@ def _witness_lease_paths(
 
 def _claim_metadata(batch_path: Path) -> Mapping[str, object] | None:
     try:
-        metadata = json.loads((batch_path / _CLAIM_METADATA_NAME).read_text(encoding="utf-8"))
+        metadata = json.loads(_claim_metadata_path(batch_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return metadata if isinstance(metadata, Mapping) else None
