@@ -59,19 +59,27 @@ from pathlib import Path
 sys.path.insert(0,{str(code_root)!r})
 spec=importlib.util.spec_from_file_location("rehearsal_materializer",{str(code_root / "scripts/materialize_replacement_forecast_live.py")!r})
 module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-def log(event,name):
-    with open({str(log)!r},"a") as f:f.write(json.dumps(dict(event=event,name=name,pid=os.getpid(),t=time.time()))+"\\n")
+import hashlib
+import src.data.replacement_forecast_live_materialization_queue as rq
+def log(event,name,key=None,sha=None):
+    with open({str(log)!r},"a") as f:f.write(json.dumps(dict(event=event,name=name,key=key,sha256=sha,pid=os.getpid(),t=time.time()))+"\\n")
 def compute(argv):
     names=argv[argv.index("--batch-input-json")+1:argv.index("--deadline-utc")]
     block=Path({str(block_flag)!r})
     for n in names:
-        log("start",Path(n).name)
+        # The worker's own request reader: the bytes it would compute from.
+        try:
+            raw=module._ConsumedInputs("rehearsal").read(Path(n),role=module.REQUEST_ROLE)
+        except Exception:
+            raw=Path(n).read_bytes()  # the pre-lease code path (phase A)
+        key=rq._request_semantic_key(json.loads(raw))
+        log("start",Path(n).name,key,hashlib.sha256(raw).hexdigest())
         if block.exists():
             block.unlink()
             signal.pthread_sigmask(signal.SIG_BLOCK,{{signal.SIGUSR1}})
             Path({str(queue_root / ".rehearsal_worker_ready.json")!r}).write_text(json.dumps(dict(pid=os.getpid(),name=Path(n).name)))
             signal.sigwait({{signal.SIGUSR1}})
-        log("end",Path(n).name)
+        log("end",Path(n).name,key,hashlib.sha256(raw).hexdigest())
         print(json.dumps(dict(input_json=n,returncode=0,stdout=json.dumps(dict(status="SUCCEEDED")),stderr="")),flush=True)
     return 0
 module.main=compute
@@ -293,11 +301,13 @@ def run(args) -> None:
     report["end"] = tree()
     report["final_reconcile_dry"] = reconcile(False)
 
-    # Execution-log analysis.
+    # Execution-log analysis, grouped by the semantic request key the worker
+    # parsed from the bytes it actually read (never by filename): two
+    # executions of one semantic identity under any names are the same work.
     events = [json.loads(l) for l in log.read_text().splitlines()]
     by_identity: dict[str, list] = {}
     for e in events:
-        key = re.split(r"\.timeout-retry-|\.recovered-", e["name"])[0]
+        key = json.dumps(e["key"]) if e.get("key") is not None else "unparsed:" + e["name"]
         by_identity.setdefault(key, []).append(e)
     overlaps, multi = [], []
     for key, evs in by_identity.items():
@@ -316,6 +326,8 @@ def run(args) -> None:
     report["executions_started"] = sum(e["event"] == "start" for e in events)
     report["executions_completed"] = sum(e["event"] == "end" for e in events)
     report["identities_executed"] = len(by_identity)
+    report["identity_grouping"] = "semantic request key parsed by the worker from the bytes it read"
+    report["unparsed_executions"] = sum(1 for e in events if e.get("key") is None)
     report["reaped_pids"] = {str(k): v for k, v in reaped.items()}
     report["concurrent_duplicate_executions"] = overlaps
     report["identities_completed_more_than_once"] = multi
