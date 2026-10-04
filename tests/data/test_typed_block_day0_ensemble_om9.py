@@ -33,9 +33,11 @@ UTC = timezone.utc
 ENS = "DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE"
 OM9 = "OM9_SOURCE_RESPONSE_INVALID"
 # (city, timezone, metric, Day0 source). Hong Kong LOW is the live anomaly: a
-# LOW family blocked by the conditional-HIGH ENS reason.
+# LOW family blocked by the conditional-HIGH ENS reason, which the current
+# materializer reaches only on its open-day HIGH branch.
 FAMILIES = {
     "singapore_high": ("Singapore", "Asia/Singapore", "high", "wu_api+same_station_fast_tail"),
+    "singapore_low": ("Singapore", "Asia/Singapore", "low", "wu_api+same_station_fast_tail"),
     "hong_kong_low": ("Hong Kong", "Asia/Hong_Kong", "low", "hko_hourly_accumulator"),
 }
 TARGET = "2026-10-05"
@@ -43,13 +45,28 @@ CUT = datetime(2026, 10, 4, 18, 30, tzinfo=UTC)  # 02:30 local on the target day
 
 
 def _forecast_db(tmp_path: Path) -> Path:
+    from src.state.schema.observation_prints_schema import ensure_table
+
     db = tmp_path / "forecasts.db"
     conn = sqlite3.connect(db)
     apply_canonical_schema(conn, forecast_tables=True)
     _ensure_schema(conn)
+    ensure_table(conn)
     conn.commit()
     conn.close()
     return db
+
+
+def _print(db: Path, observed: datetime, value: float = 27.0) -> None:
+    """One same-station settlement-channel print: the current state the ENS read is windowed by."""
+    from src.state.schema.observation_prints_schema import append_print
+
+    conn = sqlite3.connect(db)
+    assert append_print(conn, city="Singapore", station_id="WSSS", source_channel="noaa_wrh_wsss",
+                        publish_ts_utc=observed.isoformat(), value_native=value, unit="C",
+                        fetched_at_utc=observed.isoformat(), raw_report=f"WSSS {value}")
+    conn.commit()
+    conn.close()
 
 
 def _payload(family: str, **extra) -> dict:
@@ -192,7 +209,9 @@ def ens_world(tmp_path, monkeypatch):
     monkeypatch.setattr(materializer, "_compute_posterior_payload", compute)
     monkeypatch.setattr(queue, "_attach_world_read_only", lambda _conn: None)
     monkeypatch.setattr(queue, "_day0_carrier_vector_preflight_reason", lambda **_k: None)
-    return _forecast_db(tmp_path)
+    db = _forecast_db(tmp_path)
+    _print(db, CUT - timedelta(minutes=20))
+    return db
 
 
 def _drive(tmp_path: Path, db: Path, worker, payload: dict, name: str):
@@ -209,7 +228,7 @@ def _drive(tmp_path: Path, db: Path, worker, payload: dict, name: str):
     return report, path, root
 
 
-@pytest.mark.parametrize("family", sorted(FAMILIES))
+@pytest.mark.parametrize("family", ["singapore_high"])
 def test_ens_block_with_full_witness_is_fenced_and_not_retried(tmp_path, monkeypatch, ens_world, family):
     _logic(tmp_path, monkeypatch)
     worker = _Worker(ens_world, ENS)
@@ -223,6 +242,7 @@ def test_ens_block_with_full_witness_is_fenced_and_not_retried(tmp_path, monkeyp
     item = proof["items"][-1]
     assert item["selected_member_count"] == 0 and item["member_rows"]["count"] == 0
     assert item["routing"]["source"] == payload["day0_observed_extreme_source"]
+    assert item["current_state"]["source"] == "noaa_wrh_wsss"
     assert queue._UNBOUND_VERDICT_REASON not in report.reason_codes
     assert queue._UNCHANGED_BLOCKED_SKIP_REASON in report.reason_codes
     assert not path.exists()
@@ -233,7 +253,7 @@ def test_ens_block_with_full_witness_is_fenced_and_not_retried(tmp_path, monkeyp
     assert len(worker.responses) == 1
     assert queue._UNCHANGED_BLOCKED_SKIP_REASON in second.reason_codes
     # The fence is per family/metric: the other metric of the same city/date is not fenced.
-    other = {**payload, "temperature_metric": "high" if payload["temperature_metric"] == "low" else "low"}
+    other = _payload("singapore_low")
     assert queue._blocked_attempt_marker_path(root / "blocked_attempts", other) != marker
     assert not queue._blocked_attempt_state(marker_dir=root / "blocked_attempts",
         input_json=path, payload=other, forecast_db=ens_world)[2]
@@ -259,6 +279,34 @@ def test_ens_member_arrival_redecides(tmp_path, monkeypatch, ens_world):
         conn.close()
     _drive(tmp_path, ens_world, worker, payload, "s.json")
     assert len(worker.responses) == 2, "a new ENS member row must re-decide the family"
+
+
+def test_new_current_state_redecides(tmp_path, monkeypatch, ens_world):
+    _logic(tmp_path, monkeypatch)
+    worker = _Worker(ens_world, ENS)
+    payload = _payload("singapore_high")
+    _drive(tmp_path, ens_world, worker, payload, "s.json")
+    proof = worker.responses[0]["blocked_evidence"]
+    _print(ens_world, CUT - timedelta(minutes=5), 27.5)  # the read's window start moves
+    conn = _connect(ens_world)
+    try:
+        assert not evidence.evidence_holds(conn, proof, exact_request=payload)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("family", ["hong_kong_low", "singapore_low"])
+def test_low_metric_ens_block_is_not_fenced(tmp_path, monkeypatch, ens_world, family):
+    """Hong Kong 2026-10-05 LOW: the conditional-HIGH reason on a LOW family. The
+    current materializer decides it only for open-day HIGH, so no LOW witness is
+    complete: the verdict binds nothing and the request keeps its owner."""
+    _logic(tmp_path, monkeypatch)
+    worker = _Worker(ens_world, ENS)
+    payload = _payload(family)
+    report, path, root = _drive(tmp_path, ens_world, worker, payload, f"{family}.json")
+    assert "blocked_evidence" not in worker.responses[0]
+    assert path.exists() and queue._UNBOUND_VERDICT_REASON in report.reason_codes
+    assert not (root / "blocked_attempts").exists() or not list((root / "blocked_attempts").glob("*.json"))
 
 
 def test_ens_member_after_the_cut_does_not_reopen(tmp_path, monkeypatch, ens_world):
@@ -311,8 +359,16 @@ def test_ens_block_on_incomplete_witness_is_retained(tmp_path, monkeypatch, ens_
     assert not (root / "blocked_attempts").exists() or not list((root / "blocked_attempts").glob("*.json"))
 
 
-def test_ens_item_is_none_off_the_carrier_route(ens_world):
-    payload = _payload("singapore_high", day0_observed_extreme_source="wu_icao_history")
+@pytest.mark.parametrize("change", ["source", "no_state", "day_ended"])
+def test_ens_item_is_none_off_the_decided_branch(tmp_path, ens_world, change):
+    payload = _payload("singapore_high")
+    if change == "source":
+        payload["day0_observed_extreme_source"] = "wu_icao_history"
+    elif change == "no_state":
+        (tmp_path / "empty").mkdir()
+        ens_world = _forecast_db(tmp_path / "empty")
+    else:
+        payload["computed_at"] = (CUT + timedelta(days=1)).isoformat()
     conn = _connect(ens_world)
     try:
         assert evidence.day0_ensemble_unavailable_item(conn, _request(payload)) is None
