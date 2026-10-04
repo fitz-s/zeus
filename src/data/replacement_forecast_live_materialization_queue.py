@@ -2419,8 +2419,8 @@ def _current_money_risk_scopes_for_exact_seeds(
 ) -> frozenset[tuple[str, str, str]]:
     """Read only station-seed families; never enumerate global auction scope.
 
-    ``strict`` re-raises a failed read: a caller that retires work on "not held"
-    must not read an unknown book as an empty one.
+    Inventory priority does not require acquisition cost. ``strict`` re-raises
+    failed reads rather than treating an unknown classification as empty.
     """
 
     if not fam_scopes:
@@ -2447,7 +2447,6 @@ def _current_money_risk_scopes_for_exact_seeds(
                  WHERE COALESCE(p.phase, '') IN ('active', 'day0_window', 'pending_exit')
                    AND COALESCE(p.chain_state, '') IN ({state_values})
                    AND COALESCE(p.chain_shares, 0) > 0
-                   AND COALESCE(p.chain_cost_basis_usd, 0) > 0
                 """,
                 tuple(value for scope in fam_scopes for value in scope) + chain_states,
             ).fetchall()

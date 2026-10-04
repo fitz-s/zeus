@@ -4138,6 +4138,43 @@ def test_station_revision_fast_path_avoids_broad_queue_priority_reads(
     assert next_tick.status == "NO_SEEDS"
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("cost,phase,chain,quantity,expected", (
+    (0, "active", "synced", 5, True),
+    (None, "day0_window", "chain_present", 5, True),
+    ("absent_column", "pending_exit", "exit_pending_missing", 5, True),
+    (1, "active", "synced", 5, True),
+    (0, "active", "synced", 0, False),
+    (None, "active", "synced", None, False),
+    (0, "active", "local_only", 5, False),
+    (None, "active", "unknown", 5, False),
+    (0, "settled", "synced", 5, False),
+    (0, "pending_entry", "synced", 5, False),
+))
+def test_exact_station_refresh_held_scope_uses_inventory_not_cost(
+    tmp_path, metric, direction, cost, phase, chain, quantity, expected,
+) -> None:
+    """Exact station and ordinary queue reads agree without requiring USD economics."""
+    trade_db = tmp_path / "trades.db"
+    columns = "city TEXT,target_date TEXT,temperature_metric TEXT,phase TEXT,chain_state TEXT,chain_shares REAL,direction TEXT"
+    values = ["London", "2026-10-05", metric, phase, chain, quantity, direction]
+    if cost != "absent_column":
+        columns += ",chain_cost_basis_usd REAL"
+        values.append(cost)
+    family = ("London", "2026-10-05", metric)
+    wanted = frozenset({family})
+    with sqlite3.connect(trade_db) as conn:
+        conn.execute(f"CREATE TABLE position_current({columns})")
+        conn.execute(f"INSERT INTO position_current VALUES ({','.join('?' for _ in values)})", values)
+        exact = materialization_queue._current_money_risk_scopes_for_exact_seeds(wanted, trade_conn=conn)
+        ordinary = materialization_queue._current_money_risk_families(trade_db=trade_db, trade_conn=conn)
+        assert exact == ordinary == (wanted if expected else frozenset())
+        assert materialization_queue._current_money_risk_scopes_for_exact_seeds(
+            frozenset({("Denver", "2026-10-05", metric)}), trade_conn=conn,
+        ) == frozenset()
+
+
 def test_station_revision_fast_path_prefers_exact_chain_confirmed_held_family(
     monkeypatch, tmp_path
 ) -> None:

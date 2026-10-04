@@ -14594,3 +14594,192 @@ source-physics108phiUNKNOWN, provider representativeness and two station-ground
 gaps remain OPEN. Genuine next normal maintenance evidence, not forced capture,
 must establish source acquisition/bytes/clock/identity under the new loaded tip.
 Code/test/review acceptance is not whole-task completion or prediction accuracy.
+
+### Normal production terrain capture checkpoint — no code or q write
+
+checked=2026-W40; basis=normal scheduled job and independent original-byte/GRIB/
+canonical-reference validation; until=recheck-on-use. Landed/live/loaded eaf15fc7c
+full identityeaf15fc7cfc69316a028c3a28e8e0db80e8e61c0 has actual sole normal
+loader rc0, log /tmp/zeus-terrain-profile-loader-20261004.fOZ5AE/normal-loader.log.
+Main78102 stamp04:03:09.824263Z, ingest70060/forecast70087 fixed-boot eaf,
+resident70150 parent70087, cwd/live canonical三DB/configd7 are independently
+verified. Old loader log's retained restart_guard_not_selected is historical;
+independent04:07 guard getter is naturally None, without manual clearing.
+
+Actual normal maintenance scheduled04:11:28.055914Z/start04:11:28.066500Z;
+retention APPLIED34.717s at04:12:02.789Z. Audit at04:12:06.400Z is OBSERVED,
+captured HIGH/LOW with gaps{}, elapsed3.541684s. Stages: source_read1.047367,
+mask_decode.221777, cache_decode.000221, http2.171719, z_decode.098583,
+publish.002016 seconds. This closes the particular registered-profile/base-cache
+reachability failure and demonstrates this normal invocation's budget, not an
+unconditional hard native/OS bound or a guarantee for every future invocation.
+
+Final independent existing-byte check passes for both track body/index/mask SHA
+and their exact original canonical references. Actual GRIB header is paramId129,
+z/surface/step0, 20261003 1800, fc, regular1440x721; z grid equals LSM and
+temperature grid1e3d9b92… . Index200 digest5153cf4b… identifies offset224,
+length896851; actual Range206 Content-Range224–897074/137516508 matches that
+slice, raw digest5fe7d511… . Prefixes here abbreviate the full digests retained
+in normal cache/proof evidence, not invented full hashes or config declarations.
+
+Original HIGH snapshot1401879/OPKC selected25,67.25/flat375389 has
+phi773.8818359375m²s⁻², g-equivalent78.9139855m; LOW1401854/ZHCC selected
+34.5,113.75/flat320855 has phi1383.8818359375m²s⁻²,141.1166745m. Both selected
+LSM1 and original-reference identity checks pass. These are fc distribution-grid
+model-ground quantities, not sensor ground, sensor AGL or an independent
+dynamical-native height. Source-issued remains null/UNKNOWN; actual fetched
+04:12:06.294357Z and written HIGH.398453/LOW.399410 are possession/publication
+roles, not publisher-issued time. No temperature/q/lapse shift follows from this
+audit. AUDIT_ONLY_NOT_DECISION_INPUT and
+ORIGINAL_IMMUTABLE_SNAPSHOT_NOT_CURRENT_TARGET are explicit scope labels.
+
+No old108 phi rows or old756 receipts are retrofitted, and all-target/current-q
+consumption is not inferred. First new-cycle phi consumption, provider/station
+representativeness, MPMG/ZSQD qualified ground, timely current posterior/exit
+and prediction/profit outcomes remain OPEN. This closes only the bounded normal
+capture evidence slice; the original goal is not complete.
+
+The two remaining current physical-dependency rejections are not an always-newest
+false-positive: Denver NBM2707344→2708442 and Wuhan ICON2695685→2708488 each
+have real changed bodies, so the old certificate rejection is lawful. Seeds at
+03:51:20 are present; at04:11:56 no matching requests/inflight or completed new
+q is proved. DRAIN remains pending the next genuine current-source consumer
+verification, not a gate waiver or an authorized repair. Root alone decides a
+future slice after that evidence. This PLAN-only checkpoint stays uncommitted
+for the next task integration; no source/registry change, loader, manual capture,
+cycle/reseed/venue action or worktree cleanup is performed for documentation.
+
+Residual update: the two named physical-body-change scopes now have a genuine
+normal RESET, not a gate relaxation. Wuhan seed03:51:20 reaches READY04:16:23,
+posterior736103 commit04:16:29 and monitor1120 at04:16:45 with fresh
+qNO.943718614. Denver's old seed becomes READY04:17:20/736113 commit04:17:52,
+while its newer04:12:28 successor already commits736110 at04:17:27 and
+monitor850 at04:17:57 consumes the correct fresh qNO.5102628. The late old cut
+does not overwrite that newer selection. Both carry scenario_v6 and available
+exit-q source identity baseline, with HOLD, not a claimed profitable exit.
+These two DRAIN/RESET consumer gaps are CLOSED for the observed cases only.
+The old-seed interval is not the first-current-input latency or a timely PASS;
+original seed time is not new source availability and cannot attribute the whole
+delay to queue. Root assigns a bounded read-only current-lineage stage analysis;
+timing and the original goal remain OPEN, without source edits or forced
+scheduling. The exact current input clocks below supersede any25–27-minute
+cross-case timing shorthand, while preserving the old rejection case itself.
+
+Independent HK current18Z field audit reuses the genuinely acquired z digest
+5fe7d511… and compares HIGH snapshot1401255/LOW1401338: selectedflat391416,
+22.25/114.0, LSM.5078125, phi604.8818359375m²s⁻²/g-equivalent61.6808m.
+Qualified station-ground reference32m gives model-reference delta29.6808m.
+This is a derived raw-field audit, not a bound phi receipt for those HK rows:
+their original phi receipt remains UNKNOWN, and no q/center/lapse shift or
+sensor-ground promotion is made. Land fraction50.78% is not100% land, and the
+fc distribution-grid surface remains distinct from dynamical-native/sensor
+representativeness. Source capture acquisition is proved, while current receipt
+binding, first new-cycle phi consumption and full physical/prediction accuracy
+are separate remaining proof obligations.
+
+Current-lineage timing correction (read-only, no scheduling diagnosis): Denver's
+first restored736110 actually consumes NBM2709397/03Z, not the earlier2708442
+physical-change rejection example. Declared available03:59:34, local capture
+04:12:17.060646/write04:12:17.517378 → input cut04:12:28.268337 → seed file
+mtime04:12:33.464252 → READY04:17:04.676214 → callback04:17:23.063 → recorded
+INSERT04:17:27/SUCCESS04:17:27.107 → monitor850 at04:17:57.029143. Local
+write→consumer is about5m40s; actual seed mtime→READY4m31s, not the old seed's
+25-minute interval. Late-old736113 handling remains a separate preserved case.
+
+Wuhan's restored736103 consumes ICON2708488/00Z: declared available03:40:51,
+capture03:50:52.283376/write03:50:54.759612 → input cut03:51:20.686723 → seed
+mtime03:51:25.830942 → READY04:16:23.276003 → callback04:16:25.060 → recorded
+INSERT04:16:29/SUCCESS04:16:31.762 → monitor1120 at04:16:45.006300. Local
+write→consumer is about25m50s, seed mtime→READY24m57s. These are observed
+causal-stage intervals, not proof that a single cursor/job caused the delay.
+Inspection/rank/CPU-start are not persisted. computed_at is an input cut, not
+CPU start; recorded INSERT is not the exact commit instant. Published-issued/
+HTTP Last-Modified roles are not provided here; declared availability is not an
+external publication proof. Source acquisition bounded evidence is closed for
+the normal observed audit, while current forecast/monitor timeliness stays OPEN.
+No new scheduler bug, gate waiver, source edit or documentation reload follows.
+
+### Positive-chain inventory refresh qualification — before edit
+
+checked=2026-W40; basis=actual private SQL counterexamples and bounded live
+inventory control; until=recheck-on-use. The current held-refresh scope readers
+incorrectly require positive chain_cost_basis_usd in addition to physical
+inventory. Normal chain reconciliation/import can possess positive shares with
+cost0/NULL. Actual private HIGH/LOW×YES/NO×cost0/NULL matrix is8RED, with four
+cost1 controls PASS. This is a structural future refresh omission, not a proved
+cause of current latency: all27 current positive-inventory positions have
+positive cost, live reader returns19 families including Wuhan and Denver.
+No25-minute delay claim authorizes this change.
+
+Root assigns the NoObs writer only four confirmed existing paths:
+src/data/replacement_cycle_advance_trigger.py,
+src/data/replacement_forecast_live_materialization_queue.py,
+tests/test_replacement_forecast_extras_coverage_gate.py and
+tests/test_day0_extreme_updated_materialization_bridge.py. Narrow implementation
+removes the two refresh SQL cost>0 predicates and cost from the shared held
+reader's required-column set. Preserve active/day0_window/pending_exit phases,
+typed CURRENT_MONEY_RISK_CHAIN_STATES and positive chain quantity. Financial
+cost cannot negate known inventory, but unknown chain/fill, terminal phase,
+zero shares, foreign family or local-only rows are not automatically upgraded
+to held. Production extras/replay/reactor inherit this same qualification through
+the existing helper; do not edit those callers or introduce a new reader regime.
+
+This is inventory refresh eligibility/priority, not USD risk/sizing or a blanket
+positive-exposure grant. Capital caps, sizing, Kelly, cash/spendable balances,
+entry/exit/action authority and all probability/source-clock laws remain
+unchanged. Do not reuse retirement's conservative absence-negative-proof reader
+as the financial classifier; its unknown/review semantics serve a different
+obligation. Keep queue tiers/slots/caps/budgets/source cuts and current-capital
+deadlines, owner/CAS/supersession and canonical schemas unchanged.
+
+SCOPE: exact known positive-chain inventory city/date/HIGH-or-LOW family under
+the existing live phase/chain contract. DRAIN: normal source wake, materialization
+and held-monitor consumer refresh. RESET: known-flat quantity or removal from
+the existing live held-phase/chain qualification; cost is not the reset clock.
+Antibodies require real private SQL8RED→GREEN, HIGH/LOW and YES/NO cost0/NULL/
+positive-cost twins, generic/exact-station and inherited extras scope, missing
+cost column controls, false-positive phase/chain/quantity/local-only negatives,
+and unchanged current19-family live read-only control. Preserve unknown-source
+fail-closed behavior rather than manufacturing financial or probability truth.
+
+Main owns only PLAN/private test linkage, later exact existing registries and
+git/test integration. The approved source4eaf capture, current timeliness and
+physical-gap dispositions do not change. After BEFOREEDIT READY main pauses
+project writes until the four-path writer freezes. Test DBs remain private TI1
+temporary children; no daemon/canonical write/manual source/seed/cycle/venue or
+guard action. Final named review and changed-surface checks precede any separately
+authorized normal landing/loading. This plan alone is not that authorization.
+
+Final inventory four-path freeze is trigger
+fca909ea0a71f08e3eff527e95dea71140fd38df4de2229e06a9bd7385157434,
+queue99cc3dcbd2efab1c4d54bd27cca2dd8ba4d7a832ef9f2d2ffbbd31aa11fb6b2e,
+extras testbd8cf6a60d6b8092d06acf2a7752bc433840e65c89c4756b5427fa903c2c218d
+and bridge testc643eb5f6e466630327dc7f156e985664559fc0ccfdfecac2e3e5baef3d72b74.
+Only cost's shared required-column entry and the two SQL cost>0 predicates are
+removed; live phases, typed current chain and positive quantity remain exact.
+Scope is not only sorting: entry-paused reduce-only auction nomination also
+reuses held inventory. Nomination is not USD/Kelly/risk-cap/action/ENTRY authority;
+those cumulative gates remain unchanged, and no retrospective finance is inferred.
+
+Actual SQL matrix grows to80cases: original24RED/56controls→80PASS, targeted82PASS
+in /tmp/zeus-held-inventory-green-20261004.xml. Whole owned files349PASS/19FAIL
+versus original-eaf269PASS/the same19FAIL in
+/tmp/zeus-held-inventory-{owned,baseline-eaf}-20261004.xml. Eighteen failure
+signatures match exactly; the remaining signature differs only in real monotonic
+remaining4.999383/4.999215 with the same assert1vs2. That operational deadline
+measurement is not a normalized provider/source clock. None of these19 baseline
+failures is declared harmless or globally green from equality alone. Updated
+current read-only control is26positions/18families with old-cost/new-reader empty
+set difference; earlier27/19 was a different observation time, not current truth.
+
+C final APPROVE verifies exact four hashes and40 independent real-SQL cases/
+2.20s, HIGH-YES/LOW-NO cost0/NULL/missing-column and negative controls, no named
+blocker. Root accepts the narrow legal inventory qualification repair and
+authorizes normal seven-path FF delivery/loading after changed-surface checks.
+Main reuses the accepted owned/SQL/baseline evidence rather than repeating the
+large catalog or source-capture137. Capture source4eaf hashes are unchanged and
+its normal OBSERVED proof remains valid for that observed acquisition. At load,
+record actual new SHA/PID/config/canonical DB/rc and fresh full receipt; absent a
+natural zero-cost case, do not claim the private counterexample triggered in
+production. Physical representativeness/ground, first new-cycle phi binding and
+current redecision/exit timeliness remain OPEN; no appearance docs-only reload.

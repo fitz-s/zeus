@@ -1065,7 +1065,7 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
     """The (city, target_date, temperature_metric) families with a HELD position right now.
 
     Read-only from zeus_trades.position_current. A family is HELD only when it has chain-confirmed
-    economic exposure. Pending entries, local-only rows, and open-row ghosts are deliberately
+    inventory, independent of acquisition cost. Pending entries, local-only rows, and open-row ghosts are deliberately
     excluded: new-money redecision admission comes from the positive-edge screen, while held-family
     admission is reserved for money already at risk. Fail-soft: any read/schema error -> empty set
     (no prioritization, never a crash).
@@ -1082,7 +1082,7 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
             ).fetchall()
         }:
             return set()
-        required_chain_cols = {"chain_state", "chain_shares", "chain_cost_basis_usd"}
+        required_chain_cols = {"chain_state", "chain_shares"}
         if not required_chain_cols.issubset(cols):
             return set()
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to
@@ -1097,7 +1097,6 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
             WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
               AND COALESCE(chain_state, '') IN ({chain_placeholders})
               AND COALESCE(chain_shares, 0) > 0
-              AND COALESCE(chain_cost_basis_usd, 0) > 0
               AND city IS NOT NULL AND target_date IS NOT NULL
               AND temperature_metric IS NOT NULL
             """,

@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-10-02 (held physical-debt budget, partial unknowns, zero-capture fair progress)
-# Lifecycle: created=2026-06-16; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Last reused or audited: 2026-10-03 (held refresh inventory independent of cost basis)
+# Lifecycle: created=2026-06-16; last_reviewed=2026-10-03; last_reused=2026-10-03
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md;
 #   8979df299 (proven-final exact-run gaps remain incomplete when the model has any real miss).
@@ -1591,6 +1591,50 @@ def test_held_position_missing_scope_uses_extras_tuple_order(tmp_path):
     assert prod._held_position_extras_missing_scopes({"trades_db": str(trade_db)}, missing) == {
         ("Kuala Lumpur", "high", "2026-06-21")
     }
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("cost,phase,chain,quantity,expected", (
+    (0, "active", "synced", 5, True),
+    (None, "day0_window", "chain_present", 5, True),
+    ("absent_column", "pending_exit", "exit_pending_missing", 5, True),
+    (1, "active", "synced", 5, True),
+    (0, "active", "synced", 0, False),
+    (None, "active", "synced", None, False),
+    (0, "active", "local_only", 5, False),
+    (None, "active", "unknown", 5, False),
+    (0, "settled", "synced", 5, False),
+    (0, "pending_entry", "synced", 5, False),
+))
+def test_held_refresh_missing_scope_uses_inventory_not_cost(
+    tmp_path, monkeypatch, metric, direction, cost, phase, chain, quantity, expected,
+):
+    """Refresh and paused reduce-only nomination share inventory, not BUY authority."""
+    from src.data.replacement_cycle_advance_trigger import _held_position_families
+    from src.events import reactor
+    import src.state.db as db
+
+    trade_db = tmp_path / "trades.db"
+    columns = "city TEXT,target_date TEXT,temperature_metric TEXT,phase TEXT,chain_state TEXT,chain_shares REAL,direction TEXT"
+    values = ["London", "2026-10-05", metric, phase, chain, quantity, direction]
+    if cost != "absent_column":
+        columns += ",chain_cost_basis_usd REAL"
+        values.append(cost)
+    with sqlite3.connect(trade_db) as conn:
+        conn.execute(f"CREATE TABLE position_current({columns})")
+        conn.execute(f"INSERT INTO position_current VALUES ({','.join('?' for _ in values)})", values)
+        families = _held_position_families(conn)
+    family = ("London", "2026-10-05", metric)
+    assert families == ({family} if expected else set())
+    extras = ("London", metric, "2026-10-05")
+    assert prod._held_position_extras_missing_scopes({"trades_db": str(trade_db)}, {extras}) == (
+        {extras} if expected else set()
+    )
+    monkeypatch.setattr(db, "_zeus_trade_db_path", lambda: trade_db)
+    provider = reactor._edli_reactor_held_family_provider()
+    assert provider() == frozenset(families)
+    assert reactor._paused_forecast_carrier_requires_held_auction(provider) is expected
 
 
 def test_progress_keeps_servable_data_healing(_cfg_with_db, _redirect_health):
