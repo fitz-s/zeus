@@ -9,7 +9,7 @@ check and the seed input identity share one implementation.
 """
 
 # Created: 2026-10-01
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-04
 # Authority basis: merge-safety round 3 Q1 (seed identity = consumed bytes); e8df31c81.
 
 from __future__ import annotations
@@ -62,12 +62,22 @@ class VersionedFileReader:
         self._memo.clear()
 
     def read(self, path: Path) -> VersionedRead:
-        """Open without following a symlink; OSError (absent, permission, I/O) propagates."""
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        """Open without following a symlink; OSError (absent, permission, I/O) propagates.
+
+        O_NONBLOCK: a FIFO opens at once instead of waiting for a writer, so it
+        is classified NOT_REGULAR by fstat before any read. Blocking mode is
+        restored before reading a regular file.
+        """
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise UnsafeFile("NOT_REGULAR")
+            os.set_blocking(fd, True)
+        except BaseException:
+            os.close(fd)
+            raise
         with os.fdopen(fd, "rb") as handle:
             info = os.fstat(handle.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                raise UnsafeFile("NOT_REGULAR")
             if info.st_size > self._max_bytes:
                 raise UnsafeFile("SIZE")
             version = file_version(info)
