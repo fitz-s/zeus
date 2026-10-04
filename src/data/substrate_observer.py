@@ -285,6 +285,21 @@ def _priority_refresh_budget_seconds() -> float:
     return min(configured, max(1.0, interval_s - 0.5))
 
 
+def _held_refresh_ahead() -> timedelta:
+    """Lead at which a held book becomes due on the priority lane.
+
+    A held condition skipped as fresh on one pass is next examined one
+    interval later and captured within that pass's budget, so a snapshot must
+    be refreshed once it expires within interval + budget, or the next capture
+    can only land after its deadline. Derived from the lane's own cadence, so
+    it moves with it; it schedules earlier work and gates nothing.
+    """
+
+    return timedelta(
+        seconds=_priority_refresh_interval_seconds() + _priority_refresh_budget_seconds()
+    )
+
+
 def _priority_refresh_lock_wait_seconds() -> float:
     """Bounded wait so a hot priority tick is not lost behind broad substrate work."""
 
@@ -1258,6 +1273,8 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
     restrict_to_condition_ids: Iterable[str] | None = None,
     force_refresh_condition_ids: Iterable[str] | None = None,
     deadline_monotonic: float | None = None,
+    refresh_ahead_condition_ids: Iterable[str] = (),
+    refresh_ahead_fresh_at_iso: str | None = None,
 ) -> tuple[list[dict], int, int]:
     scoped_conditions = {
         str(condition_id or "").strip()
@@ -1294,11 +1311,20 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
                 continue
             if condition_id and condition_id not in forced_conditions:
                 freshness_candidates.append(condition_id)
+    ahead = set(refresh_ahead_condition_ids) if refresh_ahead_fresh_at_iso else set()
     fresh_conditions = _conditions_buy_sides_fresh(
         write_conn,
-        freshness_candidates,
+        [cid for cid in freshness_candidates if cid not in ahead],
         fresh_at_iso,
     )
+    if ahead:
+        # Held books are due before their deadline, not after: still-valid
+        # snapshots inside the refresh-ahead lead are recaptured now.
+        fresh_conditions |= _conditions_buy_sides_fresh(
+            write_conn,
+            [cid for cid in freshness_candidates if cid in ahead],
+            str(refresh_ahead_fresh_at_iso),
+        )
     if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
         raise TimeoutError("snapshot freshness prune deadline exceeded")
 
@@ -1633,8 +1659,12 @@ def _refresh_pending_family_snapshots(
     promote_pending_urgency: bool = True,
     request_priority: RequestPriority = RequestPriority.SCAN,
     capture_trigger_override: str | None = None,
+    held_refresh_ahead: timedelta = timedelta(0),
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
+
+    ``held_refresh_ahead`` makes each ``priority_write_condition_ids`` (held)
+    condition due once its snapshot expires within that lead.
 
     Decision-driven design ("先有下单结果再去找市场"):
       - Scope: ONLY the families (city/target_date/metric) of PENDING events.
@@ -1700,6 +1730,7 @@ def _refresh_pending_family_snapshots(
 
     now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
+    held_due_iso = (now_utc + held_refresh_ahead).isoformat()
     priority_conditions = {
         str(condition_id or "").strip()
         for condition_id in (priority_condition_ids or ())
@@ -2056,7 +2087,11 @@ def _refresh_pending_family_snapshots(
                         cid = str(trow.get("condition_id") or "").strip()
                         if not cid:
                             continue
-                        if not _condition_buy_sides_fresh(snapshot_read_conn, cid, now_iso):
+                        if not _condition_buy_sides_fresh(
+                            snapshot_read_conn,
+                            cid,
+                            held_due_iso if cid in priority_write_conditions else now_iso,
+                        ):
                             any_stale = True
                             break
                 except sqlite3.Error as exc:
@@ -2624,6 +2659,8 @@ def _refresh_pending_family_snapshots(
                         ),
                         force_refresh_condition_ids=forced_conditions,
                         deadline_monotonic=refresh_deadline,
+                        refresh_ahead_condition_ids=priority_write_conditions,
+                        refresh_ahead_fresh_at_iso=held_due_iso,
                     )
                 )
             finally:
@@ -2698,6 +2735,7 @@ def _refresh_pending_family_snapshots(
                 capture_reserve_seconds=snapshot_reserve_s,
                 priority_condition_ids=priority_conditions,
                 priority_write_condition_ids=priority_write_conditions,
+                priority_write_refresh_ahead=held_refresh_ahead,
                 force_refresh_condition_ids=forced_conditions,
                 priority_token_ids=priority_tokens,
                 force_refresh_token_ids=forced_tokens,
@@ -3696,6 +3734,7 @@ def _edli_money_path_substrate_priority_cycle_under_intent(
                 if marker_force_refresh_condition_ids
                 else RequestPriority.HELD_REDUCE_ONLY
             ),
+            held_refresh_ahead=_held_refresh_ahead(),
         )
         summary = {
             **dict(summary or {}),

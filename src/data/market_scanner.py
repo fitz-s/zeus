@@ -3263,17 +3263,29 @@ def capture_executable_market_snapshot(
         "enableOrderBook",
         "orderbookEnabled",
     )
+    clob_active = _boolish_market_field(raw_clob_market, "active", "isActive")
     if reconstructed_tradability:
         accepting_orders = _boolish_market_field(raw_clob_market, "accepting_orders", "acceptingOrders")
         if clob_orderbook is not None:
             enable_orderbook = clob_orderbook
-        # A reconstruction's ``active`` is the prior snapshot's, not a current
-        # fact; copying it forward latched one stale active=False into every
-        # recapture of the family.  Current CLOB lifecycle owns it when present.
-        clob_active = _boolish_market_field(raw_clob_market, "active", "isActive")
+        # A reconstruction's lifecycle labels are the prior snapshot's, not
+        # current facts; copying them forward latched one stale active=False
+        # into every recapture of the family.  Current CLOB owns them.
         if clob_active is not None:
             active = clob_active
+        clob_closed = _boolish_market_field(raw_clob_market, "closed", "isClosed")
+        if clob_closed is not None:
+            child_closed = clob_closed
+            closed = clob_closed
     else:
+        # Gamma omits the routing label on some payloads; never default it to
+        # False when current CLOB states it.
+        gamma_states_active = any(
+            _boolish_market_field(surface, "active", "isActive") is not None
+            for surface in (outcome, gamma_market_raw)
+        )
+        if not gamma_states_active and clob_active is not None:
+            active = clob_active
         # For fresh Gamma data: fill enable_orderbook from CLOB when Gamma lacked
         # the field (slug-pattern discovery omits it; tag-based includes it).
         if enable_orderbook is None and clob_orderbook is not None:
@@ -5004,8 +5016,13 @@ def refresh_executable_market_substrate_snapshots(
     background_fast_yield: bool = False,
     cooperative_write_busy_timeout_ms: int | None = None,
     capture_trigger_override: str | None = None,
+    priority_write_refresh_ahead: timedelta = timedelta(0),
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
+
+    ``priority_write_refresh_ahead`` treats a priority-write (held) condition
+    as due once its snapshot expires within that lead, so its replacement lands
+    before the deadline instead of after it.
 
     Selection is BREADTH-FIRST per city: each city contributes up to
     ``max_outcomes`` (default 4 = 2 bins × 2 directions) candidates before any
@@ -5151,7 +5168,11 @@ def refresh_executable_market_substrate_snapshots(
                 conn,
                 condition_id,
                 outcome,
-                captured=captured,
+                captured=(
+                    captured + priority_write_refresh_ahead
+                    if condition_id in priority_write_conditions
+                    else captured
+                ),
             )
             for direction in ("buy_yes", "buy_no"):
                 snapshot_side = (condition_id, direction)

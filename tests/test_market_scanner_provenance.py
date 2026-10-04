@@ -916,6 +916,109 @@ def test_reconstructed_recapture_takes_current_clob_active_not_the_persisted_lab
     assert row["active"] == 1
 
 
+def test_reconstructed_recapture_takes_current_clob_closed_not_the_persisted_label():
+    from types import SimpleNamespace
+
+    class ClosedClob(_LiveActiveClob):
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            return {
+                **super().get_clob_market_info(condition_id),
+                "closed": True,
+                "accepting_orders": False,
+            }
+
+    conn = _make_market_topology_conn()
+    result = ms.capture_executable_market_snapshot(
+        conn,
+        market=_latched_reconstruction_market("cond-closed", "2026-10-05T12:00:00+00:00"),
+        decision=SimpleNamespace(
+            tokens={
+                "token_id": "cond-closed-yes",
+                "no_token_id": "cond-closed-no",
+                "market_id": "cond-closed",
+            },
+            edge=SimpleNamespace(direction="buy_yes"),
+        ),
+        clob=ClosedClob(),
+        captured_at=datetime(2026, 10, 4, 3, 0, tzinfo=timezone.utc),
+        scan_authority="VERIFIED",
+        tolerate_missing_book=True,
+    )
+
+    row = conn.execute(
+        "SELECT closed FROM executable_market_snapshots WHERE snapshot_id = ?",
+        (result["executable_snapshot_id"],),
+    ).fetchone()
+    assert row["closed"] == 1
+
+
+def test_capture_without_gamma_active_takes_clob_active_not_a_false_default():
+    """Live since 10-02: 13 latest rows persisted active=0 because the Gamma
+    payload omitted the label and capture defaulted it to False."""
+    from types import SimpleNamespace
+
+    market = _latched_reconstruction_market("cond-unlabelled", "2026-10-05T12:00:00+00:00")
+    outcome = market["outcomes"][0]
+    outcome["accepting_orders"] = True
+    outcome["enable_orderbook"] = True
+    outcome["gamma_market_raw"] = {
+        "id": "cond-unlabelled-gamma",
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+    }
+    conn = _make_market_topology_conn()
+    result = ms.capture_executable_market_snapshot(
+        conn,
+        market=market,
+        decision=SimpleNamespace(
+            tokens={
+                "token_id": "cond-unlabelled-yes",
+                "no_token_id": "cond-unlabelled-no",
+                "market_id": "cond-unlabelled",
+            },
+            edge=SimpleNamespace(direction="buy_yes"),
+        ),
+        clob=_LiveActiveClob(),
+        captured_at=datetime(2026, 10, 4, 3, 0, tzinfo=timezone.utc),
+        scan_authority="VERIFIED",
+    )
+
+    row = conn.execute(
+        "SELECT active FROM executable_market_snapshots WHERE snapshot_id = ?",
+        (result["executable_snapshot_id"],),
+    ).fetchone()
+    assert row["active"] == 1
+
+
+def test_held_write_condition_inside_refresh_ahead_is_recaptured_before_deadline():
+    """A still-valid held book that expires inside the lead is captured now;
+    without the lead the same book reads as already fresh and waits to expire."""
+    from datetime import timedelta
+
+    captured_at = datetime(2026, 10, 4, 3, 0, tzinfo=timezone.utc)
+
+    def refresh(conn, ahead):
+        return ms.refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[_latched_reconstruction_market("cond-held", "2026-10-05T12:00:00+00:00")],
+            clob=_LiveActiveClob(),
+            captured_at=captured_at,
+            max_outcomes=0,
+            priority_condition_ids={"cond-held"},
+            priority_write_condition_ids={"cond-held"},
+            priority_write_refresh_ahead=ahead,
+        )
+
+    conn = _make_market_topology_conn()
+    first = refresh(conn, timedelta(0))
+    assert first["inserted"] == 2
+    # 160s later the book still has 20s of validity.
+    captured_at = captured_at + timedelta(seconds=160)
+
+    assert refresh(conn, timedelta(0))["inserted"] == 0
+    assert refresh(conn, timedelta(seconds=38))["inserted"] == 2
+
+
 def test_day0_refresh_past_end_anchor_does_not_require_the_routing_active_label():
     """A held Day0 child past its noon-UTC end anchor stays refreshable while
     the venue accepts orders; ``active`` is a routing label, not tradeability."""

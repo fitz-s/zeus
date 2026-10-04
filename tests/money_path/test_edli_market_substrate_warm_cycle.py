@@ -4807,6 +4807,49 @@ def test_exact_force_refresh_bypasses_fresh_prune_only_for_scoped_condition(monk
     assert [row["condition_id"] for row in pruned[0]["outcomes"]] == ["winner"]
 
 
+def test_held_condition_is_refreshed_before_its_deadline_not_after(monkeypatch):
+    """Both books expire 30s from now. A held condition is due inside the
+    refresh-ahead lead so its replacement lands before the deadline; an
+    unheld sibling keeps the plain freshness cut."""
+
+    deadline = "2026-10-04T03:00:30+00:00"
+    monkeypatch.setattr(
+        substrate_observer,
+        "_conditions_buy_sides_fresh",
+        lambda _conn, condition_ids, fresh_at_iso: {
+            cid for cid in condition_ids if deadline >= fresh_at_iso
+        },
+    )
+    market = {
+        "condition_ids": ["held", "sibling"],
+        "outcomes": [
+            {"condition_id": "held", "token_id": "yes-held"},
+            {"condition_id": "sibling", "token_id": "yes-sibling"},
+        ],
+    }
+    lead = substrate_observer._held_refresh_ahead()
+    now = datetime(2026, 10, 4, 3, 0, tzinfo=timezone.utc)
+
+    pruned, fresh_skipped, stale_submitted = (
+        substrate_observer._prune_fresh_market_outcomes_for_snapshot_refresh(
+            _FakeConn(),
+            [market],
+            fresh_at_iso=now.isoformat(),
+            refresh_ahead_condition_ids={"held"},
+            refresh_ahead_fresh_at_iso=(now + lead).isoformat(),
+        )
+    )
+
+    # Next pass is one interval away and captures within its budget.
+    assert lead.total_seconds() == pytest.approx(
+        substrate_observer._priority_refresh_interval_seconds()
+        + substrate_observer._priority_refresh_budget_seconds()
+    )
+    assert lead.total_seconds() > 30
+    assert (fresh_skipped, stale_submitted) == (1, 1)
+    assert [row["condition_id"] for row in pruned[0]["outcomes"]] == ["held"]
+
+
 def test_substrate_daemon_scheduler_health_uses_business_result(monkeypatch):
     """Scheduler OK must mean the producer made a usable business tick."""
 
