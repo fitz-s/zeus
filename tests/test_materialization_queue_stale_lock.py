@@ -480,18 +480,18 @@ def test_priority_witness_read_race_defers_without_unhandled_error(
 ):
     queue, requests, paths, _revision, plan = _three_request_priority_plan(tmp_path, monkeypatch)
     prior = plan()
-    load = queue._load_request_payload_for_coalescing
-    reads = 0
+    read_slot = queue._read_claim_slot
 
-    def replace_before_witness(path):
-        nonlocal reads
-        if path == paths[slot]:
-            reads += 1
-            if reads == 2:
-                path.write_text(new_body)
-        return load(path)
+    def replace_after_slot_read(source, **kwargs):
+        # The constructor derives identity from the bytes it read (no second
+        # pathname read), so the race is a rewrite after that read and before
+        # the under-lease byte check.
+        captured = read_slot(source, **kwargs)
+        if source == paths[slot]:
+            source.write_text(new_body)
+        return captured
 
-    monkeypatch.setattr(queue, "_load_request_payload_for_coalescing", replace_before_witness)
+    monkeypatch.setattr(queue, "_read_claim_slot", replace_after_slot_read)
     claimed, reason = queue._try_claim_priority_request(prior)
     assert claimed is None
     assert reason == (queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
