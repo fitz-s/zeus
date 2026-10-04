@@ -16176,3 +16176,51 @@ registry routes and interfaces remain unchanged, with no new file/mode/flag or
 classification. Three dirty paths only including this existing checkpoint.
 Origin remains dab665; source/test are frozen for ROOT's named review, with no
 commit/push/load or manual release of the still-active old production guard.
+
+### 2026-10-04T18:09Z late-capital guard slice actual delivery checkpoint
+
+ROOT accepted the named independent actual CLI/private CP review (6PASS,
+`/tmp/zeus-prestop-unused-guard-independent6.xml`), with source/test hashes
+unchanged. Exact three-path commit 78bd0f11ef66c2cb32a68e8a1f30020862304ace
+landed by normal fast-forward push; live only fast-forwarded from dab665.
+The task-owned ignored settings.json test symlink was removed, not its target.
+No peer source change occurred between the accepted freeze and delivery.
+
+The single fresh preflight at18:03:45Z covered all18 current open positions:
+2fresh probability,16typed probability degradation,18current held books,
+0nonterminal commands,0restart blockers. The prior Manila854 position was not
+an executed profitable SELL: canonical SETTLED event1789 at17:48:55.146616Z,
+caused_by chain_mirror_reconciler, moved day0_window to settled/closed_worthless;
+NO lost, settlement price0 and realized PnL-1.23. This natural settlement
+explains19-to18 open positions; it is not proof of timely exit.
+
+One normal registered loader ran18:04:14Z-to18:08:14Z, actualCLIrc0/session65387
+(final tool266c79); full raw log:
+`/tmp/zeus-prestop-guard-loader-20261004.u0f0gN/normal-loader.log`.
+It armed its own expected78bd generation at18:04:15.012821Z, passed initial
+and final capital handoffs, stopped old main only after normal full gates,
+bootstrapped new main and verified post-start18held/fullbook (2fresh/16degraded)
+and EDLI progressed5. The previous two dab rc1 logs remain unchanged in
+`/tmp/zeus-hourly-owner-loader-20261004.pKP4Ns/`; no manual guard release,
+venue/source action, reseed, forced cycle or extra restart occurred.
+
+Actual loaded fullSHA78bd0f11ef66c2cb32a68e8a1f30020862304ace, mainPID2287,
+stamp18:06:22.351787Z; ingest55430 and forecast55483 have fixedboot78bd HBs.
+All cwd are /Users/leofitz/zeus; main holds the three canonical DBs, ingest
+WORLD/FORECAST and forecastFORECAST. Config evidence is file-only SHA
+d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae,
+not an invented in-process configuration certificate. At18:09:15Z actual
+selectedguard=None, with fresh main/ingest/forecast heartbeats. This current
+read supersedes the loader's historical restart_guard_not_selected line.
+
+Current held probabilities are not allREADY:16 remain degraded, notably
+DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE or
+REPLACEMENT_DAY0_MEASUREMENT_DOMAIN_NOT_CURRENT. HK held dates Oct2/Oct3
+(c133/b598HIGH and daeLOW) have bid0 and no fresh statistical probability;
+current-target Oct5 latest H739595/L739597 are pre-stamp records
+(computed16:03:13Z, recorded16:15:36/59), not new post-load consumption proof
+and cannot replace old-held witnesses. No trade/profit/full-source-readiness
+claim follows from this bounded loader success. Native future2t acquisition
+awaits the human budget decision; no acquisition was enabled. Physical
+representativeness, two unproven station grounds and natural new-domain
+probability/held consumption remain open. Parent task is unfinished.
