@@ -1004,6 +1004,16 @@ def _logic_revision_paths() -> tuple[Path, ...]:
         PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
         PROJECT_ROOT / "src/data/replacement_current_value_serving.py",
         PROJECT_ROOT / "src/data/forecast_source_registry.py",
+        # Typed BLOCKED predicates and the modules that decide them.
+        PROJECT_ROOT / "src/data/materialization_block_evidence.py",
+        PROJECT_ROOT / "src/data/day0_hourly_vectors.py",
+        PROJECT_ROOT / "src/data/day0_observation_reader.py",
+        PROJECT_ROOT / "src/data/openmeteo_ecmwf_ifs9_anchor.py",
+        PROJECT_ROOT / "src/data/replacement_forecast_cycle_policy.py",
+        PROJECT_ROOT / "src/events/day0_authority.py",
+        PROJECT_ROOT / "src/data/replacement_forecast_current_target_plan.py",
+        PROJECT_ROOT / "src/data/day0_fast_obs.py",
+        PROJECT_ROOT / "src/strategy/live_inference/source_clock_vnext.py",
     )
 
 
@@ -4477,13 +4487,22 @@ def _blocked_evidence_holds(
         return True
     if forecast_db is None or not isinstance(evidence, Mapping):
         return False
-    from src.data.materialization_block_evidence import evidence_holds  # noqa: PLC0415
+    from src.data.materialization_block_evidence import (  # noqa: PLC0415
+        DAY0_ENSEMBLE, evidence_holds,
+    )
 
     try:
         conn = _queue_read_only_connection(Path(forecast_db))
     except (sqlite3.Error, OSError):
         return False
     try:
+        if evidence.get("reason") == DAY0_ENSEMBLE:
+            # The Day0 frontier and measurement domain read world truth, as the
+            # worker does; only this kind opens it.
+            try:
+                _attach_world_read_only(conn)
+            except (sqlite3.Error, OSError):
+                return False
         return evidence_holds(conn, evidence, prospective, exact_request=exact_request)
     finally:
         conn.close()

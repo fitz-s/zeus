@@ -9375,12 +9375,23 @@ def _validated_replacement_forecast_request(
         )
     precision_block_reasons = _precision_guard_block_reason(request, conn)
     if precision_block_reasons:
+        from src.data.materialization_block_evidence import (  # noqa: PLC0415
+            OM9_INVALID, blocked_evidence, om9_response_invalid_item,
+        )
+
+        # Only the pure extraction refusal of the request's own bytes is typed.
+        om9_item = (
+            om9_response_invalid_item(request)
+            if precision_block_reasons == (OM9_INVALID,) else None
+        )
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
             reason_codes=precision_block_reasons,
             posterior_id=None,
             anchor_id=None,
             readiness_id=None,
+            evidence=(None if om9_item is None
+                      else blocked_evidence(conn, request, OM9_INVALID, [om9_item])),
         )
     request = _request_with_materialization_clock(conn, request)
     frontier_request = _request_with_day0_physical_frontier(
@@ -9423,6 +9434,37 @@ _DAY0_MISSING_CURRENT_EVIDENCE_REASONS = frozenset({
 })
 
 
+def _day0_missing_current_evidence_blocked(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    reason: str,
+) -> ReplacementForecastMaterializeResult:
+    """A missing-current-evidence BLOCKED. Only the 51-member ENS shortfall is
+    typed: its evidence is the strict bundle read re-run on this normalized
+    request in the same snapshot. An unreadable store, a store whose read now
+    disagrees, or any other reason binds nothing (retained, retried)."""
+    from src.data.materialization_block_evidence import (  # noqa: PLC0415
+        DAY0_ENSEMBLE, EvidenceUnavailable, blocked_evidence, day0_ensemble_unavailable_item,
+    )
+
+    evidence = None
+    if reason == DAY0_ENSEMBLE:
+        try:
+            item = day0_ensemble_unavailable_item(conn, request)
+            if item is not None:
+                evidence = blocked_evidence(conn, request, DAY0_ENSEMBLE, [item])
+        except (EvidenceUnavailable, sqlite3.Error, OSError, KeyError, TypeError, ValueError):
+            evidence = None
+    return ReplacementForecastMaterializeResult(
+        status="BLOCKED",
+        reason_codes=(reason,),
+        posterior_id=None,
+        anchor_id=None,
+        readiness_id=None,
+        evidence=evidence,
+    )
+
+
 def prepare_replacement_forecast_live(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -9454,15 +9496,8 @@ def prepare_replacement_forecast_live(
                 conn, request, metric=metric, anchor_id=-1
             )
         except ValueError as exc:
-            reason = str(exc)
-            if reason in _DAY0_MISSING_CURRENT_EVIDENCE_REASONS:
-                return ReplacementForecastMaterializeResult(
-                    status="BLOCKED",
-                    reason_codes=(reason,),
-                    posterior_id=None,
-                    anchor_id=None,
-                    readiness_id=None,
-                )
+            if str(exc) in _DAY0_MISSING_CURRENT_EVIDENCE_REASONS:
+                return _day0_missing_current_evidence_blocked(conn, request, str(exc))
             raise
         return PreparedReplacementForecastMaterialization(
             request=request,
@@ -9714,13 +9749,7 @@ def materialize_replacement_forecast_live(
     except ValueError as exc:
         if str(exc) not in _DAY0_MISSING_CURRENT_EVIDENCE_REASONS:
             raise
-        return ReplacementForecastMaterializeResult(
-            status="BLOCKED",
-            reason_codes=(str(exc),),
-            posterior_id=None,
-            anchor_id=None,
-            readiness_id=None,
-        )
+        return _day0_missing_current_evidence_blocked(conn, request, str(exc))
     return write_prepared_replacement_forecast_live(
         conn,
         PreparedReplacementForecastMaterialization(
