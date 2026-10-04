@@ -25,8 +25,16 @@ def _load_json(path: Path):
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+    """Publish request JSON as a fresh inode atomically replacing ``path``.
+
+    Never written in place: the output may be a hardlink to a claimed
+    request, whose inode must not change (immutable request publication).
+    """
+    from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+        _write_request,
+    )
+
+    _write_request(path, payload)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,12 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         result = build_replacement_forecast_materialization_request(seed, base_dir=args.input_json.parent)
         if result.ok and result.request is not None:
             if args.queue_dir is not None:
-                # Into a live queue: publish a fresh immutable inode, never write in place.
-                from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
-                    _write_request,
-                )
-
-                _write_request(args.queue_dir / args.input_json.name, dict(result.request))
+                _write_json(args.queue_dir / args.input_json.name, dict(result.request))
             elif args.output_json is not None:
                 _write_json(args.output_json, dict(result.request))
         if args.stdout or (args.output_json is None and args.queue_dir is None):
