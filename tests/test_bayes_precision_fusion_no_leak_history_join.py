@@ -1,5 +1,8 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-08
+# Last reused/audited: 2026-10-04
+# Lifecycle: created=2026-06-08; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Purpose: Causal live-equivalent history JOIN and preserved standard-response audit evidence.
+# Reuse: Run when changing raw-product live equivalence or possession-safe history selection.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causal fixed-lead history; previous-runs
 #   for gridded models; positive-lead named-station single-runs exception with local-day cutoff;
 #   run_time != source_available_at), §5 (walk-forward, no same-day leak), §7 antibodies
@@ -576,7 +579,7 @@ def test_history_rejects_ifs025_previous_runs_but_keeps_pre_target_ifs9_single_r
     assert history.forecast_values == (19.0,)
 
 
-def test_history_rejects_standard_product_without_modified_stamp_or_valid_request_hash() -> None:
+def test_history_keeps_standard_audit_rows_without_live_equivalent_authority() -> None:
     conn = _conn()
     for target, product_id, request_url_hash in (
         ("2026-04-01", "ecmwf_ifs::standard_api_meta_stamped::run=2026-04-01T00:00:00+00:00::modified=", None),
@@ -597,8 +600,9 @@ def test_history_rejects_standard_product_without_modified_stamp_or_valid_reques
     history = _provider(conn)(
         city="Paris", metric="high", lead_days=1,
         target_date=date(2026, 5, 1), models=["ecmwf_ifs"],
-    )["ecmwf_ifs"]
-    assert history.target_dates == ("2026-04-03",)
+    )
+    assert history == {}
+    assert conn.execute("SELECT COUNT(*) FROM raw_model_forecasts WHERE endpoint_mode='standard_api_meta_stamped'").fetchone()[0] == 3
 
 
 def test_day0_previous_runs_is_physically_identified_but_not_fixed_run_history() -> None:

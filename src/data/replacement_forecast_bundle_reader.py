@@ -135,6 +135,21 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
     ):
         return None
     identity = provenance.get(identity_field)
+    from src.events.day0_authority import DAY0_MEASUREMENT_DOMAIN_REVISION
+    domain = provenance.get("day0_measurement_domain_witness")
+    conditional = provenance.get("day0_conditional_remaining_shape_witness")
+    if (provenance.get("day0_measurement_domain_revision") != DAY0_MEASUREMENT_DOMAIN_REVISION
+            or not isinstance(domain, Mapping) or not isinstance(conditional, Mapping)
+            or domain.get("metric") not in {"high", "low"}
+            or domain.get("metric") != conditional.get("metric")
+            or domain.get("coverage_cut_utc") != conditional.get("coverage_cut_utc")):
+        return "REPLACEMENT_DAY0_MEASUREMENT_DOMAIN_NOT_CURRENT"
+    expected_domain_identity = hashlib.sha256(json.dumps(
+        {key: value for key, value in domain.items() if key != "identity"},
+        sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    if domain.get("identity") != expected_domain_identity:
+        return "REPLACEMENT_DAY0_MEASUREMENT_DOMAIN_IDENTITY_INVALID"
     operator = provenance.get(operator_field)
     if not isinstance(identity, str) or not identity.strip():
         return "REPLACEMENT_DAY0_CARRIER_IDENTITY_PAIR_INCOMPLETE"
@@ -178,32 +193,15 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
             return "REPLACEMENT_DAY0_RESOLVER_TERMINAL_INPUT_INVALID"
         if not isinstance(providers, (list, tuple)) or not isinstance(final, (list, tuple)):
             return "REPLACEMENT_DAY0_FINAL_EXTREME_CENTERS_INVALID"
-        if len(providers) != len(final):
+        if final or any(not isinstance(provider, Mapping) or provider.get("remaining_variable_mapping") != "UNKNOWN" for provider in providers):
             return "REPLACEMENT_DAY0_FINAL_EXTREME_CENTERS_INVALID"
         return None
     if operator == DAY0_REMAINING_CARRIER_OPERATOR_V2:
-        if providers not in (None, (), []) or final not in (None, (), []):
+        if final not in (None, (), []) or any(not isinstance(provider, Mapping) or provider.get("remaining_variable_mapping") != "UNKNOWN" for provider in (providers or ())):
             return "REPLACEMENT_DAY0_FINAL_EXTREME_OPERATOR_MISMATCH"
         return None
     if operator == DAY0_REMAINING_CARRIER_OPERATOR_V3:
-        if not isinstance(providers, (list, tuple)) or not providers:
-            return "REPLACEMENT_DAY0_FINAL_EXTREME_PROVIDERS_INVALID"
-        if not isinstance(final, (list, tuple)) or not final or len(providers) != len(final):
-            return "REPLACEMENT_DAY0_FINAL_EXTREME_CENTERS_INVALID"
-        for provider, center in zip(providers, final, strict=True):
-            if not isinstance(provider, Mapping):
-                return "REPLACEMENT_DAY0_FINAL_EXTREME_PROVIDERS_INVALID"
-            forecast_value = provider.get("forecast_value_c")
-            if (
-                isinstance(forecast_value, bool)
-                or not isinstance(forecast_value, (int, float))
-                or not math.isfinite(float(forecast_value))
-                or isinstance(center, bool)
-                or not isinstance(center, (int, float))
-                or not math.isfinite(float(center))
-                or float(forecast_value) != float(center)
-            ):
-                return "REPLACEMENT_DAY0_FINAL_EXTREME_VALUE_MISMATCH"
+        return "REPLACEMENT_DAY0_WHOLE_PRODUCT_REMAINING_MAPPING_UNPROVEN"
     return None
 
 
@@ -528,8 +526,9 @@ def _wu_fast_pinned_carrier_reason(
         from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
 
         identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
-        conditional_identity = provenance.get("day0_conditional_high_shape_identity")
-        conditional_witness = provenance.get("day0_conditional_high_shape_witness")
+        identity_inputs["measurement_domain_witness"] = provenance.get("day0_measurement_domain_witness")
+        conditional_identity = provenance.get("day0_conditional_remaining_shape_identity")
+        conditional_witness = provenance.get("day0_conditional_remaining_shape_witness")
         conditional_basis = provenance.get("day0_remaining_variance_basis")
         if any(value is not None for value in (
             conditional_identity, conditional_witness, conditional_basis,
@@ -537,13 +536,13 @@ def _wu_fast_pinned_carrier_reason(
             if (
                 not isinstance(conditional_identity, str) or not conditional_identity
                 or not isinstance(conditional_witness, Mapping)
-                or conditional_basis != "conditional_ens_within_plus_provider_center_delta_v1"
+                or conditional_basis != "conditional_remaining_ens_within_plus_provider_center_delta_v2"
                 or conditional_identity != hashlib.sha256(json.dumps(
                     conditional_witness, sort_keys=True, separators=(",", ":"),
                 ).encode()).hexdigest()
             ):
                 raise ValueError("conditional_shape_invalid")
-            identity_inputs["conditional_high_shape_identity"] = conditional_identity
+            identity_inputs["conditional_remaining_shape_identity"] = conditional_identity
         topology = provenance["bin_topology"]
         if not isinstance(topology, list) or not topology:
             raise ValueError("topology_missing")

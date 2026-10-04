@@ -1152,6 +1152,10 @@ def seed_build_dependencies(
         "station": station,
         "logic": logic,
     }
+    from src.events.day0_authority import DAY0_MEASUREMENT_DOMAIN_REVISION
+    city_obj = runtime_cities_by_name().get(city)
+    if city_obj is not None and decision_at.astimezone(ZoneInfo(city_obj.timezone)).date().isoformat() == target_date:
+        identity["day0_measurement_domain_revision"] = DAY0_MEASUREMENT_DOMAIN_REVISION
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()
@@ -1995,6 +1999,13 @@ def _seed_already_covered(
         try:
             provenance = json.loads(str(posterior["provenance_json"] or "{}"))
         except (TypeError, ValueError):
+            return False
+        from src.data.replacement_forecast_bundle_reader import _day0_carrier_identity_reason
+
+        # Coverage must use the consumer's current domain/carrier authority;
+        # an old revision is repair debt, not a terminal duplicate. Ordinary
+        # noncarrier rows retain the reader's existing no-Day0 contract.
+        if not isinstance(provenance, Mapping) or _day0_carrier_identity_reason(provenance) is not None:
             return False
         from src.data.replacement_forecast_cycle_policy import (
             current_evidence_shape_has_held_authority, declares_fast_residual_carrier,
@@ -4364,6 +4375,8 @@ def _blocked_attempt_fingerprint(
         identity["fast_residual_coverage"] = fast_coverage_dependency
     if day0_mixture_scope:
         identity["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
+        from src.events.day0_authority import DAY0_MEASUREMENT_DOMAIN_REVISION
+        identity["day0_measurement_domain_revision"] = DAY0_MEASUREMENT_DOMAIN_REVISION
     canonical = json.dumps(
         identity,
         sort_keys=True,

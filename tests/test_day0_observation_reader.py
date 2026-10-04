@@ -43,6 +43,66 @@ from src.data.day0_observation_reader import (
 )
 
 
+@pytest.mark.parametrize("damage", [None, "body", "asof", "possession", "date", "station", "instant", "raw_missing"])
+def test_native_prefix_requires_original_measurement_clock_and_entity(damage):
+    from scripts.hko_ingest_tick import _parse_hko_extrema_csv, _build_hko_extrema_row
+    from src.data.day0_observation_reader import hko_native_prefix_proof, read_day0_measurement_domain_witness
+
+    body = (b"\xef\xbb\xbfDate time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),Minimum Air Temperature Since Midnight(degree Celsius)\r\n"
+            b"202610041800,HK Observatory,30.6,26.1\r\n")
+    snapshot = _parse_hko_extrema_csv(body.decode("utf-8-sig"),
+        fetched_at_utc="2026-10-04T10:08:43+00:00", entity_body=body)
+    row = _build_hko_extrema_row(snapshot, temperature_c=28.9,
+        accumulator_fetched_at="2026-10-04T10:05:00+00:00",
+        data_version="v1.wu-native", imported_at="2026-10-04T10:08:44+00:00")
+    provenance = json.loads(row.provenance_json)
+    inputs = dict(target_date=row.target_date, row_id=1, station_id=row.station_id,
+        observed_at=row.utc_timestamp, imported_at=row.imported_at,
+        provenance_json=row.provenance_json, raw_response=row.raw_response,
+        high=row.running_max, low=row.running_min,
+        decision_time=datetime(2026,10,4,10,9,tzinfo=timezone.utc))
+    if damage == "body": inputs["raw_response"] += "tampered"
+    if damage == "asof": inputs["observed_at"] = "2026-10-04T10:08:43+00:00"
+    if damage == "possession": inputs["imported_at"] = "2026-10-04T10:10:00+00:00"
+    if damage == "date": inputs["target_date"] = "2026-10-03"
+    if damage == "station": inputs["station_id"] = "VHHH"
+    if damage == "instant":
+        provenance["native_prefix_evidence"]["role"] = "instant_temperature"
+        inputs["provenance_json"] = json.dumps(provenance)
+    if damage == "raw_missing": inputs["raw_response"] = None
+    proof = hko_native_prefix_proof(**inputs)
+    if damage is not None:
+        assert proof is None
+        return
+    assert proof["coverage_cut_utc"] == "2026-10-04T10:00:00+00:00"
+    assert proof["body_sha256"] == "sha256:" + hashlib.sha256(body).hexdigest()
+    conn = _make_conn()
+    _insert(conn, city="Hong Kong", target_date=row.target_date, source=row.source,
+        timezone_name=row.timezone_name, local_timestamp=row.local_timestamp, utc_timestamp=row.utc_timestamp,
+        temp_current=row.temp_current, running_max=row.running_max, running_min=row.running_min,
+        station_id=row.station_id, raw_response=row.raw_response, imported_at=row.imported_at,
+        authority=row.authority, training_allowed=0, source_role="runtime_monitoring",
+        provenance_json=row.provenance_json)
+    before = conn.total_changes
+    for metric in ("high", "low"):
+        witness = read_day0_measurement_domain_witness(conn, city="Hong Kong", target_date=row.target_date,
+            timezone_name=row.timezone_name, decision_time=inputs["decision_time"], metric=metric,
+            source=row.source, observed_bound_c=row.running_max if metric == "high" else row.running_min)
+        assert witness["coverage_cut_utc"] == proof["coverage_cut_utc"]
+        assert witness["metric"] == metric and witness["body_sha256"] == proof["body_sha256"]
+    assert conn.total_changes == before
+    conn.close()
+
+
+def test_partial_instant_cannot_discard_unobserved_past():
+    from src.data.day0_observation_reader import read_day0_measurement_domain_witness
+    witness = read_day0_measurement_domain_witness(None, city="Chicago", target_date="2026-10-04",
+        timezone_name="America/Chicago", decision_time=datetime(2026,10,4,18,tzinfo=timezone.utc),
+        metric="low", source="aviationweather_metar", observed_bound_c=18.0)
+    assert witness["coverage_cut_utc"] == "2026-10-04T05:00:00+00:00"
+    assert witness["measurement_prefix_complete"] is False
+
+
 def test_hko_minute_mean_normal_writer_selects_observed_clock_and_preserves_raw_body():
     from scripts.hko_ingest_tick import append_hko_current_temperature_print
     from src.config import cities_by_name

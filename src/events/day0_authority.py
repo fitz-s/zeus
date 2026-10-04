@@ -43,10 +43,10 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # revision (a provisional carrier that cannot compose fails closed rather than
 # fall back).
 DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = (
-    "day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
+    "day0_settlement_channel_revision_model_v35_conditional_measurement_domain_native_roles_v1"
 )
 DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
-    "day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
+    "day0_resolver_terminal_composition_v36_conditional_measurement_domain_native_roles_v1"
 )
 
 
@@ -61,6 +61,7 @@ def _current_day0_probability_semantics_revision() -> str:
 
 
 DAY0_PROBABILITY_SEMANTICS_REVISION = _current_day0_probability_semantics_revision()
+DAY0_MEASUREMENT_DOMAIN_REVISION = "day0_conditional_measurement_domain_v1"
 _DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_MODE = "deterministic_bin_payoff"

@@ -44,6 +44,7 @@ timestamp without inventing historical extrema.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import hashlib
 import io
@@ -105,6 +106,8 @@ class HkoExtremaSnapshot:
     high_c: float
     low_c: float
     fetched_at_utc: str
+    native_date_time: str | None = None
+    entity_body: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -186,7 +189,7 @@ class HkoExtremaPoller:
                     response.raise_for_status()
                     if index == 0:
                         values[index] = HkoExtremaPrefetch(
-                            _parse_hko_extrema_csv(response.text,fetched_at_utc=fetched.isoformat()),
+                            _parse_hko_extrema_csv(response.content.decode("utf-8-sig"),fetched_at_utc=fetched.isoformat(), entity_body=response.content),
                             response.headers.get("etag"),response.headers.get("last-modified"))
                     else:
                         modified = response.headers.get("last-modified")
@@ -217,8 +220,9 @@ class HkoExtremaPoller:
         fetched_at = datetime.now(timezone.utc).isoformat()
         return HkoExtremaPrefetch(
             snapshot=_parse_hko_extrema_csv(
-                response.text,
+                response.content.decode("utf-8-sig"),
                 fetched_at_utc=fetched_at,
+                entity_body=response.content,
             ),
             etag=response.headers.get("etag"),
             last_modified=response.headers.get("last-modified"),
@@ -360,9 +364,12 @@ def _parse_hko_extrema_csv(
     payload: str,
     *,
     fetched_at_utc: str,
+    entity_body: bytes | None = None,
 ) -> HkoExtremaSnapshot:
     """Parse the official HKO since-midnight extrema for Observatory HQ."""
 
+    if entity_body is not None and entity_body.decode("utf-8-sig") != payload.lstrip("\ufeff"):
+        raise ValueError("HKO entity body does not reproduce parsed CSV")
     reader = csv.DictReader(io.StringIO(payload.lstrip("\ufeff")))
     for row in reader:
         station = str(row.get("Automatic Weather Station") or "").strip()
@@ -388,6 +395,8 @@ def _parse_hko_extrema_csv(
             high_c=high_c,
             low_c=low_c,
             fetched_at_utc=fetched_at_utc,
+            native_date_time=raw_time,
+            entity_body=entity_body,
         )
     raise ValueError("HKO extrema CSV missing HK Observatory row")
 
@@ -396,7 +405,7 @@ def _fetch_hko_extrema() -> HkoExtremaSnapshot:
     response = httpx.get(HKO_EXTREMA_URL, timeout=30.0)
     response.raise_for_status()
     fetched_at = proof_of_possession_available_at(datetime.now(timezone.utc))
-    return _parse_hko_extrema_csv(response.text, fetched_at_utc=fetched_at)
+    return _parse_hko_extrema_csv(response.content.decode("utf-8-sig"), fetched_at_utc=fetched_at, entity_body=response.content)
 
 
 def _latest_accumulator_temperature(
@@ -423,9 +432,12 @@ def _same_extrema_already_materialized(
     conn: sqlite3.Connection,
     snapshot: HkoExtremaSnapshot,
 ) -> bool:
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(observation_instants)")}
+    if "raw_response" not in columns:
+        return False  # legacy schema cannot prove a raw publication; never suppress refresh
     row = conn.execute(
         """
-        SELECT running_max, running_min
+        SELECT running_max, running_min, id, provenance_json, raw_response, imported_at
           FROM observation_instants
          WHERE city = ?
            AND source = 'hko_hourly_accumulator'
@@ -451,7 +463,16 @@ def _same_extrema_already_materialized(
     ).fetchone()
     if row is None:
         return False
+    from src.data.day0_observation_reader import hko_native_prefix_proof
+    proof = hko_native_prefix_proof(
+        target_date=snapshot.target_date, row_id=row[2], station_id="HKO",
+        observed_at=snapshot.observed_at_utc, imported_at=row[5],
+        provenance_json=row[3], raw_response=row[4], high=row[0], low=row[1],
+        decision_time=datetime.fromisoformat(snapshot.fetched_at_utc),
+    )
     return (
+        proof is not None
+        and
         abs(float(row[0]) - snapshot.high_c) <= 1e-9
         and abs(float(row[1]) - snapshot.low_c) <= 1e-9
     )
@@ -516,6 +537,17 @@ def _build_hko_extrema_row(
         "source_file": HKO_EXTREMA_URL,
         "parser_version": HKO_EXTREMA_PARSER,
     }
+    raw_response = None
+    if snapshot.entity_body is not None:
+        raw_response = snapshot.entity_body.decode("utf-8-sig")
+        provenance_payload["native_prefix_evidence"] = {
+            "role": "since_midnight_1min_mean_extrema",
+            "native_date_time": snapshot.native_date_time,
+            "source_url": HKO_EXTREMA_URL, "codec": "utf-8-sig",
+            "body_hash_role": "decoded_http_entity_bytes_sha256",
+            "body_sha256": "sha256:" + hashlib.sha256(snapshot.entity_body).hexdigest(),
+            "body_base64": base64.b64encode(snapshot.entity_body).decode("ascii"),
+        }
     if rollover_reset_confirmation is not None:
         identity_payload["rollover_reset_confirmation"] = (
             rollover_reset_confirmation
@@ -548,6 +580,7 @@ def _build_hko_extrema_row(
         authority="ICAO_STATION_NATIVE",
         data_version=data_version,
         provenance_json=provenance,
+        raw_response=raw_response,
     )
 
 

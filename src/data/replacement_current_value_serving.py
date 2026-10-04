@@ -1158,14 +1158,13 @@ def recorded_openmeteo_identity_has_authority(row: Mapping[str, object], artifac
     """
     try:
         from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
-        from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL, STANDARD_FORECAST_URL
+        from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
         from src.data.openmeteo_client import PREVIOUS_RUNS_URL
         if not isinstance(artifact, dict) or artifact["sha256"] != row["raw_sha256"]:
             return False
         expected_url = {"single_runs": SINGLE_RUNS_FORECAST_URL,
-            "standard_api_meta_stamped": STANDARD_FORECAST_URL,
             "previous_runs": PREVIOUS_RUNS_URL}.get(str(row["endpoint_mode"]))
-        if artifact.get("data_version") != "openmeteo_single_model_entity_body_v1" or artifact["request_url"] != expected_url:
+        if expected_url is None or artifact.get("data_version") != "openmeteo_single_model_entity_body_v1" or artifact["request_url"] != expected_url:
             return False
         if any(artifact[key] != row[key] for key in ("source_id", "product_id", "source_cycle_time")):
             return False

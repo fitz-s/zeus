@@ -1,6 +1,6 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-10-03
-# Lifecycle: created=2026-05-11; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused/audited: 2026-10-04
+# Lifecycle: created=2026-05-11; last_reviewed=2026-10-04; last_reused=2026-10-04
 # Purpose: Protect bounded collector, cross-track isolation and optional native capture without prediction-budget regression.
 # Reuse: Inspect source-run, land-mask and shared-deadline contracts; use private DB/GRIB fixtures and fake HTTP.
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.5
@@ -363,6 +363,78 @@ def test_normal_surface_audit_actual_bytes_shared_hl_and_clock_identity(tmp_path
     assert before_cache == {str(p): p.read_bytes() for p in fixture["surface_paths"].values()}
     assert before_proofs == {str(p): p.with_suffix(".proof.json").read_bytes() for p in fixture["surface_paths"].values()}
     assert tuple(fixture["db"].iterdump()) == fixture["before"]  # no q/old receipt/source clock write
+
+
+@pytest.mark.parametrize("fault", (None, "run", "grid", "reference", "generation", "entity", "missing_cache"))
+def test_forward_surface_audit_binds_committed_coverage_without_rewriting_source_proof(tmp_path, monkeypatch, fault):
+    from scripts import extract_open_ens_localday as extractor
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    fixture["session"].before_get = lambda: True
+    for track, surface in fixture["surface_paths"].items():
+        mask = surface.with_name(f".{track}_20260101_00z_lsm.grib2")
+        assert module._fetch_cycle_surface_evidence(cycle=fixture["issue"], mask_path=mask)["capture_status"] == "OBSERVED"
+    assert len(fixture["session"].calls) == 2
+    high = fixture["surface_paths"]["mx2t6_high"]
+    proof_path = high.with_suffix(".proof.json")
+    if fault == "run":
+        fixture["db"].execute("UPDATE source_run SET source_run_id='foreign-committed-run' WHERE source_run_id LIKE '%mx2t6_high%'")
+    elif fault == "grid":
+        fixture["db"].execute("UPDATE ensemble_snapshots SET provenance_json=json_set(provenance_json,'$.grid_surface_evidence.temperature_grid_identity_hash',?) WHERE temperature_metric='high'", ("f" * 64,))
+    elif fault == "reference":
+        fixture["db"].execute("UPDATE source_run_coverage SET snapshot_ids_json='[999]' WHERE temperature_metric='high'")
+    elif fault == "entity":
+        proof = json.loads(proof_path.read_bytes())
+        proof["raw_message_sha256"] = "0" * 64
+        proof_path.write_text(json.dumps(proof))
+    elif fault == "missing_cache":
+        for path in (high, high.with_suffix(".index.body"), proof_path):
+            path.unlink()  # Only this test's generated private cache.
+    cache_before = {p: p.read_bytes() for surface in fixture["surface_paths"].values()
+                    for p in (surface, surface.with_suffix(".index.body"), surface.with_suffix(".proof.json")) if p.exists()}
+    changed = []
+    if fault == "generation":
+        decode = extractor._read_surface_geopotential
+        def changing_generation(path, proof):
+            result = decode(path, proof)
+            if path == high and not changed:
+                proof_path.write_bytes(proof_path.read_bytes() + b" \n")
+                changed.append(True)
+            return result
+        monkeypatch.setattr(extractor, "_read_surface_geopotential", changing_generation)
+    db_before = tuple(fixture["db"].iterdump())
+    result = module.capture_open_ens_surface_audit()
+    expected = ["mx2t6_high", "mn2t6_low"] if fault in (None, "missing_cache") else ["mn2t6_low"]
+    assert result.get("captured_tracks") == expected, result
+    assert result["capture_status"] == "OBSERVED", result
+    assert len(fixture["session"].calls) == 2  # no recapture of already possessed bytes
+    for track in expected:
+        binding = result["snapshot_bindings"][track]
+        assert binding["snapshot_id"] == (1 if track == "mx2t6_high" else 2)
+        assert track in binding["source_run_id"]
+        cached_proof = fixture["surface_paths"][track].with_suffix(".proof.json")
+        assert binding["source_proof_sha256"] == hashlib.sha256(cached_proof.read_bytes()).hexdigest()
+        assert binding["raw_phi_m2_s2"] == 313.75
+    if fault == "missing_cache":
+        created = json.loads(proof_path.read_bytes())
+        low = fixture["surface_paths"]["mn2t6_low"]
+        origin = json.loads(cache_before[low.with_suffix(".proof.json")])
+        for key in ("source_fetched_at", "source_fetched_at_role", "source_issued_at", "source_url",
+                    "source_index_url", "source_index_sha256", "raw_message_sha256",
+                    "source_index_offset", "source_index_length", "audit_scope", "quantity_role"):
+            assert created[key] == origin[key]
+        assert high.read_bytes() == cache_before[low]
+        assert high.with_suffix(".index.body").read_bytes() == cache_before[low.with_suffix(".index.body")]
+        assert created["mask_sha256"] == hashlib.sha256(high.with_name(".mx2t6_high_20260101_00z_lsm.grib2").read_bytes()).hexdigest()
+        assert created["source_evidence_role"] == "FORWARD_SOURCE_ONLY_NO_SNAPSHOT_PIN"
+        assert not any(key in created for key in ("snapshot_id", "source_run_id", "snapshot_binding_sha256"))
+        again = module.capture_open_ens_surface_audit()
+        assert again["captured_tracks"] == expected, again
+        assert len(fixture["session"].calls) == 2
+    for path, body in cache_before.items():
+        assert path.read_bytes() == (body + b" \n" if fault == "generation" and path == proof_path else body)
+    assert tuple(fixture["db"].iterdump()) == db_before
 
 
 @pytest.mark.parametrize("field,value", (("dataDate", 20260102), ("dataType", "cf"),
@@ -780,7 +852,7 @@ def test_mask_possession_clock_cannot_use_pre_fetch_cycle_start() -> None:
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
-def test_optional_surface_cache_adds_no_http_or_prediction_budget_gate(tmp_path, monkeypatch, track):
+def test_optional_surface_invalid_mask_adds_no_http_or_prediction_budget_gate(tmp_path, monkeypatch, track):
     from src.data import ecmwf_open_data
 
     root = tmp_path / "source"
@@ -800,6 +872,18 @@ def test_optional_surface_cache_adds_no_http_or_prediction_budget_gate(tmp_path,
                        mask_grid_identity_hash=trusted["mask_grid_identity_hash"])
     mask_deadlines, extract_timeouts = [], []
     deadline = time.monotonic() + 2
+    temperature_finished = datetime.now(timezone.utc) - timedelta(hours=2)
+    wall_clock = [temperature_finished]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromtimestamp(wall_clock[0].timestamp(), tz or timezone.utc)
+    monkeypatch.setattr(ecmwf_open_data, "datetime", Clock)
+    def optional_surface(**kwargs):
+        # An optional audit's later clock must not replace temperature fetch completion.
+        wall_clock[0] += timedelta(hours=1)
+        return {"capture_status": "UNKNOWN", "unavailable_reason": "private timeout"}
+    monkeypatch.setattr(ecmwf_open_data, "_fetch_cycle_surface_evidence", optional_surface)
 
     def mask_fetch(**kwargs):
         mask_deadlines.append(kwargs["deadline"])
@@ -815,8 +899,8 @@ def test_optional_surface_cache_adds_no_http_or_prediction_budget_gate(tmp_path,
         folder = output_root / ecmwf_open_data.TRACKS[track]["extract_subdir"] / "london" / "20260606"
         folder.mkdir(parents=True)
         (folder / "target.json").write_text(json.dumps(payload))
-        surface = Path(cmd[cmd.index("--surface-geopotential-grib-path") + 1])
-        assert not surface.exists()  # No fabricated cache or weather acquisition.
+        assert "--surface-geopotential-grib-path" not in cmd
+        assert "--surface-geopotential-proof-path" not in cmd
         return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
     conn = _make_conn(tmp_path)
@@ -824,13 +908,181 @@ def test_optional_surface_cache_adds_no_http_or_prediction_budget_gate(tmp_path,
         track=track, run_date=issue, run_hour=0,
         now_utc=datetime(2026, 6, 6, 9, tzinfo=timezone.utc), skip_download=True,
         conn=conn, _runner=extract, _mask_fetch_impl=mask_fetch,
-        cycle_deadline_monotonic=deadline,
+        cycle_deadline_monotonic=deadline, extract_timeout_seconds=1,
     )
     assert requests_seen == []
+    assert wall_clock[0] == temperature_finished + timedelta(hours=1)
     assert mask_deadlines == [deadline]
     assert len(extract_timeouts) == 1 and 0 < extract_timeouts[0] <= 2
     assert result["snapshots_inserted"] == 1, result
     assert conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0] == 1
+    stored = conn.execute("SELECT source_cycle_time, fetch_finished_at FROM source_run").fetchone()
+    assert stored["source_cycle_time"] == "2026-06-06T00:00:00+00:00"
+    assert datetime.fromisoformat(stored["fetch_finished_at"]) == temperature_finished
+
+
+@pytest.mark.parametrize("remaining", (0, .25, 100))
+def test_first_surface_allowance_is_one_attempt_inside_cycle_remainder(tmp_path, monkeypatch, remaining):
+    from src.data import ecmwf_open_data as module
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    fixture["session"].before_get = lambda: True
+    clock = [100.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    transport = module._fetch_surface_audit_bytes
+    deadlines = []
+    def slow_optional(cycle, url, index_url, *, deadline):
+        deadlines.append(deadline)
+        result = transport(cycle, url, index_url, deadline=deadline)
+        clock[0] = deadline + .001  # Native publication may not accept late bytes.
+        return result
+    monkeypatch.setattr(module, "_fetch_surface_audit_bytes", slow_optional)
+    mask = fixture["surface_paths"]["mx2t6_high"].with_name(".mx2t6_high_20260101_00z_lsm.grib2")
+    result = module._fetch_cycle_surface_evidence(cycle=fixture["issue"], mask_path=mask, deadline=100 + remaining)
+    assert result["capture_status"] == "UNKNOWN"
+    assert deadlines == ([] if remaining == 0 else [100 + min(remaining, module.OPENDATA_AVAILABILITY_PROBE_SECONDS)])
+    assert len(fixture["session"].calls) == (0 if remaining == 0 else 2)
+    assert not fixture["surface_paths"]["mx2t6_high"].exists()
+    assert all(kwargs["timeout"] <= min(remaining, module.OPENDATA_AVAILABILITY_PROBE_SECONDS)
+               for _url, kwargs in fixture["session"].calls)
+
+
+@pytest.mark.parametrize("remaining", (.25, 1000))
+def test_optional_surface_cannot_spend_mandatory_extract_budget(tmp_path, monkeypatch, remaining):
+    from scripts import extract_open_ens_localday as extractor
+    from src.data import ecmwf_open_data as module
+    from tests.test_ingest_grib_source_run_context import _land_grid_proof
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch, tracks=("mx2t6_high",))
+    fixture["session"].before_get = lambda: True
+    monkeypatch.setattr(module, "_write_stderr_dump", lambda *args: None)
+    clock = [100.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    transport = module._fetch_surface_audit_bytes
+    def late_surface(cycle, url, index_url, *, deadline):
+        captured = transport(cycle, url, index_url, deadline=deadline)
+        clock[0] += .251  # Actual index + range complete after the narrow cycle budget.
+        return captured
+    monkeypatch.setattr(module, "_fetch_surface_audit_bytes", late_surface)
+    station = _land_grid_proof()["station_geometry"]
+    manifest_json = json.dumps({"cities": [{"city": "London", "lat": 51.6, "lon": .1,
+        "timezone": "Europe/London", "unit": "C", "station_geometry": station}]})
+    extracted = []
+    def mask_fetch(*, output_path, **kwargs):
+        mask = extractor._read_land_mask(output_path, output_path.with_suffix(".proof.json"))
+        return {**mask["proof"], "mask_grid_identity_hash": mask["grid_identity_hash"]}
+    def extract(cmd, *, label, timeout):
+        surface = fixture["surface_paths"]["mx2t6_high"] if "--surface-geopotential-grib-path" in cmd else None
+        result = extractor.extract_open_ens_localday(grib_path=fixture["raw"], track_name="mx2t6_high",
+            manifest_path=Path(cmd[cmd.index("--manifest-path") + 1]), output_root=tmp_path / "extracted",
+            mask_grib_path=Path(cmd[cmd.index("--mask-grib-path") + 1]),
+            mask_proof_path=Path(cmd[cmd.index("--mask-proof-path") + 1]),
+            surface_geopotential_grib_path=surface,
+            surface_geopotential_proof_path=surface.with_suffix(".proof.json") if surface else None)
+        extracted.append((timeout, json.loads(Path(result["sample_outputs"][0]).read_bytes())))
+        return {"label": label, "ok": False, "stderr_tail": "private extraction inspected"}
+    result = module.collect_open_ens_cycle(track="mx2t6_high", run_date=fixture["issue"].date(), run_hour=0,
+        skip_download=True, _runner=extract, _mask_fetch_impl=mask_fetch, extract_timeout_seconds=900,
+        coordinate_manifest_json=manifest_json, _paths=fixture["paths"], conn=fixture["db"],
+        cycle_deadline_monotonic=100 + remaining)
+    assert extracted, f"OPTIONAL_Z_SUPPRESSED_MANDATORY_EXTRACT: {result}"
+    timeout, payload = extracted[0]
+    assert timeout == min(900, remaining)
+    terrain = payload["native_capture_receipt"]["surface_geopotential_receipt_v1"]
+    assert terrain["capture_status"] == ("UNKNOWN" if remaining < 900 else "OBSERVED")
+    assert len(fixture["session"].calls) == (0 if remaining < 900 else 2)
+    assert payload["members"][0]["value_native_unit"] == pytest.approx(286 - 273.15)
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]
+
+
+@pytest.mark.parametrize("fault", (None, "cycle", "grid", "type", "unit", "timeout", "no_budget", "race",
+                                  "forwardmask", "oldbound", "oldbound_bad"))
+def test_first_extract_surface_source_evidence_is_optional_and_shared(tmp_path, monkeypatch, fault):
+    import eccodes as ec
+    from scripts import extract_open_ens_localday as extractor
+    from src.data import ecmwf_open_data as module
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib, _land_grid_proof
+
+    fixture = _terrain_audit_fixture(tmp_path, monkeypatch)
+    fixture["session"].before_get = lambda: True
+    monkeypatch.setattr(module, "_write_stderr_dump", lambda *args: None)
+    if fault == "forwardmask":
+        mask = fixture["surface_paths"]["mx2t6_high"].with_name(".mx2t6_high_20260101_00z_lsm.grib2")
+        assert module._fetch_cycle_surface_evidence(cycle=fixture["issue"], mask_path=mask)["capture_status"] == "OBSERVED"
+    elif fault in ("oldbound", "oldbound_bad"):
+        assert module.capture_open_ens_surface_audit()["capture_status"] == "OBSERVED"
+    if fault in ("forwardmask", "oldbound_bad"):
+        proof_path = fixture["surface_paths"]["mx2t6_high"].with_suffix(".proof.json")
+        proof = json.loads(proof_path.read_bytes())
+        proof["mask_sha256"] = "a" * 64
+        proof_path.write_text(json.dumps(proof))
+    if fault in ("cycle", "grid", "type", "unit"):
+        gid = ec.codes_new_from_message(fixture["z_bytes"])
+        try:
+            field, value = {"cycle": ("dataDate", 20260102), "grid": ("scanningMode", 64),
+                            "type": ("dataType", "cf"), "unit": ("paramId", 130)}[fault]
+            ec.codes_set(gid, field, value)
+            fixture["session"].z_bytes = ec.codes_get_message(gid)
+        finally:
+            ec.codes_release(gid)
+    elif fault == "timeout":
+        fixture["session"].failure = module.requests.Timeout("optional z timeout")
+    elif fault == "no_budget":
+        monkeypatch.setattr(module, "OPENDATA_AVAILABILITY_PROBE_SECONDS", 0)
+    if fault == "race":
+        original_link = module.os.link
+        def racing_link(source, target):
+            if Path(target) == fixture["surface_paths"]["mx2t6_high"] and not Path(target).exists():
+                Path(target).write_bytes(b"foreign publisher")
+            return original_link(source, target)
+        monkeypatch.setattr(module.os, "link", racing_link)
+
+    station = _land_grid_proof()["station_geometry"]
+    manifest_json = json.dumps({"cities": [{"city": "London", "lat": 51.6, "lon": .1,
+        "timezone": "Europe/London", "unit": "C", "station_geometry": station}]})
+    receipts = []
+    for track in ("mx2t6_high", "mn2t6_low"):
+        folder = tmp_path / track
+        folder.mkdir()
+        raw, _mask, _proof, _ = _tiny_native_grib(folder, track, member_count=1)
+        def mask_fetch(*, output_path, **kwargs):
+            # Private real LSM is already at the registered track cache path.
+            decoded = extractor._read_land_mask(output_path, output_path.with_suffix(".proof.json"))
+            return {**decoded["proof"], "mask_grid_identity_hash": decoded["grid_identity_hash"]}
+        def extract(cmd, *, label, timeout):
+            authorized = fault in (None, "oldbound") or (fault in ("race", "forwardmask", "oldbound_bad") and track == "mn2t6_low")
+            assert ("--surface-geopotential-grib-path" in cmd) == authorized
+            surface = Path(cmd[cmd.index("--surface-geopotential-grib-path") + 1]) if authorized else None
+            if authorized:
+                assert surface.read_bytes() == fixture["z_bytes"], "z original must exist before first extract"
+                proof = json.loads(surface.with_suffix(".proof.json").read_bytes())
+                if fault not in ("oldbound", "oldbound_bad"):
+                    assert "snapshot_id" not in proof and "source_run_id" not in proof
+                mask_path = Path(cmd[cmd.index("--mask-grib-path") + 1])
+                assert proof["mask_sha256"] == hashlib.sha256(mask_path.read_bytes()).hexdigest()
+            result = extractor.extract_open_ens_localday(grib_path=raw, track_name=track,
+                manifest_path=Path(cmd[cmd.index("--manifest-path") + 1]),
+                output_root=folder / "extract", mask_grib_path=Path(cmd[cmd.index("--mask-grib-path") + 1]),
+                mask_proof_path=Path(cmd[cmd.index("--mask-proof-path") + 1]),
+                surface_geopotential_grib_path=surface,
+                surface_geopotential_proof_path=surface.with_suffix(".proof.json") if surface else None)
+            payload = json.loads(Path(result["sample_outputs"][0]).read_bytes())
+            receipts.append(payload)
+            return {"label": label, "ok": False, "stderr_tail": "private extraction inspected"}
+        module.collect_open_ens_cycle(track=track, run_date=fixture["issue"].date(), run_hour=0,
+            skip_download=True, _runner=extract, _mask_fetch_impl=mask_fetch,
+            coordinate_manifest_json=manifest_json, _paths=fixture["paths"], conn=fixture["db"])
+    assert len(receipts) == 2
+    for track, payload in zip(("mx2t6_high", "mn2t6_low"), receipts):
+        terrain = payload["native_capture_receipt"]["surface_geopotential_receipt_v1"]
+        observed = fault in (None, "oldbound") or (fault in ("race", "forwardmask", "oldbound_bad") and track == "mn2t6_low")
+        assert terrain["capture_status"] == ("OBSERVED" if observed else "UNKNOWN")
+        assert payload["grid_surface_evidence"]["mask_source_fetched_at"] == "2026-01-01T01:00:00+00:00"
+        if observed:
+            assert terrain["raw_phi_m2_s2"] == 313.75
+    assert len(fixture["session"].calls) == (0 if fault == "no_budget" else 2 if fault in (None, "oldbound", "oldbound_bad") else
+                                           2 if fault == "timeout" else 4)
+    assert tuple(fixture["db"].iterdump()) == fixture["before"]
 
 
 def test_collector_does_not_authorize_payload_with_different_mask_hash(tmp_path, monkeypatch) -> None:

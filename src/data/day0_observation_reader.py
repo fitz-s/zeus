@@ -53,6 +53,9 @@ the settlement-metric-aware verdict for the live entry/monitor lanes.
 """
 from __future__ import annotations
 
+import base64
+import csv
+import io
 import json
 import hashlib
 import math
@@ -198,6 +201,7 @@ class Day0ObservedExtrema:
     max_gap_minutes: Optional[float] = None
     gap_suspect_metrics: tuple[str, ...] = ()
     provenance: dict = field(default_factory=dict, compare=False)
+    native_prefix: Mapping[str, object] | None = None
 
     def coverage_status_for_metric(self, metric: str) -> str:
         """Per-metric coverage verdict (M-2/H-3).
@@ -1100,7 +1104,8 @@ _LATEST_CONTEXT_SQL = """
 """
 
 _LATEST_EXTREMA_SQL = """
-    SELECT running_max, running_min
+    SELECT running_max, running_min, id, {station_projection}, utc_timestamp,
+           imported_at, provenance_json, {raw_projection}
     FROM {table_ref}
     WHERE city = ?
       AND target_date = ?
@@ -1287,6 +1292,133 @@ def _coverage_gap_analysis(
     return max_gap_minutes, tuple(sorted(suspect))
 
 
+def hko_native_prefix_proof(
+    *, target_date: str, row_id: object, station_id: object,
+    observed_at: object, imported_at: object, provenance_json: object,
+    raw_response: object, high: object, low: object, decision_time: datetime,
+) -> Mapping[str, object] | None:
+    """Qualify an actual since-midnight publication, not a spot/fetch clock.
+
+    Old rows without the HTTP entity and original CSV clock remain UNKNOWN.
+    Count/density coverage and source URL labels cannot supply this proof.
+    """
+    try:
+        provenance = json.loads(str(provenance_json or ""))
+        evidence = provenance["native_prefix_evidence"]
+        if (station_id != "HKO" or provenance["observation_basis"] != _HKO_EXTREMA_BASIS
+                or evidence["role"] != "since_midnight_1min_mean_extrema"
+                or evidence["body_hash_role"] != "decoded_http_entity_bytes_sha256"
+                or evidence["source_url"] != "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_since_midnight_maxmin.csv"
+                or evidence["codec"] != "utf-8-sig"):
+            return None
+        body = base64.b64decode(evidence["body_base64"], validate=True)
+        body_hash = "sha256:" + hashlib.sha256(body).hexdigest()
+        text = body.decode("utf-8-sig")
+        if body_hash != evidence["body_sha256"] or text != raw_response:
+            return None
+        rows = [row for row in csv.DictReader(io.StringIO(text))
+                if row.get("Automatic Weather Station", "").strip() == "HK Observatory"]
+        if len(rows) != 1:
+            return None
+        row = rows[0]
+        raw_time = row["Date time"].strip()
+        local = datetime.strptime(raw_time, "%Y%m%d%H%M").replace(tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        asof = local.astimezone(timezone.utc)
+        fetch = datetime.fromisoformat(str(provenance["extrema_fetched_at"]).replace("Z", "+00:00"))
+        possessed = datetime.fromisoformat(str(imported_at).replace("Z", "+00:00"))
+        stored = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+        if (any(clock.tzinfo is None for clock in (fetch, possessed, stored, decision_time))
+                or not asof <= fetch <= possessed <= decision_time
+                or stored != asof or local.date().isoformat() != target_date
+                or raw_time != evidence["native_date_time"]
+                or float(row["Maximum Air Temperature Since Midnight(degree Celsius)"]) != float(high)
+                or float(row["Minimum Air Temperature Since Midnight(degree Celsius)"]) != float(low)
+                or not math.isfinite(float(high)) or not math.isfinite(float(low))
+                or float(high) < float(low)):
+            return None
+        return {"source": _HKO_SOURCE, "station_id": "HKO", "target_date": target_date,
+                "basis": _HKO_EXTREMA_BASIS, "role": evidence["role"],
+                "coverage_cut_utc": asof.isoformat(), "native_date_time": raw_time,
+                "body_sha256": body_hash, "body_hash_role": evidence["body_hash_role"],
+                "source_issued_role": "UNKNOWN", "available_at_utc": fetch.isoformat(),
+                "imported_at_utc": possessed.isoformat(), "row_id": int(row_id),
+                "high_c": float(high), "low_c": float(low)}
+    except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def day0_native_prefix_for_metric(observation: Day0ObservedExtrema, metric: str) -> Mapping[str, object]:
+    if metric not in {"high", "low"} or observation.native_prefix is None:
+        raise ValueError("DAY0_NATIVE_MEASUREMENT_PREFIX_UNAVAILABLE")
+    witness = {**observation.native_prefix, "metric": metric,
+               "quantity": "since_midnight_1min_mean_max" if metric == "high" else "since_midnight_1min_mean_min"}
+    witness["identity"] = hashlib.sha256(json.dumps(witness, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return witness
+
+
+def day0_measurement_domain_witness(observation: Day0ObservedExtrema, metric: str) -> Mapping[str, object]:
+    """Complete native prefix, or partial bounds with *no* measured prefix.
+
+    The latter keeps the unresolved past from local midnight. A current spot
+    or an aggregate occurrence clock cannot silently discard that interval.
+    """
+    if observation.native_prefix is not None:
+        return day0_native_prefix_for_metric(observation, metric)
+    value = observation.high_so_far if metric == "high" else observation.low_so_far
+    if metric not in {"high", "low"} or value is None or not math.isfinite(float(value)):
+        raise ValueError("DAY0_QUALIFIED_PARTIAL_BOUND_UNAVAILABLE")
+    if observation.chosen_source is None or not observation.last_observation_time_utc:
+        raise ValueError("DAY0_QUALIFIED_PARTIAL_BOUND_UNAVAILABLE")
+    start = datetime.combine(date.fromisoformat(observation.target_date), datetime.min.time(),
+                             tzinfo=ZoneInfo(str(observation.provenance["timezone_name"]))).astimezone(timezone.utc)
+    witness = {"source": observation.chosen_source, "target_date": observation.target_date,
+               "metric": metric, "quantity": "observed_partial_max" if metric == "high" else "observed_partial_min",
+               "role": "qualified_partial_bounds_no_complete_measurement_prefix",
+               "coverage_cut_utc": start.isoformat(), "measurement_prefix_complete": False,
+               "last_observation_time_utc": observation.last_observation_time_utc,
+               "partial_bound_native": float(value), "row_count": observation.row_count,
+               "reader_provenance": observation.provenance}
+    witness["identity"] = hashlib.sha256(json.dumps(witness, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return witness
+
+
+def read_day0_measurement_domain_witness(
+    conn: sqlite3.Connection | None, *, city: str, target_date: str, timezone_name: str,
+    decision_time: datetime, metric: str, source: str, observed_bound_c: float,
+) -> Mapping[str, object]:
+    """Reuse the canonical HKO reader, otherwise keep the unknown past domain.
+
+    Partial-bound inputs must already have passed the caller's observation
+    authority/causality gate. This function never promotes their occurrence or
+    latest instant to a complete measurement-prefix clock.
+    """
+    if metric not in {"high", "low"} or not math.isfinite(observed_bound_c) or not source:
+        raise ValueError("DAY0_QUALIFIED_PARTIAL_BOUND_UNAVAILABLE")
+    if source.startswith(_HKO_SOURCE) and conn is not None:
+        table_ref = _hko_observation_table_ref(conn)
+        if table_ref is not None:
+            observation = read_day0_observed_extrema(
+                conn, city=city, target_date=target_date, timezone_name=timezone_name,
+                decision_time_utc=decision_time, source_priority=(_HKO_SOURCE,), table_ref=table_ref,
+            )
+            if observation.native_prefix is not None:
+                native_bound = observation.high_so_far if metric == "high" else observation.low_so_far
+                if native_bound != observed_bound_c:
+                    raise ValueError("DAY0_NATIVE_PREFIX_BOUND_REBUILD_MISMATCH")
+                return day0_native_prefix_for_metric(observation, metric)
+    start = datetime.combine(date.fromisoformat(target_date), datetime.min.time(),
+                             tzinfo=ZoneInfo(timezone_name)).astimezone(timezone.utc)
+    if decision_time.tzinfo is None or start > decision_time:
+        raise ValueError("DAY0_MEASUREMENT_DOMAIN_CLOCK_INVALID")
+    witness = {"source": source, "target_date": target_date, "metric": metric,
+               "quantity": "observed_partial_max" if metric == "high" else "observed_partial_min",
+               "role": "qualified_partial_bounds_no_complete_measurement_prefix",
+               "coverage_cut_utc": start.isoformat(), "measurement_prefix_complete": False,
+               "partial_bound_c": observed_bound_c}
+    witness["identity"] = hashlib.sha256(json.dumps(witness, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return witness
+
+
 def read_day0_observed_extrema(
     conn: sqlite3.Connection,
     *,
@@ -1363,6 +1495,7 @@ def read_day0_observed_extrema(
     agg_low: Optional[float] = None
     n_rows: int = 0
     last_observation_time_utc: Optional[str] = None
+    native_prefix = None
 
     for source in source_priority:
         source_sql, source_vals = _source_semantics(source)
@@ -1388,11 +1521,16 @@ def read_day0_observed_extrema(
         n_rows = int(row[2])
         last_observation_time_utc = str(row[3]) if row[3] is not None else None
         if source == _HKO_SOURCE:
+            schema, _, table = table_ref.rpartition(".")
+            info = f"PRAGMA {schema + '.' if schema else ''}table_info({table})"
+            columns = {str(column[1]) for column in conn.execute(info)}
             latest_extrema_sql = _LATEST_EXTREMA_SQL.format(
                 auth_placeholders=auth_ph,
                 source_semantics=source_sql,
                 table_ref=table_ref,
                 observation_fact_time=_OBSERVATION_FACT_TIME_SQL,
+                station_projection="station_id" if "station_id" in columns else "NULL",
+                raw_projection="raw_response" if "raw_response" in columns else "NULL",
             )
             latest_extrema = conn.execute(
                 latest_extrema_sql,
@@ -1403,6 +1541,13 @@ def read_day0_observed_extrema(
             if latest_extrema is None:
                 continue
             agg_high, agg_low = latest_extrema[0], latest_extrema[1]
+            native_prefix = hko_native_prefix_proof(
+                target_date=target_date, row_id=latest_extrema[2],
+                station_id=latest_extrema[3], observed_at=latest_extrema[4],
+                imported_at=latest_extrema[5], provenance_json=latest_extrema[6],
+                raw_response=latest_extrema[7], high=agg_high, low=agg_low,
+                decision_time=decision_time_utc,
+            )
         break
 
     # M-2/H-3: qualifying-row timeline for the chosen source only (never mixed).
@@ -1512,6 +1657,7 @@ def read_day0_observed_extrema(
             else "source_role_and_authority"
         ),
         "reader": "src.data.day0_observation_reader.read_day0_observed_extrema",
+        "native_prefix": native_prefix,
     }
 
     return Day0ObservedExtrema(
@@ -1523,6 +1669,7 @@ def read_day0_observed_extrema(
         current_temp=current_temp,
         row_count=n_rows,
         coverage_status=coverage_status,
+        native_prefix=native_prefix,
         decision_time_utc=decision_str,
         last_observation_time_utc=last_observation_time_utc,
         max_gap_minutes=max_gap_minutes,

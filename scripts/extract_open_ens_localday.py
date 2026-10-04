@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Created: 2026-09-22
-# Last reused/audited: 2026-10-03
+# Last reused/audited: 2026-10-04
 # Authority basis: current OpenData source contract; native 3h local-day extrema.
-# Lifecycle: created=2026-09-22; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Lifecycle: created=2026-09-22; last_reviewed=2026-10-04; last_reused=2026-10-04
 # Purpose: Native ENS GRIB -> local-day JSON with optional byte/point capture; no DB writes.
 # Reuse: Use the collector's explicit coordinate manifest and same-cycle land-mask proof.
 """Decode native ENS windows at settlement coordinates.
@@ -851,9 +851,10 @@ def extract_open_ens_localday(
     surface = None
     surface_unknown = {"capture_status": "UNKNOWN", "unavailable_reason": "SURFACE_GEOPOTENTIAL_UNAVAILABLE"}
     try:
-        surface_path = surface_geopotential_grib_path or mask_grib_path.with_suffix(".z.grib2")
+        if surface_geopotential_grib_path is None or surface_geopotential_proof_path is None:
+            raise ValueError("ENS_SURFACE_GEOPOTENTIAL_EXPLICIT_SOURCE_PROOF_REQUIRED")
         surface = _read_surface_geopotential(
-            surface_path, surface_geopotential_proof_path or surface_path.with_suffix(".proof.json"),
+            surface_geopotential_grib_path, surface_geopotential_proof_path,
         )
         if (surface["fields"] != mask["fields"]
                 or surface["grid_identity_hash"] != scan["temperature_grid_identity_hash"]

@@ -438,14 +438,14 @@ The current additional policy is
 field); it does not replace `day0_remaining_center_policy='unshifted_live_v1'`
 or its explicit numeric zero bias. Construction, replay, coverage and normal
 queue RESET bind both policies. The current joint identity is survival
-`day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1`
+`day0_settlement_channel_revision_model_v35_conditional_measurement_domain_native_roles_v1`
 and resolver
-`day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1`.
+`day0_resolver_terminal_composition_v36_conditional_measurement_domain_native_roles_v1`.
 Old zero-weight declarations are not silently given the new policy. A docs
 change alone is not implementation or deployment evidence.
 
 The shared-carrier V1 is retained only for explicit, immutable historical replay. Current ENTRY and
-held-position belief require a complete V2 or typed V3 carrier declaration; ordinary
+held-position belief require a complete same-domain V2 or resolver carrier declaration; ordinary
 non-carrier forecasts are unaffected. Old, partial or unknown carrier versions
 are uncovered in the existing family coverage/seed loop and are rebuilt from
 causal inputs. Valid current materialization clears this family-scoped condition.
@@ -460,8 +460,8 @@ the uncertain past extreme is then mapped to the settlement channel by the
 existing fast-residual transport exactly once, on both point q and confidence
 draws. Construct that base carrier with the no-boundary scenario; never make the
 fast extreme an absorbing floor/ceiling or invent NOAA/HKO boundary-survival
-probability for this source. HIGH uses the conditional variance below; LOW
-retains its existing minimum-path and uncertainty operator.
+probability for this source. HIGH and LOW use their own quantities under the
+same conditional-domain variance law below.
 
 The producer and ENTRY/held/submit readers bind the same source, station,
 metric, local day, observation clocks, current-state value, base-carrier identity
@@ -478,29 +478,46 @@ The combined land-grid/current-state construction is identified by
 `day0_resolver_terminal_composition_v25_land_grid_v3` when that existing
 composition is selected. Older cohorts retain their original attribution.
 
-Once a causal target-day observation and complete unresolved-hour provider
-trajectories exist, Day0 point q is a different conditional random variable from
-the source-clock full-day extreme. The open-local-day, pure-hourly HIGH
-carrier uses the following conditional decomposition:
+Day0 HIGH and LOW use a metric-specific latent variable X over the unresolved
+local-day interval. Its left cut is the actual native measurement-prefix as-of,
+not an extreme occurrence, latest spot, fetch or written clock. A qualified
+since-midnight HKO publication proves that prefix only when its original CSV
+`Date time`, actual HTTP entity bytes/hash, station/date/statistic and independent
+possession clocks reproduce the canonical row. Old raw-less rows are not such
+proof. A complete settlement-source measurement-grid archive prefix may also
+qualify, but ordinary row count, density or max-gap labels do not prove collection
+completeness.
+
+Without a complete prefix, qualified partial observations remain statistical
+bounds and X retains the unknown past from local midnight. This is an empty
+measured prefix, not a claim of continuous measurement coverage. A later current
+instant conditions the path internally and cannot discard the interval from the
+left cut to that instant. The end is the next local midnight, half-open. Its
+acquired right knot supports the last interval's explicitly modeled linear
+interpolation; it is not a next-day observation admitted to this day's sample.
+Missing support is DATA_DEGRADED, not a copied terminal hour.
+
+All provider and 51-member ENS trajectories must describe this same current-state
+conditional X before the running-boundary pushforward:
 
 ```
 provider_path_s = remaining_extreme(
-    condition(hourly_path_s, current_temperature, observation_time)
+    condition(hourly_path_s, current_temperature, observation_time), left_cut, local_end
 )
 ensemble_path_m = remaining_extreme(
-    condition(same_run_IFS_member_m, current_temperature, observation_time)
+    condition(same_run_IFS_member_m, current_temperature, observation_time), left_cut, local_end
 )
 W_cond² = Var_m(ensemble_path_m)
 B_cond² = Var_s(provider_path_s)
 D_cond  = abs(mean_s(provider_path_s) - mean_m(ensemble_path_m))
 residual = sqrt(W_cond² + D_cond²)
-effective = max(residual, hypot(instrument, observation_latency_margin / 2))
-path_error² = max(effective² - instrument², 0)
+path_error² = W_cond² + D_cond² + (observation_latency_margin / 2)²
+effective² = path_error² + instrument²
 future_s = provider_path_s + Normal(0, hypot(instrument, path_error))
 final_s         = extreme(observed_running_boundary, future_s)
 ```
 
-For pure remaining-hourly HIGH, condition all 51 same-run IFS members and
+For each metric separately, condition all 51 same-run IFS members and
 the current deterministic provider paths on the **same** observation and
 decision clock. The 51 ensemble members share one ensemble-product run and
 request identity; deterministic and ensemble products publish independently,
@@ -510,57 +527,61 @@ of which deterministic run is current. Metadata from after the decision may
 not retroactively revoke or authorize its evidence. Use the actual Day0 physical-provider representatives,
 equally weighted; a regional path supersedes its global path from the same
 provider. Their between-spread `B_cond` already belongs to the carrier mixture
-and must not enter `path_error` again. The source-clock full-day posterior and
-its original sigma remain unchanged. The current-state value is still a point
+and must not enter `path_error` again. Provider-served hourly 2m samples with an
+explicit piecewise-linear interval model are not native hourly extrema; native
+time step and aggregation remain UNKNOWN unless proven. Actual response units,
+selected coordinates/elevation and entity hash are bound, not requested
+coordinates relabeled as response geometry. Metadata availability schedules
+acquisition but cannot bind a rolling body to a run: deterministic and ensemble
+requests use the actual UTC-minute `run` selector on their legally supported
+Single Runs/ensemble endpoints. The ordinary forecast endpoint forbids `run`;
+its metadata-stamped body remains raw audit evidence, not quantitative current-q
+authority. Failed pinned requests do not retry that rolling endpoint. Unsupported
+or missing run files and nonfinite members fail closed, never retry as rolling/no-run. Every
+used innovation, left/right interpolation support and X knot must be at or
+after that proved run; historical-filled negative-lead points have no current
+ENS authority. Entity possession is actual fetch completion, not a decision
+label backdated onto capture.
+
+The original whole-day fusion remains typed audit provenance. Current Day0
+`mu_star` and `predictive_sigma_c` are X's pre-boundary moments, not a Gaussian
+substitute for its mixture q. The current-state value is still a point
 approximation; this revision does not integrate the measurement quantization
 interval. Missing members, wrong run, unavailable timestamps, or incomplete
 observation-hour coverage make that family unavailable until the existing
 current-date priority refresh fetches a complete carrier and the materializer
 reissues a certificate. A healthy family resets on the ensemble product's
-own current-run proof;
-no global entry pause follows from another family's missing carrier. LOW and
-the closed-local-day treatment retain their existing computation in this
-revision; this change does not establish a conditional-variance repair for them.
+own current-run proof. A new latest run cannot repair missing unknown-past
+support if it initializes after the left cut: RESET then needs a genuine native
+prefix/archive proof that advances the cut, or a legitimate current run covering
+all of X. Normal capture is not a promise of that missing source contract.
+No global entry pause follows from another family's missing carrier.
 
-A station product predicting the **final daily extreme** is not a remaining
-hourly path. Its center remains separately typed in
-`day0_remaining_carrier_final_extremes_c`. When such a component is present,
-the shared operator is `typed_remaining_and_final_extreme_gaussian_v3`.
-Within each surviving observed-boundary scenario, a final-HIGH Gaussian is
-conditioned on being at least that boundary; a final-LOW Gaussian is conditioned
-on being at most it. Integrate the truncated, normalized Gaussian over the same
-settlement preimages. Do not clamp the center or censor its below/above-boundary
-mass into an atom. A no-boundary scenario retains its unconditioned Gaussian.
-A zero-variance component contradicting the surviving boundary is unavailable,
-not a fabricated point mass at the boundary.
+A whole-day agency product, including HKO FND, retains its exact raw serving
+row as `agency_whole_day_extreme_forecast` audit provenance. Unknown time domain,
+station/geometry or quantization cannot be converted into an X scenario; an
+integer oracle bin is not a continuous future center. Such a provider cannot
+bypass conditional ENS or introduce the V3 lower-edge half-mass tail. The current
+carrier therefore has no quantitative final-center component without a proven
+native mapping. Historical V1/V3 operators remain only for immutable attribution.
 
-The typed V3 final-daily station composition retains the source-current error
-width and its separate variance basis, provider-component weights and
-boundary-survival mixture. Remaining-hourly components still use the max/min
-operator above. Both point probabilities and confidence draws use these same
-typed distributions, and carrier identity binds the two center sets separately.
-V1 historical replay retains its original inputs; current pure-hourly HIGH V2
-uses the conditional variance above. Materialization, ENTRY, held redecision and submit-time reproduction
-share this builder; a new Day0 semantics revision prevents mixing old and new
-decision certificates or settlement attribution.
-
-The combined land-grid-proof, conditional-HIGH and all-city current-state
-mechanism uses Day0 survival revision
-`day0_settlement_channel_revision_model_v26_land_grid_v3` and resolver revision
-`day0_resolver_terminal_composition_v25_land_grid_v3`. Predecessor revisions,
-including survival v25 and resolver v24, are historical only: current action requires recomputation
-under the combined mechanism, never a changed prefix on an old probability.
-
-For pure hourly HIGH, the conditional IFS within-spread and its disagreement
-with the conditional deterministic centers account for unresolved model error.
-The source-clock pre-observation total variance is never reduced by a
-post-observation provider spread: doing so reintroduces disagreement that the
-current observation already resolved. Instrument and observation-latency
-uncertainty remain the existing maximum floor; the operator adds instrument
-variance only once before physical max/min. The producer, held/ENTRY rebuild,
-and immutable submit replay bind the conditional shape's member/run/observation
-witness and semantics revision. Older certificates must be rematerialized for
-new action, while their original realized-fill attribution remains historical.
+Instrument and latency retain the existing city measurement overrides and
+latency-rate assumptions; they are not inferred from ENS. Quadrature models
+these separate zero-mean measurement/publication errors as independent additions
+to the forecast residual, not competing maximum floors. κ remains the existing
+cut-before historical source/station measurement-revision likelihood with its
+empirical ENTRY gate and sealed identity, never a forecast residual fit.
+Instrument and latency contributions enter once alongside W/D; provider B is
+already in the equal-provider mixture. Noise precedes a single running max/min
+and boundary atom pushforward. Provisional survival remains statistical, not
+forced to one. There is no historical residual floor, whole-day sigma-minus-
+remaining-spread closure, fitted shift or arbitrary half-degree correction.
+Producer, bundle reader, ENTRY/held and JIT bind the same measurement-domain,
+metric, run/entity/current-state witness, q and confidence draws. Joint identity
+is `day0_conditional_measurement_domain_v1`, survival v35 and resolver v36
+(full names above). Old certificates require ordinary seed/materialization
+recomputation; explicit revision-only change reopens the exact family's queue
+suppression. Never relabel an old body, clear SQL suppression or rewrite fills.
 
 The source-clock posterior, finite-member/moment band, topology, and causal
 identity remain bound into the Day0 witness and are reproduced at submit. A

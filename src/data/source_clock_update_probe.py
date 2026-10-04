@@ -10,7 +10,7 @@ import sqlite3
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Mapping
@@ -19,6 +19,7 @@ import fcntl
 
 from src.config import STATE_DIR
 from src.data.openmeteo_model_updates import (
+    NATIVE_METADATA_ENTITY_KEY,
     OpenMeteoModelUpdate,
     fetch_model_updates,
     read_model_updates_jsonl,
@@ -402,6 +403,28 @@ def probe_openmeteo_source_clock_updates(
                     endpoint_url=endpoint_url,
                     priority=True,
                 )
+                # Cache/304 replay retains the original 200 receipt only for
+                # exactly the same entity and possession clock. A cache read
+                # cannot manufacture headers or renew any source clock.
+                retained = []
+                for update in fetched:
+                    native = (update.raw or {}).get(NATIVE_METADATA_ENTITY_KEY)
+                    old_update = cached_by_model.get(update.model)
+                    old_native = ((old_update.raw or {}).get(NATIVE_METADATA_ENTITY_KEY)
+                        if old_update is not None else None)
+                    if (isinstance(native, Mapping) and native.get("response_role") == "CACHE_ENTITY"
+                            and isinstance(old_native, Mapping) and old_native.get("status") == "CAPTURED"
+                            and old_native.get("origin_response_role") == "NETWORK_200_ENTITY"
+                            and all(native.get(key) == old_native.get(key) for key in
+                                ("body_sha256", "body_base64", "byte_size", "captured_at", "request_url", "request_params"))):
+                        native = {**native, "origin_response_role": "NETWORK_200_ENTITY",
+                            "headers_status": old_native.get("headers_status", "UNKNOWN"),
+                            "http_response_headers": {str(key).lower(): str(value)
+                                for key, value in old_native.get("http_response_headers", {}).items()
+                                if str(key).lower() in {"date", "etag", "last-modified", "content-type"}}}
+                        update = replace(update, raw={**dict(update.raw or {}), NATIVE_METADATA_ENTITY_KEY: native})
+                    retained.append(update)
+                fetched = tuple(retained)
                 fetched_by_model = {update.model: update for update in fetched}
                 _record_model_update_poll(
                     due_models,

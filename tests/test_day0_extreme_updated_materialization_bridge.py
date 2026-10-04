@@ -2051,6 +2051,118 @@ def test_day0_fusion_revision_uses_its_own_owner_not_cycle_advance_marker(
     assert ownership.witness is None
 
 
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("transport", ["seed", "request"])
+@pytest.mark.parametrize("domain_revision", ["old", "missing", "current", "ordinary"])
+def test_covered_domain_revision_reaches_actual_seed_and_request_reset(
+    tmp_path, monkeypatch, metric, transport, domain_revision,
+) -> None:
+    """SQL coverage cannot suppress the reader's Day0 domain RESET before build/spawn."""
+    import hashlib
+    import src.data.replacement_forecast_bundle_reader as reader
+    import src.data.replacement_forecast_cycle_policy as policy
+    import src.data.station_ground_evidence as ground
+    from src.contracts.ensemble_snapshot_provenance import GRID_SURFACE_EVIDENCE_REVISION
+    from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V2
+    from src.events.day0_authority import DAY0_MEASUREMENT_DOMAIN_REVISION
+
+    cycle = "2026-10-04T00:00:00+00:00"
+    cut = "2026-10-04T06:00:00+00:00"
+    seed = dict(city="Shanghai", target_date="2026-10-04", temperature_metric=metric,
+        source_cycle_time=cycle, computed_at=cut, baseline_source_run_id="b",
+        openmeteo_source_run_id="o", upgrade_trigger="day0_current_temperature_advanced",
+        openmeteo_payload_json="payload.json", precision_metadata_json="precision.json",
+        bins=[{"bin_id": "30C"}])
+    domain = {"metric": metric, "coverage_cut_utc": cut}
+    domain["identity"] = hashlib.sha256(json.dumps(domain, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    provenance = {"q_lcb_basis": policy.TRADEABLE_GRADE_QLCB_BASIS,
+        "bayes_precision_fusion": {"current_evidence_shape": {
+            "translation_applied": False, "shape_lag_hours": 0,
+            "source_cycle_time": cycle, "semantics_revision": policy.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            "grid_surface_evidence_revision": GRID_SURFACE_EVIDENCE_REVISION,
+            "grid_surface_evidence_identity_hash": "a" * 64,
+            "provider_geometry_evidence": {"revision": "openmeteo_current_provider_geometry_v1", "providers": {}},
+            "provider_geometry_identity_hash": "b" * 64}},
+    }
+    if domain_revision != "ordinary":
+        provenance.update(q_shape="day0_remaining_shared_carrier_v2",
+            day0_remaining_carrier_content_identity="carrier",
+            day0_remaining_carrier_operator=DAY0_REMAINING_CARRIER_OPERATOR_V2,
+            day0_remaining_center_policy="unshifted_live_v1", day0_remaining_center_bias_c=0,
+            day0_probability_mixture_policy="unmixed_live_v1",
+            day0_measurement_domain_witness=domain,
+            day0_conditional_remaining_shape_witness={"metric": metric, "coverage_cut_utc": cut})
+        if domain_revision != "missing":
+            provenance["day0_measurement_domain_revision"] = (
+                DAY0_MEASUREMENT_DOMAIN_REVISION if domain_revision == "current" else "old")
+    reason = reader._day0_carrier_identity_reason(provenance)
+    assert reason == ("REPLACEMENT_DAY0_MEASUREMENT_DOMAIN_NOT_CURRENT"
+        if domain_revision in {"old", "missing"} else None)
+    db = tmp_path / "coverage.db"
+    with sqlite3.connect(db) as conn:
+        conn.executescript("""
+            CREATE TABLE forecast_posteriors (posterior_id INTEGER PRIMARY KEY,
+                source_id TEXT, runtime_layer TEXT, city TEXT, target_date TEXT,
+                temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT,
+                provenance_json TEXT, openmeteo_anchor_id INTEGER,
+                dependency_source_run_ids_json TEXT, q_lcb_json TEXT, q_ucb_json TEXT);
+            CREATE TABLE readiness_state (strategy_key TEXT, status TEXT,
+                dependency_json TEXT, provenance_json TEXT);
+        """)
+        conn.execute("INSERT INTO forecast_posteriors VALUES (1,?,'live',?,?,?,?,?,?,1,?,'{}','{}')",
+            (materialization_queue.SOURCE_ID, seed["city"], seed["target_date"], metric, cycle, cut,
+             json.dumps(provenance), json.dumps({"baseline_b0": "b", "openmeteo_ifs9_anchor": "o"})))
+        conn.execute("INSERT INTO readiness_state VALUES (?,'READY',?,?)",
+            (materialization_queue.STRATEGY_KEY,
+             json.dumps({"dependencies": [{"role": "baseline_b0", "source_run_id": "b"},
+                 {"role": "openmeteo_ifs9_anchor", "source_run_id": "o"}]}), json.dumps(seed)))
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(forecast_posteriors)")}
+        clause = policy.tradeable_grade_coverage_sql(posterior_columns=columns,
+            decision_time=datetime.fromisoformat(cut))
+        assert conn.execute(f"SELECT COUNT(*) FROM forecast_posteriors WHERE 1=1 {clause}").fetchone()[0] == 1
+    # Independent physical-shape/HWM proof is held constant. The tested domain
+    # authority and SQL candidate, including both early-return routes, are real.
+    monkeypatch.setattr(policy, "current_evidence_shape_has_held_authority", lambda *a, **k: True)
+    monkeypatch.setattr(materialization_queue, "replacement_input_refresh_reason", lambda *a, **k: None)
+    monkeypatch.setattr(materialization_queue, "_seed_source_cycle_boundary", lambda **k: None)
+    monkeypatch.setattr(materialization_queue, "_blocked_attempt_state", lambda **k: (None, None, False))
+    monkeypatch.setattr(ground, "archive_station_ground_evidence", lambda *a, **k: None)
+    calls = []
+    expected_covered = domain_revision in {"current", "ordinary"}
+    if transport == "seed":
+        seed_dir = tmp_path / "input"
+        seed_dir.mkdir()
+        (seed_dir / "seed.json").write_text(json.dumps(seed))
+        monkeypatch.setattr(materialization_queue, "validate_materialization_seed", lambda s: None)
+        def build(payload, **kwargs):
+            calls.append(payload)
+            return SimpleNamespace(ok=True, status="READY", reason_codes=(), request=payload)
+        monkeypatch.setattr(materialization_queue, "build_replacement_forecast_materialization_request", build)
+        with sqlite3.connect(":memory:") as trade:
+            processed, failed, _ = materialization_queue._prepare_seed_requests_with_connection(
+                seed_dir=seed_dir, seed_processed_dir=tmp_path / "seed_processed",
+                seed_failed_dir=tmp_path / "seed_failed", request_dir=tmp_path / "requests",
+                forecast_db=db, forecast_conn=None, trade_conn=trade, limit=1)
+        assert processed and not failed
+        assert bool(calls) is not expected_covered
+        assert bool(tuple((tmp_path / "requests").glob("*.json"))) is not expected_covered
+    else:
+        batch = tmp_path / "requests"
+        batch.mkdir()
+        (batch / "request.json").write_text(json.dumps(seed))
+        monkeypatch.setattr(materialization_queue, "_validate_request_payload", lambda p: (True, "", ""))
+        monkeypatch.setattr(materialization_queue, "_day0_carrier_vector_preflight_reason", lambda **k: None)
+        def runner(command):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 1, "", "private materializer reached")
+        report = materialization_queue._process_claimed_materialization_batch(
+            request_path=batch, processed_path=tmp_path / "processed", failed_path=tmp_path / "failed",
+            forecast_db=db, runner=runner, limit=1)
+        assert bool(calls) is not expected_covered
+        assert ("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_ALREADY_COVERED" in report.reason_codes) is expected_covered
+
+
 def test_covered_day0_upgrade_skips_but_instrument_expansion_rebuilds(
     tmp_path, monkeypatch
 ) -> None:

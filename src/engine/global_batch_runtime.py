@@ -6333,6 +6333,13 @@ def _qkernel_shadow_current_semantics_by_posterior(
                 tuple(chunk),
             ).fetchall()
             for posterior_identity_hash, provenance, materialized_at,city,target_date,metric,anchor_id in rows:
+                if isinstance(provenance, str):
+                    try:
+                        provenance = json.loads(provenance)
+                    except json.JSONDecodeError:
+                        continue
+                if not isinstance(provenance, Mapping):
+                    continue
                 shape = _current_evidence_shape(provenance)
                 if shape is None:
                     continue

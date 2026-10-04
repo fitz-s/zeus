@@ -22,13 +22,11 @@ from src.data.bayes_precision_fusion_download import (
     OPENMETEO_PROVIDER,
     PREVIOUS_RUNS_SOURCE_FAMILY,
     SINGLE_RUNS_SOURCE_FAMILY,
-    STANDARD_META_STAMPED_SOURCE_FAMILY,
     _model_domain_hash,
 )
 from src.data.openmeteo_client import PREVIOUS_RUNS_URL
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
     SINGLE_RUNS_FORECAST_URL,
-    STANDARD_FORECAST_URL,
 )
 from src.data.current_settlement_history import read_current_settlement_history
 
@@ -96,17 +94,7 @@ def _request_params_match_current_live_product(
     except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return False
     endpoint = str(row["endpoint"] or "").strip()
-    if endpoint_mode == "standard_api_meta_stamped":
-        forecast_hours = params.get("forecast_hours")
-        if (
-            isinstance(forecast_hours, bool)
-            or not isinstance(forecast_hours, int)
-            or not 1 <= forecast_hours <= 240
-        ):
-            return False
-        expected_params["forecast_hours"] = forecast_hours
-        base_url = STANDARD_FORECAST_URL
-    elif endpoint == "previous_runs":
+    if endpoint == "previous_runs":
         base_url = PREVIOUS_RUNS_URL
     else:
         base_url = SINGLE_RUNS_FORECAST_URL
@@ -136,23 +124,15 @@ def raw_product_matches_live_source(
     if endpoint == "single_runs" and endpoint_mode == "single_runs":
         source_id, source_family = f"{model}_single_runs", SINGLE_RUNS_SOURCE_FAMILY
         product_matches = product_id == f"{expected_model}::single_runs"
-    elif endpoint == "single_runs" and endpoint_mode == "standard_api_meta_stamped":
-        source_id, source_family = f"{model}_standard_meta_stamped", STANDARD_META_STAMPED_SOURCE_FAMILY
-        cycle = _parse_utc(row["source_cycle_time"])
-        prefix = (
-            f"{expected_model}::standard_api_meta_stamped"
-            f"::run={cycle.isoformat()}::modified="
-        ) if cycle is not None else ""
-        modification = _parse_utc(product_id[len(prefix):]) if prefix and product_id.startswith(prefix) else None
-        product_matches = (
-            modification is not None
-            and product_id == f"{prefix}{modification.isoformat()}"
-        )
     elif endpoint == "previous_runs" and model != "ecmwf_ifs" and endpoint_mode == "previous_runs":
         source_id = OPENMETEO_PREVIOUS_RUNS_SOURCE_ID.get(model, f"{model}_previous_runs")
         source_family = PREVIOUS_RUNS_SOURCE_FAMILY
         product_matches = product_id == f"{expected_model}::previous_runs"
     else:
+        # SCOPE: this provider/run/city/date/metric live-equivalent candidate.
+        # Rolling standard bodies remain stored audit evidence; metadata does
+        # not prove their run. DRAIN: normal pinned Single Runs acquisition.
+        # RESET: the actual pinned product and native body, never a new label.
         return False
     try:
         coordinates_match = (
