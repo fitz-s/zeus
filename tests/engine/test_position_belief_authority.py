@@ -2257,9 +2257,10 @@ def _seed_posterior(
             snapshot_id, city, target_date, temperature_metric, physical_quantity,
             observation_field, available_at, fetch_time, lead_hours, members_json,
             model_version, dataset_id, source_id, authority, causality_status,
-            boundary_ambiguous, source_run_id
+            boundary_ambiguous, source_run_id, forecast_window_attribution_status,
+            contributes_to_target_extrema
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, '[]', 'fixture', ?,
-                  'ecmwf_open_data', 'VERIFIED', 'OK', 0, ?)
+                  'ecmwf_open_data', 'VERIFIED', 'OK', 0, ?, 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1)
         """,
         (
             snapshot_id,
