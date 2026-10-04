@@ -375,12 +375,17 @@ def test_priority_claim_revalidates_every_reserved_slot(tmp_path, monkeypatch, s
         duplicate.write_bytes(before[target])
         queue._new_claim_batch(requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME, (duplicate,))
     claimed, reason = queue._try_claim_priority_request(prior)
-    assert claimed is None and reason
+    # The stable prefix ahead of the changed slot is claimed in planned order;
+    # the changed slot and every slot behind it stay queued, untouched.
+    assert claimed is not None and reason
+    assert [p.name for p in claimed.selected_files] == [p.name for p in paths[:slot]]
     if change == "owner":
-        assert reason == queue._PRIORITY_CLAIM_RACED_OWNER_REASONS
-    for path in paths:
-        if path != target:
-            assert path.read_bytes() == before[path]
+        assert set(queue._PRIORITY_CLAIM_RACED_OWNER_REASONS) <= set(reason)
+    else:
+        assert queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON in reason
+    for path in paths[slot + 1:]:
+        assert path.read_bytes() == before[path]
+    queue._release_claim_batch(claimed.batch_path)
 
 
 @pytest.mark.parametrize("slot", (1, 2))
@@ -761,8 +766,12 @@ def test_constant_queue_clock_does_not_weaken_claim_record_fence(tmp_path, monke
     else:
         os.utime(target, ns=(stamp + 1, stamp + 1))
     claim, reason = queue._try_claim_priority_request(prior)
-    assert claim is None and reason == (queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-    assert all(path.exists() for path in paths)
+    # The fence still catches the changed slot: it and everything behind it
+    # stay queued; only the stable slot planned ahead of it is claimed.
+    assert claim is not None and reason == (queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
+    assert [p.name for p in claim.selected_files] == [paths[0].name]
+    assert paths[1].exists() and paths[2].exists()
+    queue._release_claim_batch(claim.batch_path)
 
 
 @pytest.mark.parametrize("tail", ("environment_error", "missing_envelope"))

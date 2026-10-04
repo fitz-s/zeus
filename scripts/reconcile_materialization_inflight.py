@@ -37,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
         "applied": args.apply,
         "restored": list(report.restored),
         "refused": [list(item) for item in report.refused],
+        "held_leases": list(report.held_leases),
+        "live_staging": list(report.live_staging),
+        "drained_staging": report.drained_staging,
         "quiescent": report.quiescent,
     }, indent=2))
     return 0 if report.quiescent else 3
