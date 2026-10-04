@@ -1237,6 +1237,51 @@ class ClaimedBytesMismatch(OSError):
     """The request bytes do not hash to the claim record the lease was taken for."""
 
 
+class ClaimLeaseNotCovered(OSError):
+    """This invocation does not hold a lease on every identity its request requires."""
+
+
+# The lease descriptors this resident invocation received (worker side only).
+# Lease coverage is enforced only inside a resident queue invocation; an
+# operator's direct CLI run of a request holds no claim.
+_INVOCATION_LEASE_FDS: tuple[int, ...] = ()
+_RESIDENT_INVOCATION = False
+
+
+def _require_lease_coverage(input_json: Path) -> None:
+    """Refuse a claimed request unless this invocation holds all its identity leases.
+
+    Matching bytes alone are not ownership. For a request inside a lease-v1
+    batch, every lease path its identity witness requires must be the very
+    file one of the descriptors this invocation received refers to (same
+    device and inode). An environment retry, never a verdict on the inputs.
+    """
+
+    from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+        claim_required_lease_paths,
+    )
+
+    required = claim_required_lease_paths(input_json)
+    if required is None:
+        return
+    held = set()
+    for fd in _INVOCATION_LEASE_FDS:
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            continue
+        held.add((info.st_dev, info.st_ino))
+    for path in required:
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            info = None
+        if info is None or (info.st_dev, info.st_ino) not in held:
+            raise ClaimLeaseNotCovered(
+                f"{input_json.name}: invocation does not hold lease {path.name}"
+            )
+
+
 def _require_claimed_bytes(input_json: Path, body: bytes) -> None:
     """Refuse to consume a claimed request whose bytes are not the leased bytes.
 
@@ -1260,6 +1305,8 @@ def _require_claimed_bytes(input_json: Path, body: bytes) -> None:
 def _validated_named_inputs(input_json: Path, consumed: _ConsumedInputs):
     body = consumed.read(input_json, role=REQUEST_ROLE)
     _require_claimed_bytes(input_json, body)
+    if _RESIDENT_INVOCATION:
+        _require_lease_coverage(input_json)
     payload = json.loads(body)
     if not isinstance(payload, Mapping):
         raise ValueError("input JSON must decode to an object")
@@ -1648,6 +1695,8 @@ def _resident_worker() -> int:
         lease_fds = receive_leases(
             message, lambda frame: (sys.stdout.write(frame), sys.stdout.flush()),
         )
+        global _INVOCATION_LEASE_FDS, _RESIDENT_INVOCATION
+        _INVOCATION_LEASE_FDS, _RESIDENT_INVOCATION = tuple(lease_fds), True
         try:
             output, errors = StringIO(), StringIO()
             try:
@@ -1660,6 +1709,7 @@ def _resident_worker() -> int:
                               "stdout": output.getvalue(), "stderr": errors.getvalue(),
                               "worker_pid": os.getpid()}), flush=True)
         finally:
+            _INVOCATION_LEASE_FDS, _RESIDENT_INVOCATION = (), False
             for fd in lease_fds:
                 os.close(fd)
     return 0

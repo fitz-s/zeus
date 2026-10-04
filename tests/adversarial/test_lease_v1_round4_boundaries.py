@@ -2,6 +2,8 @@
 # Last reused/audited: 2026-10-04
 # Authority basis: lease-v1 round-4 consult; copied unchanged from
 #   artifacts/merge_safety_lease_v1_round4/test_round4_boundaries.py. Run from the checkout root.
+# One change: test_fifo_reader_rejects_without_waiting_for_a_writer uses a race-free
+#   harness (round-5 consult confirmed the original's text-buffer race); see its comment.
 """Independent round-4 probes on 844465199. Temporary queues only; no live DB writes."""
 from __future__ import annotations
 import errno
@@ -118,32 +120,33 @@ def test_same_body_rename_over_is_rejected_and_restored(tmp_path,monkeypatch):
 
 
 def test_fifo_reader_rejects_without_waiting_for_a_writer(tmp_path):
+    # Replaced in this tracked copy (round-5 consult, confirmed): the original
+    # harness read its first line with text-mode readline() and then called
+    # communicate(), which reads the raw pipe and loses text already buffered
+    # in the TextIOWrapper; with no product code at all the child's second
+    # line was lost 20/20. Same property, race-free: unbuffered binary output,
+    # read whole, plus the original's external-writer positive control.
     fifo=tmp_path/'request.json';os.mkfifo(fifo)
     code=f'''import sys,os,json
 from pathlib import Path
 sys.path.insert(0,{str(ROOT)!r})
 import src.data.replacement_forecast_live_materialization_queue as q
-print("ENTER",flush=True)
-try:q.read_regular_request(Path({str(fifo)!r}))
+try:q.read_regular_request(Path({str(fifo)!r}));print("READ",flush=True)
 except q.RequestNotRegular:print("REJECTED",flush=True)
 '''
-    child=subprocess.Popen([sys.executable,'-c',code],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    child=subprocess.Popen([sys.executable,'-c',code],stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=0)
     try:
-        assert select.select([child.stdout],[],[],15)[0], 'child import synchronization failed'
-        assert child.stdout.readline().strip()=='ENTER'
         exited=True
-        try:child.wait(timeout=.75)
+        try:child.wait(timeout=15)
         except subprocess.TimeoutExpired:exited=False
-        # Positive control: an external writer unblocks the open, after which
-        # fstat immediately identifies the FIFO. No bytes are sent.
         writer_needed=False
         if not exited:
             try:
                 fd=os.open(fifo,os.O_WRONLY|os.O_NONBLOCK);writer_needed=True;os.close(fd)
             except OSError:pass
         out,err=child.communicate(timeout=5)
-        print('PROBE',json.dumps(dict(probe='fifo_open',rejected_before_writer=exited,writer_needed=writer_needed,stdout=out,stderr=err)))
-        assert exited and 'REJECTED' in out, 'S_ISREG is reached only after a blocking FIFO open'
+        print('PROBE',json.dumps(dict(probe='fifo_open',rejected_before_writer=exited,writer_needed=writer_needed,stdout=out.decode(),stderr=err.decode())))
+        assert exited and out.decode().strip()=='REJECTED', 'S_ISREG is reached only after a blocking FIFO open'
     finally:
         if child.poll() is None:child.kill();child.wait()
 
