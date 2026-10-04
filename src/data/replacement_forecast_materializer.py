@@ -314,17 +314,58 @@ def _posterior_source_available_at(
     )
 
 
+def anchor_artifact_recorded_at(
+    conn: sqlite3.Connection, artifact_id: object,
+) -> datetime | None:
+    """When the bound anchor's canonical row was recorded; None when unbound or absent.
+
+    A naive stamp (legacy ``CURRENT_TIMESTAMP`` column) is UTC, as the shared
+    anchor authority reads it. A missing table is proven absence; any other
+    read failure propagates.
+    """
+    if artifact_id is None or isinstance(artifact_id, bool):
+        return None
+    try:
+        row = conn.execute(
+            "SELECT recorded_at FROM raw_forecast_artifacts WHERE artifact_id = ?",
+            (int(artifact_id),),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'raw_forecast_artifacts'"
+        ).fetchone() is None:
+            return None
+        raise
+    if row is None or not row[0]:
+        return None
+    stamp = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+    return (stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)).astimezone(UTC)
+
+
 def _request_with_materialization_clock(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
 ) -> ReplacementForecastMaterializeRequest:
-    """Lift computed_at to the first instant the posterior could truly exist."""
+    """Lift computed_at to the first instant the posterior could truly exist.
+
+    That is the latest of each role's possession and the recording of the anchor
+    row the posterior binds. The shared live-shape law requires that row to be
+    recorded by the decision cut. A request that names only a manifest has its
+    anchor row inserted by the worker after the request was stamped. Without
+    this lift, that request fails that law identically on every retry
+    (CURRENT_EVIDENCE_NOT_LIVE, Atlanta 2026-10-03 high).
+    """
 
     computed_at = _to_utc(request.computed_at, field_name="computed_at")
-    source_available_at = _posterior_source_available_at(conn, request)
-    if source_available_at <= computed_at:
+    lifted = max(
+        computed_at,
+        _posterior_source_available_at(conn, request),
+        anchor_artifact_recorded_at(conn, getattr(request, "anchor_artifact_id", None))
+        or computed_at,
+    )
+    if lifted <= computed_at:
         return request
-    return replace(request, computed_at=source_available_at)
+    return replace(request, computed_at=lifted)
 
 
 def _date_text(value: date | str) -> str:

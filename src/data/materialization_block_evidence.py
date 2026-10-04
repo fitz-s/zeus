@@ -16,10 +16,14 @@ DRAIN: an unsupported reason, a malformed or unbound record, an unreadable fact,
 or a predicate that no longer blocks binds nothing; the caller retains or reopens.
 RESET: the request no longer blocks for the recorded reason.
 
-Effective clock: the materializer's possession rule. computed_at is lifted to the
-later of the two roles' possession times (``source_run.fetch_finished_at`` when the
-row exists, else the request's own per-role source_available_at). A missing row or
-missing source_run table is proven absence; any other read failure is unavailable.
+Effective clock: the materializer's rule (``_request_with_materialization_clock``).
+computed_at is lifted to the latest of the two roles' possession times
+(``source_run.fetch_finished_at`` when the row exists, else the request's own
+per-role source_available_at) and the recorded_at of the anchor row the worker
+bound. The CLOCK item records that anchor id. The attempt fingerprint binds the
+request and manifest bytes, so a prospective request reaching re-decision binds
+the same immutable row. A missing row or table is proven absence; any other read
+failure is unavailable.
 
 Covered reasons (``SUPPORTED``) and their exact, required items:
 - STALE_CYCLE: [CLOCK]. The anchor cycle is outside the cycle-age bound at the
@@ -52,7 +56,7 @@ from datetime import datetime
 import json
 import sqlite3
 
-EVIDENCE_REVISION = "materialization_block_evidence_v2"
+EVIDENCE_REVISION = "materialization_block_evidence_v3"
 CLOCK = "MATERIALIZATION_CLOCK"
 STALE_CYCLE = "OM9_SOURCE_CYCLE_TOO_STALE"
 CERT_REGRESSION = "READINESS_CERT_CYCLE_REGRESSION"
@@ -116,8 +120,21 @@ def _utc(value: object, field: str) -> datetime:
     return _to_utc(value if isinstance(value, datetime) else str(value), field_name=field)
 
 
-def effective_computed_at(conn: sqlite3.Connection, payload: Mapping[str, object]) -> datetime:
-    """The materializer's clock rule for a request given as its payload."""
+def _anchor_recorded(conn: sqlite3.Connection, artifact_id: object) -> dict[str, object]:
+    """The bound anchor row's recording clock, by the materializer's own reader."""
+    from src.data.replacement_forecast_materializer import anchor_artifact_recorded_at  # noqa: PLC0415
+
+    try:
+        recorded = anchor_artifact_recorded_at(conn, artifact_id)
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        raise EvidenceUnavailable("raw_forecast_artifacts") from exc
+    return {"artifact_id": artifact_id, "recorded_at": None if recorded is None else recorded.isoformat()}
+
+
+def effective_computed_at(
+    conn: sqlite3.Connection, payload: Mapping[str, object], *, anchor_artifact_id: object = None,
+) -> datetime:
+    """The materializer's clock rule for a request given as its payload and bound anchor."""
     from src.contracts.availability_time import proof_of_possession_available_at  # noqa: PLC0415
 
     lifted = _utc(payload["computed_at"], "computed_at")
@@ -125,7 +142,12 @@ def effective_computed_at(conn: sqlite3.Connection, payload: Mapping[str, object
         run = _source_run(conn, payload.get(run_field) or None)
         possession = run["fetch_finished_at"] or payload[available_field]
         lifted = max(lifted, _utc(proof_of_possession_available_at(possession), available_field))
-    return lifted
+    recorded = _anchor_recorded(conn, anchor_artifact_id)["recorded_at"]
+    return lifted if recorded is None else max(lifted, _utc(recorded, "anchor_recorded_at"))
+
+
+def _clock_anchor_id(evidence: Mapping[str, object]) -> object:
+    return evidence["items"][0]["anchor_artifact"]["artifact_id"]
 
 
 # ---------------------------------------------------------------- recording
@@ -138,6 +160,7 @@ def clock_item(conn: sqlite3.Connection, request) -> dict[str, object]:
             {"role": role, **_source_run(conn, getattr(request, run_field, None))}
             for role, (run_field, _available) in _ROLES.items()
         ],
+        "anchor_artifact": _anchor_recorded(conn, getattr(request, "anchor_artifact_id", None)),
     }
 
 
@@ -381,6 +404,13 @@ def _well_formed(evidence: object, prospective: Mapping[str, object] | None) -> 
         or {run["role"] for run in runs} != set(_ROLES)
     ):
         return False
+    anchor = items[0].get("anchor_artifact")
+    if (
+        not isinstance(anchor, Mapping)
+        or set(anchor) != {"artifact_id", "recorded_at"}
+        or not (anchor["artifact_id"] is None or type(anchor["artifact_id"]) is int)
+    ):
+        return False
     if prospective is None:
         return True
     if reason == CERT_SUPERSEDED:
@@ -452,7 +482,7 @@ def _recorded_facts_hold(conn, evidence: Mapping[str, object]) -> bool:
     if not all(
         {"role": run["role"], **_source_run(conn, run.get("source_run_id"))} == dict(run)
         for run in evidence["items"][0]["source_runs"]
-    ):
+    ) or _anchor_recorded(conn, _clock_anchor_id(evidence)) != dict(evidence["items"][0]["anchor_artifact"]):
         return False
     item = evidence["items"][-1]
     if evidence["reason"] == CERT_SUPERSEDED:
@@ -500,7 +530,7 @@ def _recorded_facts_hold(conn, evidence: Mapping[str, object]) -> bool:
 def _prospective_blocks(conn, evidence: Mapping[str, object], payload: Mapping[str, object]) -> bool:
     from src.data.replacement_forecast_materializer import _serving_key_strictly_newer  # noqa: PLC0415
 
-    effective = effective_computed_at(conn, payload)
+    effective = effective_computed_at(conn, payload, anchor_artifact_id=_clock_anchor_id(evidence))
     item = evidence["items"][-1]
     if evidence["reason"] == STALE_CYCLE:
         from src.data.replacement_forecast_cycle_policy import cycle_age_outside_bound  # noqa: PLC0415
@@ -557,7 +587,8 @@ def evidence_holds(
                    for run in evidence["items"][0]["source_runs"]):
                 return False
             request_key = (_utc(exact_request["source_cycle_time"], "source_cycle_time"),
-                           effective_computed_at(conn, exact_request))
+                           effective_computed_at(conn, exact_request,
+                                                 anchor_artifact_id=_clock_anchor_id(evidence)))
             incoming = tuple(_utc(value, "incoming_key") for value in evidence["items"][-1]["incoming_key"])
             return request_key == incoming and _recorded_facts_hold(conn, evidence)
         if prospective is None:
@@ -568,7 +599,7 @@ def evidence_holds(
                 from src.data.forecast_target_contract import day0_remaining_from_iso_of
                 if (
                     _utc(exact_request["source_cycle_time"], "source_cycle_time").isoformat() != item["source_cycle_time_iso"]
-                    or effective_computed_at(conn, exact_request).isoformat() != item["decision_time_iso"]
+                    or effective_computed_at(conn, exact_request, anchor_artifact_id=_clock_anchor_id(evidence)).isoformat() != item["decision_time_iso"]
                     or day0_remaining_from_iso_of(exact_request.get("day0_observed_extreme_observation_time")) != item["day0_remaining_from_iso"]
                 ):
                     return False
