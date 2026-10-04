@@ -61,8 +61,9 @@ spec=importlib.util.spec_from_file_location("rehearsal_materializer",{str(code_r
 module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
 import hashlib
 import src.data.replacement_forecast_live_materialization_queue as rq
-def log(event,name,key=None,sha=None):
-    with open({str(log)!r},"a") as f:f.write(json.dumps(dict(event=event,name=name,key=key,sha256=sha,pid=os.getpid(),t=time.time()))+"\\n")
+import uuid
+def log(event,name,key=None,sha=None,invocation=None):
+    with open({str(log)!r},"a") as f:f.write(json.dumps(dict(event=event,name=name,key=key,sha256=sha,invocation=invocation,pid=os.getpid(),t=time.time()))+"\\n")
 def compute(argv):
     names=argv[argv.index("--batch-input-json")+1:argv.index("--deadline-utc")]
     block=Path({str(block_flag)!r})
@@ -73,13 +74,14 @@ def compute(argv):
         except Exception:
             raw=Path(n).read_bytes()  # the pre-lease code path (phase A)
         key=rq._request_semantic_key(json.loads(raw))
-        log("start",Path(n).name,key,hashlib.sha256(raw).hexdigest())
+        invocation=uuid.uuid4().hex
+        log("start",Path(n).name,key,hashlib.sha256(raw).hexdigest(),invocation)
         if block.exists():
             block.unlink()
             signal.pthread_sigmask(signal.SIG_BLOCK,{{signal.SIGUSR1}})
             Path({str(queue_root / ".rehearsal_worker_ready.json")!r}).write_text(json.dumps(dict(pid=os.getpid(),name=Path(n).name)))
             signal.sigwait({{signal.SIGUSR1}})
-        log("end",Path(n).name,key,hashlib.sha256(raw).hexdigest())
+        log("end",Path(n).name,key,hashlib.sha256(raw).hexdigest(),invocation)
         print(json.dumps(dict(input_json=n,returncode=0,stdout=json.dumps(dict(status="SUCCEEDED")),stderr="")),flush=True)
     return 0
 module.main=compute
@@ -215,6 +217,8 @@ def run(args) -> None:
                                         if p.name != "_claim.json") if root.exists() else [],
             "staging": sorted(p.name for p in root.glob(".staging.*")) if root.exists() else [],
             "lease_files": len(list(leases.glob("*.lease"))) if leases.exists() else 0,
+            "captures": sorted(p.name for p in (queue / "quarantined_request_aliases").glob(".capture.*"))
+            if (queue / "quarantined_request_aliases").exists() else [],
         }
 
     # The clone copies the live daemon's LEGACY batches, owned by the running
@@ -312,30 +316,38 @@ def run(args) -> None:
     overlaps, multi = [], []
     for key, evs in by_identity.items():
         spans = []
-        for pid in {e["pid"] for e in evs}:
-            mine = [e for e in evs if e["pid"] == pid]
-            start = min(e["t"] for e in mine if e["event"] == "start")
-            ends = [e["t"] for e in mine if e["event"] == "end"]
-            spans.append((start, max(ends) if ends else reaped.get(pid, float("inf")), pid, bool(ends)))
+        for invocation in {e["invocation"] for e in evs}:
+            mine = [e for e in evs if e["invocation"] == invocation]
+            start = next(e for e in mine if e["event"] == "start")
+            end = next((e for e in mine if e["event"] == "end"), None)
+            stop = end["t"] if end else reaped.get(start["pid"], float("inf"))
+            spans.append((start["t"], stop, invocation, end is not None))
         spans.sort()
-        for (s1, e1, p1, _), (s2, _e2, p2, _) in zip(spans, spans[1:]):
-            if p1 != p2 and s2 < e1:
-                overlaps.append([key, p1, p2])
+        for i, (s1, e1, inv1, _d1) in enumerate(spans):
+            for s2, _e2, inv2, _d2 in spans[i + 1:]:
+                if s2 < e1:
+                    overlaps.append([key, inv1, inv2])
         if sum(done for *_x, done in spans) > 1:
             multi.append(key)
     report["executions_started"] = sum(e["event"] == "start" for e in events)
     report["executions_completed"] = sum(e["event"] == "end" for e in events)
     report["identities_executed"] = len(by_identity)
-    report["identity_grouping"] = "semantic request key parsed by the worker from the bytes it read"
+    report["identity_grouping"] = ("semantic request key parsed by the worker from the bytes it read; "
+                                   "one span per invocation id (start/end paired by id)")
+    report["invocations"] = len({e["invocation"] for e in events})
     report["unparsed_executions"] = sum(1 for e in events if e.get("key") is None)
     report["reaped_pids"] = {str(k): v for k, v in reaped.items()}
     report["concurrent_duplicate_executions"] = overlaps
+    # Sequential re-execution of one identity from distinct publications is
+    # existing queue behavior, not concurrent ownership (round-5 consult).
     report["identities_completed_more_than_once"] = multi
-    # Held window: from B's worker starting the request until it was reaped.
-    b_start = min(e["t"] for e in events if e["pid"] == wb["pid"] and e["event"] == "start")
+    # Held window: from B's invocation starting until B's worker was reaped.
+    # "Same identity" is the parsed semantic key, never the filename.
+    b_event = next(e for e in events if e["pid"] == wb["pid"] and e["event"] == "start")
     report["B_competitor_ran_held_identity_while_held"] = any(
-        e["event"] == "start" and e["name"] == wb["name"] and e["pid"] != wb["pid"]
-        and b_start <= e["t"] < reaped[wb["pid"]]
+        e["event"] == "start" and e["key"] == b_event["key"]
+        and e["invocation"] != b_event["invocation"]
+        and b_event["t"] <= e["t"] < reaped[wb["pid"]]
         for e in events
     )
     Path(args.out).write_text(json.dumps(report, indent=1, default=str) + "\n")
