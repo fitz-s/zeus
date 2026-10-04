@@ -3,7 +3,7 @@
 # Last reused/audited: 2026-10-04
 # Authority basis: current OpenData source contract; native 3h local-day extrema.
 # Lifecycle: created=2026-09-22; last_reviewed=2026-10-04; last_reused=2026-10-04
-# Purpose: Native ENS GRIB -> local-day JSON with optional byte/point capture; no DB writes.
+# Purpose: Native ENS extrema JSON and offline 2t knot decode with original byte/point proof; no DB writes.
 # Reuse: Use the collector's explicit coordinate manifest and same-cycle land-mask proof.
 """Decode native ENS windows at settlement coordinates.
 
@@ -468,7 +468,7 @@ def _read_surface_geopotential(path: Path, proof_path: Path) -> dict[str, Any]:
             codes_release(gid)
 
 
-def _native_message_capture(gid: int) -> dict[str, Any]:
+def _native_message_capture(gid: int, *, instantaneous: bool = False) -> dict[str, Any]:
     """Capture observed metadata and byte identity, not a full-grid replay body.
 
     Optional audit capture must not change the existing numeric/eligibility path.
@@ -476,21 +476,30 @@ def _native_message_capture(gid: int) -> dict[str, Any]:
     """
     capture: dict[str, Any] = {"capture_status": "UNKNOWN", "observed_headers": {}}
     try:
-        for field in (
+        fields = (
             "edition", "centre", "tablesVersion", "discipline", "paramId",
             "shortName", "units", "typeOfLevel", "level", "dataDate", "dataTime",
             "dataType", "number", "perturbationNumber", "stepUnits", "stepType",
             "startStep", "endStep", "stepRange", "lengthOfTimeRange",
             "indicatorOfUnitForTimeRange", "productDefinitionTemplateNumber",
             "typeOfStatisticalProcessing", *_GRID_KEYS,
-        ):
+        )
+        if instantaneous:
+            fields += ("generatingProcessIdentifier", "typeOfGeneratingProcess", "validityDate", "validityTime")
+        for field in fields:
             if codes_is_defined(gid, field):
                 capture["observed_headers"][field] = codes_get(gid, field)
-        if not all(field in capture["observed_headers"] for field in (
+        required = (
             "paramId", "shortName", "units", "typeOfLevel", "level",
             "dataDate", "dataTime", "dataType", "startStep", "endStep",
             "stepRange", "lengthOfTimeRange", "indicatorOfUnitForTimeRange",
-        )):
+        )
+        if instantaneous:
+            required = ("edition", "centre", "paramId", "shortName", "units", "typeOfLevel", "level",
+                        "dataDate", "dataTime", "dataType", "stepUnits", "stepType", "startStep",
+                        "endStep", "stepRange", "generatingProcessIdentifier", "typeOfGeneratingProcess",
+                        "validityDate", "validityTime", "productDefinitionTemplateNumber", *_GRID_KEYS)
+        if not all(field in capture["observed_headers"] for field in required):
             raise ValueError("native physical headers unavailable")
         raw = codes_get_message(gid)
         if not isinstance(raw, bytes) or not raw:
@@ -523,6 +532,292 @@ def _native_message_capture(gid: int) -> dict[str, Any]:
     except Exception as exc:
         capture["unavailable_reason"] = type(exc).__name__
     return capture
+
+
+def _open_ens_source_binding(raw: bytes, evidence: dict[str, Any], headers: dict[str, Any],
+                             *, param: str, member: int, step: int, run: datetime) -> dict[str, Any]:
+    """Check supplied original index/range bytes, never a request/metadata echo.
+
+    This proves byte consistency only. The caller must retain possession evidence;
+    this offline decoder never grants forecast or trading authority.
+    """
+    index = evidence["original_index_bytes"]
+    if (not isinstance(index, bytes) or not index
+            or hashlib.sha256(index).hexdigest() != evidence["source_index_sha256"]
+            or evidence["original_range_bytes"] != raw
+            or hashlib.sha256(raw).hexdigest() != evidence["raw_message_sha256"]):
+        raise ValueError("ENS_POINT_SOURCE_BYTES_MISMATCH")
+    offset, length = evidence["source_index_offset"], evidence["source_index_length"]
+    if type(offset) is not int or offset < 0 or type(length) is not int or length != len(raw):
+        raise ValueError("ENS_POINT_SOURCE_RANGE_INVALID")
+    matches = []
+    for line in index.splitlines():
+        row = json.loads(line)
+        if row.get("_offset") == offset and row.get("_length") == length:
+            matches.append((line, row))
+    if len(matches) != 1:
+        raise ValueError("ENS_POINT_SOURCE_INDEX_AMBIGUOUS")
+    line, row = matches[0]
+    if hashlib.sha256(line).hexdigest() != evidence["source_index_line_sha256"]:
+        raise ValueError("ENS_POINT_SOURCE_INDEX_LINE_MISMATCH")
+    stream, file_type, mars_type = ("oper", "fc", "fc") if member == 0 else ("enfo", "ef", "pf")
+    if (row.get("param") != param or row.get("levtype") != "sfc" or row.get("class") != "od"
+            or str(row.get("date")) != run.strftime("%Y%m%d")
+            or str(row.get("time")).zfill(4) != run.strftime("%H%M")
+            or str(row.get("step")) != str(step) or row.get("stream") != stream
+            or row.get("type") != mars_type or headers["dataType"] != mars_type
+            or (member != 0 and str(row.get("number")) != str(member))
+            or (member == 0 and str(row.get("number", "0")) != "0")):
+        raise ValueError("ENS_POINT_SOURCE_INDEX_IDENTITY_MISMATCH")
+    url = str(evidence["source_url"])
+    expected_suffix = (f"/{run:%Y%m%d}/{run:%H}z/ifs/0p25/{stream}/"
+                       f"{run:%Y%m%d%H%M}00-{step}h-{stream}-{file_type}.grib2")
+    if (not url.startswith("https://") or not url.endswith(expected_suffix)
+            or evidence["source_index_url"] != url[:-6] + ".index"):
+        raise ValueError("ENS_POINT_SOURCE_ENVELOPE_MISMATCH")
+    fetched = datetime.fromisoformat(str(evidence["source_fetched_at"]))
+    if fetched.tzinfo is None or not run <= fetched <= datetime.now(timezone.utc):
+        raise ValueError("ENS_POINT_SOURCE_POSSESSION_CLOCK_INVALID")
+    return {key: evidence[key] for key in ("source_url", "source_index_url", "source_index_sha256",
+        "source_index_line_sha256", "source_index_offset", "source_index_length", "raw_message_sha256",
+        "source_fetched_at")}
+
+
+def _open_ens_original_surface_capture(path: Path) -> dict[str, Any]:
+    with path.open("rb") as fh:
+        gid = codes_grib_new_from_file(fh)
+        if gid is None:
+            raise ValueError("ENS_POINT_SURFACE_MESSAGE_UNAVAILABLE")
+        try:
+            capture = _native_message_capture(gid, instantaneous=True)
+            if capture["capture_status"] != "OBSERVED":
+                raise ValueError("ENS_POINT_ORIGINAL_SURFACE_METADATA_UNAVAILABLE")
+            if capture["raw_message_sha256"] != hashlib.sha256(path.read_bytes()).hexdigest():
+                raise ValueError("ENS_POINT_ORIGINAL_SURFACE_BODY_MISMATCH")
+            return capture
+        finally:
+            codes_release(gid)
+
+
+def _open_ens_original_grid(section: bytes) -> dict[str, Any]:
+    """GRIB2 template 3.0 geometry in its original angular scale."""
+    if len(section) != 72 or section[4] != 3 or int.from_bytes(section[12:14], "big") != 0:
+        raise ValueError("ENS_POINT_ORIGINAL_GRID_LAYOUT_UNSUPPORTED")
+    ni, nj = int.from_bytes(section[30:34], "big"), int.from_bytes(section[34:38], "big")
+    basic_angle = int.from_bytes(section[38:42], "big")
+    subdivisions = int.from_bytes(section[42:46], "big")
+    if basic_angle == 0 and subdivisions in (0, 0xFFFFFFFF):
+        scale = 1e-6
+    elif 0 < basic_angle < 0xFFFFFFFF and 0 < subdivisions < 0xFFFFFFFF:
+        scale = basic_angle / subdivisions
+    else:
+        raise ValueError("ENS_POINT_ORIGINAL_GRID_ANGLE_INVALID")
+    def signed_angle(offset: int) -> float:
+        value = int.from_bytes(section[offset:offset + 4], "big")
+        return (-1 if value & 0x80000000 else 1) * (value & 0x7FFFFFFF) * scale
+    if int.from_bytes(section[6:10], "big") != ni * nj:
+        raise ValueError("ENS_POINT_ORIGINAL_GRID_SIZE_INVALID")
+    return {"gridType": "regular_ll", "Ni": ni, "Nj": nj,
+        "latitudeOfFirstGridPointInDegrees": signed_angle(46),
+        "longitudeOfFirstGridPointInDegrees": signed_angle(50),
+        "iDirectionIncrementInDegrees": int.from_bytes(section[63:67], "big") * scale,
+        "jDirectionIncrementInDegrees": int.from_bytes(section[67:71], "big") * scale,
+        "scanningMode": section[71]}
+
+
+def decode_open_ens_temperature_knots(
+    *, grib_path: Path, explicit_manifest: list[dict], expected_run_utc: datetime,
+    required_steps: list[int], mask_grib_path: Path, mask_proof_path: Path,
+    surface_geopotential_grib_path: Path | None = None,
+    surface_geopotential_proof_path: Path | None = None,
+    message_source_evidence: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Read native IFS 50r1 2t point knots. No CLI, collection or DB writes.
+
+    ``message_source_evidence`` maps each local message byte offset to supplied
+    original index/range bytes and their source URL, hashes, offset, length and
+    possession clock. A missing binding leaves transport UNKNOWN; an inconsistent
+    supplied binding makes the complete run unavailable. Manifest coordinates
+    request a cell; returned coordinates come from the original native grid.
+
+    SCOPE: this supplied run/step/grid ensemble only. DRAIN: supply the complete
+    original 51-member bytes and provenance. RESET: each independent decode
+    recomputes the proof; no frozen receipt blocks a later valid input.
+    Missing transport/phi stays UNKNOWN. Neither decoding nor supplied source
+    metadata can promote these knots to LIVE_QUALIFIED or settlement extrema.
+    """
+    unavailable = {"decode_status": "UNAVAILABLE", "transport_status": "UNKNOWN",
+        "qualification_status": "OFFLINE_ONLY", "live_qualification_status": "NOT_EVALUATED",
+        "quantity_role": "native_2m_temperature_instantaneous_knots",
+        "temporal_representation": "acquired_native_knots", "projection_status": "NOT_PERFORMED",
+        "extrema_status": "NOT_COMPUTED", "native_knots": []}
+    try:
+        run = expected_run_utc
+        if not isinstance(run, datetime) or run.tzinfo is None or run.utcoffset() != timedelta(0):
+            raise ValueError("ENS_POINT_EXPECTED_RUN_INVALID")
+        if run.minute or run.second or run.microsecond or run.hour not in (0, 6, 12, 18):
+            raise ValueError("ENS_POINT_EXPECTED_RUN_INVALID")
+        if run > datetime.now(timezone.utc):
+            raise ValueError("ENS_POINT_EXPECTED_RUN_FUTURE")
+        steps = list(required_steps)
+        if not steps or len(set(steps)) != len(steps) or any(type(s) is not int for s in steps):
+            raise ValueError("ENS_POINT_REQUIRED_STEPS_INVALID")
+        control_horizon = 240 if run.hour in (0, 12) else 90
+        if any(s < 0 or s > control_horizon or (s % 3 if s <= 144 else s % 6) for s in steps):
+            raise ValueError("ENS_POINT_STEP_NOT_IN_NATIVE_CONTROL_PF_INTERSECTION")
+        if not explicit_manifest or len({c["city"] for c in explicit_manifest}) != len(explicit_manifest):
+            raise ValueError("ENS_POINT_CITY_MANIFEST_INVALID")
+        mask = _read_land_mask(Path(mask_grib_path), Path(mask_proof_path))
+        mask_capture = _open_ens_original_surface_capture(Path(mask_grib_path))
+        mask_section3 = next(s["bytes_base64"] for s in mask_capture["metadata_sections"] if s["section_number"] == 3)
+        if _open_ens_original_grid(base64.b64decode(mask_section3)) != mask["fields"]:
+            raise ValueError("ENS_POINT_ORIGINAL_LSM_GRID_HEADER_MISMATCH")
+        # Static fields keep their own original clock. A prior-run mask without
+        # source-role/model-validity proof stays diagnostic, never renewed to this run.
+        mask_validity = ("SAME_RUN_OBSERVED" if mask["proof"]["source_cycle_time"] == run.isoformat()
+                         else "UNKNOWN")
+        selected = _select_land_grid_points(mask["fields"], explicit_manifest, mask["values"].__getitem__)
+        surface_receipt: dict[str, Any] = {"capture_status": "UNKNOWN", "transport_status": "UNKNOWN",
+            "station_ground_status": "UNPROVEN", "sensor_agl_status": "UNPROVEN",
+                                          "unavailable_reason": "SURFACE_GEOPOTENTIAL_UNAVAILABLE"}
+        surface = None
+        try:
+            if surface_geopotential_grib_path is None or surface_geopotential_proof_path is None:
+                raise ValueError("SURFACE_GEOPOTENTIAL_UNAVAILABLE")
+            surface = _read_surface_geopotential(Path(surface_geopotential_grib_path),
+                                                Path(surface_geopotential_proof_path))
+            surface_capture = _open_ens_original_surface_capture(Path(surface_geopotential_grib_path))
+            surface_section3 = next(s["bytes_base64"] for s in surface_capture["metadata_sections"] if s["section_number"] == 3)
+            if (surface["fields"] != mask["fields"] or surface_section3 != mask_section3
+                    or surface["proof"]["source_cycle_time"] != run.isoformat()):
+                raise ValueError("ENS_POINT_PHI_GRID_OR_RUN_MISMATCH")
+            if any(not math.isfinite(float(surface["values"][c["flat_index"]]))
+                   for point in selected.values() for c in point["four_neighbors"]):
+                raise ValueError("ENS_POINT_PHI_VALUE_INVALID")
+            surface_receipt = {"capture_status": "OBSERVED", "transport_status": "UNKNOWN",
+                "quantity_role": "model_surface_geopotential",
+                "grid_identity_hash": surface["grid_identity_hash"], "proof": surface["proof"],
+                "observed_headers": surface["observed_headers"], "original_message": surface_capture,
+                "station_ground_status": "UNPROVEN", "sensor_agl_status": "UNPROVEN"}
+        except (ValueError, KeyError, OSError, TypeError) as exc:
+            surface = None
+            surface_receipt["unavailable_reason"] = str(exc)
+        for selection in selected.values():
+            selection["surface_class"] = ("PURE_LAND" if selection["selected_land_fraction"] == 1.
+                                          else "MIXED_LAND_WATER")
+            for cell in selection["four_neighbors"]:
+                phi = float(surface["values"][cell["flat_index"]]) if surface is not None else None
+                cell["raw_phi_m2_s2"] = phi
+        messages, knots, seen, product_grids, process_types = [], [], set(), set(), {}
+        transport_complete = True
+        consumed_offsets = set()
+        with Path(grib_path).open("rb") as fh:
+            while True:
+                local_offset = fh.tell()
+                gid = codes_grib_new_from_file(fh)
+                if gid is None:
+                    break
+                try:
+                    capture = _native_message_capture(gid, instantaneous=True)
+                    if capture["capture_status"] != "OBSERVED":
+                        raise ValueError("ENS_POINT_NATIVE_CAPTURE_UNAVAILABLE")
+                    h = capture["observed_headers"]
+                    raw = codes_get_message(gid)
+                    sections = {s["section_number"]: base64.b64decode(s["bytes_base64"], validate=True)
+                                for s in capture["metadata_sections"]}
+                    s1, s4 = sections[1], sections[4]
+                    template = int.from_bytes(s4[7:9], "big")
+                    if (h["edition"] != 2 or h["centre"] != "ecmf" or h["paramId"] != 167
+                            or h["shortName"] != "2t" or h["units"] != "K"
+                            or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
+                            or h["stepType"] != "instant" or h["stepUnits"] != 1
+                            or h["generatingProcessIdentifier"] != 161 or template not in (0, 1)):
+                        raise ValueError("ENS_POINT_PHYSICAL_OR_50R1_PROCESS_INVALID")
+                    step = int(h["endStep"])
+                    if (step not in steps or h["startStep"] != step or str(h["stepRange"]) != str(step)
+                            or (h["dataDate"], h["dataTime"]) != (int(run.strftime("%Y%m%d")), run.hour * 100)):
+                        raise ValueError("ENS_POINT_RUN_OR_STEP_MISMATCH")
+                    valid = run + timedelta(hours=step)
+                    if (h["validityDate"], h["validityTime"]) != (int(valid.strftime("%Y%m%d")), valid.hour * 100):
+                        raise ValueError("ENS_POINT_VALID_TIME_MISMATCH")
+                    if (int.from_bytes(s1[5:7], "big") != 98
+                            or int.from_bytes(s1[12:14], "big") != run.year
+                            or tuple(s1[14:19]) != (run.month, run.day, run.hour, 0, 0)
+                            or template != h["productDefinitionTemplateNumber"]
+                            or s4[13] != h["generatingProcessIdentifier"]
+                            or s4[11] != h["typeOfGeneratingProcess"] or s4[17] != 1
+                            or int.from_bytes(s4[18:22], "big") != step
+                            or s4[22] != 103 or s4[23] != 0 or int.from_bytes(s4[24:28], "big") != 2):
+                        raise ValueError("ENS_POINT_ORIGINAL_SECTION_HEADER_MISMATCH")
+                    grid = {key: h[key] for key in _GRID_KEYS}
+                    if _open_ens_original_grid(sections[3]) != grid:
+                        raise ValueError("ENS_POINT_ORIGINAL_GRID_HEADER_MISMATCH")
+                    if grid != mask["fields"]:
+                        raise ValueError("ENS_POINT_GRID_MISMATCH")
+                    if base64.b64encode(sections[3]).decode("ascii") != mask_section3:
+                        raise ValueError("ENS_POINT_ORIGINAL_LSM_GRID_MISMATCH")
+                    product_grids.add(hashlib.sha256(sections[3]).hexdigest())
+                    if len(product_grids) != 1:
+                        raise ValueError("ENS_POINT_MIXED_ORIGINAL_GRID")
+                    number = h.get("number", h.get("perturbationNumber"))
+                    if h["dataType"] == "fc" and template == 0 and number in (None, 0):
+                        member = 0
+                    elif (h["dataType"] == "pf" and template == 1 and type(number) is int
+                          and 1 <= number <= 50 and h.get("perturbationNumber", number) == number):
+                        member = number
+                    else:
+                        raise ValueError("ENS_POINT_MEMBER_IDENTITY_INVALID")
+                    if (s1[20] != (1 if member == 0 else 4)
+                            or (member != 0 and s4[35] != member)):
+                        raise ValueError("ENS_POINT_ORIGINAL_MEMBER_HEADER_MISMATCH")
+                    previous = process_types.setdefault(h["dataType"], h["typeOfGeneratingProcess"])
+                    if previous != h["typeOfGeneratingProcess"]:
+                        raise ValueError("ENS_POINT_MIXED_GENERATING_PROCESS")
+                    if (member, step) in seen:
+                        raise ValueError("ENS_POINT_DUPLICATE_MEMBER_STEP")
+                    seen.add((member, step))
+                    evidence = (message_source_evidence or {}).get(local_offset)
+                    if evidence is None:
+                        transport_complete = False
+                        capture["transport_status"] = "UNKNOWN"
+                    else:
+                        capture["source_binding"] = _open_ens_source_binding(raw, evidence, h,
+                            param="2t", member=member, step=step, run=run)
+                        capture["transport_status"] = "OBSERVED"
+                        consumed_offsets.add(local_offset)
+                    # A 50r1 fc is a control only with the official original envelope/index.
+                    # Without it retain decoded bytes as unqualified diagnostics.
+                    values = codes_get_values(gid)
+                    if len(values) != int(grid["Ni"]) * int(grid["Nj"]):
+                        raise ValueError("ENS_POINT_VALUES_GRID_SIZE_INVALID")
+                    for city in explicit_manifest:
+                        point = selected[city["city"]]
+                        value = float(values[point["selected_flat_index"]])
+                        if not math.isfinite(value) or value == codes_get(gid, "missingValue"):
+                            raise ValueError("ENS_POINT_TEMPERATURE_UNAVAILABLE")
+                        knots.append({"city": city["city"], "member": member, "step_hours": step,
+                            "valid_time_utc": valid.isoformat(), "value_k": value,
+                            "native_unit": city["unit"], "value_native_unit": kelvin_to_native(value, city["unit"]),
+                            "selected_point": {"flat_index": point["selected_flat_index"],
+                                "lat": point["selected_lat"], "lon": point["selected_lon"]},
+                            "raw_message_sha256": capture["raw_message_sha256"]})
+                    messages.append(capture)
+                finally:
+                    codes_release(gid)
+        if seen != {(member, step) for member in range(51) for step in steps}:
+            raise ValueError("ENS_POINT_MEMBER_STEP_SET_INCOMPLETE")
+        if message_source_evidence is not None and set(message_source_evidence) != consumed_offsets:
+            raise ValueError("ENS_POINT_SOURCE_BINDINGS_NOT_EXACT")
+        return {**unavailable, "decode_status": "AVAILABLE", "transport_status": "OBSERVED" if transport_complete else "UNKNOWN",
+            "native_step_hours": sorted(steps), "temporal_grid_hours": sorted(steps),
+            "run_time_utc": run.isoformat(), "native_knots": knots, "messages": messages,
+            "selected_cities": selected, "grid_identity_hash": mask["grid_identity_hash"],
+            "land_mask_receipt": {"capture_status": "OBSERVED", "transport_status": "UNKNOWN", "proof": mask["proof"],
+                "static_run_validity_status": mask_validity, "original_message": mask_capture,
+                "raw_message_sha256": hashlib.sha256(Path(mask_grib_path).read_bytes()).hexdigest()},
+            "surface_geopotential_receipt": surface_receipt}
+    except Exception as exc:
+        return {**unavailable, "unavailable_reason": str(exc) or type(exc).__name__}
 
 
 def _scan_grib_with_city_values(

@@ -1,7 +1,7 @@
 # Created: 2026-05-11
 # Last reused/audited: 2026-10-04
 # Lifecycle: created=2026-05-11; last_reviewed=2026-10-04; last_reused=2026-10-04
-# Purpose: Protect bounded collector, cross-track isolation and optional native capture without prediction-budget regression.
+# Purpose: Protect collector isolation, optional native capture and offline 2t knots without prediction-budget regression.
 # Reuse: Inspect source-run, land-mask and shared-deadline contracts; use private DB/GRIB fixtures and fake HTTP.
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.5
 #   Cross-track filename collision antibody: per-step filenames include param
@@ -34,6 +34,248 @@ import pytest
 from src.state.db import init_schema, init_schema_forecasts
 from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.source_run_repo import write_source_run
+
+
+def _native_temperature_knots_fixture(tmp_path, *, fault=None, steps=(0, 3, 6), hour=0):
+    """Synthetic ecCodes 2t bytes; no provider download or possession claim."""
+    ec = pytest.importorskip("eccodes")
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+    from scripts import extract_open_ens_localday as extractor
+
+    issue = datetime(2026, 10, 3, hour, tzinfo=timezone.utc)
+    _, mask, mask_proof, _ = _tiny_native_grib(tmp_path, "mx2t6_high", member_count=1, issue=issue)
+    grid = {"Ni": 2, "Nj": 2, "latitudeOfFirstGridPointInDegrees": 51.75,
+            "longitudeOfFirstGridPointInDegrees": 0., "latitudeOfLastGridPointInDegrees": 51.5,
+            "longitudeOfLastGridPointInDegrees": .25, "iDirectionIncrementInDegrees": .25,
+            "jDirectionIncrementInDegrees": .25, "scanningMode": 0}
+    messages, evidence, offset = [], {}, 0
+    for step in steps:
+        for member in range(51):
+            if fault == "missing" and (member, step) == (50, 6):
+                continue
+            gid = ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+            try:
+                headers = {"centre": "ecmf", **grid, "dataDate": 20261003, "dataTime": hour * 100,
+                           "productDefinitionTemplateNumber": 0 if member == 0 else 1,
+                           "generatingProcessIdentifier": 161, "paramId": 167,
+                           "dataType": "fc" if member == 0 else "pf", "step": step}
+                if member:
+                    headers["number"] = member
+                if (member, step) == (50, 6):
+                    headers.update({"process": {"generatingProcessIdentifier": 158},
+                        "run": {"dataTime": 600}, "grid": {"longitudeOfFirstGridPointInDegrees": .125},
+                        "height": {"level": 3}, "step_type": {"stepType": "max"},
+                        "pf0": {"number": 0}, "param": {"paramId": 130},
+                        "step": {"step": 7}}.get(fault, {}))
+                for key, value in headers.items():
+                    ec.codes_set(gid, key, value)
+                ec.codes_set_values(gid, [300., 310., 280 + member / 8 + step / 4, 320.])
+                body = ec.codes_get_message(gid)
+            finally:
+                ec.codes_release(gid)
+            stream, kind = ("oper", "fc") if member == 0 else ("enfo", "ef")
+            url = f"https://data.ecmwf.int/forecasts/{issue:%Y%m%d}/{hour:02d}z/ifs/0p25/{stream}/{issue:%Y%m%d%H}0000-{step}h-{stream}-{kind}.grib2"
+            row = dict(param="2t", levtype="sfc", date="20261003", time=f"{hour:02d}00", step=str(step),
+                       stream=stream, type="fc" if member == 0 else "pf", _offset=512 + offset,
+                       _length=len(body), **{"class": "od"})
+            if member:
+                row["number"] = str(member)
+            if fault == "control_stream" and member == 0:
+                row["stream"] = "enfo"
+            line = json.dumps(row).encode()
+            evidence[offset] = dict(source_url=url, source_index_url=url[:-6] + ".index",
+                original_index_bytes=line + b"\n", original_range_bytes=body,
+                source_index_sha256=hashlib.sha256(line + b"\n").hexdigest(),
+                source_index_line_sha256=hashlib.sha256(line).hexdigest(),
+                source_index_offset=row["_offset"], source_index_length=len(body),
+                raw_message_sha256=hashlib.sha256(body).hexdigest(),
+                source_fetched_at=(issue + timedelta(hours=1)).isoformat())
+            messages.append(body)
+            offset += len(body)
+    if fault == "duplicate":
+        messages.append(messages[-1])
+    if fault == "transport_tamper":
+        evidence[0]["original_range_bytes"] = messages[0][:-1] + b"0"
+    path = tmp_path / "native-2t.grib2"
+    path.write_bytes(b"".join(messages))
+    return dict(grib_path=path, explicit_manifest=[{"city": "London", "lat": 51.6, "lon": .1, "unit": "C"}],
+        expected_run_utc=issue, required_steps=list(steps), mask_grib_path=mask, mask_proof_path=mask_proof,
+        surface_geopotential_grib_path=mask.with_suffix(".z.grib2"),
+        surface_geopotential_proof_path=mask.with_suffix(".z.proof.json"),
+        message_source_evidence=evidence)
+
+
+def test_native_temperature_knots_real_eccodes_instant_without_extrema_relaxation(tmp_path):
+    from scripts import extract_open_ens_localday as extractor
+
+    inputs = _native_temperature_knots_fixture(tmp_path)
+    result = extractor.decode_open_ens_temperature_knots(**inputs)
+    assert result["decode_status"] == "AVAILABLE", result
+    assert result["transport_status"] == "OBSERVED", result
+    assert result["qualification_status"] == "OFFLINE_ONLY"
+    assert result["live_qualification_status"] == "NOT_EVALUATED"
+    assert result["quantity_role"] == "native_2m_temperature_instantaneous_knots"
+    assert result["projection_status"] == "NOT_PERFORMED"
+    assert result["extrema_status"] == "NOT_COMPUTED"
+    assert result["native_step_hours"] == [0, 3, 6]
+    assert len(result["native_knots"]) == 153
+    selected = result["selected_cities"]["London"]
+    assert selected["selected_flat_index"] == 2
+    assert selected["selected_land_fraction"] == pytest.approx(.8)
+    assert selected["surface_class"] == "MIXED_LAND_WATER"
+    assert [c["raw_phi_m2_s2"] for c in selected["four_neighbors"]] == [100., 200., 313.75, 400.]
+    assert result["land_mask_receipt"]["transport_status"] == "UNKNOWN"
+    assert result["surface_geopotential_receipt"]["transport_status"] == "UNKNOWN"
+    assert result["surface_geopotential_receipt"]["sensor_agl_status"] == "UNPROVEN"
+    knot = next(k for k in result["native_knots"] if (k["member"], k["step_hours"]) == (50, 6))
+    assert knot["value_k"] == 287.75
+    assert knot["valid_time_utc"] == "2026-10-03T06:00:00+00:00"
+    assert knot["value_native_unit"] == pytest.approx(14.6)
+    for message in result["messages"]:
+        assert message["capture_status"] == "OBSERVED"
+        assert message["observed_headers"]["generatingProcessIdentifier"] == 161
+        assert {s["section_number"] for s in message["metadata_sections"]} == {0, 1, 3, 4}
+
+
+@pytest.mark.parametrize("fault", ("missing", "duplicate", "process", "run", "grid", "height",
+    "step_type", "pf0", "param", "step", "control_stream", "transport_tamper"))
+def test_native_temperature_knots_rejects_unbound_or_incomplete_bytes(tmp_path, fault):
+    from scripts import extract_open_ens_localday as extractor
+
+    result = extractor.decode_open_ens_temperature_knots(**_native_temperature_knots_fixture(tmp_path, fault=fault))
+    assert result["decode_status"] == "UNAVAILABLE", result
+    assert result["native_knots"] == []
+    assert result["transport_status"] == "UNKNOWN"
+
+
+def test_native_temperature_knots_absent_transport_or_phi_remains_unknown(tmp_path):
+    from scripts import extract_open_ens_localday as extractor
+
+    inputs = _native_temperature_knots_fixture(tmp_path)
+    inputs.pop("message_source_evidence")
+    inputs.pop("surface_geopotential_grib_path")
+    inputs.pop("surface_geopotential_proof_path")
+    result = extractor.decode_open_ens_temperature_knots(**inputs)
+    assert result["decode_status"] == "AVAILABLE", result
+    assert result["transport_status"] == "UNKNOWN"
+    assert result["surface_geopotential_receipt"]["capture_status"] == "UNKNOWN"
+    assert all(c["raw_phi_m2_s2"] is None for c in result["selected_cities"]["London"]["four_neighbors"])
+
+
+@pytest.mark.parametrize("steps,hour,available", (((144, 150, 156), 0, True), ((87, 90), 6, True),
+    ((0, 1, 2), 0, False), ((144, 147, 150), 0, False), ((90, 93), 6, False), ((240, 246), 0, False)))
+def test_native_temperature_knots_preserves_native_cadence_and_control_horizon(tmp_path, steps, hour, available):
+    from scripts import extract_open_ens_localday as extractor
+
+    result = extractor.decode_open_ens_temperature_knots(**_native_temperature_knots_fixture(tmp_path, steps=steps, hour=hour))
+    assert (result["decode_status"] == "AVAILABLE") is available, result
+    if available:
+        assert result["native_step_hours"] == list(steps)
+        assert len(result["native_knots"]) == len(steps) * 51
+
+
+@pytest.mark.parametrize("field,value", (("units", "C"), ("validityTime", 100),
+    ("generatingProcessIdentifier", 0), ("typeOfGeneratingProcess", 255)))
+def test_native_temperature_knots_observed_header_must_match_original_sections(tmp_path, monkeypatch, field, value):
+    from scripts import extract_open_ens_localday as extractor
+
+    inputs = _native_temperature_knots_fixture(tmp_path)
+    original_get = extractor.codes_get
+    def changed_header(gid, key):
+        if key == field and original_get(gid, "paramId") == 167:
+            return value
+        return original_get(gid, key)
+    monkeypatch.setattr(extractor, "codes_get", changed_header)
+    result = extractor.decode_open_ens_temperature_knots(**inputs)
+    assert result["decode_status"] == "UNAVAILABLE", result
+    assert result["native_knots"] == []
+
+
+def test_native_temperature_knots_nonfinite_selected_cell_is_unavailable(tmp_path, monkeypatch):
+    from scripts import extract_open_ens_localday as extractor
+
+    inputs = _native_temperature_knots_fixture(tmp_path)
+    original_values = extractor.codes_get_values
+    def invalid_point(gid):
+        values = original_values(gid)
+        if extractor.codes_get(gid, "paramId") == 167:
+            values[2] = float("nan")
+        return values
+    monkeypatch.setattr(extractor, "codes_get_values", invalid_point)
+    assert extractor.decode_open_ens_temperature_knots(**inputs)["decode_status"] == "UNAVAILABLE"
+
+
+@pytest.mark.parametrize("kind", ("phi_hash", "lsm_hash", "phi_absent", "prior_static_clock"))
+def test_native_temperature_knots_geometry_has_own_original_proof(tmp_path, kind):
+    from scripts import extract_open_ens_localday as extractor
+
+    inputs = _native_temperature_knots_fixture(tmp_path)
+    if kind in ("phi_hash", "lsm_hash"):
+        path = inputs["surface_geopotential_proof_path" if kind == "phi_hash" else "mask_proof_path"]
+        proof = json.loads(path.read_text())
+        proof["raw_message_sha256" if kind == "phi_hash" else "mask_sha256"] = "0" * 64
+        path.write_text(json.dumps(proof))
+    elif kind == "phi_absent":
+        inputs["surface_geopotential_grib_path"] = tmp_path / "absent-z.grib2"
+    else:
+        prior = datetime(2026, 10, 2, tzinfo=timezone.utc)
+        from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+        (tmp_path / "prior").mkdir()
+        _, mask, proof, _ = _tiny_native_grib(tmp_path / "prior", "mx2t6_high", member_count=1, issue=prior)
+        inputs["mask_grib_path"], inputs["mask_proof_path"] = mask, proof
+    result = extractor.decode_open_ens_temperature_knots(**inputs)
+    if kind == "lsm_hash":
+        assert result["decode_status"] == "UNAVAILABLE", result
+    else:
+        assert result["decode_status"] == "AVAILABLE", result
+        if kind == "prior_static_clock":
+            assert result["land_mask_receipt"]["static_run_validity_status"] == "UNKNOWN"
+        else:
+            assert result["surface_geopotential_receipt"]["capture_status"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("fault", ("index_hash", "line_hash", "offset", "index_member", "source_model",
+    "future_possession", "duplicate_index_line"))
+def test_native_temperature_knots_transport_requires_original_index_and_clock(tmp_path, fault):
+    from scripts import extract_open_ens_localday as extractor
+
+    inputs = _native_temperature_knots_fixture(tmp_path)
+    proof = inputs["message_source_evidence"][0]
+    if fault in ("index_hash", "line_hash"):
+        proof["source_index_sha256" if fault == "index_hash" else "source_index_line_sha256"] = "0" * 64
+    elif fault == "offset":
+        proof["source_index_offset"] += 1
+    elif fault == "source_model":
+        proof["source_url"] = proof["source_url"].replace("/ifs/", "/aifs/")
+    elif fault == "future_possession":
+        proof["source_fetched_at"] = "2100-01-01T00:00:00+00:00"
+    else:
+        if fault == "index_member":
+            row = json.loads(proof["original_index_bytes"])
+            row["number"] = "50"
+            line = json.dumps(row).encode()
+            proof["original_index_bytes"] = line + b"\n"
+            proof["source_index_line_sha256"] = hashlib.sha256(line).hexdigest()
+        else:
+            proof["original_index_bytes"] *= 2
+        proof["source_index_sha256"] = hashlib.sha256(proof["original_index_bytes"]).hexdigest()
+    result = extractor.decode_open_ens_temperature_knots(**inputs)
+    assert result["decode_status"] == "UNAVAILABLE", result
+    assert result["native_knots"] == []
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_native_temperature_knots_never_relabels_original_extrema_as_instant(tmp_path, track):
+    from scripts import extract_open_ens_localday as extractor
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+
+    inputs = _native_temperature_knots_fixture(tmp_path)
+    (tmp_path / "extrema").mkdir()
+    raw, _, _, _ = _tiny_native_grib(tmp_path / "extrema", track, issue=inputs["expected_run_utc"])
+    inputs["grib_path"] = raw
+    result = extractor.decode_open_ens_temperature_knots(**inputs)
+    assert result["decode_status"] == "UNAVAILABLE", result
+    assert result["extrema_status"] == "NOT_COMPUTED"
 
 
 def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t6_low"), issue=None):
