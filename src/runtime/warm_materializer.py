@@ -22,7 +22,9 @@ import json
 import os
 from pathlib import Path
 import queue
+import select
 import socket
+import sys
 import subprocess
 import threading
 import time
@@ -43,7 +45,9 @@ class ResidentMaterializer:
 
     def _start(self, executable: str) -> None:
         self._replies=queue.Queue()
-        parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM)
+        # A stream socket: a receiver blocked for descriptors sees EOF the
+        # moment the parent's end closes (a datagram receive would wait forever).
+        parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
         try:
             process=subprocess.Popen([executable,str(_SCRIPT),"--resident-worker"],
                 cwd=_ROOT,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
@@ -118,6 +122,8 @@ class ResidentMaterializer:
                                                    "lease_fds":len(fds)})+"\n")
             self._process.stdin.flush()
             if fds:
+                # One fixed-length frame per invocation: the request id (32 hex
+                # bytes) carries its descriptors, so frames never merge.
                 socket.send_fds(self._lease_socket,[request_id.encode()],fds)
                 ack=self._reply(request_id,deadline,args,timeout)
                 if ack.get("lease_ack")!=len(fds):
@@ -150,11 +156,23 @@ def receive_leases(message: dict, write: Callable[[str], None]) -> list[int]:
     raw=os.environ.get(LEASE_SOCKET_ENV)
     if raw is None:raise RuntimeError("lease descriptors announced without a lease socket")
     lease_socket=socket.socket(fileno=os.dup(int(raw)))
+    expected=str(message["request_id"]).encode()
     try:
-        data,fds,_flags,_address=socket.recv_fds(lease_socket,256,count)
+        # Wait for the frame or for the parent's death, whichever comes first:
+        # the parent's stdin end closing (EOF readable on stdin with no frame
+        # pending) means no frame will ever arrive, so refuse instead of
+        # blocking. No clock is involved.
+        while True:
+            ready,_w,_x=select.select([lease_socket,sys.stdin],[],[])
+            if lease_socket in ready:
+                break
+            if not sys.stdin.buffer.peek(1):
+                raise RuntimeError("parent closed before sending the announced leases")
+        # Exactly one frame: its id length bounds the read.
+        data,fds,_flags,_address=socket.recv_fds(lease_socket,len(expected),count)
     finally:
         lease_socket.close()
-    if data!=str(message["request_id"]).encode() or len(fds)!=count:
+    if data!=expected or len(fds)!=count:
         for fd in fds:os.close(fd)
         raise RuntimeError("lease descriptor frame does not match its request")
     write(json.dumps({"request_id":message["request_id"],"lease_ack":count})+"\n")
