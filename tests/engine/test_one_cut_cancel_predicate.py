@@ -126,10 +126,12 @@ def _verdict(wake, dependency):
 
 
 UNPUBLISHED = CutDependency(published=False, hard_family_keys=None, belief_family_keys=None)
-# A frozen Paris winner: its family for belief, plus a Tokyo holding for hard facts.
+# A frozen Paris winner (Tokyo is merely held): the adapter's published
+# dependency names the winner's family for both hard and belief facts, since
+# neither a BUY nor a SELL reads another holding's q after selection.
 FROZEN = CutDependency(
     published=True,
-    hard_family_keys=frozenset({PARIS_KEY, TOKYO_KEY}),
+    hard_family_keys=frozenset({PARIS_KEY}),
     belief_family_keys=frozenset({PARIS_KEY}),
 )
 NO_BELIEF = CutDependency(
@@ -156,9 +158,11 @@ NO_BELIEF = CutDependency(
         (_wake("day0_extreme_event_committed"), UNPUBLISHED, "hard"),
         (_wake("current_temperature_print_committed"), UNPUBLISHED, "hard"),
         (_wake("day0_extreme_event_committed", (("Paris", "bad", "high"),)), FROZEN, "hard"),
-        # HARD: the winner's or a holding's family cancels; any other waits.
+        # HARD: only the winner's family cancels; a holding's or any other
+        # family's fact is the next cut's input.
         (_wake("day0_extreme_event_committed", (PARIS,)), FROZEN, "hard"),
-        (_wake("day0_extreme_event_committed", (TOKYO,)), FROZEN, "hard"),
+        (_wake("day0_extreme_event_committed", (TOKYO,)), FROZEN, None),
+        (_wake("day0_extreme_event_committed", (TOKYO, PARIS)), FROZEN, "hard"),
         (_wake("day0_extreme_event_committed", (LONDON,)), FROZEN, None),
         # BELIEF: only the winner's family; a holding's posterior is the next
         # cut's input.

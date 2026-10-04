@@ -3030,8 +3030,10 @@ class CutScope:
     """What a cut's frozen winner rests on, published by the runtime.
 
     ``winner_family_key``: the one family whose q the cut consumes after
-    selection. ``held_family_keys``: holdings and held obligations the cut's
-    wealth values; a hard fact for one of them still cancels the cut.
+    selection, and the only family whose fact can cancel it. A SELL is
+    scored on its own family's payoff; a BUY is sized on utility cash plus
+    its own family's payouts. Neither reads another holding's q, so
+    ``held_family_keys`` (still published by the runtime) cancels nothing.
     """
 
     winner_family_key: str

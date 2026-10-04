@@ -223,12 +223,22 @@ def test_a_family_fact_before_the_freeze_defers_then_cancels_at_the_freeze(cut):
     assert [_reasons(probe()) for probe in _probes(cut)] == [_PRINT, _PRINT, _PRINT]
 
 
-def test_a_hard_fact_for_a_holding_cancels_but_its_belief_does_not(cut):
+def test_no_fact_for_another_holding_cancels_a_frozen_cut(cut):
+    """2026-10-04 Singapore 92f60550: a Karachi/Manila Day0 fact revoked a held
+    SELL pre-venue. The winner's SELL is scored on its own family's payoff
+    (solver: utility cash + own held shares) and a BUY on utility cash plus its
+    own family's payouts (``_candidate_portfolio_endowment``); neither reads
+    another holding's q, so only the winner's family can cancel the cut."""
+
     cut.freeze(_IN_KEY, held={_OUT_KEY})
     cut.publish("current_temperature_print_committed", _OUT)
-    assert [probe() for probe in _probes(cut)] == [False, False, False]
     cut.publish_day0(_OUT)
-    assert [_reasons(probe()) for probe in _probes(cut)] == [_DAY0, _DAY0, _DAY0]
+    assert [probe() for probe in _probes(cut)] == [False, False, False]
+    cut.publish_day0(_IN)
+    labels = [probe() for probe in _probes(cut)]
+    assert all(label.startswith(_DAY0 + "[hard]#") for label in labels), labels
+    assert all("@Dallas/2026-07-11/high" in label for label in labels), labels
+    assert not any("Moscow" in label for label in labels), labels
 
 
 @pytest.mark.parametrize(
@@ -301,7 +311,7 @@ def test_family_scoped_held_completion_follows_the_same_law(
     monkeypatch, tmp_path, family
 ):
     """A generic held completion cut values its whole portfolio, yet acts
-    on one winner: only that winner's (or a holding's hard) fact ends it."""
+    on one winner: only that winner's family's fact ends it."""
 
     monkeypatch.setattr(
         reactor_wake, "exact_held_sell_completion_wake_ids", lambda **_kw: ()
@@ -427,3 +437,89 @@ def test_runtime_publishes_only_the_frozen_winner(monkeypatch):
     assert published[0] is None
     assert published[1] == reactor_wake.CutScope(winner_family_key=_IN_KEY)
     assert published[2] == "receipt"
+
+
+@pytest.mark.parametrize("action", ("SELL", "BUY"))
+def test_a_holdings_day0_fact_never_revokes_a_preflighted_winner(
+    monkeypatch, tmp_path, action
+):
+    """The real preflight -> one-shot actuation seam. A Day0 fact for a
+    non-winner holding leaves the winner's actuation (and, for a SELL, the
+    exact callable the executor receives as ``pre_venue_cancelled``) intact;
+    the winner's own Day0 fact revokes it with its labelled source."""
+
+    cut = _build_cut(monkeypatch, tmp_path)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_candidate_receipt",
+        lambda *_a, **_kw: era.EventSubmissionReceipt(
+            False, "event", "snapshot",
+            reason="GLOBAL_SELL_PREFLIGHT_STABLE", proof_accepted=True,
+        ),
+    )
+    monkeypatch.setattr(
+        era, "_global_preflight_entry_jit_receipt", lambda _e, receipt, **_kw: receipt
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_entry_authority_receipt",
+        lambda _e, receipt, **_kw: receipt,
+    )
+    monkeypatch.setattr(
+        era, "_global_actuation_current_wealth_block_reason", lambda *_a, **_kw: None
+    )
+
+    def sell_lane(event, **kwargs):
+        seen["pre_venue"] = kwargs["hard_authority_cancelled"]()
+        return era.EventSubmissionReceipt(
+            False, event.event_id, "snapshot", reason="TEST_SELL_LANE"
+        )
+
+    monkeypatch.setattr(era, "_submit_current_global_sell", sell_lane)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    authority = global_batch_runtime.GlobalPreflightAuthority(
+        probability_manifest=((_IN_KEY, "q-1"),),
+        book_epoch_identity="book-1",
+        book_economics_manifest=((_IN_KEY, "book-1"),),
+        wealth_witness_identity="wealth-1",
+        actuation_deadline=now + _dt.timedelta(seconds=30),
+    )
+    event = _forecast_event("Dallas")
+    actuation = SimpleNamespace(
+        actuation_identity=f"actuation-{action}",
+        wealth_witness_identity="wealth-1",
+        winner_event_id=event.event_id,
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(action=action, family_key=_IN_KEY)
+        ),
+    )
+
+    def actuate():
+        token = cut.captured["preflight_winner"](event, actuation, now, authority)
+        assert token.status == "STABLE"
+        return cut.captured["actuate_preflighted_winner"].consume(
+            event, actuation, _dt.datetime.now(_dt.timezone.utc),
+            token.binding_token, authority,
+        )
+
+    cut.freeze(_IN_KEY, held={_OUT_KEY})
+    cut.publish_day0(_OUT)
+    receipt = actuate()
+    assert receipt.reason != "GLOBAL_AUCTION_NO_TRADE:GLOBAL_HARD_AUTHORITY_REVOKED"
+    if action == "SELL":
+        assert receipt.reason == "TEST_SELL_LANE"
+        assert seen.pop("pre_venue") is False
+
+    cut.publish_day0(_IN)
+    # The callable the executor probes pre-venue now names the winner's fact.
+    assert str(cut.captured["final_actuation_cancelled"]()).startswith(
+        _DAY0 + "[hard]#"
+    )
+    # A fresh one-shot capability for the same winner is revoked.
+    cut.captured["actuate_preflighted_winner"] = (
+        global_batch_runtime.GlobalOneShotActuator(
+            cut.captured["actuate_preflighted_winner"]._callback
+        )
+    )
+    assert actuate().reason == "GLOBAL_AUCTION_NO_TRADE:GLOBAL_HARD_AUTHORITY_REVOKED"

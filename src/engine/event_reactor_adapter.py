@@ -8336,8 +8336,8 @@ def event_bound_live_adapter_from_trade_conn(
         if (wake_id := str(raw_wake_id or "").strip())
     )
     # INV-47 — what the running cut's frozen winner rests on (runtime-published).
-    # SCOPE: the winner's family plus the holdings its wealth values; None
-    #   until selection freezes a winner.
+    # SCOPE: the winner's family only (no BUY or SELL reads another family's
+    #   q after selection); None until selection freezes a winner.
     # DRAIN: a wake outside it stays queued for the next cut, which re-reads
     #   committed truth; publishing re-judges every wake since the cutoff.
     # RESET: each cut republishes None at entry.
@@ -8347,10 +8347,6 @@ def event_bound_live_adapter_from_trade_conn(
         if scope is not None and (
             not isinstance(scope, CutScope)
             or not str(scope.winner_family_key or "").strip()
-            or any(
-                not isinstance(family_key, str) or not family_key.strip()
-                for family_key in scope.held_family_keys
-            )
         ):
             scope = None
         _cut_scope[0] = scope
@@ -9294,7 +9290,7 @@ def event_bound_live_adapter_from_trade_conn(
             winner = frozenset({scope.winner_family_key})
             return CutDependency(
                 published=True,
-                hard_family_keys=winner | scope.held_family_keys,
+                hard_family_keys=winner,
                 belief_family_keys=winner,
             )
 
