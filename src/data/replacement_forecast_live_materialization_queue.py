@@ -5802,9 +5802,12 @@ _CAPTURE_PREFIX = ".capture."
 # ``payload/`` (any request basename, even ``receipt.json``), and control
 # metadata lives at the top level under a ``.control`` name no request
 # (``*.json``) can take. A receipt is terminal only when it names the very
-# entry it sits beside.
+# entry it sits beside. A receipt is written complete under
+# ``receipt.staging/`` and renamed into place, so the final name never holds
+# a partial receipt from this code.
 _CAPTURE_PAYLOAD_DIR = "payload"
 _ALIAS_RECEIPT_NAME = "quarantine.receipt.control"
+_RECEIPT_STAGING_DIR = "receipt.staging"
 _LEGACY_ALIAS_RECEIPT_NAME = "receipt.json"  # the round-4 layout, settled on sight
 
 
@@ -5876,7 +5879,7 @@ def _capture_entries(capture: Path) -> list[Path]:
     entries = [payload / n for n in sorted(os.listdir(payload))] if payload.is_dir() else []
     legacy_receipt = _read_capture_receipt(capture / _LEGACY_ALIAS_RECEIPT_NAME)
     for name in sorted(os.listdir(capture)):
-        if name in (_CAPTURE_PAYLOAD_DIR, _ALIAS_RECEIPT_NAME):
+        if name in (_CAPTURE_PAYLOAD_DIR, _ALIAS_RECEIPT_NAME, _RECEIPT_STAGING_DIR):
             continue
         if name == _LEGACY_ALIAS_RECEIPT_NAME and legacy_receipt is not None \
                 and legacy_receipt.get("request_name") != name:
@@ -5885,10 +5888,26 @@ def _capture_entries(capture: Path) -> list[Path]:
     return entries
 
 
+class _ReceiptUnreadable(OSError):
+    """A capture receipt whose bytes cannot be read: unknown, never invalid."""
+
+
 def _read_capture_receipt(path: Path) -> Mapping[str, object] | None:
+    """The receipt at ``path``; None when absent or not a complete receipt.
+
+    ``_ReceiptUnreadable`` when it exists but cannot be read (permission,
+    non-regular): that is unknown evidence, never grounds to discard it.
+    """
+
     try:
-        body = json.loads(read_regular_request(path)[0])
-    except (OSError, ValueError):
+        raw = read_regular_request(path)[0]
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _ReceiptUnreadable(exc.errno, f"capture receipt unreadable: {exc}", str(path)) from exc
+    try:
+        body = json.loads(raw)
+    except ValueError:
         return None
     if isinstance(body, dict) and body.get("status") == "QUARANTINED_REQUEST_ALIAS":
         return body
@@ -5896,7 +5915,19 @@ def _read_capture_receipt(path: Path) -> Mapping[str, object] | None:
 
 
 def _capture_settled(capture: Path) -> bool:
-    """Whether the capture holds a terminal receipt naming its quarantined entry."""
+    """Whether the capture provably holds a terminal receipt (unreadable: not proven)."""
+
+    try:
+        return _capture_receipted(capture)
+    except _ReceiptUnreadable:
+        return False
+
+
+def _capture_receipted(capture: Path) -> bool:
+    """Whether the capture holds a terminal receipt naming its quarantined entry.
+
+    Raises ``_ReceiptUnreadable`` when a receipt exists but cannot be read.
+    """
 
     entries = _capture_entries(capture)
     for receipt_name in (_ALIAS_RECEIPT_NAME, _LEGACY_ALIAS_RECEIPT_NAME):
@@ -5910,14 +5941,11 @@ def _capture_settled(capture: Path) -> bool:
 
 
 def _remove_capture_dir(capture: Path) -> None:
-    try:
-        (capture / _CAPTURE_PAYLOAD_DIR).rmdir()
-    except OSError:
-        pass
-    try:
-        capture.rmdir()
-    except OSError:
-        pass
+    for directory in (capture / _CAPTURE_PAYLOAD_DIR, capture / _RECEIPT_STAGING_DIR, capture):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
 
 
 def _settle_capture(capture: Path, restore_dir: Path) -> Path | None:
@@ -5926,10 +5954,21 @@ def _settle_capture(capture: Path, restore_dir: Path) -> Path | None:
     Every regular entry is a request and is restored; a non-regular entry is
     quarantined under a receipt that names it. A capture that already holds a
     terminal receipt naming its single non-regular entry is left untouched.
+    A readable final receipt that is not terminal (torn by a crash of an
+    earlier writer) and any receipt still in staging are discarded and the
+    capture classified afresh; an unreadable one raises ``_ReceiptUnreadable``
+    and is left in place.
     """
 
-    if _capture_settled(capture):
+    if _capture_receipted(capture):
         return None
+    staging = capture / _RECEIPT_STAGING_DIR
+    for control in (capture / _ALIAS_RECEIPT_NAME, staging / _ALIAS_RECEIPT_NAME):
+        control.unlink(missing_ok=True)
+    try:
+        staging.rmdir()
+    except FileNotFoundError:
+        pass
     quarantined: Path | None = None
     for captured in _capture_entries(capture):
         try:
@@ -5944,7 +5983,8 @@ def _settle_capture(capture: Path, restore_dir: Path) -> Path | None:
         _remove_capture_dir(capture)
         return None
     kind = "symlink" if _stat_mode.S_ISLNK(os.lstat(quarantined).st_mode) else "non_regular"
-    with open(capture / _ALIAS_RECEIPT_NAME, "x", encoding="utf-8") as handle:
+    staging.mkdir()
+    with open(staging / _ALIAS_RECEIPT_NAME, "x", encoding="utf-8") as handle:
         json.dump({
             "status": "QUARANTINED_REQUEST_ALIAS",
             "reason_codes": [_REQUEST_ALIAS_QUARANTINED_REASON],
@@ -5955,6 +5995,8 @@ def _settle_capture(capture: Path, restore_dir: Path) -> Path | None:
         }, handle, sort_keys=True)
         handle.flush()
         os.fsync(handle.fileno())
+    os.rename(staging / _ALIAS_RECEIPT_NAME, capture / _ALIAS_RECEIPT_NAME)
+    staging.rmdir()
     _fsync_directory(capture)
     _LOG.warning("materialization request %s is a %s; quarantined at %s",
                  quarantined.name, kind, quarantined)
@@ -5997,7 +6039,11 @@ def _settle_free_capture(capture: Path, request_dir: Path) -> str:
                 return "held"
         except FileNotFoundError:
             return "settled"
-        _settle_capture(capture, request_dir)
+        try:
+            _settle_capture(capture, request_dir)
+        except _ReceiptUnreadable as exc:
+            _LOG.warning("materialization capture %s left unsettled: %s", capture, exc)
+            return "unknown"
         return "settled"
     finally:
         os.close(fd)
