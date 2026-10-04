@@ -3267,6 +3267,12 @@ def capture_executable_market_snapshot(
         accepting_orders = _boolish_market_field(raw_clob_market, "accepting_orders", "acceptingOrders")
         if clob_orderbook is not None:
             enable_orderbook = clob_orderbook
+        # A reconstruction's ``active`` is the prior snapshot's, not a current
+        # fact; copying it forward latched one stale active=False into every
+        # recapture of the family.  Current CLOB lifecycle owns it when present.
+        clob_active = _boolish_market_field(raw_clob_market, "active", "isActive")
+        if clob_active is not None:
+            active = clob_active
     else:
         # For fresh Gamma data: fill enable_orderbook from CLOB when Gamma lacked
         # the field (slug-pattern discovery omits it; tag-based includes it).
@@ -4206,21 +4212,18 @@ def _outcome_has_explicit_live_tradeability_after_end_anchor(
 
     Polymarket weather parent ``endDate`` values are phase/time anchors, not
     final visibility authority for neg-risk child markets.  Day0/redecision must
-    be able to refresh a child that the venue still reports as active,
-    accepting orders, and orderbook-enabled.  This does not make the market
-    executable by itself: snapshot capture still fetches CLOB market/book facts,
-    and submit runs assert_snapshot_executable.
+    be able to refresh a child that the venue still reports as open, accepting
+    orders, and orderbook-enabled.  ``active`` is a routing label, not
+    tradeability (see ``_market_child_is_tradable``); a persisted reconstruction
+    can carry ``active=False`` while CLOB accepts orders, so requiring it here
+    stranded held Day0 books past the noon-UTC end anchor.  This does not make
+    the market executable by itself: snapshot capture still fetches CLOB
+    market/book facts, and submit runs assert_snapshot_executable.
     """
 
     gamma_market_raw = outcome.get("gamma_market_raw")
     if not isinstance(gamma_market_raw, dict):
         gamma_market_raw = {}
-
-    active = _boolish_market_field(outcome, "active", "isActive")
-    if active is None:
-        active = _boolish_market_field(gamma_market_raw, "active", "isActive")
-    if active is not True:
-        return False
 
     child_closed = _boolish_market_field(outcome, "closed", "isClosed")
     if child_closed is None:

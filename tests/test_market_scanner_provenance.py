@@ -823,6 +823,122 @@ def test_reconstructed_snapshot_recapture_succeeds_with_explicit_current_clob_tr
     assert result["executable_snapshot_id"]
 
 
+def _latched_reconstruction_market(condition_id: str, end_at: str) -> dict:
+    """A persisted reconstruction carrying a prior snapshot's ``active=False``."""
+
+    return {
+        "event_id": f"{condition_id}-event",
+        "slug": f"highest-temperature-in-{condition_id}",
+        "outcomes": [
+            {
+                "title": f"{condition_id} bin",
+                "token_id": f"{condition_id}-yes",
+                "no_token_id": f"{condition_id}-no",
+                "market_id": condition_id,
+                "condition_id": condition_id,
+                "question_id": f"{condition_id}-question",
+                "gamma_market_id": f"{condition_id}-gamma",
+                "market_end_at": end_at,
+                "raw_gamma_payload_hash": "f" * 64,
+                "token_map_raw": {"YES": f"{condition_id}-yes", "NO": f"{condition_id}-no"},
+                "gamma_market_raw": {
+                    "id": f"{condition_id}-gamma",
+                    "active": False,
+                    "closed": False,
+                    "enable_orderbook": True,
+                    "acceptingOrders": True,
+                    "tradability_authority": "persisted_snapshot_reconstruction",
+                },
+            }
+        ],
+    }
+
+
+class _LiveActiveClob:
+    """Current CLOB truth: the child is active, open and accepting orders."""
+
+    def get_clob_market_info(self, condition_id: str) -> dict:
+        return {
+            "condition_id": condition_id,
+            "tokens": [
+                {"token_id": f"{condition_id}-yes"},
+                {"token_id": f"{condition_id}-no"},
+            ],
+            "active": True,
+            "closed": False,
+            "archived": False,
+            "enable_order_book": True,
+            "accepting_orders": True,
+            "feesEnabled": True,
+        }
+
+    def get_orderbook_snapshot(self, token_id: str) -> dict:
+        return {
+            "asset_id": token_id,
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "neg_risk": True,
+            "bids": [{"price": "0.40", "size": "10"}],
+            "asks": [{"price": "0.42", "size": "10"}],
+        }
+
+    def get_fee_rate(self, token_id: str) -> float:
+        return 0
+
+
+def test_reconstructed_recapture_takes_current_clob_active_not_the_persisted_label():
+    """Live 2026-10-03: one JIT row persisted active=0 and every reconstruction
+    copied it forward, latching held Atlanta/Taipei books at active=0 although
+    CLOB reported the child active and accepting the whole time."""
+    from types import SimpleNamespace
+
+    conn = _make_market_topology_conn()
+    result = ms.capture_executable_market_snapshot(
+        conn,
+        market=_latched_reconstruction_market("cond-latched", "2026-10-05T12:00:00+00:00"),
+        decision=SimpleNamespace(
+            tokens={
+                "token_id": "cond-latched-yes",
+                "no_token_id": "cond-latched-no",
+                "market_id": "cond-latched",
+            },
+            edge=SimpleNamespace(direction="buy_yes"),
+        ),
+        clob=_LiveActiveClob(),
+        captured_at=datetime(2026, 10, 4, 3, 0, tzinfo=timezone.utc),
+        scan_authority="VERIFIED",
+    )
+
+    row = conn.execute(
+        "SELECT active FROM executable_market_snapshots WHERE snapshot_id = ?",
+        (result["executable_snapshot_id"],),
+    ).fetchone()
+    assert row["active"] == 1
+
+
+def test_day0_refresh_past_end_anchor_does_not_require_the_routing_active_label():
+    """A held Day0 child past its noon-UTC end anchor stays refreshable while
+    the venue accepts orders; ``active`` is a routing label, not tradeability."""
+
+    conn = _make_market_topology_conn()
+    summary = ms.refresh_executable_market_substrate_snapshots(
+        conn,
+        markets=[_latched_reconstruction_market("cond-day0", "2026-10-03T12:00:00+00:00")],
+        clob=_LiveActiveClob(),
+        captured_at=datetime(2026, 10, 4, 3, 0, tzinfo=timezone.utc),
+        max_outcomes=1,
+    )
+
+    assert "market_end_at_elapsed" not in summary["executable_snapshot_candidate_rejection_counts"]
+    assert summary["executable_snapshot_candidate_override_counts"] == {
+        "market_end_at_elapsed_live_tradeability": 1,
+    }
+    assert summary["inserted"] == 1
+    assert conn.execute(
+        "SELECT active FROM executable_market_snapshot_latest WHERE condition_id = 'cond-day0'"
+    ).fetchone()["active"] == 1
+
+
 def test_snapshot_refresh_persists_yes_and_no_substrate_sides():
     """Relationship: background substrate must not erase the later decision side."""
 
