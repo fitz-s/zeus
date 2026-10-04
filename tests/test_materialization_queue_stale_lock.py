@@ -388,11 +388,23 @@ def test_priority_claim_revalidates_every_reserved_slot(tmp_path, monkeypatch, s
     queue._release_claim_batch(claimed.batch_path)
 
 
+def _publish(queue, path, body):
+    """Republish as the production publisher does: a fresh inode replaces the name."""
+    queue._publish_request_bytes(path, body)
+
+
+def _released(queue, claimed):
+    if claimed is not None:
+        queue._release_claim_batch(claimed.batch_path)
+
+
 @pytest.mark.parametrize("slot", (1, 2))
-@pytest.mark.parametrize("fault", ("move_failure", "rewrite_during_move", "publisher_collision"))
-def test_priority_partial_move_preserves_inputs_and_recovers(
+@pytest.mark.parametrize("fault", ("move_failure", "republish_during_capture", "publisher_collision"))
+def test_priority_capture_fault_keeps_stable_prefix_and_loses_nothing(
     tmp_path, monkeypatch, slot, fault,
 ):
+    """A slot whose capture fails or races defers alone with its newest bytes;
+    the stable slots planned ahead of it are claimed; nothing is stranded."""
     queue, requests, paths, _revision, plan = _three_request_priority_plan(tmp_path, monkeypatch)
     prior = plan()
     before = {path: path.read_bytes() for path in paths}
@@ -404,105 +416,90 @@ def test_priority_partial_move_preserves_inputs_and_recovers(
         nonlocal fired
         if source == paths[slot] and not fired:
             fired = True
-            if fault == "rewrite_during_move":
-                source.write_bytes(replacement)
+            if fault == "republish_during_capture":
+                _publish(queue, source, replacement)  # a new inode at the queue name
             else:
                 if fault == "publisher_collision":
-                    paths[0].write_bytes(replacement)
+                    _publish(queue, paths[0], replacement)
                 raise FileNotFoundError("competing move")
         real_replace(source, target)
 
     monkeypatch.setattr(queue.os, "replace", race)
     claimed, reason = queue._try_claim_priority_request(prior)
-    assert fired and claimed is None
-    assert reason == (queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-    for path in paths:
-        expected = replacement if (
-            (fault == "rewrite_during_move" and path == paths[slot])
-            or (fault == "publisher_collision" and path == paths[0])
-        ) else before[path]
-        assert path.read_bytes() == expected
+    try:
+        assert fired and claimed is not None
+        assert queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON in reason
+        assert [p.name for p in claimed.selected_files] == [p.name for p in paths[:slot]]
+        # The leased slots carry exactly their planned bytes.
+        for path in paths[:slot]:
+            assert (claimed.batch_path / path.name).read_bytes() == before[path]
+        # The changed slot is queued with its newest bytes; those behind it untouched.
+        expected_slot = replacement if fault == "republish_during_capture" else before[paths[slot]]
+        assert paths[slot].read_bytes() == expected_slot
+        for path in paths[slot + 1:]:
+            assert path.read_bytes() == before[path]
+        if fault == "publisher_collision":
+            # A newer publication at an already captured name is a new request,
+            # never consumed by this claim and never overwritten.
+            assert paths[0].read_bytes() == replacement
+    finally:
+        _released(queue, claimed)
     inflight = requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME
-    leased = tuple(path for batch in inflight.glob("*") for path in queue._claim_request_files(batch))
+    _keys, recovered, unknown = queue._recover_stale_claims(request_path=requests, inflight_path=inflight)
+    assert not unknown and not queue.inflight_requests_pending(inflight)
     if fault == "publisher_collision":
-        assert len(leased) == 1 and leased[0].read_bytes() == before[paths[0]]
-        queue._write_stage_receipt_payload(leased[0], {"stage": "claimed"})
-        monkeypatch.setattr(queue, "_claim_age_seconds", lambda _batch: 61.0)
-        _keys, recovered, unknown = queue._recover_stale_claims(request_path=requests, inflight_path=inflight)
-        assert recovered == 1 and not unknown
-        assert paths[0].read_bytes() == replacement
         restored = next(path for path in requests.glob("*.recovered-*.json"))
         assert restored.read_bytes() == before[paths[0]]
-        assert queue._read_stage_receipt(restored)["stage"] == "claimed"
-    else:
-        assert leased == ()
 
 
-def test_priority_rollback_publication_window_never_overwrites_new_request(tmp_path, monkeypatch):
-    queue, requests, paths, _revision, plan = _three_request_priority_plan(tmp_path, monkeypatch)
-    prior = plan()
+def test_priority_rollback_never_overwrites_a_newer_publication(tmp_path, monkeypatch):
+    """CLAIM_ALL rollback returns captured requests collision-safe."""
+    queue, requests, paths, _revision, _plan = _three_request_priority_plan(tmp_path, monkeypatch)
     old_second = paths[1].read_bytes()
     new_second = json.dumps(dict(json.loads(old_second), computed_at="2026-08-24T10:00:00+00:00")).encode()
-    real_replace, real_link = queue.os.replace, queue.os.link
-    published = False
-
-    def publish_at_rollback(source, target):
-        nonlocal published
-        if target == paths[1] and source.parent != requests:
-            published = True
-            paths[1].write_bytes(new_second)
+    real_replace = queue.os.replace
 
     def replace(source, target):
         if source == paths[2]:
-            raise FileNotFoundError("third move raced")
-        publish_at_rollback(source, target)
+            _publish(queue, paths[1], new_second)  # lands while slot 1 is captured
+            raise FileNotFoundError("third capture raced")
         real_replace(source, target)
 
-    def link(source, target):
-        publish_at_rollback(source, target)
-        real_link(source, target)
-
     monkeypatch.setattr(queue.os, "replace", replace)
-    monkeypatch.setattr(queue.os, "link", link)
-    claimed, reason = queue._try_claim_priority_request(prior)
-    assert claimed is None and reason and published
-    assert paths[1].read_bytes() == new_second
-    assert paths[0].exists() and paths[2].exists()
-    inflight = requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME
-    retained = [path for batch in inflight.iterdir() for path in queue._claim_request_files(batch)]
-    assert len(retained) == 1 and retained[0].read_bytes() == old_second
-    monkeypatch.setattr(queue, "_claim_age_seconds", lambda _batch: 61.0)
-    _keys, recovered, unknown = queue._recover_stale_claims(request_path=requests, inflight_path=inflight)
-    assert recovered == 1 and not unknown
-    assert paths[1].read_bytes() == new_second
+    with pytest.raises(FileNotFoundError):
+        queue._new_claim_batch(requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME, paths)
+    assert paths[1].read_bytes() == new_second  # the newer publication keeps its name
     assert next(requests.glob("*.recovered-*.json")).read_bytes() == old_second
+    assert paths[0].exists() and paths[2].exists()
+    assert not queue.inflight_requests_pending(requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME)
 
 
 @pytest.mark.parametrize("slot", (1, 2))
 @pytest.mark.parametrize("new_body", ("{", "{}"))
-def test_priority_witness_read_race_defers_without_unhandled_error(
+def test_priority_republish_after_lease_defers_that_slot(
     tmp_path, monkeypatch, slot, new_body,
 ):
+    """A republish after a slot was leased is a new inode: its capture fails the
+    inode check, the new request stays queued, the prefix ahead is claimed."""
     queue, requests, paths, _revision, plan = _three_request_priority_plan(tmp_path, monkeypatch)
     prior = plan()
     read_slot = queue._read_claim_slot
 
-    def replace_after_slot_read(source, **kwargs):
-        # The constructor derives identity from the bytes it read (no second
-        # pathname read), so the race is a rewrite after that read and before
-        # the under-lease byte check.
+    def republish_after_read(source, **kwargs):
         captured = read_slot(source, **kwargs)
         if source == paths[slot]:
-            source.write_text(new_body)
+            _publish(queue, source, new_body.encode())
         return captured
 
-    monkeypatch.setattr(queue, "_read_claim_slot", replace_after_slot_read)
+    monkeypatch.setattr(queue, "_read_claim_slot", republish_after_read)
     claimed, reason = queue._try_claim_priority_request(prior)
-    assert claimed is None
-    assert reason == (queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON,)
-    assert all(path.exists() for path in paths)
-    assert paths[slot].read_text() == new_body
-    assert not tuple((requests.parent / queue.MATERIALIZATION_INFLIGHT_DIR_NAME).glob("*"))
+    try:
+        assert claimed is not None and queue._PRIORITY_CLAIM_SNAPSHOT_CHANGED_REASON in reason
+        assert [p.name for p in claimed.selected_files] == [p.name for p in paths[:slot]]
+        assert paths[slot].read_text() == new_body
+        assert all(path.exists() for path in paths[slot:])
+    finally:
+        _released(queue, claimed)
 
 
 def _run_priority_fixture(queue, requests, tmp_path):
