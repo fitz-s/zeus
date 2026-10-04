@@ -233,32 +233,21 @@ def test_held_family_after_its_local_day_keeps_its_request(tmp_path, monkeypatch
     assert reads and all(strict for _s, strict in reads)
 
 
-def test_expired_contract_of_a_held_family_is_kept_while_its_cycle_is_in_bound(tmp_path, monkeypatch):
-    """The pinned held reader ignores readiness expiry and checks only the cycle-age bound."""
+def test_expired_contract_of_a_held_family_is_kept(tmp_path, monkeypatch):
+    """The pinned held reader ignores readiness expiry; held work is never retired."""
     body = _london_request(target_date="2026-10-04", source_cycle_time="2026-10-03T00:00:00+00:00",
                            expires_at="2026-10-03T23:00:00+00:00")
     scope = ("London", "2026-10-04", "low")
-    _q, _r, spawned, receipts, _p, _reads = _drive(tmp_path, monkeypatch, body, held=frozenset({scope}))
-    assert len(spawned) == 1 and receipts == []
-    stale = dict(body, source_cycle_time="2026-10-02T12:00:00+00:00")  # 36h > 30h bound
-    q, _r, spawned, receipts, _p, _reads = _drive(
-        tmp_path / "b", monkeypatch, stale, held=frozenset({scope}))
-    assert spawned == [] and receipts[0]["reason_codes"] == [q._REQUEST_EXPIRED_REASON]
+    _q, _r, spawned, receipts, _p, reads = _drive(tmp_path, monkeypatch, body, held=frozenset({scope}))
+    assert len(spawned) == 1 and receipts == [] and reads
 
 
-def test_unreadable_exposure_never_retires_what_exposure_decides(tmp_path, monkeypatch):
-    """Only a lapse that depends on "not held" reads exposure; unknown is held."""
-    body = _london_request(expires_at="2026-10-05T12:00:00+00:00")  # ended day, open contract
+@pytest.mark.parametrize("expires_at", ["2026-10-03T12:00:00+00:00", "2026-10-05T12:00:00+00:00"])
+def test_unreadable_exposure_never_retires(tmp_path, monkeypatch, expires_at):
+    """Expired or ended-day alike: an unknown book is a held book."""
+    body = _london_request(expires_at=expires_at)
     _q, _r, spawned, receipts, path, reads = _drive(tmp_path, monkeypatch, body, held_error=True)
     assert reads and len(spawned) == 1 and receipts == [] and path.exists()
-
-
-def test_expired_out_of_bound_cycle_retires_without_reading_exposure(tmp_path, monkeypatch):
-    """The London cycle is ~42h old: no reader, held included, serves it."""
-    q, _r, spawned, receipts, _p, reads = _drive(
-        tmp_path, monkeypatch, _london_request(), held_error=True)
-    assert spawned == [] and reads == []
-    assert receipts[0]["reason_codes"] == [q._REQUEST_EXPIRED_REASON]
 
 
 def test_open_unexpired_request_is_untouched_and_never_reads_exposure(tmp_path, monkeypatch):

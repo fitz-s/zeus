@@ -2863,44 +2863,39 @@ def _request_contract_lapse_reason(
     Without this check such a request retries forever.
 
     Expired: entry readers and the held ``position_belief`` read refuse an
-    expired readiness row. The pinned held reader ignores that row and refuses
-    a carrier cycle outside ``cycle_age_outside_bound`` instead. An expired
-    request is therefore unusable when its family is not chain-held, or when
-    its carrier cycle is also outside that bound.
+    expired readiness row. Local day ended: entry needs an open local day, and
+    the current-target plan and every producer drop an ended day.
 
-    Local day ended: entry needs an open local day, and the current-target plan
-    and every producer drop an ended day. One consumer remains: chain-held
-    exposure. Post-day reduce-only redecision and settlement keep using
-    statistical q until the settlement value is final, and the cycle-advance
-    producer still admits a held family's committed causal baseline. A held
-    family's ended day therefore never retires a request.
+    Either way, one consumer can remain: chain-held exposure. The pinned held
+    reader ignores readiness expiry and checks the carrier cycle age. Post-day
+    reduce-only redecision and settlement keep using statistical q until the
+    settlement value is final. The cycle-advance producer still admits a held
+    family's committed causal baseline. So a lapse retires a request only when
+    the family is proven not chain-held. A held family's stale request is
+    replaced the ordinary way, when a newer request for the same family
+    supersedes it.
 
-    ``held`` reads chain-confirmed exposure and runs only when a lapse is
-    otherwise proven. A failed read raises and is treated as held.
-    An unknown city or timezone, or an unparseable date or clock, is not a
-    lapse.
+    ``held`` reads chain-confirmed exposure and runs only once a lapse is
+    proven. A failed read raises and is treated as held. An unknown city or
+    timezone, or an unparseable date or clock, is not a lapse.
     """
 
     scope = _request_family_scope(payload)
     if scope is None:
         return None
     expires_at = _parse_utc_iso(payload.get("expires_at"))
+    reason = None
     if expires_at is not None and expires_at <= now_utc:
-        from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
-            cycle_age_outside_bound,
-        )
-
-        cycle = _parse_utc_iso(payload.get("source_cycle_time"))
-        if (cycle is not None and cycle_age_outside_bound(now_utc, cycle)) or not held(scope):
-            return _REQUEST_EXPIRED_REASON
-    try:
-        target_day = date.fromisoformat(scope[1])
-    except ValueError:
-        return None
-    local_today = _city_local_today(scope[0], now_utc)
-    if local_today is not None and target_day < local_today and not held(scope):
-        return _REQUEST_TARGET_DAY_ENDED_REASON
-    return None
+        reason = _REQUEST_EXPIRED_REASON
+    else:
+        try:
+            target_day = date.fromisoformat(scope[1])
+        except ValueError:
+            return None
+        local_today = _city_local_today(scope[0], now_utc)
+        if local_today is not None and target_day < local_today:
+            reason = _REQUEST_TARGET_DAY_ENDED_REASON
+    return None if reason is None or held(scope) else reason
 
 
 def _is_near_dated_target_day(
