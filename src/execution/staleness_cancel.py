@@ -1822,6 +1822,20 @@ def _capture_standing_entry_values(
                     f"ENTRY_REST_PORTFOLIO_AUTHORITY_INVALID:{type(exc).__name__}",
                 )
             return now, [values[c] for c in order]
+        if wealth.buy_cash_unavailable_reason is not None:
+            # The witness cannot prove BUY cash, so no BUY rest may keep
+            # filling on it, exactly as no fresh BUY is selected or submitted.
+            # SCOPE: this pass's active rests. DRAIN: the witness owner's
+            # obligation drain; these cancels release their own reservations.
+            # RESET: a witness with coherent spendable cash.
+            for rest in active:
+                command_id = str(rest["command_id"])
+                values[command_id] = _protective(
+                    rest,
+                    families.get(command_id),
+                    f"ENTRY_REST_PORTFOLIO_AUTHORITY_INVALID:{wealth.buy_cash_unavailable_reason}",
+                )
+            return now, [values[c] for c in order]
         # One fresh-BUY cut per family per pass: its book epoch, the pass's
         # maker-fill samples, and the optimum with every rest held (live
         # wealth). Only the released optimum is per rest.

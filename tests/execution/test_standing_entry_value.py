@@ -881,6 +881,39 @@ class TestRealWitnessDecisionInstant:
             )
 
 
+class TestUnprovableBuyCash:
+    """A witness whose reservations exceed chain pUSD vetoes every BUY. A rest
+    is a BUY still filling, so it cancels too, whatever else the floor holds."""
+
+    @pytest.mark.parametrize("legacy_micro", [0, 1_000_000_000])
+    def test_a_typed_buy_cash_veto_cancels_the_rest(self, monkeypatch, legacy_micro):
+        conn = _trade_db()
+        _seed_early_rest(conn)
+        _real_authority_harness(monkeypatch)
+        _publish_real_allocator(conn)
+        at = datetime.now(UTC)
+        # $3 pUSD under the rest's own $5 reservation.
+        _seed_real_wealth(conn, captured_at=at - timedelta(seconds=5), pusd_micro=3_000_000)
+        conn.execute(
+            "UPDATE collateral_ledger_snapshots SET usdc_e_legacy_balance_micro=?", (legacy_micro,)
+        )
+        conn.commit()
+        venue = _NoCancelVenue()
+
+        result = C.run_c3_staleness_cancel_cycle(
+            conn, conn, sqlite3.connect(":memory:"), venue,
+            world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: at,
+        )
+
+        valuation = result["valuations"][0]
+        assert (valuation.action, valuation.reason) == (
+            "CANCEL",
+            "ENTRY_REST_PORTFOLIO_AUTHORITY_INVALID:CURRENT_WEALTH_SPENDABLE_CASH_INVALID",
+        )
+        assert valuation.evidence["authority_valid"] is False
+        assert venue.calls == [["venue-1"]]
+
+
 class TestRealAllocatorLifecycle:
     """F2: before the allocator's first publish the pass decides nothing; a
     later loss of authority still fails closed."""
