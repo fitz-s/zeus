@@ -6035,10 +6035,25 @@ def _settle_abandoned_captures(request_dir: Path) -> int:
 
 
 def _settle_free_capture(capture: Path, request_dir: Path) -> str:
-    """"settled", "held" (a live quarantine owns it) or "unknown" (unreadable)."""
+    """Settle a capture whose flock is free; its state as ``_classify_capture`` names it."""
+
+    return _classify_capture(capture, request_dir)
+
+
+def _classify_capture(capture: Path, settle_into: Path | None) -> str:
+    """Classify a capture under its flock; settle it into ``settle_into`` when given.
+
+    The one classification behind both reconcile modes, so a dry run
+    (``settle_into=None``, nothing mutated) reports exactly the state apply
+    would act on: "held" (a live quarantine owns it, or the name now holds
+    another directory), "unknown" (it or its receipt cannot be read), "gone"
+    (already removed), else "free" (dry run) / "settled" (apply).
+    """
 
     try:
         fd = os.open(capture, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return "gone"
     except OSError:
         return "unknown"
     try:
@@ -6052,12 +6067,15 @@ def _settle_free_capture(capture: Path, request_dir: Path) -> str:
             if not os.path.samestat(os.fstat(fd), os.lstat(capture)):
                 return "held"
         except FileNotFoundError:
-            return "settled"
+            return "gone"
         try:
-            _settle_capture(capture, request_dir)
-        except _ReceiptUnreadable as exc:
-            _LOG.warning("materialization capture %s left unsettled: %s", capture, exc)
+            _capture_receipted(capture)
+        except OSError as exc:  # _ReceiptUnreadable or an unlistable capture
+            _LOG.warning("materialization capture %s is unreadable: %s", capture, exc)
             return "unknown"
+        if settle_into is None:
+            return "free"
+        _settle_capture(capture, settle_into)
         return "settled"
     finally:
         os.close(fd)
@@ -6676,15 +6694,10 @@ def reconcile_inflight_for_migration(
     for capture in _capture_dirs(request_path):
         if _capture_settled(capture):
             continue
-        if not apply:
-            state = _probe_capture(capture)
-            if state != "free":
-                unsettled.append((capture.name, state))
-            continue
-        state = _settle_free_capture(capture, request_path)
+        state = _classify_capture(capture, request_path if apply else None)
         if state == "settled":
             settled_captures += 1
-        else:
+        elif state not in ("free", "gone"):
             unsettled.append((capture.name, state))
     drained = _drain_abandoned_staging(inflight_path) if apply else len(
         _abandoned_staging(inflight_path)
@@ -6727,23 +6740,6 @@ def reconcile_inflight_for_migration(
         tuple(restored), tuple(refused), tuple(held_leases), tuple(live_staging), drained,
         tuple(unsettled), settled_captures,
     )
-
-
-def _probe_capture(capture: Path) -> str:
-    """Observe a capture's flock without settling it: "free", "held" or "unknown"."""
-    try:
-        fd = os.open(capture, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return "unknown"
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return "free"
-    except BlockingIOError:
-        return "held"
-    except OSError:
-        return "unknown"
-    finally:
-        os.close(fd)
 
 
 def _release_without_sweep(leases: Sequence[_lease.HeldLease]) -> None:
