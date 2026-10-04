@@ -390,7 +390,7 @@ def test_priority_claim_revalidates_every_reserved_slot(tmp_path, monkeypatch, s
 
 def _publish(queue, path, body):
     """Republish as the production publisher does: a fresh inode replaces the name."""
-    queue._publish_request_bytes(path, body)
+    queue.publish_request_bytes(path, body)
 
 
 def _released(queue, claimed):

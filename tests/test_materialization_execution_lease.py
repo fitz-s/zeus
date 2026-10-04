@@ -386,3 +386,31 @@ def test_symlinked_request_is_quarantined_without_touching_its_target(tmp_path):
     assert not (tmp_path / "blocked_attempts").exists()
     with pytest.raises(queue.RequestNotRegular):
         queue._new_claim_batch(inflight, (links[0],))
+
+
+# --- immutable publication ------------------------------------------------------
+
+
+def test_republish_is_a_new_inode_so_a_claimed_hardlink_keeps_its_bytes(tmp_path):
+    requests, inflight, (a,) = _queued(tmp_path, "a.json")
+    b = requests / "b.json"
+    os.link(a, b)
+    before = a.read_bytes()
+    batch = queue._new_claim_batch(inflight, (a,))
+    queue._write_request(b, _request(baseline_source_run_id="new-baseline-run"))
+    assert (batch / "a.json").read_bytes() == before
+    assert (batch / "a.json").stat().st_ino != b.stat().st_ino
+
+
+def test_executor_refuses_bytes_that_do_not_match_the_claim_record(tmp_path):
+    from scripts import materialize_replacement_forecast_live as worker
+
+    requests, inflight, (a,) = _queued(tmp_path, "a.json")
+    batch = queue._new_claim_batch(inflight, (a,))
+    claimed = batch / "a.json"
+    worker._require_claimed_bytes(claimed, claimed.read_bytes())  # matching bytes pass
+    with pytest.raises(worker.ClaimedBytesMismatch):
+        worker._require_claimed_bytes(claimed, b'{"tampered": true}')
+    outside = tmp_path / "dry-run.json"
+    outside.write_text("{}")
+    worker._require_claimed_bytes(outside, outside.read_bytes())  # no claim, no record
