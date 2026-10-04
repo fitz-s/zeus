@@ -436,3 +436,16 @@ def test_fifo_request_is_rejected_without_waiting_for_a_writer(tmp_path):
     ) % (str(Path.cwd()), str(fifo))
     done = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
     assert done.stdout.strip() == "REJECTED", (done.stdout, done.stderr)
+
+
+def test_resident_invocation_refuses_a_claim_whose_leases_it_does_not_hold(tmp_path, monkeypatch):
+    from scripts import materialize_replacement_forecast_live as worker
+
+    requests, inflight, (a,) = _queued(tmp_path, "a.json")
+    batch = queue._new_claim_batch(inflight, (a,))
+    claimed = batch / "a.json"
+    monkeypatch.setattr(worker, "_INVOCATION_LEASE_FDS", ())
+    with pytest.raises(worker.ClaimLeaseNotCovered):  # bytes match, ownership does not
+        worker._require_lease_coverage(claimed)
+    monkeypatch.setattr(worker, "_INVOCATION_LEASE_FDS", queue._claim_lease_fds([claimed]))
+    worker._require_lease_coverage(claimed)  # exactly the transferred union: accepted
