@@ -4949,6 +4949,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
 
 
 _FORECAST_TABLES = (
+    "day0_hourly_vectors",
     "single_live_cutover_generation",
     "ensemble_snapshots",
     "source_run",
@@ -5863,7 +5864,9 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # runs CREATE INDEX ON market_events(temperature_metric), it crashes with
     # "no such column: temperature_metric". Fix: always build via _create_market_events
     # (canonical static DDL in v2_schema.py) and never copy from world_src.
-    _WORLD_ATTACH_EXCLUDED: frozenset[str] = frozenset({"market_events"})
+    _WORLD_ATTACH_EXCLUDED: frozenset[str] = frozenset({
+        "market_events", "day0_hourly_vectors",
+    })
 
     # Opt-in TypedConnection identity guard (P2): if a TypedConnection is
     # passed, verify it wraps the forecasts DB. Raw sqlite3.Connection callers
@@ -6085,6 +6088,11 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         _create_replacement_forecast_live_tables as _create_replacement_live,
     )
     _create_replacement_live(conn)
+
+    # FORECAST-only hourly evidence uses its existing runtime schema owner;
+    # fresh bootstrap must satisfy the same strict table ownership registry.
+    from src.data.day0_hourly_vectors import _ensure_schema as _ensure_hourly_vectors
+    _ensure_hourly_vectors(conn)
 
     # DIQ packet (docs/rebuild/quarantine_excision_2026-07-11.md): fact_revocations
     # is owner-local — this forecasts-DB instance carries calibration_pairs

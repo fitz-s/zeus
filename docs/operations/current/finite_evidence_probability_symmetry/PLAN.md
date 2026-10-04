@@ -15923,3 +15923,125 @@ files, no instantaneous2t member cache; its existing oper/fc z index lists only
 one2t step0, not an immutable51-member future path. This is availability
 planning evidence, not a new acquisition route or authority for conditional q.
 No commit/push/loader has run for this repair;15b runtime remains separate.
+
+### Qualified-domain slice normal delivery/runtime checkpoint
+
+ROOT accepted this6-path slice; normal FF landed
+0b5ee41a3f75c457df0c5f213e38fc2edaf5407d from15b, with the three frozen hashes
+unchanged. The exact task-tree config symlink was removed; its d7 live target
+and unrelated live artifacts were preserved. Current live/origin equal0b5,
+tracked-clean. One normal loader started16:40:34Z/session72776 and returned
+actual rc0 (chunk776b11), log
+/tmp/zeus-qualified-domain-loader-20261004.aQOW0k/normal-loader.log. Existing
+typed fresh-failed-monitor repair handoff, warm preflight, pre-stop capital
+attestation and zero-main witness governed it; no allow/force/clear or manual
+source/venue action was used. Prior15b first refusal/retry facts remain above.
+
+Main89581 boot stamp16:42:58.602618Z names full0b5; ingest85760(start16:40:41)
+and forecast85815(start16:40:47) fixed boot heartbeats also name0b5. Main
+heartbeat16:44:12.155493Z, sidecar heartbeats16:42:48Z, all three cwdlive and
+main canonical WORLD/FORECAST/TRADE handles were read-only verified. Config d7
+remains file-only evidence. Post-start monitor coverage is19 open holdings,
+two fresh and17 typed probability-degraded with full held books; EDLI reports
+263 claimable/12 processing/progress13. This is not all-ready/ENTRY/q proof.
+The log's restart_guard_not_selected is retained verbatim; selected active
+guard is actually None at16:46:43.585157Z via the existing read-only API, not
+an agent clear or fabricated reset.
+
+Natural post-boot producer callbacks16:44:24/16:45:06/16:45:51 continue. No new
+post-boot Hong Kong Oct4/Oct5 vector was yet bound; the16:42:20 Hong Kong ENS400
+predates the main stamp and is not called post-load proof. Hong Kong local day
+has advanced toOct5, so the real Oct4 native15:40 prefix is not relabeled as a
+new current-day trigger. Private actual producer/body/persist/consumer proof
+establishes the bounded code repair; natural qualified-prefix/runtime vector
+RESET and complete51/q receipt remain unproven until real source facts arrive.
+ENS per-run publication, model/site representativeness, ground2 and realized
+profit remain independent OPEN obligations. Do not restart for this PLAN-only
+checkpoint or archive the still-running task without its next disposition.
+
+### Canonical hourly-vector ownership bounded before-edit plan
+
+ROOT approved correcting the existing canonical FORECAST table ownership gap;
+this is governance/INV-37 truth routing, not a new source or probability regime.
+Read-only canonical sqlite_master confirms the SQL table day0_hourly_vectors,
+with the twelve columns declared by day0_hourly_vectors._TABLE_DDL. Its normal
+writer opens get_forecasts_connection inside the FORECAST WriteClass.LIVE flock
+and invokes _ensure_schema. The exact registry lookup raises KeyError and
+is_forecast_class returns False; no wildcard/internal exemption applies. A
+private real-DDL/actual-registry-check counterexample identifies the table as
+extra-on-disk. No live schema/data writes were made.
+
+Planned approved surfaces are architecture/db_table_ownership.yaml and the
+existing tests/state/test_table_registry_coherence.py: register forecasts /
+forecast_class, vector_id, actual twelve-column types/nullability and the
+existing _ensure_schema creator; prove real runtime DDL ownership, correct
+class, wrong-DB rejection, and fresh/pre-existing table twins. Preserve all
+registry equality/column checks and unrelated rows. SCOPE is this table/DB;
+DRAIN is normal canonical schema bootstrap/runtime creation, RESET is matching
+registry ownership and actual table shape. This grants no source/q authority.
+
+Inspection found no lazy-table exemption in assert_db_matches_registry: adding
+an owning row alone makes a freshly initialized FORECAST DB fail missing-table
+equality. Therefore the minimal bootstrap dependency is pending ROOT approval:
+src/state/db.py::init_schema_forecasts should reuse the original _ensure_schema
+DDL, with architecture/_schema_fingerprint.txt repinned only for that intentional
+bootstrap change. Do not invent optional ownership, relax equality, or execute
+live DDL. Original unregistered lookup/extra-table failures and private fresh
+schema failure must be recorded before repair, then green coherence/checks.
+ROOT subsequently approved these exact two additional surfaces. The original
+helper executes only three CREATE TABLE/INDEX statements on its passed conn:
+no business INSERT/commit/HTTP/connection factory or recursive initializer.
+Its local import defines pure objects; the quota tracker constructor sets
+in-memory fields/path only, without opening a file or making a request. Existing
+db bootstrap already imports config, so no new config writer is introduced.
+Exclude this FORECAST-only table from world ghost copying and reuse the single
+DDL owner after both static/ATTACH paths. No schema version counter changes.
+Private initial antibodies yielded 3 real failures (owner KeyError, absent
+fresh table, existing runtime table classified extra) and 2 wrong-DB controls
+passed; /tmp/zeus-hourly-owner-red.xml. Registered missing tables remain fatal;
+fresh bootstrap creates the table instead of weakening registry equality.
+
+The existing ECMWF decoder accepts cf/fc zero-number messages as member0 and
+falls back from unavailable enfo/cf to oper/fc. Existing owning references do
+not establish an official control-alias equivalence or per-message source
+stream/URL proof. That remains a physical provenance gap, not evidence that a
+new native2t acquisition is authorized. Its resource decision is still pending;
+no extra HTTP, native capture, q remint, venue action or loader is part of this
+ownership check. Loaded0b5 and all prior real loader outcomes remain unchanged.
+
+Ownership repair is now frozen for named bootstrap/registry review: the existing
+FORECAST initializer reuses _ensure_schema, excludes this FORECAST-only table
+from world ghost copying and includes it in the existing forecast table list.
+The twelve declared columns match actual SQLite types/nullability, including
+nullable TEXT primary key vector_id (no tightening/rewrite). The original helper
+still has three CREATE statements only; private rollback preserves its caller's
+transaction. Actual persistence uses the original FORECAST LIVE factory inside
+the FORECAST flock; no canonical connection was opened by the private antibody.
+Cold imports under an audit hook forbid DB/network/file writes; the standard-
+library TI1 temporary-root probe is initialized before that hook. Its first
+probe failure was a harness issue, not a source regression.
+
+Original three behavior failures and two wrong-DB controls are preserved in
+/tmp/zeus-hourly-owner-red.xml. Final affected ownership/A1/A4 cases pass18 in
+3.96s (/tmp/zeus-hourly-owner-final-affected.xml), covering fresh and existing
+runtime tables, idempotent re-init, wrong typed DB identity, pure DDL rollback,
+writer routing and cold import. The earlier whole coherence plus four existing
+DB schema/read-only controls yielded38PASS/2FAIL, not an all-green run:
+/tmp/zeus-hourly-owner-final.xml. One was the subsequently fixed cold-import
+harness; the other is unchanged TRADE EXPECTED_TRADE_DB_TABLES fixture drift.
+Exact original0b5 db.py and ownership YAML git-object overlay reproduces that
+same node/message with the same eight missing expected names, without changing
+source clocks (/tmp/zeus-hourly-owner-original0b5-baseline.xml). No unrelated
+TRADE fixture or registry rows were repaired; unchanged passes are reused.
+
+The existing schema tool generated pin
+5775445528719b9ace3ea6c7edeba1195c9843277dc1afbcc22dc93a7728b299 and its normal
+verification passes. Compile2, YAML, planning-lock, scoped freshness and diff
+checks pass. db.py SHA af73f000f1b3a0bee330f380ff51168d165715d071edad86903281f3358dc2fd;
+ownership YAML b2b7df54a4a6f95d96ae3cf823a59562d4f1cacec8e1d6ff3c453d035ffcaecb;
+test bab25db4cf628308a461cc70f6143bae654b9be7ec4a3f5c12928d0071a2518c.
+Five expected files only (including this pre-existing dirty PLAN); no stage,
+commit, push, live DDL or loader. table_registry._REGISTRY is populated at module
+import, so existing0b5 processes are not claimed to have loaded this correction;
+new ownership takes effect in a subsequent separately authorized normal boot.
+Physical fc/control provenance and native acquisition decisions remain OPEN.

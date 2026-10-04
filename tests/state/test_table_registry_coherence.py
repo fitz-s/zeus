@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-10-04
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.1, §1.2, §3 (REV 4)
 #   Antibodies A1, A2 (subset as A4), A8 per PLAN §3
 #   INV-37 enforcement per architecture/invariants.yaml::INV-37
@@ -167,6 +167,154 @@ EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
 # ---------------------------------------------------------------------------
 # A1 — Bidirectional set-equality: registry vs sqlite_master
 # ---------------------------------------------------------------------------
+
+class TestDay0HourlyVectorOwnership:
+    """Runtime-created hourly evidence must retain canonical FORECAST ownership."""
+
+    def test_runtime_vectors_have_forecast_owner_and_exact_columns(self):
+        from src.data.day0_hourly_vectors import _ensure_schema
+        from src.state import table_registry as registry
+
+        assert registry.owner("day0_hourly_vectors") == registry.DBIdentity.FORECASTS
+        assert registry.is_forecast_class("day0_hourly_vectors")
+        entry = registry._REGISTRY[("day0_hourly_vectors", registry.DBIdentity.FORECASTS)]
+        assert entry.pk_col == "vector_id"
+        assert entry.created_by == "src/data/day0_hourly_vectors.py::_ensure_schema"
+        with sqlite3.connect(":memory:") as conn:
+            _ensure_schema(conn)
+            actual = {(row[1], row[2], not bool(row[3]))
+                      for row in conn.execute("PRAGMA table_info(day0_hourly_vectors)")}
+        assert {(col.name, col.type, col.nullable) for col in entry.required_columns} == actual
+        assert len(actual) == 12
+
+    @pytest.mark.parametrize("already_created", (False, True))
+    def test_forecast_bootstrap_handles_fresh_and_runtime_table(self, already_created):
+        from src.data.day0_hourly_vectors import _ensure_schema
+        from src.state.db import init_schema_forecasts
+        from src.state.table_registry import DBIdentity, assert_db_matches_registry
+
+        with sqlite3.connect(":memory:") as conn:
+            if already_created:
+                _ensure_schema(conn)
+                conn.execute("INSERT INTO day0_hourly_vectors VALUES "
+                             "(?,?,?,?,?,?,?,?,?,?,?,?)",
+                             ("existing", "ifs", "Hong Kong", "2026-10-04",
+                              "Asia/Hong_Kong", "2026-10-04T12:00:00+00:00",
+                              "openmeteo", "https://example.invalid", "original",
+                              "[]", "[]", None))
+            init_schema_forecasts(conn)
+            assert_db_matches_registry(conn, DBIdentity.FORECASTS)
+            assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == int(already_created)
+            original_schema = conn.execute(
+                "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+            ).fetchall()
+            init_schema_forecasts(conn)
+            assert_db_matches_registry(conn, DBIdentity.FORECASTS)
+            assert conn.execute(
+                "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+            ).fetchall() == original_schema
+            assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == int(already_created)
+
+    def test_runtime_schema_helper_keeps_callers_transaction(self):
+        from src.data.day0_hourly_vectors import _ensure_schema
+
+        with sqlite3.connect(":memory:") as conn:
+            conn.execute("BEGIN")
+            _ensure_schema(conn)
+            assert conn.in_transaction
+            conn.rollback()
+            assert conn.execute(
+                "SELECT name FROM sqlite_master WHERE name='day0_hourly_vectors'"
+            ).fetchone() is None
+
+    def test_cold_schema_owner_import_has_no_db_network_or_file_writes(self):
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", """
+import os, sys, tempfile
+# Initialize the standard-library TI1 temporary-root probe before auditing
+# schema imports; that probe is test isolation, not a schema-owner side effect.
+tempfile.gettempdir()
+def forbid_io(event, args):
+    if event in ('sqlite3.connect', 'socket.connect', 'socket.bind'):
+        raise AssertionError('schema import attempted external I/O: ' + event)
+    if event == 'open':
+        mode, flags = args[1], args[2]
+        if (isinstance(mode, str) and any(c in mode for c in 'wax+')) or (
+            isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+        ):
+            raise AssertionError('schema import attempted file write')
+sys.addaudithook(forbid_io)
+from src.state import db
+from src.data.day0_hourly_vectors import _ensure_schema
+assert callable(db.init_schema_forecasts) and callable(_ensure_schema)
+"""],
+            cwd=_REPO_ROOT, capture_output=True, text=True, timeout=20,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_bootstrap_rejects_wrong_connection_identity(self):
+        from src.state.connection_pair import WorldConnection
+        from src.state.db import init_schema_forecasts
+
+        with sqlite3.connect(":memory:") as conn:
+            with pytest.raises(ValueError, match="must be DBIdentity.FORECASTS"):
+                init_schema_forecasts(WorldConnection.wrap(conn))
+            assert conn.execute("SELECT name FROM sqlite_master").fetchall() == []
+
+    def test_writer_uses_forecast_live_factory_inside_forecast_lock(self, monkeypatch):
+        from contextlib import contextmanager
+        from src.data import day0_hourly_vectors as hourly
+        from src.state import db, db_writer_lock as locks
+
+        calls = []
+        private = sqlite3.connect(":memory:")
+
+        @contextmanager
+        def writer_lock(path, write_class, *, blocking):
+            assert path == db.ZEUS_FORECASTS_DB_PATH
+            assert write_class == locks.WriteClass.LIVE
+            calls.append("lock")
+            yield
+            calls.append("unlock")
+
+        def factory(*, write_class):
+            assert calls == ["lock"]
+            assert write_class == locks.WriteClass.LIVE
+            calls.append("factory")
+            return private
+
+        monkeypatch.setattr(locks, "db_writer_lock", writer_lock)
+        monkeypatch.setattr(db, "get_forecasts_connection", factory)
+        vector = hourly.Day0HourlyVector(
+            model="ifs", city="Hong Kong", target_date="2026-10-04",
+            timezone_name="Asia/Hong_Kong",
+            captured_at="2026-10-04T12:00:00+00:00",
+            times=("2026-10-04T20:00", "2026-10-04T21:00", "2026-10-04T22:00",
+                   "2026-10-04T23:00", "2026-10-05T00:00"),
+            temps_c=(28.0, 27.0, 26.0, 25.0, 24.0),
+        )
+        from datetime import datetime, timezone
+        assert hourly.persist_day0_hourly_vectors(
+            [vector], target_date="2026-10-04", request_hash="original",
+            now=datetime(2026, 10, 4, 12, tzinfo=timezone.utc),
+        ) == 1
+        assert calls == ["lock", "factory", "unlock"]
+
+    @pytest.mark.parametrize("wrong_db", ("world", "trade"))
+    def test_runtime_vector_table_is_rejected_on_wrong_db(self, monkeypatch, wrong_db):
+        from src.data.day0_hourly_vectors import _ensure_schema
+        from src.state import table_registry as registry
+
+        # Isolate extra-table rejection from unrelated schemas; the real DDL and
+        # actual registry assertion still run, with no internal exception added.
+        monkeypatch.setattr(registry, "tables_for", lambda db: frozenset())
+        with sqlite3.connect(":memory:") as conn:
+            _ensure_schema(conn)
+            with pytest.raises(registry.RegistryAssertionError, match="day0_hourly_vectors"):
+                registry.assert_db_matches_registry(conn, registry.DBIdentity(wrong_db))
+
 
 class TestA1RegistryVsSqliteMaster:
     """A1 antibody: registry declared tables == tables init_schema creates.

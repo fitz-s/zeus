@@ -108,6 +108,33 @@ tables:
   # Ghost copies exist on world.db as legacy_archived until P3 cleanup.
   # ---------------------------------------------------------------------------
 
+  - name: day0_hourly_vectors
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: src/data/day0_hourly_vectors.py::_ensure_schema
+    pk_col: vector_id
+    required_columns:
+      - {name: vector_id, type: TEXT, nullable: true}
+      - {name: model, type: TEXT, nullable: false}
+      - {name: city, type: TEXT, nullable: false}
+      - {name: target_date, type: TEXT, nullable: false}
+      - {name: timezone_name, type: TEXT, nullable: false}
+      - {name: captured_at, type: TEXT, nullable: false}
+      - {name: provider, type: TEXT, nullable: false}
+      - {name: endpoint, type: TEXT, nullable: false}
+      - {name: request_hash, type: TEXT, nullable: false}
+      - {name: times_json, type: TEXT, nullable: false}
+      - {name: temps_c_json, type: TEXT, nullable: false}
+      - {name: source_run_meta_json, type: TEXT, nullable: true}
+    notes: >
+      Existing Day0 hourly raw/provenance evidence, written only on FORECAST
+      under the LIVE writer flock. init_schema_forecasts reuses the same
+      idempotent runtime DDL so fresh and existing databases satisfy strict
+      registry coherence. SQLite's TEXT PRIMARY KEY is nullable in the actual
+      existing DDL; registration does not tighten or rewrite that schema.
+      Table ownership does not grant source, probability, or settlement authority.
+
   - name: observations
     db: forecasts
     schema_class: forecast_class
