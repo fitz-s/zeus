@@ -3119,11 +3119,22 @@ def _cycle_advance_seed_priority_map(
                 local_today_cache=local_today_by_city,
             )
         )
+        if fam_scope[0] not in local_today_by_city and any(
+            name in day0_identity_by_name for name in names
+        ):
+            local_today_by_city[fam_scope[0]] = _city_local_today(
+                fam_scope[0], priority_now
+            )
         for name in names:
             payload = payload_by_name[name]
             current_day0_identity = (
                 name in day0_identity_by_name
-                and (target_day is None or target_day >= priority_now.date())
+                and (
+                    target_day is None
+                    or target_day >= (
+                        local_today_by_city.get(fam_scope[0]) or priority_now.date()
+                    )
+                )
             )
             current_debt_day0 = (
                 _TIMEOUT_RETRY_MARKER not in path_by_name[name].name
@@ -3143,6 +3154,8 @@ def _cycle_advance_seed_priority_map(
                 or fam_scope in current_global_scope
                 or fam_scope in never_priced_scopes
                 or current_day0_identity
+                or current_debt_day0
+                or capital_protection_retry
                 or own_clock_station_revision
             ):
                 # The Day0 conditioning identity is part of the durable request
@@ -3319,17 +3332,6 @@ def _priority_map_with_names(
             queue_files,
             payloads,
         )
-    for path in queue_files:
-        payload = (
-            payloads.get(path)
-            if payloads is not None
-            else _load_request_payload_for_coalescing(path)
-        )
-        if (
-            payload is not None
-            and _day0_conditioning_identity_key(payload) is not None
-        ):
-            priority_names.add(path.name)
     return priority, priority_names
 
 

@@ -14002,3 +14002,245 @@ handoff. No new owner metadata, protocol file or registry fiction is landed.
 Default provider DEM is not exact physical sensor-location/AGL proof; MPMG/ZSQD
 ground remains unknown and unactivated. Terrain/source authority and realized
 profit gaps remain separate from this book-read liveness repair.
+
+After withdrawal the task branch is safely rebased onto20b with only this PLAN
+ahead. Exact client280365a2b8ff1a74afd972c08e1bbba0c0c646256a2343c8feac1d7792f3783d
+and governor5e2e45334ca18e8f1c9495e7ea70e3b3049d2c5fcb11a2a152bf91c1db29df5c
+match that landed tip. Its owned whole2 finishes581PASS/69FAIL/38.77s: same69
+original-faea IDs,61 byte-exact messages and eight repr-address-only differences.
+Evidence is upstream20b-owned.xml/.log under the existing lease evidence folder.
+The two added deadline/default-dedupe tests are included; no full17 repetition.
+Compile4/diff PASS; existing governor-test Purpose/Reuse headers remain missing
+(freshness2ERROR), reported rather than silently repaired or called clean.
+Persistent direct-gitobjects proof /tmp/zeus-20b-books-proof.aJblZV/{proof.py,result.json,run.log}
+finishes9/9PASS/rc0/16.688s: six actual-spawn cases (four interrupts, success,
+non-HTTP error) reaped and retry after bounded expiry, residual lease0.219–2.981s;
+three deterministic HTTPError/429/mutation-default60s controls retain protection.
+This final proof supersedes an earlier nondeterministic short-backoff harness
+failure; neither that whole harness nor its unexecuted tests is called PASS.
+
+### Normal retention-lane surface capture plan (before edit)
+
+Root authorizes /root/kma_source_clock_executor alone to write four existing
+paths: src/data/ecmwf_open_data.py, src/ingest/forecast_live_daemon.py,
+tests/test_ecmwf_open_data_collect_cycle.py and tests/test_forecast_retention.py.
+No new file/flag/executor is required. Main owns this PLAN and later only the
+existing touched registry rows; after this before-edit entry it performs no
+parallel project writes until the source writer freezes. The shared tree is
+/Users/leofitz/.codex/worktrees/red-cancel-source-drain/zeus, based on landed20b
+with an audit-only PLAN checkpoint. Existing read-only test configd7 remains
+main-owned; all tests use private temp state/HTTP fakes, no canonical DB copies.
+
+The earlier cache-only collector cannot normally acquire missing surface z.
+Add exactly one bounded public index plus selected byte Range z129/surface/step0
+capture after the normal forecast-retention callback, on its existing independent
+executor lane. Do not add HTTP to the mandatory temperature/LSM collector,
+track/DB-lock/commit or materialization/reseed chains. Use an exact normally
+completed cycle with validated temperature/LSM distribution-grid identity and
+real source bytes/headers/possession/audit clocks. Preserve provider-issued
+UNKNOWN where absent. A wrong date/grid/parameter/unit,404/read failure or
+incomplete body leaves optional audit UNKNOWN and a subsequent hourly normal
+retry, without altering q, shape identities, source-run state, existing source
+availability, forecast budget or lower-level source qualification.
+
+SCOPE: that completed cycle and exact temp/LSM grid, source z byte body/receipt
+and selected cell. DRAIN: the existing normal retention callback's separate
+bounded capture, never an operator fetch/forced queue event. RESET: a genuine
+same-cycle source body with complete receipt allows future normal captures to
+carry optional physical evidence. Old756 receipts are not edited/reminted and
+no temperature q is regenerated just for height. Finite observed phi/unit/grid
+describes the public wire/model-reference surface, not sensor MSL/AGL or proven
+true dynamical ENS native terrain; no lapse, center/bias/scale correction or
+prediction-accuracy/physics-all-clear conclusion is authorized.
+
+Antibodies: actual bounded index/Range bytes→header/hash/grid/cycle receipt;
+wrong/future/unknown clocks, wrong units/parameter/grid and404 remain UNKNOWN;
+retain original temperature numeric aggregates/member usage/identity/clock and
+mandatory collector shared deadline. Exercise real retention callback and
+independent executor/overlap/next-hour retry, prove no extra mandatory-chain
+HTTP and no old receipt/q mutation. Existing atomic receipt/cache and source
+truth locks remain cumulative; failure cannot mark the original successful
+forecast source run FAILED or renew old possession.
+
+The full35-line ingest scoped contract and42-line module book were read with
+data/tests law. At freeze choose the exact data manifest15, ingest manifest's
+bootstrap/source-producer/user-channel/scheduler and digest-profile node,
+module-book forecast-live-daemon suite, plus owned collector/retention suites,
+deduplicated once. No state/NoObs34/whole39 repeat or source-gate waiver. Header
+repair, if required on an owned reused test, belongs to the writer. Independent
+review names real bytes/geometry, causal clocks and isolation from mandatory
+producer/retention work. Normal20b loading concerns only the already-landed live
+checkout, not these uncommitted private source changes. The terrain repair may
+land/load only after frozen tests, baseline dispositions and root acceptance;
+future natural production evidence remains separately pending.
+
+Terrain initial four-path freeze (not delivery acceptance): ecmwf
+cafeda4dbc7eafb8eb03b2949034beb8369c1d86eef4f658a5ff71d0758ee89b;
+daemon8482c647335dcf3cc599dbd577c29fbc42d1812f48d11c7b6811e72ce15d1e41;
+collector test4374670e444ad3d8e06df6c66ca1ba01b583e2bb879b3d5b392bf6e7c01fca99;
+retention test77777af7c1924f3d47c27c9a42717fe1cdaccedb1f1250b1e3d985d41997c24c.
+Original actual HIGH/LOW two RED become GREEN; whole two owned files90PASS/
+12.93s, XML /tmp/zeus-terrain-owned-tests.xml, with28 new fake-HTTP/real-ecCodes
+bounded-byte/deadline/clock/immutable-q/track-reuse antibodies. Retention's
+SUCCESS-after-capture order does not guarantee that a current or old snapshot
+will consume that new cache. Production0/756 receipt height acquisition/usage
+remains DEFER; a possible same-owner prefetch design is not implemented or
+accepted merely because audit acquisition passes. No old receipt is reminted.
+
+Integrator runs data manifest15 plus ingestion's five required entries and
+module-book forecast-live-daemon suite once, reusing the already-run owned90:
+691PASS/26FAIL/70ERROR/23.14s, rc1, XML/log in
+/tmp/zeus-terrain-final-20261004.SbETDx/required-data-ingest.{xml,log}.
+Only the26 failed nodes and one representative of the identical setup error
+are replayed in a fresh private process with original20b's two complete modules:
+26FAIL/oneERROR,2.45s. All26 failure IDs/reasons/values match (20 byte-exact,
+six only function repr addresses); the representative setup is byte-exact and
+all70 errors share ENTRY venue command requires non-empty q_version. Their
+test bodies never execute, so those70 are not covered PASS. Exact baseline XML/
+log are baseline-affected.{xml,log}; no whole batch baseline repetition occurs.
+
+Disposition: prior data4 API/TIGGE/account-truth/placeholder-envelope failures
+remain as named above. Eight daemon structural-win cases fail at missing tuple
+structure; the remaining14 involve structural finality/revalidation and reactor
+coverage/fairness/ack assertions. Their original20b failures establish no new
+terrain delta, not harmlessness or that each fixture reaches the current source
+authority seam; retain named follow-up rather than changing expectations.
+Seventy user-channel cases defer for their common illegal ENTRY q_version
+fixture. No production identity law is relaxed to run them. Data/ingest module
+compile132/YAML2/changed registry field preservation/diff PASS; owned freshness2
+and compile4 were separately verified by the writer and are not rerun to inflate
+counts. Current origin20b/frozen source hashes remain unchanged.
+
+New named runtime timeliness risk is separate and higher-priority than optional
+terrain appearance:89 observed window reports include44 request-limit and44
+retained-owner errors associated with one London Oct2 LOW station-input-revision
+timeout-retry request. Repeated CURRENT_EVIDENCE_NOT_LIVE/Q_MODE:FUSED_NORMAL_FULL
+BLOCKED lacks classified evidence and retains an unbound owner;564 max-instance
+skips are observed. Exact priority/source/expiry classification remains under
+read-only investigation; this does not establish the sole cause of Denver's
+greater-than10-minute READY-to-consume gap. Do not terminalize unknown evidence,
+change priority/source law or call all queue drainage complete. Named independent
+terrain review and root disposition of these issues are still required before
+any new source commit/land/load. Existing20b main loading is independently real,
+not this unlanded terrain code or an integrator's new loader return.
+
+### Named review corrections and expired-request priority plan (before edit)
+
+Terrain source acceptance is BLOCKED by two independently reproduced Important
+findings: trickling HTTP bodies evade the candidate's purported wall deadline,
+and tampering a cached selected phi still produces OBSERVED. The initial90
+passing cases and exact baseline comparison do not close either counterexample.
+No terrain commit/land/load is permitted until the specific fixes and named
+review pass. No producer prefetch is implemented in this round: the acquisition
+remains an optional audit/cache path, not guaranteed current snapshot authority.
+
+Root authorizes the NoObs-appointed source writer alone first to modify exactly
+src/data/replacement_forecast_live_materialization_queue.py and existing
+tests/test_day0_extreme_updated_materialization_bridge.py. The existing
+_cycle_advance_seed_priority_map3124–26 correctly excludes past NONHELD seeds
+from priority, but actual _priority_map_with_names3332–41 later unconditionally
+re-adds any complete Day0 identity. A real-wrapper private LondonOct2LOW/now
+Oct4T01:11UTC counterexample produces empty inner names yet promoted wrapper
+names with current risk/global empty. The old past-nonheld test covers only
+the inner helper and cannot disprove this composition error.
+
+The wrapper must honor the existing inner current/held qualification, not invent
+a second age policy. SCOPE is that exact seed/request family and current held
+classification in the existing priority-map composition. DRAIN is routing an
+expired NONHELD request back to ordinary background cleanup without consuming
+reserved current/held priority slots. RESET is a genuinely current eligible
+family or held capital recognized by the existing inner law. Keep bytes, source
+clocks/cycles, tier definitions, priority caps, deadlines, global/current/own-clock
+twins, owner/CAS/revalidation and all terminal criteria. Do not drop requests,
+terminalize unknown BLOCKED verdicts or treat every Day0/CAPTURE as background.
+Test actual wrapper→inner→selection relationships for HIGH/LOW expired NONHELD,
+current NONHELD and past/current HELD, with global/debt/own-clock controls and
+immutable input bytes. The named London44 retained failures support an observed
+mechanism but historical payload/rank proof is missing; they do not prove the
+sole cause of Denver's greater-than10-minute consumer lag.
+
+Before edit, root expands that same two-path correctness slice for its date
+twin: inner current-Day0 comparison incorrectly uses priority_now.date() UTC.
+Reuse the existing _city_local_today and existing per-city cache for that exact
+comparison; do not add a helper, gate or source-clock policy. AtOct4T01:11UTC,
+MiamiOct3 is still local today and must retain lawful current priority, while
+TokyoOct3 is local yesterday and a NONHELD request must return to background.
+HIGH/LOW west/east local-midnight controls must pass through the real wrapper
+and selection, alongside held/global/own-clock/never-priced preservation. No
+source-clock authority is granted by the priority hint or existing calendar
+fallback. This closes the INV-47 false-positive twin of removing wrapper
+promotion; simply deleting the loop without the local-date correction is not
+an accepted repair. Files and sequential owner schedule are unchanged.
+
+After that queue writer freezes, /root/kma_source_clock_executor alone resumes
+its original four terrain paths to correct wall-bound transport and immutable
+cached body/selected-value reproduction. Use a genuine finite wall bound for
+index/Range streaming and HTTP trickle, including cleanup/error/partialbody.
+If an ephemeral spawned worker is necessary it is a DB-free one-shot read child,
+not a new persistent executor, forked inherited connection or thread that can
+outlive the budget. Preserve existing independent retention executor and
+mandatory collector isolation, original budget and failure-UNKNOWN policy.
+Cached OBSERVED requires independently re-reading/hash-checking the actual
+immutable z bytes and re-decoding exact cycle/grid/units/selected cell/phi;
+receipt-only tampering must not promote evidence. Source clocks and legitimate
+late audit remain distinct and no q/old756 receipt is rewritten.
+
+Terrain SCOPE is the exact completed-cycle z body/grid/cell audit and that read
+deadline. DRAIN is a bounded normal capture or valid immutable-cache re-read;
+RESET is a new genuine verified body/receipt, not wall-clock renewal or trusting
+mutable JSON. Trickle/future/partial/corruptbody/wrongphi/index/nonce tests must
+remain UNKNOWN with no extra retry/HTTP/prediction gate. Existing valid cached
+HIGH/LOW, exact normal scheduling and raw-temperature identities must retain
+their positive controls. Independent review explicitly re-runs both hostile
+counterexamples before root acceptance.
+
+Source writers are sequential: queue two-path edit/freeze first, terrain four
+only after root starts it. Main owns PLAN/registries/tests integration but pauses
+all project edits after this entry until the active writer freezes; read-only
+checks/runtime work may proceed without production mutation. Existing required
+data/ingest audit and baseline artifacts remain evidence for their frozen source
+versions, not future changed blobs. Select only affected final checks after each
+freeze, do not blind-repeat the full17/34/state matrix or weaken any proof gate.
+
+Queue's first fb8/e30 candidate is BLOCKED: computed current_debt_day0 and
+capital_protection_retry were omitted from names despite actual tier-11. Final
+source84ee73394ead45cd1dc71181261c891bb079133b64cb9ed5997658172388304f and
+bridge testd4ddcb52cf56bd075aa21f759413bca7900b75564ab27224426a030942ff2387
+add only those already computed lawful conditions, not unconditional promotion.
+Actual money DB/UNKNOWN→known claim controls and false urgency negatives close
+the four debt RED cases; final targeted35PASS, whole181PASS/samefive old20b
+failures. Independent C final APPROVE has15PASS/2.01s, AST/diff PASS. Exact XMLs:
+/tmp/zeus-queue-debt-{red,green,owned}-20261004.xml and
+/tmp/zeus-queue-wrapper-{green,owned,baseline-20b}-20261004.xml. Private marker
+path/operational PID-clock normalization never masks a provider clock or hash.
+
+Root authorizes queue-only delivery, not the two-Important terrain candidate.
+Terrain four files plus only their audit-registry delta are preserved in
+/tmp/zeus-terrain-final-20261004.SbETDx/pending-terrain-before-queue-land.patch
+(SHA2fee8cecc67a3a0dd6bb0f32aeec0437dbbd919d138dbaa4f89f567c0ddf5b99)
+before temporary apply_patch withdrawal. The pure queue tree's required data15
+finishes584PASS/4knownFAIL/12.77s; its XML/log are queue-only-data15.{xml,log}
+in that directory. The four exact data failures are the original20b baseline
+already compared above, not new regression or harmlessness. No terrain code is
+staged. Commit scope is queue source/test, their existing two registry notes and
+this PLAN; pending source files are restored exactly after git integration.
+
+Next terrain before-edit design is root-approved but writer waits for git-ready:
+pure HTTP is isolated in an ephemeral SPAWN child/new session, two bounded
+index/Range requests, no DB inherited/opened. Parent closes candidate DB/read
+units before launch. Its global monotonic deadline covers start, headers, body
+and IPC; capped framing plus nonblocking selector reads prevent poll→recv
+partial-frame hangs. Timeout kill/bounded reap is cleanup only; parent uniquely
+decodes/verifies/publishes cache. Actual spawn/loopback trickle/partial-frame
+tests, not MockTransport alone, must prove the wall bound. No new persistent
+actor/executor or HTTP in mandatory temperature/LSM/commit/reseed paths.
+
+Cached proof must reproduce its own original immutable snapshot_id/source_run,
+full grid/mask and selected phi from raw bytes, not always-newest candidate.
+Current candidate's cycle/grid/LSM is separately validated. Pruned original
+reference stays UNKNOWN and healthy siblings continue. Original fetch/capture/
+audit clocks are not renewed or relabeled current target. No old756 receipt/q
+remint and no prefetch this round: surface capture stays AUDIT_ONLY and current
+snapshot consumption remains DEFER. KMA's next sole four-path writer window
+starts only after main queue git integration; main then performs only live
+normal-loader/RO actions, without concurrent project editing.

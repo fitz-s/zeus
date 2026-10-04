@@ -3405,6 +3405,160 @@ def test_past_nonheld_day0_seed_returns_to_background_cleanup(
     assert current_path.name in priority_names
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize(
+    "city,target_date,now_iso,held,expected_priority",
+    (
+        ("London", "2026-10-02", "2026-10-04T01:11:00+00:00", False, False),
+        ("London", "2026-10-04", "2026-10-04T01:11:00+00:00", False, True),
+        ("London", "2026-10-02", "2026-10-04T01:11:00+00:00", True, True),
+        ("London", "2026-10-05", "2026-10-04T01:11:00+00:00", False, True),
+        ("London", "2026-10-10", "2026-10-04T01:11:00+00:00", False, True),
+        ("Miami", "2026-10-03", "2026-10-04T03:59:00+00:00", False, True),
+        ("Miami", "2026-10-03", "2026-10-04T04:00:00+00:00", False, False),
+        ("Tokyo", "2026-10-03", "2026-10-03T14:59:00+00:00", False, True),
+        ("Tokyo", "2026-10-03", "2026-10-03T15:00:00+00:00", False, False),
+        ("Tokyo", "2026-10-04", "2026-10-03T15:00:00+00:00", False, True),
+    ),
+)
+def test_day0_priority_wrapper_and_claim_plan_use_current_local_family(
+    tmp_path, monkeypatch, metric, city, target_date, now_iso, held, expected_priority,
+) -> None:
+    """Complete transport identity alone cannot resurrect an expired priority slot."""
+    cut = datetime.fromisoformat(now_iso)
+
+    class DecisionClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cut.astimezone(tz) if tz is not None else cut.replace(tzinfo=None)
+
+    monkeypatch.setattr(materialization_queue, "datetime", DecisionClock)
+    family = (city, target_date, metric)
+    exposure = frozenset({family}) if held else frozenset()
+    # Private claim-time read leaves; the real classifier, identity parser,
+    # lane selector and read-plan builder remain intact.
+    monkeypatch.setattr(materialization_queue, "_current_money_risk_families", lambda **_kwargs: exposure)
+    monkeypatch.setattr(materialization_queue, "_current_global_auction_scope_families", lambda *_args, **_kwargs: frozenset())
+    monkeypatch.setattr(materialization_queue, "_current_probability_debt_families", lambda **_kwargs: frozenset())
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    path = request_dir / f"{city}.{target_date}.{metric}.private.json"
+    payload = {
+        "city": city, "target_date": target_date, "temperature_metric": metric,
+        "source_cycle_time": "2026-10-02T12:00:00+00:00",
+        "computed_at": "2026-10-02T23:43:05+00:00",
+        "baseline_source_run_id": "private-selector-only:baseline",
+        "openmeteo_source_run_id": "private-selector-only:openmeteo",
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-10-02T23:40:00+00:00",
+        "day0_observed_extreme_c": 8.0, "day0_observed_extreme_unit": "C",
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    priority, names = materialization_queue._priority_map_with_names(
+        None, (path,), {path: payload}, current_money_risk=exposure,
+        current_global_scope=frozenset(),
+    )
+    plans = {
+        lane: materialization_queue._build_request_claim_read_plan(
+            request_path=request_dir, processed_path=tmp_path / "processed",
+            failed_path=tmp_path / "failed", forecast_db=None, limit=1, lane=lane,
+        )
+        for lane in (
+            materialization_queue.MATERIALIZATION_LANE_PRIORITY,
+            materialization_queue.MATERIALIZATION_LANE_BACKGROUND,
+        )
+    }
+    assert plans[materialization_queue.MATERIALIZATION_LANE_PRIORITY].claim.selected_files == (
+        (path,) if expected_priority else ()
+    )
+    assert plans[materialization_queue.MATERIALIZATION_LANE_BACKGROUND].claim.selected_files == (
+        () if expected_priority else (path,)
+    )
+    assert (path.name in names) is expected_priority
+    if held:
+        assert priority[path.name][0] == -4
+    elif not expected_priority:
+        assert priority[path.name][0] == 2
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("held,retry", ((True, False), (True, True), (False, False), (False, True)))
+def test_day0_priority_claim_recovers_actual_capital_debt_after_unknown_first_read(
+    tmp_path, monkeypatch, metric, held, retry,
+) -> None:
+    """A later confirmed stale-q read owns priority; retry metadata alone does not."""
+    cut = datetime(2026, 10, 4, 1, 11, tzinfo=timezone.utc)
+
+    class DecisionClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cut.astimezone(tz) if tz is not None else cut.replace(tzinfo=None)
+
+    monkeypatch.setattr(materialization_queue, "datetime", DecisionClock)
+    trade_path = tmp_path / "trade.db"
+    with sqlite3.connect(trade_path) as conn:
+        conn.execute(
+            "CREATE TABLE position_current (city TEXT, target_date TEXT, "
+            "temperature_metric TEXT, phase TEXT, chain_state TEXT, "
+            "chain_shares REAL, chain_cost_basis_usd REAL, "
+            "last_monitor_prob_is_fresh INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES ('London', '2026-10-02', ?, "
+            "'active', 'synced', ?, ?, 0)",
+            (metric, 10 if held else 0, 5 if held else 0),
+        )
+        conn.execute("CREATE TABLE decision_log (id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT)")
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: trade_path)
+    family = ("London", "2026-10-02", metric)
+    expected_debt = frozenset({family}) if held else frozenset()
+    # Both held ownership and stale-q filtering are real private SQLite reads.
+    assert materialization_queue._current_probability_debt_families() == expected_debt
+    real_money_risk = materialization_queue._current_money_risk_families
+    reads = 0
+
+    def unknown_then_known(**kwargs):
+        nonlocal reads
+        reads += 1
+        return frozenset() if reads == 1 else real_money_risk(**kwargs)
+
+    monkeypatch.setattr(materialization_queue, "_current_money_risk_families", unknown_then_known)
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    suffix = ".timeout-retry-1-1" if retry else ""
+    path = request_dir / f"London.2026-10-02.{metric}.private{suffix}.json"
+    payload = {
+        "city": "London", "target_date": "2026-10-02", "temperature_metric": metric,
+        "source_cycle_time": "2026-10-02T12:00:00+00:00",
+        "computed_at": "2026-10-02T23:43:05+00:00",
+        "baseline_source_run_id": "private-selector-only:baseline",
+        "openmeteo_source_run_id": "private-selector-only:openmeteo",
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-10-02T23:40:00+00:00",
+        "day0_observed_extreme_c": 8.0, "day0_observed_extreme_unit": "C",
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    if retry:
+        materialization_queue._write_stage_receipt_payload(path, {
+            "capital_protection_first_timeout_at": cut.isoformat(),
+            "capital_protection_timeout_attempt": 1,
+            "capital_protection_retry_tier": "urgent",
+        })
+    priority, names = materialization_queue._priority_map_with_names(None, (path,), {path: payload})
+    assert reads == 2
+    assert priority[path.name][0] == ((-10 if retry else -11) if held else 2)
+    reads = 0
+    plan = materialization_queue._build_request_claim_read_plan(
+        request_path=request_dir, processed_path=tmp_path / "processed",
+        failed_path=tmp_path / "failed", forecast_db=None, limit=1,
+        lane=materialization_queue.MATERIALIZATION_LANE_PRIORITY,
+    )
+    assert reads == 2
+    assert plan.claim.selected_files == ((path,) if held else ())
+    assert (path.name in names) is held
+
+
 def test_materialization_lanes_keep_independent_seed_cursors(tmp_path) -> None:
     """Priority progress cannot move the background cleanup frontier."""
     request_dir = tmp_path / "requests"
