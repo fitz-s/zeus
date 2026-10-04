@@ -16045,3 +16045,134 @@ commit, push, live DDL or loader. table_registry._REGISTRY is populated at modul
 import, so existing0b5 processes are not claimed to have loaded this correction;
 new ownership takes effect in a subsequent separately authorized normal boot.
 Physical fc/control provenance and native acquisition decisions remain OPEN.
+
+### Hourly ownership landing and refused normal loader checkpoint
+
+ROOT accepted named independent9PASS and the unchanged frozen hashes. Normal
+commit aeca34412 rebased cleanly onto peer4c9bf936 (SELL authority changes, no
+bootstrap/registry/deploy dependency changes); rebased affected18PASS3.92s is
+/tmp/zeus-hourly-owner-rebased-4c9.xml. Final dab665f76eb9b6179714cb5e67194a01299e8eb1
+FF-landed origin/live with ancestor proof. Five expected paths only; the exact
+private config link was removed and the live d7 target was unchanged.
+Initial live FF was refused by a concurrent index.lock; it naturally disappeared
+before a second normal FF. No agent unlink/quarantine or metadata recovery was
+used. Live then FF-matched dab665, tracked-clean; peer artifacts were preserved.
+
+Normal RO capital preflight17:27:03Z had19 open holdings/nonterminal0. One normal
+loader started17:27:33Z/session31911 and returned actual rc1 at17:27:36Z:
+/tmp/zeus-hourly-owner-loader-20261004.pKP4Ns/normal-loader.log. Its armed-guard
+capital handoff refused19 open/fresh1/probability-degraded14, with two
+monitor_probability_and_clob_stale blockers dae091b0-607 and7ede0ebb-7b8, plus
+quote-only stale854857eb-a1b/d71bc49d-18a. Typed partition/book admission was
+not current. No prerequisites/main were restarted. Script-owned release reason
+restart_refused is retained; actual selected guard is None at17:30:23.443387Z.
+No manual clear/DRAIN/retry or canonical schema writes were performed.
+
+Actual loaded SHA remains4c9bf936b93a262ee1e69e4b44b2f52b9fff5bb5, stamp
+16:56:33.969184Z/main57175 (fresh heartbeat17:28:53.199711Z); ingest53108 and
+forecast53125 fixed boot heartbeats still4c9 at17:29:49/48Z. All cwdlive and
+main actual WORLD/FORECAST/TRADE handles match canonical files; d7 is file-only
+config evidence. A fresh Python process resolves new hourly owner FORECAST,
+but this does not prove existing runtime _REGISTRY loaded dab665 or new q READY.
+ROOT assigned only read-only blocker DRAIN investigation; any changed-condition
+loader retry needs separate authorization. Original38PASS/2FAIL and corrected
+affected18PASS/baseline dispositions above remain unchanged, not whole-green.
+
+ROOT's subsequent official ECMWF50r1 research closes the blanket fc/cf alias
+concern:50r1 replaces enfo/cf with oper/fc and retains50 perturbed members.
+Thus existing fc/pf alone is not a defect. Exact raw cycle/product/grid/lead
+binding and acquired future2t proof remain required; source-issued/transaction
+clocks and support intersection cannot be inferred from a label. Native
+acquisition budget still awaits the user's decision and no download is enabled.
+Parent checkpoint only is dirty; child frozen merged work and private artifacts
+are preserved for ROOT's later managed cleanup. No task-wide completion claim.
+
+### Changed-condition retry: full handoff passed, pre-stop changed
+
+ROOT authorized one fresh whole-portfolio RO check and conditional retry, not
+a bypass. Actual registered handoff17:37:05.602877Z was GREEN over all19 with
+nonterminal0, fresh2/probability-degraded16/settlement-recoverable1 (Manila854),
+no stale quotes/restart blockers/missing or invalid monitor timestamps. A single
+normal changed-condition loader started17:37:29Z/session67198; its own pause
+initializer and full19 handoff verified, then normal prerequisite reload and
+warm preflight ran. Log remains separate from the first refusal:
+/tmp/zeus-hourly-owner-loader-20261004.pKP4Ns/normal-loader-changed-condition-retry.log.
+Actual rc1 at17:40:56Z refuses to STOP main: after reload, Manila854 became
+quote-only stale; settlement-recoverable/no-action counts changed1 to0 and the
+exact held-book/partition condition no longer passed. This is not a command
+nonterminal or schema/registry failure and not a successful whole deployment.
+
+Main57175 remains loaded4c9/stamp16:56:33.969184Z and keeps monitoring; its
+heartbeat17:41:53Z is fresh. Ingest22417(start17:37:37) and forecast23112
+(start17:37:42) really boot dab665 with fixed boot heartbeats17:41:40/17:42:13.
+Actual cwdlive and canonical DB handles were verified for each; main has all
+three DBs, sidecars FORECAST (and ingest WORLD). File config staysd7. This is
+mixed-loaded state, not main-registry/runtime completion. At17:42:32.621846Z
+the actual selected guard still expects dab665, issued17:37:30.153456Z; it was
+not manually cleared or inferred None from the earlier first-attempt release.
+
+ROOT assigned read-only classification-flip investigation. Existing preflight
+and loader snapshots contain the19-position partition but no exact Manila
+event sequence/cut (sample empty), so that absent evidence is not fabricated.
+No third retry, source/SQL/venue action or cleanup commit is authorized here.
+Managed artifact listing matches parent red-cancel-source-drain and children
+ens-first-extract-source-evidence/metadata-native-capture exactly; frozen child
+work and external test/log artifacts remain preserved, with no archive/delete.
+The parent has only this truthful PLAN checkpoint dirty. Acquisition resource
+choice, physical runtime inputs and whole-task readiness remain unresolved.
+
+### Unused pre-STOP guard cleanup: bounded before-edit plan
+
+ROOT authorized the verified late-capital handoff refusal only. Existing
+deploy_live._cmd_restart_locked arms its own expected-SHA/issued-at generation,
+reloads prerequisites, then at the late handoff refusal returns1 before STOP
+without _release_unused_live_restart_guard. Current real second-attempt guard
+still targets dab665 while main4c9 runs; normal CP proof requires the target
+loaded SHA, so this never-used restart generation lacks RESET. The effect is
+ENTRY pause, not a direct held-monitor/SELL permission gate. Neither the old
+active production guard nor market classification is manually altered here.
+
+Allowed code/test surfaces are scripts/deploy_live.py and the existing
+tests/test_ops_scripts_smoke.py, plus this PLAN. Reuse the exact existing
+generation-matched helper in that one pre-STOP refusal and retain rc1/logged
+reason/STOP-not-called. SCOPE is only this invocation's armed SHA+issued_at;
+DRAIN is the normal refusal path using CP's existing CAS; RESET releases only
+that still-selected witness, while newer/operator guards and failed cleanup
+remain selected. No new API, flag, schema, blanket finally or cleanup after
+STOP/potential side effects. The adjacent one-main UNKNOWN refusal is deferred:
+unused/self-generation and intended release policy are not proven, so retain
+the protective guard there. The existing warm refusal behavior is unchanged.
+
+Private actual command-path antibodies must show old late handoff strands its
+generation, after repair releases exactly that generation without STOP, newer
+and operator generations remain selected, failed cleanup is preserved/logged,
+and one-main UNKNOWN/STOP failure/post-STOP failure do not use unused cleanup.
+Actual private CP CAS/entries effect is required; no live DB, HTTP, launchctl,
+orders, manual source refresh or loader is permitted during implementation.
+Existing registered ops-smoke/warm/success controls and focused generation
+controls are the narrow validation route. ROOT will name-review frozen hashes
+before any separate publishing/loading authorization. CodeGraph returned no
+indexed helper result; exact current source, not graph absence, establishes
+the call sites and generation protocol. Peer origin remains dab665 at this cut.
+
+The verified late-capital branch now has only an eight-line existing-helper
+call before its unchanged rc1 return. Original dab private actual CLI/handoff
+refusal leaves the real CP generation selected (not a mocked release count):
+/tmp/zeus-prestop-unused-guard-originaldab-state-red.xml,1FAIL2.35s. Earlier
+matrix5FAIL/4controlsPASS is retained separately in
+/tmp/zeus-prestop-unused-guard-originaldab-red.xml. Final narrow suite passes11
+in2.67s (/tmp/zeus-prestop-unused-guard-green.xml): actual generated helper code
+and private CP transactions release own generation; newer same-SHA issued-at,
+foreign SHA, operator pause and a generation changed between helper read/CAS
+stay selected; actual cleanup API failure stays paused and is logged. One-main
+UNKNOWN, STOP failure and post-STOP absent-witness failure never use this
+cleanup. Existing warm refusal and complete continuous-cutover controls pass.
+No whole ops suite or unrelated source/baseline suites were repeated.
+
+Frozen script SHA5617c0f41bd335f01b902d650563502fd899e9b03fde495bcee28f3e0157de9e;
+test SHA0012880f3dba8d7b16b4734b81e8a4244098a83de663c09672ba30972d9d58bb.
+Compile2/planning-lock/scoped freshness/diff pass; exact existing script/test
+registry routes and interfaces remain unchanged, with no new file/mode/flag or
+classification. Three dirty paths only including this existing checkpoint.
+Origin remains dab665; source/test are frozen for ROOT's named review, with no
+commit/push/load or manual release of the still-active old production guard.

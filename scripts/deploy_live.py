@@ -4576,6 +4576,14 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                     "during prerequisite reload:"
                 )
                 print(handoff_detail)
+                # Main was not stopped; retire only this unused invocation.
+                print(
+                    _release_unused_live_restart_guard(
+                        labels,
+                        expected_sha=expected_live_sha,
+                        issued_at=restart_guard_issued_at,
+                    )
+                )
                 return 1
             print(f"pre-stop {handoff_detail}")
             if continuous_monitor_cutover:

@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-29; last_reused=2026-08-31
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-04; last_reused=2026-10-04
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-09-22
+# Last reused/audited: 2026-10-04
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -8534,6 +8534,150 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
     output = capsys.readouterr().out
     assert "warm restart preflight is not green" in output
     assert "restart_refused" in output
+
+
+@pytest.mark.parametrize("failure_stage,guard_change", (
+    ("capital", "none"),
+    ("capital", "same_sha_new_generation"),
+    ("capital", "different_sha"),
+    ("capital", "operator"),
+    ("capital", "release_failed"),
+    ("capital", "cas_race"),
+    ("one_main_unknown", "none"),
+    ("stop_failed", "none"),
+    ("post_stop_unknown", "none"),
+))
+def test_deploy_live_late_refusal_uses_exact_unused_guard_generation(
+    monkeypatch, capsys, tmp_path, failure_stage, guard_change,
+):
+    """Run the real CLI branch/helper and private CP CAS, never launchctl/live DB."""
+    from src.control import control_plane as cp
+    from src.state.db import apply_architecture_kernel_schema, get_world_connection
+
+    conn = get_world_connection()
+    try:
+        apply_architecture_kernel_schema(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    dl = _load("deploy_live_late_unused_guard", "deploy_live.py")
+    calls, release_runs, armed = [], [], []
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "_gate", lambda *_a, **_k: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "e" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(dl, "_loaded_live_restart_obligation_gate",
+                        lambda *_a, **_k: (True, "initial capital handoff admitted"))
+
+    def arm(labels, *, expected_sha, issued_at):
+        assert cp.arm_deploy_live_restart_guard(expected_sha, issued_at=issued_at)["status"] == "armed"
+        armed.append(cp.get_active_deploy_live_restart_guard())
+        return True, "pause armed"
+
+    monkeypatch.setattr(dl, "_pause_entries_for_live_restart_if_needed", arm)
+    monkeypatch.setattr(dl, "_current_prerequisite_code_identity_labels",
+                        lambda labels, **_k: set(labels))
+    monkeypatch.setattr(dl, "_wait_for_prerequisite_code_identity",
+                        lambda *_a, **_k: (True, "sidecar identity current"))
+    monkeypatch.setattr(dl, "_restart_migration_targets_current",
+                        lambda: (True, "migrations current"))
+    monkeypatch.setattr(dl, "_ensure_restart_trade_schemas_before_warm_preflight",
+                        lambda: (True, "schema current"))
+
+    def preflight(labels, **kwargs):
+        calls.append(("preflight", kwargs))
+        state = kwargs.get("expected_live_process_state")
+        if kwargs.get("process_state_only"):
+            if state == "running" and failure_stage == "one_main_unknown":
+                return False, "one-main presence UNKNOWN"
+            if state == "absent" and failure_stage == "post_stop_unknown":
+                return False, "zero-main presence UNKNOWN"
+        return True, "warm proof current"
+
+    def late_handoff(labels):
+        calls.append(("handoff",))
+        if guard_change in {"same_sha_new_generation", "different_sha"}:
+            newer_at = (datetime.fromisoformat(armed[0].issued_at)
+                        + timedelta(microseconds=1)).isoformat()
+            cp.arm_deploy_live_restart_guard(
+                "e" * 40 if guard_change == "same_sha_new_generation" else "f" * 40,
+                issued_at=newer_at,
+            )
+        elif guard_change == "operator":
+            cp.pause_entries("private operator pause", issued_by="operator")
+        return failure_stage != "capital", "late capital handoff refused"
+
+    def stop(label):
+        calls.append(("stop", label))
+        assert failure_stage in {"stop_failed", "post_stop_unknown"}
+        return failure_stage != "stop_failed", "stop outcome UNKNOWN"
+
+    def release_subprocess(argv, **kwargs):
+        # Execute the helper's generated code against the current test's TI1
+        # WORLD connection. No external interpreter, network or production DB.
+        assert argv[1] == "-c" and kwargs["cwd"] == str(tmp_path)
+        assert kwargs["timeout"] == 30.0
+        release_runs.append(argv[2])
+        stream = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stream):
+                exec(argv[2], {})
+        except Exception as exc:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr=str(exc))
+        return types.SimpleNamespace(returncode=0, stdout=stream.getvalue(), stderr="")
+
+    if guard_change == "release_failed":
+        def fail_release(witness):
+            assert witness == armed[0]
+            raise RuntimeError("private cleanup failed")
+        monkeypatch.setattr(cp, "release_unused_deploy_live_restart_guard", fail_release)
+    elif guard_change == "cas_race":
+        original_release = cp.release_unused_deploy_live_restart_guard
+        def replace_before_cas(witness):
+            assert witness == armed[0]
+            cp.arm_deploy_live_restart_guard(
+                witness.expected_sha,
+                issued_at=(datetime.fromisoformat(witness.issued_at)
+                           + timedelta(microseconds=1)).isoformat(),
+            )
+            return original_release(witness)
+        monkeypatch.setattr(cp, "release_unused_deploy_live_restart_guard", replace_before_cas)
+    monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", preflight)
+    monkeypatch.setattr(dl, "_wait_for_loaded_live_restart_handoff", late_handoff)
+    monkeypatch.setattr(dl, "_stop_label", stop)
+    monkeypatch.setattr(dl.subprocess, "run", release_subprocess)
+    monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
+
+    assert dl.main(["restart", "live-trading"]) == 1
+    witness = cp.get_active_deploy_live_restart_guard()
+    output = capsys.readouterr().out
+    assert len(armed) == 1
+    if failure_stage == "capital":
+        assert not any(call[0] == "stop" for call in calls)
+        if guard_change == "none":
+            assert witness is None and not cp.is_entries_paused()
+        assert len(release_runs) == 1
+        assert json.dumps(armed[0].expected_sha) in release_runs[0]
+        assert json.dumps(armed[0].issued_at) in release_runs[0]
+        if guard_change == "none":
+            assert "released" in output
+        else:
+            assert cp.is_entries_paused()
+            if guard_change == "operator":
+                assert witness is None
+            elif guard_change == "release_failed":
+                assert witness == armed[0]
+                assert "release failed rc=1: private cleanup failed" in output
+            elif guard_change == "cas_race":
+                assert witness != armed[0]
+                assert "noop reason=restart_guard_invocation_mismatch" in output
+            else:
+                assert witness != armed[0]
+                assert "a different guard is selected" in output
+    else:
+        assert release_runs == []
+        assert witness == armed[0] and cp.is_entries_paused()
+        assert any(call[0] == "stop" for call in calls) == (failure_stage != "one_main_unknown")
 
 
 def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypatch):
