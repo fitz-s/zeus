@@ -173,15 +173,18 @@ def receive_leases(message: dict, write: Callable[[str], None]) -> list[int]:
         # to the full length; EOF mid-frame or descriptors arriving on a later
         # read are framing errors.
         data,fds,_flags,_address=socket.recv_fds(lease_socket,len(expected),count)
+        late=[]
         while data and len(data)<len(expected):
             more,extra,_flags,_address=socket.recv_fds(lease_socket,len(expected)-len(data),count)
-            fds+=extra
+            late+=extra
             if not more:break
             data+=more
     finally:
         lease_socket.close()
-    if data!=expected or len(fds)!=count:
-        for fd in fds:os.close(fd)
+    if data!=expected or len(fds)!=count or late:
+        # Descriptors must arrive with the frame's first read (the parent
+        # sends them in that one sendmsg); any later ones are a framing error.
+        for fd in (*fds,*late):os.close(fd)
         raise RuntimeError("lease descriptor frame does not match its request")
     write(json.dumps({"request_id":message["request_id"],"lease_ack":count})+"\n")
     return fds
