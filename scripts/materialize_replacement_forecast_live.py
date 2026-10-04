@@ -143,7 +143,13 @@ class _ConsumedInputs:
         self.attempt_id = attempt_id
 
     def read(self, path: Path, *, role: str = "input") -> bytes:
-        resolved = Path(path).resolve()
+        # The request is read as the regular file its claimed pathname names:
+        # resolve its directory only, never its final component, so the
+        # O_NOFOLLOW reader refuses a symlinked request instead of following it.
+        resolved = (
+            Path(path).parent.resolve() / Path(path).name
+            if role == REQUEST_ROLE else Path(path).resolve()
+        )
         try:
             read = self._reader.read(resolved)
         except UnsafeFile as exc:
