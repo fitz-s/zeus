@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-10-01
+# Last reused or audited: 2026-10-04
 # Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
@@ -13006,6 +13006,254 @@ class TestRemainingDayMembers:
 # R22 — replayable provenance identity on persisted vectors (PR#404 P1)
 # ===========================================================================
 
+def _qualified_prefetch_world(damage=None):
+    from scripts.hko_ingest_tick import _parse_hko_extrema_csv, _build_hko_extrema_row
+    from tests.test_day0_observation_reader import _make_conn, _insert
+    from src.config import runtime_cities_by_name
+
+    city = runtime_cities_by_name()["Hong Kong"]
+    cut = datetime(2026, 10, 4, 15, 50, 33, tzinfo=UTC)
+    body = (b"\xef\xbb\xbfDate time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),Minimum Air Temperature Since Midnight(degree Celsius)\r\n"
+            b"202610042340,HK Observatory,30.6,25.6\r\n")
+    snapshot = _parse_hko_extrema_csv(body.decode("utf-8-sig"),
+        fetched_at_utc="2026-10-04T15:48:18+00:00", entity_body=body)
+    row = _build_hko_extrema_row(snapshot, temperature_c=28.9,
+        accumulator_fetched_at="2026-10-04T15:40:00+00:00",
+        data_version="v1.wu-native", imported_at="2026-10-04T15:48:19+00:00")
+    provenance = json.loads(row.provenance_json)
+    if damage == "body":
+        provenance["native_prefix_evidence"]["body_sha256"] = "sha256:" + "0" * 64
+    if damage == "spot":
+        provenance["native_prefix_evidence"]["role"] = "instant_temperature"
+    if damage == "future":
+        provenance["extrema_fetched_at"] = "2026-10-04T15:59:00+00:00"
+    conn = _make_conn()
+    _insert(conn, city=city.name, target_date=row.target_date, source=row.source,
+        timezone_name=row.timezone_name, local_timestamp=row.local_timestamp,
+        utc_timestamp=row.utc_timestamp, temp_current=row.temp_current,
+        running_max=row.running_max, running_min=row.running_min,
+        station_id=row.station_id, raw_response=row.raw_response,
+        imported_at=row.imported_at, authority=row.authority,
+        training_allowed=0, source_role="runtime_monitoring",
+        provenance_json=json.dumps(provenance))
+    return conn, city, cut
+
+
+@pytest.mark.parametrize("damage", [None, "spot", "body", "future", "date"])
+def test_prefetch_qualified_domain_preserves_unknown_past(damage):
+    import src.data.day0_hourly_vectors as hv
+
+    conn, city, cut = _qualified_prefetch_world(damage)
+    target = "2026-10-03" if damage == "date" else "2026-10-04"
+    try:
+        before = conn.total_changes
+        window = hv.read_day0_hourly_measurement_window_start(
+            conn, city=city, target_date=target, decision_time=cut)
+        expected = datetime(2026, 10, 4, 15, 40, tzinfo=UTC) if damage is None else (
+            datetime.combine(date.fromisoformat(target), datetime.min.time(),
+                             tzinfo=ZoneInfo(city.timezone)).astimezone(UTC))
+        assert window == expected
+        assert conn.total_changes == before
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("damage", [None, "spot", "body", "future"])
+def test_native_prefix_prefetch_reaches_physical_persist_and_remaining_consumer(monkeypatch, metric, damage):
+    """Real source qualification→normal producer→actual parser/storage/consumer.
+
+    The old producer discards this genuine15:40 prefix and rejects run06Z.
+    Only the HTTP transport and provider release clock are private fakes; the
+    source/body/window gates and complete-vector read-back remain real.
+    """
+    import src.data.day0_hourly_vectors as hv
+    import src.data.openmeteo_model_updates as updates
+    import src.data.bayes_precision_fusion_download as dl
+    import src.strategy.live_inference.source_clock_vnext as clocks
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+    from src.data.day0_observation_reader import read_day0_measurement_domain_witness
+
+    conn, city, cut = _qualified_prefetch_world(damage)
+    run = cut.replace(hour=6, minute=0, second=0)
+    domain = read_day0_measurement_domain_witness(conn, city=city.name,
+        target_date="2026-10-04", timezone_name=city.timezone, decision_time=cut,
+        metric=metric, source="hko_hourly_accumulator",
+        observed_bound_c=30.6 if metric == "high" else 25.6)
+    window = datetime.fromisoformat(domain["coverage_cut_utc"])
+    models = hv.day0_hourly_models_for_city(city)
+    calls = []
+    updates_by_model = [SimpleNamespace(model=m, last_run_initialisation_time=run,
+        last_run_availability_time=run, last_run_modification_time=run,
+        to_source_run_clock=lambda: SimpleNamespace()) for m in models]
+    monkeypatch.setattr(updates, "fetch_model_updates", lambda *a, **k: updates_by_model)
+    monkeypatch.setattr(clocks, "source_publicly_usable_at", lambda *a: run)
+    monkeypatch.setattr(hv, "_day0_utc_now", lambda: cut)
+    monkeypatch.setattr(hv.quota_tracker, "can_call", lambda: True)
+    # No ENS fallback: its absence stays explicit while deterministic progress
+    # is persisted independently, exactly as the normal sibling path promises.
+    monkeypatch.setattr(hv, "fetch_day0_source_clock_ensemble_vectors", lambda *a, **k: ([], ""))
+    monkeypatch.setattr(hv, "_probe_day0_source_clock_ensemble_run_hwm", lambda **k: None)
+    monkeypatch.setattr(hv, "day0_hourly_target_dates_for_refresh", lambda **k: ("2026-10-04",))
+    for state in (hv._LAST_REFRESH_MONOTONIC, hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC,
+                  hv._INCOMPLETE_RETRY_STREAK):
+        monkeypatch.setattr(hv, next(name for name in (
+            "_LAST_REFRESH_MONOTONIC", "_INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC",
+            "_INCOMPLETE_RETRY_STREAK") if getattr(hv, name) is state), {})
+
+    def transport(*, models, locations, run, **kw):
+        calls.append((tuple(models), run))
+        times = [(datetime(2026, 10, 4, 6, tzinfo=UTC) + timedelta(hours=i)).astimezone(
+            ZoneInfo(city.timezone)).strftime("%Y-%m-%dT%H:%M") for i in range(72)]
+        payload = {"latitude":22.25, "longitude":114.0, "elevation":38,
+                   "hourly_units":{"temperature_2m":"°C"},
+                   "hourly":{"time":times,"temperature_2m":[28.0] * len(times)}}
+        body = json.dumps(payload).encode()
+        params = {"models":OPENMETEO_MODEL_IDS.get(models[0], models[0]), "run":run.isoformat(),
+                  "latitude":city.lat,"longitude":city.lon,"timezone":city.timezone,
+                  "hourly":"temperature_2m"}
+        return [dl._bind_physical_response(payload, model=models[0],
+            url=SINGLE_RUNS_FORECAST_URL, params=params, run=run,
+            captures=((body, cut.timestamp()),))]
+
+    monkeypatch.setattr(dl, "_fetch_single_runs_hourly_payloads_batched", transport)
+    actual_persist = hv.persist_day0_hourly_vectors
+    actual_read = hv.read_freshest_day0_hourly_vectors
+    monkeypatch.setattr(hv, "persist_day0_hourly_vectors", lambda vectors, **kw:
+        actual_persist(vectors, conn=conn, **kw))
+    monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", lambda **kw:
+        actual_read(conn=conn, **kw))
+    try:
+        stats = hv.maybe_refresh_day0_hourly_vectors([city], decision_time=cut,
+            remaining_window_starts={(city.name,"2026-10-04"):window},
+            quota_priority_cities=1, high_ensemble_city_dates=((city.name,"2026-10-04"),),
+            return_stats=True)
+        if damage is not None:
+            assert stats.vectors_written == 0 and not calls
+            assert not stats.ready_city_dates
+            assert stats.incomplete_expected_bundles == 1
+            return  # The actual run selector must reject, before fake HTTP.
+        assert stats.vectors_written == len(models)
+        assert len(calls) == len(models) and all(r == run for _, r in calls)
+        vectors = actual_read(conn=conn, city=city.name, target_date="2026-10-04",
+            now=cut, expected_models=models, require_expected=True,
+            remaining_window_start=window, require_complete_remaining_window=True)
+        assert len(vectors) == len(models)
+        assert all(hv._day0_hourly_response_role_valid(json.loads(v.source_run_meta_json)) for v in vectors)
+        values, _ = hv.remaining_day_extremes_c_with_current_state(vectors,
+            target_date="2026-10-04", decision_time=cut, metric=metric,
+            current_state=hv.Day0CurrentTemperatureState(28.9, window, "hko-native-current"),
+            settlement_unit="C", fallback_window_start=window)
+        assert len(values) == len(models)
+        assert stats.incomplete_expected_bundles == 1  # Missing51 stays UNKNOWN.
+        assert not stats.ready_city_dates
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("lane", ["scheduled", "targeted"])
+@pytest.mark.parametrize("damage", [None, "spot"])
+def test_normal_prefetch_callers_supply_qualified_not_spot_window(monkeypatch, lane, damage):
+    import contextlib
+    import src.config as config
+    import src.state.db as db
+    import src.data.day0_hourly_vectors as hv
+    import src.events.reactor as reactor
+
+    conn, city, cut = _qualified_prefetch_world(damage)
+    captured = {}
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cut if tz is not None else cut.replace(tzinfo=None)
+    monkeypatch.setattr(reactor, "datetime", FixedDatetime)
+    monkeypatch.setattr(config, "runtime_cities", lambda: [city])
+    monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {city.name:city})
+    monkeypatch.setattr(hv, "day0_hourly_target_dates_for_refresh", lambda **k: ("2026-10-04",))
+    @contextlib.contextmanager
+    def qualified_connection(**kwargs):
+        assert kwargs["deadline_monotonic"] > reactor.time.monotonic()
+        yield conn
+    monkeypatch.setattr(db, "get_forecasts_connection_with_world_read_only", qualified_connection)
+    def refresh(*args, **kwargs):
+        captured.update(kwargs)
+        return hv.Day0HourlyRefreshStats(vectors_written=1, cities_attempted=1)
+    monkeypatch.setattr(hv, "maybe_refresh_day0_hourly_vectors", refresh)
+    try:
+        if lane == "targeted":
+            refresher = reactor._edli_reactor_day0_hourly_refresher(held_family_provider=lambda: ())
+            assert refresher(city=city.name, target_date="2026-10-04", metric="low")
+        else:
+            monkeypatch.setattr(reactor, "_edli_current_held_position_family_keys", lambda:set())
+            monkeypatch.setattr(reactor, "_edli_day0_hourly_refresh_due_families", lambda **k:
+                reactor._Day0HourlyPriorityProbe(refresh_due_families=frozenset(),
+                    window_starts=((city.name,"2026-10-04",cut),), proved=True))
+            monkeypatch.setattr(reactor, "_edli_day0_hourly_priority_families", lambda **k: [])
+            monkeypatch.setattr(reactor, "_edli_order_day0_hourly_refresh_cities", lambda cities, **k:(cities,0))
+            monkeypatch.setattr(reactor, "_edli_rotate_day0_hourly_refresh_order", lambda cities, **k:cities)
+            reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=False)
+        expected = (datetime(2026,10,4,15,40,tzinfo=UTC) if damage is None
+                    else datetime(2026,10,3,16,tzinfo=UTC))
+        assert captured["remaining_window_starts"] == {(city.name,"2026-10-04"):expected}
+        assert captured["causal_run_boundaries"] == captured["remaining_window_starts"]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("name,target", [("NYC","2026-11-01"), ("London","2026-10-25")])
+def test_unknown_measurement_prefetch_retains_dst_local_midnight(name, target):
+    import src.data.day0_hourly_vectors as hv
+    from src.config import runtime_cities_by_name
+    from tests.test_day0_observation_reader import _make_conn
+
+    city = runtime_cities_by_name()[name]
+    start = datetime.combine(date.fromisoformat(target), datetime.min.time(),
+                             tzinfo=ZoneInfo(city.timezone)).astimezone(UTC)
+    conn = _make_conn()
+    try:
+        assert hv.read_day0_hourly_measurement_window_start(conn, city=city,
+            target_date=target, decision_time=start + timedelta(hours=10)) == start
+    finally:
+        conn.close()
+
+
+def test_qualified_window_does_not_promote_unpublished_ensemble_run(monkeypatch, caplog):
+    import httpx
+    import src.data.day0_hourly_vectors as hv
+    import src.data.openmeteo_model_updates as updates
+    import src.data.openmeteo_client as transport
+    import src.strategy.live_inference.source_clock_vnext as clocks
+
+    conn, city, cut = _qualified_prefetch_world()
+    run = cut.replace(hour=6, minute=0, second=0)
+    calls = []
+    update = SimpleNamespace(model="ecmwf_ifs025_ensemble",
+        last_run_initialisation_time=run,last_run_availability_time=run,
+        last_run_modification_time=run,to_source_run_clock=lambda:None)
+    def metadata(models, **kw):
+        assert models == ["ecmwf_ifs025_ensemble"]  # Never deterministic clocks.
+        return [update]
+    def unavailable(url, params, **kw):
+        calls.append((url,dict(params)))
+        response = httpx.Response(400, json={"reason":"run_not_published"},
+            request=httpx.Request("GET",url))
+        raise transport.OpenMeteoHTTPStatusError(response, transport.OpenMeteoHTTPOutcome(
+            400,transport.OpenMeteoRetryClass.CONDITIONAL,None,"run_not_published","0" * 64))
+    monkeypatch.setattr(updates,"fetch_model_updates",metadata)
+    monkeypatch.setattr(clocks,"source_publicly_usable_at",lambda *a:run)
+    monkeypatch.setattr(transport,"fetch",unavailable)
+    try:
+        assert hv.fetch_day0_source_clock_ensemble_vectors(city,now=cut,
+            window_start=cut.replace(minute=40,second=0)) == ([],"")
+        assert len(calls) == 1
+        assert calls[0][0] == hv.OPENMETEO_ENSEMBLE_URL
+        assert calls[0][1]["run"] == "2026-10-04T06:00"
+        assert "conditional:run_not_published" in caplog.text
+    finally:
+        conn.close()
+
+
 class TestRequestHashProvenance:
     def _ready_vectors(self, city, now, models):
         """Possessed deterministic/ENS rows for the real run-proof consumer."""
@@ -15092,10 +15340,10 @@ class TestRequestHashProvenance:
 
         def read_state(**_kwargs):
             clock["now"] = boundary_now
-            return None
+            return datetime(2026, 6, 9, 22, tzinfo=UTC)
 
         monkeypatch.setattr(
-            vectors_module, "read_day0_current_temperature_state", read_state
+            vectors_module, "read_day0_hourly_measurement_window_start", read_state
         )
 
         def refresh(*_args, **_kwargs):

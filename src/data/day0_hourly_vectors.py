@@ -5171,6 +5171,56 @@ def _day0_readback_bundle_is_current_or_newer(
     return True
 
 
+def read_day0_hourly_measurement_window_start(
+    conn: sqlite3.Connection, *, city: Any, target_date: str, decision_time: datetime,
+) -> datetime:
+    """Acquire the consumer's qualified H/L domain, never a spot-clock prefix.
+
+    Unknown coverage retains midnight. Both metric witnesses must qualify the
+    same native publication before one shared hourly acquisition can omit past
+    knots; ordinary partial bounds and current-temperature prints cannot do so.
+    """
+    from src.data.day0_observation_reader import (
+        _hko_observation_table_ref,
+        read_day0_measurement_domain_witness,
+        read_day0_observed_extrema,
+        source_priority_for_city,
+    )
+
+    try:
+        tz = ZoneInfo(str(getattr(city, "timezone", "")))
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ValueError("DAY0_MEASUREMENT_DOMAIN_CLOCK_INVALID") from exc
+    target = date.fromisoformat(target_date)
+    start = datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
+    end = datetime.combine(target + timedelta(days=1), datetime_time.min, tzinfo=tz).astimezone(UTC)
+    if decision_time.tzinfo is None:
+        raise ValueError("DAY0_MEASUREMENT_DOMAIN_CLOCK_INVALID")
+    observation = read_day0_observed_extrema(
+        conn, city=str(city.name), target_date=target_date,
+        timezone_name=str(city.timezone), decision_time_utc=decision_time,
+        source_priority=source_priority_for_city(city, target_date),
+        table_ref=_hko_observation_table_ref(conn),
+    )
+    if observation.native_prefix is None:
+        return start
+    cuts = []
+    for metric in ("high", "low"):
+        witness = read_day0_measurement_domain_witness(
+            conn, city=str(city.name), target_date=target_date,
+            timezone_name=str(city.timezone), decision_time=decision_time,
+            metric=metric, source=str(observation.chosen_source),
+            observed_bound_c=(observation.high_so_far if metric == "high" else observation.low_so_far),
+        )
+        if witness.get("metric") != metric or witness.get("target_date") != target_date:
+            return start
+        cut = datetime.fromisoformat(str(witness["coverage_cut_utc"]).replace("Z", "+00:00"))
+        if cut.tzinfo is None or not start <= cut < end or cut > decision_time:
+            return start
+        cuts.append(cut.astimezone(UTC))
+    return min(cuts)
+
+
 def maybe_refresh_day0_hourly_vectors(
     cities: list[Any],
     *,
@@ -5208,16 +5258,11 @@ def maybe_refresh_day0_hourly_vectors(
     recovery lane after ordinary priority quota is exhausted.  That lane is
     capped below the critical limits, preserving a hard held-capital floor.
 
-    ``causal_run_boundaries`` is a separate, optional per-(city, target_date)
-    map from ``remaining_window_starts``: it carries
-    ``read_day0_current_temperature_state(...).observed_at`` (the same
-    predicate the materializer and the live-materialization-queue preflight
-    already use), consulted by the fetcher to choose between the pinned
-    single-runs endpoint and the standard endpoint for each model
-    (``_select_day0_run_endpoint``). A city/date pair absent from this map
-    fetches with no boundary known, so only the publicly-usable gate can be
-    resolved there; the coverage gate keeps today's freshest-run-only
-    behavior for that pair.
+    ``remaining_window_starts`` carries the owning observation reader's
+    qualified measurement-prefix cut, never the latest spot's physical clock.
+    The same cut drives endpoint selection; absent qualification retains local
+    midnight. ``causal_run_boundaries`` remains a compatibility input, but
+    cannot narrow an unresolved acquisition domain without a qualified cut.
     """
     if decision_time.tzinfo is None:
         raise ValueError("decision_time must be timezone-aware")
@@ -5242,12 +5287,13 @@ def maybe_refresh_day0_hourly_vectors(
         local_day = decision_time.astimezone(tz).date()
         if target < local_day:
             return None
-        if target == local_day:
-            # Until native prefix qualification is available here, acquire
-            # the whole unresolved window. Acquisition does not certify any
-            # pre-initialisation knot as a same-run forecast (consumer gate).
-            return datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
-        return datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
+        start = datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
+        end = datetime.combine(target + timedelta(days=1), datetime_time.min, tzinfo=tz).astimezone(UTC)
+        if explicit is not None:
+            # Only the caller's owning measurement-domain reader supplies this
+            # cut. No spot/current-state clock is a complete measured prefix.
+            return explicit.astimezone(UTC) if start <= explicit < end else None
+        return start
 
     def mark_incomplete(
         *,

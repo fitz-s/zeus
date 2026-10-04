@@ -15798,3 +15798,122 @@ as a hazard badge is moved to its existing rationale and the owned no-leak test
 gets its existing category coverage. Unrelated registry drift is not repaired.
 No task push or normal loader has run; current runtime and primary goal proof
 remain distinct from this development acceptance checkpoint.
+
+### Accepted normal delivery and current runtime boundary
+
+checked=2026-W40; basis=normal CLI/session and immutable boot identities below;
+until=recheck-on-use. ROOT accepted the bounded32-path integration, which landed
+as15b264df74b4047bce65959df128a04529bcf0cc by normal FF push from d161. The task
+testing settings symlink was removed without touching its live target; live then
+advanced only by FF with tracked-clean state and unchanged d7 config file hash.
+
+First normal loader at15:36:15Z returned actual rc1, refusing to interrupt27
+held positions while command448ecd7b459e44ad remained nonterminal. It released
+its unused guard normally and left all previous actors running. Preserve
+/tmp/zeus-native-domain-loader-20261004.BhUQo6/normal-loader.log. This failure is
+not retrospectively changed to success. The ordinary runtime then cancelled the
+Warsaw Oct5 HIGH BUY entry: CANCEL_REQUESTED15:36:38.817245, dispatch15:38:00.102137,
+CANCEL_ACKED3443b2c18bfe4170/seq6 at15:38:01.545; existing WS_USER fact49437 is
+CANCEL_CONFIRMED with matched0, no trade facts, and position voided. No agent
+cancel, journal reducer, SQL terminal setter or venue request caused this drain.
+
+ROOT separately authorized one changed-condition normal retry after a fresh
+read showed zero nonterminal commands and unchanged expected/live/origin SHA.
+Retry15:41:05Z/session47911 returned actual rc0 (not inferred from an observer),
+with its independent log changed-condition-retry.log in the same artifact.
+Normal full-book capital handoff and zero-main witness preceded bootstrap.
+Main58308 boot stamp15:43:10.388450Z names the full15b SHA; ingest42124 and
+forecast43248 heartbeats use their fixed _PROCESS_GIT_HEAD15b. All three actors
+have cwd/Users/leofitz/zeus, main holds the three canonical DB files there, and
+main heartbeat15:45:26.551142Z is fresh. Config d7 is file-only hash evidence,
+not an invented in-process config dump. The loader reports startup monitoring
+coverage across26 holdings, eight fresh probability and18 probability-degraded
+positions with fresh held books; parked EDLI current debt/stale processing are
+zero. The normal shared-proof CAS cleared the guard; no manual clear was used.
+
+Code-loaded acceptance does not establish every current source receipt or
+quantitative family is ready. Independent post-stamp full-cut, actual native
+HKO CSV/capture clocks, pinned/metadata originals, same-cycle ENS/body/LSM/phi,
+conditional-domain revisions and real ENTRY/held/JIT consumption must be bound
+to natural producer evidence; missing evidence remains typed DATA_DEGRADED.
+HK with no held object cannot prove a held-lane trigger. Ground2, provider/model
+representativeness, source-publication/commit roles, timely materialization and
+realized profit remain separate open obligations. No forced source/cycle/seed
+was used. This is an ongoing-task checkpoint, not overall completion or a reason
+for a documentation-only reload.
+
+### BEFOREEDIT: qualified measurement-domain producer alignment
+
+checked=2026-W40; basis=ROOT-authorized bounded repair, actual15b scheduled
+fetches15:46:05/15:52:50Z and canonical HKO row9936263; until=recheck-on-use.
+The native CSV body independently qualifies a since-midnight HIGH30.6/LOW25.6
+prefix through15:40Z, possessed15:48:18.814870Z. Consumer domain qualification
+uses that coverage cut. Producer strict_window_start instead discards a valid
+explicit cut and returns local midnight, then overwrites its causal boundary;
+its normal06Z deterministic run is consequently rejected. A pure actual-source
+control changes only that qualified boundary and admits single_runs. This is
+not a same-run cache skip: both persisted-ready helpers already reject legacy
+hourly-response roles. Existing legacy rows additionally fail capture brackets.
+
+Owned code: src/data/day0_hourly_vectors.py and the actual two producer callers
+in src/events/reactor.py (scheduled and targeted reactor), not the adapter.
+Antibodies remain in existing test_day0_remaining_day_pricing.py and, only if
+needed for actual request preflight RESET, the existing Day0 bridge test. Main
+owns these edits and necessary existing source/test registry rationale rows.
+Reuse the observation-reader qualified domain/prefix predicate; never duplicate
+its CSV/body/date/metric qualification or promote a spot/current-temperature,
+extreme occurrence, fetched/written clock or decision cut into measured coverage.
+H/L/date/source remain separately qualified; an unknown prefix retains local
+midnight, including the unpublished/unknown past. Legitimate explicit cuts must
+survive strict_window_start and run-selection, with no rolling fallback.
+
+SCOPE: exact city/local-date/metric measurement domain and exact provider run.
+DRAIN: existing45s producer schedule/targeted reactor, original quota/deadline
+and incomplete retry; successful actual qualified vectors persist/read back and
+wake the existing H/L reseeder. RESET: a new genuine qualified source/capture
+changes the existing dependency frontier; no forced capture/seed/cycle. Preserve
+unknown-domain late-run refusal, DST/calendar geometry, real next-midnight
+interpolation support, HTTP/run clocks,51-member completeness and native roles.
+Tests must drive normal producer selection through fake transport, real private
+vector persistence and consumer/preflight, with native-prefix positive and
+spot/malformed/date/metric/body/future-cut negatives. Independent ENS pinned
+HTTP400 conditional:run_not_published remains a separate UNKNOWN; do not borrow
+deterministic metadata or claim the domain repair makes that product published.
+Record actual selected ENS product/run and current metadata roles read-only.
+Run changed-source/caller focused controls, compile, required changed-surface
+planning/registry/YAML/freshness checks; prior broad baselines are not rebranded
+as green and unaffected54/whole thousand-node suites are not repeated.
+Freeze/hash and named review precede any separately authorized land/load.
+
+The bounded implementation now shares read_day0_measurement_domain_witness
+across scheduled/targeted reactor acquisition, keeps H/L/native-source/date
+qualification and charges source-read time to the existing deadline. Future
+dates without a possessed prefix retain their local-day geometry. Final source
+hashes are hourly d7a2194e7e89d9074b6e8563c265d41b129ec36bf213725e14cb08a294f8f0ea,
+reactor8336f83332866da67d94b45dc7a3b58005860e1cf0ebb808528705dcf12b89f9;
+pricing273011ecf7ac23206f011f27a53374bb8b731655ac4568755d34879c0690d9cc.
+37 focused cases pass (focused-final.xml), eight existing physical capture-clock
+controls pass (clock-controls.xml), both under /tmp/zeus-qualified-domain-tests.amTOPJ.
+Original15b actual producer H/L controls fail on the midnight run refusal, not
+on a missing fixture/API (original15b.xml). The normal child is not invoked;
+test HTTP transport is fake and every writable DB/raw artifact is private TI1.
+Named independent review passes9 controls plus5 actual-source boundary cases,
+with frozen hashes unchanged; /tmp/zeus-qualified-domain-independent9.xml.
+AST3/YAML2/planning/freshness/diff and legal mapping closeout pass. A first
+invalid mapping mode was a checker harness error, not a source failure. The
+two changed-source downstream warnings have exact original15b signatures;
+unrelated registry/docs drift is not repaired or described as all-green.
+
+ENS request metadata uses its own ecmwf_ifs025_ensemble domain and API product
+ecmwf_ifs025; the suggested deterministic-clock mix-up is refuted in this code.
+Live cache records06Z/modification15:48:09/availability15:49:14 and earlier00Z
+independently. Existing Hong Kong HTTP400 logs do not retain full request
+parameters, so the exact historical rejected run is UNKNOWN. A new cycle does
+not guarantee publication of a51-member per-run archive. Actual HTTP400 remains
+typed UNKNOWN in the private negative, with no rolling fallback or q grant.
+Existing06Z canonical raw ingestion has51 members/3h steps3..144, but only
+mx2t3/mn2t3-derived tracks. The bounded current raw directory has mask/phi audit
+files, no instantaneous2t member cache; its existing oper/fc z index lists only
+one2t step0, not an immutable51-member future path. This is availability
+planning evidence, not a new acquisition route or authority for conditional q.
+No commit/push/loader has run for this repair;15b runtime remains separate.

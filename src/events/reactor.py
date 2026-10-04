@@ -6630,7 +6630,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             day0_hourly_target_dates_for_refresh,
             maybe_refresh_day0_hourly_vectors,
             probe_day0_provider_run_hwm,
-            read_day0_current_temperature_state,
+            read_day0_hourly_measurement_window_start,
         )
         from src.state.db import get_forecasts_connection_with_world_read_only
 
@@ -6870,24 +6870,9 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             )
             advance_cursor()
             return
-        # Causal run-selection boundary: the same latest-same-station-print
-        # predicate the materializer and the live-materialization-queue
-        # preflight already use (read_day0_current_temperature_state), NOT
-        # priority_probe.window_starts above (that is a coarser,
-        # possibly-staler predicate built from _latest_authorized_day0_fact's
-        # running extreme, used only for the post-fetch coverage/staleness
-        # check). A hint for endpoint selection, never authority: any failure
-        # here degrades to today's freshest-run-only behavior, it never blocks
-        # the refresh itself.
-        # Populated per (city, target_date), not just each city's first date:
-        # a city can be mid-refresh for more than one local date (e.g. near
-        # local midnight), and only a date whose local day has already
-        # started at decision_time can have a boundary at all --
-        # read_day0_current_temperature_state returns None for a
-        # not-yet-started date (confirmed by
-        # test_day0_current_temperature_state_none_for_not_yet_started_local_date),
-        # which correctly leaves gap (b) unappliable there: the freshest run
-        # is simply the right run for a date that has not started.
+        # Reuse the consumer's measured H/L prefix domain, not a current spot
+        # or an extreme's occurrence clock. Unknown coverage retains midnight;
+        # a later pinned run remains unavailable for that unresolved past.
         causal_run_boundaries: dict[tuple[str, str], datetime] = {}
         boundary_read_failures: list[str] = []
         try:
@@ -6913,7 +6898,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                         continue
                     for boundary_target_date in boundary_target_dates:
                         try:
-                            current_state = read_day0_current_temperature_state(
+                            coverage_cut = read_day0_hourly_measurement_window_start(
                                 conn=boundary_conn,
                                 city=boundary_city,
                                 target_date=boundary_target_date,
@@ -6925,22 +6910,20 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                                 f"{type(exc).__name__}"
                             )
                             continue
-                        if current_state is not None:
+                        if coverage_cut <= decision_time:
                             causal_run_boundaries[
                                 (boundary_city_name, boundary_target_date)
-                            ] = current_state.observed_at
+                            ] = coverage_cut
         except Exception as exc:  # noqa: BLE001 -- hint, not authority
             causal_run_boundaries = {}
             boundary_read_failures.append(f"<connection>:{type(exc).__name__}")
         if boundary_read_failures:
-            # A missing boundary degrades that (city, target_date) to today's
-            # freshest-run-only coverage behavior -- correct, per "unservable
-            # degrades like absent", but never silent: name every failed
-            # city/date and exception class in one line per cycle.
+            # Without qualified coverage, retain the entire unknown past.
+            # Log the narrow failure; no spot/fetch clock substitutes for it.
             _log.warning(
                 "edli_day0_hourly_refresh: causal boundary probe degraded for "
-                "%d city/date entries (falling back to freshest-run-only "
-                "endpoint selection there): %s",
+                "%d city/date entries (retaining the unresolved local-midnight "
+                "domain there): %s",
                 len(boundary_read_failures),
                 ", ".join(boundary_read_failures[:20]),
             )
@@ -6971,10 +6954,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             # A held scope therefore must not disable recovery for an independent
             # priority scope after the ordinary priority tranche is exhausted.
             allow_priority_recovery=quota_priority_cities > 0,
-            remaining_window_starts={
-                (city_name, target_date): window_start
-                for city_name, target_date, window_start in priority_probe.window_starts
-            },
+            remaining_window_starts=causal_run_boundaries,
             causal_run_boundaries=causal_run_boundaries,
             provider_run_hwm=provider_run_hwm,
             release_due_city_dates=release_due_city_dates,
@@ -12297,7 +12277,11 @@ def _edli_reactor_day0_hourly_refresher(
             return False
         try:
             from src.config import runtime_cities_by_name
-            from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+            from src.data.day0_hourly_vectors import (
+                maybe_refresh_day0_hourly_vectors,
+                read_day0_hourly_measurement_window_start,
+            )
+            from src.state.db import get_forecasts_connection_with_world_read_only
 
             city_obj = runtime_cities_by_name().get(family[0])
             if city_obj is None:
@@ -12333,13 +12317,32 @@ def _edli_reactor_day0_hourly_refresher(
                 quota_priority_cities = 0
                 allow_priority_recovery = False
             decision_time = datetime.now(timezone.utc)
+            refresh_budget = _reactor_day0_hourly_refresh_budget_seconds()
+            refresh_deadline = time.monotonic() + refresh_budget
+            qualified_windows = {}
+            try:
+                with get_forecasts_connection_with_world_read_only(
+                    deadline_monotonic=refresh_deadline,
+                ) as conn:
+                    coverage_cut = read_day0_hourly_measurement_window_start(
+                        conn, city=city_obj, target_date=family[1], decision_time=decision_time,
+                    )
+                    if coverage_cut <= decision_time:
+                        qualified_windows[(family[0], family[1])] = coverage_cut
+            except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
+                _log.warning("reactor day0-hourly measurement domain unavailable for %s: %r", family, exc)
+            remaining_budget = refresh_deadline - time.monotonic()
+            if remaining_budget < 1.0:
+                return False
             stats = maybe_refresh_day0_hourly_vectors(
                 [city_obj],
                 decision_time=decision_time,
                 interval_s=_reactor_day0_hourly_refresh_interval_seconds(),
-                budget_s=_reactor_day0_hourly_refresh_budget_seconds(),
+                budget_s=remaining_budget,
                 max_cities=1,
-                timeout_s=_reactor_day0_hourly_fetch_timeout_seconds(),
+                timeout_s=min(_reactor_day0_hourly_fetch_timeout_seconds(), remaining_budget),
+                remaining_window_starts=qualified_windows,
+                causal_run_boundaries=qualified_windows,
                 # SCOPE: only a canonical currently-held family may borrow the
                 # final Open-Meteo tranche. DRAIN: this one targeted complete
                 # bundle attempt. RESET: the next reactor drain re-reads held
