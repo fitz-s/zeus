@@ -15,6 +15,7 @@ import functools
 import hashlib
 import json
 import marshal
+import math
 import os
 import re
 import sqlite3
@@ -1881,41 +1882,109 @@ def _unrecorded_cohort_claims(
     conn: sqlite3.Connection,
     fusion: Mapping[str, object],
     claims: Mapping[int, tuple[str, datetime, datetime | None, object, str]],
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    posterior_computed_at: datetime,
+    day0_tau: str | None,
 ) -> dict[int, tuple[str, datetime, datetime | None, object, str]] | str:
-    """Claims for a dependency id no role records, from the row's own identity.
+    """The spread cohort an older fallback-branch posterior consumed, re-derived.
 
-    The anchor proof covers the persisted IFS row only when no role serves IFS
-    (anchor-only); when IFS is served, that row is already a role, so another
-    IFS id is a spread-cohort row and is re-proven like the rest.
+    Such a posterior recorded its center rows but not the between-provider
+    cohort. Its raw_model_forecast_ids name, for a used model, only its center
+    row (a recorded role) and its cohort row, so every present unroled
+    dependency row of a used model is a consumed cohort row. Repeating the
+    producer's one cohort call (the fallback selector over the used models at
+    the posterior's cut and Day0 tau) must return all of them, inside the
+    dependency set, at the persisted provider count. An unroled row of a model
+    outside the used models is a fetched candidate the selection dropped: not
+    consumed, never claimed. A missing unroled row has no model left to
+    classify, so it is excused only when the re-derived cohort reproduces the
+    persisted between-provider sigma, which pins the values that were consumed.
     """
-    from src.forecast.model_selection import ANCHOR_MODEL
+    from src.data.replacement_current_value_serving import read_freshest_coherent_instrument_values
+    from src.data.replacement_forecast_materializer import BETWEEN_COHORT_WINDOW_HOURS
 
-    served = fusion.get("current_value_serving")
-    anchor_served = isinstance(served, Mapping) and ANCHOR_MODEL in served
+    unverifiable = ("basis=current_value_serving_consumed_proof_unverifiable:"
+                    f"role={_UNRECORDED_COHORT_ROLE}")
+    shape = fusion.get("current_evidence_shape")
+    used = fusion.get("used_models")
     try:
-        ids = sorted({int(i) for i in fusion.get("raw_model_forecast_ids") or ()} - set(claims))
+        deps = {int(i) for i in fusion.get("raw_model_forecast_ids") or ()}
     except (TypeError, ValueError):
-        return "basis=current_value_serving_provenance_unverifiable:dependency_ids"
-    table = _authority_table_ref(conn, "raw_model_forecasts") if ids else None
+        return unverifiable
+    unroled = sorted(deps - set(claims))
+    if not unroled:
+        return {}  # The cohort rows are dependencies, so each is already a role.
+    table = _authority_table_ref(conn, "raw_model_forecasts")
+    try:
+        models_by_id = {} if table is None else {
+            int(row[0]): str(row[1]) for row in conn.execute(
+                f"SELECT raw_model_forecast_id, model FROM {table} WHERE raw_model_forecast_id IN "
+                f"({','.join('?' for _ in unroled)})", unroled)}
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(exc, basis="consumed_physical_proof_read_unavailable")
+    if not isinstance(used, list) or not used:
+        return unverifiable
+    width = {raw_id for raw_id, model in models_by_id.items() if model in used}
+    if not width and len(models_by_id) == len(unroled):
+        return {}  # Only unselected candidates: no cohort row is outside the roles.
+    try:
+        provider_count = int(shape["provider_count"])
+        effective = float(shape["effective_provider_count"])
+        between = float(shape["provider_between_sigma_c"])
+        center = float(shape["ensemble_member_mean_c"]) - float(shape["ensemble_center_delta_c"])
+    except (KeyError, TypeError, ValueError):
+        return unverifiable
+    try:
+        cohort = read_freshest_coherent_instrument_values(
+            conn, city=city, metric=metric, target_date=str(target_date),
+            decision_time_iso=posterior_computed_at.isoformat(),
+            models=tuple(str(model) for model in used),
+            cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+            include_station_sources=True, day0_remaining_from_iso=day0_tau,
+        )
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(exc, basis="consumed_physical_proof_read_unavailable")
+    ids = {int(value.raw_model_forecast_id): (model, value) for model, value in cohort.items()}
+    if not ids or len(ids) != provider_count or not set(ids) <= deps or not width <= set(ids):
+        return unverifiable
+    if len(models_by_id) < len(unroled) and not _reproduces_between_sigma(
+            [float(value.value_c) for _model, value in ids.values()],
+            center=center, effective=effective, between=between):
+        return unverifiable
     out: dict[int, tuple[str, datetime, datetime | None, object, str]] = {}
-    for raw_id in ids:
-        try:
-            row = None if table is None else conn.execute(
-                f"SELECT model, source_cycle_time, captured_at FROM {table} WHERE raw_model_forecast_id=?",
-                (raw_id,)).fetchone()
-        except sqlite3.OperationalError as exc:
-            _raise_hwm_read_unavailable(exc, basis="consumed_physical_proof_read_unavailable")
-        if row is None:
-            return ("basis=current_value_serving_consumed_proof_unverifiable:"
-                    f"consumed_raw_id={raw_id}:role={_UNRECORDED_COHORT_ROLE}")
-        if str(row[0]) == ANCHOR_MODEL and not anchor_served:
+    for raw_id, (model, value) in ids.items():
+        if raw_id in claims:
             continue
-        cycle = _parse_source_cycle_utc(row[1])
+        cycle = _parse_source_cycle_utc(value.served_cycle)
         if cycle is None:
-            return ("basis=current_value_serving_raw_row_identity_mismatch:"
-                    f"model={row[0]}:consumed_raw_id={raw_id}:role={_UNRECORDED_COHORT_ROLE}")
-        out[raw_id] = (str(row[0]), cycle, _parse_source_cycle_utc(row[2]), None, _UNRECORDED_COHORT_ROLE)
+            return unverifiable
+        out[raw_id] = (str(model), cycle, _parse_source_cycle_utc(value.captured_at), None,
+                       _UNRECORDED_COHORT_ROLE)
     return out
+
+
+def _reproduces_between_sigma(values: list[float], *, center: float, effective: float, between: float) -> bool:
+    """Whether these provider values reproduce the persisted between sigma.
+
+    The shape persists the provider count, the effective count 1/sum(w^2), the
+    center and sqrt(sum(w*(v-center)^2)). Equal weights (effective == count)
+    and two providers determine the weights exactly; three or more unequal
+    weights do not, so nothing is reproduced.
+    """
+    n = len(values)
+    squared = sorted((value - center) ** 2 for value in values)
+    tolerance = 1e-9 * max(1.0, between)
+    if math.isclose(effective, n, rel_tol=1e-12):
+        return abs(math.sqrt(sum(squared) / n) - between) <= tolerance
+    if n == 2:
+        root = math.sqrt(max(0.0, 2.0 / effective - 1.0))
+        high, low = (1.0 + root) / 2.0, (1.0 - root) / 2.0
+        return any(abs(math.sqrt(a * squared[0] + b * squared[1]) - between) <= tolerance
+                   for a, b in ((high, low), (low, high)))
+    return False
 
 
 def _exact_current_value_serving_lag(
@@ -2084,13 +2153,14 @@ def _exact_current_value_serving_lag(
         return True, "basis=current_value_serving_provenance_unverifiable:role_claim", None
     if claims and fusion.get("source_clock_one_scheme") is None and not any(
             str(key).endswith("_value_serving") and key != "current_value_serving" for key in fusion):
-        # A station-augmented posterior written before its spread cohort was
-        # recorded as a role consumed rows that only raw_model_forecast_ids
-        # names. Each unroled non-anchor id there is re-proven by its own row:
-        # it must still exist and verify its own body at the posterior's cut.
-        # Remove once no live posterior lacks a recorded cohort role on this
-        # branch (every such posterior is past its readiness expiry).
-        unrecorded = _unrecorded_cohort_claims(conn, fusion, claims)
+        # A precision-fusion posterior without a scheme payload (no scheme,
+        # station omitted) written before its fallback spread cohort was
+        # recorded as a role: re-derive that cohort and re-prove it. Remove once
+        # no live posterior on this branch lacks the role (every such posterior
+        # is past its readiness expiry).
+        unrecorded = _unrecorded_cohort_claims(conn, fusion, claims, city=city,
+            target_date=target_date, metric=metric, posterior_computed_at=posterior_computed_at,
+            day0_tau=day0_tau)
         if isinstance(unrecorded, str):
             return True, unrecorded, None
         claims = {**claims, **unrecorded}

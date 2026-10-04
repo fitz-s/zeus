@@ -11488,13 +11488,11 @@ def test_every_q_input_row_has_one_recorded_role_on_the_anchor_only_branch(tmp_p
     real = materialize_replacement_forecast_live
     with _q_input_rows_spy(monkeypatch) as seen:
         def checked_materialize(conn, request):
-            for key in ("selected", "cohort"):
-                seen[key].clear()
-            seen.pop("shape_models", None)
+            seen["reset"]()
             result = real(conn, request)
             if result.ok:
-                assert seen["selected"] and "shape_models" in seen, seen
-                fusion, _claims = _assert_every_q_input_row_has_one_role(conn, result.posterior_id, seen)
+                fusion, _claims, call = _assert_every_q_input_row_has_one_role(conn, result.posterior_id, seen)
+                assert call["anchor"] is None, call
                 checked.append(fusion["current_evidence_shape"]["provider_geometry_audit"]["anchor_ifs9_role"])
             return result
         monkeypatch.setattr(sys.modules[__name__], "materialize_replacement_forecast_live", checked_materialize)

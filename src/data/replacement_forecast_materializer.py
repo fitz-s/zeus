@@ -3446,8 +3446,8 @@ class _BayesPrecisionFusionFusionOverride:
     current_evidence_members_c: tuple[float, ...] | None = None
     current_evidence_member_bounds_c: tuple[tuple[float, float], ...] | None = None
     # The provider rows behind the between-provider spread when no source-clock
-    # scheme payload carries them (the station-augmented center): a consumed
-    # input, recorded like every other serving role.
+    # scheme payload carries them (no scheme, or a live station source outside
+    # it): a consumed input, recorded like every other serving role.
     between_cohort_value_serving: Mapping[str, Mapping[str, object]] | None = None
 
 

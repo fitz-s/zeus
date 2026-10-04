@@ -52206,7 +52206,7 @@ def _chicago_between_cohort_posterior(tmp_path,monkeypatch,*,scheme="partial",be
     return fixture, row, cut, victim
 
 
-def _advance_icon_and_rematerialize(fixture,monkeypatch,first,*,hours,minutes):
+def _advance_icon_and_rematerialize(fixture,monkeypatch,first,*,hours,minutes,models=("icon_global",),values=None):
     from src.data import bayes_precision_fusion_download as dl
     from src.data import openmeteo_model_surface as surface
     from src.data import replacement_forecast_materializer as materializer
@@ -52215,12 +52215,24 @@ def _advance_icon_and_rematerialize(fixture,monkeypatch,first,*,hours,minutes):
     city = fixture.city
     def http(_url,params,**kwargs):
         profile = surface._profile(params["models"])
-        lat = profile["lat_min"]+round((city.lat-profile["lat_min"])/profile["dy"])*profile["dy"]
-        lon = profile["lon_min"]+round((city.lon-profile["lon_min"])/profile["dx"])*profile["dx"]
+        if profile["grid_type"] == "regular":
+            lat = profile["lat_min"]+round((city.lat-profile["lat_min"])/profile["dy"])*profile["dy"]
+            lon = profile["lon_min"]+round((city.lon-profile["lon_min"])/profile["dx"])*profile["dx"]
+        else:
+            # The projected CONUS cell exactly as the surface reader snaps it (float32).
+            f32 = surface._float32
+            px, py = surface._project(profile,latitude=city.lat,longitude=city.lon)
+            index = []
+            for value, axis, step in ((px,"x","dx"),(py,"y","dy")):
+                q = f32(f32(value-profile[f"origin_{axis}"])/profile[step])
+                index.append(math.floor(q+.5) if q >= 0 else math.ceil(q-.5))
+            lat, lon = surface._project(profile,x=f32(f32(f32(index[0])*profile["dx"])+profile["origin_x"]),
+                y=f32(f32(f32(index[1])*profile["dy"])+profile["origin_y"]))
+            lon = f32(math.fmod(f32(lon+180),360)-180)
         body = json.dumps({"latitude":lat,"longitude":lon,"elevation":32.,"timezone":city.timezone,
             "utc_offset_seconds":-18000,"hourly_units":{"temperature_2m":"°C"},
             "hourly":{"time":[f"{first['target_date']}T{hour:02d}:00" for hour in range(24)],
-                      "temperature_2m":[25.]*24}},sort_keys=True).encode()
+                      "temperature_2m":[(values or {}).get(params["models"],25.)]*24}},sort_keys=True).encode()
         kwargs["capture_entity_body"](body,capture.timestamp())
         kwargs["capture_network_response"](body,capture.timestamp(),{"content-type":"application/json"})
         return json.loads(body)
@@ -52234,8 +52246,8 @@ def _advance_icon_and_rematerialize(fixture,monkeypatch,first,*,hours,minutes):
         assert dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=cycle,
             targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,target_date=first["target_date"],metric="low",
                 latitude=city.lat,longitude=city.lon,timezone_name=city.timezone,lead_days=1)],
-            models=("icon_global",),frozen_source_runs={"icon_global":(cycle,capture)},
-            include_previous_runs=False,prune_after=False)["written_row_count"] == 1
+            models=models,frozen_source_runs={model:(cycle,capture) for model in models},
+            include_previous_runs=False,prune_after=False)["written_row_count"] == len(models)
     fixture.sql_clock[0] = cut
     produced = materializer.materialize_replacement_forecast_live(fixture.conn,
         replace(fixture.request,computed_at=cut,expires_at=cut+_dt.timedelta(hours=1)))
@@ -52432,175 +52444,246 @@ def test_a_newer_center_beside_a_valid_cohort_keeps_the_posterior(tmp_path,monke
 
 @contextmanager
 def _q_input_rows_spy(monkeypatch):
-    """Record the raw rows the producer actually feeds q: the selected likelihood
-    globals and regional experts, the station sources and anchor entering the center,
-    and every provider row behind the between-provider spread."""
-    from src.data import bayes_precision_fusion_capture as capture_mod
+    """Record, at the producer's own call site, the raw rows that actually feed q.
+
+    When the producer calls _read_current_evidence_shape, its frame is read:
+    served_current (model -> the one row whose value entered the center, checked
+    against the center inputs _z_by_model) for every center model, and the cohort
+    map whose values are exactly the shape's provider_values_c. Ids come from
+    those objects, never from the provenance."""
+    import sys
     from src.data import replacement_forecast_materializer as materializer
-    from src.data import replacement_current_value_serving as serving
-    seen = {"selected": set(), "cohort": set()}
-    def reset():
-        seen["selected"].clear(); seen["cohort"].clear(); seen.pop("shape_models", None)
-    seen["reset"] = reset
-    real_capture = capture_mod.capture_bayes_precision_instruments
-    def capture(**kwargs):
-        result = real_capture(**kwargs)
-        seen["selected"].update(result.selection.likelihood_globals)
-        seen["selected"].update(result.selection.regional_experts)
-        return result
-    real_cohort = serving.read_freshest_coherent_instrument_values
-    def cohort(*args, **kwargs):
-        rows = real_cohort(*args, **kwargs)
-        seen["cohort"].update(int(value.raw_model_forecast_id) for value in rows.values())
-        return rows
+    seen = {"calls": []}
+    seen["reset"] = seen["calls"].clear
     real_shape = materializer._read_current_evidence_shape
+    producer = materializer._replacement_bayes_precision_fusion_override.__code__
     def shape(conn, request, *, provider_values_c, **kwargs):
-        seen["shape_models"] = set(provider_values_c)
+        frame = sys._getframe(1)
+        while frame.f_code is not producer:  # past any other test wrapper of this reader
+            frame = frame.f_back
+        caller = frame.f_locals
+        scheme = caller.get("_source_clock_center") is not None
+        cohort = caller["_scheme_coherent_current" if scheme else "_fallback_coherent_current"]
+        assert {m: float(cohort[m].value_c) for m in provider_values_c} == dict(provider_values_c)
+        served, center = caller["served_current"], caller["_source_clock_used_models"]
+        for m in center:
+            if m in served and m != "ecmwf_ifs":
+                assert float(caller["_z_by_model"][m]) == float(served[m].value_c), m
+        seen["calls"].append({
+            "center": {m: int(served[m].raw_model_forecast_id) for m in center if m in served},
+            "cohort": {m: int(cohort[m].raw_model_forecast_id) for m in provider_values_c},
+            "anchor": int(served["ecmwf_ifs"].raw_model_forecast_id) if "ecmwf_ifs" in served else None,
+            "computed_at": request.computed_at, "tau": request.day0_observed_extreme_observation_time,
+            "branch": ("no_scheme" if caller["_scheme"] is None else "station_omitted" if caller["_station_live_omitted"]
+                       else "partial" if caller["_scheme_partial_current"]
+                       else "pair_unavailable" if caller["_scheme_current_pair_missing"] else "complete")})
         return real_shape(conn, request, provider_values_c=provider_values_c, **kwargs)
-    monkeypatch.setattr(capture_mod, "capture_bayes_precision_instruments", capture)
-    monkeypatch.setattr(serving, "read_freshest_coherent_instrument_values", cohort)
     monkeypatch.setattr(materializer, "_read_current_evidence_shape", shape)
     yield seen
 
 
 def _assert_every_q_input_row_has_one_role(conn, posterior_id, seen):
+    """The used-model dependency ids are exactly the actual center rows, the
+    actual cohort rows and the anchor's served row, and every one of them that
+    feeds q is a recorded serving role (the anchor-only anchor is its own proof)."""
     from src.data import replacement_input_hwm as hwm
+    computed_at = conn.execute("SELECT computed_at FROM forecast_posteriors WHERE posterior_id=?",
+        (posterior_id,)).fetchone()[0]
+    calls = [c for c in seen["calls"] if c["computed_at"] == _dt.datetime.fromisoformat(computed_at)]
+    assert len(calls) == 1, seen["calls"]
+    call = calls[0]
     fusion = json.loads(conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
         (posterior_id,)).fetchone()[0])["bayes_precision_fusion"]
     claims = hwm._recorded_serving_claims(fusion)
     assert claims is not None
-    roles_by_id = {}
-    scheme = fusion.get("source_clock_one_scheme") or {}
-    for owner in (fusion, scheme):
-        for role, mapping in owner.items():
-            if str(role).endswith("_value_serving") and isinstance(mapping, Mapping):
-                for model, item in mapping.items():
-                    roles_by_id.setdefault(int(item["raw_model_forecast_id"]), set()).add(model)
-    served = fusion["current_value_serving"]
-    center_ids = {int(served[m]["raw_model_forecast_id"]) for m in (seen["selected"] | set(fusion["used_models"]))
-                  if m in served}
-    used_center_models = (set(fusion["used_models"]) | seen["selected"]) - {"ecmwf_ifs"}
-    assert used_center_models <= set(served), (used_center_models, sorted(served))
-    q_input_ids = center_ids | seen["cohort"]
-    # The anchor center is its anchor proof when no role serves IFS (anchor-only).
-    unroled = {i for i in q_input_ids if i not in claims}
-    if "ecmwf_ifs" not in served:
-        ifs_rows = {i for i in unroled if conn.execute(
-            "SELECT model FROM raw_model_forecasts WHERE raw_model_forecast_id=?", (i,)).fetchone()[0] == "ecmwf_ifs"}
-        assert (fusion["current_evidence_shape"]["provider_geometry_audit"]["anchor_ifs9_role"] == "anchor_only"
-                if ifs_rows else True)
-        unroled -= ifs_rows
-    assert not unroled, (sorted(unroled), sorted(claims))
-    return fusion, claims
+    used = set(fusion["used_models"])
+    deps = {int(i) for i in fusion["raw_model_forecast_ids"]}
+    model = {int(i): str(conn.execute("SELECT model FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+        (i,)).fetchone()[0]) for i in deps}
+    q_inputs = set(call["center"].values()) | set(call["cohort"].values())
+    anchor = {call["anchor"]} - {None}
+    assert q_inputs | anchor <= deps, (sorted(deps), call)
+    assert {i for i in deps if model[i] in used} == {i for i in q_inputs | anchor if model[i] in used}, (
+        sorted(deps), call)
+    assert not q_inputs - set(claims), (sorted(q_inputs - set(claims)), sorted(claims))
+    return fusion, claims, call
 
 
-def test_every_q_input_row_has_one_recorded_role_on_the_station_augmented_branch(tmp_path,monkeypatch,_hko_clock_native_sources):
-    """Structural guard (A/D): a raw row enters q only under a recorded serving
-    role (or as the anchor-only anchor), so the consumed verdict that re-proves
-    every role re-proves every q input. HKO with a live hko_fnd source leaves the
-    frozen scheme (station-augmented, no scheme payload); its spread cohort is
-    recorded as the top-level between_cohort_value_serving role."""
+def _hk_scheme(tmp_path,monkeypatch,branch):
+    """A frozen Hong Kong scheme that sends the ordinary producer down ``branch``
+    while hko_fnd is live: no_scheme (no row), station_omitted (hko_fnd outside the
+    scheme), pair_unavailable (one current configured family) or complete."""
+    import functools
+    from src.strategy.live_inference import source_clock_city_weights as weights
+    configured = {"no_scheme":(),"station_omitted":("icon_global","ukmo_global_deterministic_10km","ecmwf_ifs"),
+        "pair_unavailable":("hko_fnd","kma_gdps"),
+        "complete":("icon_global","ukmo_global_deterministic_10km","hko_fnd")}[branch]
+    path = tmp_path/f"hk-{branch}.csv"
+    path.write_text("city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n"
+        +("Hong Kong,ACTIVE,"+"+".join(configured)+","+"+".join(f"{m}:{1/len(configured):.4f}" for m in configured)
+          +",30,true,GRID_CAP10_LIVE_READY\n" if configured else ""))
+    monkeypatch.setenv(weights.ENV_CITY_ONE_SCHEME_PATH,str(path))
+    monkeypatch.setattr(weights,"load_city_one_schemes",
+        functools.lru_cache(maxsize=8)(weights.load_city_one_schemes.__wrapped__))
+
+
+@pytest.mark.parametrize("metric",("high","low"))
+@pytest.mark.parametrize("branch",("no_scheme","station_omitted","pair_unavailable","complete","partial_post_day"))
+def test_every_q_input_row_has_one_recorded_role_on_every_hko_branch(tmp_path,monkeypatch,branch,metric,_hko_clock_native_sources):
+    """Structural guard (A/D), from the producer's own call: the used-model
+    dependency ids are exactly the rows that fed the center and the spread
+    cohort (and the anchor's row), and every row that fed q is a recorded
+    serving role, so the consumed verdict that re-proves every role re-proves
+    every q input. Day0 HKO at its Day0 tau on every branch; partial_post_day
+    re-materializes after the local day at the frozen tau."""
     with _q_input_rows_spy(monkeypatch) as seen:
-        fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high")
+        if branch == "partial_post_day":
+            fixture, row, _cut = _hko_partial_current_post_day_posterior(tmp_path,monkeypatch,metric)
+            posterior_id = row["posterior_id"]
+        else:
+            _hk_scheme(tmp_path,monkeypatch,branch)
+            fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric)
+            posterior_id = fixture.result.posterior_id
     try:
-        assert seen["selected"] and seen["cohort"] and seen.get("shape_models"), seen
-        fusion, claims = _assert_every_q_input_row_has_one_role(fixture.conn, fixture.result.posterior_id, seen)
-        assert fusion["source_clock_one_scheme"] is None
-        assert "hko_fnd" in fusion["used_models"]
-        assert set(fusion["between_cohort_value_serving"]) == seen["shape_models"]
-        assert {claim[4] for claim in claims.values()} == {"current_value_serving"}
-    finally:
-        fixture.conn.close()
-
-
-def test_every_q_input_row_has_one_recorded_role_on_the_partial_scheme_branch(tmp_path,monkeypatch,_noaa_native_sources):
-    with _q_input_rows_spy(monkeypatch) as seen:
-        fixture, row, _cut, victim = _chicago_between_cohort_posterior(tmp_path,monkeypatch,before_last_materialization=seen["reset"])
-    try:
-        assert seen["selected"] and seen["cohort"] and seen.get("shape_models"), seen
-        fusion, claims = _assert_every_q_input_row_has_one_role(fixture.conn, row["posterior_id"], seen)
-        assert fusion["source_clock_one_scheme"]["fallback_reason"] == "configured_current_provider_set_incomplete"
-        assert claims[victim][4] == "between_cohort_value_serving"
-    finally:
-        fixture.conn.close()
-        fixture.builtin.close()
-
-
-def test_every_q_input_row_has_one_recorded_role_on_the_full_scheme_branch(tmp_path,monkeypatch,_noaa_native_sources):
-    """The ordinary all-current scheme after ICON advanced twice: the spread
-    cohort holds the +3 h ICON while the center serves the +6 h ICON, so a q
-    input row exists that no center role covers."""
-    with _q_input_rows_spy(monkeypatch) as seen:
-        fixture, row, _cut, victim = _chicago_between_cohort_posterior(tmp_path,monkeypatch,scheme="full",before_last_materialization=seen["reset"])
-    try:
-        assert seen["selected"] and seen["cohort"] and seen.get("shape_models"), seen
-        assert victim in seen["cohort"]
-        fusion, claims = _assert_every_q_input_row_has_one_role(fixture.conn, row["posterior_id"], seen)
+        fusion, claims, call = _assert_every_q_input_row_has_one_role(fixture.conn, posterior_id, seen)
+        assert call["branch"] == branch.removesuffix("_post_day"), call
+        assert call["tau"] is not None and call["cohort"], call
         scheme = fusion["source_clock_one_scheme"]
-        assert "fallback_reason" not in scheme and not scheme["missing_sources"]
+        roles = {claim[4] for raw_id, claim in claims.items() if raw_id in set(call["cohort"].values())}
+        if branch in ("no_scheme","station_omitted"):
+            assert scheme is None and set(fusion["between_cohort_value_serving"]) == set(call["cohort"])
+        else:
+            assert set(scheme["between_cohort_value_serving"]) == set(call["cohort"])
+        assert roles <= {"current_value_serving","between_cohort_value_serving"}, roles
+    finally:
+        fixture.conn.close()
+
+
+@pytest.mark.parametrize("scheme",("partial","full"))
+def test_every_q_input_row_has_one_recorded_role_on_the_chicago_scheme_branches(tmp_path,monkeypatch,scheme,_noaa_native_sources):
+    """The ordinary Chicago LOW producer after ICON advanced: the spread cohort
+    holds an older ICON row while the center serves the newer one, so a q input
+    exists that no center role covers (partial: KMA absent; full: all current)."""
+    with _q_input_rows_spy(monkeypatch) as seen:
+        fixture, row, _cut, victim = _chicago_between_cohort_posterior(tmp_path,monkeypatch,scheme=scheme)
+    try:
+        fusion, claims, call = _assert_every_q_input_row_has_one_role(fixture.conn, row["posterior_id"], seen)
+        assert call["branch"] == scheme.replace("full","complete"), call
+        assert victim in call["cohort"].values() and victim not in call["center"].values()
         assert claims[victim][4] == "between_cohort_value_serving"
     finally:
         fixture.conn.close()
         fixture.builtin.close()
 
 
-@pytest.mark.parametrize("state",("healthy","unrecorded_row_deleted","unrecorded_body_same_mtime"))
-def test_a_station_augmented_posterior_without_a_cohort_role_reproves_its_unroled_rows(
-        tmp_path,monkeypatch,state,_hko_clock_native_sources):
-    """Posteriors written before the station-augmented cohort became a role name
-    those rows only in raw_model_forecast_ids. On that branch alone (no scheme
-    payload, no cohort role) every unroled non-anchor dependency id is re-proven
-    by its own row at the posterior's cut: healthy serves, a deleted or changed
-    row refuses with role=unrecorded_cohort."""
+def _chicago_no_scheme_lineage(tmp_path,monkeypatch,*,record_role=True):
+    """Chicago LOW without a frozen scheme, three ordinary captures: c0 IFS/ICON/UKMO,
+    c0+4 h ICON/HRRR/NBM, c0+8 h ICON. At the last cut the center serves ICON@+8,
+    UKMO@c0, HRRR@+4 and IFS@c0; the provider dedup drops NBM@+4 (fetched, in the
+    dependency ids, never consumed); the spread cohort is {ICON@+4, HRRR@+4}, so
+    ICON@+4 is a consumed width-only row. ``record_role=False`` is the producer
+    before the fallback cohort became a role (5dd9e4224): the only producer delta."""
+    import functools
+    from src.data import replacement_forecast_materializer as materializer
+    from src.strategy.live_inference import source_clock_city_weights as weights
+    path = tmp_path/"no-scheme.csv"
+    path.write_text("city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n")
+    monkeypatch.setenv(weights.ENV_CITY_ONE_SCHEME_PATH,str(path))
+    monkeypatch.setattr(weights,"load_city_one_schemes",
+        functools.lru_cache(maxsize=8)(weights.load_city_one_schemes.__wrapped__))
+    if not record_role:
+        real = materializer._BayesPrecisionFusionFusionOverride
+        monkeypatch.setattr(materializer,"_BayesPrecisionFusionFusionOverride",
+            lambda **kwargs: real(**{**kwargs,"between_cohort_value_serving":None}))
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    first = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (fixture.result.posterior_id,)).fetchone())
+    _advance_icon_and_rematerialize(fixture,monkeypatch,first,hours=4,minutes=1,
+        models=("icon_global","gfs_hrrr","ncep_nbm_conus"),
+        values={"icon_global":21.,"gfs_hrrr":19.5,"ncep_nbm_conus":19.6})
+    row, cut = _advance_icon_and_rematerialize(fixture,monkeypatch,first,hours=8,minutes=2)
+    rows = {(r["model"],r["source_cycle_time"]): int(r["raw_model_forecast_id"]) for r in fixture.conn.execute(
+        "SELECT raw_model_forecast_id, model, source_cycle_time FROM raw_model_forecasts")}
+    c0 = _dt.datetime.fromisoformat(first["source_cycle_time"])
+    at = lambda model,hours: rows[(model,(c0+_dt.timedelta(hours=hours)).isoformat())]
+    fusion = json.loads(row["provenance_json"])["bayes_precision_fusion"]
+    assert fusion["source_clock_one_scheme"] is None and "ncep_nbm_conus" not in fusion["used_models"]
+    assert {int(v["raw_model_forecast_id"]) for v in fusion["current_value_serving"].values()} == {
+        at("icon_global",8),at("ukmo_global_deterministic_10km",0),at("gfs_hrrr",4),at("ecmwf_ifs",0)}
+    assert ("between_cohort_value_serving" in fusion) is record_role
+    ids = SimpleNamespace(width=at("icon_global",4),nbm=at("ncep_nbm_conus",4),stale_icon=at("icon_global",0))
+    assert {ids.width,ids.nbm} <= set(fusion["raw_model_forecast_ids"])
+    assert ids.stale_icon not in fusion["raw_model_forecast_ids"]
+    return fixture, row, cut, ids
+
+
+@pytest.mark.parametrize("producer",("legacy","recorded"))
+@pytest.mark.parametrize("fault",("healthy","dedup_nbm_deleted","width_icon_deleted","width_icon_deleted_stale_substitute",
+                                   "width_icon_body_changed_stale_substitute"))
+def test_one_no_scheme_lineage_refuses_a_lost_width_row_and_serves_a_lost_unconsumed_row(
+        tmp_path,monkeypatch,fault,producer,_noaa_native_sources):
+    """Lead bar for the legacy path, on one lineage. A consumed width-only row
+    (ICON@+4) lost must refuse, including when the selector then substitutes
+    stale center rows (UKMO@c0, IFS@c0) that sit inside the dependency set at the
+    persisted provider count: deleted (its model is gone with it, so only a cohort
+    reproducing the persisted between sigma excuses a missing row) or changed in
+    place (present, so it must be in the re-derived cohort). A fetched-but-
+    deduplicated row (NBM@+4) deleted must keep serving. Legacy: no cohort role,
+    the cohort is re-derived. Recorded: the role is re-proven by id."""
     import os
     from pathlib import Path
     from src.data import replacement_input_hwm as hwm
-    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high")
+    from src.data.replacement_current_value_serving import read_freshest_coherent_instrument_values
+    from src.data.replacement_forecast_materializer import BETWEEN_COHORT_WINDOW_HOURS
+    fixture, row, cut, ids = _chicago_no_scheme_lineage(tmp_path,monkeypatch,record_role=producer == "recorded")
+    ro = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
+    ro.row_factory = sqlite3.Row
+    ro.execute("PRAGMA query_only=ON")
     restore = None
     try:
-        row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
-            (fixture.result.posterior_id,)).fetchone())
         provenance = json.loads(row["provenance_json"])
         fusion = provenance["bayes_precision_fusion"]
-        assert fusion["source_clock_one_scheme"] is None
-        # An older posterior on this branch: the cohort is not a role, and its
-        # dependency set names one extra provider row (its own earlier capture,
-        # same target and metric) that entered the shape.
-        del fusion["between_cohort_value_serving"]
-        earlier = _dt.datetime.fromisoformat(row["source_cycle_time"])-_dt.timedelta(hours=6)
-        fixture.write_provider_cohort(earlier,_dt.datetime.fromisoformat(row["computed_at"])-_dt.timedelta(hours=1))
+        computed = _dt.datetime.fromisoformat(row["computed_at"])
+        victims = {"healthy":(),"dedup_nbm_deleted":(ids.nbm,),"width_icon_deleted":(ids.width,),
+                   "width_icon_deleted_stale_substitute":(ids.width,ids.stale_icon),
+                   "width_icon_body_changed_stale_substitute":(ids.stale_icon,)}[fault]
+        for victim in victims:
+            fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(victim,))
         fixture.conn.commit()
-        unroled = int(fixture.conn.execute("SELECT raw_model_forecast_id FROM raw_model_forecasts WHERE model='icon_global'"
-            " AND city=? AND target_date=? AND metric='high' AND datetime(source_cycle_time)=datetime(?)",
-            (row["city"],row["target_date"],earlier.isoformat())).fetchone()[0])
-        fusion["raw_model_forecast_ids"] = sorted({*fusion["raw_model_forecast_ids"], unroled})
-        claims = hwm._recorded_serving_claims(fusion)
-        assert unroled not in claims
-        assert set(hwm._unrecorded_cohort_claims(fixture.conn, fusion, claims)) == {unroled}
-        if state == "unrecorded_row_deleted":
-            fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(unroled,))
-            fixture.conn.commit()
-        elif state == "unrecorded_body_same_mtime":
+        if fault == "width_icon_body_changed_stale_substitute":
             body = Path(fixture.conn.execute("SELECT a.artifact_path FROM raw_model_forecasts r"
                 " JOIN raw_forecast_artifacts a ON a.artifact_id=r.artifact_id WHERE r.raw_model_forecast_id=?",
-                (unroled,)).fetchone()[0])
+                (ids.width,)).fetchone()[0])
+            assert body.resolve().is_relative_to(Path(os.environ["ZEUS_TEST_STATE_ROOT"]).resolve())
             original,before = body.read_bytes(),body.stat()
             body.write_bytes(bytes([original[0]^1])+original[1:])
             os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns))
             restore = lambda: (body.write_bytes(original),os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns)))
+        if fault.endswith("stale_substitute"):
+            cohort = read_freshest_coherent_instrument_values(ro,city=row["city"],metric="low",
+                target_date=row["target_date"],decision_time_iso=computed.isoformat(),
+                models=tuple(fusion["used_models"]),cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                include_station_sources=True)
+            substitute = {int(v.raw_model_forecast_id) for v in cohort.values()}
+            assert ids.width not in substitute and substitute <= set(fusion["raw_model_forecast_ids"])
+            assert len(substitute) == fusion["current_evidence_shape"]["provider_count"]
         hwm.clear_consumed_proof_memo()
-        verdict = hwm._exact_current_value_serving_lag(fixture.conn,city=row["city"],target_date=row["target_date"],
-            metric="high",decision_time=fixture.cut,posterior_computed_at=_dt.datetime.fromisoformat(row["computed_at"]),
-            provenance=provenance)[1]
-        if state == "healthy":
-            assert verdict is None, verdict
+        reason = hwm.replacement_live_input_lag_reason(ro,city=row["city"],target_date=row["target_date"],metric="low",
+            decision_time=cut,posterior_source_cycle_time=row["source_cycle_time"],posterior_computed_at=computed,
+            posterior_provenance=provenance,use_memo=False)
+        if fault in ("healthy","dedup_nbm_deleted"):
+            assert reason is None, reason
+        elif producer == "legacy":
+            assert reason == "basis=current_value_serving_consumed_proof_unverifiable:role=unrecorded_cohort", reason
         else:
-            assert verdict.startswith("basis=current_value_serving_consumed_proof_unverifiable:"), verdict
-            assert verdict.endswith(f"consumed_raw_id={unroled}:role=unrecorded_cohort"), verdict
+            assert reason == ("basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:"
+                              f"consumed_raw_id={ids.width}:role=between_cohort_value_serving"), reason
     finally:
         if restore is not None:
             restore()
+        ro.close()
         fixture.conn.close()
+        fixture.builtin.close()
 
 
 @pytest.mark.parametrize("claim",("conflicting_cycle","malformed_id"))

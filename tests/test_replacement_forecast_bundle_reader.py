@@ -4111,6 +4111,14 @@ def test_held_redecision_blocks_same_cycle_late_input(_shanghai_reader_current_c
     actual = datetime.fromisoformat(consumed["captured_at"])
     hypothetical_prior = actual-timedelta(minutes=5)
     consumed["captured_at"] = (actual-timedelta(minutes=10)).isoformat()
+    # One row has one capture stamp: every role naming this row carries the
+    # same (negative) claim, so the provenance stays internally consistent.
+    for owner in (fusion, fusion.get("source_clock_one_scheme") or {}):
+        for key, role in owner.items():
+            if (str(key).endswith("_value_serving") and isinstance(role, dict)
+                    and isinstance(role.get("icon_global"), dict)
+                    and role["icon_global"].get("raw_model_forecast_id") == consumed["raw_model_forecast_id"]):
+                role["icon_global"]["captured_at"] = consumed["captured_at"]
     # Negative-only logical prior: the actual native/body capture is still
     # 03Z. Isolate the original temporal comparison, not a claimed READY row.
     component = json.loads(json.dumps(provenance))
@@ -4120,7 +4128,7 @@ def test_held_redecision_blocks_same_cycle_late_input(_shanghai_reader_current_c
         decision_time=normal.request.computed_at,posterior_computed_at=hypothetical_prior,provenance=component)
     assert checked
     assert reason == ("basis=current_value_serving_consumed_proof_unverifiable:"
-        f"model=icon_global:consumed_raw_id={consumed['raw_model_forecast_id']}")
+        f"model=icon_global:consumed_raw_id={consumed['raw_model_forecast_id']}:role=current_value_serving")
     view = _reader_with_posterior_fault(normal,provenance_json=json.dumps(provenance))
     held = read_replacement_forecast_bundle(view,**{**normal.kwargs,"raw_input_hwm_conn":view},
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION)
@@ -4130,7 +4138,7 @@ def test_held_redecision_blocks_same_cycle_late_input(_shanghai_reader_current_c
     assert held.reason_code in {
         "REPLACEMENT_RAW_INPUT_HWM:basis=anchor_only_ifs9_provenance_unverifiable",
         "REPLACEMENT_RAW_INPUT_HWM:basis=current_value_serving_raw_row_identity_mismatch:"
-            f"model=icon_global:consumed_raw_id={consumed['raw_model_forecast_id']}",
+            f"model=icon_global:consumed_raw_id={consumed['raw_model_forecast_id']}:role=current_value_serving",
     }
 
 
@@ -4275,7 +4283,7 @@ def test_raw_hwm_unreadable_consumed_evidence_stays_superseded(_shanghai_reader_
     serving = json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]["icon_global"]
     assert _hourly_relabel_reason(normal,consumed_row_present=False) == (
         "basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:"
-        f"consumed_raw_id={serving['raw_model_forecast_id']}")
+        f"consumed_raw_id={serving['raw_model_forecast_id']}:role=current_value_serving")
 
 
 def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance(
