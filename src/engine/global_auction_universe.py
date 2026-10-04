@@ -2077,6 +2077,11 @@ def bind_current_global_probability_tokens(
                 continue
             local_tokens[condition_id] = pair
             local_metadata_by_token.setdefault((condition_id, selected), row)
+        if not refresh_metadata:
+            # A condition's token pair never changes, so binding identity
+            # alone takes the persisted pair (a disagreement raised above);
+            # freshness and invalidation govern tradeability metadata only.
+            local_tokens = static_tokens
 
     local_metadata_family_keys: set[str] = set()
     clob_attempted_family_keys: set[str] = set()

@@ -28107,6 +28107,44 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q(invalidated_
     assert local.bindings == original.bindings
     assert local.sample_matrix_identity == missing.sample_matrix_identity
 
+    # Identity-only binding (no metadata sink, no Gamma reader) takes the
+    # persisted pair past its metadata freshness, but never an ambiguous or
+    # incomplete one.
+    def _stale_identity_conn():
+        return _global_book_metadata_conn(
+            original,
+            captured_at="2026-07-10T07:55:00+00:00",
+            freshness_deadline="2026-07-10T07:56:00+00:00",
+        )
+
+    def _bind_identity_only(conn):
+        return bind_current_global_probability_tokens(
+            forecast,
+            probability_witnesses={missing.family_key: missing},
+            trade_conn=conn,
+            checked_at_utc=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+        )[missing.family_key]
+
+    stale_identity = _bind_identity_only(_stale_identity_conn())
+    assert stale_identity.bindings == original.bindings
+    assert stale_identity.sample_matrix_identity == missing.sample_matrix_identity
+    unbound = original.bindings[0].condition_id
+    ambiguous = _stale_identity_conn()
+    ambiguous.execute(
+        "UPDATE executable_market_snapshots SET no_token_id = 'conflicting-no' "
+        "WHERE snapshot_id = ?",
+        (f"metadata-{unbound}-YES",),
+    )
+    with pytest.raises(ValueError, match=f"GLOBAL_LOCAL_TOKEN_IDENTITY_AMBIGUOUS:{unbound}"):
+        _bind_identity_only(ambiguous)
+    incomplete = _stale_identity_conn()
+    incomplete.execute(
+        "UPDATE executable_market_snapshots SET no_token_id = '' WHERE condition_id = ?",
+        (unbound,),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_GAMMA_EVENT_READER_MISSING"):
+        _bind_identity_only(incomplete)
+
     local_metadata = {}
     local_complete = bind_current_global_probability_tokens(
         forecast,
@@ -28430,7 +28468,7 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q(invalidated_
     assert stale_metadata == batch_metadata
 
     stale_calls = []
-    stale_fallback = bind_current_global_probability_tokens(
+    stale_identity = bind_current_global_probability_tokens(
         forecast,
         probability_witnesses={missing.family_key: missing},
         get_gamma_event=lambda slug: stale_calls.append(slug) or gamma_event,
@@ -28441,8 +28479,8 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q(invalidated_
         ),
         checked_at_utc=_dt.datetime(2026, 7, 10, 8, 1, tzinfo=_dt.timezone.utc),
     )[missing.family_key]
-    assert stale_calls == ["current-family-slug"]
-    assert stale_fallback.bindings == original.bindings
+    assert stale_calls == []
+    assert stale_identity.bindings == original.bindings
 
     partial = _global_book_metadata_conn(
         original,
