@@ -1,8 +1,8 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-02
-# Lifecycle: created=2026-07-03; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Last reused/audited: 2026-10-04
+# Lifecycle: created=2026-07-03; last_reviewed=2026-10-04; last_reused=2026-10-04
 # Authority basis: current global auction, executable Kelly, and wealth contracts
-#                 + exit_portfolio_execution_authority_2026-06-13 E2/E6
+#                 + operator ruling 2026-10-04: SELL passes the BUY EV floor
 """Current global-auction solver properties over executable portfolio wealth."""
 
 from __future__ import annotations
@@ -4428,14 +4428,131 @@ def test_hong_kong_day0_sell_uses_current_point_not_confidence_stress_mean():
     assert decision.expected_terminal_wealth.expected_ev_usd > 0.0
 
 
+def _cash_starved_manila_sell(*, bid, side="NO"):
+    """Decision 900799 (a6c31638, Manila 2026-10-05 high NO) receipt inputs."""
+
+    return _global_sell_candidate(
+        candidate_id=f"manila-a6c31638-{side}-{bid}",
+        family="Manila|2026-10-05|high",
+        side=side,
+        held_q=0.7958241603849102,
+        bids=((bid, "2.25"),),
+        shares="2.25",
+        fee="0.05",
+        min_tick="0.01",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_cash_starved_sell_below_held_q_is_rejected_despite_log_gain(side):
+    """Operator ruling 2026-10-04: no cash state justifies selling below hold value.
+
+    Decision 900799 sold 0.56 of 2.25 shares at bid 0.45 (net 0.437625) with
+    q = 0.7958 flat and $0.175594 utility cash: ΔlogW = +0.0677 on the cash
+    basis, EV = -0.2006 against holding. The log gain is the cash shortage,
+    not value; the common EV floor rejects it exactly as it rejects a BUY.
+    """
+
+    held_q = 0.7958241603849102
+    sell = _cash_starved_manila_sell(bid="0.45", side=side)
+    cash = Decimal("0.175594")
+    net = Decimal("0.45") - Decimal("0.05") * Decimal("0.45") * Decimal("0.55")
+    proceeds = Decimal("0.56") * net
+    assert proceeds == Decimal("0.24507")
+    receipt_log = held_q * math.log(
+        float(
+            (cash + Decimal("2.25") - Decimal("0.56") + proceeds)
+            / (cash + Decimal("2.25"))
+        )
+    ) + (1.0 - held_q) * math.log(float((cash + proceeds) / cash))
+    assert receipt_log == pytest.approx(0.0677019120440216)
+    assert float(proceeds) - 0.56 * held_q == pytest.approx(-0.20059152981554973)
+
+    decision = _global_select(
+        (sell,), floor=str(cash), ceiling=str(cash), cash=str(cash),
+    )
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons == {
+        sell.candidate_id: "NON_POSITIVE_EXPECTED_OBJECTIVE"
+    }
+    counterfactual = decision.candidate_evaluations[0].sell_point_counterfactual
+    assert counterfactual is not None
+    assert counterfactual.status == "NON_POSITIVE"
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_cash_starved_sell_above_held_q_is_a_value_sell(side):
+    """Net bid above q: positive EV against holding, admitted at any cash level."""
+
+    held_q = 0.7958241603849102
+    sell = _cash_starved_manila_sell(bid="0.90", side=side)
+
+    decision = _global_select(
+        (sell,), floor="0.175594", ceiling="0.175594", cash="0.175594",
+    )
+
+    assert decision.candidate is sell
+    terminal = decision.expected_terminal_wealth
+    assert terminal is not None
+    assert terminal.held_probability_mean == pytest.approx(held_q)
+    net = 0.90 - 0.05 * 0.90 * 0.10
+    assert terminal.expected_ev_usd == pytest.approx(
+        float(decision.shares) * (net - held_q)
+    )
+    assert terminal.expected_ev_usd > 0.0
+    assert decision.expected_growth.expected_ev_usd > 0.0
+    cert = S.global_sell_fak_prefix_certificate(decision)
+    assert cert["ev_lower_bound_usd"] > 0.0
+    # A JIT book whose submitted floor nets below q no longer proves value.
+    below_q = replace(
+        sell.executable_sell_curve,
+        levels=(BookLevel(price=Decimal("0.70"), size=Decimal("2.25")),),
+    )
+    current = replace(
+        sell, executable_sell_curve=below_q, proposal_sell_curve=below_q,
+        execution_curve_identity=S.executable_curve_identity(below_q),
+    )
+    with pytest.raises(ValueError, match="fill economics non-positive"):
+        S.global_sell_fak_prefix_certificate(decision, current_candidate=current)
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_cash_starved_partial_value_sell_stops_at_the_last_level_above_q(side):
+    """Cash pressure may size a value sell, never extend it below hold value.
+
+    Bids 0.70 x 1 then 0.30 x 9 against q = 0.50 with $0.20 cash: the cash-basis
+    log objective rewards selling deep into 0.30, but a FAK floor at 0.30 nets
+    below q for every filled share, so the sale stops at the 0.70 level.
+    """
+
+    sell = _global_sell_candidate(
+        candidate_id=f"partial-value-{side}",
+        family=f"partial-value-{side}",
+        side=side,
+        held_q=0.50,
+        bids=(("0.70", "1"), ("0.30", "9")),
+        shares="10",
+        min_tick="0.01",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+
+    decision = _global_select((sell,), floor="0.2", ceiling="0.2", cash="0.2")
+
+    assert decision.candidate is sell
+    assert decision.shares == Decimal("1.00")
+    assert decision.limit_price == Decimal("0.70")
+    assert decision.expected_terminal_wealth.expected_ev_usd == pytest.approx(0.20)
+    cert = S.global_sell_fak_prefix_certificate(decision)
+    assert cert["ev_lower_bound_usd"] > 0.0
+
+
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize("metric", ("high", "low"))
-def test_hong_kong_log_positive_cash_ev_negative_sell_enters_auction(side, metric):
-    """E2/E6 regression using decision 888561 economics and newly supplied depth.
+def test_hong_kong_log_positive_cash_ev_negative_sell_is_rejected(side, metric):
+    """Decision 888561: log-positive at bid 0.19 < q 0.4014 is still an EV loss."""
 
-    The immutable receipt proves these wealth/q/fee numbers, not this fixture's
-    complete bid depth or a historical fill. Cost basis is absent from permission.
-    """
     held_q = 0.4013657819973186
     sell = _global_sell_candidate(
         candidate_id=f"hong-kong-log-law-{metric}-{side}",
@@ -4449,78 +4566,26 @@ def test_hong_kong_log_positive_cash_ev_negative_sell_enters_auction(side, metri
         exit_authority_status="immature",
         exit_authority_reason="current_statistical_probability",
     )
-    endowment = S.CandidatePortfolioEndowment(
-        loss_wealth_floor_usd=Decimal("0.858079"),
-        win_wealth_floor_usd=Decimal("5.858079"),
-        current_token_shares=Decimal("5"),
-        ledger_snapshot_id=sell.ledger_snapshot_id,
-    )
-
-    decision = _global_select(
-        (sell,), floor="0.858079", ceiling="0.858079", cash="0.858079",
-        candidate_portfolio_endowment_resolver=lambda _candidate: endowment,
-    )
-
-    assert decision.candidate is sell
-    assert decision.shares == Decimal("2.40")
-    assert decision.cash_proceeds_usd == Decimal("0.437532")
-    terminal = decision.expected_terminal_wealth
-    assert terminal is not None
-    assert terminal.wealth_after_loss_usd == Decimal("3.895611")
-    assert terminal.wealth_after_win_usd == Decimal("1.295611")
     independent_log = held_q * math.log(3.895611 / 5.858079) + (
         1.0 - held_q
     ) * math.log(1.295611 / 0.858079)
-    independent_ev = 0.437532 - 2.4 * held_q
-    assert terminal.expected_delta_log_wealth == pytest.approx(independent_log)
-    assert terminal.expected_delta_log_wealth == pytest.approx(0.08291646628523747)
-    assert terminal.expected_ev_usd == pytest.approx(independent_ev)
-    assert terminal.expected_ev_usd < 0
-    for forged_ev in (abs(terminal.expected_ev_usd), float("nan")):
-        with pytest.raises(ValueError):
-            replace(terminal, expected_ev_usd=forged_ev)
-    assert decision.expected_growth is not None
-    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(
-        independent_log
+    assert independent_log == pytest.approx(0.08291646628523747)
+    assert 0.437532 - 2.4 * held_q < 0.0
+
+    decision = _global_select(
+        (sell,), floor="0.858079", ceiling="0.858079", cash="0.858079",
     )
-    assert decision.expected_growth.expected_ev_usd == pytest.approx(independent_ev)
-    assert not S._positive_common_expected_growth(
-        decision.expected_growth,
-        capital_lock_hours=decision.capital_lock_hours,
-        action="BUY",
-    )
-    counterfactual = decision.candidate_evaluations[0].sell_point_counterfactual
-    assert counterfactual is not None
-    assert counterfactual.status == "POSITIVE"
-    assert counterfactual.expected_ev_usd < 0
-    cert = S.global_sell_fak_prefix_certificate(decision)
-    assert cert["delta_log_wealth_lower_bound"] > 0
-    assert cert["ev_lower_bound_usd"] < 0
-    worse_curve = replace(
-        sell.executable_sell_curve,
-        levels=(BookLevel(price=Decimal("0.05"), size=Decimal("5")),),
-    )
-    worse_current = replace(
-        sell, executable_sell_curve=worse_curve, proposal_sell_curve=worse_curve,
-        execution_curve_identity=S.executable_curve_identity(worse_curve),
-    )
-    with pytest.raises(ValueError, match="fill economics non-positive"):
-        S.global_sell_fak_prefix_certificate(decision, current_candidate=worse_current)
-    # Independently enumerate every submitted cent prefix against the submitted
-    # floor with twice the unrounded fee, rather than assuming a full fill.
-    size = Decimal("0.01")
-    while size <= decision.shares:
-        proceeds = size * Decimal("0.17461")
-        delta_log, ev = S.global_sell_fill_prefix_objective(
-            decision, filled_shares=size, net_proceeds_usd=proceeds,
-        )
-        assert delta_log > 0
-        assert ev < 0
-        size += Decimal("0.01")
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons == {
+        sell.candidate_id: "NON_POSITIVE_EXPECTED_OBJECTIVE"
+    }
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_cash_ev_negative_maker_sell_scores_zero_partial_full_fill_distribution(side):
+def test_cash_ev_negative_maker_sell_is_rejected(side):
+    """The maker twin: a rest below q is an EV loss at every fill fraction."""
+
     held_q = 0.4013657819973186
     taker = _global_sell_candidate(
         candidate_id=f"log-law-maker-{side}", family=f"log-law-maker-{side}",
@@ -4535,40 +4600,27 @@ def test_cash_ev_negative_maker_sell_scores_zero_partial_full_fill_distribution(
         fill_probability=0.5, fill_probability_source="unbound",
         rest_deadline_minutes=20.0, asset_epoch_identity="log-law-maker-epoch",
     )
-    outcomes = (
-        S.MakerFillOutcome(Decimal("0.5"), Decimal("0"), Decimal("0")),
-        S.MakerFillOutcome(Decimal("0.3"), Decimal("0.5"), Decimal("0.191")),
-        S.MakerFillOutcome(Decimal("0.2"), Decimal("1"), Decimal("0.191")),
-    )
     witness = _current_maker_witness(
         provisional, proposal=proposal, asset_epoch="log-law-maker-epoch",
-        outcomes=outcomes,
+        outcomes=(
+            S.MakerFillOutcome(Decimal("0.5"), Decimal("0"), Decimal("0")),
+            S.MakerFillOutcome(Decimal("0.3"), Decimal("0.5"), Decimal("0.191")),
+            S.MakerFillOutcome(Decimal("0.2"), Decimal("1"), Decimal("0.191")),
+        ),
     )
     maker = replace(
         provisional, maker_fill_witness=witness,
         fill_probability_source=witness.witness_identity,
     )
+
     decision = _global_select(
         (maker,), floor="0.858079", ceiling="0.858079", cash="0.858079",
     )
 
-    assert decision.candidate is maker
-    assert decision.expected_growth.expected_ev_usd < 0
-    independent_log = independent_ev = 0.0
-    for outcome in outcomes:
-        size = decision.shares * outcome.fill_fraction
-        proceeds = size * outcome.proceeds_per_share_usd
-        delta_log = held_q * math.log(float(
-            (Decimal("5.858079") - size + proceeds) / Decimal("5.858079")
-        )) + (1 - held_q) * math.log(float(
-            (Decimal("0.858079") + proceeds) / Decimal("0.858079")
-        ))
-        independent_log += float(outcome.probability) * delta_log
-        independent_ev += float(outcome.probability) * (float(proceeds) - held_q * float(size))
-        assert delta_log >= 0
-    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(independent_log)
-    assert decision.expected_growth.expected_ev_usd == pytest.approx(independent_ev)
-    assert independent_log > 0
+    assert decision.candidate is None
+    assert decision.rejection_reasons == {
+        maker.candidate_id: "NON_POSITIVE_EXPECTED_OBJECTIVE"
+    }
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -8308,10 +8360,10 @@ def test_family_calibration_changes_mean_sell_hold_decision():
     assert plain.candidate is sell
     assert plain.expected_terminal_wealth is not None
     assert plain.expected_terminal_wealth.held_probability_mean == pytest.approx(0.30)
-    assert with_family_resolver.candidate is sell
-    assert with_family_resolver.expected_terminal_wealth.expected_delta_log_wealth > 0
-    assert with_family_resolver.expected_terminal_wealth.held_probability_mean == pytest.approx(0.60)
-    assert with_family_resolver.expected_terminal_wealth.expected_ev_usd == pytest.approx(0)
+    assert with_family_resolver.candidate is None
+    assert with_family_resolver.rejection_reasons[sell.candidate_id] == (
+        "NON_POSITIVE_EXPECTED_OBJECTIVE"
+    )
 
 
 def test_mean_buy_and_sell_share_expected_axis_and_sell_correction_carries():
@@ -9572,8 +9624,7 @@ def test_selector_consults_the_shared_predicate_before_it_binds_an_order(monkeyp
     taker, maker = _live_residue_maker_pair("parity")
     seen = []
 
-    def reject_all(expected_growth, *, capital_lock_hours, action):
-        assert action == "BUY"
+    def reject_all(expected_growth, *, capital_lock_hours):
         seen.append(expected_growth)
         return False
 

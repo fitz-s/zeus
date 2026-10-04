@@ -12451,8 +12451,12 @@ def test_red_stale_or_missing_monitor_quote_recaptures_snapshot_and_uses_fak(
         def get_order_status(_order_id):
             return {"status": "OPEN"}
 
+    # Held q 0.80 against a 0.44 bid: this sale is a certain EV loss, and RED
+    # still liquidates. The SELL EV floor binds only the capital auction.
     stale = ExitContext(
         exit_reason="RED_FORCE_EXIT",
+        fresh_prob=0.80,
+        fresh_prob_is_fresh=True,
         current_market_price=stale_price,
         current_market_price_is_fresh=False,
         best_bid=0.45,
@@ -12493,6 +12497,7 @@ def test_red_stale_or_missing_monitor_quote_recaptures_snapshot_and_uses_fak(
         exit_intent=_cycle_red_exit_intent(conn, position, stale),
     )
     assert outcome.startswith("sell_pending: order=ord-red-protective")
+    assert submitted["exact_limit_price"] < stale.fresh_prob
     assert submitted["submit_order_type"] == "FAK"
     assert submitted["exact_limit_price"] == 0.44
     assert submitted["current_price"] == 0.44

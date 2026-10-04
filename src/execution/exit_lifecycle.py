@@ -3279,6 +3279,7 @@ class GlobalSellExecutionAuthority:
             CurrentMakerFillWitness,
             GlobalSingleOrderSellCandidate,
             _maker_witness_rejection,
+            _positive_common_expected_growth,
             executable_curve_identity,
         )
 
@@ -3414,14 +3415,9 @@ class GlobalSellExecutionAuthority:
             or decision.shares <= 0
             or decision.shares > jit_candidate.held_shares
             or action_economics_invalid
-            or expected_growth is None
-            or not math.isfinite(expected_growth.expected_ev_usd)
-            or not (
-                expected_growth.ruin_probability_reduction > 0.0
-                or (
-                    expected_growth.ruin_probability_reduction == 0.0
-                    and expected_growth.expected_delta_log_wealth > 0.0
-                )
+            or not _positive_common_expected_growth(
+                expected_growth,
+                capital_lock_hours=decision.capital_lock_hours,
             )
         ):
             raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_INVALID")

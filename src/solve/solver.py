@@ -3065,14 +3065,15 @@ def _positive_common_expected_growth(
     expected_growth: ExpectedGrowthComparison | None,
     *,
     capital_lock_hours: float | None,
-    action: Literal["BUY", "SELL"],
 ) -> bool:
-    """The common log-growth law, retaining the BUY-only positive EV gate.
+    """The one law a selectable order's common-axis score must satisfy.
 
     The selector binds and ranks only proposals that pass it, and the selected
     order and its evaluation enforce it, so the auction cannot choose an order
-    its own validation rejects. E2/E6 permits a SELL that improves log wealth
-    below held-token q; its cash EV remains evidence, not a separate veto.
+    its own validation rejects. The EV floor binds BUY and SELL alike: a held
+    binary is worth q per share at settlement, so selling below that is a
+    certain expected loss that no cash state justifies (operator ruling
+    2026-10-04). Log growth or ruin reduction is necessary, never sufficient.
     """
 
     return (
@@ -3087,10 +3088,7 @@ def _positive_common_expected_growth(
                 and expected_growth.expected_capital_efficiency > 0.0
             )
         )
-        and (
-            action == "SELL"
-            or expected_growth.expected_ev_usd > _ROBUST_EV_EPS_USD
-        )
+        and expected_growth.expected_ev_usd > _ROBUST_EV_EPS_USD
     )
 
 
@@ -3619,7 +3617,7 @@ class GlobalSellPointCounterfactual:
             self.ruin_probability_reduction == 0.0
             and self.expected_delta_log_wealth > 0.0
         )
-        positive = utility_positive
+        positive = utility_positive and self.expected_ev_usd > _ROBUST_EV_EPS_USD
         if (
             self.status == "POSITIVE"
             and (self.rejection_reason is not None or not positive)
@@ -3986,6 +3984,7 @@ class GlobalSingleOrderCandidateEvaluation:
                         self.ruin_probability_reduction > 0.0
                         or self.robust_delta_log_wealth > 0.0
                     )
+                    and self.robust_ev_usd > _ROBUST_EV_EPS_USD
                 )
                 or (
                     reason == "NON_POSITIVE_ROBUST_FILL_PREFIX"
@@ -3994,6 +3993,7 @@ class GlobalSingleOrderCandidateEvaluation:
                             self.ruin_probability_reduction > 0.0
                             or self.robust_delta_log_wealth > 0.0
                         )
+                        and self.robust_ev_usd > _ROBUST_EV_EPS_USD
                     )
                 )
             ):
@@ -4031,7 +4031,6 @@ class GlobalSingleOrderCandidateEvaluation:
             or not _positive_common_expected_growth(
                 self.expected_growth,
                 capital_lock_hours=self.capital_lock_hours,
-                action=self.action,
             )
             or (
                 not mean_action
@@ -4074,6 +4073,7 @@ class GlobalSingleOrderCandidateEvaluation:
                     and self.robust_delta_log_wealth > 0.0
                 )
             )
+            or self.robust_ev_usd <= _ROBUST_EV_EPS_USD
             or (
                 self.ruin_probability_reduction == 0.0
                 and self.capital_efficiency <= 0.0
@@ -4335,7 +4335,6 @@ class GlobalSingleOrderDecision:
             and not _positive_common_expected_growth(
                 self.expected_growth,
                 capital_lock_hours=self.capital_lock_hours,
-                action=getattr(self.candidate, "action", "BUY"),
             )
         ):
             raise ValueError("global order lacks a positive common expected-growth score")
@@ -7067,7 +7066,7 @@ def global_sell_fak_prefix_certificate(
     ruin, delta_log, ev = _global_sell_fill_prefix_extended_objective(
         decision, filled_shares=decision.shares, net_proceeds_usd=proceeds,
     )
-    if not (ruin > 0 or (ruin == 0 and delta_log > 0)):
+    if not (ev > 0 and (ruin > 0 or (ruin == 0 and delta_log > 0))):
         raise ValueError("SELL rounding-safe fill economics non-positive")
     return {
         "semantics": "sell_submitted_floor_twice_unrounded_fee_v1",
@@ -7145,7 +7144,8 @@ def _score_global_single_order_sell(
                     loss_after=loss_baseline - shares + proceeds,
                     win_after=win_baseline + proceeds,
                 )
-                return ruin > 0 or (ruin == 0 and growth > 0)
+                ev = proceeds - Decimal(str(1.0 - robust_q)) * shares
+                return ev > 0 and (ruin > 0 or (ruin == 0 and growth > 0))
             except (ArithmeticError, ValueError):
                 return False
 
@@ -7347,7 +7347,7 @@ def _score_global_single_order_sell(
     utility_positive = ruin_reduction > 0.0 or (
         ruin_reduction == 0.0 and robust_du > 0.0
     )
-    if not utility_positive:
+    if not (utility_positive and robust_ev > _ROBUST_EV_EPS_USD):
         return replace(
             scored,
             rejection_reasons={
@@ -7375,7 +7375,7 @@ def _score_global_single_order_sell(
         prefix_utility_positive = prefix_ruin > 0.0 or (
             prefix_ruin == 0.0 and prefix_du > 0.0
         )
-        if not prefix_utility_positive:
+        if not (prefix_utility_positive and prefix_ev > 0.0):
             return replace(
                 scored,
                 rejection_reasons={
@@ -8123,7 +8123,6 @@ def select_global_single_order(
         if not score.rejection_reasons and not _positive_common_expected_growth(
             expected_growth,
             capital_lock_hours=expected_growth.capital_lock_hours,
-            action=getattr(candidate, "action", "BUY"),
         ):
             rejections[candidate.candidate_id] = _NON_POSITIVE_EXPECTED_GROWTH
             return None, None
@@ -8634,7 +8633,6 @@ def select_global_single_order(
             and _positive_common_expected_growth(
                 score.expected_growth,
                 capital_lock_hours=score.capital_lock_hours,
-                action="BUY",
             )
             and score.candidate.candidate_id not in rejections
         }
@@ -8959,7 +8957,6 @@ def select_global_single_order(
         and _positive_common_expected_growth(
             score.expected_growth,
             capital_lock_hours=score.capital_lock_hours,
-            action=getattr(score.candidate, "action", "BUY"),
         )
     )
     if not positive_scored:
