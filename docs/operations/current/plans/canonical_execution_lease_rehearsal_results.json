@@ -1,34 +1,34 @@
 {
- "old_root": "/private/tmp/claude-501/-Users-leofitz-zeus/58464645-9a59-4320-acce-dec6b037962b/scratchpad/base4",
+ "old_root": "/private/tmp/claude-501/-Users-leofitz-zeus/58464645-9a59-4320-acce-dec6b037962b/scratchpad/base5",
  "new_root": "/Users/leofitz/zeus/.claude/worktrees/agent-afae5b8569708c7eb",
  "clone_legacy_batches_rebound_to_dead_pid": [
-  "priority.20260929T081348797618Z.pid10121",
-  "priority.20261004T045549400086Z.pid10121"
+  "priority.20260929T081348797618Z.pid34746",
+  "priority.20261004T073526550839Z.pid34746"
  ],
  "start": {
-  "requests": 206,
+  "requests": 125,
   "inflight_requests": [
-   "priority.20261004T045549400086Z.pid10121/Ankara.2026-10-04.high.20261004T045525Z.enqueue-b121ea39219246ec8106b14766e7eb00.json",
-   "priority.20261004T045549400086Z.pid10121/Atlanta.2026-10-03.high.20261004T043659Z.station-input-revision.transition-2638085dece03fe105d3004172bed2877a84e4c37702f078712f94472ff2b178.json",
-   "priority.20261004T045549400086Z.pid10121/Los_Angeles.2026-10-03.low.20261004T040153Z.station-input-revision.transition-7f8158f81a29ed0a24ec726fda26ad73a125a94c1057043ca82e7f36c4c89d00.json"
+   "priority.20261004T073526550839Z.pid34746/Chengdu.2026-10-04.high.20261004T073449Z.transition-303c868ad41c81bb0c78f4e2cf0cf927ed276c3a5d74e9a8c46440d4abff102b.json",
+   "priority.20261004T073526550839Z.pid34746/Lucknow.2026-10-04.low.20261004T073447Z.station-input-revision.transition-74d46f8c05e1666d13c009cac7f95551950c1bd483c93e14bed8ae4847dafc37.json",
+   "priority.20261004T073526550839Z.pid34746/Warsaw.2026-10-06.low.20261004T061702Z.enqueue-ba3e3ac389ee45a3bfebcf55c27180b5.json"
   ],
   "staging": [],
   "lease_files": 0
  },
  "A_old_worker": {
-  "pid": 10125,
-  "request": "Shanghai.2026-10-04.low.20261004T040153Z.station-input-revision.transition-0dd279aa2ba556d9df4d51ecc9dc046ef397310f6e8696d1294146654be392fd.json",
+  "pid": 35151,
+  "request": "Miami.2026-10-04.high.20261004T070611Z.station-input-revision.transition-b2e086bbddb4908c0821e959dcd6603ce9fca639ca56450e7dbd0c56982cbbe3.json",
   "alive_after_parent_kill": true
  },
  "A_after_stop": {
-  "requests": 203,
+  "requests": 122,
   "inflight_requests": [
-   "priority.20261004T045549400086Z.pid10121/Ankara.2026-10-04.high.20261004T045525Z.enqueue-b121ea39219246ec8106b14766e7eb00.json",
-   "priority.20261004T045549400086Z.pid10121/Atlanta.2026-10-03.high.20261004T043659Z.station-input-revision.transition-2638085dece03fe105d3004172bed2877a84e4c37702f078712f94472ff2b178.json",
-   "priority.20261004T045549400086Z.pid10121/Los_Angeles.2026-10-03.low.20261004T040153Z.station-input-revision.transition-7f8158f81a29ed0a24ec726fda26ad73a125a94c1057043ca82e7f36c4c89d00.json",
-   "priority.20261004T045553333559Z.pid10122/Denver.2026-10-03.low.20261004T040911Z.station-input-revision.transition-0721770ba2f81b2bae8f7271472d8384ca3de9a332b957c534432baa7f2ac077.json",
-   "priority.20261004T045553333559Z.pid10122/Sao_Paulo.2026-10-04.high.20261004T041000Z.station-input-revision.transition-20fbf5ebdb0d0d1931057a53db76e3e7b997d8725b0c3bd74f816ec6fd5b8006.json",
-   "priority.20261004T045553333559Z.pid10122/Shanghai.2026-10-04.low.20261004T040153Z.station-input-revision.transition-0dd279aa2ba556d9df4d51ecc9dc046ef397310f6e8696d1294146654be392fd.json"
+   "priority.20261004T073526550839Z.pid34746/Chengdu.2026-10-04.high.20261004T073449Z.transition-303c868ad41c81bb0c78f4e2cf0cf927ed276c3a5d74e9a8c46440d4abff102b.json",
+   "priority.20261004T073526550839Z.pid34746/Lucknow.2026-10-04.low.20261004T073447Z.station-input-revision.transition-74d46f8c05e1666d13c009cac7f95551950c1bd483c93e14bed8ae4847dafc37.json",
+   "priority.20261004T073526550839Z.pid34746/Warsaw.2026-10-06.low.20261004T061702Z.enqueue-ba3e3ac389ee45a3bfebcf55c27180b5.json",
+   "priority.20261004T073535087789Z.pid34747/Atlanta.2026-10-04.high.20261004T072318Z.station-input-revision.transition-8267d29898879b9ecbe82b5a5bd1d23b7b33d2aeede9fc90128e8130f73325ae.json",
+   "priority.20261004T073535087789Z.pid34747/Miami.2026-10-04.high.20261004T070611Z.station-input-revision.transition-b2e086bbddb4908c0821e959dcd6603ce9fca639ca56450e7dbd0c56982cbbe3.json",
+   "priority.20261004T073535087789Z.pid34747/Toronto.2026-10-04.low.20261004T070611Z.station-input-revision.transition-8d255b40ca6969084fd2ca285dd59a52707e467ccb8477cafda31c164af742f1.json"
   ],
   "staging": [],
   "lease_files": 0
@@ -50,20 +50,20 @@
   "drained_staging": 0
  },
  "A2_after": {
-  "requests": 209,
+  "requests": 128,
   "inflight_requests": [],
   "staging": [],
   "lease_files": 0
  },
  "S_constructor": {
-  "pid": 10140,
-  "staging": ".staging.20261004T045556782811Z.lease-v1.a8cbd218947a.pid10140"
+  "pid": 36391,
+  "staging": ".staging.20261004T073538493333Z.lease-v1.4efcdf186f22.pid36391"
  },
  "S_alive_tree": {
-  "requests": 209,
+  "requests": 128,
   "inflight_requests": [],
   "staging": [
-   ".staging.20261004T045556782811Z.lease-v1.a8cbd218947a.pid10140"
+   ".staging.20261004T073538493333Z.lease-v1.4efcdf186f22.pid36391"
   ],
   "lease_files": 2
  },
@@ -72,11 +72,11 @@
   "restored": 0,
   "refused": [],
   "held_leases": [
-   "2f7ff06362248c4340bba190f97342b20245a1977dd2d22e08562be9c61c7a7e.lease:HELD",
-   "d59f8acb5128a9fcf8589d98758916f6069074c25806d3f7e092637ce488313b.lease:HELD"
+   "c66305d7f0ef6ed6b13afc2a3fd33749bf9ac9fff1fbb74cc7c3ea7374ca42a2.lease:HELD",
+   "c793845218fccf314eb0ae09f3909054730f2d5fcd05fd85f6ee315908a0d56a.lease:HELD"
   ],
   "live_staging": [
-   ".staging.20261004T045556782811Z.lease-v1.a8cbd218947a.pid10140"
+   ".staging.20261004T073538493333Z.lease-v1.4efcdf186f22.pid36391"
   ],
   "drained_staging": 0
  },
@@ -85,11 +85,11 @@
   "restored": 0,
   "refused": [],
   "held_leases": [
-   "2f7ff06362248c4340bba190f97342b20245a1977dd2d22e08562be9c61c7a7e.lease:HELD",
-   "d59f8acb5128a9fcf8589d98758916f6069074c25806d3f7e092637ce488313b.lease:HELD"
+   "c66305d7f0ef6ed6b13afc2a3fd33749bf9ac9fff1fbb74cc7c3ea7374ca42a2.lease:HELD",
+   "c793845218fccf314eb0ae09f3909054730f2d5fcd05fd85f6ee315908a0d56a.lease:HELD"
   ],
   "live_staging": [
-   ".staging.20261004T045556782811Z.lease-v1.a8cbd218947a.pid10140"
+   ".staging.20261004T073538493333Z.lease-v1.4efcdf186f22.pid36391"
   ],
   "drained_staging": 0
  },
@@ -100,10 +100,10 @@
  "S_alive_staging_survives": true,
  "S_constructor_alive_after_kill": false,
  "S_dead_tree_before_drain": {
-  "requests": 209,
+  "requests": 128,
   "inflight_requests": [],
   "staging": [
-   ".staging.20261004T045556782811Z.lease-v1.a8cbd218947a.pid10140"
+   ".staging.20261004T073538493333Z.lease-v1.4efcdf186f22.pid36391"
   ],
   "lease_files": 2
  },
@@ -121,36 +121,36 @@
   "drained_staging": 0
  },
  "S_after": {
-  "requests": 209,
+  "requests": 128,
   "inflight_requests": [],
   "staging": [],
   "lease_files": 0
  },
  "B_worker": {
-  "pid": 10173,
-  "request": "Shanghai.2026-10-04.low.20261004T040153Z.station-input-revision.transition-0dd279aa2ba556d9df4d51ecc9dc046ef397310f6e8696d1294146654be392fd.json",
+  "pid": 38290,
+  "request": "Miami.2026-10-04.high.20261004T070611Z.station-input-revision.transition-b2e086bbddb4908c0821e959dcd6603ce9fca639ca56450e7dbd0c56982cbbe3.json",
   "alive_after_parent_kill": true
  },
  "B_competitor_ticks": 6,
  "B_inflight_while_worker_lives": [
-  "priority.20261004T045602022360Z.lease-v1.c58be91438bb.pid10165/Shanghai.2026-10-04.low.20261004T040153Z.station-input-revision.transition-0dd279aa2ba556d9df4d51ecc9dc046ef397310f6e8696d1294146654be392fd.json"
+  "priority.20261004T073543697566Z.lease-v1.751e9260b4ac.pid38056/Miami.2026-10-04.high.20261004T070611Z.station-input-revision.transition-b2e086bbddb4908c0821e959dcd6603ce9fca639ca56450e7dbd0c56982cbbe3.json"
  ],
  "B_reconcile_while_worker_lives": {
   "exit": 3,
   "restored": 0,
   "refused": [
    [
-    "priority.20261004T045602022360Z.lease-v1.c58be91438bb.pid10165",
+    "priority.20261004T073543697566Z.lease-v1.751e9260b4ac.pid38056",
     "HELD"
    ]
   ],
   "held_leases": [
-   "2d96347d191982ba17b7f64d9c7ac94508238ee893b14849dd750e75082b687e.lease:HELD",
-   "2e40dcc1723213e4fb0de5331c3a7bb6002dcfb79ff43ba4c22c45a861319257.lease:HELD",
-   "3b3b795c33f7e36465a283758a938a659e6e42f34343dbf67f6a57fa50de0986.lease:HELD",
-   "3e765131222382c2b5d4469f5016866a6ccc57952c0adab24f9590b51ce4a15a.lease:HELD",
-   "9aa84cd4e284665a30419042811268140016e43b289ddf328df98296182ee6ed.lease:HELD",
-   "fbeeb1844c58f1a5ea869e242946c8c848fa7dd9c128e32ce832c45a8f2847e5.lease:HELD"
+   "187f752d649aabfefac70ab6a30a058355f97229b47c5a23e4f60b0b06ac01d1.lease:HELD",
+   "280ddcadf3233afdc53328b84e86f512cde94841be45b31070f0ffc5b3176a3d.lease:HELD",
+   "460ed368354dd2303a7585dd042feb940a97ca273a9dd0c79b9ba8a7aba6a66c.lease:HELD",
+   "4784404e2788a4110c238fabd772eb0447b74f81a33f72a7357913364fc77921.lease:HELD",
+   "7ca4584cb50ced2254505dbbe7d0c8d787075a3853b0380b226ba7f9ce56d455.lease:HELD",
+   "90359bedb827d32ef60cd6656678a6a5134a19ecaf6a906cbf47e711a8f9f78c.lease:HELD"
   ],
   "live_staging": [],
   "drained_staging": 0
@@ -164,13 +164,13 @@
   "drained_staging": 0
  },
  "R_after": {
-  "requests": 66,
+  "requests": 67,
   "inflight_requests": [],
   "staging": [],
   "lease_files": 0
  },
- "D_ticks": 22,
- "D_processed": 66,
+ "D_ticks": 34,
+ "D_processed": 67,
  "D_failed": 0,
  "D_stopped": [],
  "end": {
@@ -187,12 +187,14 @@
   "live_staging": [],
   "drained_staging": 0
  },
- "executions_started": 86,
- "executions_completed": 84,
+ "executions_started": 87,
+ "executions_completed": 85,
  "identities_executed": 84,
+ "identity_grouping": "semantic request key parsed by the worker from the bytes it read",
+ "unparsed_executions": 0,
  "reaped_pids": {
-  "10125": 1791089754.258913,
-  "10173": 1791089765.7953851
+  "35151": 1791099336.0366132,
+  "38290": 1791099347.274008
  },
  "concurrent_duplicate_executions": [],
  "identities_completed_more_than_once": [],
