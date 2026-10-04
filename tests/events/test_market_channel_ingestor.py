@@ -4529,6 +4529,116 @@ def test_market_channel_refresh_queue_retries_exception_without_reinvalidating()
     assert service.refresh_action_dropped_count == 0
 
 
+def test_due_held_refresh_supersedes_without_invalidating_the_current_snapshot():
+    # A due refresh is a schedule: the snapshot stays valid to its own deadline
+    # and the refresh replaces it on arrival. Invalidating first blinded the
+    # held exit for every deferral (live 2026-10-04: 57/58 hit current books).
+    _conn, writer = _conn_writer()
+    invalidated: list[MarketChannelAction] = []
+    refreshed: list[MarketChannelAction] = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"held-token"}, token_metadata=_metadata("held-token")),
+        invalidate_snapshot=invalidated.append,
+        refresh_snapshot=lambda action: refreshed.append(action) or (
+            "deferred" if len(refreshed) == 1 else "completed"
+        ),
+        refresh_window_seconds=1.0,
+    )
+    due = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="held_snapshot_due",
+        token_id="held-token",
+        condition_id="0xcondition",
+    )
+
+    service._enqueue_refresh_action(due)
+
+    assert service.wait_refresh_idle(timeout=3.0)
+    assert refreshed == [due, due]
+    assert invalidated == []
+
+
+def test_venue_evidence_coalesced_into_queued_due_refresh_is_still_recorded():
+    _conn, writer = _conn_writer()
+    invalidated: list[MarketChannelAction] = []
+    refreshed: list[MarketChannelAction] = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"held-token"}, token_metadata=_metadata("held-token")),
+        invalidate_snapshot=invalidated.append,
+        refresh_snapshot=refreshed.append,
+    )
+    due = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="held_snapshot_due",
+        token_id="held-token",
+        condition_id="0xcondition",
+    )
+    tick = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        token_id="held-token",
+        condition_id="0xcondition",
+    )
+
+    service._refresh_worker_running = True
+    service._refresh_worker_idle.clear()
+    service._enqueue_refresh_action(due)
+    service._enqueue_refresh_action(tick)
+    threading.Thread(target=service._drain_refresh_actions, daemon=True).start()
+
+    assert service.wait_refresh_idle(timeout=2.0)
+    # Held priority is kept, and the absorbed venue fact is still invalidated.
+    assert refreshed == [due]
+    assert invalidated == [tick]
+    assert service.refresh_action_coalesced_count == 1
+
+
+def test_venue_evidence_behind_inflight_due_refresh_queues_its_own_invalidation():
+    _conn, writer = _conn_writer()
+    started = threading.Event()
+    release = threading.Event()
+    invalidated: list[MarketChannelAction] = []
+    refreshed: list[MarketChannelAction] = []
+
+    def refresh(action: MarketChannelAction) -> None:
+        refreshed.append(action)
+        if len(refreshed) == 1:
+            started.set()
+            assert release.wait(timeout=2.0)
+
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"held-token"}, token_metadata=_metadata("held-token")),
+        invalidate_snapshot=invalidated.append,
+        refresh_snapshot=refresh,
+        refresh_window_seconds=1.0,
+    )
+    due = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="held_snapshot_due",
+        token_id="held-token",
+        condition_id="0xcondition",
+    )
+    tick = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        token_id="held-token",
+        condition_id="0xcondition",
+    )
+
+    service._enqueue_refresh_action(due)
+    assert started.wait(timeout=1.0)
+    # The in-flight due refresh may have read its book before this fact.
+    service._enqueue_refresh_action(tick)
+    # A later due arrival merges into the queued repair and keeps its evidence.
+    service._enqueue_refresh_action(due)
+    release.set()
+
+    assert service.wait_refresh_idle(timeout=4.0)
+    assert invalidated == [tick]
+    assert refreshed == [due, due]
+    assert service.refresh_action_coalesced_count == 1
+
+
 def test_market_channel_condition_refresh_reconstructs_family_then_trims_siblings(monkeypatch):
     import src.data.market_scanner as market_scanner
     from src.ingest.price_channel_ingest import (

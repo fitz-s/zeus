@@ -483,13 +483,16 @@ def _edli_exact_snapshot_refresh_completed(
     action,
     *,
     checked_at: datetime,
+    captured_not_before: datetime,
 ) -> bool:
     """Verify a callback wrote an exact, current executable projection.
 
     SCOPE: the action's exact condition/token pair. DRAIN: a false result is a
     typed queue defer, so the persistent retry and scheduler re-observation
     retain the pair. RESET: only this read observing active/open/accepting,
-    orderbook-enabled, unexpired evidence completes the action.
+    orderbook-enabled, unexpired evidence captured by this attempt completes
+    the action; a due refresh leaves the prior snapshot valid, so a projection
+    older than ``captured_not_before`` is that prior snapshot, not the refresh.
     """
 
     condition_id = str(action.condition_id or "").strip()
@@ -525,6 +528,8 @@ def _edli_exact_snapshot_refresh_completed(
         captured_at = captured_at.astimezone(timezone.utc)
         deadline = deadline.astimezone(timezone.utc)
         if not (captured_at <= checked_at < deadline <= captured_at + FRESHNESS_WINDOW_DEFAULT):
+            return False
+        if captured_at < captured_not_before:
             return False
         invalidations = trade_conn.execute(
             """
@@ -6979,6 +6984,7 @@ def _edli_market_channel_ingestor_cycle(
                         timeout_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
                     )
                     _disable_background_quote_autocheckpoint(trade_conn)
+                    refresh_captured_at = datetime.now(timezone.utc)
                     with PolymarketClient(
                         public_request_priority=RequestPriority.SUBMIT_JIT
                     ) as exact_clob:
@@ -6988,7 +6994,7 @@ def _edli_market_channel_ingestor_cycle(
                                 action,
                                 [market],
                                 exact_clob,
-                                datetime.now(timezone.utc),
+                                refresh_captured_at,
                             ),
                             snapshot_write_context_factory=(
                                 _edli_price_channel_trade_write_context_factory(
@@ -7008,6 +7014,7 @@ def _edli_market_channel_ingestor_cycle(
                         trade_conn,
                         action,
                         checked_at=datetime.now(timezone.utc),
+                        captured_not_before=refresh_captured_at,
                     ):
                         logger.warning(
                             "EDLI market-channel refresh deferred: exact projection is not current condition_id=%s token_id=%s",

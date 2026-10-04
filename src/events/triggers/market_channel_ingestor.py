@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Iterator, Literal
@@ -116,6 +116,12 @@ class MarketChannelAction:
     token_id: str | None = None
     condition_id: str | None = None
 
+    @property
+    def invalidates_snapshot(self) -> bool:
+        # A due held refresh is a schedule, not venue evidence: the current
+        # snapshot stays valid to its own deadline and the refresh supersedes it.
+        return self.refresh_snapshot and self.reason != "held_snapshot_due"
+
 
 @dataclass(frozen=True)
 class _PendingRefreshAction:
@@ -126,6 +132,16 @@ class _PendingRefreshAction:
     invalidated: bool = False
     retry_count: int = 0
     not_before_monotonic: float = 0.0
+    # Venue evidence a coalesced arrival handed to this repair's action.
+    absorbed_evidence: MarketChannelAction | None = None
+
+    @property
+    def evidence(self) -> MarketChannelAction | None:
+        """The invalidation this repair records before refreshing, if any."""
+
+        if self.absorbed_evidence is not None:
+            return self.absorbed_evidence
+        return self.action if self.action.invalidates_snapshot else None
 
 
 @dataclass(frozen=True)
@@ -3509,19 +3525,28 @@ class MarketChannelOnlineService:
             queued = self._pending_refresh_actions.get(key)
             inflight = self._inflight_refresh_actions.get(key)
             previous = queued or inflight
-            if previous is not None:
+            if queued is not None:
                 self.refresh_action_coalesced_count += 1
-                if queued is not None and (
-                    self._is_held_refresh_action(action)
-                    and not self._is_held_refresh_action(queued.action)
-                ):
-                    self._pending_refresh_actions[key] = _PendingRefreshAction(
-                        action=action,
-                        generation=queued.generation,
-                        invalidated=queued.invalidated,
-                        retry_count=queued.retry_count,
-                        not_before_monotonic=queued.not_before_monotonic,
-                    )
+                # Held priority and venue evidence each survive the merge: a
+                # schedule-only held action keeps the invalidation it absorbs.
+                self._pending_refresh_actions[key] = replace(
+                    queued,
+                    action=(
+                        action
+                        if self._is_held_refresh_action(action)
+                        and not self._is_held_refresh_action(queued.action)
+                        else queued.action
+                    ),
+                    absorbed_evidence=queued.evidence
+                    or (action if action.invalidates_snapshot else None),
+                )
+                return
+            # Evidence arriving behind a schedule-only in-flight refresh is not
+            # recorded by it, so it queues its own invalidate-then-refresh.
+            if inflight is not None and not (
+                action.invalidates_snapshot and inflight.evidence is None
+            ):
+                self.refresh_action_coalesced_count += 1
                 return
             self._refresh_action_generation += 1
             self._pending_refresh_actions[key] = _PendingRefreshAction(
@@ -3631,10 +3656,8 @@ class MarketChannelOnlineService:
                 MARKET_CHANNEL_REFRESH_ACTION_RETRY_BASE_SECONDS
                 * (2 ** min(retry_count - 1, 10)),
             )
-            retried = _PendingRefreshAction(
-                action=pending.action,
-                generation=pending.generation,
-                invalidated=pending.invalidated,
+            retried = replace(
+                pending,
                 retry_count=retry_count,
                 not_before_monotonic=max(
                     pending.not_before_monotonic,
@@ -3653,19 +3676,14 @@ class MarketChannelOnlineService:
     ) -> _PendingRefreshAction:
         """Publish one successful invalidation to same-key in-flight arrivals."""
 
-        if pending.invalidated or self.invalidate_snapshot is None:
+        evidence = pending.evidence
+        if pending.invalidated or self.invalidate_snapshot is None or evidence is None:
             return pending
-        marked = _PendingRefreshAction(
-            action=pending.action,
-            generation=pending.generation,
-            invalidated=True,
-            retry_count=pending.retry_count,
-            not_before_monotonic=pending.not_before_monotonic,
-        )
+        marked = replace(pending, invalidated=True)
         with self._refresh_worker_lock:
             self._inflight_refresh_actions[key] = marked
         try:
-            self.invalidate_snapshot(pending.action)
+            self.invalidate_snapshot(evidence)
         except Exception:
             with self._refresh_worker_lock:
                 current = self._inflight_refresh_actions.get(key)
@@ -3677,12 +3695,9 @@ class MarketChannelOnlineService:
                     and queued.invalidated
                     and queued.action.reason == pending.action.reason
                 ):
-                    self._pending_refresh_actions[key] = _PendingRefreshAction(
-                        action=queued.action,
-                        generation=queued.generation,
+                    self._pending_refresh_actions[key] = replace(
+                        queued,
                         invalidated=False,
-                        retry_count=queued.retry_count,
-                        not_before_monotonic=queued.not_before_monotonic,
                     )
             raise
         return marked
@@ -3711,15 +3726,14 @@ class MarketChannelOnlineService:
         action = pending.action
         if not action.refresh_snapshot:
             return "dropped", pending
-        if not pending.invalidated and self.invalidate_snapshot is not None:
-            self.invalidate_snapshot(action)
-            pending = _PendingRefreshAction(
-                action=action,
-                generation=pending.generation,
-                invalidated=True,
-                retry_count=pending.retry_count,
-                not_before_monotonic=pending.not_before_monotonic,
-            )
+        evidence = pending.evidence
+        if (
+            not pending.invalidated
+            and self.invalidate_snapshot is not None
+            and evidence is not None
+        ):
+            self.invalidate_snapshot(evidence)
+            pending = replace(pending, invalidated=True)
         now = datetime.now(UTC)
         if (
             self._refresh_window_start is None
@@ -3736,11 +3750,8 @@ class MarketChannelOnlineService:
             seconds=max(1.0, self.refresh_window_seconds)
         )
         if is_held and held_key in self._held_refresh_window_keys:
-            pending = _PendingRefreshAction(
-                action=pending.action,
-                generation=pending.generation,
-                invalidated=pending.invalidated,
-                retry_count=pending.retry_count,
+            pending = replace(
+                pending,
                 not_before_monotonic=max(
                     pending.not_before_monotonic,
                     time.monotonic() + max(0.0, (next_window - now).total_seconds()),
@@ -3758,11 +3769,8 @@ class MarketChannelOnlineService:
             else self.max_refresh_actions_per_window
         )
         if action_count >= max(1, max_actions):
-            pending = _PendingRefreshAction(
-                action=action,
-                generation=pending.generation,
-                invalidated=pending.invalidated,
-                retry_count=pending.retry_count,
+            pending = replace(
+                pending,
                 not_before_monotonic=max(
                     pending.not_before_monotonic,
                     time.monotonic()
@@ -3789,11 +3797,8 @@ class MarketChannelOnlineService:
                 return "deferred", pending
             if result == "deferred":
                 if is_held:
-                    pending = _PendingRefreshAction(
-                        action=pending.action,
-                        generation=pending.generation,
-                        invalidated=pending.invalidated,
-                        retry_count=pending.retry_count,
+                    pending = replace(
+                        pending,
                         not_before_monotonic=max(
                             pending.not_before_monotonic,
                             time.monotonic()

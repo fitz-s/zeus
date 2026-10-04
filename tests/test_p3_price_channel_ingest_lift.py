@@ -7969,3 +7969,77 @@ def test_market_channel_snapshot_invalidation_bootstraps_before_write_lease():
     )
 
     assert trade_open.lineno < background_bound.lineno < lease.lineno
+
+
+def test_exact_refresh_completion_requires_this_attempts_capture() -> None:
+    """A due refresh no longer invalidates the prior snapshot, so the still-
+    current prior projection must not read as the refresh having landed."""
+    from decimal import Decimal
+
+    from src.contracts.executable_market_snapshot import (
+        FRESHNESS_WINDOW_DEFAULT,
+        ExecutableMarketSnapshot,
+    )
+    from src.events.triggers.market_channel_ingestor import MarketChannelAction
+    from src.ingest.price_channel_ingest import _edli_exact_snapshot_refresh_completed
+    from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
+
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    prior = datetime(2026, 10, 4, 3, 0, tzinfo=timezone.utc)
+
+    def snapshot(snapshot_id: str, captured_at: datetime) -> ExecutableMarketSnapshot:
+        return ExecutableMarketSnapshot(
+            snapshot_id=snapshot_id,
+            gamma_market_id="gamma-1",
+            event_id="event-1",
+            event_slug="weather-held",
+            condition_id="condition-held",
+            question_id="question-1",
+            yes_token_id="held-token",
+            no_token_id="sibling-token",
+            selected_outcome_token_id="held-token",
+            outcome_label="YES",
+            enable_orderbook=True,
+            active=True,
+            closed=False,
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=Decimal("0.01"),
+            min_order_size=Decimal("5"),
+            fee_details={"bps": 0, "source": "test"},
+            token_map_raw={"YES": "held-token", "NO": "sibling-token"},
+            rfqe=None,
+            neg_risk=True,
+            orderbook_top_bid=Decimal("0.49"),
+            orderbook_top_ask=Decimal("0.51"),
+            orderbook_depth_jsonb='{"asks":[["0.51","100"]],"bids":[["0.49","100"]]}',
+            raw_gamma_payload_hash="a" * 64,
+            raw_clob_market_info_hash="b" * 64,
+            raw_orderbook_hash="c" * 64,
+            authority_tier="CLOB",
+            captured_at=captured_at,
+            freshness_deadline=captured_at + FRESHNESS_WINDOW_DEFAULT,
+        )
+
+    insert_snapshot(conn, snapshot("snap-prior", prior))
+    action = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="held_snapshot_due",
+        condition_id="condition-held",
+        token_id="held-token",
+    )
+    attempt = prior + timedelta(seconds=70)
+    checked = attempt + timedelta(seconds=2)
+
+    assert not _edli_exact_snapshot_refresh_completed(
+        conn, action, checked_at=checked, captured_not_before=attempt
+    )
+
+    insert_snapshot(conn, snapshot("snap-refreshed", attempt))
+    assert _edli_exact_snapshot_refresh_completed(
+        conn, action, checked_at=checked, captured_not_before=attempt
+    )
