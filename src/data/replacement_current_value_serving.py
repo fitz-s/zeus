@@ -1147,19 +1147,20 @@ def _remaining_window_boundary(row: Mapping[str, object]) -> str:
         return cut
 
 
-def _physical_response_has_authority(row: Mapping[str, object], *, _require_surface: bool = True) -> bool:
-    """Verify actual single-model product and exact hourly/local-day value, not request intention."""
+def recorded_openmeteo_identity_has_authority(row: Mapping[str, object], artifact: object) -> bool:
+    """The body-free half of the Open-Meteo proof: the row's recorded product.
+
+    The row is bound to its recorded entity body (sha, source, product, cycle),
+    fetched from its endpoint mode's URL; that capture recorded this row's model
+    and requested the matching Open-Meteo model, which is the row's model_name.
+    Only DB-recorded fields are read: no body bytes, no clocks against a
+    decision, no current live request policy.
+    """
     try:
-        from pathlib import Path
-        import hashlib
-        from src.data.bayes_precision_fusion_download import _parse_batched_single_runs_payload
         from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
         from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL, STANDARD_FORECAST_URL
         from src.data.openmeteo_client import PREVIOUS_RUNS_URL
-        artifact = row["physical_artifact"]
         if not isinstance(artifact, dict) or artifact["sha256"] != row["raw_sha256"]:
-            return False
-        if not _physical_proof_clocks_have_authority(row, artifact):
             return False
         expected_url = {"single_runs": SINGLE_RUNS_FORECAST_URL,
             "standard_api_meta_stamped": STANDARD_FORECAST_URL,
@@ -1170,11 +1171,29 @@ def _physical_response_has_authority(row: Mapping[str, object], *, _require_surf
             return False
         metadata = json.loads(str(artifact["metadata"]))["physical_response"]
         params = json.loads(str(artifact["request_params_json"]))
-        if metadata["revision"] != "openmeteo_single_model_entity_body_v1" or params != metadata["request_params"]:
-            return False
         model = str(row["model"])
-        if metadata["model"] != model or params["models"] != OPENMETEO_MODEL_IDS.get(model, model):
+        return (metadata["revision"] == "openmeteo_single_model_entity_body_v1" and params == metadata["request_params"]
+                and metadata["model"] == model and params["models"] == OPENMETEO_MODEL_IDS.get(model, model)
+                and row.get("model_name", params["models"]) == params["models"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
+def _physical_response_has_authority(row: Mapping[str, object], *, _require_surface: bool = True) -> bool:
+    """Verify actual single-model product and exact hourly/local-day value, not request intention."""
+    try:
+        from pathlib import Path
+        import hashlib
+        from src.data.bayes_precision_fusion_download import _parse_batched_single_runs_payload
+        from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+        artifact = row["physical_artifact"]
+        if not recorded_openmeteo_identity_has_authority(row, artifact):
             return False
+        if not _physical_proof_clocks_have_authority(row, artifact):
+            return False
+        metadata = json.loads(str(artifact["metadata"]))["physical_response"]
+        params = json.loads(str(artifact["request_params_json"]))
+        model = str(row["model"])
         if params.get("elevation") is not None or params.get("cell_selection", "land") != "land":
             return False
         variable = ("temperature_2m" if row["endpoint"] != "previous_runs" or int(row.get("lead_days") or 0) == 0

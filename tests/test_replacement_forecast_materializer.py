@@ -11480,7 +11480,10 @@ def test_normal_anchor_only_writer_rebuilds_v6_and_public_entry_held_own_proof(t
 def test_every_q_input_row_has_one_recorded_role_on_the_anchor_only_branch(tmp_path, monkeypatch):
     """Structural guard (A/D) on the anchor-only branch: the IFS center is the
     anchor proof, never a persisted IFS row, and every other row entering q is a
-    recorded serving role."""
+    recorded serving role. The same posterior without its cohort role (the
+    legacy shape) has no unroled dependency row, so its legacy claims are empty
+    and it serves."""
+    from src.data import replacement_input_hwm as hwm
     from tests.integration.test_w3_solve_seam_g3 import (
         _assert_every_q_input_row_has_one_role, _q_input_rows_spy,
     )
@@ -11493,6 +11496,8 @@ def test_every_q_input_row_has_one_recorded_role_on_the_anchor_only_branch(tmp_p
             if result.ok:
                 fusion, _claims, call = _assert_every_q_input_row_has_one_role(conn, result.posterior_id, seen)
                 assert call["anchor"] is None, call
+                legacy = {key: value for key, value in fusion.items() if key != "between_cohort_value_serving"}
+                assert hwm._unrecorded_cohort_claims(conn, legacy, hwm._recorded_serving_claims(legacy)) == {}
                 checked.append(fusion["current_evidence_shape"]["provider_geometry_audit"]["anchor_ifs9_role"])
             return result
         monkeypatch.setattr(sys.modules[__name__], "materialize_replacement_forecast_live", checked_materialize)

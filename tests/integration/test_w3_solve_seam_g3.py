@@ -52214,8 +52214,11 @@ def _advance_icon_and_rematerialize(fixture,monkeypatch,first,*,hours,minutes,mo
     capture, cut = fixture.cut+_dt.timedelta(minutes=minutes), fixture.cut+_dt.timedelta(minutes=minutes+4)
     city = fixture.city
     def http(_url,params,**kwargs):
-        profile = surface._profile(params["models"])
-        if profile["grid_type"] == "regular":
+        if params["models"] == "ecmwf_ifs":
+            from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+            cell = source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,target_elevation_m=204.8)
+            lat, lon = cell["selected_grid_lat"], (cell["selected_grid_lon"]+180)%360-180
+        elif (profile := surface._profile(params["models"]))["grid_type"] == "regular":
             lat = profile["lat_min"]+round((city.lat-profile["lat_min"])/profile["dy"])*profile["dy"]
             lon = profile["lon_min"]+round((city.lon-profile["lon_min"])/profile["dx"])*profile["dx"]
         else:
@@ -52576,13 +52579,18 @@ def test_every_q_input_row_has_one_recorded_role_on_the_chicago_scheme_branches(
         fixture.builtin.close()
 
 
-def _chicago_no_scheme_lineage(tmp_path,monkeypatch,*,record_role=True):
-    """Chicago LOW without a frozen scheme, three ordinary captures: c0 IFS/ICON/UKMO,
-    c0+4 h ICON/HRRR/NBM, c0+8 h ICON. At the last cut the center serves ICON@+8,
-    UKMO@c0, HRRR@+4 and IFS@c0; the provider dedup drops NBM@+4 (fetched, in the
-    dependency ids, never consumed); the spread cohort is {ICON@+4, HRRR@+4}, so
-    ICON@+4 is a consumed width-only row. ``record_role=False`` is the producer
-    before the fallback cohort became a role (5dd9e4224): the only producer delta."""
+def _chicago_no_scheme_lineage(tmp_path,monkeypatch,*,record_role=True,ifs_cohort=False):
+    """Chicago LOW without a frozen scheme, from the ordinary producer.
+
+    Default captures: c0 IFS/ICON/UKMO, c0+4 h ICON/HRRR/NBM, c0+8 h ICON. At the
+    last cut the center serves ICON@+8, UKMO@c0, HRRR@+4 and IFS@c0; the provider
+    dedup drops NBM@+4 (fetched, in the dependency ids, never consumed); the
+    spread cohort is {ICON@+4, HRRR@+4}, so ICON@+4 is a consumed width-only row.
+    ``ifs_cohort``: c0 IFS/ICON/UKMO plus HRRR/NBM, c0+4 h ICON, c0+8 h IFS. The
+    center serves ICON@+4, IFS@+8, UKMO@c0 and HRRR@c0; no newer cycle pairs two
+    families, so the cohort is the whole c0 set and IFS@c0 and ICON@c0 are
+    width-only rows. ``record_role=False`` is the producer before the fallback
+    cohort became a role (5dd9e4224): the only producer delta."""
     import functools
     from src.data import replacement_forecast_materializer as materializer
     from src.strategy.live_inference import source_clock_city_weights as weights
@@ -52598,90 +52606,137 @@ def _chicago_no_scheme_lineage(tmp_path,monkeypatch,*,record_role=True):
     fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
     first = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
         (fixture.result.posterior_id,)).fetchone())
-    _advance_icon_and_rematerialize(fixture,monkeypatch,first,hours=4,minutes=1,
-        models=("icon_global","gfs_hrrr","ncep_nbm_conus"),
-        values={"icon_global":21.,"gfs_hrrr":19.5,"ncep_nbm_conus":19.6})
-    row, cut = _advance_icon_and_rematerialize(fixture,monkeypatch,first,hours=8,minutes=2)
+    steps = ((0,1,("gfs_hrrr","ncep_nbm_conus")),(4,2,("icon_global",)),(8,3,("ecmwf_ifs",))) if ifs_cohort else (
+        (4,1,("icon_global","gfs_hrrr","ncep_nbm_conus")),(8,2,("icon_global",)))
+    for hours, minutes, models in steps:
+        row, cut = _advance_icon_and_rematerialize(fixture,monkeypatch,first,hours=hours,minutes=minutes,models=models,
+            values={"icon_global":21.,"gfs_hrrr":19.5,"ncep_nbm_conus":19.6,"ecmwf_ifs":19.2})
     rows = {(r["model"],r["source_cycle_time"]): int(r["raw_model_forecast_id"]) for r in fixture.conn.execute(
         "SELECT raw_model_forecast_id, model, source_cycle_time FROM raw_model_forecasts")}
     c0 = _dt.datetime.fromisoformat(first["source_cycle_time"])
     at = lambda model,hours: rows[(model,(c0+_dt.timedelta(hours=hours)).isoformat())]
     fusion = json.loads(row["provenance_json"])["bayes_precision_fusion"]
     assert fusion["source_clock_one_scheme"] is None and "ncep_nbm_conus" not in fusion["used_models"]
+    assert ("between_cohort_value_serving" in fusion) is record_role
+    if ifs_cohort:
+        assert {int(v["raw_model_forecast_id"]) for v in fusion["current_value_serving"].values()} == {
+            at("icon_global",4),at("ukmo_global_deterministic_10km",0),at("gfs_hrrr",0),at("ecmwf_ifs",8)}
+        ids = SimpleNamespace(width=at("icon_global",0),ifs=at("ecmwf_ifs",0),nbm=at("ncep_nbm_conus",0))
+        assert {ids.width,ids.ifs,ids.nbm} <= set(fusion["raw_model_forecast_ids"])
+        return fixture, row, cut, ids
     assert {int(v["raw_model_forecast_id"]) for v in fusion["current_value_serving"].values()} == {
         at("icon_global",8),at("ukmo_global_deterministic_10km",0),at("gfs_hrrr",4),at("ecmwf_ifs",0)}
-    assert ("between_cohort_value_serving" in fusion) is record_role
     ids = SimpleNamespace(width=at("icon_global",4),nbm=at("ncep_nbm_conus",4),stale_icon=at("icon_global",0))
     assert {ids.width,ids.nbm} <= set(fusion["raw_model_forecast_ids"])
     assert ids.stale_icon not in fusion["raw_model_forecast_ids"]
     return fixture, row, cut, ids
 
 
-@pytest.mark.parametrize("producer",("legacy","recorded"))
-@pytest.mark.parametrize("fault",("healthy","dedup_nbm_deleted","width_icon_deleted","width_icon_deleted_stale_substitute",
-                                   "width_icon_body_changed_stale_substitute"))
-def test_one_no_scheme_lineage_refuses_a_lost_width_row_and_serves_a_lost_unconsumed_row(
-        tmp_path,monkeypatch,fault,producer,_noaa_native_sources):
-    """Lead bar for the legacy path, on one lineage. A consumed width-only row
-    (ICON@+4) lost must refuse, including when the selector then substitutes
-    stale center rows (UKMO@c0, IFS@c0) that sit inside the dependency set at the
-    persisted provider count: deleted (its model is gone with it, so only a cohort
-    reproducing the persisted between sigma excuses a missing row) or changed in
-    place (present, so it must be in the re-derived cohort). A fetched-but-
-    deduplicated row (NBM@+4) deleted must keep serving. Legacy: no cohort role,
-    the cohort is re-derived. Recorded: the role is re-proven by id."""
+def _change_raw_body(conn, raw_id):
+    """Flip one byte of a raw row's captured body in place, keeping inode, size and mtime."""
     import os
     from pathlib import Path
+    body = Path(conn.execute("SELECT a.artifact_path FROM raw_model_forecasts r"
+        " JOIN raw_forecast_artifacts a ON a.artifact_id=r.artifact_id WHERE r.raw_model_forecast_id=?",
+        (raw_id,)).fetchone()[0])
+    assert body.resolve().is_relative_to(Path(os.environ["ZEUS_TEST_STATE_ROOT"]).resolve())
+    original,before = body.read_bytes(),body.stat()
+    body.write_bytes(bytes([original[0]^1])+original[1:])
+    os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns))
+    return lambda: (body.write_bytes(original),os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns)))
+
+
+def _lineage_reason(fixture, row, cut):
     from src.data import replacement_input_hwm as hwm
-    from src.data.replacement_current_value_serving import read_freshest_coherent_instrument_values
-    from src.data.replacement_forecast_materializer import BETWEEN_COHORT_WINDOW_HOURS
-    fixture, row, cut, ids = _chicago_no_scheme_lineage(tmp_path,monkeypatch,record_role=producer == "recorded")
     ro = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
     ro.row_factory = sqlite3.Row
     ro.execute("PRAGMA query_only=ON")
+    try:
+        hwm.clear_consumed_proof_memo()
+        return hwm.replacement_live_input_lag_reason(ro,city=row["city"],target_date=row["target_date"],metric="low",
+            decision_time=cut,posterior_source_cycle_time=row["source_cycle_time"],
+            posterior_computed_at=_dt.datetime.fromisoformat(row["computed_at"]),
+            posterior_provenance=json.loads(row["provenance_json"]),use_memo=False)
+    finally:
+        ro.close()
+
+
+_LOST = "basis=current_value_serving_consumed_proof_unverifiable:"
+
+
+@pytest.mark.parametrize("producer",("legacy","recorded"))
+@pytest.mark.parametrize("fault",("healthy","nbm_deleted","nbm_body_changed","nbm_model_mutated",
+    "nbm_model_mutated_to_used","width_icon_deleted","width_icon_deleted_stale_substitute","width_icon_body_changed",
+    "width_icon_model_mutated"))
+def test_one_no_scheme_lineage_classifies_every_unroled_row_by_its_recorded_identity(
+        tmp_path,monkeypatch,fault,producer,_noaa_native_sources):
+    """The lead's bar on one lineage. Legacy (no cohort role): a row whose
+    stored model is used (ICON@+4) is a consumed cohort row, re-proven by id,
+    which binds its model to its own capture; a row whose stored model is not
+    used (NBM@+4) never vetoes, whatever its body, once its capture recorded
+    that model. A missing row, or an unused one whose capture recorded another
+    model, has an unknown model, so its consumed authority is unknown and the
+    posterior refuses (a lost unconsumed row refuses on legacy). NBM relabelled
+    to a used model is claimed and its by-id proof refuses. Recorded: the
+    cohort role is re-proven by id and NBM is never read. The stale
+    substitution (ICON@c0 also gone, so a re-derived cohort would be the stale
+    center rows) changes nothing here."""
+    fixture, row, cut, ids = _chicago_no_scheme_lineage(tmp_path,monkeypatch,record_role=producer == "recorded")
     restore = None
     try:
-        provenance = json.loads(row["provenance_json"])
-        fusion = provenance["bayes_precision_fusion"]
-        computed = _dt.datetime.fromisoformat(row["computed_at"])
-        victims = {"healthy":(),"dedup_nbm_deleted":(ids.nbm,),"width_icon_deleted":(ids.width,),
-                   "width_icon_deleted_stale_substitute":(ids.width,ids.stale_icon),
-                   "width_icon_body_changed_stale_substitute":(ids.stale_icon,)}[fault]
-        for victim in victims:
-            fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(victim,))
+        victim = ids.nbm if fault.startswith("nbm") else ids.width
+        if fault.endswith("deleted") or fault.endswith("stale_substitute"):
+            for gone in (victim,ids.stale_icon) if fault.endswith("stale_substitute") else (victim,):
+                fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(gone,))
+        elif fault.endswith("body_changed"):
+            restore = _change_raw_body(fixture.conn,victim)
+        elif "model_mutated" in fault:
+            # A model with no row at this natural key, outside used_models or
+            # (to_used) a used one: UKMO's only rows are at c0.
+            fixture.conn.execute("UPDATE raw_model_forecasts SET model=? WHERE raw_model_forecast_id=?",
+                ("ukmo_global_deterministic_10km" if fault.endswith("to_used") else "gem_hrdps_continental",victim))
         fixture.conn.commit()
-        if fault == "width_icon_body_changed_stale_substitute":
-            body = Path(fixture.conn.execute("SELECT a.artifact_path FROM raw_model_forecasts r"
-                " JOIN raw_forecast_artifacts a ON a.artifact_id=r.artifact_id WHERE r.raw_model_forecast_id=?",
-                (ids.width,)).fetchone()[0])
-            assert body.resolve().is_relative_to(Path(os.environ["ZEUS_TEST_STATE_ROOT"]).resolve())
-            original,before = body.read_bytes(),body.stat()
-            body.write_bytes(bytes([original[0]^1])+original[1:])
-            os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns))
-            restore = lambda: (body.write_bytes(original),os.utime(body,ns=(before.st_atime_ns,before.st_mtime_ns)))
-        if fault.endswith("stale_substitute"):
-            cohort = read_freshest_coherent_instrument_values(ro,city=row["city"],metric="low",
-                target_date=row["target_date"],decision_time_iso=computed.isoformat(),
-                models=tuple(fusion["used_models"]),cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
-                include_station_sources=True)
-            substitute = {int(v.raw_model_forecast_id) for v in cohort.values()}
-            assert ids.width not in substitute and substitute <= set(fusion["raw_model_forecast_ids"])
-            assert len(substitute) == fusion["current_evidence_shape"]["provider_count"]
-        hwm.clear_consumed_proof_memo()
-        reason = hwm.replacement_live_input_lag_reason(ro,city=row["city"],target_date=row["target_date"],metric="low",
-            decision_time=cut,posterior_source_cycle_time=row["source_cycle_time"],posterior_computed_at=computed,
-            posterior_provenance=provenance,use_memo=False)
-        if fault in ("healthy","dedup_nbm_deleted"):
-            assert reason is None, reason
-        elif producer == "legacy":
-            assert reason == "basis=current_value_serving_consumed_proof_unverifiable:role=unrecorded_cohort", reason
-        else:
-            assert reason == ("basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:"
-                              f"consumed_raw_id={ids.width}:role=between_cohort_value_serving"), reason
+        reason = _lineage_reason(fixture,row,cut)
+        role = {"legacy":"unrecorded_cohort","recorded":"between_cohort_value_serving"}[producer]
+        expected = {
+            "healthy":None,"nbm_body_changed":None,
+            "nbm_deleted":None if producer == "recorded" else f"{_LOST}consumed_raw_id={ids.nbm}:role=unrecorded_cohort",
+            "nbm_model_mutated":None if producer == "recorded" else f"{_LOST}consumed_raw_id={ids.nbm}:role=unrecorded_cohort",
+            "nbm_model_mutated_to_used":None if producer == "recorded" else (
+                f"{_LOST}model=ukmo_global_deterministic_10km:consumed_raw_id={ids.nbm}:role=unrecorded_cohort"),
+            "width_icon_deleted":(f"{_LOST}consumed_raw_id={ids.width}:role=unrecorded_cohort" if producer == "legacy"
+                else f"{_LOST}model=icon_global:consumed_raw_id={ids.width}:role={role}"),
+            "width_icon_body_changed":f"{_LOST}model=icon_global:consumed_raw_id={ids.width}:role={role}",
+            "width_icon_model_mutated":(f"{_LOST}consumed_raw_id={ids.width}:role=unrecorded_cohort" if producer == "legacy"
+                else f"{_LOST}model=icon_global:consumed_raw_id={ids.width}:role={role}"),
+        }
+        expected["width_icon_deleted_stale_substitute"] = expected["width_icon_deleted"]
+        assert reason == expected[fault], reason
     finally:
         if restore is not None:
             restore()
-        ro.close()
+        fixture.conn.close()
+        fixture.builtin.close()
+
+
+@pytest.mark.parametrize("producer",("legacy","recorded"))
+@pytest.mark.parametrize("fault",("healthy","ifs_body_changed"))
+def test_a_width_only_ifs_row_is_reproven_like_every_cohort_row(tmp_path,monkeypatch,fault,producer,_noaa_native_sources):
+    """No IFS row is exempt by its model. On this branch the anchor's raw row is
+    always a current role, so an unroled IFS dependency is a spread-cohort row
+    (IFS@c0 here, beside the IFS@+8 center) and its body change refuses."""
+    fixture, row, cut, ids = _chicago_no_scheme_lineage(tmp_path,monkeypatch,record_role=producer == "recorded",
+        ifs_cohort=True)
+    restore = None
+    try:
+        if fault == "ifs_body_changed":
+            restore = _change_raw_body(fixture.conn,ids.ifs)
+        role = {"legacy":"unrecorded_cohort","recorded":"between_cohort_value_serving"}[producer]
+        assert _lineage_reason(fixture,row,cut) == (None if fault == "healthy"
+            else f"{_LOST}model=ecmwf_ifs:consumed_raw_id={ids.ifs}:role={role}")
+    finally:
+        if restore is not None:
+            restore()
         fixture.conn.close()
         fixture.builtin.close()
 
