@@ -5941,6 +5941,77 @@ _CLAIM_SLOT_CHANGED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_SL
 CLAIM_ALL, CLAIM_PREFIX, CLAIM_EACH = "all", "prefix", "each"
 
 
+class ClaimOwnership:
+    """Everything one claim construction owns, released on every exit.
+
+    - ``leases``: one entry per unique lease path, {path: HeldLease}.
+    - ``required``: for each slot, the set of lease paths it needs. Two slots
+      sharing an identity view share that path's single descriptor.
+    - ``staging_fd``: the flocked staging directory descriptor.
+
+    ``drop(slot)`` releases only the paths no surviving slot requires.
+    ``handoff(batch)`` transfers exactly the union the survivors require to
+    ``_HELD_CLAIM_LEASES`` (the set the worker receives) and releases the
+    rest. ``__exit__`` closes every descriptor not handed off, whether the
+    body returned normally, returned early or raised.
+    """
+
+    def __init__(self) -> None:
+        self.leases: dict[Path, _lease.HeldLease] = {}
+        self.required: dict[int, frozenset[Path]] = {}
+        self.staging_fd: int | None = None
+        self._handed_off = False
+
+    def __enter__(self) -> "ClaimOwnership":
+        return self
+
+    def require(self, slot: int, paths: Iterable[Path]) -> bool:
+        """Hold every path ``slot`` needs, all-or-none; False when one is owned elsewhere.
+
+        ``OSError`` when one cannot be read (UNKNOWN). On False or OSError the
+        slot holds nothing and nothing it newly opened stays open.
+        """
+
+        needed = frozenset(Path(p) for p in paths)
+        fresh = _lease.acquire_all(sorted(needed - set(self.leases)))
+        if fresh is None:
+            return False
+        for held in fresh:
+            self.leases[held.path] = held
+        self.required[slot] = needed
+        return True
+
+    def _union(self) -> frozenset[Path]:
+        return frozenset().union(*self.required.values()) if self.required else frozenset()
+
+    def drop(self, slot: int) -> None:
+        needed = self.required.pop(slot, frozenset())
+        still = self._union()
+        _lease.release([self.leases.pop(p) for p in sorted(needed - still) if p in self.leases])
+
+    def survivors(self) -> list[_lease.HeldLease]:
+        return [self.leases[p] for p in sorted(self._union())]
+
+    def handoff(self, batch_path: Path) -> list[_lease.HeldLease]:
+        kept = self.survivors()
+        kept_paths = {held.path for held in kept}
+        _lease.release([h for p, h in sorted(self.leases.items()) if p not in kept_paths])
+        with _HELD_CLAIM_LEASES_GUARD:
+            _HELD_CLAIM_LEASES[str(batch_path)] = kept
+        self.leases, self.required, self._handed_off = {}, {}, True
+        return kept
+
+    def __exit__(self, *_exc) -> None:
+        try:
+            if self.staging_fd is not None:
+                os.close(self.staging_fd)
+                self.staging_fd = None
+        finally:
+            if not self._handed_off:
+                leases, self.leases, self.required = list(self.leases.values()), {}, {}
+                _lease.release(leases)
+
+
 @contextmanager
 def _claim_construction(
     inflight_path: Path,
@@ -5953,7 +6024,8 @@ def _claim_construction(
     """The one owner of a claim from its staging directory to its handoff.
 
     Yields ``(batch_path, admitted sources, deferral reasons)``; ``batch_path``
-    is None when no slot was admitted. Every lane's claim goes through here.
+    is None when no slot was admitted. Every lane's claim goes through here,
+    and everything it holds lives in one ``ClaimOwnership``.
 
     The constructor first creates its staging directory and holds its flock
     (so recovery tells a live constructor from a crashed one by fact, never by
@@ -5961,163 +6033,141 @@ def _claim_construction(
 
     1. Lease, per slot: the pathname is read with the one no-follow,
        nonblocking classifier. Not a regular file (symlink, dangling link,
-       FIFO, directory): quarantined by capture-then-classify (exclusive name,
-       terminal receipt, no forecast-input fence; a regular repair landing
-       first is restored, never discarded). Regular: every identity view
-       parsed from those bytes is acquired in one sorted all-or-none call.
+       FIFO, directory): quarantined by capture-then-classify. Regular: the
+       slot requires every identity view parsed from those bytes; the ones
+       not already held are acquired in one sorted all-or-none call.
     2. Capture, then classify, per leased slot: the pathname is atomically
-       renamed into staging and only the CAPTURED entry is judged. It must be
-       a regular file and the very inode that was leased (published inodes
-       are immutable, so the same inode is the same bytes); otherwise it goes
-       back through the classifier and the slot is not admitted. A
-       publication landing at the original name after the capture is a new
-       request and is never consumed here.
+       renamed into staging's payload namespace and only the CAPTURED entry
+       is judged. It must be a regular file and the very inode that was
+       leased (published inodes are immutable, so the same inode is the same
+       bytes); otherwise it goes back through the classifier and the slot is
+       dropped, releasing only the lease paths no surviving slot requires.
 
     ``admission`` decides what an unadmitted slot does to the rest: CLAIM_ALL
     raises; CLAIM_PREFIX (the priority lane) stops there, keeping the stable
     planned prefix in order; CLAIM_EACH skips it. The lease-v1 metadata is
-    written before any capture and staging is published by rename.
+    written before any capture and staging is published by rename; the
+    worker then receives exactly the survivors' lease union.
 
-    On any exception every captured entry is returned through the classifier,
-    staging is removed, and only then are the leases released, in a
-    ``finally`` no cleanup failure can skip. A crash leaves captured entries in
-    a staging directory whose flock is free; ``_drain_abandoned_staging``
-    returns them through the same classifier. On success the caller holds the
-    leases (``_HELD_CLAIM_LEASES``) until ``_release_claim_batch``.
+    On any exception every captured entry is returned through the classifier
+    and staging is removed; ``ClaimOwnership.__exit__`` then closes every
+    descriptor on every exit (normal, early return or exception). A crash
+    leaves captured entries in a staging directory whose flock is free;
+    ``_drain_abandoned_staging`` returns them through the same classifier. On
+    success the caller holds the leases (``_HELD_CLAIM_LEASES``) until
+    ``_release_claim_batch``.
     """
 
-    admitted: list[tuple[_ClaimSlot, list[_lease.HeldLease]]] = []
+    slots: dict[int, _ClaimSlot] = {}
+    order: list[int] = []
     reasons: list[str] = []
     captured: list[tuple[Path, Path]] = []  # (original pathname, captured entry)
-    staging_fd: int | None = None
     staging: Path | None = None
     batch_path: Path | None = None
-    try:
-        generation = uuid4().hex
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        name = f"{prefix}{stamp}{_LEASE_BATCH_MARK}{generation[:12]}.pid{os.getpid()}"
-        inflight_path.mkdir(parents=True, exist_ok=True)
-        staging = inflight_path / f"{_STAGING_PREFIX}{name}"
-        staging.mkdir()
-        staging_fd = os.open(staging, os.O_RDONLY)
-        # A scanner may see the directory between mkdir and this flock. It can
-        # only delete what it holds the flock on, through the deletion: either
-        # it holds it now (this flock fails) or it already deleted the
-        # directory (the path no longer names this inode). Both abort here,
-        # before anything is captured.
+    with ClaimOwnership() as own:
         try:
-            fcntl.flock(staging_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            reclaimed = not os.path.samestat(os.fstat(staging_fd), os.stat(staging))
-        except (BlockingIOError, FileNotFoundError):
-            reclaimed = True
-        if reclaimed:
-            staging = None
-            raise FileNotFoundError("staging directory was reclaimed before its flock")
-        # Phase 1, per slot: peek (no-follow, nonblocking), then lease the
-        # identity parsed from those bytes. A pathname that is not a regular
-        # file is quarantined by capture-then-classify, so a regular repair
-        # landing first is restored, never discarded.
-        for source in request_files:
-            expected = None if expected_records is None else expected_records.get(source.name)
-            reason = None
+            generation = uuid4().hex
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            name = f"{prefix}{stamp}{_LEASE_BATCH_MARK}{generation[:12]}.pid{os.getpid()}"
+            inflight_path.mkdir(parents=True, exist_ok=True)
+            staging = inflight_path / f"{_STAGING_PREFIX}{name}"
+            staging.mkdir()
+            own.staging_fd = os.open(staging, os.O_RDONLY)
+            # A scanner may see the directory between mkdir and this flock. It
+            # can only delete what it holds the flock on, through the deletion:
+            # either it holds it now (this flock fails) or it already deleted
+            # the directory (the path no longer names this inode). Both abort
+            # here, before anything is captured.
             try:
-                slot = _read_claim_slot(source, expected=expected)
-            except RequestNotRegular:
-                _quarantine_request_alias(source)
-                reason = _REQUEST_ALIAS_QUARANTINED_REASON
-            except FileNotFoundError:
-                reason = _CLAIM_SLOT_CHANGED_REASON
-            else:
-                own = {lease.path for _slot, held in admitted for lease in held}
+                fcntl.flock(own.staging_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                reclaimed = not os.path.samestat(os.fstat(own.staging_fd), os.stat(staging))
+            except (BlockingIOError, FileNotFoundError):
+                reclaimed = True
+            if reclaimed:
+                staging = None
+                raise FileNotFoundError("staging directory was reclaimed before its flock")
+            for index, source in enumerate(request_files):
+                expected = None if expected_records is None else expected_records.get(source.name)
+                reason = None
                 try:
-                    leases = _lease.acquire_all(
-                        path for path in _witness_lease_paths(inflight_path, slot.witness)
-                        if path not in own
-                    )
-                except OSError:
-                    leases, reason = None, _CLAIM_LEASE_UNKNOWN_REASON
+                    slot = _read_claim_slot(source, expected=expected)
+                except RequestNotRegular:
+                    _quarantine_request_alias(source)
+                    reason = _REQUEST_ALIAS_QUARANTINED_REASON
+                except FileNotFoundError:
+                    reason = _CLAIM_SLOT_CHANGED_REASON
                 else:
-                    if leases is None:
-                        reason = _CLAIM_IDENTITY_LEASED_REASON
-                    else:
-                        admitted.append((slot, leases))
-            if reason is not None:
-                reasons.append(reason)
-                if admission != CLAIM_EACH:
-                    break
-        if admission == CLAIM_ALL and len(admitted) < len(request_files):
-            raise _claim_failure(reasons)
-        if not admitted:
-            staging_path, staging = staging, None
-            _remove_empty_claim_batch(staging_path)
-            yield None, (), tuple(dict.fromkeys(reasons))
-            return
-        _write_lease_claim_metadata(
-            staging, [s for s, _h in admitted], [l for _s, h in admitted for l in h], generation,
-        )
-        # Phase 2, per admitted slot: capture the pathname into staging, then
-        # classify the CAPTURED entry. It must be a regular file and the very
-        # inode (hence, published inodes being immutable, the very bytes) that
-        # was leased; anything else goes back through the one classifier and
-        # the slot is not admitted. A publication landing at the original name
-        # after the capture is a new request and is never consumed here.
-        kept: list[tuple[_ClaimSlot, list[_lease.HeldLease]]] = []
-        for index, (slot, held) in enumerate(admitted):
-            entry = staging / slot.source.name
-            alias = False
-            try:
-                os.replace(slot.source, entry)  # staging is fresh: nothing is replaced
-            except FileNotFoundError:
-                ok = False
-            else:
-                captured.append((slot.source, entry))
+                    try:
+                        if own.require(index, _witness_lease_paths(inflight_path, slot.witness)):
+                            slots[index] = slot
+                            order.append(index)
+                        else:
+                            reason = _CLAIM_IDENTITY_LEASED_REASON
+                    except OSError:
+                        reason = _CLAIM_LEASE_UNKNOWN_REASON
+                if reason is not None:
+                    reasons.append(reason)
+                    if admission != CLAIM_EACH:
+                        break
+            if admission == CLAIM_ALL and len(order) < len(request_files):
+                raise _claim_failure(reasons)
+            if order:
+                _write_lease_claim_metadata(
+                    staging, [slots[i] for i in order], own.survivors(), generation,
+                )
+            kept: list[int] = []
+            for position, index in enumerate(order):
+                slot = slots[index]
+                entry = staging / slot.source.name
                 alias = False
                 try:
-                    body, info = read_regular_request(entry)
-                    ok = body == slot.body and (info.st_dev, info.st_ino) == slot.inode
-                except RequestNotRegular:
-                    ok, alias = False, True
+                    os.replace(slot.source, entry)  # staging is fresh: nothing is replaced
                 except FileNotFoundError:
                     ok = False
-                if not ok:
-                    captured.pop()
-                    _return_captured_request(entry, slot.source.parent, staging.name)
-            if ok:
-                kept.append((slot, held))
-                continue
-            reasons.append(_REQUEST_ALIAS_QUARANTINED_REASON if alias else _CLAIM_SLOT_CHANGED_REASON)
-            if admission == CLAIM_ALL:
-                if alias:
-                    raise RequestNotRegular(errno.EINVAL, "captured request is not a regular file",
-                                            str(slot.source))
-                raise FileNotFoundError("request changed between its lease and its capture")
-            _lease.release(held)
-            if admission == CLAIM_PREFIX:
-                for _later, later_held in admitted[index + 1:]:
-                    _lease.release(later_held)
-                break
-        dropped = len(kept) < len(admitted)
-        admitted = kept
-        if not admitted:
-            staging_path, staging = staging, None
-            _remove_empty_claim_batch(staging_path)
-            yield None, (), tuple(dict.fromkeys(reasons))
-            return
-        slots = [slot for slot, _held in admitted]
-        leases = [lease for _slot, held in admitted for lease in held]
-        if dropped:  # the records name exactly the captured slots, in order
-            _write_lease_claim_metadata(staging, slots, leases, generation)
-        _fsync_directory(staging)
-        for parent in {slot.source.parent for slot in slots}:
-            _fsync_directory(parent)
-        os.rename(staging, inflight_path / name)
-        staging, batch_path = None, inflight_path / name
-        _fsync_directory(batch_path)
-        _fsync_directory(inflight_path)
-        with _HELD_CLAIM_LEASES_GUARD:
-            _HELD_CLAIM_LEASES[str(batch_path)] = leases
-    except BaseException:
-        try:
+                else:
+                    captured.append((slot.source, entry))
+                    try:
+                        body, info = read_regular_request(entry)
+                        ok = body == slot.body and (info.st_dev, info.st_ino) == slot.inode
+                    except RequestNotRegular:
+                        ok, alias = False, True
+                    except FileNotFoundError:
+                        ok = False
+                    if not ok:
+                        captured.pop()
+                        _return_captured_request(entry, slot.source.parent, staging.name)
+                if ok:
+                    kept.append(index)
+                    continue
+                reasons.append(_REQUEST_ALIAS_QUARANTINED_REASON if alias else _CLAIM_SLOT_CHANGED_REASON)
+                if admission == CLAIM_ALL:
+                    if alias:
+                        raise RequestNotRegular(errno.EINVAL, "captured request is not a regular file",
+                                                str(slot.source))
+                    raise FileNotFoundError("request changed between its lease and its capture")
+                own.drop(index)
+                if admission == CLAIM_PREFIX:
+                    for later in order[position + 1:]:
+                        own.drop(later)
+                    break
+            if not kept:
+                staging_path, staging = staging, None
+                _remove_empty_claim_batch(staging_path)
+                outcome = (None, (), tuple(dict.fromkeys(reasons)))
+            else:
+                survivors = [slots[i] for i in kept]
+                if kept != order:  # the records name exactly the captured slots, in order
+                    _write_lease_claim_metadata(staging, survivors, own.survivors(), generation)
+                _fsync_directory(staging)
+                for parent in {slot.source.parent for slot in survivors}:
+                    _fsync_directory(parent)
+                os.rename(staging, inflight_path / name)
+                staging, batch_path = None, inflight_path / name
+                _fsync_directory(batch_path)
+                _fsync_directory(inflight_path)
+                own.handoff(batch_path)
+                outcome = (batch_path, tuple(s.source for s in survivors), tuple(dict.fromkeys(reasons)))
+        except BaseException:
             home = batch_path if batch_path is not None else staging
             for source, entry in reversed(captured):
                 current = (home / entry.name) if home is not None else entry
@@ -6128,15 +6178,10 @@ def _claim_construction(
             for leftover in (batch_path, staging):
                 if leftover is not None:
                     _remove_empty_claim_batch(leftover)
-        finally:
-            try:
-                if staging_fd is not None:
-                    os.close(staging_fd)
-            finally:
-                _lease.release(lease for _slot, held in admitted for lease in held)
-        raise
-    os.close(staging_fd)
-    yield batch_path, tuple(slot.source for slot in slots), tuple(dict.fromkeys(reasons))
+            if batch_path is not None:
+                _release_claim_batch(batch_path)
+            raise
+    yield outcome
 
 
 def _abandoned_staging(inflight_path: Path) -> tuple[Path, ...]:
