@@ -145,6 +145,8 @@ class _CycleAdvanceRetryPending(RuntimeError):
 class _Day0EnqueueOwnerRequestCheck:
     state: _Day0EnqueueOwnerRequestState
     reason: str
+    # The ENS baseline run the ACTIVE owner request will materialize.
+    baseline_source_run_id: str | None = None
 
 
 def _family_manifests_from_db(
@@ -908,16 +910,47 @@ def _day0_enqueue_owner_request_check(
                 _Day0EnqueueOwnerRequestState.INDETERMINATE,
                 f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_PAYLOAD_INVALID",
             )
-        witness = payload.get("day0_enqueue_owner_witness")
-        if not isinstance(witness, Mapping):
-            return _Day0EnqueueOwnerRequestCheck(
-                _Day0EnqueueOwnerRequestState.INDETERMINATE,
-                f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_WITNESS_INVALID",
-            )
-        if {key: witness.get(key) for key in expected_witness} == expected_witness:
+        if "day0_enqueue_owner_witness" in payload:
+            witness = payload["day0_enqueue_owner_witness"]
+            if not isinstance(witness, Mapping):
+                return _Day0EnqueueOwnerRequestCheck(
+                    _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                    f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_WITNESS_INVALID",
+                )
+            observed = {key: witness.get(key) for key in expected_witness}
+        else:
+            # The queue writes a witness only for Day0-conditioned owner seeds.
+            # Every other request built from this marker's seed is identified by
+            # its own scope fields: same file name, family, carrier cycle, and
+            # (absent) conditioning identity.
+            request_cycle = _parse_cycle(payload.get("source_cycle_time"))
+            if request_cycle is None:
+                return _Day0EnqueueOwnerRequestCheck(
+                    _Day0EnqueueOwnerRequestState.INDETERMINATE,
+                    f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_PAYLOAD_INVALID",
+                )
+            observed = {
+                "city": payload.get("city"),
+                "target_date": payload.get("target_date"),
+                "metric": payload.get("temperature_metric"),
+                "target_cycle_time": (
+                    target_cycle_iso
+                    if request_cycle == _parse_cycle(target_cycle_iso)
+                    else request_cycle.isoformat()
+                ),
+                "seed_file": seed_file,
+                "conditioning_identity": _day0_conditioning_identity(
+                    source=payload.get("day0_observed_extreme_source"),
+                    observation_time=payload.get("day0_observed_extreme_observation_time"),
+                    observed_extreme_c=payload.get("day0_observed_extreme_c"),
+                    unit=payload.get("day0_observed_extreme_unit"),
+                ),
+            }
+        if observed == expected_witness:
             return _Day0EnqueueOwnerRequestCheck(
                 _Day0EnqueueOwnerRequestState.ACTIVE,
                 f"DAY0_ENQUEUE_OWNER_REQUEST_{location}_ACTIVE",
+                str(payload.get("baseline_source_run_id") or "").strip() or None,
             )
         return _Day0EnqueueOwnerRequestCheck(
             _Day0EnqueueOwnerRequestState.INACTIVE,
@@ -1350,29 +1383,31 @@ def _enqueue_decision(
     if visible_seed_file is not None and visible_seed_file.exists():
         return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
     if visible_seed_file is not None and owned_stage_file is not None:
-        if minimum_posterior_computed_at is not None:
-            request_check = _day0_enqueue_owner_request_check(
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                target_cycle_iso=target_cycle_iso,
-                seed_file=seed_file,
-                identity=recorded_identity,
-                queue_lock_wait_seconds=owner_lock_wait_seconds,
+        # The consumed seed's queued request is this marker's single owner; a
+        # fresh seed beside it supersedes the waiting request and resets its
+        # queue turn, so the family never reaches the materializer.
+        request_check = _day0_enqueue_owner_request_check(
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            target_cycle_iso=target_cycle_iso,
+            seed_file=seed_file,
+            identity=recorded_identity,
+            queue_lock_wait_seconds=owner_lock_wait_seconds,
+        )
+        if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
+            return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
+        if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
+            _LOG.warning(
+                "cycle-advance owner request INDETERMINATE; retaining marker "
+                "city=%s target_date=%s metric=%s target_cycle=%s reason=%s",
+                city,
+                target_date,
+                metric,
+                target_cycle_iso,
+                request_check.reason,
             )
-            if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
-                return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
-            if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
-                _LOG.warning(
-                    "same-cycle held recompute request INDETERMINATE; retaining marker "
-                    "city=%s target_date=%s metric=%s target_cycle=%s reason=%s",
-                    city,
-                    target_date,
-                    metric,
-                    target_cycle_iso,
-                    request_check.reason,
-                )
-                return _CycleAdvanceEnqueueDecision.RETRY_PENDING
+            return _CycleAdvanceEnqueueDecision.RETRY_PENDING
         if _latest_posterior_covers_target_cycle(
             conn,
             city=city,
@@ -1531,13 +1566,8 @@ def _superseded_baseline_seed_file(
             identity=recorded_identity,
             queue_lock_wait_seconds=_CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS,
         )
-        if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
-            raise _CycleAdvanceRetryPending(request_check.reason)
-        if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
-            raise RuntimeError(
-                "missing marker seed still has an active owner: "
-                f"{seed_file}"
-            )
+        if _queued_owner_delivers(request_check, required):
+            return None
         return seed_file
     try:
         seed_payload = json.loads(seed_path.read_text(encoding="utf-8"))
@@ -1559,14 +1589,28 @@ def _superseded_baseline_seed_file(
         identity=recorded_identity,
         queue_lock_wait_seconds=_CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS,
     )
+    if _queued_owner_delivers(request_check, required):
+        return None
+    return seed_file
+
+
+def _queued_owner_delivers(
+    request_check: _Day0EnqueueOwnerRequestCheck, required: str,
+) -> bool:
+    """Whether the marker's queued owner request already carries the committed run.
+
+    ACTIVE with the required baseline: True, that request materializes it.
+    ACTIVE with another baseline or INACTIVE: False, the caller replaces the
+    marker seed now; a still-queued older owner is fenced downstream (baseline
+    below the ENS HWM at claim, or a stale Day0 witness at commit) and never
+    delays the committed run. INDETERMINATE: retry.
+    """
     if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
         raise _CycleAdvanceRetryPending(request_check.reason)
-    if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
-        raise RuntimeError(
-            "superseded baseline seed still has an active owner: "
-            f"{seed_file}"
-        )
-    return seed_file
+    return (
+        request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE
+        and request_check.baseline_source_run_id == required
+    )
 
 
 def _promote_existing_enqueue_to_held(
@@ -1721,6 +1765,7 @@ def _record_enqueue(
                        )
                        OR (? IS NOT NULL AND seed_file = ?)
                    )
+                   AND (? IS NULL OR seed_file = ?)
                 """,
                 (
                     datetime.now(tz=UTC).isoformat(),
@@ -1740,6 +1785,8 @@ def _record_enqueue(
                     day0_conditioning_identity,
                     day0_observed_extreme_observation_time,
                     day0_conditioning_identity,
+                    superseded_seed_file,
+                    superseded_seed_file,
                     superseded_seed_file,
                     superseded_seed_file,
                 ),
@@ -2440,7 +2487,9 @@ def enqueue_cycle_advance_reseeds(
                     if day0_observation_advance_candidate and not verdict["needs_advance"]
                     else None
                 ),
-                replace_existing_seed_file=bool(day0_payload) or missing_posterior,
+                replace_existing_seed_file=(
+                    bool(day0_payload) or missing_posterior or superseded_seed_file is not None
+                ),
                 day0_observed_extreme_observation_time=day0_observation_time,
                 day0_observed_extreme_source=day0_payload.get("day0_observed_extreme_source"),
                 day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),

@@ -1,8 +1,8 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-10-02 (exact-request LOW/HIGH cert supersession); 2026-09-15 (causal baseline completion witness;
+# Last reused or audited: 2026-10-04 (stale queued owner never holds a committed ENS run back); 2026-10-02 (exact-request LOW/HIGH cert supersession); 2026-09-15 (causal baseline completion witness;
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
-# Lifecycle: created=2026-06-12; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-04; last_reused=2026-10-04
 #   (held re-heal: 30-min cooldown replaced by the input-identity fence;
 #   worker ERROR is fenced (input verdict) or owner-retained (transient), never respawned)
 # Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.
@@ -1033,13 +1033,19 @@ def test_committed_ens_reset_requires_certified_held_grade_at_decision_clock(mon
 
 
 @pytest.mark.parametrize(
-    ("owner_state", "expected_enqueued", "expected_status"),
+    ("owner_state", "owner_carries_committed_run", "expected_enqueued", "expected_status"),
     (
-        (cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE, 1, "CYCLE_ADVANCE_TRIGGER"),
+        (cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE, False, 1, "CYCLE_ADVANCE_TRIGGER"),
+        # A queued owner still carrying the OLDER baseline cannot hold the
+        # committed run back: it is replaced now and fenced downstream.
+        (cycle_advance._Day0EnqueueOwnerRequestState.ACTIVE, False, 1, "CYCLE_ADVANCE_TRIGGER"),
+        # A queued owner already carrying the committed run is the delivery.
+        (cycle_advance._Day0EnqueueOwnerRequestState.ACTIVE, True, 0, "CYCLE_ADVANCE_TRIGGER"),
         (
-            cycle_advance._Day0EnqueueOwnerRequestState.ACTIVE,
+            cycle_advance._Day0EnqueueOwnerRequestState.INDETERMINATE,
+            False,
             0,
-            "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE",
+            "CYCLE_ADVANCE_RETRY_PENDING",
         ),
     ),
 )
@@ -1048,6 +1054,7 @@ def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     owner_state: cycle_advance._Day0EnqueueOwnerRequestState,
+    owner_carries_committed_run: bool,
     expected_enqueued: int,
     expected_status: str,
     after_local_day_end: bool,
@@ -1178,10 +1185,11 @@ def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
         "_day0_enqueue_owner_request_check",
         lambda **kwargs: cycle_advance._Day0EnqueueOwnerRequestCheck(
             owner_state,
+            owner_state.value,
             (
-                "ABSENT"
-                if owner_state is cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE
-                else "ACTIVE"
+                committed_run
+                if owner_carries_committed_run
+                else "ecmwf_open_data:mx2t6_high:2026-08-22T18Z"
             ),
         ),
     )
@@ -1217,12 +1225,13 @@ def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
 
     assert report["status"] == expected_status
     assert report["seeds_enqueued"] == expected_enqueued
-    assert report["already_enqueued"] == 0
-    if owner_state is cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE:
+    assert report["causal_baseline_scope_failed"] == 0
+    if expected_enqueued:
+        assert report["already_enqueued"] == 0
         assert built["required_baseline_source_run_id"] == committed_run
     else:
         assert built == {}
-        assert report["causal_baseline_scope_failed"] == 1
+        assert report["already_enqueued"] + report["retry_pending"] == 1
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     marker = conn.execute(
@@ -1235,7 +1244,7 @@ def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
     ).fetchone()
     conn.close()
     assert marker is not None
-    if owner_state is cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE:
+    if expected_enqueued:
         assert marker["seed_file"] != str(old_seed)
         assert (
             json.loads(Path(marker["seed_file"]).read_text())["baseline_source_run_id"]
