@@ -5284,10 +5284,28 @@ def _apply_request_claim_read_plan(
 
 
 def _claim_request_files(batch_path: Path) -> tuple[Path, ...]:
+    """Captured request entries of a batch that are regular files (no-follow)."""
     return tuple(
-        path
-        for path in batch_path.glob("*.json")
-        if path.is_file() and path.name != _CLAIM_METADATA_NAME
+        path for path in _captured_entries(batch_path)
+        if _stat_mode.S_ISREG(os.lstat(path).st_mode)
+    )
+
+
+def _captured_entries(batch_path: Path) -> tuple[Path, ...]:
+    """Every captured ``*.json`` entry of a batch, whatever its type (lstat only).
+
+    A capture can hold a symlink, dangling link or FIFO substituted at the
+    queue name; recovery and rollback must see it to classify it, never skip
+    it as absent the way ``exists()``/``is_file()`` would.
+    """
+
+    try:
+        names = sorted(os.listdir(batch_path))
+    except FileNotFoundError:
+        return ()
+    return tuple(
+        batch_path / name for name in names
+        if name.endswith(".json") and name != _CLAIM_METADATA_NAME
     )
 
 
@@ -5491,8 +5509,8 @@ def _remove_empty_claim_batch(batch_path: Path) -> None:
     classify historical progress receipts as live ownership work.
     """
 
-    if _claim_request_files(batch_path):
-        return
+    if _captured_entries(batch_path):
+        return  # a captured entry of any type keeps its batch until classified
     try:
         (batch_path / _CLAIM_METADATA_NAME).unlink()
     except FileNotFoundError:
@@ -5681,10 +5699,11 @@ def _recover_stale_claims(
         live = state in (_lease.LeaseState.HELD, _lease.LeaseState.UNKNOWN)
         try:
             request_files = _claim_request_files(batch_path)
-            if dead or not (request_files or live):
-                for path in request_files:
-                    _restore_claimed_request(path, request_path, batch_path.name)
-                    recovered += 1
+            entries = _captured_entries(batch_path)
+            if dead or not (entries or live):
+                for path in entries:
+                    if _return_captured_request(path, request_path, batch_path.name) is not None:
+                        recovered += 1
                 _remove_empty_claim_batch(batch_path)
                 continue
         finally:
@@ -5728,10 +5747,11 @@ class _ClaimSlot:
     body: bytes
     row: tuple[str, int, int, str]
     witness: dict[str, tuple[str, ...]]
+    inode: tuple[int, int]
 
 
 def _read_claim_slot(
-    source: Path, *, expected: tuple[str, int, int, str] | None, name: Path | None = None,
+    source: Path, *, expected: tuple[str, int, int, str] | None,
 ) -> _ClaimSlot:
     """The exact bytes and identity of one selected request.
 
@@ -5741,10 +5761,7 @@ def _read_claim_slot(
     constructor, never claimed).
     """
 
-    # ``source`` is what is read (the captured entry); ``name`` is the queue
-    # pathname it was captured from, which the slot and its record carry.
     body, info = read_regular_request(source)
-    source = source if name is None else name
     row = (source.name, info.st_mtime_ns, info.st_size, hashlib.sha256(body).hexdigest())
     if expected is not None and expected != row:
         raise FileNotFoundError("planned request changed before its lease")
@@ -5758,7 +5775,7 @@ def _read_claim_slot(
         raise ValueError(
             f"materialization claim requires semantic/coalescing identity: {source.name}"
         )
-    return _ClaimSlot(source, body, row, witness)
+    return _ClaimSlot(source, body, row, witness, (info.st_dev, info.st_ino))
 
 
 _STAGING_PREFIX = ".staging."
@@ -5925,32 +5942,33 @@ def _claim_construction(
     prefix: str = "",
     admission: str = CLAIM_ALL,
 ):
-    """The one owner of a claim from its first capture to its handoff.
+    """The one owner of a claim from its staging directory to its handoff.
 
     Yields ``(batch_path, admitted sources, deferral reasons)``; ``batch_path``
     is None when no slot was admitted. Every lane's claim goes through here.
 
-    Capture, then classify. The constructor first creates its staging
-    directory and holds its flock (so recovery tells a live constructor from a
-    crashed one by fact, never by age). Each slot's pathname is then
-    atomically renamed into staging (the capture), and only the captured entry
-    is classified, with the one no-follow nonblocking reader:
+    The constructor first creates its staging directory and holds its flock
+    (so recovery tells a live constructor from a crashed one by fact, never by
+    age). Then:
 
-    - not a regular file (symlink, dangling link, FIFO, directory): the
-      captured entry is quarantined (exclusive name, terminal receipt, no
-      forecast-input fence). A regular file published at the original name
-      after the capture is a new request and is never consumed by this one.
-    - regular, but not the planned bytes (``expected``) or without identity:
-      returned to the queue collision-safe; the slot defers.
-    - regular with identity: every identity view of the slot is acquired in
-      one sorted all-or-none call; the identity and the recorded hash come
-      from the captured bytes. Held by a live owner or unreadable: returned to
-      the queue; the slot defers.
+    1. Lease, per slot: the pathname is read with the one no-follow,
+       nonblocking classifier. Not a regular file (symlink, dangling link,
+       FIFO, directory): quarantined by capture-then-classify (exclusive name,
+       terminal receipt, no forecast-input fence; a regular repair landing
+       first is restored, never discarded). Regular: every identity view
+       parsed from those bytes is acquired in one sorted all-or-none call.
+    2. Capture, then classify, per leased slot: the pathname is atomically
+       renamed into staging and only the CAPTURED entry is judged. It must be
+       a regular file and the very inode that was leased (published inodes
+       are immutable, so the same inode is the same bytes); otherwise it goes
+       back through the classifier and the slot is not admitted. A
+       publication landing at the original name after the capture is a new
+       request and is never consumed here.
 
     ``admission`` decides what an unadmitted slot does to the rest: CLAIM_ALL
-    raises before anything is published; CLAIM_PREFIX (the priority lane)
-    stops there, keeping the stable planned prefix in order; CLAIM_EACH skips
-    it. The lease-v1 metadata is then written and staging published by rename.
+    raises; CLAIM_PREFIX (the priority lane) stops there, keeping the stable
+    planned prefix in order; CLAIM_EACH skips it. The lease-v1 metadata is
+    written before any capture and staging is published by rename.
 
     On any exception every captured entry is returned through the classifier,
     staging is removed, and only then are the leases released, in a
@@ -5966,7 +5984,6 @@ def _claim_construction(
     staging_fd: int | None = None
     staging: Path | None = None
     batch_path: Path | None = None
-    request_dir = request_files[0].parent if request_files else None
     try:
         generation = uuid4().hex
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -5988,58 +6005,32 @@ def _claim_construction(
         if reclaimed:
             staging = None
             raise FileNotFoundError("staging directory was reclaimed before its flock")
+        # Phase 1, per slot: peek (no-follow, nonblocking), then lease the
+        # identity parsed from those bytes. A pathname that is not a regular
+        # file is quarantined by capture-then-classify, so a regular repair
+        # landing first is restored, never discarded.
         for source in request_files:
             expected = None if expected_records is None else expected_records.get(source.name)
             reason = None
-            # Peek (routing only): a pathname that is not a regular file is
-            # quarantined by capture-then-classify, so a regular repair landing
-            # first is restored, never discarded. A regular one is captured
-            # into staging and every decision below is made on the captured
-            # entry, which must be the very inode the peek saw.
             try:
-                _peek, peeked = read_regular_request(source)
+                slot = _read_claim_slot(source, expected=expected)
             except RequestNotRegular:
                 _quarantine_request_alias(source)
                 reason = _REQUEST_ALIAS_QUARANTINED_REASON
             except FileNotFoundError:
                 reason = _CLAIM_SLOT_CHANGED_REASON
-            if reason is None:
-                entry = staging / source.name
+            else:
+                own = {lease.path for _slot, held in admitted for lease in held}
                 try:
-                    os.replace(source, entry)  # capture: staging is fresh, nothing is replaced
-                except FileNotFoundError:
-                    reason = _CLAIM_SLOT_CHANGED_REASON
-            if reason is None:
-                captured.append((source, entry))
-                try:
-                    slot = _read_claim_slot(entry, expected=expected, name=source)
-                    current = os.lstat(entry)
-                    if (current.st_dev, current.st_ino) != (peeked.st_dev, peeked.st_ino):
-                        raise FileNotFoundError("request name changed between peek and capture")
-                except RequestNotRegular:
-                    captured.pop()
-                    _quarantine_captured_entry(entry, source.parent)
-                    reason = _REQUEST_ALIAS_QUARANTINED_REASON
-                except (FileNotFoundError, ValueError) as exc:
-                    captured.pop()
-                    _return_captured_request(entry, source.parent, staging.name)
-                    if isinstance(exc, ValueError) and admission == CLAIM_ALL:
-                        raise  # an explicit single claim of an identity-less request
-                    reason = _CLAIM_SLOT_CHANGED_REASON
+                    leases = _lease.acquire_all(
+                        path for path in _witness_lease_paths(inflight_path, slot.witness)
+                        if path not in own
+                    )
+                except OSError:
+                    leases, reason = None, _CLAIM_LEASE_UNKNOWN_REASON
                 else:
-                    own = {lease.path for _slot, held in admitted for lease in held}
-                    try:
-                        leases = _lease.acquire_all(
-                            path for path in _witness_lease_paths(inflight_path, slot.witness)
-                            if path not in own
-                        )
-                    except OSError:
-                        leases, reason = None, _CLAIM_LEASE_UNKNOWN_REASON
-                    else:
-                        reason = None if leases is not None else _CLAIM_IDENTITY_LEASED_REASON
                     if leases is None:
-                        captured.pop()
-                        _return_captured_request(entry, source.parent, staging.name)
+                        reason = _CLAIM_IDENTITY_LEASED_REASON
                     else:
                         admitted.append((slot, leases))
             if reason is not None:
@@ -6053,14 +6044,67 @@ def _claim_construction(
             _remove_empty_claim_batch(staging_path)
             yield None, (), tuple(dict.fromkeys(reasons))
             return
+        _write_lease_claim_metadata(
+            staging, [s for s, _h in admitted], [l for _s, h in admitted for l in h], generation,
+        )
+        # Phase 2, per admitted slot: capture the pathname into staging, then
+        # classify the CAPTURED entry. It must be a regular file and the very
+        # inode (hence, published inodes being immutable, the very bytes) that
+        # was leased; anything else goes back through the one classifier and
+        # the slot is not admitted. A publication landing at the original name
+        # after the capture is a new request and is never consumed here.
+        kept: list[tuple[_ClaimSlot, list[_lease.HeldLease]]] = []
+        for index, (slot, held) in enumerate(admitted):
+            entry = staging / slot.source.name
+            alias = False
+            try:
+                os.replace(slot.source, entry)  # staging is fresh: nothing is replaced
+            except FileNotFoundError:
+                ok = False
+            else:
+                captured.append((slot.source, entry))
+                alias = False
+                try:
+                    body, info = read_regular_request(entry)
+                    ok = body == slot.body and (info.st_dev, info.st_ino) == slot.inode
+                except RequestNotRegular:
+                    ok, alias = False, True
+                except FileNotFoundError:
+                    ok = False
+                if not ok:
+                    captured.pop()
+                    _return_captured_request(entry, slot.source.parent, staging.name)
+            if ok:
+                kept.append((slot, held))
+                continue
+            reasons.append(_REQUEST_ALIAS_QUARANTINED_REASON if alias else _CLAIM_SLOT_CHANGED_REASON)
+            if admission == CLAIM_ALL:
+                if alias:
+                    raise RequestNotRegular(errno.EINVAL, "captured request is not a regular file",
+                                            str(slot.source))
+                raise FileNotFoundError("request changed between its lease and its capture")
+            _lease.release(held)
+            if admission == CLAIM_PREFIX:
+                for _later, later_held in admitted[index + 1:]:
+                    _lease.release(later_held)
+                break
+        dropped = len(kept) < len(admitted)
+        admitted = kept
+        if not admitted:
+            staging_path, staging = staging, None
+            _remove_empty_claim_batch(staging_path)
+            yield None, (), tuple(dict.fromkeys(reasons))
+            return
         slots = [slot for slot, _held in admitted]
         leases = [lease for _slot, held in admitted for lease in held]
-        _write_lease_claim_metadata(staging, slots, leases, generation)
+        if dropped:  # the records name exactly the captured slots, in order
+            _write_lease_claim_metadata(staging, slots, leases, generation)
         _fsync_directory(staging)
         for parent in {slot.source.parent for slot in slots}:
             _fsync_directory(parent)
         os.rename(staging, inflight_path / name)
         staging, batch_path = None, inflight_path / name
+        _fsync_directory(batch_path)
         _fsync_directory(inflight_path)
         with _HELD_CLAIM_LEASES_GUARD:
             _HELD_CLAIM_LEASES[str(batch_path)] = leases
@@ -6115,11 +6159,15 @@ def _abandoned_staging(inflight_path: Path) -> tuple[Path, ...]:
 
 
 def _drain_abandoned_staging(inflight_path: Path) -> int:
-    """Remove crash debris left before a claim was published; no request is lost.
+    """Settle staging whose constructor died: return its captures, then remove it.
 
-    Each candidate is re-locked here and the flock is held continuously
-    through the deletion, so an earlier observation is never trusted: a
-    constructor that took the flock since then is never deleted.
+    A constructor captures requests into its staging directory before
+    publishing it, so dead staging can hold captured entries. Each one goes
+    back through the one classifier (regular: restored collision-safe to the
+    queue; anything else: quarantined). Each candidate is re-locked here and
+    the flock is held continuously through the deletion, so an earlier
+    observation is never trusted: a constructor that took the flock since
+    then is never touched.
     """
 
     drained = 0
@@ -6138,8 +6186,9 @@ def _drain_abandoned_staging(inflight_path: Path) -> int:
                     continue
             except FileNotFoundError:
                 continue
-            if _claim_request_files(path):
-                continue  # cannot happen (requests move only after publication)
+            request_dir = inflight_path.parent / "requests"
+            for entry in _captured_entries(path):
+                _return_captured_request(entry, request_dir, path.name)
             _remove_empty_claim_batch(path)
             drained += not path.exists()
         finally:
@@ -6365,11 +6414,13 @@ def reconcile_inflight_for_migration(
             elif not dead:
                 refused.append((batch_path.name, state.value))
                 continue
-            for path in _claim_request_files(batch_path):
-                restored.append(
-                    str(_restore_claimed_request(path, request_path, batch_path.name))
-                    if apply else str(path)
-                )
+            for path in _captured_entries(batch_path):
+                if not apply:
+                    restored.append(str(path))
+                    continue
+                returned = _return_captured_request(path, request_path, batch_path.name)
+                if returned is not None:
+                    restored.append(str(returned))
             if apply:
                 _remove_empty_claim_batch(batch_path)
         finally:
