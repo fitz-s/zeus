@@ -9,9 +9,10 @@ checked=2026-W40.
 
 | Before (LEGACY) | After (lease-v1) |
 |---|---|
-| `inflight/<stamp>.pid<N>/` batch, owner by `claimed_at` age | `inflight/<stamp>.lease-v1.<gen>.pid<N>/` batch whose `_claim.json` carries `protocol`, `leases`, ordered `records` |
+| `inflight/<stamp>.pid<N>/` batch, owner by `claimed_at` age | `inflight/<stamp>.lease-v1.<gen>.pid<N>/` batch whose `claim.control` carries `protocol`, `leases`, ordered `records`. The control name is not `*.json`, so no request can collide with it. A batch without `claim.control` is read from `_claim.json`, the earlier layout, which reconcile still restores |
 | no lease | `inflight/leases/<sha256(identity)>.lease`, owned by `flock` on the claiming OFD, shared with the executing resident worker via `SCM_RIGHTS`. The queue parent also keeps its copy until outcome handling ends, so the lease frees when both have let go. |
 | — | `inflight/.staging.<batch>/` while a claim is built, flocked by its constructor until it is published by rename; free staging is crash debris and is drained |
+| — | `quarantined_request_aliases/.capture.<name>.<id>/`: the captured entry under `payload/`, the terminal receipt at `quarantine.receipt.control`. The receipt is written complete under `receipt.staging/` and renamed into place. Under the capture flock, a readable but non-terminal receipt or a staged one is discarded and the capture is classified again. An unreadable receipt is kept and reported `unknown`. |
 | blocked markers keyed on an envelope-inclusive fingerprint | `fence_version: f2-forecast-input`; old markers never match and are re-decided by the next attempt. A verdict caused by an invalid envelope never establishes a forecast-input fence (an existing forecast-input marker is still consulted before the worker runs). |
 
 A LEGACY batch is the only kind the age bound may still restore. Both versions
