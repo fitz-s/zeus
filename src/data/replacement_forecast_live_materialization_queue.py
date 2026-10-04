@@ -5798,7 +5798,14 @@ _REQUEST_ALIAS_DIR = "quarantined_request_aliases"
 
 
 _CAPTURE_PREFIX = ".capture."
-_ALIAS_RECEIPT_NAME = "receipt.json"
+# A capture directory separates its namespaces: the captured entry lives under
+# ``payload/`` (any request basename, even ``receipt.json``), and control
+# metadata lives at the top level under a ``.control`` name no request
+# (``*.json``) can take. A receipt is terminal only when it names the very
+# entry it sits beside.
+_CAPTURE_PAYLOAD_DIR = "payload"
+_ALIAS_RECEIPT_NAME = "quarantine.receipt.control"
+_LEGACY_ALIAS_RECEIPT_NAME = "receipt.json"  # the round-4 layout, settled on sight
 
 
 def _quarantine_request_alias(source: Path) -> Path | None:
@@ -5814,73 +5821,134 @@ def _quarantine_captured_entry(entry: Path, request_dir: Path) -> Path | None:
 def _capture_and_settle(source: Path, restore_dir: Path) -> Path | None:
     """Capture ``source``, then classify what was captured; never follow it.
 
-    Capture is ``os.rename`` of the pathname into a fresh, exclusive capture
-    directory (``tempfile.mkdtemp``: a unique name no other quarantine can
-    reuse) that this process flocks before the rename. Only the captured entry
-    is classified, with the shared no-follow nonblocking reader:
+    Capture is ``os.rename`` of the pathname into the ``payload/`` namespace of
+    a fresh, exclusive capture directory (built under a private name, flocked,
+    then renamed into the scanned namespace, so it is never visible unlocked).
+    Only the captured entry is classified, with the shared no-follow
+    nonblocking reader:
 
     - regular: a publication repaired the name after it was seen as an alias.
-      It is a request, not an alias: restored collision-safe to ``request_dir``
-      (default: its own directory) and the capture directory removed.
-    - anything else (symlink, dangling link, FIFO, directory): it stays in its
-      capture directory with an exclusively created terminal receipt. Its
-      target is never read or touched and no forecast-input marker is written.
+      It is a request: restored collision-safe to ``restore_dir`` and the
+      capture directory removed.
+    - anything else (symlink, dangling link, FIFO, directory): it stays in
+      ``payload/`` with an exclusively created terminal receipt (control
+      namespace) that names it. Its target is never read or touched and no
+      forecast-input marker is written.
 
-    A crash between capture and receipt leaves an unreceipted capture
-    directory whose flock is free; ``_settle_abandoned_captures`` classifies it
+    A crash between capture and receipt leaves an unreceipted capture whose
+    flock is free; ``_settle_abandoned_captures`` (and reconcile) classify it
     the same way. Returns the quarantined entry, or None when nothing was
     quarantined (the name left, or the captured entry was a regular request).
     """
 
     root = restore_dir.parent / _REQUEST_ALIAS_DIR
     root.mkdir(parents=True, exist_ok=True)
-    # Created under a name settlers never scan, flocked, then renamed into the
-    # scanned namespace: a capture directory is never visible unlocked.
     private = Path(tempfile.mkdtemp(dir=root, prefix=".private."))
     fd = os.open(private, os.O_RDONLY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (private / _CAPTURE_PAYLOAD_DIR).mkdir()
         capture = root / f"{_CAPTURE_PREFIX}{source.name}.{private.name.rsplit('.', 1)[-1]}"
         os.rename(private, capture)
-        captured = capture / source.name
+        captured = capture / _CAPTURE_PAYLOAD_DIR / source.name
         try:
             os.rename(source, captured)
         except FileNotFoundError:
-            capture.rmdir()
+            _remove_capture_dir(capture)
             return None
-        _fsync_directory(capture)
+        _fsync_directory(captured.parent)
         _fsync_directory(source.parent)
         return _settle_capture(capture, restore_dir)
     finally:
         os.close(fd)
 
 
-def _settle_capture(capture: Path, restore_dir: Path) -> Path | None:
-    """Classify a capture directory's entry (caller holds its flock)."""
+def _capture_entries(capture: Path) -> list[Path]:
+    """The captured payload entries of a capture directory (lstat listing).
 
-    if (capture / _ALIAS_RECEIPT_NAME).exists():
-        return None  # already settled: terminal evidence, never touched again
-    entries = [p for p in capture.iterdir() if p.name != _ALIAS_RECEIPT_NAME]
-    if not entries:
-        capture.rmdir()
-        return None
-    captured = entries[0]
+    The round-4 layout kept the entry at the top level beside a
+    ``receipt.json``; such an entry is still payload unless that receipt names
+    it, so a request literally named ``receipt.json`` is never mistaken for
+    control metadata.
+    """
+
+    payload = capture / _CAPTURE_PAYLOAD_DIR
+    entries = [payload / n for n in sorted(os.listdir(payload))] if payload.is_dir() else []
+    legacy_receipt = _read_capture_receipt(capture / _LEGACY_ALIAS_RECEIPT_NAME)
+    for name in sorted(os.listdir(capture)):
+        if name in (_CAPTURE_PAYLOAD_DIR, _ALIAS_RECEIPT_NAME):
+            continue
+        if name == _LEGACY_ALIAS_RECEIPT_NAME and legacy_receipt is not None \
+                and legacy_receipt.get("request_name") != name:
+            continue  # a genuine round-4 receipt for another entry
+        entries.append(capture / name)
+    return entries
+
+
+def _read_capture_receipt(path: Path) -> Mapping[str, object] | None:
     try:
-        read_regular_request(captured)
-    except RequestNotRegular:
+        body = json.loads(read_regular_request(path)[0])
+    except (OSError, ValueError):
+        return None
+    if isinstance(body, dict) and body.get("status") == "QUARANTINED_REQUEST_ALIAS":
+        return body
+    return None
+
+
+def _capture_settled(capture: Path) -> bool:
+    """Whether the capture holds a terminal receipt naming its quarantined entry."""
+
+    entries = _capture_entries(capture)
+    for receipt_name in (_ALIAS_RECEIPT_NAME, _LEGACY_ALIAS_RECEIPT_NAME):
+        receipt = _read_capture_receipt(capture / receipt_name)
+        if receipt is None:
+            continue
+        named = receipt.get("request_name")
+        if len(entries) == 1 and entries[0].name == named and not _is_regular_entry(entries[0]):
+            return True
+    return False
+
+
+def _remove_capture_dir(capture: Path) -> None:
+    try:
+        (capture / _CAPTURE_PAYLOAD_DIR).rmdir()
+    except OSError:
         pass
-    except FileNotFoundError:
-        return None
-    else:
-        _return_captured_request(captured, restore_dir, capture.name)
+    try:
         capture.rmdir()
+    except OSError:
+        pass
+
+
+def _settle_capture(capture: Path, restore_dir: Path) -> Path | None:
+    """Classify a capture directory's entries (caller holds its flock).
+
+    Every regular entry is a request and is restored; a non-regular entry is
+    quarantined under a receipt that names it. A capture that already holds a
+    terminal receipt naming its single non-regular entry is left untouched.
+    """
+
+    if _capture_settled(capture):
         return None
-    kind = "symlink" if _stat_mode.S_ISLNK(os.lstat(captured).st_mode) else "non_regular"
+    quarantined: Path | None = None
+    for captured in _capture_entries(capture):
+        try:
+            read_regular_request(captured)
+        except RequestNotRegular:
+            quarantined = quarantined or captured
+            continue
+        except FileNotFoundError:
+            continue
+        _return_captured_request(captured, restore_dir, capture.name)
+    if quarantined is None:
+        _remove_capture_dir(capture)
+        return None
+    kind = "symlink" if _stat_mode.S_ISLNK(os.lstat(quarantined).st_mode) else "non_regular"
     with open(capture / _ALIAS_RECEIPT_NAME, "x", encoding="utf-8") as handle:
         json.dump({
             "status": "QUARANTINED_REQUEST_ALIAS",
             "reason_codes": [_REQUEST_ALIAS_QUARANTINED_REASON],
-            "request_name": captured.name,
+            "request_name": quarantined.name,
             "kind": kind,
             "quarantined_at": datetime.now(timezone.utc).isoformat(),
             "forecast_input_fence": False,
@@ -5889,36 +5957,50 @@ def _settle_capture(capture: Path, restore_dir: Path) -> Path | None:
         os.fsync(handle.fileno())
     _fsync_directory(capture)
     _LOG.warning("materialization request %s is a %s; quarantined at %s",
-                 captured.name, kind, captured)
-    return captured
+                 quarantined.name, kind, quarantined)
+    return quarantined
+
+
+def _capture_dirs(request_dir: Path) -> list[Path]:
+    root = request_dir.parent / _REQUEST_ALIAS_DIR
+    return sorted(root.glob(f"{_CAPTURE_PREFIX}*")) if root.exists() else []
 
 
 def _settle_abandoned_captures(request_dir: Path) -> int:
     """Finish quarantines a crashed process left mid-way (their flock is free)."""
 
-    root = request_dir.parent / _REQUEST_ALIAS_DIR
-    if not root.exists():
-        return 0
     settled = 0
-    for capture in sorted(root.glob(f"{_CAPTURE_PREFIX}*")):
-        if (capture / _ALIAS_RECEIPT_NAME).exists():
+    for capture in _capture_dirs(request_dir):
+        if _capture_settled(capture):
             continue
-        try:
-            fd = os.open(capture, os.O_RDONLY | os.O_NOFOLLOW)
-        except OSError:
-            continue
-        try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if not os.path.samestat(os.fstat(fd), os.lstat(capture)):
-                    continue
-            except OSError:
-                continue  # a live quarantine holds it
-            _settle_capture(capture, request_dir)
-            settled += 1
-        finally:
-            os.close(fd)
+        state = _settle_free_capture(capture, request_dir)
+        settled += state == "settled"
     return settled
+
+
+def _settle_free_capture(capture: Path, request_dir: Path) -> str:
+    """"settled", "held" (a live quarantine owns it) or "unknown" (unreadable)."""
+
+    try:
+        fd = os.open(capture, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return "unknown"
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "held"
+        except OSError:
+            return "unknown"
+        try:
+            if not os.path.samestat(os.fstat(fd), os.lstat(capture)):
+                return "held"
+        except FileNotFoundError:
+            return "settled"
+        _settle_capture(capture, request_dir)
+        return "settled"
+    finally:
+        os.close(fd)
 
 
 def _return_captured_request(captured: Path, request_dir: Path, owner_name: str) -> Path | None:
@@ -6488,15 +6570,20 @@ class InflightReconcileReport:
     restored: tuple[str, ...]
     refused: tuple[tuple[str, str], ...]  # (batch, state) left untouched
     # Residue outside any published batch that still names an owner: a held
-    # lease or a live constructor's staging directory. Either one means a
-    # claimant is still running, so the queue is not quiescent.
+    # lease, a live constructor's staging directory, or a quarantine capture
+    # that is held or unreadable. Any one means a claimant is still running
+    # (or its state is unknown), so the queue is not quiescent.
     held_leases: tuple[str, ...] = ()
     live_staging: tuple[str, ...] = ()
     drained_staging: int = 0
+    unsettled_captures: tuple[tuple[str, str], ...] = ()  # (capture, "held"|"unknown")
+    settled_captures: int = 0
 
     @property
     def quiescent(self) -> bool:
-        return not (self.refused or self.held_leases or self.live_staging)
+        return not (
+            self.refused or self.held_leases or self.live_staging or self.unsettled_captures
+        )
 
 
 def reconcile_inflight_for_migration(
@@ -6522,6 +6609,23 @@ def reconcile_inflight_for_migration(
     inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
     restored: list[str] = []
     refused: list[tuple[str, str]] = []
+    # Quarantine captures: a free one is settled (a regular capture restored,
+    # an alias terminally receipted); a held or unreadable one is reported.
+    unsettled: list[tuple[str, str]] = []
+    settled_captures = 0
+    for capture in _capture_dirs(request_path):
+        if _capture_settled(capture):
+            continue
+        if not apply:
+            state = _probe_capture(capture)
+            if state != "free":
+                unsettled.append((capture.name, state))
+            continue
+        state = _settle_free_capture(capture, request_path)
+        if state == "settled":
+            settled_captures += 1
+        else:
+            unsettled.append((capture.name, state))
     drained = _drain_abandoned_staging(inflight_path) if apply else len(
         _abandoned_staging(inflight_path)
     )
@@ -6561,7 +6665,25 @@ def reconcile_inflight_for_migration(
     ) if inflight_path.exists() else []
     return InflightReconcileReport(
         tuple(restored), tuple(refused), tuple(held_leases), tuple(live_staging), drained,
+        tuple(unsettled), settled_captures,
     )
+
+
+def _probe_capture(capture: Path) -> str:
+    """Observe a capture's flock without settling it: "free", "held" or "unknown"."""
+    try:
+        fd = os.open(capture, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return "unknown"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return "free"
+    except BlockingIOError:
+        return "held"
+    except OSError:
+        return "unknown"
+    finally:
+        os.close(fd)
 
 
 def _release_without_sweep(leases: Sequence[_lease.HeldLease]) -> None:

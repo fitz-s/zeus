@@ -378,7 +378,7 @@ def test_symlinked_request_is_quarantined_without_touching_its_target(tmp_path):
     # holding the captured link and its exclusively created receipt.
     captures = list((tmp_path / queue._REQUEST_ALIAS_DIR).glob(".capture.Paris.alias.json.*"))
     assert len(captures) == 1
-    links = [p for p in captures[0].iterdir() if p.is_symlink()]
+    links = [p for p in (captures[0] / queue._CAPTURE_PAYLOAD_DIR).iterdir() if p.is_symlink()]
     receipts = [p for p in captures[0].iterdir() if p.name == queue._ALIAS_RECEIPT_NAME]
     assert len(links) == 1 and len(receipts) == 1
     receipt = json.loads(receipts[0].read_text())
