@@ -1501,6 +1501,8 @@ def _move_request(
     _fsync_directory(destination_dir)
     path.unlink()
     _fsync_directory(path.parent)
+    if terminal_receipt is not None:
+        _trace_seed_outcome(path, terminal_receipt)
     return target
 
 
@@ -1538,17 +1540,21 @@ def _publish_latest_seed(seed_path: Path, seed: Mapping[str, object]) -> Path:
     return latest_path
 
 
-def _write_sidecar(path: Path, payload: dict[str, object]) -> None:
-    path.with_suffix(path.suffix + ".receipt.json").write_text(
-        json.dumps(payload, sort_keys=True, indent=2),
-        encoding="utf-8",
-    )
+def _trace_seed_outcome(path: Path, payload: Mapping[str, object]) -> None:
     trace = _producer_trace()
     if trace is not None:
         for entry in trace["seed_window"]:
             if path.name == entry["name"] or path.name.startswith(entry["name"].removesuffix(".json") + "."):
                 entry["outcome"] = str(payload.get("status", "SIDECAR_WRITTEN"))
                 entry["reason_codes"] = list(payload.get("reason_codes", ()))
+
+
+def _write_sidecar(path: Path, payload: dict[str, object]) -> None:
+    path.with_suffix(path.suffix + ".receipt.json").write_text(
+        json.dumps(payload, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    _trace_seed_outcome(path, payload)
 
 
 @contextmanager
@@ -6355,6 +6361,9 @@ def process_own_clock_station_revision_fast_path(
 
     forecast_conn: sqlite3.Connection | None = None
     cursor_write_failed = False
+    processed: list[str] = []
+    failed: list[str] = []
+    reasons: list[str] = []
     try:
         # The lock spans filename discovery, exact family reads, request write,
         # and seed move. A background lane can therefore never claim the same
@@ -6405,8 +6414,10 @@ def process_own_clock_station_revision_fast_path(
                     )
     except _ClaimReadDeadlineExceeded:
         return report(
-            "DEFERRED",
-            reason_codes=(_CLAIM_READ_DEFERRED_REASON,),
+            "FAILED" if failed else "PROCESSED" if processed else "DEFERRED",
+            reason_codes=tuple(dict.fromkeys((*reasons, _CLAIM_READ_DEFERRED_REASON))),
+            processed=processed,
+            failed=failed,
         )
     except Exception as exc:  # noqa: BLE001 - fast lane must leave retries truthful
         return report(
@@ -6708,6 +6719,11 @@ def _prepare_seed_requests_with_connection(
     for seed_json in seeds:
         if actionable_count >= actionable_limit or inspected_count >= inspection_cap:
             break
+        try:
+            _raise_if_claim_read_expired()
+        except _ClaimReadDeadlineExceeded:
+            reasons.append(_CLAIM_READ_DEFERRED_REASON)
+            break
         inspected_count += 1
         entry = None if trace is None else next(
             (item for item in trace["seed_window"] if item["name"] == seed_json.name), None)
@@ -6865,7 +6881,8 @@ def _prepare_seed_requests_with_connection(
                     },
                 )
                 processed.append(str(moved))
-                actionable_count += 1
+                if regression_basis not in {"current_ensemble_hwm", "baseline_input_hwm"}:
+                    actionable_count += 1
                 continue
             # An instrument expansion bypasses ordinary q coverage only while
             # the single fusion-upgrade authority still proves that exact-cycle
@@ -6901,7 +6918,8 @@ def _prepare_seed_requests_with_connection(
                     },
                 )
                 processed.append(str(moved))
-                actionable_count += 1
+                # No request was published. Terminal cleanup consumes the
+                # bounded inspection window, not a prepared-request slot.
                 continue
             # One resolution at the seed's own cut feeds the fence check, the
             # build and the failure record, so they cannot read different inputs.
@@ -7004,7 +7022,6 @@ def _prepare_seed_requests_with_connection(
                 _publish_latest_seed(moved, seed)
                 processed.append(str(moved))
                 reasons.append(_UNCHANGED_BLOCKED_SEED_SKIP_REASON)
-                actionable_count += 1
                 continue
             ownership_check = _upgrade_day0_seed_has_current_enqueue_ownership(
                 forecast_db=forecast_db,
@@ -7036,6 +7053,7 @@ def _prepare_seed_requests_with_connection(
                 request_payload["day0_enqueue_owner_witness"] = dict(
                     ownership_check.witness
                 )
+            _raise_if_claim_read_expired()
             _write_request(request_path, request_payload)
             moved = _move_request(seed_json, processed_path)
             _publish_latest_seed(moved, seed)
@@ -7050,7 +7068,10 @@ def _prepare_seed_requests_with_connection(
             processed.append(str(moved))
             actionable_count += 1
         except _ClaimReadDeadlineExceeded:
-            raise
+            reasons.append(_CLAIM_READ_DEFERRED_REASON)
+            if entry is not None:
+                entry["outcome"] = "DEFERRED_READ_DEADLINE"
+            break
         except Exception as exc:
             receipt = {
                 "status": "ERROR",
@@ -7204,7 +7225,9 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         seed_reasons.append(
             "REPLACEMENT_LIVE_MATERIALIZATION_ORPHAN_REQUEST_STAGE_DRAINED"
         )
-    if lane == MATERIALIZATION_LANE_PRIORITY and (seed_processed or seed_failed):
+    if lane == MATERIALIZATION_LANE_PRIORITY and (
+        seed_processed or seed_failed or _CLAIM_READ_DEFERRED_REASON in seed_reasons
+    ):
         # Seed transport is one atomic priority tranche. Once it publishes a
         # request, return that durable progress immediately; the next one-second
         # callback owns request claiming. Re-scanning the widened request/DB
@@ -7379,14 +7402,16 @@ def _claim_only_report(
             reasons.append(
                 "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE"
             )
-    elif not (seed_processed or seed_failed) and _CLAIM_ROTATION_CLOCK_DEFERRED_REASON not in reasons:
+    elif not (seed_processed or seed_failed) and not {
+        _CLAIM_ROTATION_CLOCK_DEFERRED_REASON, _CLAIM_READ_DEFERRED_REASON,
+    }.intersection(reasons):
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY")
     return ReplacementForecastLiveMaterializationQueueReport(
         status=(
             "FAILED"
             if failed or seed_failed
             else ("PROCESSED" if processed or seed_processed else (
-                "DEFERRED" if _CLAIM_ROTATION_CLOCK_DEFERRED_REASON in reasons else "NO_REQUESTS"
+                "DEFERRED" if {_CLAIM_ROTATION_CLOCK_DEFERRED_REASON, _CLAIM_READ_DEFERRED_REASON}.intersection(reasons) else "NO_REQUESTS"
             ))
         ),
         request_dir=str(claim.request_path),
@@ -7670,6 +7695,15 @@ def process_replacement_forecast_live_materialization_queue(
                 and exc.args != ("DB_CONNECTION_DEADLINE_EXPIRED",)
             ):
                 raise
+            if (
+                claim is not None and claim.batch_path is None
+                and (claim.seed_processed_files or claim.seed_failed_files)
+            ):
+                # The deadline cannot erase an already completed file handoff.
+                # Remaining seeds stay queued; terminal sidecar policy is unchanged.
+                return _claim_only_report(replace(
+                    claim, seed_reasons=(*claim.seed_reasons, _CLAIM_READ_DEFERRED_REASON),
+                ))
             return ReplacementForecastLiveMaterializationQueueReport(
                 status="DEFERRED",
                 request_dir=str(request_path),

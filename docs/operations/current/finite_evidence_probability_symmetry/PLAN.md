@@ -15156,3 +15156,99 @@ profit/timeliness/physical source gaps. Root authorizes the expected five-path
 normal FF lane after narrow checks; new runtime identity/loader rc and diagnostic
 phase evidence remain separate proof. Source capture4, inventory trigger, cfgd7
 and unrelated files stay unchanged; no appearance-only source/physics edits.
+
+### Recovery delivery checkpoint and next producer budget candidate — 2026-10-04
+
+Repair060c0de447e607580ce9fad5170ff36f0ea9d818 lands by normal FF from725.
+Main's independent narrow integration is6PASS4.18s, frozen source/test hashes
+406cf/e951 and protected queue/trigger/capture hashes match. AST/compile,
+two changed registry YAML parses, test freshness and diff-check pass; the exact
+private cfgd7 symlink is removed before the five-path commit. Tasktree is clean.
+Single normal loader starts09:31:43Z and returns actualrc0 (session56264), log
+/tmp/zeus-exit-journal-loader-20261004.UkxV48/normal-loader.log. Main41226 has
+full060c stamp09:33:53.763240Z; ingest28829/forecast28886 start afterFF, cfgd7,
+live cwd and three canonical DB FDs are verified. Loader verifies27/27 fresh
+held monitors/fullbook/no degraded probability and queue receipt903562 with
+scope213. Its historical restart_guard_not_selected line is not current guard
+truth: independent poststamp complete903562 and naturallyNone guard are separately
+confirmed by root. This is recovery/diagnostic delivery, not profit or timely
+producer/physical representativeness completion. No second loader or manual
+source/venue/guard action occurs.
+
+BEFOREEDIT candidate, source writes still blocked pending root's final READY:
+only src/data/replacement_forecast_live_materialization_queue.py and existing
+tests/test_day0_extreme_updated_materialization_bridge.py, baseline060c with
+queuef4e4a9bea0a7f02fd09ac79c3a6d49f1d8d5e2e8b9d1c642e517d725c0f73c83
+and test75cb4be0bb9b44dbd45f388efafe1de12a07ae59ecb897c8e3760098411d8aaf.
+Integrator owns this PLAN and later touched existing registry rows; root's
+assigned sole source writer owns both files. No new file/schema/flag/actor.
+
+Part1 corrects the verified diagnostic terminal_move classification: once a seed
+has actually moved with a typed terminal receipt, its bounded trace reports that
+typed outcome rather than INSPECTED_RETAINED. Unknown/uninspected is not a gate
+rejection; retain the no-extra-I/O trace contract and existing typed receipt truth.
+Part2 is an explicitly changed attempt-budget performance policy, not a claim that
+the prior law was invalid: only deterministically completed already-covered,
+source-cycle-regression or unchanged-blocked terminal dispositions with no new
+READY request may avoid consuming an actionable slot. Owner recovery, real READY
+publication, unbound/unknown/error/retry and all other existing counted paths keep
+the original three-slot charge. No unlimited productive/READY quota. Inspection
+window remains12 and the existing10s shared deadline, lease/CAS, cursor and
+held/global/first-q interleave remain authoritative; total cleanup I/O remains
+bounded by that same window/deadline, not a new budget.
+
+SCOPE is one existing producer lane pass and each exact seed/request identity.
+DRAIN is the normal callback's bounded terminal cleanup followed by actionable
+work only while its existing window/deadline permits. RESET is a genuinely changed
+input/new READY request or next normal pass, never renewing stale source clocks or
+turning unknown evidence into completed coverage. Required antibodies use actual
+producer entrypoints: mixed terminal→READY sequences, all-terminal12 exhaustion,
+owner-recovery/unknown/error still counted, cutoff/deferred/locked partial trace,
+HIGH/LOW and held/global/first-q fairness twins, exact cursor/lease/receipt control,
+no extra reads/scans, and terminal trace aligned to the existing typed receipt.
+C must independently pre-review narrow exemptions versus productive quota and
+total I/O/fairness before root enables source writes; current main only prepares
+cfg isolation and PLAN, with no test execution/source edit/cycle/HTTP/reseed/load.
+After freeze select only changed producer/helper controls and mandatory affected
+checks; do not repeat unrelated recovery/physics matrices. Performance seconds,
+market-speed exits and the overall goal remain OPEN until natural phase evidence
+and a real root-cause repair prove them.
+
+Final BEFOREEDIT READY, root accepts C's narrow policy direction: the shared
+source-cycle-regression branch near6868 exempts only current_ensemble_hwm and
+baseline_input_hwm completed terminal dispositions. day0_observation and legacy
+anchor regressions retain their original charge. Covered/unchanged exemptions
+require successful disposition with no NEW request; this is not a new unified
+crash-durability contract or an index expansion. Real held/global/first-q READY
+publications and owner-stale recovery still spend the original three-slot budget.
+Inspection12 is not proof of a hard10s wall bound. Writer must exercise a real
+private deadline counterexample; if needed, reuse the existing deadline checker
+at each newly inspected candidate and before READY publication to prevent an
+additional late READY. Typed expiry remains retryable/deferred through the existing
+lease/deadline route, never broad-except permanent BLOCKED. Existing total budget,
+source clocks, lease/CAS, scheduler ordering and all gates remain unchanged.
+Root relays this READY to the sole probability source writer for the same two
+owned files; main pauses all project writes, including PLAN/registries, until
+freeze. Only normal read-only assistance is permitted in that writer window.
+
+Two-path final freeze is queuea66290b24637f9876a3e5314bc18dd0b422ebb9eaec8f14c8ea788e04045f20a
+and bridge4153a6f2d1fea372806bc0b0f8d8409de040ade2ad91bda343267219b89d0abc.
+Original060c exact-source/pin-reload counterexample batch has8 actual RED and5
+controls PASS; final focused36PASS and all14 new cases PASS. Whole owned file is
+239PASS/5FAIL of244, not green. Exact060c overlay reproduces the same five typed
+failures (four missing-anchor fixtures and one past target date), without source
+clock normalization or claiming those historical failures harmless. XMLs are
+/tmp/zeus-terminal-budget-060c-red.xml, zeus-terminal-budget-green.xml,
+zeus-terminal-budget-owned-full.xml and zeus-terminal-budget-failed5-060c-control.xml.
+Source delta is only the accepted terminal budget/trace/deadline behavior; no
+queue scan/index, source/certificate/actor/config/authority expansion. C final
+independent review APPROVES exact frozen hashes with15 PASS, including non-mirror
+real-SQL held/reserved-role lookthrough and deadline/partial/RESET controls. Main's
+narrow independent integration adds5 PASS2.02s; hash/AST/compile/YAML/fresh/diff
+pass. Root authorizes the five-path normal FF lane and one normal loader after
+current capital preconditions, without manual drainage of any other command.
+Main may edit only touched existing registry
+rows/PLAN and narrow integration checks, never the frozen files or live state.
+No alternate or repeated loader is authorized at this checkpoint. Natural post-load
+producer traces must still distinguish throughput policy from a measured latency
+root cause, and physical representation/source-ground/clock-role gaps stay OPEN.

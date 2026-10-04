@@ -3129,6 +3129,175 @@ def test_producer_trace_marks_real_action_cap_uninspected(tmp_path, monkeypatch)
     assert harness.cursor.read_text().strip() == paths[-1].name
 
 
+def _terminal_budget_queue(tmp_path, monkeypatch, *, kind="covered", all_terminal=False):
+    """Real selector, ownership, moves and reports; inject only proof/build results.
+
+    This is transport scheduling evidence, not a probability/physical certificate.
+    No materializer or posterior writer is invoked.
+    """
+    held = frozenset((f"H{i:02}", "2026-10-05", "high") for i in range(14 if all_terminal else 3))
+    global_scope = frozenset({("Global", "2026-10-05", "low")})
+    harness = _retained_priority_seed_queue(tmp_path, monkeypatch, held=held, global_scope=global_scope)
+    paths = [harness.write(*scope) for scope in sorted(held | global_scope)]
+    first = harness.write("FirstQ", "2026-10-05", "low")
+    paths.append(first)
+    for path in paths:
+        payload = json.loads(path.read_text())
+        payload["cycle_advance_enqueue_owner"] = False
+        path.write_text(json.dumps(payload))
+    with sqlite3.connect(harness.db) as conn:
+        conn.row_factory = sqlite3.Row
+        assert cycle_advance._record_enqueue(
+            conn, city="FirstQ", target_date="2026-10-05", metric="low",
+            consumed_cycle_iso="2026-10-03T12:00:00+00:00", target_cycle_iso="2026-10-03T12:00:00+00:00",
+            held_position=False, seed_file=str(first),
+        )
+    import src.data.station_ground_evidence as ground
+    monkeypatch.setattr(ground, "archive_station_ground_evidence", lambda *args, **kwargs: None)
+    monkeypatch.setattr(materialization_queue, "_seed_source_cycle_boundary", lambda **kw:
+        ((kind, "2026-10-04T00:00:00+00:00") if kw["seed"]["city"] == "H00" and kind in
+         {"current_ensemble_hwm", "baseline_input_hwm", "current_day0_observation", "legacy_anchor_clock"} else None))
+    monkeypatch.setattr(materialization_queue, "_seed_already_covered", lambda **kw:
+        all_terminal or (kind == "covered" and kw["seed"]["city"] == "H00"))
+    monkeypatch.setattr(materialization_queue, "_seed_dependencies_at_cut", lambda *args, **kwargs:
+        SimpleNamespace(identity=None, transport=SimpleNamespace(paths={}, error=None)))
+    built = []
+    def build(seed, **kwargs):
+        built.append(seed["city"])
+        if kind == "exception" and seed["city"] == "H00":
+            raise OSError("private environment retry")
+        return SimpleNamespace(ok=True, status="READY", reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",), request={
+            key: seed[key] for key in ("city", "target_date", "temperature_metric", "source_cycle_time")})
+    monkeypatch.setattr(materialization_queue, "build_replacement_forecast_materialization_request", build)
+    marker = tmp_path / "blocked.json"
+    marker.write_text(json.dumps({"blocked_evidence": {"status": "PRIVATE_TYPED_NO_POSTERIOR"}}))
+    monkeypatch.setattr(materialization_queue, "_blocked_attempt_state", lambda **kw:
+        (marker, "private-exact-input-fingerprint", kind == "unchanged" and kw["payload"]["city"] == "H00"))
+    def run():
+        return materialization_queue.process_replacement_forecast_live_materialization_queue(
+            request_dir=harness.requests, processed_dir=tmp_path / "processed", failed_dir=tmp_path / "failed",
+            seed_dir=harness.seeds, seed_processed_dir=tmp_path / "seed_processed", seed_failed_dir=tmp_path / "seed_failed",
+            forecast_db=harness.db, seed_limit=3, limit=3, discover=False, lane="priority")
+    return harness, run, built
+
+
+@pytest.mark.parametrize("kind", ("covered", "current_ensemble_hwm", "baseline_input_hwm", "unchanged"))
+def test_terminal_no_request_does_not_displace_ready_held_reserved_roles(tmp_path, monkeypatch, kind):
+    harness, run, _ = _terminal_budget_queue(tmp_path, monkeypatch, kind=kind)
+    report = run()
+    requests = [json.loads(path.read_text()) for path in harness.requests.glob("*.json")]
+    assert {request["city"] for request in requests} == {"H01", "Global", "FirstQ"}
+    assert len(requests) == 3 and report.seed_processed_count == 4
+    assert all(path.exists() for path in harness.seeds.glob("H0[2-9]*.json"))
+    entry = next(item for item in report.producer_trace["seed_window"] if item["name"].startswith("H00."))
+    assert entry["outcome"].startswith("SKIPPED_")
+    assert entry["outcome"] != "INSPECTED_RETAINED"
+
+
+@pytest.mark.parametrize("kind", ("current_day0_observation", "legacy_anchor_clock", "changed", "exception"))
+def test_other_terminal_and_changed_input_keep_original_action_budget(tmp_path, monkeypatch, kind):
+    harness, run, _ = _terminal_budget_queue(tmp_path, monkeypatch, kind=kind)
+    run()
+    requests = {json.loads(path.read_text())["city"] for path in harness.requests.glob("*.json")}
+    assert "H01" not in requests
+    assert {"Global", "FirstQ"} <= requests
+    assert len(requests) == (3 if kind == "changed" else 2)
+
+
+def test_exempt_terminal_work_still_stops_at_real_inspection_window(tmp_path, monkeypatch):
+    harness, run, _ = _terminal_budget_queue(tmp_path, monkeypatch, all_terminal=True)
+    report = run()
+    assert report.seed_processed_count == 12
+    assert len(report.producer_trace["seed_window"]) == 12
+    assert len(list(harness.seeds.glob("*.json"))) == 4
+    assert not list(harness.requests.glob("*.json"))
+
+
+@pytest.mark.parametrize("expired_before_write", (False, True))
+def test_seed_deadline_retains_unpublished_and_reports_already_ready(tmp_path, monkeypatch, expired_before_write):
+    harness, run, built = _terminal_budget_queue(tmp_path, monkeypatch, kind="changed")
+    now = [0.0]
+    monkeypatch.setattr(materialization_queue.time, "monotonic", lambda: now[0])
+    original = (materialization_queue.build_replacement_forecast_materialization_request if expired_before_write
+                else materialization_queue._write_request)
+    def delayed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        now[0] = 11.0
+        return result
+    monkeypatch.setattr(materialization_queue,
+        "build_replacement_forecast_materialization_request" if expired_before_write else "_write_request", delayed)
+    report = run()
+    assert materialization_queue._CLAIM_READ_DEFERRED_REASON in report.reason_codes
+    assert len(built) == 1
+    assert len(list(harness.requests.glob("*.json"))) == (0 if expired_before_write else 1)
+    assert report.seed_processed_count == (0 if expired_before_write else 1)
+    assert not report.failed_files and not report.seed_failed_files
+    assert list(harness.seeds.glob("Global.*")) and list(harness.seeds.glob("FirstQ.*"))
+    assert materialization_queue._active_claim_read_deadline() is None
+    # A later normal pass gets a fresh deadline and drains retained work.
+    monkeypatch.setattr(materialization_queue,
+        "build_replacement_forecast_materialization_request" if expired_before_write else "_write_request", original)
+    now[0] = 0.0
+    resumed = run()
+    assert resumed.seed_processed_count == 3
+    assert resumed.seed_failed_count == 0
+
+
+def test_station_fast_deadline_keeps_completed_ready_handoff(tmp_path, monkeypatch):
+    harness, _, _ = _terminal_budget_queue(tmp_path, monkeypatch, kind="changed")
+    for path in tuple(harness.seeds.glob("*.json")):
+        path.rename(path.with_name(path.stem + ".station-input-revision.private.json"))
+    now = [0.0]
+    monkeypatch.setattr(materialization_queue.time, "monotonic", lambda: now[0])
+    original = materialization_queue._write_request
+    def delayed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        now[0] = 11.0
+        return result
+    monkeypatch.setattr(materialization_queue, "_write_request", delayed)
+    report = materialization_queue.process_own_clock_station_revision_fast_path(
+        request_dir=harness.requests, seed_dir=harness.seeds,
+        seed_processed_dir=tmp_path / "seed_processed", seed_failed_dir=tmp_path / "seed_failed",
+        forecast_db=harness.db,
+    )
+    assert report.status == "PROCESSED"
+    assert report.seed_processed_count == 1 and report.seed_failed_count == 0
+    assert materialization_queue._CLAIM_READ_DEFERRED_REASON in report.reason_codes
+    assert len(list(harness.requests.glob("*.json"))) == 1
+    assert len(list(harness.seeds.glob("*.json"))) == 4
+    assert materialization_queue._active_claim_read_deadline() is None
+
+
+def test_terminal_trace_success_matches_durable_receipt(tmp_path, monkeypatch):
+    seeds = tmp_path / "seeds"; seeds.mkdir()
+    path = seeds / "seed.json"; path.write_text("{}")
+    trace = {"seed_window": [{"name": path.name, "outcome": "INSPECTED_RETAINED"}]}
+    monkeypatch.setattr(materialization_queue._claim_read_local, "producer_trace", trace, raising=False)
+    receipt = {"status": "SKIPPED_UNCHANGED_BLOCKED_INPUT", "reason_codes": ["UNCHANGED"], "request_written": False}
+    target = materialization_queue._move_request(path, tmp_path / "processed", terminal_receipt=receipt)
+    assert json.loads(Path(str(target) + ".receipt.json").read_text()) == receipt
+    assert trace["seed_window"][0]["outcome"] == receipt["status"]
+    assert trace["seed_window"][0]["reason_codes"] == receipt["reason_codes"]
+    assert not path.exists()
+
+
+def test_terminal_trace_is_updated_only_after_successful_move(tmp_path, monkeypatch):
+    seeds = tmp_path / "seeds"; seeds.mkdir()
+    path = seeds / "seed.json"; path.write_text("{}")
+    trace = {"seed_window": [{"name": path.name, "outcome": "INSPECTED_RETAINED"}]}
+    monkeypatch.setattr(materialization_queue._claim_read_local, "producer_trace", trace, raising=False)
+    real_unlink = Path.unlink
+    def broken_unlink(self, *args, **kwargs):
+        if self == path:
+            raise OSError("private unlink failure")
+        return real_unlink(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", broken_unlink)
+    with pytest.raises(OSError):
+        materialization_queue._move_request(path, tmp_path / "processed", terminal_receipt={"status": "SKIPPED_UNCHANGED_BLOCKED_INPUT"})
+    assert trace["seed_window"][0]["outcome"] == "INSPECTED_RETAINED"
+    assert path.exists()
+
+
 def test_priority_seed_family_frontier_keeps_full_capital_preselector(
     tmp_path, monkeypatch,
 ) -> None:

@@ -2011,6 +2011,10 @@ test_metadata:
       unchanged. New durable postcommit events wake a waiting same-family worker
       without timer delay; duplicate/generic events and running coalescing retain
       their backoff, and old timers cannot affect a replacement pending owner.
+      Successful no-new-request HWM/covered/unchanged terminal work preserves
+      held/global/first-q READY slots within the existing twelve-item window;
+      other charged paths, real deadline expiry/RESET, fast-lane partial handoff
+      and typed successful-move trace remain behavioral controls, not an SLA.
   tests/test_replacement_forecast_materializer.py:
     modules: [data, state]
     category: core_law_antibody
