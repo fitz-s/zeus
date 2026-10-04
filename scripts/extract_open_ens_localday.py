@@ -733,6 +733,11 @@ def decode_open_ens_temperature_knots(
                             or h["stepType"] != "instant" or h["stepUnits"] != 1
                             or h["generatingProcessIdentifier"] != 161 or template not in (0, 1)):
                         raise ValueError("ENS_POINT_PHYSICAL_OR_50R1_PROCESS_INVALID")
+                    # GRIB2 discipline 0 / category 0 / parameter 0 is temperature.
+                    # The original 2m level below distinguishes 2t from other heights;
+                    # dewpoint (parameter 6) cannot borrow an echoed 167/2t header.
+                    if raw[6] != 0 or s4[9:11] != b"\x00\x00":
+                        raise ValueError("ENS_POINT_ORIGINAL_PARAMETER_IDENTITY_MISMATCH")
                     step = int(h["endStep"])
                     if (step not in steps or h["startStep"] != step or str(h["stepRange"]) != str(step)
                             or (h["dataDate"], h["dataTime"]) != (int(run.strftime("%Y%m%d")), run.hour * 100)):

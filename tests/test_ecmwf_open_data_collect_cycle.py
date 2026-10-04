@@ -66,6 +66,7 @@ def _native_temperature_knots_fixture(tmp_path, *, fault=None, steps=(0, 3, 6), 
                         "run": {"dataTime": 600}, "grid": {"longitudeOfFirstGridPointInDegrees": .125},
                         "height": {"level": 3}, "step_type": {"stepType": "max"},
                         "pf0": {"number": 0}, "param": {"paramId": 130},
+                        "dewpoint": {"paramId": 168}, "discipline": {"discipline": 10},
                         "step": {"step": 7}}.get(fault, {}))
                 for key, value in headers.items():
                     ec.codes_set(gid, key, value)
@@ -189,6 +190,36 @@ def test_native_temperature_knots_observed_header_must_match_original_sections(t
     result = extractor.decode_open_ens_temperature_knots(**inputs)
     assert result["decode_status"] == "UNAVAILABLE", result
     assert result["native_knots"] == []
+
+
+@pytest.mark.parametrize("fault", ("dewpoint", "discipline"))
+def test_native_temperature_knots_original_parameter_rejects_temperature_header_spoof(tmp_path, monkeypatch, fault):
+    """Original dewpoint/other-discipline bytes cannot be relabelled as 2t."""
+    from scripts import extract_open_ens_localday as extractor
+
+    inputs = _native_temperature_knots_fixture(tmp_path, fault=fault)
+    original_get = extractor.codes_get
+    actual_headers = []
+    def echoed_temperature(gid, key):
+        changed = (original_get(gid, "paramId") == 168 if fault == "dewpoint"
+                   else original_get(gid, "discipline") == 10)
+        if changed:
+            if key == "paramId":
+                actual_headers.append((original_get(gid, "paramId"), original_get(gid, "shortName"),
+                                       original_get(gid, "discipline")))
+            if key in ("paramId", "shortName", "units", "discipline"):
+                return {"paramId": 167, "shortName": "2t", "units": "K", "discipline": 0}[key]
+        return original_get(gid, key)
+    monkeypatch.setattr(extractor, "codes_get", echoed_temperature)
+    result = extractor.decode_open_ens_temperature_knots(**inputs)
+    assert actual_headers
+    if fault == "dewpoint":
+        assert actual_headers[0] == (168, "2d", 0)
+    else:
+        assert actual_headers[0][2] == 10
+    assert result["decode_status"] == "UNAVAILABLE", result
+    assert result["native_knots"] == []
+    assert result["unavailable_reason"] == "ENS_POINT_ORIGINAL_PARAMETER_IDENTITY_MISMATCH"
 
 
 def test_native_temperature_knots_nonfinite_selected_cell_is_unavailable(tmp_path, monkeypatch):
