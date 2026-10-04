@@ -1680,6 +1680,92 @@ def test_capital_proof_locates_nearest_rejected_executable_buy_frontier():
     assert receipt["venue_submit_count_after"] == 5
 
 
+def test_capital_proof_resolves_semantics_only_for_the_kept_frontier():
+    """The per-family semantics lookup runs for the one nearest frontier, not
+    for every rejected BUY row, and the frozen revision is unchanged."""
+
+    @dataclass(frozen=True)
+    class Evaluation:
+        candidate_id: str
+        family_key: str
+        bin_id: str = "34C"
+        condition_id: str = "condition-34"
+        side: str = "YES"
+        token_id: str = "yes-34"
+        action: str = "BUY"
+        execution_mode: str = "TAKER_LIMIT"
+        rejection_reason: str | None = "NON_POSITIVE_EXPECTED_OBJECTIVE"
+        buy_rejection_economics: dict[str, object] | None = None
+
+    def economics(expected_du: float) -> dict[str, object]:
+        return {
+            "rejection_reason": "NON_POSITIVE_EXPECTED_OBJECTIVE",
+            "probability_basis": "POSTERIOR_PREDICTIVE_MEAN",
+            "probe_kind": "MINIMUM_MARKETABLE",
+            "probe_shares": "10",
+            "probe_cost_usd": "3.1",
+            "probe_limit_price": "0.30",
+            "probe_expected_fill_price_before_fee": "0.30",
+            "probe_expected_delta_log_wealth": expected_du,
+            "probe_expected_log_growth_per_hour": expected_du / 24.0,
+            "probe_expected_ev_usd": -0.1,
+            "probe_expected_capital_efficiency": expected_du / 3.1,
+        }
+
+    asked: list[str] = []
+
+    class RecordingLookup:
+        def get(self, key, default=None, /):
+            asked.append(key)
+            return "revision-" + key
+
+    at = _dt.datetime(2026, 8, 12, 1, 0, tzinfo=_dt.timezone.utc)
+    families = ("family-far", "family-near", "family-mid")
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=None,
+            expected_growth=None,
+            candidate_evaluations=tuple(
+                Evaluation(
+                    candidate_id=f"candidate-{family}",
+                    family_key=family,
+                    buy_rejection_economics=economics(du),
+                )
+                for family, du in zip(families, (-0.004, -0.002, -0.003))
+            ),
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            limit_price=None,
+            max_spend_usd=None,
+            cash_proceeds_usd=None,
+            candidate_input_count=3,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        )
+    )
+    receipt = global_batch_runtime._capital_proof_counterfactual_receipt(
+        selected,
+        selection_epoch_identity="epoch",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        probability_manifest=(),
+        full_scope_identity="scope",
+        book_epoch_identity="book",
+        wealth_witness=SimpleNamespace(
+            witness_identity="wealth", economic_identity="wealth-economics"
+        ),
+        family_context_by_key={},
+        probability_semantics_by_family=RecordingLookup(),
+        probability_witnesses={},
+        payoff_q_lcb_by_candidate=None,
+        venue_submit_count_before=0,
+        venue_submit_count_after=0,
+    )
+    frontier = receipt["nearest_rejected_buy_frontier"]
+    assert frontier["family_key"] == "family-near"
+    assert frontier["probability_semantics_revision"] == "revision-family-near"
+    assert asked == ["family-near"]
+
+
 def test_book_native_side_receipt_requires_current_neg_risk_state_shape():
     state = (
         "family",
@@ -36597,6 +36683,173 @@ def test_global_batch_actual_and_proof_share_cut_local_plan_cache(
     }
 
 
+def test_global_batch_cut_pays_shadow_authority_only_for_proof_winner_posteriors(
+    monkeypatch,
+):
+    """Shadow evidence must not tax the cut: a cut with no proof winner
+    evaluates no posterior's entry authority, however many families it holds."""
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b), captured_at_utc=decision_at
+    )
+    family_a, family_b = scope.family_keys
+
+    def witness(family_key, suffix):
+        return SimpleNamespace(
+            family_key=family_key,
+            captured_at_utc=decision_at,
+            posterior_identity_hash=f"run-{suffix}",
+            witness_identity=f"q-{suffix}",
+            q_version=f"q-version-{suffix}",
+        )
+
+    witness_by_event = {
+        event_a.event_id: witness(family_a, "a"),
+        event_b.event_id: witness(family_b, "b"),
+    }
+    forecast = sqlite3.connect(":memory:")
+    forecast.execute(
+        "CREATE TABLE forecast_posteriors ("
+        "posterior_identity_hash TEXT PRIMARY KEY, provenance_json TEXT, "
+        "computed_at TEXT, city TEXT, target_date TEXT, "
+        "temperature_metric TEXT, openmeteo_anchor_id TEXT)"
+    )
+    for suffix, city in (("a", "Alpha"), ("b", "Beta")):
+        forecast.execute(
+            "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?)",
+            (
+                f"run-{suffix}",
+                json.dumps(
+                    {
+                        "bayes_precision_fusion": {
+                            "current_evidence_shape": {
+                                "semantics_revision": (
+                                    global_batch_runtime
+                                    .CURRENT_EVIDENCE_SEMANTICS_REVISION
+                                ),
+                                "between_cohort_status": "SIMULTANEOUS_PROVEN",
+                            }
+                        }
+                    }
+                ),
+                decision_at.isoformat(),
+                city,
+                "2026-07-11",
+                "high",
+                None,
+            ),
+        )
+    authority_calls: list[str] = []
+    lookups: list[object] = []
+    real_lookup = (
+        global_batch_runtime._qkernel_shadow_current_semantics_by_posterior
+    )
+
+    def authority(_provenance, *, city, **_kwargs):
+        authority_calls.append(city)
+        return True
+
+    def spy(conn, probability_witnesses):
+        lookups.append(set(probability_witnesses))
+        return real_lookup(conn, probability_witnesses)
+
+    monkeypatch.setattr(
+        global_batch_runtime, "current_evidence_shape_has_entry_authority", authority
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_qkernel_shadow_current_semantics_by_posterior", spy
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_selection_holdings",
+        lambda prepared_by_event, **_kwargs: dict(prepared_by_event),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: _WealthNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-shadow",
+            economic_identity="wealth-economics-shadow",
+            ledger_snapshot_id="ledger-shadow",
+            native_holdings_micro=(),
+            pending_entry_endowments_micro=(),
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue-shadow",
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "_store_global_auction_receipt", lambda *_, **__: 1
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_stored_global_auction_receipt",
+        lambda _conn, *, selected, decision_log_id: selected,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda *_a, **_k: SimpleNamespace(
+            decision=SimpleNamespace(
+                candidate=None,
+                candidate_evaluations=(),
+                rejection_reasons={},
+                no_trade_reason="TEST_NO_TRADE",
+            ),
+            winner_event_id=None,
+            holding_coverage=(),
+            materialization_excluded_by_family={},
+            actuation=None,
+        ),
+    )
+    trade = sqlite3.connect(":memory:")
+    try:
+        global_batch_runtime.process_current_global_batch(
+            (event_a, event_b),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=forecast,
+            trade_conn=trade,
+            payload_reader=lambda current: json.loads(current.payload_json),
+            prepare_event=lambda current, _at: EventSubmissionReceipt(
+                False,
+                current.event_id,
+                current.causal_snapshot_id,
+                prepared_global_family=bridge.PreparedGlobalFamily(
+                    decision_id=f"decision-{current.event_id}",
+                    probability_witness=witness_by_event[current.event_id],
+                    candidate_seeds=(),
+                ),
+            ),
+            actuate_winner=lambda *_: pytest.fail("no-trade must not actuate"),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            current_book_epoch_provider=lambda probabilities, _at: (
+                probabilities,
+                None,
+            ),
+        )
+    finally:
+        trade.close()
+        forecast.close()
+
+    # The cut reached the shadow-semantics step with both families in scope...
+    assert lookups == [{family_a, family_b}]
+    # ...and paid for neither posterior, because no consumer asked.
+    assert authority_calls == []
+
+
 @pytest.mark.parametrize("case", ["agree", "differ", "side_effect"])
 def test_global_batch_proof_solve_reuses_actual_result_when_policies_agree(
     monkeypatch,
@@ -46581,10 +46834,27 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatc
         )
         for family_key, q in ((family_a, 0.90), (family_b, 0.80))
     }
+    # The fixture has no forecast DB file for the native-coordinate certificate,
+    # so stub only that DB-backed authority; shape semantics and the
+    # between-cohort check stay real. The stub records which family's
+    # authority was actually evaluated.
+    authority_calls: list[str] = []
+
+    def authority(_provenance, *, city, **_kwargs):
+        authority_calls.append(city)
+        return True
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_evidence_shape_has_entry_authority",
+        authority,
+    )
     semantics_conn = sqlite3.connect(":memory:")
     semantics_conn.execute(
         "CREATE TABLE forecast_posteriors ("
-        "posterior_identity_hash TEXT PRIMARY KEY, provenance_json TEXT)"
+        "posterior_identity_hash TEXT PRIMARY KEY, provenance_json TEXT, "
+        "computed_at TEXT, city TEXT, target_date TEXT, "
+        "temperature_metric TEXT, openmeteo_anchor_id TEXT)"
     )
     for family_key, revision, lag, reused in (
         (
@@ -46601,7 +46871,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatc
         ),
     ):
         semantics_conn.execute(
-            "INSERT INTO forecast_posteriors VALUES (?,?)",
+            "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?)",
             (
                 f"posterior-{family_key}",
                 json.dumps(
@@ -46622,20 +46892,71 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatc
                         }
                     }
                 ),
+                "2026-08-11T00:00:00+00:00",
+                family_key,
+                "2026-08-11",
+                "high",
+                None,
             ),
         )
-    semantics_by_posterior = (
+    # The lookup resolves each posterior when asked, so ask while the
+    # connection is still open.
+    lookup = (
         global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
             semantics_conn,
             qkernel_witnesses,
         )
     )
-    semantics_conn.close()
+    semantics_by_posterior = {
+        f"posterior-{family_key}": revision
+        for family_key in (family_a, family_b)
+        if (revision := lookup.get(f"posterior-{family_key}"))
+    }
+    assert authority_calls == [family_a, family_b]
     assert semantics_by_posterior == {
         f"posterior-{family_a}": (
             global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
         ),
     }
+    # Cut path: the shadow writer reads the lookup only for the proof winner,
+    # so the authority runs for that one posterior, not every family in the
+    # cut, and the frozen event is byte-identical to the eager-map result.
+    authority_calls.clear()
+    lazy_events = global_batch_runtime._market_relative_alpha_shadow_events(
+        selected=SimpleNamespace(
+            decision=SimpleNamespace(candidate_evaluations=qkernel_evaluations)
+        ),
+        proof_selected=proof_for(qkernel_evaluations[0]),
+        probability_witnesses=qkernel_witnesses,
+        book_epoch=SimpleNamespace(
+            assets=assets,
+            witness_identity="book-epoch",
+        ),
+        family_context_by_key={
+            family_a: {
+                "city": "Alpha",
+                "target_date": "2026-08-11",
+                "metric": "high",
+            },
+            family_b: {
+                "city": "Beta",
+                "target_date": "2026-08-11",
+                "metric": "low",
+            },
+        },
+        selection_epoch_identity="selection-epoch",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        qkernel_semantics_by_posterior=(
+            global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
+                semantics_conn,
+                qkernel_witnesses,
+            )
+        ),
+        strategy_keys=("forecast_qkernel_entry",),
+    )
+    assert authority_calls == [family_a]
+    semantics_conn.close()
     qkernel_events = global_batch_runtime._market_relative_alpha_shadow_events(
         selected=SimpleNamespace(
             decision=SimpleNamespace(candidate_evaluations=qkernel_evaluations)
@@ -46665,6 +46986,9 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money(monkeypatc
         strategy_keys=("forecast_qkernel_entry",),
     )
     assert len(qkernel_events) == 1
+    assert [(e.event_id, e.envelope_json) for e in lazy_events] == [
+        (e.event_id, e.envelope_json) for e in qkernel_events
+    ]
     qkernel_envelopes = [
         json.loads(event.envelope_json) for event in qkernel_events
     ]

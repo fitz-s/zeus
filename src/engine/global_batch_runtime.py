@@ -18,7 +18,7 @@ import threading
 import time
 import zlib
 from types import SimpleNamespace
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 import numpy as np
 
@@ -6298,22 +6298,44 @@ def _native_buy_min_order_vwap(
     return float(raw_vwap), float(fee_adjusted)
 
 
+class _RevisionLookup(Protocol):
+    def get(self, key: str, default: str | None = None, /) -> str | None: ...
+
+
+class _LazyRevisions:
+    """Revision per key, resolved on first ``get`` and memoized.
+
+    A lookup, not a collection: no length and no iteration, so even
+    ``lookup or {}`` never resolves a key; a consumer pays only for the keys
+    it asks for.
+    """
+
+    def __init__(self, resolve: Callable[[str], str | None]) -> None:
+        self._resolve = resolve
+        self._memo: dict[str, str | None] = {}
+
+    def get(self, key: str, default: str | None = None, /) -> str | None:
+        if key not in self._memo:
+            self._memo[key] = self._resolve(key) or None
+        return self._memo[key] or default
+
+
 def _qkernel_shadow_current_semantics_by_posterior(
     conn: object,
     probability_witnesses: Mapping[str, object],
-) -> dict[str, str]:
-    """Bind shadow eligibility to exact decision-snapshot posterior semantics."""
+) -> _RevisionLookup:
+    """Bind shadow eligibility to exact decision-snapshot posterior semantics.
+
+    Each posterior's entry-authority check (a read-only certificate query) runs
+    when a consumer first looks that posterior up, never for the whole cut.
+    """
 
     if not isinstance(conn, sqlite3.Connection):
         return {}
-    posterior_hashes = sorted(
-        {
-            str(getattr(witness, "posterior_identity_hash", "") or "").strip()
-            for witness in probability_witnesses.values()
-            if str(
-                getattr(witness, "posterior_identity_hash", "") or ""
-            ).strip()
-        }
+    posterior_hashes = frozenset(
+        str(getattr(witness, "posterior_identity_hash", "") or "").strip()
+        for witness in probability_witnesses.values()
+        if str(getattr(witness, "posterior_identity_hash", "") or "").strip()
     )
     if not posterior_hashes:
         return {}
@@ -6323,46 +6345,68 @@ def _qkernel_shadow_current_semantics_by_posterior(
     # snapshot is eligible.
     # RESET: a fresh posterior hash maps to its exact licensed semantics and
     # may claim its target-date key.
-    output: dict[str, str] = {}
     from src.data.station_ground_evidence import forecast_db_from_connection
     authority_forecast_db = forecast_db_from_connection(conn)
-    try:
-        for start in range(0, len(posterior_hashes), 500):
-            chunk = posterior_hashes[start : start + 500]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = conn.execute(
-                "SELECT posterior_identity_hash,provenance_json,computed_at,city,target_date,temperature_metric,openmeteo_anchor_id "
-                "FROM forecast_posteriors "
-                f"WHERE posterior_identity_hash IN ({placeholders})",
-                tuple(chunk),
-            ).fetchall()
-            for posterior_identity_hash, provenance, materialized_at,city,target_date,metric,anchor_id in rows:
-                if isinstance(provenance, str):
-                    try:
-                        provenance = json.loads(provenance)
-                    except json.JSONDecodeError:
-                        continue
-                if not isinstance(provenance, Mapping):
-                    continue
-                shape = _current_evidence_shape(provenance)
-                if shape is None:
-                    continue
-                if (
-                    current_evidence_shape_has_entry_authority(provenance, materialized_at=materialized_at,
-                        city=city,target_date=target_date,metric=metric,anchor_id=anchor_id,
-                        forecast_db=authority_forecast_db)
-                    and shape.get("between_cohort_status")
-                    == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
-                    and not current_evidence_shape_semantics_mismatch(provenance)
-                ):
-                    revision = str(shape.get("semantics_revision") or "")
-                    if revision in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS:
-                        output[str(posterior_identity_hash)] = revision
-    except (sqlite3.Error, TypeError, ValueError):
-        # Evidence collection may drain an entry gate but must never disturb the
-        # auction's SELL/HOLD/CASH result. Missing authority simply emits no row.
-        return {}
-    return output
+
+    def current_revision(posterior_identity_hash: str) -> str | None:
+        if posterior_identity_hash not in posterior_hashes:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT provenance_json,computed_at,city,target_date,temperature_metric,openmeteo_anchor_id "
+                "FROM forecast_posteriors WHERE posterior_identity_hash=?",
+                (posterior_identity_hash,),
+            ).fetchone()
+            if row is None:
+                return None
+            provenance, materialized_at, city, target_date, metric, anchor_id = row
+            if isinstance(provenance, str):
+                try:
+                    provenance = json.loads(provenance)
+                except json.JSONDecodeError:
+                    return None
+            if not isinstance(provenance, Mapping):
+                return None
+            shape = _current_evidence_shape(provenance)
+            if shape is None:
+                return None
+            if (
+                current_evidence_shape_has_entry_authority(provenance, materialized_at=materialized_at,
+                    city=city,target_date=target_date,metric=metric,anchor_id=anchor_id,
+                    forecast_db=authority_forecast_db)
+                and shape.get("between_cohort_status")
+                == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
+                and not current_evidence_shape_semantics_mismatch(provenance)
+            ):
+                revision = str(shape.get("semantics_revision") or "")
+                if revision in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS:
+                    return revision
+        except (sqlite3.Error, TypeError, ValueError):
+            # Evidence collection may drain an entry gate but must never disturb the
+            # auction's SELL/HOLD/CASH result. Missing authority simply emits no row.
+            return None
+        return None
+
+    return _LazyRevisions(current_revision)
+
+
+def _probability_semantics_by_family(
+    probability_witnesses: Mapping[str, object],
+    qkernel_semantics_by_posterior: _RevisionLookup,
+) -> _RevisionLookup:
+    """Day0 stamp, else the qkernel posterior's semantics, resolved per family on lookup."""
+
+    def revision(family_key: str) -> str | None:
+        witness = probability_witnesses.get(family_key)
+        if witness is None:
+            return None
+        return day0_probability_semantics_revision(
+            str(getattr(witness, "q_version", "") or "")
+        ) or qkernel_semantics_by_posterior.get(
+            str(getattr(witness, "posterior_identity_hash", "") or "")
+        )
+
+    return _LazyRevisions(revision)
 
 
 def _market_relative_alpha_shadow_events(
@@ -6375,7 +6419,7 @@ def _market_relative_alpha_shadow_events(
     selection_epoch_identity: str,
     selection_cut_at_utc: datetime,
     decision_at_utc: datetime,
-    qkernel_semantics_by_posterior: Mapping[str, str] | None = None,
+    qkernel_semantics_by_posterior: _RevisionLookup | None = None,
     strategy_keys: Sequence[str] = (
         "day0_nowcast_entry",
         "forecast_qkernel_entry",
@@ -6712,7 +6756,7 @@ def _market_relative_alpha_shadow_exit_events(
     wealth_witness: object,
     book_epoch: CurrentGlobalBookEpoch | None,
     decision_at_utc: datetime,
-    qkernel_semantics_by_posterior: Mapping[str, str] | None = None,
+    qkernel_semantics_by_posterior: _RevisionLookup | None = None,
 ) -> tuple[object, ...]:
     """Freeze the first robust, executable exit for each exact shadow BUY.
 
@@ -7962,7 +8006,7 @@ def _capital_proof_counterfactual_receipt(
     book_epoch_identity: str,
     wealth_witness: object,
     family_context_by_key: Mapping[str, Mapping[str, str]],
-    probability_semantics_by_family: Mapping[str, str],
+    probability_semantics_by_family: _RevisionLookup,
     probability_witnesses: Mapping[str, object],
     payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
     | None,
@@ -8105,9 +8149,8 @@ def _capital_proof_counterfactual_receipt(
             "city": str(context.get("city") or ""),
             "target_date": str(context.get("target_date") or ""),
             "metric": str(context.get("metric") or ""),
-            "probability_semantics_revision": str(
-                probability_semantics_by_family.get(evaluation_family_key) or ""
-            ),
+            # Resolved below for the one frontier that is kept, not per row.
+            "probability_semantics_revision": "",
             "bin_id": bin_id,
             "condition_id": str(evaluation.get("condition_id") or ""),
             "side": side,
@@ -8160,6 +8203,13 @@ def _capital_proof_counterfactual_receipt(
         if rejected_buy_frontiers
         else None
     )
+    if nearest_rejected_buy_frontier is not None:
+        nearest_rejected_buy_frontier["probability_semantics_revision"] = str(
+            probability_semantics_by_family.get(
+                nearest_rejected_buy_frontier["family_key"]
+            )
+            or ""
+        )
     winner = None
     winner_evaluation = None
     if candidate is not None:
@@ -10349,27 +10399,12 @@ def process_current_global_batch(
                     book_epoch_identity=venue_identity,
                     wealth_witness=selection_wealth,
                     family_context_by_key=family_context_by_key,
-                    probability_semantics_by_family={
-                        family_key: (
-                            day0_probability_semantics_revision(
-                                str(getattr(witness, "q_version", "") or "")
-                            )
-                            or str(
-                                qkernel_semantics_by_posterior.get(
-                                    str(
-                                        getattr(
-                                            witness,
-                                            "posterior_identity_hash",
-                                            "",
-                                        )
-                                        or ""
-                                    )
-                                )
-                                or ""
-                            )
+                    probability_semantics_by_family=(
+                        _probability_semantics_by_family(
+                            attempt_probabilities,
+                            qkernel_semantics_by_posterior,
                         )
-                        for family_key, witness in attempt_probabilities.items()
-                    },
+                    ),
                     probability_witnesses=attempt_probabilities,
                     payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                     venue_submit_count_before=int(proof_submit_count_before),
