@@ -1,5 +1,5 @@
 # Created: 2026-09-25
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-04
 # Authority basis: root AGENTS.md INV-47 (SCOPE/DRAIN/RESET);
 #   docs/operations/current/plans/auction_collapse_repair_design_2026-08-24.md
 #   §2 gate 4 (JIT GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED re-derives q).
@@ -171,6 +171,16 @@ def _probes(cut):
     )
 
 
+def _reasons(label):
+    """``wake:r[kind]#id@families,...`` -> ``wake:r,...``; other values as-is."""
+
+    if not isinstance(label, str) or not label.startswith("wake:"):
+        return label
+    return "wake:" + ",".join(
+        part.split("[", 1)[0] for part in label[len("wake:"):].split(",")
+    )
+
+
 def test_unrelated_city_print_never_cancels_a_cut(cut):
     """A print for another city changes no input the cut acts on."""
 
@@ -196,7 +206,7 @@ def test_a_fact_for_the_frozen_winners_family_cancels_through_actuation(
 
     cut.freeze(_IN_KEY)
     cut.publish(reason, _IN)
-    assert [probe() for probe in _probes(cut)] == [label, label, label]
+    assert [_reasons(probe()) for probe in _probes(cut)] == [label, label, label]
 
 
 def test_a_family_fact_before_the_freeze_defers_then_cancels_at_the_freeze(cut):
@@ -210,7 +220,7 @@ def test_a_family_fact_before_the_freeze_defers_then_cancels_at_the_freeze(cut):
     assert [probe() for probe in _probes(cut)] == [False, False, False]
 
     cut.freeze(_IN_KEY)
-    assert [probe() for probe in _probes(cut)] == [_PRINT, _PRINT, _PRINT]
+    assert [_reasons(probe()) for probe in _probes(cut)] == [_PRINT, _PRINT, _PRINT]
 
 
 def test_a_hard_fact_for_a_holding_cancels_but_its_belief_does_not(cut):
@@ -218,7 +228,7 @@ def test_a_hard_fact_for_a_holding_cancels_but_its_belief_does_not(cut):
     cut.publish("current_temperature_print_committed", _OUT)
     assert [probe() for probe in _probes(cut)] == [False, False, False]
     cut.publish_day0(_OUT)
-    assert [probe() for probe in _probes(cut)] == [_DAY0, _DAY0, _DAY0]
+    assert [_reasons(probe()) for probe in _probes(cut)] == [_DAY0, _DAY0, _DAY0]
 
 
 @pytest.mark.parametrize(
@@ -227,7 +237,7 @@ def test_a_hard_fact_for_a_holding_cancels_but_its_belief_does_not(cut):
 def test_capital_and_unknown_wakes_still_supersede_every_cut(cut, reason):
     assert cut.captured["epoch_superseded"]() is False
     cut.publish(reason)
-    assert cut.captured["epoch_superseded"]() == f"wake:{reason}"
+    assert _reasons(cut.captured["epoch_superseded"]()) == f"wake:{reason}"
 
 
 @pytest.mark.parametrize(
@@ -235,7 +245,7 @@ def test_capital_and_unknown_wakes_still_supersede_every_cut(cut, reason):
 )
 def test_a_family_fact_naming_no_family_cancels_even_before_the_freeze(cut, reason):
     cut.publish(reason)
-    assert cut.captured["selection_cancelled"]() == f"wake:{reason}"
+    assert _reasons(cut.captured["selection_cancelled"]()) == f"wake:{reason}"
 
 
 def test_a_new_cut_rejudges_from_none(cut):
@@ -248,7 +258,7 @@ def test_a_new_cut_rejudges_from_none(cut):
     cut.reset()
     assert cut.captured["selection_cancelled"]() is False
     cut.freeze(_OUT_KEY)
-    assert cut.captured["selection_cancelled"]() == _DAY0
+    assert _reasons(cut.captured["selection_cancelled"]()) == _DAY0
 
 
 def test_frozen_cut_ignores_routine_monitor_fairness(monkeypatch, tmp_path):
@@ -262,7 +272,7 @@ def test_frozen_cut_ignores_routine_monitor_fairness(monkeypatch, tmp_path):
     cut.freeze(_IN_KEY)
     assert cut.captured["selection_cancelled"]() is False
     cut.publish_day0(_IN)
-    assert cut.captured["selection_cancelled"]() == _DAY0
+    assert _reasons(cut.captured["selection_cancelled"]()) == _DAY0
 
 
 def test_cutoff_is_the_cuts_own_decision_time(monkeypatch, tmp_path):
@@ -283,7 +293,7 @@ def test_cutoff_is_the_cuts_own_decision_time(monkeypatch, tmp_path):
     assert cut.captured["selection_cancelled"]() is False
 
     cut.publish_day0(_IN, published_at=decision_at + _dt.timedelta(seconds=1))
-    assert cut.captured["selection_cancelled"]() == _DAY0
+    assert _reasons(cut.captured["selection_cancelled"]()) == _DAY0
 
 
 @pytest.mark.parametrize("family", (_IN, _OUT))
@@ -306,7 +316,7 @@ def test_family_scoped_held_completion_follows_the_same_law(
     held.publish("current_temperature_print_committed", family)
     assert held.captured["final_actuation_cancelled"]() is False
     held.freeze(_IN_KEY)
-    assert held.captured["final_actuation_cancelled"]() == (
+    assert _reasons(held.captured["final_actuation_cancelled"]()) == (
         _PRINT if family == _IN else False
     )
 

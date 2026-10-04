@@ -4241,7 +4241,11 @@ def _global_final_actuation_block_reason(
     if now >= deadline.astimezone(UTC):
         return deadline_expired_reason
     try:
-        if hard_authority_cancelled():
+        revoked = hard_authority_cancelled()
+        if revoked:
+            logging.getLogger(__name__).info(
+                "global final actuation revoked: source=%s", revoked
+            )
             return "GLOBAL_AUCTION_NO_TRADE:GLOBAL_HARD_AUTHORITY_REVOKED"
     except Exception as exc:  # noqa: BLE001 - hard authority loss is fail closed
         return (

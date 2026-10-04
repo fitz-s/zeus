@@ -12731,7 +12731,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert captured["forecast_conn"] is forecast
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
-    assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed"
+    assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed[hard]#new-day0-wake"
     urgent_reason["value"] = "market_price_advanced"
     assert captured["restrict_to_family_keys"] is None
     assert callable(captured["candidate_policy_rejection_resolver"])
@@ -12895,10 +12895,10 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     urgent_revision["value"] = (7, 8, 9)
     urgent_reason["value"] = "forecast_posterior_advanced"
     # A posterior naming no family keeps its veto (fail closed).
-    assert captured["epoch_superseded"]() == "wake:forecast_posterior_advanced"
+    assert captured["epoch_superseded"]() == "wake:forecast_posterior_advanced[belief]#new-day0-wake"
     urgent_revision["value"] = (10, 11, 12)
     urgent_reason["value"] = "day0_extreme_event_committed"
-    assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed"
+    assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed[hard]#new-day0-wake"
     urgent_revision["value"] = (4, 5, 6)
     urgent_reason["value"] = "market_price_advanced"
     prepared_receipt = captured["prepare_event"](
@@ -13360,11 +13360,11 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     urgent_revision["value"] = (10, 11, 12)
     urgent_reason["value"] = "forecast_posterior_advanced"
     # A posterior naming no family keeps its veto (fail closed).
-    assert captured["epoch_superseded"]() == "wake:forecast_posterior_advanced"
+    assert captured["epoch_superseded"]() == "wake:forecast_posterior_advanced[belief]#new-day0-wake"
 
     urgent_revision["value"] = (13, 14, 15)
     urgent_reason["value"] = "day0_extreme_event_committed"
-    assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed"
+    assert captured["epoch_superseded"]() == "wake:day0_extreme_event_committed[hard]#new-day0-wake"
 
 
 def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
@@ -35960,7 +35960,10 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     )
     wake_revision[0] += 1
     wake_reason[0] = "day0_extreme_event_committed"
-    assert cancelled() == "wake:day0_extreme_event_committed"
+    assert cancelled() == (
+        "wake:day0_extreme_event_committed[hard]"
+        "#urgent-day0_extreme_event_committed"
+    )
 
     wake_revision[0] = 1
     wake_reason[0] = "held_position_monitor_pending"
@@ -36075,7 +36078,10 @@ def test_live_adapter_buy_preflight_survives_routine_monitor_handoff(monkeypatch
 
     wake_revision[0] += 1
     wake_reason[0] = "day0_extreme_event_committed"
-    assert cancelled() == "wake:day0_extreme_event_committed"
+    assert cancelled() == (
+        "wake:day0_extreme_event_committed[hard]"
+        "#urgent-day0_extreme_event_committed"
+    )
 
 
 def test_live_adapter_does_not_turn_entry_capital_gate_into_forced_hold(

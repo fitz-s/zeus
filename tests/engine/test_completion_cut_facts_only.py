@@ -1,5 +1,5 @@
 # Created: 2026-09-30
-# Last reused or audited: 2026-09-30
+# Last reused or audited: 2026-10-04
 # Authority basis: live 08:11-08:41Z 09-30 (live cf424e239): 24 of 31 INCOMPLETE
 #   global cuts died at scope_scan to generic_completion_fence/latch at ~29.5 s.
 #   Operator law: a cut is cancelled only when a fact it depends on changes.
@@ -461,8 +461,9 @@ def test_a_request_marker_or_elapsed_time_never_cancels_a_generic_completion(
     captured["cut_scope_observer"](
         reactor_wake.CutScope(winner_family_key=_DALLAS)
     )
-    assert final() == "wake:day0_extreme_event_committed"
-    assert selection() == "wake:day0_extreme_event_committed"
+    label = "wake:day0_extreme_event_committed[hard]#day0-dallas@Dallas/2026-07-11/high"
+    assert final() == label
+    assert selection() == label
 
 
 def _run_generic_completion_batch(monkeypatch, era):

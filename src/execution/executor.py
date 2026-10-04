@@ -8320,10 +8320,18 @@ def execute_exit_order(
             # Client binding and certificate persistence can consume the last
             # milliseconds of validity after the initial pre-persist check.
             abort_reason = _exit_execution_authority_deadline_error(intent, conn=conn)
+            payload: dict[str, str] = {}
             if abort_reason is None and pre_venue_cancelled is not None:
                 try:
-                    if pre_venue_cancelled():
+                    revoked = pre_venue_cancelled()
+                    if revoked:
                         abort_reason = "global_final_authority_revoked_pre_venue"
+                        # The revoking fact's label (which wake, family, kind).
+                        payload["cancel_source"] = (
+                            revoked.strip()
+                            if isinstance(revoked, str) and revoked.strip()
+                            else "unattributed"
+                        )
                 except Exception as exc:  # noqa: BLE001 - final authority fails closed.
                     abort_reason = (
                         "global_final_authority_unavailable_pre_venue:"
@@ -8336,7 +8344,7 @@ def execute_exit_order(
                 command_id=command_id,
                 event_type="SUBMIT_REJECTED",
                 occurred_at=datetime.now(timezone.utc).isoformat(),
-                payload={"reason": abort_reason},
+                payload={"reason": abort_reason, **payload},
             )
             conn.commit()
             return OrderResult(

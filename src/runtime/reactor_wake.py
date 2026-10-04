@@ -3131,12 +3131,23 @@ def cut_invalidating_wakes(
 
 
 def wake_invalidation_label(wakes: Collection[object]) -> str:
-    """Attribution label naming the reasons of the invalidating wakes."""
+    """Attribution label naming each invalidating wake as
+    ``reason[kind]#wake_id@city/date/metric+...`` (families omitted if none)."""
 
-    reasons = sorted(
-        {str(getattr(wake, "reason", "") or "") or "unknown" for wake in wakes}
-    )
-    return "wake:" + (",".join(reasons) if reasons else "unknown")
+    def one(wake: object) -> str:
+        reason = str(getattr(wake, "reason", "") or "") or "unknown"
+        wake_id = str(getattr(wake, "wake_id", "") or "") or "unknown"
+        families = "+".join(
+            "/".join(map(str, family))
+            if isinstance(family, (tuple, list))
+            else str(family)
+            for family in tuple(getattr(wake, "forecast_families", ()) or ())
+        )
+        return f"{reason}[{wake_kind(wake)}]#{wake_id}" + (
+            f"@{families}" if families else ""
+        )
+
+    return "wake:" + (",".join(sorted(one(wake) for wake in wakes)) or "unknown")
 
 
 def wakes_after_cutoff(

@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused or audited: 2026-10-01
+# Last reused or audited: 2026-10-04
 # Authority basis: cut-cancel throughput task (2026-09-29): one predicate
 #   decides whether a wake invalidates a running cut; a structural antibody
 #   prevents a second copy.
@@ -221,3 +221,28 @@ def test_marker_is_judged_as_a_wake_and_old_facts_are_not(tmp_path):
     wakes = reactor_wake.wakes_after_cutoff(cutoff.isoformat(), exclude_wake_ids=(), path=path)
     assert [wake.wake_id for wake in wakes] == [newer.wake_id]
     assert cut_invalidating_wakes(wakes, FROZEN).hard == wakes
+
+
+def test_invalidation_label_names_each_wake_its_kind_and_families():
+    """The cancel label is the revoke attribution written to the executor's
+    SUBMIT_REJECTED payload and the cut row's cancel_source: it must say which
+    wake, of what kind, for which families."""
+
+    label = reactor_wake.wake_invalidation_label(
+        (
+            SimpleNamespace(
+                wake_id="w-day0",
+                reason="day0_extreme_event_committed",
+                forecast_families=(PARIS, TOKYO),
+            ),
+            SimpleNamespace(
+                wake_id="w-fill", reason="position_fill_projected", forecast_families=()
+            ),
+        )
+    )
+    assert label == (
+        "wake:day0_extreme_event_committed[hard]#w-day0"
+        "@Paris/2026-07-20/high+Tokyo/2026-07-20/high,"
+        "position_fill_projected[capital]#w-fill"
+    )
+    assert reactor_wake.wake_invalidation_label(()) == "wake:unknown"

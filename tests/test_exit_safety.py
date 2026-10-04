@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-10-02
+# Last reused/audited: 2026-10-04
 # Lifecycle: created=2026-04-27; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
@@ -6836,7 +6836,9 @@ def test_exit_prevenue_final_cancel_terminalizes_command_without_sdk_call(
             ),
             conn=conn,
             decision_id="exit-final-cancel",
-            pre_venue_cancelled=lambda: True,
+            pre_venue_cancelled=lambda: (
+                "wake:day0_extreme_event_committed[hard]#w1@Karachi/2026-10-04/high"
+            ),
         )
 
         assert result.status == "rejected"
@@ -6847,11 +6849,19 @@ def test_exit_prevenue_final_cancel_terminalizes_command_without_sdk_call(
             "SELECT state FROM venue_commands WHERE command_id = ?",
             (result.command_id,),
         ).fetchone()[0] == "REJECTED"
-        assert conn.execute(
-            "SELECT event_type FROM venue_command_events WHERE command_id = ? "
-            "ORDER BY sequence_no",
+        last_event = conn.execute(
+            "SELECT event_type, payload_json FROM venue_command_events "
+            "WHERE command_id = ? ORDER BY sequence_no DESC LIMIT 1",
             (result.command_id,),
-        ).fetchall()[-1][0] == "SUBMIT_REJECTED"
+        ).fetchone()
+        assert last_event[0] == "SUBMIT_REJECTED"
+        # The revoking fact is on the durable row, not only in a log line.
+        assert json.loads(last_event[1]) == {
+            "reason": "global_final_authority_revoked_pre_venue",
+            "cancel_source": (
+                "wake:day0_extreme_event_committed[hard]#w1@Karachi/2026-10-04/high"
+            ),
+        }
         assert conn.execute(
             "SELECT COUNT(*) FROM collateral_reservations "
             "WHERE command_id = ? AND released_at IS NULL",
@@ -18907,6 +18917,8 @@ def _seed_rejected_global_sell(conn, *, case):
                          (venue_order_id, command_id))
     payload = {
         'pre_venue': {'reason': 'global_final_authority_revoked_pre_venue'},
+        'pre_venue_attributed': {'reason': 'global_final_authority_revoked_pre_venue',
+                                 'cancel_source': 'wake:day0_extreme_event_committed'},
         'pre_venue_with_envelope': {'reason': 'global_final_authority_revoked_pre_venue',
                                     'final_submission_envelope_id': 'x'},
         'acked': None,
@@ -18953,7 +18965,9 @@ def _seed_rejected_global_sell(conn, *, case):
     )
 
 
-@pytest.mark.parametrize('case', ['pre_venue', 'fak_no_match_proof'])
+@pytest.mark.parametrize(
+    'case', ['pre_venue', 'pre_venue_attributed', 'fak_no_match_proof']
+)
 def test_rejected_sell_with_positive_no_order_proof_frees_global_slot(conn, case):
     from src.execution import exit_lifecycle
 
