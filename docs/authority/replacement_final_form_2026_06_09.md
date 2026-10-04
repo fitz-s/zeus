@@ -444,6 +444,17 @@ and resolver
 Old zero-weight declarations are not silently given the new policy. A docs
 change alone is not implementation or deployment evidence.
 
+2026-10-04 revert record: the v35/v36 conditional measurement-domain law
+(15b264df7, 0b5ee41a3) was reverted as a broken deploy, and the v34/v33 law
+above is current again. Its ENS acquisition assumed the Ensemble API accepts
+`run`. The provider refuses `run` for every run and model (HTTP 400 "requested
+model run is not available"; 200 without `run`), so no post-revision Day0
+carrier could materialize. Its midnight coverage domain also refused every
+post-midnight run for non-HKO cities. A re-land must acquire ENS on the
+provider's real contract (latest-run body bound to its run by exact
+metadata bracket) and must never leave a held Day0 position without a serving
+belief.
+
 The shared-carrier V1 is retained only for explicit, immutable historical replay. Current ENTRY and
 held-position belief require a complete V2 or typed V3 carrier declaration; ordinary
 non-carrier forecasts are unaffected. Old, partial or unknown carrier versions

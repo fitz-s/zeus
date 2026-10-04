@@ -16393,3 +16393,33 @@ fresh all-held strict capital/nonterminal/process/config admission. Native
 decoder does not import/change the adapter; the bool suite was not rerun for
 an unrelated decoder change. No new source acquisition, runtime caller or
 forecast authority is present. Existing docs59 exact baseline drift remains.
+
+### 2026-10-04 REVERTED as broken deploy
+
+15b264df7 and 0b5ee41a3 are reverted on branch exit-chain-revert-15b. The
+earlier text above stays as the record of what was attempted. dab665f76 (table
+registration) and the later offline ENS GRIB decode work stay.
+
+Defect (a): the Ensemble API rejects `run=` for every run and model. Probes on
+2026-10-04 (ecmwf_ifs025 06Z/00Z/10-03 00Z/09-20 00Z, gfs025, icon_seamless_eps)
+all returned HTTP 400 "The requested model run is not available"; the same
+request without `run` returned 200. Live effect: 281 run_not_published ENS
+failures from 10:44 CDT (0 before), 0 ENS member rows since 15:40Z, 2889
+DAY0_CONDITIONAL_HIGH_ENSEMBLE_UNAVAILABLE queue blocks (HIGH and LOW; the
+name is a legacy string), 0 Day0 carriers among 131 live posteriors since
+15:40Z. The reader revoked every pre-revision carrier as
+REPLACEMENT_DAY0_MEASUREMENT_DOMAIN_NOT_CURRENT. Held exits ran without
+fresh_prob (171/h at 08h CDT -> 1806/h at 11h CDT), and queue throughput fell
+from 532 to 120 per 90 min.
+
+Defect (b): coverage_cut = local midnight for non-HKO cities, together with
+the negative-lead support rule and DAY0_RUN_STARTS_AFTER_CAUSAL_BOUNDARY,
+refuses every run initialised after local midnight. Same-day Day0 carriers are
+then unproducible for most of the local day, which violates the ratified
+availability invariant: adding or failing evidence never reduces the
+availability of the last validated active posterior.
+
+Re-land requirements: provider-real ENS acquisition (an unpinned latest-run
+body bound to its run by identical before/after metadata under its own typed
+authority; WIP on branch exit-chain-ens-bracket-wip), and a domain law that
+never leaves a held Day0 position without a serving belief.
