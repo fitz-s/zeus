@@ -318,7 +318,7 @@ files:
     zone: K1_truth
     authority_role: station_temperature_provider_adapter
     why: Fixed-endpoint station clients preserve native values, QC, observation and actual receipt clocks. Reviewed exact-value equality is registry metadata; no fabricated
-      publisher timestamp or final daily value. WRH fast JSON references preserve observed station metadata and original full-batch response identity separately from temperature identity; metadata is not ground or sensor-height authority.
+      publisher timestamp or final daily value. Shared sample conversion rejects JSON booleans before float coercion while preserving real numeric zero, negative and finite native values and existing clock/QC rules. WRH fast JSON references preserve observed station metadata and original full-batch response identity separately from temperature identity; metadata is not ground or sensor-height authority.
     downstream: []
   src/data/noaa_wrh_timeseries.py:
     zone: K1_truth

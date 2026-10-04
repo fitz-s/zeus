@@ -353,6 +353,8 @@ def _utc(value: str) -> datetime:
 
 def _sample(route, observed: datetime, value, receipt: datetime, digest: str,
             published: datetime | None = None, station_reference=None) -> StationTemperaturePrint | None:
+    if isinstance(value, bool):
+        return None
     value = float(value)
     if not math.isfinite(value) or value == -999 or observed > receipt:
         return None

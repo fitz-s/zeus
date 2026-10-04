@@ -1,7 +1,7 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-03
-# Lifecycle: created=2026-09-29; last_reviewed=2026-10-03; last_reused=2026-10-03
-# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md WRH metadata slice
+# Last reused/audited: 2026-10-04
+# Lifecycle: created=2026-09-29; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md native sample boolean boundary
 # Purpose: Pin station adapter parsing and registry source roles, including fast-admission proof law.
 # Reuse: Run when physical_current_sources, station_temperature_adapters, or the registry JSON changes.
 # Authority: REQ-20260929-223929-bf51a2; recorded provider responses, 2026-09-30 UTC.
@@ -347,6 +347,47 @@ def test_jma_bad_quality_and_future_values_cannot_enter():
     body = json.dumps({"20260930135000": {"temp": [18.8, 1]},
                        "20260930150000": {"temp": [19.0, 0]}}).encode()
     assert parse_station_payload(route, body, received_at=NOW) == ()
+
+
+@pytest.mark.parametrize("provider", ["jma_amedas", "imgw_synop"])
+@pytest.mark.parametrize("value", [True, False, 0, -5.5, 18.25, float("nan"), float("inf"), float("-inf"), -999])
+def test_native_station_temperature_bool_is_not_numeric_zero(provider, value):
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == provider)
+    if provider == "jma_amedas":
+        payload = {"20260930130000": {"temp": [value, 0]}}
+    else:
+        payload = {"id_stacji": route.identity["provider_station"],
+                   "data_pomiaru": "2026-09-30", "godzina_pomiaru": "04",
+                   "temperatura": value}
+    body = json.dumps(payload).encode()
+    samples = parse_station_payload(route, body, received_at=NOW)
+    import math
+    if isinstance(value, bool) or not math.isfinite(value) or value == -999:
+        assert samples == ()
+    else:
+        sample, = samples
+        assert sample.value_native == value and sample.unit == route.unit
+        assert sample.observed_at == datetime(2026, 9, 30, 4, tzinfo=timezone.utc)
+        assert sample.fetched_at == NOW
+        assert valid_station_print(route, sample.raw_report,
+                                   observed_at=sample.observed_at, value=value)
+        import hashlib
+        assert json.loads(sample.raw_report)["payload_sha256"] == hashlib.sha256(body).hexdigest()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_jma_boolean_row_does_not_replace_valid_extreme_twin(metric):
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "jma_amedas")
+    body = json.dumps({
+        "20260930130000": {"temp": [True, 0]},
+        "20260930131000": {"temp": [False, 0]},
+        "20260930132000": {"temp": [0, 0]},
+        "20260930133000": {"temp": [-5.5, 0]},
+    }).encode()
+    samples = parse_station_payload(route, body, received_at=NOW)
+    assert [s.value_native for s in samples] == [0.0, -5.5]
+    aggregate = max if metric == "high" else min
+    assert aggregate(s.value_native for s in samples) == (0.0 if metric == "high" else -5.5)
 
 
 def test_systematic_mismatch_cannot_be_admitted(tmp_path):

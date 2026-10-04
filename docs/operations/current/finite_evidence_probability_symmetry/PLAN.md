@@ -16224,3 +16224,172 @@ claim follows from this bounded loader success. Native future2t acquisition
 awaits the human budget decision; no acquisition was enabled. Physical
 representativeness, two unproven station grounds and natural new-domain
 probability/held consumption remain open. Parent task is unfinished.
+
+### 2026-10-04 native ENS offline decoder continuation — BEFORE EDIT
+
+Exact managed parent restored from its recoverable archive, preserving pushed
+checkpoint6abb83b6185cb07d45a1df69687ed42f37d746c5 on
+fix/red-cancel-source-drain-20261003. Fresh origin/live remains
+78bd0f11ef66c2cb32a68e8a1f30020862304ace; parent branch is already based on
+that tip and has only the documentary checkpoint descendant. Old archived
+children were not restored. At18:26Z actual main2287/ingest55430/forecast55483
+still run78bd, cwd/live canonical handles and file-only configd7 verified,
+selected guardNone. HK current local target is Oct5; latest H739595/L739597
+are still pre-boot16:03/16:15 records, not new remaining-domain consumption.
+
+ROOT assigned /root/native_ens_point_decoder_impl an independent managed child
+based on78bd, owning only scripts/extract_open_ens_localday.py and
+tests/test_ecmwf_open_data_collect_cycle.py. Parent integrator owns this PLAN
+and subsequent existing registry mapping, not those source/test files while
+the worker writes. Offline implementation only: no collector callback, new
+HTTP, download, CLI/runtime activation, forced cycle/reseed, canonical writes,
+guard action or restart. The human has not chosen the proposed512MiB/run300s
+acquisition budget; offline synthetic fixtures cannot authorize acquisition.
+
+Bounded acceptance: decode explicit original GRIB2 instantaneous native2t
+(param/unit/2m/instant-step), exact cycle and requested support, unique51-member
+membership and Cycle50r1 control identity from actual ecmf/process161 raw
+sections, matching immutable raw-body/index selection and dissemination-grid
+identity. Reuse existing point/land selection and real LSM/optional phi proof;
+lambda/ground difference is descriptive evidence, never sensor correction or
+automatic lapse/q shift. Actual missing/foreign/member duplicate/process/run/
+grid/unit/truncated or tampered bytes must reject, with HIGH/LOW support twins
+and real ecCodes private fixtures. Preserve existing mx2t3/mn2t3 extraction,
+native interval semantics, clocks, legacy unknown behavior and typed source
+qualification. Source-run provenance cannot be reconstructed from filename,
+requested coordinates, tablesVersion/date alone or invented issued clock.
+
+SCOPE: one explicit immutable offline body/run/member-support/selected-cell
+identity. DRAIN: none in production for this slice; acquisition and downstream
+same-X conditional carrier integration remain separately gated. RESET: a new
+real body with complete matching immutable evidence may be decoded without
+rewriting old evidence. No claim that private51 fixtures are real future2t
+availability, source representativeness, live posterior readiness or profit.
+Existing extractor registry requires collect-cycle/source-run-context tests;
+final owned/affected checks and parent mapping are assessed only after freeze,
+not by repeating unrelated historic probability batches.
+
+Integrator governance extension approved by ROOT: only the existing
+architecture/script_manifest.yaml::extract_open_ens_localday.py row is updated
+to describe the pure offline instantaneous point-helper role, distinct from
+the unchanged interval CLI. Existing required collect-cycle and
+ingest-grib-source-run-context suites remain both required. No new registry
+file, CLI, mode, runtime callback, download authority or DRAIN flag is added.
+This harmonizes the owning script description with the bounded source helper;
+INV-06/INV-14 physical quantity/date identity and INV-47 typed missing-evidence
+boundaries are preserved. Mapping is not evidence that implementation passed.
+
+The current all-city read-only lane reports54 source families: NOAA48
+(37C/11F), WU5 (Auckland/Jinan/Jakarta/Lagos/Taipei), HKO1. Optional physical
+registry coverage22/11 families is not54 physical PASS. HK32m and KORD204.8m
+primary ground originals are qualified where individually bound; MPMG/ZSQD
+remain missing, with owning station-ground materialization failing closed.
+The WRH active batch wrapper preserves JSON/hash but strips original observation
+metadata, so cumulative-prefix authority is not proved by that batch alone.
+These are lane-reported current residuals, not new source fixes or authorization
+for ground acquisition, historical fitting or treating regular-grid height as
+sensor ground; recheck on use.
+
+Next proposed pure-offline consumer bridge (design only, no source write):
+src/data/day0_hourly_vectors.py plus existing
+tests/test_day0_remaining_day_pricing.py. Translate a qualified decoded native
+point result into the existing per-member typed vector/conditional-path seam,
+preserving exact51 same-run/same-grid/support, physical body/index/LSM/phi
+witness and actual capture clocks. Feed the same coverage-cut-to-local-end
+latent X to W/D/B before the running-extreme pushforward once; carry real
+source roles rather than forging the existing Open-Meteo response metadata.
+Normal producer persistence/collector/acquisition and canonical schema are
+outside this proposal. Exact DTO compatibility and own-clock predicate may
+require refinement before ROOT assigns any writer. No synthetic fixture may
+be presented as real future-body possession or current probability recovery.
+
+### 2026-10-04 station temperature JSON boolean boundary — BEFORE EDIT
+
+ROOT authorized parent ownership only src/data/station_temperature_adapters.py
+and existing tests/test_station_temperature_adapters.py plus this PLAN for a
+verified malformed-input defect. The all-city read-only auditor reproduced
+actual JMA RJTT44166 timestamp/QC0 with temp:[true,0] accepted as1.0C and
+temp:[false,0] as0C: Python float(bool) is not physical temperature evidence.
+This is a generated private malformed body, not proof that a provider recently
+sent it and not an explanation of the current HK missing members.
+
+Smallest correction: the shared owning _sample boundary rejects bool before
+float conversion. Preserve numeric0, negatives, finite fractions, native units,
+existing missing/nonfinite/QC/clock/identity/rounding and prefix qualification.
+Do not broaden into unproved QC-boolean behavior or probability/source math.
+Actual JMA and IMGW shared-parser True/False twins plus nominal0/negative/finite
+controls must first RED on old code, then GREEN with affected owner suite.
+Native child still owns its disjoint extractor/collect test only.
+
+SCOPE malformed temperature source/payload/sample identity; DRAIN the next
+legal physical sample through the existing normal source writer; RESET reject
+boolean values while legal zero remains admissible. All tests stay private
+TI1/template-config; no network, live DB, source cycle, venue or guard action.
+Freeze source/test hash with compile/diff/changed-surface registry proof for
+ROOT's named review; no commit, landing or restart is authorized for this slice.
+
+Exact existing source-rationale adapter row and test-topology trusted/owner rows
+are the only additional bool-slice registry surfaces; no unrelated drift repair.
+Original78 actual parser RED:6FAIL/6nominal controlsPASS2.05s,
+/tmp/zeus-station-bool-red-20261004.xml. Two-source True/False and HIGH/LOW
+mixed-row failures are physical-input behavior, not a conftest failure.
+After the two-line shared bool guard, owner suite121PASS/1SKIP2.61s,
+/tmp/zeus-station-bool-owner-20261004.xml;20new matrix cases PASS, with original
+nominal source parsing, clock/QC, private causal reader/ingest and rounding
+controls unchanged. The optional netCDF fixture skip is recorded, not a pass.
+Source/test AST compile and diffcheck pass. Parent own ignored config is a
+symlink to its tracked settings.example.json, not a live configuration change;
+TI1 writes only a validated private /tmp test root. No production mutation.
+
+Frozen adapter SHAadcf70e9f1caf84cff14aa87bd907199ce65f16da0826f8bfabd0a2c6b4217bf;
+test SHA54f8ccc3c40cbda7297ed59579900a82d15ecf5bebd393c141c5fce6af90da73.
+The optional skip is exact recorded-provider KNMI response parsing, because
+netCDF4 is unavailable; no KNMI PASS is claimed. Planning-lock/freshness
+machine result has no issues. Docs machine check actualrc1:59 issues; direct
+run_docs with only the exact changed registry/PLAN read surface overlaid from
+original taskHEAD6abb produces the identical59 issue dictionaries, with zero
+new or changed-scope issues (tool648d11). Do not call this repo-wide docs clean:
+45 non-Markdown artifacts,4 unclassified docs,4 broken paths,2 unregistered
+tracked files,2 unregistered subtrees and2 pointer/currentness issues remain.
+ROOT's narrow owner-suite scope was followed; unrelated whole forecast/data
+matrices were not repeated. Await named review/delivery decision; no commit,
+push, loader or source collection was performed for the new slices.
+
+### Native offline decoder final integration gate
+
+ROOT accepted bool independent6 private actual parser-to-SQLite cases with
+frozen source/test unchanged. Native child originally produced240owner PASS
+before its last guards, then42focused/extrema PASS; neither substitutes for
+the final parent integration. Named C first found a real original-quantity
+hole: an actual dewpoint body could borrow echoed2t headers. Original independent
+6PASS/1RED XML /tmp/zeus-native-point-independent7.xml remains evidence.
+The child correction binds original Section0 discipline0 and Section4
+category0/parameter0, alongside original run/process161/grid/member fields;
+changed4 independent cases PASS3.83s with old extrema control, XML
+/tmp/zeus-native-point-independent-recovery4.xml. No header echo, table version
+or configuration substitutes for these raw bytes, and decode availability
+never upgrades OFFLINE_ONLY or authorizes a forecast/settlement value.
+
+Child119a4b8576ef713117f98029b90ca1ceff818cae then05abd75fdc3727d6f2227865b2bdc642670ec1dc
+were clean disjoint cherry-picked as24ced3c80 thenac1bd98d4; parent bool and
+governance work was preserved. Exact final extractor SHA
+ec2481a185f968d4614229f776b9d5d97995c69270dbb2dba2f5b046875d0191;
+collect test SHAb2992379e62e237c09897d5028c86bc11a53ad99c2905114ff7dcdff4d3c3194.
+One final two-owner batch in private TI1 state /tmp/zeus-native-final-owner.YATeW4
+is the loading gate; XML /tmp/zeus-native-final-integration-20261004.xml.
+Existing collector-test registry row records point-proof antibodies; interval
+CLI and both required suites are unchanged. No native future2t acquisition or
+live conditional carrier bridge has been enabled. The human budget remains
+unresolved, and the separately designed bridge is not implemented in this batch.
+
+Final parent exact frozen two-owner integration actualrc0,242PASS0FAIL0SKIP
+80.29s (session45206/tool d53632), XML above. This is after the original
+quantity/discipline correction, not reused pre-guard240 evidence. Bool121PASS
+and its one optional KNMI skip remain separately reported, not merged into an
+all-green whole-repo claim. Four frozen hashes still match; compile4/YAML3,
+planning/freshness machine checks and diff pass. ROOT accepted both named
+reviews and authorized normal delivery only after this integration proof and
+fresh all-held strict capital/nonterminal/process/config admission. Native
+decoder does not import/change the adapter; the bool suite was not rerun for
+an unrelated decoder change. No new source acquisition, runtime caller or
+forecast authority is present. Existing docs59 exact baseline drift remains.
