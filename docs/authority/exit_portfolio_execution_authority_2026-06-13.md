@@ -10,9 +10,11 @@ expected-value loss that no account cash state justifies, and cash returns at
 settlement anyway. A capital-auction SELL is therefore admissible only when its
 own expected EV against holding, under the q its certificate uses and net of
 fees, exceeds the same epsilon BUY must exceed. E2's "log utility accepts a bid
-below q_t" no longer licenses a SELL: ΔlogW on a cash-only wealth basis rises
-as cash falls, so below-q acceptance sold holdings to fund the book. Log growth
-and ruin reduction still size and rank admitted SELLs. Typed protective exits
+below q_t", E3's `v ≥ q·e^{−g*T}` and E6's interior x* each license a sale
+below q; none does so any longer: ΔlogW on a cash-only wealth basis rises as
+cash falls, so below-q acceptance sold holdings to fund the book. Log growth
+and ruin reduction still size and rank admitted SELLs; an admitted taker sale
+stops before any bid level whose fragment-safe net price is at or below q. Typed protective exits
 (RED force exit, Day0 hard-fact dead bin, exact zero support) are not capital
 auction SELLs and are unaffected.
 

@@ -3387,6 +3387,7 @@ class GlobalSellExecutionAuthority:
             or decision.robust_delta_log_wealth != 0.0
             or decision.robust_ev_usd != 0.0
             or not math.isfinite(expected_terminal.expected_ev_usd)
+            or expected_terminal.expected_ev_usd <= 0.0
             or not (
                 expected_terminal.ruin_probability_reduction > 0.0
                 or (
@@ -3406,6 +3407,7 @@ class GlobalSellExecutionAuthority:
                 )
             )
             or not math.isfinite(decision.robust_ev_usd)
+            or decision.robust_ev_usd <= 0.0
         )
         if (
             jit_candidate.execution_curve_identity

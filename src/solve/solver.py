@@ -7066,7 +7066,7 @@ def global_sell_fak_prefix_certificate(
     ruin, delta_log, ev = _global_sell_fill_prefix_extended_objective(
         decision, filled_shares=decision.shares, net_proceeds_usd=proceeds,
     )
-    if not (ev > 0 and (ruin > 0 or (ruin == 0 and delta_log > 0))):
+    if not (ev > _ROBUST_EV_EPS_USD and (ruin > 0 or (ruin == 0 and delta_log > 0))):
         raise ValueError("SELL rounding-safe fill economics non-positive")
     return {
         "semantics": "sell_submitted_floor_twice_unrounded_fee_v1",
@@ -7145,7 +7145,9 @@ def _score_global_single_order_sell(
                     win_after=win_baseline + proceeds,
                 )
                 ev = proceeds - Decimal(str(1.0 - robust_q)) * shares
-                return ev > 0 and (ruin > 0 or (ruin == 0 and growth > 0))
+                return float(ev) > _ROBUST_EV_EPS_USD and (
+                    ruin > 0 or (ruin == 0 and growth > 0)
+                )
             except (ArithmeticError, ValueError):
                 return False
 
@@ -7375,7 +7377,7 @@ def _score_global_single_order_sell(
         prefix_utility_positive = prefix_ruin > 0.0 or (
             prefix_ruin == 0.0 and prefix_du > 0.0
         )
-        if not (prefix_utility_positive and prefix_ev > 0.0):
+        if not (prefix_utility_positive and prefix_ev > _ROBUST_EV_EPS_USD):
             return replace(
                 scored,
                 rejection_reasons={

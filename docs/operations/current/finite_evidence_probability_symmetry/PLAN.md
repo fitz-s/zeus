@@ -282,7 +282,11 @@ exit. Existing LOW and native NO-token checks form the symmetry counterpart.
 
 Confirmed bounded repair slices:
 
-0. Core exit-action law conflict, proved against ACTIVE exit authority E2/E6:
+0. SUPERSEDED 2026-10-04 by the operator ruling recorded as the 2026-10-04
+   erratum in `docs/authority/exit_portfolio_execution_authority_2026-06-13.md`:
+   a capital-auction SELL must pass the same positive-EV floor as BUY. Do not
+   restore SELL-specific expected-log admission. Original text kept as history:
+   Core exit-action law conflict, proved against ACTIVE exit authority E2/E6:
    the implementation additionally requires positive SELL cash EV, although
    E2 explicitly permits a bid below q when expected log wealth improves.
    Immutable Hong Kong decision 888561 independently reproduces W=0.858079,
@@ -12681,7 +12685,9 @@ Adjacent family receipts895983/895984 at06:04:25 were complete EVALUATED and
 rejected NON_POSITIVE_EXPECTED_OBJECTIVE: q0.4045887, price0.091, shares0.01,
 mean delta-log -0.00067859 and EV -0.003177. No other-city preparation blocker
 is proved; the memory-coverage linkage to that exact generation remains a
-telemetry gap. SELL may lawfully reduce ruin risk with positive mean delta-log
+telemetry gap. SUPERSEDED 2026-10-04 (see the 2026-10-04 erratum in
+`docs/authority/exit_portfolio_execution_authority_2026-06-13.md`; SELL now
+passes the BUY positive-EV floor): SELL may lawfully reduce ruin risk with positive mean delta-log
 despite negative EV (solver3064/E2/E6); a BUY-style positive-EV gate is not its
 law. This is not a profit flip or an independently reproduced wealth proof.
 

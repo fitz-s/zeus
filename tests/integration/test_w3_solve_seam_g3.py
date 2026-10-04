@@ -54562,6 +54562,43 @@ def test_value_sell_keeps_improved_jit_bid(_normal_hko_concentrated_sell):
     assert authority.limit_price() == case.authority.limit_price()
 
 
+@pytest.mark.parametrize("forged", ("comparison", "terminal"))
+def test_final_sell_authority_rejects_a_forged_below_hold_value_decision(
+    _normal_hko_concentrated_sell, forged,
+):
+    """The submit boundary re-proves the SELL EV floor; it does not trust the selector.
+
+    Forge only the EV sign on an otherwise valid value sale and rebind every
+    actuation identity, so the economics check is the sole remaining guard.
+    """
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+    case = _normal_hko_concentrated_sell
+    actuation = case.ranked.actuation
+    decision = copy.copy(actuation.decision)
+    growth = copy.copy(decision.expected_growth)
+    terminal = copy.copy(decision.expected_terminal_wealth)
+    target = growth if forged == "comparison" else terminal
+    object.__setattr__(target, "expected_ev_usd", -abs(target.expected_ev_usd))
+    object.__setattr__(decision, "expected_growth", growth)
+    object.__setattr__(decision, "expected_terminal_wealth", terminal)
+    forged_actuation = copy.copy(actuation)
+    object.__setattr__(forged_actuation, "decision", decision)
+    object.__setattr__(forged_actuation, "actuation_identity", global_single_order_actuation_identity(
+        decision=decision, winner_event_id=actuation.winner_event_id,
+        universe_witness_identity=actuation.universe_witness_identity,
+        wealth_witness_identity=actuation.wealth_witness_identity,
+        selection_epoch_identity=actuation.selection_epoch_identity,
+        selection_cut_at_utc=actuation.selection_cut_at_utc,
+        decision_at_utc=actuation.decision_at_utc))
+    object.__setattr__(forged_actuation, "economic_identity", global_single_order_economic_identity(
+        decision=decision, probability_witness=actuation.probability_witness,
+        wealth_economic_identity=actuation.wealth_economic_identity))
+    object.__setattr__(forged_actuation, "auction_receipt_ref", None)
+    forged_actuation.__post_init__()
+    with pytest.raises(ValueError, match="GLOBAL_SELL_EXECUTION_ECONOMICS_INVALID"):
+        GlobalSellExecutionAuthority.from_current(actuation=forged_actuation, jit_candidate=case.rebound)
+
+
 def _normal_hko_sell_intents(case):
     """Audit projection of the actual selected/JIT objects of the value sale."""
     from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
