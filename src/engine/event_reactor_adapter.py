@@ -14932,7 +14932,7 @@ def _durable_global_sell_market_authority(
         or base.captured_at > quote_at
         or quote_at > base.freshness_deadline
         or checked_at > base.freshness_deadline
-        or base.active is not True
+        # ``active`` is a routing label; closed/accepting/orderbook decide it.
         or base.closed is not False
         or base.accepting_orders is not True
         or base.enable_orderbook is not True

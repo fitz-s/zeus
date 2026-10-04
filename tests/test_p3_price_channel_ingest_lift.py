@@ -5537,6 +5537,7 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
     ]
     # Committed on every held REST quote, changed or not: the refresh is a
     # schedule, so the current snapshot stays valid until it is superseded.
+    assert all(action.invalidates_snapshot is False for action in refreshed)
     assert invalidated == []
     check = sqlite3.connect(trade_path)
     try:
@@ -6342,10 +6343,11 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
         "_edli_tokens_requiring_rest_quote_refresh",
         lambda conn, token_ids, **kwargs: ([], len(token_ids)),
     )
+    produced = []
     monkeypatch.setattr(
         lane,
         "_edli_enqueue_held_snapshot_refresh_actions",
-        lambda pending: actions.extend(pending) or {
+        lambda pending: actions.extend(pending) or produced.extend(pending) or {
             "held_snapshot_refresh_actions_enqueued": len(pending),
             "held_snapshot_refresh_enqueue_unavailable": [],
         },
@@ -6510,6 +6512,10 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
         }
     ]
     assert actions == []
+    # Proactive and hard-debt held refreshes are schedules, never venue
+    # evidence: an invalidation from them would blind the still-valid book.
+    assert {action.reason for action in produced} == {"held_snapshot_due"}
+    assert all(action.invalidates_snapshot is False for action in produced)
 
 
 def test_held_quote_commit_tracks_exact_native_refresh_and_rejects_audit_only_commit(monkeypatch):

@@ -2128,6 +2128,33 @@ def test_monitor_cadence_fresh_nonaccepting_snapshot_disposes_failed_monitor(
     recovered = evidence["settlement_recoverable_positions"][0]
     assert recovered["closed_market_validation"] == "snapshot_accepting_orders_false"
 
+    # ``active`` is a routing label: an open, accepting held book still has a
+    # SELL venue, so its stale monitor inputs block instead of being excused.
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            "UPDATE executable_market_snapshot_latest "
+            "SET active = 0, closed = 0, accepting_orders = 1"
+        )
+        conn.commit()
+        routing_inactive = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            max_age_seconds=60.0,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+        )
+        conn.execute(
+            "UPDATE executable_market_snapshot_latest SET accepting_orders = 0"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert routing_inactive["settlement_recoverable_position_count"] == 0
+    assert routing_inactive["blocking_stale_position_count"] == 1
+
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:

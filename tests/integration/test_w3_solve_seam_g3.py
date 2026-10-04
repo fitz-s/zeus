@@ -43584,6 +43584,73 @@ def test_global_sell_durable_market_channel_authority_is_exact_and_fail_closed()
 
 
 @pytest.mark.parametrize(
+    ("active", "closed", "authorized"),
+    ((False, False, True), (True, True, False)),
+)
+def test_global_sell_durable_authority_keys_on_tradeability_not_routing_label(
+    active, closed, authorized
+):
+    """``active`` is a routing label: an open, accepting, orderbook-enabled held
+    book is sellable whatever it reads; a closed one never is."""
+
+    from src.contracts.executable_market_snapshot import ExecutableTradeabilityStatus
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+    from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
+
+    event = _global_scope_event(city="Paris", source_run_id="durable-routing-label")
+    candidate = _adapter_sell_actuation(event).decision.candidate
+    now = _dt.datetime.now(_dt.timezone.utc)
+    base = replace(
+        _jit_market_authority(candidate, tick="0.01", min_order_size="5").snapshot,
+        active=active,
+        closed=closed,
+        captured_at=now - _dt.timedelta(milliseconds=100),
+        freshness_deadline=now + _dt.timedelta(seconds=5),
+        tradeability_status=ExecutableTradeabilityStatus(
+            accepting_orders=True,
+            clob_archived=False,
+            clob_enable_order_book=True,
+            executable_allowed=True,
+            reason="fixture",
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_snapshot_schema(conn)
+    ensure_table(conn)
+    insert_snapshot(conn, base)
+    depth = {
+        "bids": [{"price": "0.60", "size": "10"}],
+        "asks": [{"price": "0.61", "size": "10"}],
+    }
+    conn.execute(
+        """INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            candidate.token_id,
+            "buy_yes" if candidate.side == "YES" else "buy_no",
+            "routing-depth-evidence", "routing-event", candidate.condition_id,
+            candidate.side, now.isoformat(), "routing-hash",
+            0.60, 0.61, json.dumps(depth), now.isoformat(), 1,
+        ),
+    )
+    call = lambda: era._durable_global_sell_market_authority(  # noqa: E731
+        conn,
+        condition_id=candidate.condition_id,
+        token_id=candidate.token_id,
+        side=candidate.side,
+        submit_at=now,
+    )
+    if authorized:
+        raw, authority = call()
+        assert raw["asset_id"] == candidate.token_id
+        assert authority.snapshot.captured_at == now
+    else:
+        with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_METADATA_INVALID"):
+            call()
+    conn.close()
+
+
+@pytest.mark.parametrize(
     ("age_minutes", "certificate", "expected_reason"),
     (
         (

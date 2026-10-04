@@ -97,6 +97,9 @@ HELD_MONITOR_QUOTE_READ_MAX_SECONDS = 1.0
 #: The read stays inside the position's own deadline and the child's governor
 #: lease expires with it (20b98dd97), so this cannot extend the monitor cycle.
 HELD_MONITOR_NETWORK_QUOTE_READ_MAX_SECONDS = 3.0
+#: Fastest observed complete belief read; the held quote leaves at least this
+#: much of the position deadline so a slow book cannot starve the belief read.
+HELD_MONITOR_PRIMARY_BELIEF_READ_COST_FLOOR_SECONDS = 0.27
 #: How far back a confirming sample may be sought. This is a FRESHNESS bound and
 #: must stay tight: widening it to 600 s let a 10-minute-stale quote confirm a
 #: collapse, which is exactly the staleness
@@ -2867,7 +2870,7 @@ def monitor_quote_refresh(
                 if not callable(hard_deadline_books):
                     return None
                 quote_deadline = _held_monitor_stage_deadline(
-                    float(deadline),
+                    float(deadline) - HELD_MONITOR_PRIMARY_BELIEF_READ_COST_FLOOR_SECONDS,
                     HELD_MONITOR_NETWORK_QUOTE_READ_MAX_SECONDS,
                 )
                 book = hard_deadline_books(

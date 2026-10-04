@@ -1046,13 +1046,13 @@ def _current_snapshot_nonexecutable_for_restart(
         or freshness_deadline < now_utc
     ):
         return False
+    # ``active`` is a routing label, not tradeability: an open, accepting book
+    # still has a SELL venue and keeps its monitor-input freshness check.
     validation = None
     if int(row["closed"] or 0) == 1:
         validation = "snapshot_closed"
     elif row["accepting_orders"] is not None and int(row["accepting_orders"]) == 0:
         validation = "snapshot_accepting_orders_false"
-    elif int(row["active"] or 0) == 0:
-        validation = "snapshot_inactive"
     if validation is None:
         return False
     position_evidence.update(
