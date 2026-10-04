@@ -1,5 +1,5 @@
 # Created: 2026-10-03
-# Last reused/audited: 2026-10-03
+# Last reused/audited: 2026-10-04
 # Authority basis: canonical_execution_lease_migration.md (rehearsal evidence).
 """Migration rehearsal for the lease-v1 protocol on a clone of the live queue.
 
@@ -167,6 +167,7 @@ def run(args) -> None:
     subprocess.run(["cp", "-cR", str(args.source), str(queue)], check=True)
     log = scratch / "exec.jsonl"
     old, new = Path(args.old_root).resolve(), Path(args.new_root).resolve()
+    sys.path.insert(0, str(new))  # tree() classifies batches with NEW code
     report: dict[str, object] = {"old_root": str(old), "new_root": str(new)}
     reaped: dict[int, float] = {}
 
@@ -209,12 +210,16 @@ def run(args) -> None:
                 "live_staging": body["live_staging"], "drained_staging": body["drained_staging"]}
 
     def tree() -> dict:
+        # Batch layout (which name is metadata) is the queue's to decide.
+        import src.data.replacement_forecast_live_materialization_queue as q
+
         root = queue / "inflight"
         leases = root / "leases"
+        batches = [p for p in root.iterdir() if p.is_dir() and p != leases] if root.exists() else []
         return {
             "requests": len(list((queue / "requests").glob("*.json"))),
-            "inflight_requests": sorted(p.parent.name + "/" + p.name for p in root.glob("*/*.json")
-                                        if p.name != "_claim.json") if root.exists() else [],
+            "inflight_requests": sorted(b.name + "/" + p.name for b in batches
+                                        for p in q._captured_entries(b)),
             "staging": sorted(p.name for p in root.glob(".staging.*")) if root.exists() else [],
             "lease_files": len(list(leases.glob("*.lease"))) if leases.exists() else 0,
             "captures": sorted(p.name for p in (queue / "quarantined_request_aliases").glob(".capture.*"))
