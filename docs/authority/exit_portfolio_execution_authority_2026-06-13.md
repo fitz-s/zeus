@@ -2,6 +2,20 @@
 
 Status: ACTIVE
 
+## ERRATUM (2026-10-04, operator ruling)
+
+A held position is a binary that settles within the family horizon; its hold
+value is q × payout. Selling at a net executable price below that is a certain
+expected-value loss that no account cash state justifies, and cash returns at
+settlement anyway. A capital-auction SELL is therefore admissible only when its
+own expected EV against holding, under the q its certificate uses and net of
+fees, exceeds the same epsilon BUY must exceed. E2's "log utility accepts a bid
+below q_t" no longer licenses a SELL: ΔlogW on a cash-only wealth basis rises
+as cash falls, so below-q acceptance sold holdings to fund the book. Log growth
+and ruin reduction still size and rank admitted SELLs. Typed protective exits
+(RED force exit, Day0 hard-fact dead bin, exact zero support) are not capital
+auction SELLs and are unaffected.
+
 ## ERRATUM (2026-07-25, operator first-principles correction)
 
 The 2026-07-24 Day0 fixed-action rule applies to every non-deterministic

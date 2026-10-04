@@ -68,7 +68,8 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   admission is posterior predictive mean `q > fee-inclusive executable cost` plus positive
   expected delta-log wealth and EV, never a price-independent `q > 0.5` wall; `q_lcb/q_ucb`
   remain confidence evidence and do not add a second ambiguity preference. The terminal median
-  follows the probability branch. A reduce-only SELL is scored against HOLD instead. Every
+  follows the probability branch. A reduce-only SELL is scored against HOLD instead and passes
+  the same EV floor: net proceeds must exceed q × shares, whatever the cash state. Every
   statistical BUY and SELL uses posterior-mean expected log-growth and EV for its fixed-action
   size and every FAK prefix. Day0 statistical SELL additionally carries current temporal
   authority bound to its probability witness; maturity may upgrade that evidence
