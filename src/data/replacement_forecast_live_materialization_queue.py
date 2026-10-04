@@ -362,7 +362,9 @@ class ReplacementForecastLiveMaterializationQueueReport:
     seed_failed_files: tuple[str, ...] = ()
     reason_codes: tuple[str, ...] = ()
     # Per-tick execution progress (canonical lease 2.4); "leased" alone is not
-    # progress. held_first: the first child this tick served a held family.
+    # progress. started counts only items the worker itself answered for (not a
+    # parent-synthesized timeout or missing envelope); held_first: the first of
+    # those served a held family. A crash mid-batch leaves the rest unstarted.
     leased_count: int = 0
     started_count: int = 0
     completed_count: int = 0
@@ -8667,6 +8669,13 @@ def _process_claimed_materialization_batch(
             except subprocess.TimeoutExpired as exc:
                 completed_by_path[item.input_json] = _timeout_result(item.command, exc)
 
+    # Started means the worker itself answered for the item: a synthetic
+    # timeout or missing-envelope result proves no item began. Ambiguous
+    # outcomes (a crash mid-batch) therefore never count as started.
+    started = [
+        item for item in pending
+        if _worker_answered(completed_by_path[item.input_json])
+    ]
     committed_posterior_count = 0
     reactor_wake_published_count = 0
     completed_count = 0
@@ -9004,14 +9013,21 @@ def _process_claimed_materialization_batch(
         failed_files=tuple(failed),
         reason_codes=tuple(reasons),
         leased_count=len(request_files),
-        started_count=len(pending),
+        started_count=len(started),
         completed_count=completed_count,
         deferred_count=(
             len(timed_out_requests) + len(transient_read_retries) + len(write_deferred)
         ),
-        held_first=bool(pending) and _request_family_scope(
-            pending[0].request_payload
+        held_first=bool(started) and _request_family_scope(
+            started[0].request_payload
         ) in _current_money_risk_families_or_empty(),
+    )
+
+
+def _worker_answered(completed: subprocess.CompletedProcess[str]) -> bool:
+    """Whether this per-item result came from the worker, not the parent's stand-in."""
+    return _subprocess_result_error_type(completed) not in (
+        "TimeoutExpired", "MaterializationBatchMissingEnvelope",
     )
 
 
