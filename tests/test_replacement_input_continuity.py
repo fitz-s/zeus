@@ -122,43 +122,121 @@ def test_input_continuity_blocked_optional_successor_retains_q(_shanghai_reader_
             posterior_computed_at=normal.row["computed_at"],posterior_provenance=json.loads(normal.row["provenance_json"]))
     finally:next(newer_context,None)
 
-def _c3_q(normal,cut):
-    """Live C3's readiness-bound q identity for the certificate's family."""
-    from src.execution.staleness_cancel import read_current_family_q_versions
-    family=(normal.row["city"],normal.row["target_date"],normal.row["temperature_metric"])
-    return read_current_family_q_versions(normal.conn,[family],now=cut)[family]
+def _c3_market(normal):
+    """Re-certify with executable one-degree bins and their market topology rows."""
+    from src.data import replacement_forecast_materializer as M
+    from src.state.db import init_schema_world_only
+    from tests.test_replacement_forecast_materializer import _TemperatureBin
+    normal.request=replace(normal.request,bins=(_TemperatureBin("25C or below",upper_c=25.,center_c=24.),
+        _TemperatureBin("26C",lower_c=26.,upper_c=26.,center_c=26.),
+        _TemperatureBin("27C or above",lower_c=27.,center_c=28.)))
+    legal=M.materialize_replacement_forecast_live(normal.conn,normal.request)
+    assert legal.ok,legal.reason_codes
+    init_schema_world_only(normal.conn)
+    at=normal.request.computed_at.isoformat()
+    for i,item in enumerate(normal.request.bins):
+        normal.conn.execute("""INSERT INTO market_events (market_slug,city,target_date,temperature_metric,
+            condition_id,token_id,range_label,range_low,range_high,created_at,recorded_at)
+            VALUES (?,?,?,'high',?,?,?,?,?,?,?)""",(f"c3-continuity-{i}",normal.row["city"],
+            normal.row["target_date"],"0x"+f"{i+701:064x}",f"c3-yes-{i}",item.bin_id,item.lower_c,item.upper_c,at,at))
+    normal.conn.commit()
+    return dict(normal.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",(legal.posterior_id,)).fetchone())
+
+def _c3_pass(normal,monkeypatch,cut):
+    """Live C3's own capture of one standing rest, stopped after its probability read.
+
+    Returns (valuation, served probability witness or None when the read refused).
+    """
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine import global_auction_universe as universe
+    from src.events.opportunity_event import ForecastSnapshotReadyPayload,make_opportunity_event
+    from src.execution import staleness_cancel as C3
+    from tests.execution.test_standing_entry_value import _seed_early_rest,_trade_db
+    class ClockType(type):
+        def __instancecheck__(cls,value):return isinstance(value,datetime)
+    class ReaderClock(datetime,metaclass=ClockType):
+        @classmethod
+        def now(cls,tz=None):return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+    monkeypatch.setattr(B,"datetime",ReaderClock)
+    family=(normal.row["city"],normal.row["target_date"],"high")
+    payload=ForecastSnapshotReadyPayload(city=family[0],target_date=family[1],metric="high",
+        source_id="replacement_0_1",source_run_id="c3-continuity",cycle=normal.request.source_cycle_time.isoformat(),
+        track="replacement_0_1_openmeteo_bayes_fusion",snapshot_id="c3-continuity",snapshot_hash="c3-continuity",
+        captured_at=cut.isoformat(),available_at=cut.isoformat(),required_fields_present=True,
+        required_steps_present=True,member_count=51,min_members_floor=51,completeness_status="COMPLETE",
+        required_steps=[],observed_steps=[],expected_members=51,source_run_status="COMPLETE",
+        source_run_completeness_status="COMPLETE",coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE")
+    event=make_opportunity_event(event_type="FORECAST_SNAPSHOT_READY",entity_key="|".join(family),
+        source="c3-continuity",observed_at=cut.isoformat(),available_at=cut.isoformat(),
+        received_at=cut.isoformat(),payload=payload,causal_snapshot_id="c3-continuity")
+    monkeypatch.setattr(universe,"scan_current_global_auction_scope",
+        lambda **_:SimpleNamespace(events=(event,),resolution_at_by_family={}))
+    prepared=[]
+    real=adapter._prepare_current_global_probability_family
+    def spy(*a,**k):
+        prepared.append(real(*a,**k))
+        return prepared[-1]
+    monkeypatch.setattr(adapter,"_prepare_current_global_probability_family",spy)
+    def stop(*a,**k):raise RuntimeError("probability read is the unit under test")
+    monkeypatch.setattr(universe,"bind_current_global_probability_tokens",stop)
+    trade=_trade_db();_seed_early_rest(trade)
+    try:
+        _now,values=C3._capture_standing_entry_values(trade,normal.conn,normal.conn,
+            [{"command_id":"cmd","token_id":"tok-rest","venue_order_id":"venue-1"}],
+            families={"cmd":family},clock=lambda:cut)
+    finally:trade.close()
+    return values[0],(prepared[0].probability_witness if prepared else None)
+
+_C3_READ_STOPPED="ENTRY_REST_TOKEN_IDENTITY_UNAVAILABLE:RuntimeError:probability read is the unit under test"
 
 def test_input_continuity_new_ens_does_not_change_c3_q_identity(_shanghai_reader_current_certificate,monkeypatch):
     normal=_shanghai_reader_current_certificate
-    assert _c3_q(normal,normal.request.computed_at)==normal.row["posterior_identity_hash"]
-    newer_context=F._reader_next_native_cycle(normal,monkeypatch);newer=next(newer_context)
+    row=_c3_market(normal)
+    first,first_q=_c3_pass(normal,monkeypatch,normal.request.computed_at)
+    cycle=normal.request.source_cycle_time+timedelta(hours=6)
+    cut=cycle+timedelta(hours=8,minutes=15)
+    from src.data.station_ground_evidence import forecast_db_from_connection
+    _request,snapshot,builtin=F._reader_shanghai_native_high(normal.conn,
+        replace(normal.request,source_cycle_time=cycle,computed_at=cut),
+        forecast_db_from_connection(normal.conn).parent,monkeypatch)
     try:
+        normal.conn.commit()
+        assert H._latest_eligible_ensemble_input_mark(normal.conn,city=row["city"],target_date=row["target_date"],
+            metric="high",decision_time=cut)==(snapshot["snapshot_id"],cycle)
+        second,second_q=_c3_pass(normal,monkeypatch,cut)
         # The landing is refresh debt for the builders, not C3 authority: the
-        # standing rest keeps the same posterior q-version.
-        assert H._latest_eligible_ensemble_input_mark(normal.conn,city=normal.row["city"],
-            target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],
-            decision_time=newer.cut)[1]>datetime.fromisoformat(normal.row["source_cycle_time"])
-        assert _c3_q(normal,newer.cut)==normal.row["posterior_identity_hash"]
+        # standing rest is valued on the same posterior q content.
+        assert first.reason==second.reason==_C3_READ_STOPPED,(first,second)
+        assert first_q.posterior_identity_hash==second_q.posterior_identity_hash==row["posterior_identity_hash"]
+        assert first_q.q_version==second_q.q_version
+        assert first_q.probability_content_identity==second_q.probability_content_identity
         assert "current_ensemble_snapshot_superseded" in H.replacement_input_refresh_reason(normal.conn,
-            city=normal.row["city"],target_date=normal.row["target_date"],metric=normal.row["temperature_metric"],
-            decision_time=newer.cut,posterior_source_cycle_time=normal.row["source_cycle_time"],
-            posterior_computed_at=normal.row["computed_at"],posterior_provenance=json.loads(normal.row["provenance_json"]))
-    finally:next(newer_context,None)
+            city=row["city"],target_date=row["target_date"],metric="high",decision_time=cut,
+            posterior_source_cycle_time=row["source_cycle_time"],posterior_computed_at=row["computed_at"],
+            posterior_provenance=json.loads(row["provenance_json"]))
+    finally:builtin.close()
 
-@pytest.mark.parametrize("fault,basis",[("unknown","replacement_input_hwm_read_unavailable:OperationalError"),
+@pytest.mark.parametrize("fault,basis",[("unknown","OperationalError:interrupted"),
+    ("unread","consumed_physical_proof_read_unavailable"),
     ("invalid","current_value_serving_consumed_proof_unverifiable")])
 def test_input_continuity_c3_unknown_or_invalid_consumed_authority_is_protective(
         _shanghai_reader_current_certificate,monkeypatch,fault,basis):
     normal=_shanghai_reader_current_certificate
+    _c3_market(normal)
+    # A faked reader is not a changed read: start from a cold memo.
+    H.clear_consumed_proof_memo();B._LIVE_GRADE_MEMO.clear()
+    def unknown(*a,**k):raise sqlite3.OperationalError("interrupted")
     if fault=="unknown":
-        def unknown(*a,**k):raise sqlite3.OperationalError("interrupted")
-        monkeypatch.setattr(H,"replacement_live_input_lag_reason",unknown)
+        # The verdict itself raises: unknown consumed authority, never fresh.
+        monkeypatch.setattr(B,"replacement_live_input_lag_reason",unknown)
     else:
-        # A faked reader is not a changed read: start from a cold memo.
-        H.clear_consumed_proof_memo()
-        monkeypatch.setattr(C,"read_consumed_instrument_values",lambda *a,**k:{},raising=False)
-    q=_c3_q(normal,normal.request.computed_at)
-    assert q.startswith(f"__Q_AUTHORITY_BLOCKED__:{normal.row['posterior_identity_hash']}:") and basis in q
+        monkeypatch.setattr(C,"read_consumed_instrument_values",
+            unknown if fault=="unread" else (lambda *a,**k:{}),raising=False)
+    value,witness=_c3_pass(normal,monkeypatch,normal.request.computed_at)
+    assert witness is None
+    assert value.action=="CANCEL" and value.evidence["authority_valid"] is False
+    assert value.reason.startswith("ENTRY_REST_PROBABILITY_BLOCKED:") and basis in value.reason
 
 def test_input_continuity_unknown_active_readiness_is_not_last_good_fallback(_shanghai_reader_current_certificate):
     normal=_shanghai_reader_current_certificate
@@ -618,20 +696,23 @@ def test_memo_misses_a_deleted_consumed_row_and_hits_after_an_unrelated_commit(_
     normal.conn.execute(f"DELETE FROM {table} WHERE {key[0]}=?",(key[1],));normal.conn.commit()
     assert not B.read_replacement_forecast_bundle(normal.conn,**normal.kwargs).ok
 
-def test_c3_cancels_a_rest_whose_consumed_row_is_deleted_after_a_warm_read(_shanghai_reader_current_certificate):
+def test_c3_cancels_a_rest_whose_consumed_row_is_deleted_after_a_warm_read(_shanghai_reader_current_certificate,monkeypatch):
     # Reviewer hwm_c3_memo_repro on live C3: a warm memo must not keep the
-    # standing rest's q-version once its consumed evidence no longer exists.
+    # standing rest's q once its consumed evidence no longer exists.
     normal=_shanghai_reader_current_certificate
+    row=_c3_market(normal)
     H.clear_consumed_proof_memo();B._LIVE_GRADE_MEMO.clear()
-    assert _c3_q(normal,normal.request.computed_at)==normal.row["posterior_identity_hash"]
-    normal.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(_consumed_raw_ids(normal)[0],))
+    warm,warm_q=_c3_pass(normal,monkeypatch,normal.request.computed_at)
+    assert warm.reason==_C3_READ_STOPPED and warm_q.posterior_identity_hash==row["posterior_identity_hash"]
+    normal.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(_consumed_raw_ids(row)[0],))
     normal.conn.commit()
-    q=_c3_q(normal,normal.request.computed_at)
-    assert q.startswith(f"__Q_AUTHORITY_BLOCKED__:{normal.row['posterior_identity_hash']}:")
-    assert "consumed_proof_unverifiable" in q
+    value,witness=_c3_pass(normal,monkeypatch,normal.request.computed_at)
+    assert witness is None and value.action=="CANCEL"
+    assert value.reason.startswith("ENTRY_REST_PROBABILITY_BLOCKED:") and "consumed_proof_unverifiable" in value.reason
 
-def _consumed_raw_ids(normal):
-    serving=json.loads(normal.row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
+def _consumed_raw_ids(normal_or_row):
+    row=getattr(normal_or_row,"row",normal_or_row)
+    serving=json.loads(row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
     return sorted(item["raw_model_forecast_id"] for item in serving.values())
 
 @pytest.mark.parametrize("table,column,where",[
