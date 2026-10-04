@@ -10,8 +10,9 @@ checked=2026-W40.
 | Before (LEGACY) | After (lease-v1) |
 |---|---|
 | `inflight/<stamp>.pid<N>/` batch, owner by `claimed_at` age | `inflight/<stamp>.lease-v1.<gen>.pid<N>/` batch whose `_claim.json` carries `protocol`, `leases`, ordered `records` |
-| no lease | `inflight/leases/<sha256(identity)>.lease`, owned by `flock` on the claiming OFD, shared with the executing resident worker via `SCM_RIGHTS` |
-| blocked markers keyed on an envelope-inclusive fingerprint | `fence_version: f2-forecast-input`; old markers never match and are re-decided by the next attempt |
+| no lease | `inflight/leases/<sha256(identity)>.lease`, owned by `flock` on the claiming OFD, shared with the executing resident worker via `SCM_RIGHTS`. The queue parent also keeps its copy until outcome handling ends, so the lease frees when both have let go. |
+| — | `inflight/.staging.<batch>/` while a claim is built, flocked by its constructor until it is published by rename; free staging is crash debris and is drained |
+| blocked markers keyed on an envelope-inclusive fingerprint | `fence_version: f2-forecast-input`; old markers never match and are re-decided by the next attempt. A verdict caused by an invalid envelope never establishes a forecast-input fence (an existing forecast-input marker is still consulted before the worker runs). |
 
 A LEGACY batch is the only kind the age bound may still restore. Both versions
 can read each other's `requests/` files; neither interprets the other's
@@ -32,10 +33,14 @@ No step waits on a clock. Each step ends on an observable fact.
    its request stays in `inflight/` for step 3.
 3. **Reconcile.** `python3 scripts/reconcile_materialization_inflight.py`
    (dry run), then `--apply`. Exit 0 means quiescent: every inflight request is
-   back in `requests/` and no lease file remains. Exit 3 lists refused batches:
-   a lease-v1 batch whose lease is HELD or UNKNOWN, or a LEGACY batch whose
-   recorded pid is alive. Resolve that owner (step 2) and rerun. Never delete a
-   refused batch by hand.
+   back in `requests/`, no lease is held, and no live constructor's staging
+   directory remains (crash-left staging, whose flock is free, is drained).
+   Exit 3 lists what is still owned: refused batches (a lease-v1 batch whose
+   lease is HELD, or UNKNOWN including an unsupported protocol; a LEGACY batch
+   whose recorded pid is alive), `held_leases`, and `live_staging`. Resolve
+   that owner (step 2) and rerun. Never delete a refused batch by hand. Exit 0
+   is evidence for step 1, not a substitute: it cannot see a claimant that has
+   not yet taken its first lease, which is why step 1 stops acquisition first.
 4. **Deploy the new code and start the consumer.** Restart through the normal
    live deploy (all daemons, mesh-coherent). The first tick claims from
    `requests/` under lease-v1.
