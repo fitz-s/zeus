@@ -2015,20 +2015,21 @@ class TestBeliefDeadWatchdog:
         assert "belief_stale_cycles=3" in pos.applied_validations
 
     def test_fault_line_names_the_cycles_decline_reason(self, caplog):
-        """A designed decline (post-local-day hard fact not yet available) must be
-        readable from the fault line itself, not indistinguishable from a broken
-        refresh (Hong Kong 2026-09-14, 54+ cycles)."""
+        """A fault line must name the branch that left belief stale, so it is not
+        indistinguishable from another stale branch (Hong Kong 2026-09-14, 54+
+        cycles). A past-day wait on the final daily product is not such a branch:
+        it never faults (tests/engine/test_post_day_held_belief.py)."""
         import src.engine.monitor_refresh as mr
 
         mr._belief_stale_cycles.clear()
         pos = self._pos(trade_id="t-watchdog-reason")
         caplog.set_level("ERROR", logger=mr.__name__)
         for _ in range(3):
-            pos.applied_validations = ["POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"]
+            pos.applied_validations = ["day0_current_global_probability_unavailable:ValueError:X"]
             mr._track_belief_staleness(pos)
         line = [r.getMessage() for r in caplog.records if "BELIEF_AUTHORITY_FAULT" in r.getMessage()]
         assert len(line) == 1
-        assert line[0].endswith("reasons=POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
+        assert line[0].endswith("reasons=day0_current_global_probability_unavailable:ValueError:X")
         assert "belief_stale_cycles=3" in pos.applied_validations
 
     def test_failed_refresh_cycle_does_not_carry_last_cycles_reasons(self, monkeypatch, caplog):

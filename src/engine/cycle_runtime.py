@@ -150,6 +150,7 @@ _HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP = 200
 _HELD_MONITOR_PRIMARY_BELIEF_READ_COST_MIN_SAMPLES = 50
 from src.engine.monitor_refresh import (  # noqa: E402 - one floor for admission and quote
     HELD_MONITOR_PRIMARY_BELIEF_READ_COST_FLOOR_SECONDS as _HELD_MONITOR_PRIMARY_BELIEF_READ_COST_FLOOR_SECONDS,
+    position_awaits_final_observation as _position_awaits_final_observation,
 )
 _held_monitor_primary_belief_read_elapsed_samples: "deque[float]" = deque(
     maxlen=_HELD_MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SAMPLE_CAP
@@ -10819,7 +10820,11 @@ def execute_monitoring_phase(
                     exit_reason=_incomplete_reason,
                     hours_to_settlement=hours_to_settlement,
                 )
-                deps.logger.warning(
+                (
+                    deps.logger.info
+                    if _position_awaits_final_observation(pos)
+                    else deps.logger.warning
+                )(
                     "Exit authority incomplete for %s: %s",
                     pos.trade_id,
                     _incomplete_reason,

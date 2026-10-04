@@ -1876,10 +1876,17 @@ def _track_belief_staleness(pos: Position) -> None:
         return
     if not getattr(pos, "last_monitor_market_price_is_fresh", False):
         return
+    if position_awaits_final_observation(pos):
+        # The local day is over and only the final daily product can fix q; its
+        # absence is a wait on the source, not a broken refresh. The wait has no
+        # age bound here and nothing alarms on a stalled product: the ingest tick
+        # only logs `not_published` at INFO and records coverage
+        # SOURCE_NOT_PUBLISHED_YET.
+        _belief_stale_cycles.pop(key, None)
+        return
     count = _belief_stale_cycles.get(key, 0) + 1
     _belief_stale_cycles[key] = count
-    # The cycle's own validation tags say WHY belief is not fresh (a designed
-    # decline such as POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE, or a failed
+    # The cycle's own validation tags say WHY belief is not fresh (a failed
     # refresh); the fault line carries them so the alarm is precise.
     reasons = ",".join(
         tag for tag in (getattr(pos, "applied_validations", []) or [])
@@ -3319,6 +3326,26 @@ _POST_LOCAL_DAY_HARD_FACT_ELIGIBLE_SOURCE_TYPES = frozenset({"noaa", "hko"})
 def _post_local_day_hard_fact_lane_applies(city) -> bool:
     source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
     return source_type in _POST_LOCAL_DAY_HARD_FACT_ELIGIBLE_SOURCE_TYPES
+
+
+def _awaiting_final_daily_observation(pos: Position, city, target_d) -> bool:
+    """Whether this position's outcome is decided by a final product not yet read.
+
+    The contract-local target day is over and the city's settlement family
+    resolves on a final daily product. The outcome is then physically fixed;
+    the final-daily lane (`_post_local_day_final_daily_verdict`) is its only q
+    authority, so a missing row is a wait on that product, not a belief fault.
+    """
+    return _is_position_after_target_local_day(
+        pos, city, target_d
+    ) and _post_local_day_hard_fact_lane_applies(city)
+
+
+def position_awaits_final_observation(pos) -> bool:
+    """Typed state: this cycle's belief is waiting on the final daily product."""
+    return "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in (
+        getattr(pos, "applied_validations", None) or ()
+    )
 
 
 def _day0_absorbing_hard_fact_overlay(
@@ -4780,14 +4807,24 @@ def monitor_probability_refresh(
                 post_day_final_missing = (
                     "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in str(exc)
                 )
-                _append_monitor_validation(
-                    stale,
-                    "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"
-                    if post_day_final_missing
-                    else "day0_current_global_probability_unavailable:"
-                    f"{type(exc).__name__}:{exc}",
+                # SCOPE: a past-local-day hko/noaa family only. DRAIN: the
+                # final daily row lands and the overlay above returns exact q.
+                # RESET: the next monitor cycle reads that row; a pre-day or
+                # same-day position never enters this branch.
+                awaiting_final = post_day_final_missing or (
+                    _awaiting_final_daily_observation(pos, city, target_d)
                 )
-                if not post_day_final_missing and not isinstance(
+                if awaiting_final:
+                    _append_monitor_validation(
+                        stale, "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"
+                    )
+                if not post_day_final_missing:
+                    _append_monitor_validation(
+                        stale,
+                        "day0_current_global_probability_unavailable:"
+                        f"{type(exc).__name__}:{exc}",
+                    )
+                if not awaiting_final and not isinstance(
                     exc,
                     _CachedCurrentGlobalDay0FamilyError,
                 ):
@@ -4796,7 +4833,7 @@ def monitor_probability_refresh(
                         target_date=str(pos.target_date),
                         metric=resolve_position_metric(pos)[0],
                     )
-                logger.warning(
+                (logger.info if awaiting_final else logger.warning)(
                     "monitor_probability_refresh: current global Day0 probability "
                     "unavailable for %s: %s",
                     pos.trade_id,
