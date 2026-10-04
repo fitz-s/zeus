@@ -3833,8 +3833,16 @@ def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
 
 def _load_request_payload_for_coalescing(path: Path) -> Mapping[str, object] | None:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return _parse_request_payload(path.read_bytes())
+    except OSError:
+        return None
+
+
+def _parse_request_payload(body: bytes) -> Mapping[str, object] | None:
+    """The request object these exact bytes encode; None when malformed."""
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -5636,9 +5644,10 @@ def _read_claim_slot(
     row = (source.name, info.st_mtime_ns, info.st_size, hashlib.sha256(body).hexdigest())
     if expected is not None and expected != row:
         raise FileNotFoundError("planned request changed before its lease")
-    # A rewrite after ``body`` was read changes the identity read here or fails
-    # the byte check under the lease; it never moves unread bytes.
-    witness = _claim_identity_witness(_load_request_payload_for_coalescing(source) or {})
+    # The identity is parsed from these same bytes, never re-read from the
+    # pathname: the lease must protect exactly the body that will be moved
+    # (lease identity = identity(parse(body)), record hash = sha256(body)).
+    witness = _claim_identity_witness(_parse_request_payload(body) or {})
     if witness is None:
         if expected is not None:
             raise FileNotFoundError("planned request identity changed before its lease")
