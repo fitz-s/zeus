@@ -2414,10 +2414,10 @@ def _seed_source_cycle_boundary(
 
 
 def _write_request(path: Path, payload: dict[str, object]) -> None:
-    _publish_request_bytes(path, json.dumps(payload, sort_keys=True, indent=2).encode("utf-8"))
+    publish_request_bytes(path, json.dumps(payload, sort_keys=True, indent=2).encode("utf-8"))
 
 
-def _publish_request_bytes(path: Path, body: bytes) -> None:
+def publish_request_bytes(path: Path, body: bytes) -> None:
     """Publish request bytes as a fresh inode atomically replacing ``path``.
 
     Invariant: a published request inode is immutable. No writer opens an
@@ -3867,6 +3867,14 @@ def _load_request_payload_for_coalescing(path: Path) -> Mapping[str, object] | N
         return None
 
 
+def _is_regular_entry(path: Path) -> bool:
+    """Whether ``path`` itself is a regular file (lstat: an alias is never followed)."""
+    try:
+        return _stat_mode.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 class RequestNotRegular(OSError):
     """A request path that is a symlink or any non-regular file: a mutable alias.
 
@@ -5061,7 +5069,7 @@ def _build_request_claim_read_plan(
 ) -> _RequestClaimReadPlan:
     """Create a no-mutation request claim plan before taking the queue flock."""
     request_files = (
-        tuple(path for path in request_path.glob("*.json") if path.is_file())
+        tuple(path for path in request_path.glob("*.json") if _is_regular_entry(path))
         if request_path.exists()
         else ()
     )
@@ -5336,7 +5344,7 @@ def _restore_claimed_request(path: Path, request_path: Path, batch_name: str) ->
     publication holding the original name keeps it and ours takes a
     ``.recovered-`` name. An interrupted restore can leave two names for one
     inode; that is safe because a published request inode is immutable
-    (``_publish_request_bytes`` always replaces, never writes in place), so a
+    (``publish_request_bytes`` always replaces, never writes in place), so a
     republish of either name is a new inode and cannot change the other.
     """
 
@@ -6196,6 +6204,35 @@ def _drain_abandoned_staging(inflight_path: Path) -> int:
     return drained
 
 
+def _quarantine_request_aliases(request_path: Path) -> int:
+    """Quarantine every non-regular entry of the queue directory (lstat only).
+
+    Planning reads only regular files, so an alias would otherwise sit in the
+    queue forever as identity-deferred debt. Each is captured, then classified
+    (``_quarantine_request_alias``); a regular file found at capture is
+    restored, not discarded. Unfinished quarantines of a crashed process are
+    settled first.
+    """
+
+    _settle_abandoned_captures(request_path)
+    try:
+        names = os.listdir(request_path)
+    except FileNotFoundError:
+        return 0
+    quarantined = 0
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = request_path / name
+        try:
+            if _stat_mode.S_ISREG(os.lstat(path).st_mode):
+                continue
+        except FileNotFoundError:
+            continue
+        quarantined += _quarantine_request_alias(path) is not None
+    return quarantined
+
+
 def inflight_requests_pending(inflight_path: Path) -> bool:
     """Whether any published claim batch holds an authority-carrying request.
 
@@ -6308,6 +6345,22 @@ def _claim_owner_alive(batch_path: Path) -> bool | None:
     if state is _lease.LeaseState.ACQUIRED_FOR_RECOVERY:
         return False
     return None
+
+
+def claim_record_sha256(input_json: Path) -> str | None:
+    """The leased request hash of a claimed request file, or None outside a claim.
+
+    A request inside a lease-v1 batch whose record is missing or unreadable is
+    unbound: it has no hash a consumer could check, so this raises.
+    """
+
+    batch = Path(input_json).parent
+    if _claim_state_class(batch) != _lease.LEASE_PROTOCOL:
+        return None
+    for record in _claim_records(batch):
+        if record.name == Path(input_json).name:
+            return record.request_sha256
+    raise FileNotFoundError(f"{Path(input_json).name}: no claim record in {batch.name}")
 
 
 def _claim_records(batch_path: Path) -> tuple[ClaimRecord, ...]:
@@ -8134,6 +8187,9 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     orphan_stage_removed_count = _remove_orphan_request_stage_receipts(
         request_path
     )
+    # SCOPE: non-regular queue entries only. DRAIN: captured and classified
+    # here (aliases quarantined, a regular repair restored). RESET: none.
+    _quarantine_request_aliases(request_path)
     active_keys, recovered_count, unknown_active_batches = _recover_stale_claims(
         request_path=request_path,
         inflight_path=inflight_path,
@@ -8230,7 +8286,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         )
 
     request_files = (
-        tuple(path for path in request_path.glob("*.json") if path.is_file())
+        tuple(path for path in request_path.glob("*.json") if _is_regular_entry(path))
         if request_path.exists()
         else ()
     )

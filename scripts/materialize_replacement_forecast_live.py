@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -1232,8 +1233,34 @@ def _materialize(
     )
 
 
+class ClaimedBytesMismatch(OSError):
+    """The request bytes do not hash to the claim record the lease was taken for."""
+
+
+def _require_claimed_bytes(input_json: Path, body: bytes) -> None:
+    """Refuse to consume a claimed request whose bytes are not the leased bytes.
+
+    Defense in depth for the immutable-publication invariant: a request inside
+    a lease-v1 claim batch must hash to its ``ClaimRecord.request_sha256``. A
+    request outside any claim (operator dry runs) carries no record. An
+    environment retry, never a verdict on the inputs.
+    """
+
+    from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+        claim_record_sha256,
+    )
+
+    expected = claim_record_sha256(input_json)
+    if expected is not None and hashlib.sha256(body).hexdigest() != expected:
+        raise ClaimedBytesMismatch(
+            f"{input_json.name}: request bytes do not match the claimed sha256 {expected}"
+        )
+
+
 def _validated_named_inputs(input_json: Path, consumed: _ConsumedInputs):
-    payload = json.loads(consumed.read(input_json, role=REQUEST_ROLE))
+    body = consumed.read(input_json, role=REQUEST_ROLE)
+    _require_claimed_bytes(input_json, body)
+    payload = json.loads(body)
     if not isinstance(payload, Mapping):
         raise ValueError("input JSON must decode to an object")
     base_dir = input_json.parent
