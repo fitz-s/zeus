@@ -43,10 +43,10 @@ Covered reasons (``SUPPORTED``) and their exact, required items:
 - DAY0_REQUIRED: [DAY0_REQUIRED]. The original request's target day has started,
   but its immutable input has neither an extreme nor a typed zero-observation
   declaration. Exact-request only; no prospective family fence or DB absence.
-- DAY0_ENSEMBLE: [CLOCK, DAY0_ENSEMBLE]. The request routes to the Day0 carrier
-  and the strict 51-member ENS bundle read at its effective clock and coverage
-  cut returns fewer members, so no conditional shape (no posterior) can exist.
-  Metric-generic: the bundle is per city/date, the scope per city/date/metric.
+- DAY0_ENSEMBLE: [CLOCK, DAY0_ENSEMBLE]. The request routes to the Day0
+  carrier's open-day HIGH branch and the strict 51-member ENS read at its
+  effective clock, windowed by the current same-station state, returns fewer
+  members, so no conditional shape (no posterior) can exist.
 - OM9_INVALID: [OM9_INVALID]. The request's own OM9 response bytes refuse the
   full/remaining local-day extraction at its own cut; a pure function of the
   request and those bytes (bound by the consumed witness and fingerprint). A
@@ -60,7 +60,7 @@ Covered reasons (``SUPPORTED``) and their exact, required items:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 import json
 import sqlite3
 
@@ -248,38 +248,50 @@ def blocked_evidence(conn: sqlite3.Connection, request, reason: str, items=()) -
 
 
 def day0_ensemble_unavailable_item(conn: sqlite3.Connection, request) -> dict[str, object] | None:
-    """The strict ENS bundle read ``day0_conditional_remaining_shape`` decides by.
+    """The strict ENS bundle read ``day0_conditional_high_shape`` decides by.
 
     ``request`` is normalized (clock lifted, Day0 frontier applied), as the
-    materializer judged it. None unless it routes to the carrier and the read
-    (same arguments as the shape's) returns fewer than 51 members. The member
-    rows are bound as the superset the read filters (every ENS row of the
-    city/date captured by the cut), plus the run pin and cycle-age law that
-    decide run currency. An unreadable store raises: never evidence.
+    materializer judged it. None unless it routes to the carrier's open-day HIGH
+    branch and the read (the shape's own arguments: window from the current
+    same-station state) returns fewer than 51 members. Bound facts: that state's
+    identity, every ENS row of the city/date captured by the cut (the superset
+    the read filters), the run pin and the cycle-age law (run currency). Which
+    fusion models served the carrier is bound by the attempt fingerprint's
+    selector frontier, not here. An unreadable store raises: never evidence.
     """
     import hashlib
+    from datetime import date
+    from src.config import runtime_cities_by_name
     from src.data.day0_hourly_vectors import (
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES, DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT,
         DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX, DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL,
         _day0_provider_run_hwm_pin_path, day0_source_clock_ensemble_member_models,
-        read_freshest_day0_hourly_vectors,
+        read_day0_current_temperature_state, read_freshest_day0_hourly_vectors,
     )
+    from src.data.forecast_target_contract import compute_target_local_day_window_utc
     from src.data.replacement_forecast_cycle_policy import replacement_source_cycle_max_age_hours
-    from src.data.replacement_forecast_materializer import (
-        _date_text, _day0_carrier_extreme_c, _day0_measurement_domain,
-    )
+    from src.data.replacement_forecast_materializer import _date_text, _day0_carrier_extreme_c
 
-    if _day0_carrier_extreme_c(request) is None:
-        return None
     target = _date_text(request.target_date)
     cut = _utc(request.computed_at, "computed_at")
-    coverage = _utc(_day0_measurement_domain(
-        conn, request, metric=str(request.temperature_metric))["coverage_cut_utc"], "coverage_cut")
+    city = runtime_cities_by_name().get(str(request.city))
+    if (
+        str(request.temperature_metric) != "high"
+        or _day0_carrier_extreme_c(request) is None
+        or city is None
+        or cut > compute_target_local_day_window_utc(
+            city_timezone=request.city_timezone, target_local_date=date.fromisoformat(target),
+        ).end_utc
+    ):
+        return None
+    state = read_day0_current_temperature_state(conn=conn, city=city, target_date=target, decision_time=cut)
+    if state is None:
+        return None
     selected = read_freshest_day0_hourly_vectors(
-        city=str(request.city), target_date=target, now=cut, conn=conn,
+        city=str(city.name), target_date=target, now=cut, conn=conn,
         expected_models=day0_source_clock_ensemble_member_models(), require_expected=True,
         max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-        remaining_window_start=coverage, require_complete_remaining_window=True,
+        remaining_window_start=state.observed_at.astimezone(UTC), require_complete_remaining_window=True,
         raise_on_db_error=True,
     )
     if len(selected) == DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_COUNT:
@@ -289,7 +301,7 @@ def day0_ensemble_unavailable_item(conn: sqlite3.Connection, request) -> dict[st
         " FROM day0_hourly_vectors WHERE city = ? AND target_date = ?"
         " AND julianday(captured_at) <= julianday(?) AND substr(model, 1, ?) = ?"
         " ORDER BY model, captured_at",
-        (str(request.city), target, cut.isoformat(),
+        (str(city.name), target, cut.isoformat(),
          len(DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX), DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX),
     ).fetchall()
     try:
@@ -299,13 +311,14 @@ def day0_ensemble_unavailable_item(conn: sqlite3.Connection, request) -> dict[st
         run_pin = None  # the run refusal reads the same absence as "no causal pin"
     return json.loads(json.dumps({
         "kind": DAY0_ENSEMBLE, "predicate_revision": DAY0_ENSEMBLE_REVISION,
-        "decision_time_iso": cut.isoformat(), "coverage_cut_utc": coverage.isoformat(),
+        "decision_time_iso": cut.isoformat(),
         "routing": {
             "source": request.day0_observed_extreme_source,
             "observed_extreme_c": request.day0_observed_extreme_c,
             "observation_time": (None if request.day0_observed_extreme_observation_time is None
                                  else str(request.day0_observed_extreme_observation_time)),
         },
+        "current_state": state.identity(),
         "cycle_max_age_hours": replacement_source_cycle_max_age_hours(),
         "run_pin": run_pin,
         "member_rows": {

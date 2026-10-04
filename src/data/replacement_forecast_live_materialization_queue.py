@@ -1004,7 +1004,8 @@ def _logic_revision_paths() -> tuple[Path, ...]:
         PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
         PROJECT_ROOT / "src/data/replacement_current_value_serving.py",
         PROJECT_ROOT / "src/data/forecast_source_registry.py",
-        # Typed BLOCKED predicates and the modules that decide them.
+        # Typed BLOCKED predicates and the modules/config that decide them.
+        CONFIG_DIR / "station_forecast_sources.json",
         PROJECT_ROOT / "src/data/materialization_block_evidence.py",
         PROJECT_ROOT / "src/data/day0_hourly_vectors.py",
         PROJECT_ROOT / "src/data/day0_observation_reader.py",
