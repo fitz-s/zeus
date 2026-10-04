@@ -414,3 +414,25 @@ def test_executor_refuses_bytes_that_do_not_match_the_claim_record(tmp_path):
     outside = tmp_path / "dry-run.json"
     outside.write_text("{}")
     worker._require_claimed_bytes(outside, outside.read_bytes())  # no claim, no record
+
+
+def test_fifo_request_is_rejected_without_waiting_for_a_writer(tmp_path):
+    """The classifier opens O_NONBLOCK: a FIFO is rejected at once, no writer needed.
+
+    Same property as the round-4 FIFO probe, with a harness that reads the
+    child's whole output (the probe's text-mode readline() can buffer the
+    second line before communicate() reads the raw pipe, losing it).
+    """
+    import sys as _sys
+
+    fifo = tmp_path / "request.json"
+    os.mkfifo(fifo)
+    code = (
+        "import sys;sys.path.insert(0,%r)\n"
+        "import src.data.replacement_forecast_live_materialization_queue as q\n"
+        "from pathlib import Path\n"
+        "try:\n q.read_regular_request(Path(%r));print('READ')\n"
+        "except q.RequestNotRegular:print('REJECTED')\n"
+    ) % (str(Path.cwd()), str(fifo))
+    done = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert done.stdout.strip() == "REJECTED", (done.stdout, done.stderr)
