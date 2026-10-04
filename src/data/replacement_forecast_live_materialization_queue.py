@@ -2415,8 +2415,13 @@ def _current_money_risk_scopes_for_exact_seeds(
     fam_scopes: frozenset[tuple[str, str, str]],
     *,
     trade_conn: sqlite3.Connection | None = None,
+    strict: bool = False,
 ) -> frozenset[tuple[str, str, str]]:
-    """Read only station-seed families; never enumerate global auction scope."""
+    """Read only station-seed families; never enumerate global auction scope.
+
+    ``strict`` re-raises a failed read: a caller that retires work on "not held"
+    must not read an unknown book as an empty one.
+    """
 
     if not fam_scopes:
         return frozenset()
@@ -2452,6 +2457,8 @@ def _current_money_risk_scopes_for_exact_seeds(
     except _ClaimReadDeadlineExceeded:
         raise
     except Exception as exc:  # noqa: BLE001 - exact causal work must still drain
+        if strict:
+            raise
         _LOG.error("station-revision exact held-family read failed: %s", exc)
         return frozenset()
     return frozenset(
@@ -2831,6 +2838,69 @@ def _city_local_today(city_name: str, now_utc: datetime) -> date | None:
         return city_local_date_at(city.timezone, now_utc)
     except (KeyError, ValueError):
         return None
+
+
+_REQUEST_CONTRACT_LAPSED_STATUS = "SKIPPED_REQUEST_CONTRACT_LAPSED"
+_REQUEST_EXPIRED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_EXPIRED"
+_REQUEST_TARGET_DAY_ENDED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TARGET_LOCAL_DAY_ENDED"
+)
+
+
+def _request_contract_lapse_reason(
+    payload: Mapping[str, object],
+    *,
+    now_utc: datetime,
+    held: Callable[[tuple[str, str, str]], bool],
+) -> str | None:
+    """The reason no consumer can use this request's posterior, or None.
+
+    The request carries its own contract. ``expires_at`` is the readiness
+    certificate's expiry; the seed or request builder derives it from the
+    carrier cycle (``replacement_readiness_expires_at``). ``target_date`` is a
+    city-local settlement day. The materializer judges a request at its stamped
+    ``computed_at``, not at retry time, so neither fact can make a retry block.
+    Without this check such a request retries forever.
+
+    Expired: entry readers and the held ``position_belief`` read refuse an
+    expired readiness row. The pinned held reader ignores that row and refuses
+    a carrier cycle outside ``cycle_age_outside_bound`` instead. An expired
+    request is therefore unusable when its family is not chain-held, or when
+    its carrier cycle is also outside that bound.
+
+    Local day ended: entry needs an open local day, and the current-target plan
+    and every producer drop an ended day. One consumer remains: chain-held
+    exposure. Post-day reduce-only redecision and settlement keep using
+    statistical q until the settlement value is final, and the cycle-advance
+    producer still admits a held family's committed causal baseline. A held
+    family's ended day therefore never retires a request.
+
+    ``held`` reads chain-confirmed exposure and runs only when a lapse is
+    otherwise proven. A failed read raises and is treated as held.
+    An unknown city or timezone, or an unparseable date or clock, is not a
+    lapse.
+    """
+
+    scope = _request_family_scope(payload)
+    if scope is None:
+        return None
+    expires_at = _parse_utc_iso(payload.get("expires_at"))
+    if expires_at is not None and expires_at <= now_utc:
+        from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+            cycle_age_outside_bound,
+        )
+
+        cycle = _parse_utc_iso(payload.get("source_cycle_time"))
+        if (cycle is not None and cycle_age_outside_bound(now_utc, cycle)) or not held(scope):
+            return _REQUEST_EXPIRED_REASON
+    try:
+        target_day = date.fromisoformat(scope[1])
+    except ValueError:
+        return None
+    local_today = _city_local_today(scope[0], now_utc)
+    if local_today is not None and target_day < local_today and not held(scope):
+        return _REQUEST_TARGET_DAY_ENDED_REASON
+    return None
 
 
 def _is_near_dated_target_day(
@@ -7549,6 +7619,7 @@ def _process_claimed_materialization_batch(
     source_cycle_regressions: list[str] = []
     source_cycles_awaiting_ensemble: list[str] = []
     already_covered: list[str] = []
+    contract_lapsed: list[str] = []
     write_deferred: list[str] = []
     error_retained: list[str] = []
     unclassified_retained: list[str] = []
@@ -7588,6 +7659,42 @@ def _process_claimed_materialization_batch(
             failed.append(str(moved))
             continue
         request_payload = _load_request_payload_for_coalescing(input_json)
+        # SCOPE: this request. DRAIN: a terminal receipt, no child process.
+        # RESET: none; the contract is the request's own immutable bytes.
+        # Producers publish fresh work only for an open or held family.
+        lapse_reason = None
+        lapse_clock = datetime.now(timezone.utc)
+        if request_payload is not None:
+            try:
+                lapse_reason = _request_contract_lapse_reason(
+                    request_payload,
+                    now_utc=lapse_clock,
+                    held=lambda scope: bool(_current_money_risk_scopes_for_exact_seeds(
+                        frozenset({scope}), strict=True,
+                    )),
+                )
+            except _ClaimReadDeadlineExceeded:
+                raise
+            except Exception as exc:  # noqa: BLE001 - unknown exposure is held
+                _LOG.warning("materialize[%s] contract check deferred: %s", input_json.name, exc)
+        if lapse_reason is not None:
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=request_payload,
+                receipt_dir_name="superseded_latest",
+                status=_REQUEST_CONTRACT_LAPSED_STATUS,
+                reason_codes=(lapse_reason,),
+                result_evidence={
+                    "request_validated": True,
+                    "subprocess_spawned": False,
+                    "expires_at": request_payload.get("expires_at"),
+                    "decided_at": lapse_clock.isoformat(),
+                },
+            )
+            processed.append(str(receipt))
+            contract_lapsed.append(str(receipt))
+            continue
         cycle_boundary = (
             _seed_source_cycle_boundary(
                 forecast_db=forecast_db,
@@ -8090,6 +8197,8 @@ def _process_claimed_materialization_batch(
         reasons.append("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION")
     if source_cycles_awaiting_ensemble:
         reasons.append(_AWAITING_ENSEMBLE_HWM_REASON)
+    if contract_lapsed:
+        reasons.append(_REQUEST_CONTRACT_LAPSED_STATUS)
     if already_covered:
         reasons.append(
             "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_ALREADY_COVERED"
