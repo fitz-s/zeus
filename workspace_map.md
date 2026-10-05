@@ -55,6 +55,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `config/` | Runtime settings and reality contracts | `config/AGENTS.md` |
 | `.code-review-graph/` | Tracked derived online context | graph status via `python3 scripts/topology_doctor.py --code-review-graph-status --json` |
 | `state/` | Runtime DBs and local control files | classify before treating as truth |
+| `state/observation_raw/sha256/` | Immutable decoded WU/Ogimet entities, referenced by normal forward observation rows; capped storage, no automatic GC or probability/prefix authority | `scripts/obs_live_tick.py`, `architecture/artifact_lifecycle.yaml` |
 | `loop/` | 24/7 improvement loop v3 (codex-sandbox single tick, INTERVAL cadence knob, query escrow `queries/`, HALT/JOURNAL/LEDGER state, prompts) — inert until the operator loads the launchd plist | `loop/tick.sh` header; design: `docs/operations/current/plans/allday_improvement_loop_v3_codex_2026-07-09.md` (method authority: v2 design doc) |
 | artifacts (untracked) | Review artifacts untracked 2026-05-23 — bodies on disk, gitignored. See `docs/archive_registry.md`. | untracked |
 | historical evidence (untracked) | Historical evidence trails untracked 2026-05-23 — bodies on disk, gitignored. | untracked |

@@ -1791,6 +1791,7 @@ files:
       the observation bucket or raw source print) before every observation_instants INSERT. A causally newer same-hour WU
       payload supersedes the current row in either direction while the displaced view remains immutable in observation_revisions;
       append-only-extremum assumptions cannot preserve a provider value after WU has corrected it.
+      The bounded forward-capture seam handles only validated captured_entity_custody_v1 metadata; same parsed identity keeps the original row/NULL/first custody, while an otherwise lawful revision synchronizes the new body reference and custody in the same transaction. Other provenance, identity, scalar and causal-clock material guards remain unchanged; raw custody does not grant prefix or action authority.
   src/data/meteostat_bulk_client.py:
     zone: K2_runtime
     authority_role: meteostat_bulk_boundary
@@ -1817,6 +1818,7 @@ files:
     why: Ogimet METAR hourly fetch + extremum-preserving UTC-hour buckets for every configured NOAA-settled ICAO. Mirror of
       NOAA's METAR bulletins; temperature parsed through src/data/metar_temperature.py (T-group tenths first); C->F only
       after aggregation when settlement_unit=='F'.
+      Forward rows retain exact decoded response entity bytes and actual acquisition clocks for the existing live writer's immutable CAS custody; safe metadata excludes credentials and source-issued time remains unknown when absent. Custody does not grant complete-prefix or probability authority.
   src/data/solar_append.py:
     zone: K2_runtime
     authority_role: live_solar_append
@@ -1835,6 +1837,7 @@ files:
     authority_role: wu_icao_hourly_boundary
     why: WU ICAO historical.json hourly fetch + snap-to-UTC-hour for 47 wu_icao cities. Reuses WU_API_KEY public-key fallback
       from daily_obs_append to avoid the Day-0 ghost-trade regression (commit 65921ed).
+      Forward rows retain exact decoded response entity bytes and actual acquisition clocks for immutable CAS custody. Public-key query credentials are never stored in URL/params/headers; source-issued time is not inferred from acquisition or server clocks, and custody alone cannot authorize prefix/q.
     downstream:
     - src/data/meteostat_bulk_client.py
     - src/data/ogimet_hourly_client.py

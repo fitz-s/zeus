@@ -463,7 +463,7 @@ test_trust_policy:
     tests/test_flash_crash_evidence_gate.py: {created: "2026-06-02", last_used: "2026-09-03", note: "Persistent market-path catastrophe evidence is causal, scale-free held-side executable-bid drawdown: ask-sensitive mark price cannot mask a collapse, established positions use a bounded one-hour reference, new low-price holdings use the causal trailing-hour bid high, missing history remains explicitly unavailable, and only fresh executable multi-sample collapse can override HOLD while guaranteed settlement winners remain protected."}
     tests/test_hk_rejects_vhhh_source.py: {created: "2026-04-21", last_used: "2026-10-03", note: "Actual HIGH/LOW canonical writes accept nonconflicting HKO binding at either layer; foreign/conflicting/unbound station identities reject before insert, while other-city nullable station writes remain legal."}
     tests/test_hk_settlement_floor_rounding.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_hourly_clients_parse.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_hourly_clients_parse.py: {created: "2026-04-21", last_used: "2026-10-05", note: "Normal WU/Ogimet parsing preserves decoded entity bytes/acquisition clocks and safe identity metadata without credential retention or prefix authority."}
     tests/test_k1_slice_d.py: {created: "2026-04-17", last_used: "2026-04-29"}
     tests/test_k2_slice_e.py: {created: "2026-04-21", last_used: "2026-04-27"}
     tests/test_k2_live_ingestion_relationships.py: {created: "2026-04-13", last_used: "2026-04-25"}
@@ -485,7 +485,8 @@ test_trust_policy:
     tests/test_obs_v2_dst_missing_hour_flag.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_obs_v2_physical_bounds.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_obs_v2_reader_gate.py: {created: "2026-04-25", last_used: "2026-04-25"}
-    tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-10-03", note: "Typed observation provenance/source contracts and fail-closed malformed-date A2 cause; existing Shenzhen downward-revision supersession and immutable observation_revisions evidence retained."}
+    tests/test_obs_v2_writer.py: {created: "2026-04-21", last_used: "2026-10-05", note: "Typed observation provenance/source contracts and fail-closed malformed-date A2 cause; existing Shenzhen downward-revision supersession and immutable observation_revisions evidence retained. Strict owned custody repeats preserve first/NULL rows; H/L lawful revisions bind current body while foreign non-custody/type changes remain rejected."}
+    tests/test_observation_instants_v2_freshness.py: {created: "2026-05-17", last_used: "2026-10-05", note: "Normal producer/private canonical custody readback, CAS no-overwrite/cap/per-response failures, repeated directory-fsync failure and recovery without scalar or prefix/q authority changes."}
     tests/test_pe_reconstruction_relationships.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_phase4_5_extractor.py: {created: "2026-04-16", last_used: "2026-04-16"}
     tests/test_phase5_gate_d_low_purity.py: {created: "2026-04-17", last_used: "2026-04-17"}
@@ -1097,6 +1098,7 @@ categories:
     - tests/test_noaa_wrh_settlement_product.py
     - tests/test_obs_v2_reader_gate.py
     - tests/test_obs_v2_writer.py
+    - tests/test_observation_instants_v2_freshness.py
     - tests/test_temperature.py
     - tests/test_tier_resolver.py
     - tests/test_topology_doctor.py
@@ -2087,6 +2089,16 @@ test_metadata:
     notes: >
       Protects v2 writer antibodies around authority fields, provenance, and
       per-city source routing.
+  tests/test_observation_instants_v2_freshness.py:
+    modules: [data, ingest]
+    category: core_law_antibody
+    blocks_commit: true
+    law_dependencies:
+      - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
+    notes: >
+      Pins the normal observation writer and immutable decoded-entity custody
+      with per-response unavailable recovery, honest clocks and no prefix/q promotion.
   tests/test_obs_v2_reader_gate.py:
     modules: [scripts, data]
     category: core_law_antibody

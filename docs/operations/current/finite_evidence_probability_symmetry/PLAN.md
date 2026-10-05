@@ -17108,3 +17108,49 @@ Child cleanup inventory: clean tracked84f, no worker/test activity or needed
 raw input; exact own ignored template settings SHAe95eb2066414092e2b4416cd24b94a9a08ff050493df2ebff1d38a543d519a3b.
 Ignored pytest cache/two historical extract-stderr diagnostics are not required
 source inputs; actual needed native originals remain only in parent packet.
+
+Generic forward entity slice named acceptance: original0c6 independent review
+found two Important defects, foreign non-custody context accepted during lawful
+widening and fsync-failed orphan reuse incorrectly OBSERVED. Child7316fde fixes
+strict non-custody/core JSON type binding for owned-custody revisions and applies
+successful directory fsync to every verified publication/reuse. Original private
+REDs retained; 182 changed cases PASS plus 10 baseline writer controls, then
+independent10 PASS/2.44s with exact seven hashes unchanged closed both findings.
+Parent clean disjoint cherry-picks0c6+7316 as f1e69d613/d396ed25f; no change to
+materializer, q/math/core/semrev or native raw. Four source/three test bytes
+match child final review exactly. Existing source/script/test/lifecycle/workspace
+registries declare state/observation_raw/sha256 immutable decoded entity owner,
+normal512MiB/10000-body cap, no auto-GC/overwrite/historical retrofit and no
+prefix/action authority. Legacy NULL/first custody preserved; otherwise lawful
+H/L widening/correction synchronizes actual current reference and custody.
+SCOPE exact captured response; DRAIN normal next response or durable verified
+reuse; RESET directory durability succeeds and strict custody binds, not cached
+file existence or new unrelated provenance. Runtime forward capture remains
+UNPROVEN until a normal post-load response/current canonical row is observed.
+Live remains4fc while origin7130 waits human authorization for exact git-lock
+quarantine; no live FF retry, loader, raw acquisition or guard action in this
+independent integration stage. Parent123 needed originals remain untracked.
+
+Parent integration controls30 PASS/2.83s, actualrc0, including strict foreign
+HIGH/LOW core rejection, custody repeat/widening, fsync-failed reuse and normal
+producer/private canonical path plus original ingest-admission suite:
+/tmp/zeus-forward-integrator-named.xml. Compile AST7/YAML4 passed. Changed-surface
+freshness initially found two missing Purpose/Reuse headers on the existing
+freshness test; added only those comments after the tests finished, leaving its
+entire executable body identical to reviewed7316. Test-topology had no row for
+that pre-existing file; now explicit lifecycle/category/law dependencies and
+required script-test routing cover the changed surface, not unrelated drift.
+
+Final governance verification: freshness/planning OK zero issues, AST7/YAML4
+and diff checks PASS. Source/test/script registry tools report zero changed-path
+issues; whole-repo issue counts455/542/283 are not declared globally clean or
+repaired here. Header-only freshness test SHA nowb58dee3d1689d73b09e97630abfd535e6131a9008a3d41f93ffd0b7e370e9fa7;
+removing exactly the two new comments reproduces reviewed7316 bytes exactly.
+No further behavioral tests needed for these comments/registry descriptions.
+Exact child own regular template settings SHAe95 was deleted after tests;
+no active handles or required ignored input, tracked7316 clean before managed
+archive. Recoverable archive receipt01a10b74-4b37-7172-9494-5f2fd6bfcaa8 is for
+/Users/leofitz/.codex/worktrees/forward-observation-raw-capture-7781/zeus only.
+The older forward-observation-raw-capture attachment points to a missing directory
+and is stale, not restoration/cleanup evidence. Child branch can be removed only
+after this verified integration/snapshot; parent raw originals remain untouched.

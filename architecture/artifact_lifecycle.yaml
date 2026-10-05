@@ -115,6 +115,14 @@ artifact_classes:
     record_required: true
 
 classification_rules:
+  - id: observation_decoded_entity_original
+    path_globs:
+      - state/observation_raw/sha256/**
+    artifact_class: generated_evidence
+    lifecycle: active
+    canonical_owner: scripts/obs_live_tick.py
+    destination_rule: Immutable decoded WU/Ogimet response entities owned by the normal forward observation writer; content-addressed small refs accompany canonical rows.
+    guardrail: Normal storage cap 512MiB/10000bodies; no automatic GC, age deletion, historical rewrite or prefix/q/action authority. Source-issued clocks remain independently unproven when absent.
   - id: current_operations_package
     path_globs:
       - docs/operations/current/

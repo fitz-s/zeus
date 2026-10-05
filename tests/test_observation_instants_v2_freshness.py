@@ -1,6 +1,8 @@
 # Created: 2026-05-17
 # Lifecycle: created=2026-05-17; last_reviewed=2026-10-05; last_reused=2026-10-05
 # Last reused or audited: 2026-10-05 (normal producer/private canonical custody)
+# Purpose: Pin normal observation freshness and immutable decoded-entity custody through private canonical writes.
+# Reuse: Read scripts/obs_live_tick.py and the typed observation writer before relying on capture/freshness assertions.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
 #   Antibody for F44: observation_instants writer dead since 2026-05-10.
 #   These tests catch the "dead-writer" category permanently by asserting
