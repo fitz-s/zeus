@@ -1,0 +1,50 @@
+{
+  "request": "REQ-20261005-040720-130256",
+  "candidate": "8fd9248238a4590a2e6087f9a1ecf80dc09b84fd",
+  "branch": "feat/fast-obs-round5",
+  "scope": "ISOLATED_CLOUD_FIXTURES_NOT_PRODUCTION_OR_FULL_ZEUS_VALIDATION",
+  "tests_passed": 49,
+  "tests_failed": 0,
+  "tests_skipped": 0,
+  "runs": [
+    {"command": "python artifacts/fast_obs_audit/test_round5_trace.py", "tests": 15, "exit_code": 0},
+    {"command": "python artifacts/fast_obs_audit/test_round5_closeout.py", "tests": 30, "exit_code": 0},
+    {"command": "python artifacts/fast_obs_audit/test_round5_public_recheck.py", "tests": 4, "exit_code": 0}
+  ],
+  "tested_blobs": {
+    "src/runtime/observation_reaction_trace.py": "181eec18ea2ff51c423bd01f81062fbda460be20",
+    "artifacts/fast_obs_audit/round5_closeout.py": "e8218297e70206d1206ec50b34baf9b33b27b61b",
+    "artifacts/fast_obs_audit/test_round5_trace.py": "030dcb159c231207bc5c4925b22521c1c27579dd",
+    "artifacts/fast_obs_audit/test_round5_closeout.py": "7b73246607f3301da778ad8490ad78cc38e115fb",
+    "artifacts/fast_obs_audit/round5_public_recheck.py": "e4117347934bd07955ada65c594c77a722354d86",
+    "artifacts/fast_obs_audit/test_round5_public_recheck.py": "ca1ffce58ec18510446fba44169d8cdcbfa59cfd"
+  },
+  "executed_checks": [
+    "Python syntax compilation of all new audit/test utilities",
+    "Read-only SQLite connection rejects INSERT",
+    "Source database bytes unchanged after isolated native-fact capture",
+    "Exact bound snapshot condition_id selects settlement evidence rather than command market_id",
+    "A-B-A observation revisions cannot be attributed by newest same-content timestamp",
+    "UTC/CDT conversion, DST ambiguity rejection, half-open mixed-ISO timestamp windows",
+    "Full ACK chain requires canonical ACK event, wake identity, and readiness identity",
+    "All 54 city rows present in the report",
+    "GitHub compare confirms exact candidate ancestry and no excluded-file changes"
+  ],
+  "not_executed": [
+    "Local WebCodex scratch checkout or shell",
+    "Production database, log, chain balance or redemption receipt access",
+    "Independent decompression/reanalysis of the 5352-command archive",
+    "Four-city repeated first-availability HTTP experiment",
+    "Full Zeus integration/baseline test suite",
+    "Per-row source and wake-consumer hook integration",
+    "Production performance or logging-overhead benchmark",
+    "Any deployment, restart, production repair, or live push"
+  ],
+  "blocked_hosted_attempt": "An isolated hosted-audit workflow write was denied; no workflow was created, executed, or retried through a bypass.",
+  "closure_status": {
+    "captured_live_writer_census": "DONE_WITH_SUPPLIED_SNAPSHOT_EVIDENCE",
+    "new_public_speed_race": "RESIDUAL_R1",
+    "production_latency": "RESIDUAL_R2",
+    "historical_economic_reconciliation": "RESIDUAL_R3"
+  }
+}
