@@ -418,6 +418,7 @@ def test_native_source_partial_is_nullable_quantity_not_extrema(tmp_path):
             manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
         row = conn.execute("SELECT * FROM source_run").fetchone()
         assert result.status == "INCOMPLETE"
+        assert (row["ingest_mode"], row["origin_mode"]) == ("ARCHIVE_BACKFILL", "ARCHIVE_BACKFILL")
         assert (row["status"], row["completeness_status"], row["partial_run"]) == ("PARTIAL", "PARTIAL", 1)
         assert row["temperature_metric"] is None
         assert row["physical_quantity"] == "native_2m_temperature_instantaneous_knots"
@@ -448,6 +449,8 @@ def test_native_source_full_scope_real_knots_and_no_geophysical_clock_upgrade(tm
             manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
         result = _native_source_scope(conn, source, manifest, inputs)
         assert source.status == result.status == "AVAILABLE", result
+        row = conn.execute("SELECT * FROM source_run").fetchone()
+        assert (row["ingest_mode"], row["origin_mode"]) == ("ARCHIVE_BACKFILL", "ARCHIVE_BACKFILL")
         assert len(result.native_knots) == 153
         assert {k["step_hours"] for k in result.native_knots} == {0, 3, 6}
         assert all(k["selected_point"]["selected_flat_index"] == 2 for k in result.native_knots)
@@ -483,12 +486,15 @@ def test_native_source_missing_body_resume_preserves_identity_and_first_possessi
         final = module.persist_native_temperature_source_run(conn, cache_dir=cache,
             manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
         assert final.source_run_id == first.source_run_id and final.status == "AVAILABLE"
+        row = conn.execute("SELECT * FROM source_run").fetchone()
+        assert (row["ingest_mode"], row["origin_mode"]) == ("ARCHIVE_BACKFILL", "ARCHIVE_BACKFILL")
         after = json.loads(manifest.read_bytes())["messages"]
         assert all(m in after for m in before)
         result = _native_source_scope(conn, final, manifest, inputs)
         changed_scope = _native_source_scope(conn, final, manifest, inputs,
             qualified_prefix_cut_utc=inputs["expected_run_utc"] + timedelta(hours=2))
         assert result.temperature_first_possession_at == changed_scope.temperature_first_possession_at
+        assert result.qualification_status == changed_scope.qualification_status == "OFFLINE_ONLY"
         assert conn.execute("SELECT COUNT(*) FROM source_run").fetchone()[0] == 1
     finally:
         conn.close()

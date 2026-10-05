@@ -308,6 +308,7 @@ def persist_native_temperature_source_run(conn: sqlite3.Connection, *, cache_dir
     with conn:
         write_source_run(conn, source_run_id=run_id, source_id="ecmwf_open_data",
             track="2t_instant_native_knots", release_calendar_key="ecmwf_open_data",
+            ingest_mode="ARCHIVE_BACKFILL", origin_mode="ARCHIVE_BACKFILL",
             source_cycle_time=expected_run_utc, source_issue_time=None, source_release_time=None,
             source_available_at=max(clocks, key=datetime.fromisoformat) if complete else None,
             status="SUCCESS" if complete else "PARTIAL", completeness_status="COMPLETE" if complete else "PARTIAL",
