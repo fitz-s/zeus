@@ -1072,10 +1072,35 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
 # --------------------------------------------------------------------------
 # Entry points
 # --------------------------------------------------------------------------
+ARTIFACT_NAMES = ("multiday_evaluation.md", "multiday_evaluation.json")
+
+
 def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def clear_stale_tmp(out_dir: Path) -> list[str]:
+    """Unlink the fixed-name ``.tmp`` of each artifact left by a killed run; returns what it removed.
+
+    The faulthandler watchdog (and a parent SIGKILL) exit without running ``finally`` or atexit,
+    so a kill between ``write_text`` and ``os.replace`` leaves at most one ``<artifact>.tmp`` per
+    artifact. The next write would overwrite it anyway, so nothing accumulates; this just removes
+    it at the start of the next run instead of leaving it until then. Only the two exact names
+    this script writes are touched.
+    """
+    removed = []
+    for name in ARTIFACT_NAMES:
+        tmp = out_dir / (name + ".tmp")
+        try:
+            tmp.unlink()
+            removed.append(tmp.name)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("could not remove stale %s", tmp, exc_info=True)
+    return removed
 
 
 def run_multiday_evaluation(
@@ -1142,6 +1167,9 @@ def run_multiday_evaluation(
     if write:
         out = Path(out_dir) if out_dir else Path(STATE_DIR)
         out.mkdir(parents=True, exist_ok=True)
+        stale = clear_stale_tmp(out)
+        if stale:
+            logger.warning("removed stale temp artifacts from a killed run: %s", stale)
         _atomic_write(out / "multiday_evaluation.md", report["markdown"])
         body = {k: v for k, v in report.items() if k != "markdown"}
         _atomic_write(out / "multiday_evaluation.json", json.dumps(body, indent=1))

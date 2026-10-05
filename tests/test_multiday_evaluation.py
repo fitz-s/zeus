@@ -844,12 +844,18 @@ def _taker_fact(conn, command_id, order_id, side, top_price, size, legs, *, trad
     )
 
 
+
+
 def test_exit_position_with_economics_debt_gets_no_proceeds_and_is_counted():
     entries = [_entry("c1", "p1", "A", 30)]
     td = _td(entries, [_pos("p1", direction="buy_yes", pnl=0.0)], {"c1": [_fill(0.2)]},
              exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 5.0}], exit_debt=["p1"])
     rep = _report(td, _listings("A"))
     assert rep["exits"] == [] and rep["coverage"]["exit_positions_economics_debt"] == 1
+
+
+
+
 
 
 def test_floor_counterexample_end_to_end_from_the_database(tmp_path):
@@ -1133,3 +1139,46 @@ def test_report_counts_unverifiable_entry_positions_and_never_prices_their_sells
     assert total["exit_cost_unknown"] == 1 and total["exit_pnl_usd"] == 0.0
     assert rep["coverage"]["exit_positions_unverifiable_entry_cost"] == 1
     assert rep["coverage"]["entry_commands_taker_unverifiable"] == 1
+
+
+# ---- the child's temp files after a watchdog kill ----------------------------------------------
+def test_stale_tmp_artifacts_of_a_killed_run_are_removed_at_the_next_write(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    for name in ("multiday_evaluation.md.tmp", "multiday_evaluation.json.tmp"):
+        (out / name).write_text("half written")
+    (out / "unrelated.tmp").write_text("keep")
+    assert sorted(me.clear_stale_tmp(out)) == ["multiday_evaluation.json.tmp", "multiday_evaluation.md.tmp"]
+    assert sorted(p.name for p in out.iterdir()) == ["unrelated.tmp"]
+    assert me.clear_stale_tmp(out) == []                                 # nothing left, nothing to do
+
+
+def test_a_run_clears_a_stale_tmp_before_writing_and_leaves_only_the_artifacts(tmp_path):
+    dbs = _make_dbs(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "multiday_evaluation.json.tmp").write_text("left by a watchdog kill")
+    _run(tmp_path, dbs)
+    assert sorted(p.name for p in out.iterdir()) == ["multiday_evaluation.json", "multiday_evaluation.md"]
+
+
+def test_watchdog_kill_between_write_and_replace_leaves_the_tmp_and_the_next_run_removes_it(tmp_path):
+    """The claim being fixed: a kill does NOT clean up after itself. faulthandler exits without
+    running finally or atexit, so the fixed-name .tmp stays until the next run."""
+    import subprocess
+
+    out = tmp_path / "out"
+    out.mkdir()
+    code = (
+        "import faulthandler, time, pathlib\n"
+        f"faulthandler.dump_traceback_later(1.0, exit=True)\n"
+        f"p = pathlib.Path({str(out / 'multiday_evaluation.json.tmp')!r})\n"
+        "try:\n"
+        "    p.write_text('x')\n"
+        "    time.sleep(30)          # the kill lands between write_text and os.replace\n"
+        "finally:\n"
+        "    p.unlink()              # would clean up if finally ran\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 1 and (out / "multiday_evaluation.json.tmp").exists()   # the claim 'nothing left' was false
+    assert me.clear_stale_tmp(out) == ["multiday_evaluation.json.tmp"]

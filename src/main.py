@@ -2039,7 +2039,10 @@ def _run_multiday_evaluation_child(
     Raises on a non-zero exit (except DB-busy, which skips this cadence) and on timeout,
     so ``_scheduler_job`` records FAILED. ``subprocess.run`` kills the child when the
     timeout fires; the child holds no non-daemon worker thread and writes only two
-    fixed-name atomic temp files, so a kill leaves nothing to clean up.
+    fixed-name atomic temp files. A kill (this timeout, or the child's own watchdog, which
+    exits without running ``finally`` or atexit) can leave at most one such ``.tmp`` per
+    artifact; the child unlinks any stale one at the start of its next run, so nothing
+    accumulates.
 
     The child also carries its own deadline (``scripts.multiday_evaluation.CHILD_DEADLINE_S``,
     270 s, enforced by a faulthandler watchdog that dumps the stacks and exits 1), so it ends
