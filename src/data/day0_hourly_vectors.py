@@ -52,7 +52,7 @@ import threading
 import time
 from collections import Counter
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from functools import lru_cache
@@ -304,6 +304,8 @@ class Day0CurrentTemperatureState:
     observed_at: datetime
     source: str
     clock_evidence: Mapping[str, object] | None = None
+    # The exact ledger row/event read; telemetry provenance, never identity.
+    input_ref: Mapping[str, object] | None = field(default=None, compare=False)
 
     def identity(self) -> dict[str, object]:
         return {
@@ -4497,6 +4499,7 @@ def read_day0_current_temperature_state(
             ),
             observed_at=kma.observed_at,
             source="aviationweather_metar",
+            input_ref={"kma_event_id": kma.event_id},
         ) if kma is not None else None
     )
     if kma_state is not None:
@@ -4515,7 +4518,7 @@ def read_day0_current_temperature_state(
         rows = conn.execute(
             f"""
             SELECT publish_ts_utc, value_native, unit, station_id, source_channel,
-                   raw_report, fetched_at_utc
+                   raw_report, fetched_at_utc, rowid
               FROM {table}
              WHERE city = ?
                AND source_channel IN ({placeholders})
@@ -4538,7 +4541,7 @@ def read_day0_current_temperature_state(
     latest_state = None
     latest_clock = None
     decision_utc = decision_time.astimezone(UTC)
-    for publish_raw, value_raw, unit_raw, station_raw, channel_raw, raw_report, fetched_raw in rows:
+    for publish_raw, value_raw, unit_raw, station_raw, channel_raw, raw_report, fetched_raw, row_id in rows:
         channel = str(channel_raw or "").strip().lower()
         station_raw = str(station_raw or "").strip().upper()
         if station_raw != station and not station_raw.startswith(f"{station}:"):
@@ -4663,6 +4666,7 @@ def read_day0_current_temperature_state(
                 observed_at=observation_time,
                 source=str(channel_raw),
                 clock_evidence=clock_evidence,
+                input_ref={"print_id": int(row_id)},
             )
     return latest_state
 

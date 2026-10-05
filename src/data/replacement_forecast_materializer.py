@@ -1797,6 +1797,9 @@ def _day0_noaa_preliminary_carrier(
     clock_evidence = getattr(current_state, "clock_evidence", None)
     if isinstance(clock_evidence, Mapping):
         carrier["current_temperature_clock_evidence"] = dict(clock_evidence)
+    input_ref = getattr(current_state, "input_ref", None)
+    if isinstance(input_ref, Mapping):
+        carrier["current_temperature_input_ref"] = dict(input_ref)
     return carrier, likelihood
 
 
@@ -8564,6 +8567,9 @@ def _compute_posterior_payload(
                 ),
                 **({"day0_current_temperature_clock_evidence": dict(_day0_shared_carrier["current_temperature_clock_evidence"])}
                    if isinstance(_day0_shared_carrier.get("current_temperature_clock_evidence"), Mapping) else {}),
+                # Telemetry-only: the exact row read, outside every identity hash.
+                **({"day0_current_temperature_input_ref": dict(_day0_shared_carrier["current_temperature_input_ref"])}
+                   if isinstance(_day0_shared_carrier.get("current_temperature_input_ref"), Mapping) else {}),
                 "day0_remaining_carrier_operator": str(
                     _day0_shared_carrier["operator"]
                 ),

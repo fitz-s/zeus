@@ -25,7 +25,7 @@ _FIELDS = frozenset({'city','target_date','metric','station_id','source_channel'
     'event_id','venue_ack_at_ms','q_served_at_ms','posterior_ready_at_ms','wake_published',
     'observation_ref','input_reference_status','readiness_id','readiness_computed_at_utc',
     'wake_id','wake_received_at_ms','wake_published_at_ms','decision_id','decision_outcome',
-    'decision_reason','decision_at_ms','command_at_ms','commit_disposition'})
+    'decision_reason','decision_at_ms','command_at_ms','commit_disposition','input_ref'})
 
 
 def _utc(value: Any) -> datetime:
@@ -79,12 +79,18 @@ def emit_observation_committed(row: Mapping[str, Any], *, world_committed_at_ms:
     except Exception:pass
 
 
-def _readiness_reference(conn: Any, row: Any, posterior_id: int) -> dict[str, Any]:
-    """A readiness UPSERT is not a history; preserve its exact pointer at publication."""
+def _readiness_reference(conn: Any, row: Any, posterior_id: int, readiness_id: str | None = None) -> dict[str, Any]:
+    """A readiness UPSERT is not a history; preserve its exact pointer at publication.
+
+    A known readiness_id narrows the read to its primary key; the dependency
+    check is unchanged.
+    """
     try:
         matches=[]
         for ready in conn.execute('SELECT readiness_id,computed_at,dependency_json FROM readiness_state '
-            "WHERE city=? AND target_local_date=? AND temperature_metric=? AND status='READY'",tuple(row[:3])):
+            "WHERE city=? AND target_local_date=? AND temperature_metric=? AND status='READY'"
+            +('' if readiness_id is None else ' AND readiness_id=?'),
+            tuple(row[:3])+(() if readiness_id is None else (readiness_id,))):
             dependencies=json.loads(ready[2] or '{}').get('dependencies',[])
             if any(d.get('role')=='soft_anchor_posterior' and d.get('posterior_id')==posterior_id for d in dependencies):
                 matches.append(ready)
@@ -117,18 +123,40 @@ def _unique_print_reference(conn: Any, *, city: str, state: Any, computed_at: st
     except Exception:return None,'INPUT_REFERENCE_UNAVAILABLE'
 
 
-def emit_posterior_ready(conn: Any, posterior_id: int, *, wake_published: bool) -> None:
+def _consumed_print_reference(conn: Any, carried: Mapping[str, Any]) -> tuple[Any,str]:
+    """Resolve the exact input row the reader recorded; never a content search."""
     try:
-        row=conn.execute('SELECT city,target_date,temperature_metric,posterior_identity_hash,provenance_json,computed_at '
-                         'FROM forecast_posteriors WHERE posterior_id=?',(posterior_id,)).fetchone()
-        if row is None:return
-        prov=json.loads(row[4] or '{}');state=prov.get('day0_current_temperature_state')
-        ref,status=_unique_print_reference(conn,city=row[0],state=state,computed_at=row[5])
+        if 'kma_event_id' in carried:return None,'CONSUMED_KMA_EVENT_REVISION'
+        if 'print_id' not in carried:return None,'CONSUMED_INPUT_KIND_UNKNOWN'
+        # The reader's own schema choice: attached WORLD, else the same database.
+        attached={r[1] for r in conn.execute('PRAGMA database_list')}
+        names=('id','city','station_id','source_channel','publish_ts_utc','value_native','unit','fetched_at_utc','raw_report')
+        row=conn.execute('SELECT rowid,'+','.join(names[1:])+' FROM '+('world.' if 'world' in attached else '')
+            +'observation_prints WHERE rowid=?',(int(carried['print_id']),)).fetchone()
+        if row is None:return None,'CONSUMED_REVISION_ROW_MISSING'
+        return observation_revision_reference(dict(zip(names,row))),'CONSUMED_LEDGER_REVISION'
+    except Exception:return None,'INPUT_REFERENCE_UNAVAILABLE'
+
+
+def emit_posterior_ready(conn: Any, posterior_id: int, *, wake_published: bool,
+                         readiness_id: str | None = None) -> str | None:
+    """Returns the exact posterior identity hash for its own wake, or None."""
+    try:
+        row=conn.execute('SELECT city,target_date,temperature_metric,posterior_identity_hash,'
+            "json_extract(provenance_json,'$.day0_current_temperature_state'),computed_at,"
+            "json_extract(provenance_json,'$.day0_current_temperature_input_ref') "
+            'FROM forecast_posteriors WHERE posterior_id=?',(posterior_id,)).fetchone()
+        if row is None:return None
+        state=json.loads(row[4]) if row[4] else None
+        carried=json.loads(row[6]) if row[6] else None
+        ref,status=(_consumed_print_reference(conn,carried) if isinstance(carried,Mapping)
+            else _unique_print_reference(conn,city=row[0],state=state,computed_at=row[5]))
         emit_stage('POSTERIOR_READY',city=row[0],target_date=row[1],metric=row[2],
             posterior_id=posterior_id,posterior_identity_hash=row[3],input_identity=state,
-            observation_ref=ref,input_reference_status=status,wake_published=wake_published,
-            **_readiness_reference(conn,row,posterior_id))
-    except Exception:pass
+            observation_ref=ref,input_ref=carried,input_reference_status=status,wake_published=wake_published,
+            **_readiness_reference(conn,row,posterior_id,readiness_id))
+        return row[3]
+    except Exception:return None
 
 
 def emit_q_served(bundle: Any) -> None:

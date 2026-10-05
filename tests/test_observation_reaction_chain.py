@@ -24,7 +24,8 @@ from src.data.day0_hourly_vectors import Day0HourlyVector, day0_source_clock_ens
 from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
 from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
 from src.runtime.observation_reaction_trace import (
-    completed_trace, emit_posterior_ready, emit_stage, emit_venue_ack,
+    completed_trace, emit_observation_committed, emit_posterior_ready, emit_stage, emit_venue_ack,
+    emit_wake_received,
 )
 
 _hko_native_surfaces = fixtures._hko_native_surfaces
@@ -422,10 +423,12 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     world_committed_at_ms=time.time_ns()//1_000_000
     input_identity={"source":"aviationweather_metar",
         "observed_at_utc":fixtures._dt(18,5).isoformat(),"value_native":30.0}
-    emit_stage("SOURCE_COMMITTED",city="Shanghai",station_id="ZSPD",
-        source_channel="aviationweather_metar",input_identity=input_identity,
-        response_received_at_ms=response_received_at_ms,
-        world_committed_at_ms=world_committed_at_ms)
+    # The production per-row hook, over the exact committed revision.
+    world.row_factory=sqlite3.Row
+    committed_row=dict(world.execute("SELECT * FROM observation_prints WHERE raw_report LIKE 'METAR ZSPD%'").fetchone())
+    world.row_factory=None
+    emit_observation_committed(committed_row,world_committed_at_ms=world_committed_at_ms,
+                               disposition="ADVANCES_SOURCE_FRONTIER")
     vector=Day0HourlyVector(model="ecmwf_ifs",city="Shanghai",target_date="2026-06-07",
         timezone_name="Asia/Shanghai",captured_at=fixtures._dt(18,8).isoformat(),
         times=tuple(f"2026-06-07T{hour:02d}:00" for hour in range(24)),
@@ -480,6 +483,7 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
         wake_received_at_ms=time.time_ns()//1_000_000
         wake=reactor_wake.read_reactor_wake(path=wake_path)
         assert wake is not None and wake.reason=='forecast_posterior_advanced'
+        emit_wake_received(wake_id=wake.wake_id)  # The main.py consumer hook, wake_id only.
     assert wake.forecast_families == (('Shanghai','2026-06-07','high'),)
     # Exercise the production held-family selector against a separate read-only
     # TRADE connection; an ended local date does not erase money at risk.
@@ -571,6 +575,12 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
             events.append(json.loads(message[len(prefix):]))
     trace=completed_trace(events,posterior_identity_hash=row["posterior_identity_hash"])
     assert trace["status"]=="OBSERVED_COMPLETE",trace
+    (ready,)=[e for e in events if e["stage"]=="POSTERIOR_READY"]
+    assert ready["input_reference_status"]=="CONSUMED_LEDGER_REVISION"
+    assert ready["observation_ref"]["id"]==committed_row["id"]
+    assert [(e["wake_id"],e["posterior_identity_hash"]) for e in events if e["stage"]=="WAKE_PUBLISHED"]==[
+        (wake.wake_id,row["posterior_identity_hash"])]
+    assert trace["all_hops_observed"] and trace["lineage_grade"]=="EXPLICIT_REVISION",trace
     assert isinstance(trace["q_served_at_ms"],int)
     assert isinstance(trace["venue_ack_at_ms"],int)
     assert trace["q_served_at_ms"]>=trace["posterior_ready_at_ms"]>=trace["world_committed_at_ms"]
@@ -595,6 +605,7 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='observation_prints'").fetchone()[0]==0
     assert world.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='forecast_posteriors'").fetchone()[0]==0
     conn.close();world.close();trade.close()
+
 
 # ---------------------------------------------------------------------------
 # Production stage hooks: each emits once with exact ids and never raises.
@@ -669,3 +680,171 @@ def test_source_commit_hook_never_raises_and_skips_invalid_rows(caplog):
     emit_observation_committed({},world_committed_at_ms=1)
     assert _trace_events(caplog)==[]
 
+
+def _posterior_db(tmp_path,*,provenance,prints=()):
+    conn=sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE forecast_posteriors(posterior_id INTEGER PRIMARY KEY,city TEXT,target_date TEXT,"
+                 "temperature_metric TEXT,posterior_identity_hash TEXT,provenance_json TEXT,computed_at TEXT)")
+    conn.execute("CREATE TABLE readiness_state(readiness_id TEXT PRIMARY KEY,computed_at TEXT,dependency_json TEXT,"
+                 "city TEXT,target_local_date TEXT,temperature_metric TEXT,status TEXT)")
+    conn.execute("INSERT INTO forecast_posteriors VALUES(7,'Tokyo','2026-10-05','high','hash-7',?,'2026-10-05T08:10:00+00:00')",
+                 (json.dumps(provenance),))
+    conn.execute("INSERT INTO readiness_state VALUES('ready-7','2026-10-05T08:10:00+00:00',?,'Tokyo','2026-10-05','high','READY')",
+                 (json.dumps({"dependencies":[{"role":"soft_anchor_posterior","posterior_id":7}]}),))
+    tmp_path.mkdir(parents=True,exist_ok=True)
+    conn.execute("ATTACH DATABASE ? AS world",(str(tmp_path/"world.db"),))
+    conn.execute("CREATE TABLE world.observation_prints(id INTEGER PRIMARY KEY,city TEXT,station_id TEXT,source_channel TEXT,"
+                 "publish_ts_utc TEXT,value_native REAL,unit TEXT,fetched_at_utc TEXT,raw_report TEXT)")
+    conn.executemany("INSERT INTO world.observation_prints VALUES(?,?,?,?,?,?,?,?,?)",prints)
+    return conn
+
+
+_PRINT_A=(1,'Tokyo','RJTT','x','2026-10-05T08:00:00+00:00',20.0,'C','2026-10-05T08:01:00+00:00','a')
+_PRINT_B=(2,'Tokyo','RJTT','x','2026-10-05T08:00:00+00:00',21.0,'C','2026-10-05T08:02:00+00:00','b')
+_PRINT_A2=(3,'Tokyo','RJTT','x','2026-10-05T08:00:00+00:00',20.0,'C','2026-10-05T08:03:00+00:00','a2')
+_STATE={"source":"x","observed_at_utc":"2026-10-05T08:00:00+00:00","value_native":20.0}
+
+
+def test_posterior_ready_carries_the_consumed_row_through_a_b_a(tmp_path,caplog):
+    from src.runtime.observation_reaction_trace import emit_posterior_ready, observation_revision_reference
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    names=('id','city','station_id','source_channel','publish_ts_utc','value_native','unit','fetched_at_utc','raw_report')
+    for consumed in (_PRINT_A,_PRINT_A2):
+        caplog.clear()
+        conn=_posterior_db(tmp_path/str(consumed[0]),prints=(_PRINT_A,_PRINT_B,_PRINT_A2),provenance={
+            "day0_current_temperature_state":_STATE,
+            "day0_current_temperature_input_ref":{"print_id":consumed[0]}})
+        assert emit_posterior_ready(conn,7,wake_published=False,readiness_id="ready-7")=="hash-7"
+        (ready,)=_trace_events(caplog)
+        assert ready["stage"]=="POSTERIOR_READY" and ready["posterior_identity_hash"]=="hash-7"
+        assert ready["input_reference_status"]=="CONSUMED_LEDGER_REVISION"
+        assert ready["observation_ref"]==observation_revision_reference(dict(zip(names,consumed)))
+        assert ready["readiness_id"]=="ready-7"
+        conn.close()
+
+
+def test_posterior_ready_without_carried_row_leaves_a_b_a_unresolved(tmp_path,caplog):
+    from src.runtime.observation_reaction_trace import emit_posterior_ready
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    conn=_posterior_db(tmp_path,prints=(_PRINT_A,_PRINT_B,_PRINT_A2),
+                       provenance={"day0_current_temperature_state":_STATE})
+    assert emit_posterior_ready(conn,7,wake_published=False)=="hash-7"
+    (ready,)=_trace_events(caplog)
+    assert ready["observation_ref"] is None and ready["input_reference_status"]=="AMBIGUOUS_INPUT_REVISION"
+    conn.close()
+
+
+def test_posterior_ready_kma_event_reference_is_named_not_guessed(tmp_path,caplog):
+    from src.runtime.observation_reaction_trace import emit_posterior_ready
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    carried={"kma_event_id":"kma-1"}
+    conn=_posterior_db(tmp_path,provenance={"day0_current_temperature_state":_STATE,
+                                            "day0_current_temperature_input_ref":carried})
+    emit_posterior_ready(conn,7,wake_published=False)
+    (ready,)=_trace_events(caplog)
+    assert ready["input_ref"]==carried and ready["observation_ref"] is None
+    assert ready["input_reference_status"]=="CONSUMED_KMA_EVENT_REVISION"
+    conn.close()
+
+
+def test_posterior_ready_never_raises_into_the_materializer(caplog):
+    from src.runtime.observation_reaction_trace import emit_posterior_ready
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    conn=sqlite3.connect(":memory:")
+    assert emit_posterior_ready(conn,7,wake_published=False) is None
+    conn.close()
+    assert emit_posterior_ready(conn,7,wake_published=False) is None
+    assert _trace_events(caplog)==[]
+
+
+def test_reader_records_the_exact_row_without_changing_state_identity(tmp_path):
+    from src.config import cities_by_name
+    from src.data.day0_hourly_vectors import Day0CurrentTemperatureState, read_day0_current_temperature_state
+    from src.data.physical_current_sources import load_physical_current_sources
+    from src.data import station_temperature_adapters as adapters
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+    city=cities_by_name["Ankara"]
+    route=next(r for r in load_physical_current_sources()[0] if r.provider=="mgm_metar" and r.station_id==city.wu_station)
+    now=datetime.now(timezone.utc);observed=now-timedelta(minutes=2)
+    sample=adapters._sample(route,observed,12.0,now,"a"*64)
+    conn=sqlite3.connect(tmp_path/"world.sqlite");ensure_table(conn)
+    assert append_print(conn,city=city.name,station_id=route.station_id,source_channel=route.source_channel,
+        publish_ts_utc=observed.isoformat(),value_native=12.0,unit=route.unit,
+        fetched_at_utc=now.isoformat(),raw_report=sample.raw_report)
+    conn.commit()
+    (row_id,)=conn.execute("SELECT id FROM observation_prints").fetchone()
+    from zoneinfo import ZoneInfo
+    state=read_day0_current_temperature_state(conn=conn,city=city,
+        target_date=observed.astimezone(ZoneInfo(city.timezone)).date().isoformat(),decision_time=now)
+    assert state is not None and state.input_ref=={"print_id":row_id}
+    # Telemetry-only field: identity and equality stay exactly the old content law.
+    assert set(state.identity())=={"value_native","observed_at_utc","source"}
+    assert state==Day0CurrentTemperatureState(value_native=state.value_native,observed_at=state.observed_at,
+        source=state.source,clock_evidence=state.clock_evidence)
+    conn.close()
+
+
+def test_wake_published_names_its_own_posterior_and_hooks_never_raise(caplog,monkeypatch):
+    import scripts.materialize_replacement_forecast_live as cli
+    from src.runtime import reactor_wake
+    from src.runtime import observation_reaction_trace as trace
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    monkeypatch.setattr(reactor_wake,"publish_reactor_wake",lambda **kw:SimpleNamespace(wake_id="wake-9"))
+    request=fixtures._request()
+    assert cli._publish_materialization_wake(request,posterior_identity_hash="hash-7") is True
+    assert [(e["stage"],e["wake_id"],e["posterior_identity_hash"]) for e in _trace_events(caplog)]==[
+        ("WAKE_PUBLISHED","wake-9","hash-7")]
+    caplog.clear()
+    # A missing posterior identity never labels the wake with anything else.
+    assert cli._publish_materialization_wake(request) is True
+    assert _trace_events(caplog)==[]
+    monkeypatch.setattr(trace._LOG,"info",lambda *a,**k:(_ for _ in ()).throw(RuntimeError("sink")))
+    trace.emit_wake_published(wake_id="w",posterior_identity_hash="h")
+    trace.emit_wake_received(wake_id="w-raise")
+
+
+def test_wake_received_once_per_wake_and_joined_only_through_its_publication(caplog,monkeypatch):
+    from src.runtime import observation_reaction_trace as trace
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    monkeypatch.setattr(trace,"_RECEIVED",{})
+    trace.emit_wake_received(wake_id="wake-9")
+    trace.emit_wake_received(wake_id="wake-9")
+    trace.emit_wake_received(wake_id="")
+    received=_trace_events(caplog)
+    assert [(e["stage"],e["wake_id"]) for e in received]==[("WAKE_RECEIVED","wake-9")]
+    assert "posterior_identity_hash" not in received[0] or received[0]["posterior_identity_hash"] is None
+    published=[{"stage":"WAKE_PUBLISHED","wake_id":"wake-9","posterior_identity_hash":"hash-7"}]
+    labels=trace.published_wake_hashes(published)
+    assert trace.wake_posterior_hash(received[0],labels)=="hash-7"
+    # A second, different publication label for one wake_id is ambiguity, not latest-wins.
+    assert trace.published_wake_hashes(published+[dict(published[0],posterior_identity_hash="hash-8")])=={}
+
+
+def test_main_consumer_records_wake_receipt_before_dispatch(monkeypatch,caplog):
+    import src.main as main_module
+    from src.runtime import reactor_wake as wake_module
+    from src.runtime import observation_reaction_trace as trace
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    monkeypatch.setattr(trace,"_RECEIVED",{})
+    wake=wake_module.ReactorWake("wake-consumed","2026-10-05T08:00:00+00:00","replacement_forecast_materializer",
+        "forecast_posterior_advanced",forecast_families=(("Tokyo","2026-10-05","high"),))
+    seen=[]
+    def reactor(**kwargs):
+        seen.append([e["wake_id"] for e in _trace_events(caplog) if e["stage"]=="WAKE_RECEIVED"])
+        return False
+    class IdleLock:
+        def locked(self):return False
+    monkeypatch.setattr(main_module,"_defer_for_held_position_monitor",lambda _job:False)
+    monkeypatch.setattr(main_module,"_exit_monitor_excluded_wake_ids",lambda:frozenset())
+    monkeypatch.setattr(main_module,"_forecast_wake_held_families",lambda _f:frozenset())
+    monkeypatch.setattr(wake_module,"exact_held_sell_completion_wake_ids",lambda **_k:frozenset())
+    monkeypatch.setattr(wake_module,"strict_generic_held_family_completion_wakes",lambda **_k:())
+    monkeypatch.setattr(wake_module,"read_reactor_wake",lambda **_k:wake)
+    monkeypatch.setattr(wake_module,"coalescible_reactor_wakes",lambda _w:(wake,))
+    monkeypatch.setattr(main_module,"_edli_reactor_active_lock",IdleLock())
+    monkeypatch.setattr(main_module,"_edli_event_reactor_cycle",reactor)
+    monkeypatch.setattr(main_module,"_edli_last_reactor_wake_id",None)
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert seen==[["wake-consumed"],["wake-consumed"]]
+    assert [e["wake_id"] for e in _trace_events(caplog) if e["stage"]=="WAKE_RECEIVED"]==["wake-consumed"]

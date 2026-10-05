@@ -7077,6 +7077,10 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     if not wakes:
         return False
+    from src.runtime.observation_reaction_trace import emit_wake_received
+
+    for queued in wakes:  # Non-authoritative receipt clock; first take per wake.
+        emit_wake_received(wake_id=queued.wake_id)
     with _forecast_exit_monitor_attempts_lock:
         completed_forecast_ids = {
             wake_id
