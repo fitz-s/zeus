@@ -5105,6 +5105,7 @@ def maybe_refresh_day0_hourly_vectors(
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
     quota_critical_cities: int = 0,
     quota_priority_cities: int = 0,
+    critical_max_attempts: int | None = None,
     allow_priority_recovery: bool = False,
     remaining_window_starts: Mapping[tuple[str, str], datetime] | None = None,
     causal_run_boundaries: Mapping[tuple[str, str], datetime] | None = None,
@@ -5131,6 +5132,13 @@ def maybe_refresh_day0_hourly_vectors(
     quota.  When explicitly authorized, a priority city may use the bounded
     recovery lane after ordinary priority quota is exhausted.  That lane is
     capped below the critical limits, preserving a hard held-capital floor.
+
+    ``max_cities`` counts fetch attempts, never offered positions: a throttled
+    or already-current city is skipped without consuming a slot, so the page
+    scans forward to the next due city.  ``critical_max_attempts`` (None =
+    unbounded) caps the attempts the critical prefix may spend, so due held
+    cities go first but cannot consume the slots reserved for the priority
+    prefix behind them.
 
     ``causal_run_boundaries`` is a separate, optional per-(city, target_date)
     map from ``remaining_window_starts``: it carries
@@ -5234,6 +5242,9 @@ def maybe_refresh_day0_hourly_vectors(
     now_monotonic = time.monotonic()
     started_monotonic = now_monotonic
     checked = 0
+    critical_checked = 0
+    critical_city_count = max(0, int(quota_critical_cities))
+    priority_city_count = max(0, int(quota_priority_cities))
     release_due_scopes = frozenset(
         (str(city).strip(), str(target_date).strip())
         for city, target_date in release_due_city_dates
@@ -5255,6 +5266,12 @@ def maybe_refresh_day0_hourly_vectors(
             break
         name = str(getattr(city, "name", "") or "")
         if not name:
+            continue
+        if (
+            city_index < critical_city_count
+            and critical_max_attempts is not None
+            and critical_checked >= max(0, int(critical_max_attempts))
+        ):
             continue
         try:
             target_dates = day0_hourly_target_dates_for_refresh(
@@ -5296,8 +5313,6 @@ def maybe_refresh_day0_hourly_vectors(
                     remaining_window_starts=window_starts,
                 )
             )
-            critical_city_count = max(0, int(quota_critical_cities))
-            priority_city_count = max(0, int(quota_priority_cities))
             if city_index < critical_city_count:
                 quota_lane = "critical"
                 quota_context = quota_tracker.critical_lane()
@@ -5449,6 +5464,8 @@ def maybe_refresh_day0_hourly_vectors(
                         continue
                     _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
                 checked += 1
+                if quota_lane == "critical":
+                    critical_checked += 1
                 vectors: list[Day0HourlyVector] = []
                 request_hash = ""
                 materialization_time: datetime | None = None

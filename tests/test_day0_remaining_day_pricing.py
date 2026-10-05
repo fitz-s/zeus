@@ -14776,20 +14776,25 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(vectors_module, "maybe_refresh_day0_hourly_vectors", refresh)
         reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
+        # The whole proved prefix is offered; the fetcher spends attempts on
+        # due cities only, and the reservation law is an attempt cap.
         if debt == "urgent_held":
-            # Preserve the original capital-debt/discovery reservation law.
-            assert captured["cities"] == ["Held A", "Held B", "Priority"]
-            assert captured["quota_critical_cities"] == 2
+            # Capital debt keeps all but one attempt; discovery keeps one.
+            assert captured["cities"] == ["Held A", "Held B", "Held C", "Priority"]
+            assert captured["quota_critical_cities"] == 3
             assert captured["quota_priority_cities"] == 1
+            assert captured["critical_max_attempts"] == 2
         elif debt == "priority":
-            # Still-valid held authority cannot monopolize discovery's slot.
-            assert captured["cities"] == ["Held A", "Priority", "Held B"]
-            assert captured["quota_critical_cities"] == 1
+            # Still-valid held authority cannot monopolize discovery's slots.
+            assert captured["cities"] == ["Held A", "Held B", "Held C", "Priority"]
+            assert captured["quota_critical_cities"] == 3
             assert captured["quota_priority_cities"] == 1
+            assert captured["critical_max_attempts"] == 1
         else:
             assert captured["cities"] == ["Held A", "Held B", "Held C"]
             assert captured["quota_critical_cities"] == 3
             assert captured["quota_priority_cities"] == 0
+            assert captured["critical_max_attempts"] is None
         assert hwm_calls == ([True] if debt == "release_only" else [])
         assert captured["release_due_city_dates"] == (due_scopes if debt == "release_only" else frozenset())
 

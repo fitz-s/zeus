@@ -6799,65 +6799,33 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
         )
-        held_refresh_due = bool(urgent_held_families)
-        quota_critical_cities = 0
-        quota_priority_cities = 0
+        # The whole proved prefix is offered, never a ``max_cities`` page: the
+        # fetcher spends ``max_cities`` attempts on due cities only, so a
+        # throttled or still-current city costs no slot and the scan reaches
+        # the discovery tail (2026-10-04: a 3-city held page, all throttled,
+        # fetched nothing in 291 of 453 trading cycles).  Held capital goes
+        # first.  While discovery debt exists, due held authority keeps all
+        # but one attempt and still-valid held authority keeps one.
+        quota_critical_cities = held_city_count
+        quota_priority_cities = max(0, priority_city_count - held_city_count)
+        critical_max_attempts = (
+            (max(1, max_cities - 1) if urgent_held_families else 1)
+            if quota_priority_cities
+            else None
+        )
+        cursor_advance = 1
         if trading_lane_active:
-            held = ordered_cities[:held_city_count]
-            priority = ordered_cities[held_city_count:priority_city_count]
-            if not held and not priority:
-                if priority_probe.proved:
-                    _log.info(
-                        "edli_day0_hourly_refresh deferred: trading lane active; "
-                        "no same-day held or strict-bundle priority cities"
-                    )
-                    return
-                # Priority proof failed locally. Do not promote an unproved city,
-                # but preserve the ordinary maintenance universe sweep.
-                ordered_cities = ordered_cities[:max_cities]
-                cursor_advance = 1
-            elif held_refresh_due:
-                # Current capital keeps most of the bounded cut, but one failed
-                # held-city provider must not stop probability generation for
-                # the rest of the market universe. Reserve one independent
-                # discovery slot whenever both segments exist.
-                if priority and max_cities >= 2:
-                    held_cut = held[: max(1, max_cities - 1)]
-                    priority_cut = priority[:1]
-                    ordered_cities = held_cut + priority_cut
-                    quota_critical_cities = len(held_cut)
-                    quota_priority_cities = len(priority_cut)
-                else:
-                    ordered_cities = held[:max_cities]
-                    quota_critical_cities = len(ordered_cities)
-                cursor_advance = 1
-            elif held and priority and max_cities >= 2:
-                # First protect one money-at-risk city, then make discovery
-                # progress before a slow held fetch can exhaust the whole
-                # budget.  Any remaining slots return to held capital.
-                ordered_cities = [held[0], priority[0]] + held[1:max_cities - 1]
-                quota_critical_cities = 1
-                quota_priority_cities = 1
-                cursor_advance = 1
-            elif held:
-                ordered_cities = held[:max_cities]
-                quota_critical_cities = len(ordered_cities)
-                cursor_advance = 1
-            else:
-                ordered_cities = priority[:max_cities]
-                quota_priority_cities = len(ordered_cities)
-                cursor_advance = 1
-        else:
-            # Preserve capital priority for the whole proved prefix, not just
-            # the first ``max_cities`` list positions. The fetcher itself caps
-            # actual calls at ``max_cities``; a throttled front page therefore
-            # may scan forward without silently demoting another current-
-            # authority gap into the 30-minute maintenance retry lane.
-            quota_critical_cities = held_city_count
-            quota_priority_cities = max(
-                0, priority_city_count - held_city_count
-            )
-            cursor_advance = 1
+            if priority_city_count:
+                # The unprioritized universe sweep waits while trading.
+                ordered_cities = ordered_cities[:priority_city_count]
+            elif priority_probe.proved:
+                _log.info(
+                    "edli_day0_hourly_refresh deferred: trading lane active; "
+                    "no same-day held or strict-bundle priority cities"
+                )
+                return
+            # Otherwise priority proof failed locally: promote no unproved
+            # city, but keep the ordinary maintenance universe sweep.
         remaining_budget_seconds = (
             refresh_deadline_monotonic - time.monotonic()
         )
@@ -6967,6 +6935,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             ),
             quota_critical_cities=quota_critical_cities,
             quota_priority_cities=quota_priority_cities,
+            critical_max_attempts=critical_max_attempts,
             # Recovery has its own hard ceiling below the held-capital reserve.
             # A held scope therefore must not disable recovery for an independent
             # priority scope after the ordinary priority tranche is exhausted.

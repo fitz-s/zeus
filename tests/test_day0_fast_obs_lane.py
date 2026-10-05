@@ -4166,7 +4166,9 @@ class TestMutexNoHttpSplit:
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
-        assert calls == [["A", "B", "C"], ["B", "C", "D"]]
+        # Every held city is offered every cycle; the fetcher skips throttled
+        # cities without spending a slot, and the cursor rotates the order.
+        assert calls == [["A", "B", "C", "D", "E"], ["B", "C", "D", "E", "A"]]
         assert reactor_module._DAY0_HOURLY_REFRESH_CURSOR == 2
 
     def test_hourly_refresh_due_held_bundle_preserves_discovery_progress(
@@ -4217,6 +4219,7 @@ class TestMutexNoHttpSplit:
                     "selected": [city.name for city in selected],
                     "critical": kwargs["quota_critical_cities"],
                     "priority": kwargs["quota_priority_cities"],
+                    "critical_attempts": kwargs["critical_max_attempts"],
                 }
             )
             or SimpleNamespace(
@@ -4232,10 +4235,97 @@ class TestMutexNoHttpSplit:
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
+        # Due held capital keeps max_cities - 1 attempts; discovery keeps the
+        # rest, and both segments rotate.
         assert calls == [
-            {"selected": ["A", "B", "F"], "critical": 2, "priority": 1},
-            {"selected": ["B", "C", "G"], "critical": 2, "priority": 1},
+            {
+                "selected": ["A", "B", "C", "D", "E", "F", "G", "H"],
+                "critical": 5, "priority": 3, "critical_attempts": 2,
+            },
+            {
+                "selected": ["B", "C", "D", "E", "A", "G", "H", "F"],
+                "critical": 5, "priority": 3, "critical_attempts": 2,
+            },
         ]
+
+    @pytest.mark.parametrize("held_due", (False, True))
+    def test_hourly_refresh_throttled_held_page_cannot_starve_due_cities(
+        self, monkeypatch, held_due
+    ):
+        """Only due cities consume fetch slots (2026-10-04: 291/453 empty cycles).
+
+        Six same-day held cities sit inside the refresh interval.  The real
+        fetcher throttle skips them, so the cycle's attempts reach the due
+        discovery cities instead of ending on an all-throttled held page.
+        A held city that is itself due is still fetched first.
+        """
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        import src.main  # load settings consumers before replacing the config singleton
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+        from src.events import reactor as reactor_module
+
+        held_names = ("H1", "H2", "H3", "H4", "H5", "H6")
+        due_names = ("Toronto", "Warsaw", "Wellington")
+        cities = [
+            SimpleNamespace(name=name, timezone="UTC")
+            for name in (*held_names, *due_names)
+        ]
+        target_date = datetime.now(UTC).date().isoformat()
+        held = {(name, target_date, "low") for name in held_names}
+        due = {(name, target_date, "low") for name in due_names}
+        if held_due:
+            due.add(("H6", target_date, "low"))
+        fetched = []
+
+        monkeypatch.setattr(
+            config_module,
+            "settings",
+            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        )
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
+        monkeypatch.setattr(
+            reactor_module, "_edli_current_held_position_family_keys", lambda: held
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_day0_hourly_refresh_due_families",
+            lambda **_kwargs: reactor_module._Day0HourlyPriorityProbe(
+                refresh_due_families=frozenset(due), proved=True,
+            ),
+        )
+        monkeypatch.setattr(reactor_module, "_DAY0_HOURLY_REFRESH_CURSOR", 0)
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "3")
+        monkeypatch.setattr(vectors_module, "quota_tracker", OpenMeteoQuotaTracker())
+        monkeypatch.setattr(
+            vectors_module, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"]
+        )
+        monkeypatch.setattr(
+            vectors_module, "day0_source_clock_ensemble_target_dates", lambda **_kw: ()
+        )
+        monkeypatch.setattr(
+            vectors_module,
+            "fetch_day0_hourly_vectors",
+            lambda city, **_kw: (fetched.append(city.name) or [], ""),
+        )
+        now = vectors_module.time.monotonic()
+        with vectors_module._REFRESH_LOCK:
+            vectors_module._LAST_REFRESH_MONOTONIC.clear()
+            vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+            vectors_module._INCOMPLETE_RETRY_STREAK.clear()
+            for name in held_names:
+                if held_due and name == "H6":
+                    continue
+                vectors_module._LAST_REFRESH_MONOTONIC[f"{name}|{target_date}"] = now
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        if held_due:
+            # The due held city leads; discovery spends the remaining slots.
+            assert fetched == ["H6", "Toronto", "Warsaw"]
+        else:
+            assert fetched == ["Toronto", "Warsaw", "Wellington"]
 
     def test_hourly_refresh_preserves_full_missing_authority_priority_prefix(
         self, monkeypatch
