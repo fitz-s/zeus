@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-05
 # Authority: REQ-20260930-114240-ee2a70; isolated observation/auction/executor integration.
 """Controlled forecast inputs, real Day0 integration and posterior persistence.
 
@@ -595,3 +595,77 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='observation_prints'").fetchone()[0]==0
     assert world.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='forecast_posteriors'").fetchone()[0]==0
     conn.close();world.close();trade.close()
+
+# ---------------------------------------------------------------------------
+# Production stage hooks: each emits once with exact ids and never raises.
+# ---------------------------------------------------------------------------
+
+def _trace_events(caplog):
+    prefix="OBSERVATION_REACTION_TRACE "
+    return [json.loads(r.getMessage()[len(prefix):]) for r in caplog.records
+            if r.getMessage().startswith(prefix)]
+
+
+def test_source_tick_emits_one_source_commit_per_inserted_row(monkeypatch,tmp_path,caplog):
+    import threading
+    from src.config import cities_by_name
+    from src.data import station_temperature_adapters as adapters
+    from src.data import replacement_forecast_production as production
+    from src.data.physical_current_sources import load_physical_current_sources
+    from src.runtime.observation_reaction_trace import observation_revision_reference
+    from src.state import db, write_coordinator as coordinator
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+    import src.ingest_main as ingest
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    city=cities_by_name["Ankara"]
+    route=next(r for r in load_physical_current_sources()[0] if r.provider=="mgm_metar" and r.station_id==city.wu_station)
+    now=datetime.now(timezone.utc)
+    newest,older=now-timedelta(minutes=2),now-timedelta(minutes=40)
+    path=tmp_path/"world.sqlite"
+    with sqlite3.connect(path) as conn:
+        ensure_table(conn)
+        # Already-ledgered sample: suppressed by append_print, so no stage line.
+        append_print(conn,city=city.name,station_id=route.station_id,source_channel=route.source_channel,
+            publish_ts_utc=(now-timedelta(minutes=20)).isoformat(),value_native=12.0,unit=route.unit,
+            fetched_at_utc=(now-timedelta(minutes=19)).isoformat(),raw_report="seed")
+    samples=(adapters._sample(route,newest,13.0,now,"a"*64),adapters._sample(route,older,11.0,now,"b"*64),
+             adapters._sample(route,now-timedelta(minutes=20),12.0,now,"c"*64))
+    class Lease:
+        def __enter__(self):return self
+        def __exit__(self,*_):return False
+        def record_commit(self,**kw):pass
+    monkeypatch.setattr(adapters,"fetch_station_temperature",lambda *a,**kw:samples)
+    monkeypatch.setattr(db,"world_write_mutex",lambda:threading.Lock())
+    monkeypatch.setattr(db,"get_world_connection",lambda **kw:sqlite3.connect(path))
+    monkeypatch.setattr(coordinator,"default_runtime_write_coordinator",lambda:SimpleNamespace(lease=lambda *a,**kw:Lease()))
+    monkeypatch.setattr(production,"_replacement_forecast_live_materialization_queue_config",lambda:{})
+    monkeypatch.setattr("src.data.physical_current_delivery.current_temperature_priority_families",lambda:{})
+    monkeypatch.setattr(production,"_enqueue_fusion_upgrade_reseeds_if_needed",lambda cfg,**kw:{"status":"FUSION_UPGRADE_TRIGGER"})
+    monkeypatch.setattr(ingest,"_physical_current_pending_wakes",set())
+    before=time.time_ns()//1_000_000
+    result=ingest._day0_current_temperature_source_tick(city,route)
+    assert result["status"]=="COMMITTED" and result["inserted"]==2
+    commits=[e for e in _trace_events(caplog) if e["stage"]=="SOURCE_COMMITTED"]
+    with sqlite3.connect(path) as conn:
+        conn.row_factory=sqlite3.Row
+        rows={r["publish_ts_utc"]:dict(r) for r in conn.execute("SELECT * FROM observation_prints WHERE raw_report!='seed'")}
+    assert len(commits)==2
+    by_clock={e["observation_ref"]["publish_ts_utc"]:e for e in commits}
+    for clock,row in rows.items():
+        event=by_clock[datetime.fromisoformat(clock).astimezone(timezone.utc).isoformat()]
+        # The full immutable revision, rebuilt from the committed row itself.
+        assert event["observation_ref"]==observation_revision_reference(row)
+        assert event["input_reference_status"]=="EXPLICIT_LEDGER_REVISION"
+    assert by_clock[newest.isoformat()]["commit_disposition"]=="ADVANCES_SOURCE_FRONTIER"
+    assert by_clock[older.isoformat()]["commit_disposition"]=="BEHIND_SOURCE_FRONTIER"
+    clocks={e["world_committed_at_ms"] for e in commits}
+    assert len(clocks)==1 and before<=next(iter(clocks))<=min(e["recorded_at_ms"] for e in commits)
+
+
+def test_source_commit_hook_never_raises_and_skips_invalid_rows(caplog):
+    from src.runtime.observation_reaction_trace import emit_observation_committed
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    emit_observation_committed({"id":0},world_committed_at_ms=1)
+    emit_observation_committed({},world_committed_at_ms=1)
+    assert _trace_events(caplog)==[]
+
