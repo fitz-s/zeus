@@ -37,6 +37,10 @@ recorded on the submit path:
                        law, on canonical fills ordered by fill_dedup's execution_ts), so
                        a buy that fills after a sell never enters that sell's cost.
 
+Entry history: a window position (target_date >= --since) is costed and bucketed from its
+COMPLETE ENTRY history regardless of the ENTRY_FLOOR_DAYS cut, which only bounds which other
+ENTRY commands feed the entry-level counts.
+
 Units: ENTRY commands are bucketed by their own market age. Positions (outcome,
 exits, exposure) are bucketed by the age of their first filled ENTRY command.
 Filtering is by target_date >= --since; open exposure older than the window is
@@ -326,7 +330,8 @@ def load_trades_data(conn, since: date) -> dict:
         "LEFT JOIN position_current p ON p.position_id = c.position_id "
         "WHERE c.intent_kind = 'ENTRY' AND {where}"
     )
-    td["entries"] = [dict(r) for r in conn.execute(entry_sql.format(where="c.created_at >= ?"), (floor,))]
+    entries = {r["command_id"]: dict(r) for r in conn.execute(entry_sql.format(where="c.created_at >= ?"), (floor,))}
+    td["entries"] = []   # filled below, once the window's positions are known
     td["positions"] = [
         dict(r)
         for r in conn.execute(
@@ -341,6 +346,11 @@ def load_trades_data(conn, since: date) -> dict:
         )
     ]
     pids = [p["position_id"] for p in td["positions"]]
+    # The floor only bounds which OTHER ENTRY commands are read for the entry-level counts. A
+    # window position's cost, age bucket and exits use its COMPLETE ENTRY history, however old.
+    for r in _in_rows(conn, entry_sql.format(where="c.position_id IN ({ph})"), pids):
+        entries.setdefault(r["command_id"], dict(r))
+    td["entries"] = sorted(entries.values(), key=lambda e: (e["created_at"], e["command_id"]))
     td["exit_cmds"] = [
         dict(r)
         for r in _in_rows(
@@ -693,6 +703,13 @@ def build_report(
         if pid not in first_fill or rec["_submitted"] < first_fill[pid]["_submitted"]:
             first_fill[pid] = rec
         buys_by_pos.setdefault(pid, []).extend(td["fills"].get(rec["command_id"], ()))
+    floor_s = (since - timedelta(days=ENTRY_FLOOR_DAYS)).isoformat()
+    window_pids = {p["position_id"] for p in td["positions"]}
+    cov["positions_entry_history_read_beyond_floor"] = sum(
+        1 for pid, rec in first_fill.items() if pid in window_pids and rec["decision_time"][:10] < floor_s
+    )
+    if not cov["positions_entry_history_read_beyond_floor"]:
+        del cov["positions_entry_history_read_beyond_floor"]
 
     # ---- positions: outcome, exits, exposure ------------------------------
     exit_debt = set(td["exit_fill_debt"])
@@ -910,10 +927,13 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
     ]
     out += [f"warning: {w}" for w in rep["warnings"]]
     out.append(
-        f"entry floor: ENTRY commands are read from created_at >= {rep['entry_floor_date']} "
-        f"({ENTRY_FLOOR_DAYS} days before the window). A position whose first filled ENTRY is older is "
-        "bucketed 'unknown' (coverage.positions_without_filled_entry_in_window) and its sells cannot be "
-        "costed (exit_cost_unknown)."
+        "entry history: every window position's COMPLETE ENTRY command history is read, however old, so "
+        "its cost and its age bucket (its FIRST filled ENTRY) never depend on a date cut "
+        f"(coverage.positions_entry_history_read_beyond_floor counts those older than "
+        f"{rep['entry_floor_date']}). The {ENTRY_FLOOR_DAYS}-day floor only bounds which other ENTRY commands "
+        "feed the entry-level counts. A position with no filled ENTRY command in the DB at all (a chain-only "
+        "holding, say) is bucketed 'unknown' (coverage.positions_without_filled_entry_in_window) and its "
+        "sells cannot be costed (exit_cost_unknown)."
     )
     for metric in ("high", "low"):
         out += ["", f"## {metric.upper()} by market age at entry"]

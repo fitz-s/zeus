@@ -379,14 +379,60 @@ def test_no_graded_position_leaves_the_matched_difference_null():
     assert "= $- over 0 positions" in me.render_markdown(rep)
 
 
-def test_entry_floor_is_named_in_the_report_and_counted():
+def test_entry_history_wording_is_true_and_counters_are_present():
     rep = _report(_td([], [_pos("p1", pnl=1.0)], {}), {})
     assert rep["entry_floor_days"] == me.ENTRY_FLOOR_DAYS == 7
     assert rep["entry_floor_date"] == "2026-09-21"                  # SINCE 2026-09-28 minus 7 days
     assert rep["coverage"]["positions_without_filled_entry_in_window"] == 1
     md = me.render_markdown(rep)
-    assert "entry floor" in md and "2026-09-21" in md and "7 days" in md
-    assert "positions_without_filled_entry_in_window" in md and "exit_cost_unknown" in md
+    assert "COMPLETE ENTRY command history" in md and "never depend on a date cut" in md
+    assert "2026-09-21" in md and "7-day floor only bounds" in md
+    assert "bucketed 'unknown'" in md and "no filled ENTRY command in the DB at all" in md
+    assert "bucketed 'unknown' (coverage.positions_without_filled_entry_in_window)" in md
+    assert "older is bucketed" not in md                              # the false claim is gone
+
+
+def test_position_with_an_entry_older_than_the_floor_is_costed_from_its_full_history():
+    """Old 10@0.20 (before the floor), new 10@0.80, SELL 5: cost is $2.50 (avg 0.50), not $4.00."""
+    old = _entry("c_old", "p1", "A", 4, size=10.0)                    # 2026-10-01T04:00
+    new = _entry("c_new", "p1", "A", 30, size=10.0)
+    fills = {
+        "c_old": [(10.0, 0.20, "2026-10-01T04:00:00+00:00")],
+        "c_new": [(10.0, 0.80, "2026-10-02T06:00:00+00:00")],
+        "x1": [(5.0, 0.90, "2026-10-02T09:00:00+00:00")],
+    }
+    positions = [_pos("p1", direction="buy_yes", pnl=1.0)]
+    rep = _report(
+        _td([old, new], positions, fills, exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 5.0}]),
+        _listings("A"),
+    )
+    (row,) = rep["exits"]
+    assert row["cost_usd"] == pytest.approx(2.5) and row["proceeds_usd"] == pytest.approx(4.5)
+    assert row["age_bucket"] == "<12h"                                 # first fill, 4 h after the 00:00 listing
+    assert not any(c["age_bucket"] == "24-48h" and c["exits"] for c in rep["cells"])
+
+
+def test_loader_reads_the_full_entry_history_of_window_positions_beyond_the_floor(tmp_path):
+    trades, _fc, _world = _make_dbs(tmp_path)
+    t = sqlite3.connect(trades)
+    # an ENTRY of the window position that predates the floor (2026-09-21) by weeks
+    t.execute(
+        "INSERT INTO venue_commands (command_id, snapshot_id, position_id, intent_kind, size, price, state, created_at)"
+        " VALUES ('c_old','s1','p1','ENTRY',10,0.2,'FILLED','2026-08-01T06:00:00+00:00')"
+    )
+    # an unrelated old ENTRY of a position OUTSIDE the window must stay out
+    t.execute(
+        "INSERT INTO venue_commands (command_id, snapshot_id, position_id, intent_kind, size, price, state, created_at)"
+        " VALUES ('c_other','s1','pZ','ENTRY',10,0.2,'FILLED','2026-08-01T06:00:00+00:00')"
+    )
+    t.commit()
+    t.close()
+    conn = me._open_ro(trades)
+    td = me.load_trades_data(conn, SINCE)
+    conn.close()
+    ids = {e["command_id"] for e in td["entries"]}
+    assert {"c1", "c_old"} <= ids and "c_other" not in ids
+    assert [e["command_id"] for e in td["entries"]] == sorted(ids, key=lambda i: next(e["created_at"] for e in td["entries"] if e["command_id"] == i))
 
 
 def test_position_whose_history_cannot_be_loaded_is_unknown_with_null_cost():
@@ -400,6 +446,14 @@ def test_position_whose_history_cannot_be_loaded_is_unknown_with_null_cost():
     assert row["cost_usd"] is None and row["age_bucket"] == "unknown"
     total = next(t for t in rep["totals"] if t["metric"] == "high")
     assert total["exit_cost_unknown"] == 1 and rep["coverage"]["positions_without_filled_entry_in_window"] == 1
+
+
+def test_entry_history_older_than_the_floor_is_counted_in_coverage():
+    old = _entry("c_old", "p1", "A", 4, size=10.0)
+    old["created_at"] = "2026-09-01T06:00:00+00:00"                    # weeks before the 2026-09-21 floor
+    fills = {"c_old": [(10.0, 0.2, "2026-09-01T06:00:00+00:00")]}
+    rep = _report(_td([old], [_pos("p1", pnl=0.0)], fills), _listings("A"))
+    assert rep["coverage"]["positions_entry_history_read_beyond_floor"] == 1
 
 
 def test_outcome_win_rate_attribution_and_equity_series():
@@ -803,3 +857,40 @@ def test_taker_buy_without_exact_legs_keeps_the_canonical_price():
     _taker_fact(conn, "b1", "ord-b1", "BUY", 0.30, 10,
                 [{"asset_id": YES_TOK, "side": "SELL", "matched_amount": "4", "price": "0.30"}])   # legs cover 4 of 10
     assert [f[:2] for f in me.load_economic_fills(conn, ["b1"])["b1"]] == [(10.0, 0.30)]
+
+
+def test_floor_counterexample_end_to_end_from_the_database(tmp_path):
+    """Old 10@0.20 omitted by the floor, new 10@0.80, SELL 5@0.90: cost $2.50, bucket from the FIRST entry."""
+    trades, fc, world = _make_dbs(tmp_path)
+    t = sqlite3.connect(trades)
+    t.executescript(
+        """
+        DELETE FROM venue_commands; DELETE FROM venue_trade_facts; DELETE FROM position_events;
+        INSERT INTO venue_commands (command_id, snapshot_id, position_id, intent_kind, size, price, state, created_at,
+            venue_order_id, token_id, envelope_id)
+        VALUES ('c_old','s1','p1','ENTRY',10,0.2,'FILLED','2026-08-01T00:30:00+00:00',NULL,NULL,NULL),
+               ('c_new','s1','p1','ENTRY',10,0.8,'FILLED','2026-10-02T06:00:00+00:00',NULL,NULL,NULL),
+               ('x1','s1','p1','EXIT',5,0.9,'FILLED','2026-10-02T09:00:00+00:00','o-x1','TOK',NULL);
+        INSERT INTO venue_trade_facts (trade_id, venue_order_id, command_id, state, filled_size, fill_price,
+            tx_hash, observed_at, local_sequence)
+        VALUES ('t_old','o','c_old','CONFIRMED','10','0.2',NULL,'2026-08-01T00:31:00+00:00',1),
+               ('t_new','o','c_new','CONFIRMED','10','0.8',NULL,'2026-10-02T06:01:00+00:00',1),
+               ('t_x1','o-x1','x1','CONFIRMED','5','0.9',NULL,'2026-10-02T09:01:00+00:00',1);
+        UPDATE position_current SET realized_pnl_usd = 1.0, settled_at = '2026-10-03T01:00:00+00:00';
+        INSERT INTO position_events VALUES ('p1','EXIT_INTENT','{"exit_reason":"GLOBAL_CAPITAL_OPTIMAL_SELL"}',2);
+        """
+    )
+    f = sqlite3.connect(fc)
+    f.execute("DELETE FROM market_events")
+    f.execute("INSERT INTO market_events VALUES ('A','Tokyo','2026-10-02','high','2026-08-01T00:00:00Z')")
+    f.commit()
+    f.close()
+    t.commit()
+    t.close()
+    rep = _run(tmp_path, (trades, fc, world), write=False)
+    (row,) = rep["exits"]
+    assert row["cost_usd"] == pytest.approx(2.5) and row["proceeds_usd"] == pytest.approx(4.5)
+    assert row["age_bucket"] == "<12h"          # first ENTRY 30 min after listing, not the 24-48h of the later buy
+    assert rep["coverage"]["positions_entry_history_read_beyond_floor"] == 1
+    total = next(x for x in rep["totals"] if x["metric"] == "high")
+    assert total["exit_cost_unknown"] == 0
