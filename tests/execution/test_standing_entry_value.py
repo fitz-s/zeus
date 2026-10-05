@@ -1768,9 +1768,9 @@ def _two_family_harness(monkeypatch, *, arrivals=0):
     """Rest cmd-a (FAMILY, q 0.75: kept) then rest cmd-b (FAMILY_B, whose
     posterior turned against it, q 0.30), each 10 @ 0.50 on its own token, on
     the real wealth witness, allocator and venue batch path. ``arrivals``
-    further kept rests (cmd-n0, cmd-n1, ...) are seeded on their own families
-    and stay invisible to the pass until ``arrive(n)`` opens the first n;
-    ``turn(command_id, q)`` moves a rest's posterior."""
+    further kept rests (cmd-n0, cmd-n1, ...) are seeded on their own families;
+    the pass sees only the rests ``show(*command_ids)`` names (cmd-a and cmd-b
+    until then); ``turn(command_id, q)`` moves a rest's posterior."""
     from src.engine import event_reactor_adapter as adapter
     from src.engine import global_auction_universe as universe
     from src.engine import global_batch_runtime as runtime
@@ -1850,15 +1850,18 @@ def _two_family_harness(monkeypatch, *, arrivals=0):
     # This process has queued none of the rests yet.
     monkeypatch.setattr(C, "_VALUE_QUEUE", {}, raising=False)
     monkeypatch.setattr(C, "_COMPARE_QUEUE", {}, raising=False)
-    opened = [0]
+    shown = {"cmd-a", "cmd-b"}
     real_find = C.find_open_entry_rests
 
     def find(*args, **kwargs):
-        hidden = {f"cmd-n{n}" for n in range(opened[0], arrivals)}
-        return [e for e in real_find(*args, **kwargs) if e["command_id"] not in hidden]
+        return [e for e in real_find(*args, **kwargs) if e["command_id"] in shown]
+
+    def show(*command_ids):
+        shown.clear()
+        shown.update(command_ids)
 
     monkeypatch.setattr(C, "find_open_entry_rests", find)
-    return SimpleNamespace(conn=conn, arrive=lambda n: opened.__setitem__(0, n), turn=turn)
+    return SimpleNamespace(conn=conn, show=show, turn=turn)
 
 
 class TestNoPrefixStarvesALaterRest:
@@ -1954,7 +1957,7 @@ class TestNoPrefixStarvesALaterRest:
         expensive.add("cmd-a")
         passes = []
         for n in range(1, arrivals + 1):
-            h.arrive(n)
+            h.show("cmd-a", "cmd-b", *(f"cmd-n{k}" for k in range(n)))
             passes.append(run())
             if ["venue-b"] in venue.calls:
                 break
@@ -1966,3 +1969,51 @@ class TestNoPrefixStarvesALaterRest:
         assert passes[1]["cmd-b"][0] == "CANCEL"
         assert passes[1]["cmd-b"][1].startswith(("CURRENT_MEAN_VALUE_NON_POSITIVE", "ENTRY_REST_BUY_REFUTED"))
         assert h.conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-b'").fetchone()[0] == "CANCELLED"
+
+    def test_a_rest_waiting_for_its_cancel_is_never_overtaken_by_churn(self, monkeypatch):
+        # The reviewer's reproduction: four full ticks, exactly two open rests
+        # each. cmd-b was valued and kept earlier, then its posterior turned
+        # (q 0.30 at its 0.50 limit): it needs its CANCEL. Each tick the
+        # previous new rest has closed and another opens whose value check
+        # takes 90 s against the 60 s budget. Least-recently-valued ordering
+        # put every newcomer (never valued) first and deferred cmd-b on every
+        # tick; in the queue cmd-b is ahead of every later arrival.
+        ticks = 4
+        h = _two_family_harness(monkeypatch, arrivals=ticks)
+        h.show("cmd-b")
+        h.turn("cmd-b", 0.75)
+        clock = [900.0]
+        monkeypatch.setattr(C, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        real = C.value_standing_entry
+
+        def value(entry, **kwargs):
+            if entry["command_id"].startswith("cmd-n"):
+                clock[0] += 90.0
+            return real(entry, **kwargs)
+
+        monkeypatch.setattr(C, "value_standing_entry", value)
+        venue = _NoCancelVenue()
+
+        def tick():
+            result = C.run_c3_staleness_cancel_cycle(
+                h.conn, h.conn, sqlite3.connect(":memory:"), venue,
+                world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: datetime.now(UTC),
+                budget_seconds=self.BUDGET,
+            )
+            return [(v.command_id, v.action, v.reason) for v in result["valuations"]]
+
+        assert tick() == [("cmd-b", "KEEP", "CURRENT_ENTRY_REST_VALUE_POSITIVE")]
+        h.turn("cmd-b", 0.30)
+        trace = []
+        for i in range(ticks):
+            h.show("cmd-b", f"cmd-n{i}")
+            trace.append(tick())
+            if ["venue-b"] in venue.calls:
+                break
+
+        assert ["venue-b"] in venue.calls, trace
+        (b,) = [v for v in trace[0] if v[0] == "cmd-b"]
+        assert b[1] == "CANCEL" and b[2].startswith(("CURRENT_MEAN_VALUE_NON_POSITIVE", "ENTRY_REST_BUY_REFUTED"))
+        assert len(trace) == 1, trace
+        assert h.conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-b'").fetchone()[0] == "CANCELLED"
+        assert C._VALUE_QUEUE.keys() <= {"cmd-b", "cmd-n0"}
