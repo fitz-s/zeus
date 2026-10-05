@@ -1,6 +1,6 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-09-29 (WU producer station identity)
-# Lifecycle: created=2026-04-21; last_reviewed=2026-09-29; last_reused=2026-09-29
+# Last reused/audited: 2026-10-05 (decoded entity bytes and credential rejection)
+# Lifecycle: created=2026-04-21; last_reviewed=2026-10-05; last_reused=2026-10-05
 # Purpose: Networkless parse + aggregate invariants for the WU/Ogimet hourly clients and the shared METAR temperature parser.
 # Reuse: Inspect src/data/metar_temperature.py, src/data/ogimet_hourly_client.py and src/data/wu_hourly_client.py before relying on these assertions.
 # Authority basis: plan v3 Phase 0 files #4/#5; extremum-preservation
@@ -39,6 +39,46 @@ from src.data.wu_hourly_client import (
     _aggregate_hourly,
     _detect_missing_local_hour as wu_detect_missing_local_hour,
 )
+
+
+def test_wu_normal_fetch_retains_decoded_entity_bom_crlf(monkeypatch):
+    import json
+    import src.data.wu_hourly_client as client
+    body = b'\xef\xbb\xbf' + json.dumps({
+        'metadata': {'language': 'en-US', 'transaction_id': 'private-fixture',
+                     'version': '1', 'location_id': 'KORD:9:US', 'units': 'e'},
+        'observations': [{'key': 'KORD', 'valid_time_gmt': 1705327200,
+                          'temp': 32, 'obs_id': 'KORD'}],
+    }).encode() + b'\r\n'
+    monkeypatch.setattr(client.httpx, 'get', lambda *a, **kw: httpx.Response(
+        200, content=body, headers={'content-type': 'application/json',
+                                  'set-cookie': 'private-never-retain'}))
+    result = client.fetch_wu_hourly('KORD', 'US', date(2024, 1, 15),
+        date(2024, 1, 15), 'F', 'America/Chicago', city_name='Chicago')
+    assert not result.failed and result.observations
+    captures = getattr(result, 'captures', ())
+    assert len(captures) == 1
+    assert captures[0].entity == body
+    assert captures[0].started_at <= captures[0].finished_at
+    assert 'apiKey' not in captures[0].request_params
+    assert 'set-cookie' not in captures[0].headers
+
+
+@pytest.mark.parametrize('escaped', [False, True])
+def test_wu_credential_body_is_unavailable_not_rewritten(monkeypatch, escaped):
+    import json
+    import src.data.wu_hourly_client as client
+    body = json.dumps({'metadata': {'location_id': 'KORD:9:US', 'units': 'e'},
+        'observations': [{'key': 'KORD', 'obs_id': 'KORD', 'temp': 0, 'valid_time_gmt': 1705327200}],
+        'apiKey': 'never-retain-private-fixture'}).encode()
+    if escaped:
+        body = body.replace(b'apiKey', b'api\\u004bey')
+    monkeypatch.setattr(client.httpx, 'get', lambda *a, **kw: httpx.Response(200, content=body))
+    result = client.fetch_wu_hourly('KORD', 'US', date(2024, 1, 15),
+        date(2024, 1, 15), 'F', 'America/Chicago', city_name='Chicago')
+    assert not result.failed and result.observations[0].hour_min_temp == 0
+    assert result.captures[0].entity is None
+    assert result.captures[0].unavailable_reason == 'CREDENTIAL_BEARING_ENTITY'
 
 
 # ----------------------------------------------------------------------
