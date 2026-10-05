@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-03
+# Last reused/audited: 2026-10-05
 # Authority basis: REQ-20260929-223929-bf51a2; canonical_execution_lease.md 2.2.
 """One resident interpreter around the existing materialization CLI.
 
@@ -19,6 +19,7 @@ window in which no process holds them.
 from __future__ import annotations
 import atexit
 import json
+import logging
 import os
 from pathlib import Path
 import queue
@@ -35,30 +36,38 @@ _ROOT=Path(__file__).resolve().parents[2]
 _SCRIPT=_ROOT / "scripts" / "materialize_replacement_forecast_live.py"
 _MAX_REPLY=8*1024*1024
 LEASE_SOCKET_ENV="ZEUS_MATERIALIZER_LEASE_SOCKET_FD"
+TRACE_FD_ENV="ZEUS_MATERIALIZER_TRACE_FD"
 
 class ResidentMaterializer:
-    def __init__(self) -> None:
+    def __init__(self, *, trace_fd: int = 1) -> None:
         self._lock=threading.Lock()
         self._process: subprocess.Popen[str] | None=None
         self._replies: queue.Queue=queue.Queue()
         self._lease_socket: socket.socket | None=None
+        # The daemon's own log stream; the worker's stdout is the reply pipe.
+        self._trace_fd=trace_fd
 
     def _start(self, executable: str) -> None:
         self._replies=queue.Queue()
         # A stream socket: a receiver blocked for descriptors sees EOF the
         # moment the parent's end closes (a datagram receive would wait forever).
         parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
+        try:trace=os.dup(self._trace_fd)
+        except OSError:trace=None  # Telemetry never blocks the worker.
+        fds=(child.fileno(),) if trace is None else (child.fileno(),trace)
         try:
             process=subprocess.Popen([executable,str(_SCRIPT),"--resident-worker"],
                 cwd=_ROOT,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                 # Preserve uncaptured startup/log-handler diagnostics in daemon logs;
                 # stdout alone is the framed reply channel.
-                stderr=None,text=True,bufsize=1,pass_fds=(child.fileno(),),
-                env={**os.environ,LEASE_SOCKET_ENV:str(child.fileno())})
+                stderr=None,text=True,bufsize=1,pass_fds=fds,
+                env={**os.environ,LEASE_SOCKET_ENV:str(child.fileno()),
+                     **({} if trace is None else {TRACE_FD_ENV:str(trace)})})
         except BaseException:
             parent.close();raise
         finally:
             child.close()
+            if trace is not None:os.close(trace)
         self._process=process
         self._lease_socket=parent
         replies=self._replies
@@ -143,6 +152,24 @@ atexit.register(_WORKER.close)
 def run_warm_materialization(argv: Sequence[str], *, timeout: float,
                              lease_fds: Sequence[int] = ()) -> subprocess.CompletedProcess[str]:
     return _WORKER.run(argv,timeout=timeout,lease_fds=lease_fds)
+
+
+def attach_trace_log() -> None:
+    """Worker side: stage trace lines go to the parent's log stream, never the reply.
+
+    Non-authoritative and non-raising: a missing or broken stream loses lines.
+    """
+    try:
+        raw=os.environ.get(TRACE_FD_ENV)
+        if raw is None:return
+        # An inherited descriptor keeps the daemon's O_APPEND open file description.
+        handler=logging.StreamHandler(os.fdopen(int(raw),"w",buffering=1,encoding="utf-8"))
+        handler.handleError=lambda _record:None  # Never write into the reply's stderr.
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
+        log=logging.getLogger("zeus.observation_reaction")
+        log.addHandler(handler);log.setLevel(logging.INFO);log.propagate=False
+    except Exception:
+        pass
 
 
 def receive_leases(message: dict, write: Callable[[str], None]) -> list[int]:
