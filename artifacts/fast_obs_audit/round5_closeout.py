@@ -263,7 +263,9 @@ def live_command_rows(conn) -> tuple[list[dict], dict]:
     if missing: raise ValueError('MISSING_REQUIRED_TABLES:' + ','.join(missing))
     commands = table_rows(conn,'venue_commands')
     positions = {r['position_id']:r for r in table_rows(conn,'position_current')}
-    snapshots = {r[0] for r in conn.execute('SELECT snapshot_id FROM executable_market_snapshots')}
+    snapshot_fields = [k for k in ('snapshot_id','condition_id','selected_outcome_token_id') if k in columns(conn,'executable_market_snapshots')]
+    bindings = {r['snapshot_id']:dict(r) for r in conn.execute('SELECT '+','.join(snapshot_fields)+' FROM executable_market_snapshots')}
+    snapshots = set(bindings)
     groups = {}
     for table in ('venue_command_events','venue_trade_facts','venue_order_facts'):
         g = defaultdict(list)
@@ -302,7 +304,11 @@ def live_command_rows(conn) -> tuple[list[dict], dict]:
     details = {'commands': related, 'positions': [positions[p] for p in pids if p in positions],
         'position_events': table_rows(conn,'position_events',where=' WHERE position_id IN ('+','.join('?' for _ in pids)+')',args=tuple(pids)) if pids else []}
     for table, group in groups.items(): details[table] = [r for cid in selected for r in group[cid]]
-    conditions = {str(r.get('condition_id') or r.get('market_id') or '') for r in related}
+    # A venue market id is not necessarily a condition id. Resolve the exact
+    # bound snapshot before attributing a settlement or reporting absence.
+    conditions = {str(bindings.get(r['snapshot_id'],{}).get('condition_id') or '') for r in related} - {''}
+    details['bound_snapshot_identities'] = [bindings[r['snapshot_id']] for r in related if r['snapshot_id'] in bindings]
+    details['settlement_binding_residuals'] = [r['command_id'] for r in related if not bindings.get(r['snapshot_id'],{}).get('condition_id')]
     for table in ('settlement_commands','review_work_items','position_lots','execution_fact','outcome_fact'):
         cols = columns(conn,table)
         if not cols:
@@ -435,7 +441,7 @@ def trace_distributions(observations: list[dict], events: list[dict], ack_events
             q=[e for e in es if e.get('stage')=='Q_SERVED' and e.get('posterior_identity_hash')==h and e.get('q_served_at_ms',-1)>=rt]
             if not q:residuals['POSTERIOR_NOT_PROVED_SERVED']+=1;continue
             serve=min(q,key=lambda e:e['q_served_at_ms']);qt=serve['q_served_at_ms'];hops['posterior_to_q'].append(qt-rt)
-            wake=[e for e in es if e.get('stage')=='WAKE_RECEIVED' and e.get('posterior_identity_hash')==h and rt<=e.get('wake_received_at_ms',-1)<=qt]
+            wake=[e for e in es if e.get('stage')=='WAKE_RECEIVED' and e.get('wake_id') and e.get('posterior_identity_hash')==h and rt<=e.get('wake_received_at_ms',-1)<=qt]
             if wake:
                 wt=min(e['wake_received_at_ms'] for e in wake)
                 hops['posterior_to_wake'].append(wt-rt);hops['wake_to_q'].append(qt-wt)
