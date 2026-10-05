@@ -228,8 +228,11 @@ class Cell:
     flat: int = 0
     pnl_null: int = 0
     realized_pnl_usd: float = 0.0
-    world_grade_pnl_usd: float = 0.0   # settlement_attribution cross-check of realized_pnl_usd
-    world_grade_n: int = 0
+    # What the settled positions would have made had every share been held to settlement
+    # (settlement_attribution.world_grade_pnl_usd, src/analysis/settlement_skill_attribution.py).
+    # NOT a check of realized_pnl_usd, which also includes the actual SELLs.
+    hold_to_settlement_pnl_usd: float = 0.0
+    hold_to_settlement_n: int = 0
     closed_unsettled: int = 0
     closed_unsettled_pnl_usd: float = 0.0
     exits: int = 0
@@ -270,6 +273,9 @@ class Cell:
         out["mean_settlement_lead_hours"] = round(self.lead_hours_sum / self.lead_n, 3) if self.lead_n else None
         out["exit_pnl_usd"] = round(self.exit_proceeds_costed_usd - self.exit_cost_usd, 6)
         out["hold_minus_sell_usd"] = round(self.resolved_hold_value_usd - self.resolved_sell_proceeds_usd, 6)
+        out["realized_minus_hold_to_settlement_usd"] = (
+            round(self.realized_pnl_usd - self.hold_to_settlement_pnl_usd, 6) if self.hold_to_settlement_n else None
+        )
         return out
 
 
@@ -594,8 +600,8 @@ def build_report(
             c.settled += 1
             c.attribution[att["category"] if att else "UNGRADED"] += 1
             if att and att["world_pnl"] is not None:
-                c.world_grade_n += 1
-                c.world_grade_pnl_usd += att["world_pnl"]
+                c.hold_to_settlement_n += 1
+                c.hold_to_settlement_pnl_usd += att["world_pnl"]
             if pnl is None:
                 c.pnl_null += 1
             else:
@@ -710,11 +716,14 @@ def build_report(
         "schema": SCHEMA,
         "generated_at": now.isoformat(),
         "since_target_date": since_s,
+        "entry_floor_date": (since - timedelta(days=ENTRY_FLOOR_DAYS)).isoformat(),
+        "entry_floor_days": ENTRY_FLOOR_DAYS,
         "clocks": {
             "decision_time": "venue_commands.created_at of the ENTRY command",
             "market_listed_at": "min market_events.created_at (Gamma 'Z' createdAt) of the condition_id; null otherwise",
             "settlement_lead_hours": "selector horizon (local midnight ending target_date, city tz) - decision_time",
             "equity_date": "position_current.settled_at (UTC date), phase=settled, realized_pnl_usd not null",
+            "realized_vs_hold_to_settlement": "realized_pnl_usd includes actual SELLs; hold_to_settlement_pnl_usd (settlement_attribution.world_grade_pnl_usd) is the all-shares-held counterfactual; their difference is what the exits changed, not a reconciliation error",
             "exit_cost": "per SELL: running-average cost of the inventory held at that fill (ENTRY and EXIT fills replayed by fill_dedup execution_ts); null when the loaded fills cannot account for the shares",
         },
         "coverage": dict(sorted(cov.items())),
@@ -776,6 +785,12 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
         "coverage: " + ", ".join(f"{k}={v}" for k, v in rep["coverage"].items()),
     ]
     out += [f"warning: {w}" for w in rep["warnings"]]
+    out.append(
+        f"entry floor: ENTRY commands are read from created_at >= {rep['entry_floor_date']} "
+        f"({ENTRY_FLOOR_DAYS} days before the window). A position whose first filled ENTRY is older is "
+        "bucketed 'unknown' (coverage.positions_without_filled_entry_in_window) and its sells cannot be "
+        "costed (exit_cost_unknown)."
+    )
     for metric in ("high", "low"):
         out += ["", f"## {metric.upper()} by market age at entry"]
         out += _table([r for r in rep["by_age_bucket"] if r["metric"] == metric], ["age_bucket"])
@@ -784,9 +799,14 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
     out += ["", "## Settlement attribution / exit reasons / keep revaluations"]
     for t in rep["totals"]:
         out.append(
-            f"- {t['metric'].upper()} realized pnl ${_f(t['realized_pnl_usd'])} (position_current, "
-            f"{t['settled']} settled) vs world-grade ${_f(t['world_grade_pnl_usd'])} "
-            f"(settlement_attribution, {t['world_grade_n']} graded)"
+            f"- {t['metric'].upper()} realized ${_f(t['realized_pnl_usd'])} "
+            f"(position_current, includes the actual SELLs; {t['settled']} settled)"
+        )
+        out.append(
+            f"- {t['metric'].upper()} hold-to-settlement ${_f(t['hold_to_settlement_pnl_usd'])} "
+            f"(settlement_attribution, every share held to settlement; {t['hold_to_settlement_n']} graded); "
+            f"realized minus hold-to-settlement ${_f(t['realized_minus_hold_to_settlement_usd'])}, "
+            f"the exits' effect (see the hold-sell$ column)"
         )
         out.append(f"- {t['metric'].upper()} attribution: {t['attribution'] or '-'}")
         out.append(f"- {t['metric'].upper()} exit reasons: {t['exit_reasons'] or '-'}")

@@ -252,7 +252,7 @@ def test_sell_vs_hold_regret_sign_and_unresolved_exits():
     assert b["hold_minus_sell_usd"] == pytest.approx(3.0 - 3.5)
     assert b["exit_reasons"] == {"GLOBAL_CAPITAL_OPTIMAL_SELL": 4}
     assert b["open_positions"] == 1 and b["closed_unsettled"] == 1
-    assert b["world_grade_pnl_usd"] == pytest.approx(0.0) and b["world_grade_n"] == 2
+    assert b["hold_to_settlement_pnl_usd"] == pytest.approx(0.0) and b["hold_to_settlement_n"] == 2
 
 
 def _buy(ts, size, price):
@@ -324,6 +324,35 @@ def test_uncostable_sell_is_counted_and_excluded_from_exit_pnl():
     total = next(t for t in rep["totals"] if t["metric"] == "high")
     assert total["exit_cost_unknown"] == 1 and total["exit_pnl_usd"] == 0.0 and total["exits"] == 1
     assert rep["exits"][0]["cost_usd"] is None
+
+
+def test_realized_and_hold_to_settlement_are_labelled_apart_and_never_equated():
+    """realized includes the SELL; hold-to-settlement is the all-held counterfactual."""
+    entries = [_entry("c1", "p1", "A", 30)]
+    fills = {"c1": [(5.0, 0.4, "2026-10-01T10:00:00+00:00")], "x1": [(5.0, 0.7, "2026-10-01T12:00:00+00:00")]}
+    positions = [_pos("p1", direction="buy_yes", pnl=1.5)]          # sold 5@0.7 for +1.5
+    attribution = {"p1": {"category": "SKILL_LOSS", "settled_in_bin": 0, "direction": "buy_yes", "world_pnl": -2.0}}
+    rep = _report(
+        _td(entries, positions, fills, exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 5.0}]),
+        _listings("A"), attribution,
+    )
+    total = next(t for t in rep["totals"] if t["metric"] == "high")
+    assert total["realized_pnl_usd"] == pytest.approx(1.5) and total["hold_to_settlement_pnl_usd"] == pytest.approx(-2.0)
+    assert total["realized_minus_hold_to_settlement_usd"] == pytest.approx(3.5)
+    assert total["hold_minus_sell_usd"] == pytest.approx(-3.5)  # the exit explains the whole gap
+    md = me.render_markdown(rep)
+    assert "realized $1.50" in md and "hold-to-settlement $-2.00" in md
+    assert "cross-check" not in md and "world-grade" not in md and " vs " not in md.split("## Settlement")[1]
+
+
+def test_entry_floor_is_named_in_the_report_and_counted():
+    rep = _report(_td([], [_pos("p1", pnl=1.0)], {}), {})
+    assert rep["entry_floor_days"] == me.ENTRY_FLOOR_DAYS == 7
+    assert rep["entry_floor_date"] == "2026-09-21"                  # SINCE 2026-09-28 minus 7 days
+    assert rep["coverage"]["positions_without_filled_entry_in_window"] == 1
+    md = me.render_markdown(rep)
+    assert "entry floor" in md and "2026-09-21" in md and "7 days" in md
+    assert "positions_without_filled_entry_in_window" in md and "exit_cost_unknown" in md
 
 
 def test_outcome_win_rate_attribution_and_equity_series():
