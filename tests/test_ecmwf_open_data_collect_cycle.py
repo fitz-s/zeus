@@ -1,6 +1,6 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-10-04
-# Lifecycle: created=2026-05-11; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Last reused/audited: 2026-10-05
+# Lifecycle: created=2026-05-11; last_reviewed=2026-10-05; last_reused=2026-10-05
 # Purpose: Protect collector isolation, optional native capture and offline 2t knots without prediction-budget regression.
 # Reuse: Inspect source-run, land-mask and shared-deadline contracts; use private DB/GRIB fixtures and fake HTTP.
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.5
@@ -379,6 +379,251 @@ def _native_temperature_transport_fixture(tmp_path, *, fault=None, land_mask=Fal
     output = tmp_path / "packet"
     output.mkdir()
     return inputs["expected_run_utc"], output, Session(), calls
+
+
+def _native_source_cache_fixture(tmp_path, *, steps=(0, 3, 6), missing=()):
+    """Retained synthetic originals, never a network or real-provider claim."""
+    inputs = _native_temperature_knots_fixture(tmp_path, steps=steps)
+    cache = tmp_path / "source-cache"
+    cache.mkdir()
+    for offset, evidence in inputs["message_source_evidence"].items():
+        row = json.loads(evidence["original_index_bytes"])
+        member, step = int(row.get("number", 0)), int(row["step"])
+        if (member, step) in missing:
+            continue
+        path = cache / f"step{step:03d}-member{member:02d}.grib2"
+        path.write_bytes(evidence["original_range_bytes"])
+        index_path = path.with_suffix(".index.body")
+        index_path.write_bytes(evidence["original_index_bytes"])
+        proof = {key: value for key, value in evidence.items()
+                 if key not in ("original_index_bytes", "original_range_bytes")}
+        proof.update(member=member, step_hours=step, index_path=index_path.name,
+                     range_http={"status": 206, "headers": {
+                         "Content-Length": str(len(evidence["original_range_bytes"])),
+                         "Content-Range": f"bytes {row['_offset']}-{row['_offset']+row['_length']-1}/{row['_offset']+row['_length']}"}})
+        path.with_suffix(".grib2.proof.json").write_text(json.dumps(proof))
+    conn = sqlite3.connect(tmp_path / "private-forecasts.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    conn.commit()
+    return inputs, cache, conn, tmp_path / "native-source-manifest.json"
+
+
+def test_native_source_partial_is_nullable_quantity_not_extrema(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path, missing=((50, 6),))
+    try:
+        result = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        row = conn.execute("SELECT * FROM source_run").fetchone()
+        assert result.status == "INCOMPLETE"
+        assert (row["status"], row["completeness_status"], row["partial_run"]) == ("PARTIAL", "PARTIAL", 1)
+        assert row["temperature_metric"] is None
+        assert row["physical_quantity"] == "native_2m_temperature_instantaneous_knots"
+        assert row["source_issue_time"] is None and row["source_release_time"] is None
+        assert row["source_available_at"] is None
+        assert row["observed_count"] == 152
+        assert conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def _native_source_scope(conn, source, manifest, inputs, **changes):
+    from src.data import ecmwf_open_data as module
+    args = dict(source_run_id=source.source_run_id, manifest_path=manifest,
+        required_steps=inputs["required_steps"], qualified_prefix_cut_utc=inputs["expected_run_utc"] + timedelta(hours=1),
+        local_day_end_utc=inputs["expected_run_utc"] + timedelta(hours=max(inputs["required_steps"])),
+        explicit_manifest=inputs["explicit_manifest"], mask_grib_path=inputs["mask_grib_path"],
+        mask_proof_path=inputs["mask_proof_path"])
+    args.update(changes)
+    return module.read_native_temperature_scope(conn, **args)
+
+
+def test_native_source_full_scope_real_knots_and_no_geophysical_clock_upgrade(tmp_path):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    try:
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        result = _native_source_scope(conn, source, manifest, inputs)
+        assert source.status == result.status == "AVAILABLE", result
+        assert len(result.native_knots) == 153
+        assert {k["step_hours"] for k in result.native_knots} == {0, 3, 6}
+        assert all(k["selected_point"]["selected_flat_index"] == 2 for k in result.native_knots)
+        assert all(k["surface_class"] == "MIXED_LAND_WATER" for k in result.native_knots)
+        assert result.temperature_first_possession_at == (inputs["expected_run_utc"] + timedelta(hours=1)).isoformat()
+        assert result.available_at is None and result.static_validity_status == "UNKNOWN"
+        assert result.qualification_status == "OFFLINE_ONLY"
+        assert result.projection_status == "NOT_PERFORMED" and result.extrema_status == "NOT_COMPUTED"
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM source_run_coverage").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_native_source_missing_body_resume_preserves_identity_and_first_possession(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    missing = cache / "step006-member50.grib2"
+    raw, proof = missing.read_bytes(), missing.with_suffix(".grib2.proof.json").read_bytes()
+    missing.unlink()
+    monkeypatch.setattr(module.requests, "Session", lambda: pytest.fail("source-only resume made HTTP"))
+    try:
+        first = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        before = json.loads(manifest.read_bytes())["messages"]
+        # A failed external 503 leaves originals alone: repeated normal inventory
+        # neither requests nor renews cached proof clocks.
+        retry = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        assert retry == first and json.loads(manifest.read_bytes())["messages"] == before
+        missing.write_bytes(raw)
+        missing.with_suffix(".grib2.proof.json").write_bytes(proof)
+        final = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        assert final.source_run_id == first.source_run_id and final.status == "AVAILABLE"
+        after = json.loads(manifest.read_bytes())["messages"]
+        assert all(m in after for m in before)
+        result = _native_source_scope(conn, final, manifest, inputs)
+        changed_scope = _native_source_scope(conn, final, manifest, inputs,
+            qualified_prefix_cut_utc=inputs["expected_run_utc"] + timedelta(hours=2))
+        assert result.temperature_first_possession_at == changed_scope.temperature_first_possession_at
+        assert conn.execute("SELECT COUNT(*) FROM source_run").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("fault", ["raw", "index", "clock", "range", "dewpoint", "duplicate"])
+def test_native_source_original_tamper_fails_closed(tmp_path, fault):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    try:
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        path = cache / "step006-member50.grib2"
+        proof_path = path.with_suffix(".grib2.proof.json")
+        proof = json.loads(proof_path.read_bytes())
+        if fault == "raw":
+            path.write_bytes(path.read_bytes()[:-1] + b"0")
+        elif fault == "index":
+            (cache / proof["index_path"]).write_bytes(b"{}\n")
+        elif fault == "clock":
+            proof["source_fetched_at"] = (inputs["expected_run_utc"] + timedelta(hours=2)).isoformat()
+            proof_path.write_text(json.dumps(proof))
+        elif fault == "range":
+            proof["range_http"]["status"] = 200
+            proof_path.write_text(json.dumps(proof))
+        elif fault == "dewpoint":
+            ec = pytest.importorskip("eccodes")
+            gid = ec.codes_new_from_message(path.read_bytes())
+            try:
+                ec.codes_set(gid, "paramId", 168)
+                raw = ec.codes_get_message(gid)
+            finally:
+                ec.codes_release(gid)
+            path.write_bytes(raw)
+            proof["raw_message_sha256"] = hashlib.sha256(raw).hexdigest()
+            proof_path.write_text(json.dumps(proof))
+        else:
+            duplicate = cache / "step006-member50-duplicate.grib2"
+            duplicate.write_bytes(path.read_bytes())
+            duplicate.with_suffix(".grib2.proof.json").write_bytes(proof_path.read_bytes())
+        # A new unreferenced duplicate does not rewrite the old immutable
+        # manifest generation; inventorying it must nevertheless fail closed.
+        assert _native_source_scope(conn, source, manifest, inputs).status == ("AVAILABLE" if fault == "duplicate" else "UNKNOWN")
+        updated = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        assert updated.status == "INCOMPLETE"
+        assert conn.execute("SELECT status FROM source_run").fetchone()[0] == "PARTIAL"
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("fault", ["prefix", "left", "right", "mask", "manifest", "native_gap"])
+def test_native_source_scope_qualification_not_guessed(tmp_path, fault):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    try:
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        changes = {}
+        if fault == "prefix":
+            changes["qualified_prefix_cut_utc"] = None
+        elif fault == "left":
+            changes["required_steps"] = [3, 6]
+        elif fault == "right":
+            changes["local_day_end_utc"] = inputs["expected_run_utc"] + timedelta(hours=7)
+        elif fault == "mask":
+            inputs["mask_grib_path"].write_bytes(b"not-original")
+        elif fault == "native_gap":
+            changes["required_steps"] = [0, 6]
+        else:
+            manifest.write_bytes(manifest.read_bytes() + b" ")
+        result = _native_source_scope(conn, source, manifest, inputs, **changes)
+        assert result.status == "UNKNOWN" and result.native_knots == ()
+        if fault == "manifest":
+            with pytest.raises(ValueError, match="PREVIOUS_MANIFEST_UNBOUND"):
+                module.persist_native_temperature_source_run(conn, cache_dir=cache,
+                    manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+    finally:
+        conn.close()
+
+
+def test_native_source_46_of_51_one_knot_is_not_six_knot_shape(tmp_path):
+    from src.data import ecmwf_open_data as module
+    steps = (9, 12, 15, 18, 21, 24)
+    missing = {(m, s) for s in steps for m in range(51) if s != 9 or m >= 46}
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path, steps=steps, missing=missing)
+    try:
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=list(steps))
+        assert source.status == "INCOMPLETE" and source.observed_count == 46
+        assert len(source.missing_member_steps) == 260
+        result = _native_source_scope(conn, source, manifest, inputs)
+        assert result.status == "INCOMPLETE" and not result.native_knots
+        assert result.available_at is None
+    finally:
+        conn.close()
+
+
+def test_native_source_tampered_then_missing_cannot_reset_clock_anchor(tmp_path):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    args = dict(cache_dir=cache, manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+    try:
+        original = module.persist_native_temperature_source_run(conn, **args)
+        proof_path = cache / "step006-member50.grib2.proof.json"
+        original_proof = proof_path.read_bytes()
+        proof = json.loads(original_proof)
+        proof["source_fetched_at"] = (inputs["expected_run_utc"] + timedelta(hours=2)).isoformat()
+        proof_path.write_text(json.dumps(proof))
+        assert module.persist_native_temperature_source_run(conn, **args).status == "INCOMPLETE"
+        assert module.persist_native_temperature_source_run(conn, **args).status == "INCOMPLETE"
+        proof_path.write_bytes(original_proof)
+        restored = module.persist_native_temperature_source_run(conn, **args)
+        assert restored.status == "AVAILABLE" and restored.source_run_id == original.source_run_id
+        assert _native_source_scope(conn, restored, manifest, inputs).temperature_first_possession_at == json.loads(original_proof)["source_fetched_at"]
+    finally:
+        conn.close()
+
+
+def test_native_source_all_bodies_pruned_degrades_same_identity_without_eviction(tmp_path):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    args = dict(cache_dir=cache, manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+    try:
+        original = module.persist_native_temperature_source_run(conn, **args)
+        # Only private generated fixture bodies are pruned here.
+        for path in cache.glob("*.grib2"):
+            path.unlink()
+        pruned = module.persist_native_temperature_source_run(conn, **args)
+        assert pruned.status == "INCOMPLETE" and pruned.observed_count == 0
+        assert pruned.source_run_id == original.source_run_id
+        assert conn.execute("SELECT status FROM source_run").fetchone()[0] == "PARTIAL"
+        assert len(json.loads(manifest.read_bytes())["retained_identities"]) == 153
+    finally:
+        conn.close()
 
 
 def test_native_temperature_capture_original_index_range_global_once(tmp_path):

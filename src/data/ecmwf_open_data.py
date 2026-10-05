@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-10-04
+# Last reused or audited: 2026-10-05
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -115,6 +115,315 @@ class OpenDataPaths:
     extract_script: Path
     manifest_path: Path
     origin: str
+
+
+_NATIVE_2T_QUANTITY = "native_2m_temperature_instantaneous_knots"
+_NATIVE_2T_VERSION = "ecmwf_ifs50r1_2t_native_source_v1"
+
+
+@dataclass(frozen=True)
+class NativeTemperatureSource:
+    status: str
+    source_run_id: str | None
+    observed_count: int
+    missing_member_steps: tuple[tuple[int, int], ...]
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class NativeTemperatureScope:
+    status: str
+    native_knots: tuple[dict, ...] = ()
+    available_at: str | None = None
+    temperature_first_possession_at: str | None = None
+    reason: str | None = None
+    quantity_role: str = _NATIVE_2T_QUANTITY
+    temporal_representation: str = "acquired_native_knots"
+    qualification_status: str = "OFFLINE_ONLY"
+    projection_status: str = "NOT_PERFORMED"
+    extrema_status: str = "NOT_COMPUTED"
+    static_validity_status: str = "UNKNOWN"
+
+
+def _native_temperature_steps(run: datetime, steps: list[int]) -> list[int]:
+    if (run.tzinfo is None or run.utcoffset() != timedelta(0) or run.hour not in (0, 6, 12, 18)
+            or run.minute or run.second or run.microsecond or run > datetime.now(timezone.utc)):
+        raise ValueError("NATIVE_2T_RUN_INVALID")
+    horizon = 240 if run.hour in (0, 12) else 90
+    if (not steps or len(set(steps)) != len(steps)
+            or any(type(s) is not int or s < 0 or s > horizon
+                   or s % (3 if s <= 144 else 6) for s in steps)):
+        raise ValueError("NATIVE_2T_NATIVE_STEPS_INVALID")
+    return sorted(steps)
+
+
+def _read_native_temperature_record(path: Path, run: datetime) -> tuple[dict, bytes]:
+    """Revalidate retained originals; metadata echoes never replace GRIB sections."""
+    import base64
+    import eccodes as ec
+    from urllib.parse import urlsplit
+    from scripts import extract_open_ens_localday as decoder
+
+    raw = path.read_bytes()
+    proof_path = path.with_suffix(".grib2.proof.json")
+    proof_bytes = proof_path.read_bytes()
+    proof = json.loads(proof_bytes)
+    member, step = proof["member"], proof["step_hours"]
+    if type(member) is not int or not 0 <= member <= 50:
+        raise ValueError("NATIVE_2T_MEMBER_INVALID")
+    _native_temperature_steps(run, [step])
+    if (raw[:4] != b"GRIB" or raw[-4:] != b"7777" or len(raw) < 20 or raw[7] != 2
+            or int.from_bytes(raw[8:16], "big") != len(raw)):
+        raise ValueError("NATIVE_2T_MESSAGE_FRAMING_INVALID")
+    if urlsplit(proof["source_url"]).hostname not in (
+            "data.ecmwf.int", "ecmwf-forecasts.s3.eu-central-1.amazonaws.com"):
+        raise ValueError("NATIVE_2T_SOURCE_HOST_INVALID")
+    if proof["range_http"].get("status") != 206:
+        raise ValueError("NATIVE_2T_RANGE_NOT_206")
+    headers = proof["range_http"]["headers"]
+    span = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", headers["Content-Range"])
+    if not span:
+        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
+    start, end, total = map(int, span.groups())
+    if (not 0 <= start <= proof["source_index_offset"]
+            or end < proof["source_index_offset"] + len(raw) - 1 or end >= total
+            or int(headers["Content-Length"]) != end - start + 1):
+        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
+    index_path = path.parent / proof["index_path"]
+    if not index_path.resolve().is_relative_to(path.parent.resolve()):
+        raise ValueError("NATIVE_2T_INDEX_OUTSIDE_CACHE")
+    index = index_path.read_bytes()
+    gid = ec.codes_new_from_message(raw)
+    try:
+        capture = decoder._native_message_capture(gid, instantaneous=True)
+        if capture["capture_status"] != "OBSERVED":
+            raise ValueError("NATIVE_2T_CAPTURE_UNKNOWN")
+        h = capture["observed_headers"]
+        sections = {s["section_number"]: base64.b64decode(s["bytes_base64"], validate=True)
+                    for s in capture["metadata_sections"]}
+        s1, s3, s4 = sections[1], sections[3], sections[4]
+        valid = run + timedelta(hours=step)
+        if (h["paramId"] != 167 or h["shortName"] != "2t" or h["units"] != "K"
+                or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
+                or h["stepType"] != "instant" or h["stepUnits"] != 1
+                or h["startStep"] != step or h["endStep"] != step or str(h["stepRange"]) != str(step)
+                or h["centre"] != "ecmf" or h["generatingProcessIdentifier"] != 161
+                or h["dataType"] != ("fc" if member == 0 else "pf")
+                or h.get("number", 0) != member
+                or (h["dataDate"], h["dataTime"]) != (int(run.strftime("%Y%m%d")), run.hour * 100)
+                or (h["validityDate"], h["validityTime"]) != (int(valid.strftime("%Y%m%d")), valid.hour * 100)
+                or raw[6] != 0 or s4[9:11] != b"\x00\x00"
+                or int.from_bytes(s1[5:7], "big") != 98
+                or int.from_bytes(s1[12:14], "big") != run.year
+                or tuple(s1[14:19]) != (run.month, run.day, run.hour, 0, 0)
+                or s1[20] != (1 if member == 0 else 4)
+                or int.from_bytes(s4[7:9], "big") != (0 if member == 0 else 1)
+                or h["productDefinitionTemplateNumber"] != (0 if member == 0 else 1)
+                or s4[13] != 161 or s4[11] != h["typeOfGeneratingProcess"]
+                or s4[17] != 1 or int.from_bytes(s4[18:22], "big") != step
+                or s4[22] != 103 or s4[23] != 0 or int.from_bytes(s4[24:28], "big") != 2
+                or (member and s4[35] != member)
+                or decoder._open_ens_original_grid(s3) != {k: h[k] for k in decoder._GRID_KEYS}):
+            raise ValueError("NATIVE_2T_ORIGINAL_IDENTITY_MISMATCH")
+        binding = decoder._open_ens_source_binding(raw, {**proof, "original_index_bytes": index,
+            "original_range_bytes": raw}, h, param="2t", member=member, step=step, run=run)
+        return {**binding, "member": member, "step_hours": step, "valid_time_utc": valid.isoformat(),
+            "path": str(path.resolve()), "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
+            "grid_sha256": hashlib.sha256(s3).hexdigest(),
+            "observed_headers": h,
+            "original_section_sha256": {str(n): hashlib.sha256(body).hexdigest() for n, body in sections.items()},
+            "process_type": h["typeOfGeneratingProcess"]}, raw
+    finally:
+        ec.codes_release(gid)
+
+
+def persist_native_temperature_source_run(conn: sqlite3.Connection, *, cache_dir: Path,
+        manifest_path: Path, expected_run_utc: datetime, product_steps: list[int]) -> NativeTemperatureSource:
+    """Dormant source-only prototype. Caller supplies a private canonical connection.
+
+    No HTTP, schedule, source activation, snapshots, hourly vectors or q writes.
+    SCOPE: stable product/run/original-grid. DRAIN: normal cadence may retain the
+    missing original ranges; this function only inventories them. RESET: exact
+    proofs are rechecked on every call, without renewing retained possession clocks.
+    A product's expected steps may grow, never shrink with a city/cut scope view.
+    """
+    steps = _native_temperature_steps(expected_run_utc, product_steps)
+    if conn.in_transaction:
+        raise ValueError("NATIVE_2T_REQUIRES_OWN_TRANSACTION")
+    previous_bytes = manifest_path.read_bytes() if manifest_path.exists() else None
+    previous = json.loads(previous_bytes) if previous_bytes else None
+    if previous:
+        previous_row = get_source_run(conn, previous["source_run_id"])
+        if not previous_row or previous_row["manifest_hash"] != hashlib.sha256(previous_bytes).hexdigest():
+            raise ValueError("NATIVE_2T_PREVIOUS_MANIFEST_UNBOUND")
+    old = {(m["member"], m["step_hours"]): m for m in
+           (previous or {}).get("retained_identities", (previous or {}).get("messages", []))}
+    if previous and (previous["run_time_utc"] != expected_run_utc.isoformat()
+                     or not set(previous["product_steps"]).issubset(steps)):
+        raise ValueError("NATIVE_2T_CACHE_RUN_OR_PLAN_CHANGED")
+    records, errors, seen = [], [], set()
+    for path in sorted(cache_dir.glob("step*-member*.grib2")):
+        try:
+            record, _ = _read_native_temperature_record(path, expected_run_utc)
+            key = record["member"], record["step_hours"]
+            if key in seen:
+                raise ValueError("NATIVE_2T_DUPLICATE_MEMBER_STEP")
+            seen.add(key)
+            if key in old and old[key] != record:
+                raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
+            records.append(record)
+        except Exception as exc:
+            errors.append(f"{path.name}:{exc}")
+    if previous:
+        compatible = [m for m in records if m["grid_sha256"] == previous["grid_sha256"]]
+        if len(compatible) != len(records):
+            errors.append("NATIVE_2T_RETAINED_GRID_CHANGED")
+            records = compatible
+    grids = {m["grid_sha256"] for m in records}
+    process_types = {(m["member"] == 0, m["process_type"]) for m in records}
+    if ((len(grids) != 1 and not (previous and not grids))
+            or any(sum(role == other for other, _ in process_types) > 1
+                               for role, _ in process_types)):
+        return NativeTemperatureSource("UNKNOWN", None, len(records), (), "NATIVE_2T_GRID_OR_PROCESS_UNKNOWN")
+    grid = next(iter(grids)) if grids else previous["grid_sha256"]
+    run_id = f"ecmwf_open_data:2t_instant_native_knots:{expected_run_utc:%Y%m%dT%H%MZ}:grid:{grid}:ifs50r1"
+    if previous and (previous["source_run_id"] != run_id or previous["grid_sha256"] != grid):
+        raise ValueError("NATIVE_2T_CACHE_IDENTITY_CHANGED")
+    wanted = {(m, s) for s in steps for m in range(51)}
+    actual = {(m["member"], m["step_hours"]) for m in records}
+    missing = tuple(sorted(wanted - actual))
+    complete = not missing and not errors and wanted == actual
+    clocks = [m["source_fetched_at"] for m in records]
+    observed_steps = [s for s in steps if {(m, s) for m in range(51)} <= actual]
+    payload = {"version": _NATIVE_2T_VERSION, "quantity_role": _NATIVE_2T_QUANTITY,
+        "source_run_id": run_id, "run_time_utc": expected_run_utc.isoformat(), "grid_sha256": grid,
+        "product_steps": steps, "messages": records, "errors": errors,
+        # Keep original identity anchors even when a later scan finds a missing
+        # or tampered body: repair cannot reset its first-possession clock.
+        "retained_identities": list({**old, **{(m["member"], m["step_hours"]): m for m in records}}.values()),
+        "source_issued_at": None, "source_publication_at": None,
+        "qualification_status": "OFFLINE_ONLY"}
+    content = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(content).hexdigest()
+    with conn:
+        write_source_run(conn, source_run_id=run_id, source_id="ecmwf_open_data",
+            track="2t_instant_native_knots", release_calendar_key="ecmwf_open_data",
+            source_cycle_time=expected_run_utc, source_issue_time=None, source_release_time=None,
+            source_available_at=max(clocks, key=datetime.fromisoformat) if complete else None,
+            status="SUCCESS" if complete else "PARTIAL", completeness_status="COMPLETE" if complete else "PARTIAL",
+            temperature_metric=None, physical_quantity=_NATIVE_2T_QUANTITY, observation_field="2t",
+            valid_time_start=expected_run_utc + timedelta(hours=steps[0]),
+            valid_time_end=expected_run_utc + timedelta(hours=steps[-1]),
+            data_version=_NATIVE_2T_VERSION, expected_members=51,
+            observed_members=len({m["member"] for m in records}), expected_steps_json=steps,
+            observed_steps_json=observed_steps, expected_count=len(wanted), observed_count=len(actual),
+            partial_run=not complete, manifest_hash=digest,
+            raw_payload_hash=hashlib.sha256(json.dumps(sorted(m["raw_message_sha256"] for m in records)).encode()).hexdigest(),
+            reason_code=None if complete else "NATIVE_2T_INCOMPLETE_OR_INVALID_ORIGINAL")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    # DB commits first. Failed publication leaves readback UNKNOWN, not a false ready row.
+    with tempfile.NamedTemporaryFile(dir=manifest_path.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.replace(temporary, manifest_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return NativeTemperatureSource("AVAILABLE" if complete else "INCOMPLETE", run_id,
+        len(actual), missing, errors[0] if errors else None)
+
+
+def read_native_temperature_scope(conn: sqlite3.Connection, *, source_run_id: str,
+        manifest_path: Path, required_steps: list[int], qualified_prefix_cut_utc: datetime | None,
+        local_day_end_utc: datetime, explicit_manifest: list[dict], mask_grib_path: Path,
+        mask_proof_path: Path) -> NativeTemperatureScope:
+    """Qualified scope view of immutable originals, never hourly or live q authority.
+
+    SCOPE: supplied qualified prefix cut through local end, with native brackets.
+    DRAIN: supply missing bytes/prefix/static proof through existing source cadence.
+    RESET: revalidate this scope independently; a different city/cut never changes cache identity.
+    Static transport/model-validity and sensor-ground remain UNKNOWN in this prototype.
+    """
+    import base64
+    import eccodes as ec
+    from scripts import extract_open_ens_localday as decoder
+
+    try:
+        content = manifest_path.read_bytes()
+        payload = json.loads(content)
+        row = get_source_run(conn, source_run_id)
+        if (not row or row["manifest_hash"] != hashlib.sha256(content).hexdigest()
+                or payload["source_run_id"] != source_run_id or payload["version"] != _NATIVE_2T_VERSION
+                or row["physical_quantity"] != _NATIVE_2T_QUANTITY or row["temperature_metric"] is not None
+                or row["source_id"] != "ecmwf_open_data" or row["track"] != "2t_instant_native_knots"
+                or row["dataset_id"] != _NATIVE_2T_VERSION or row["source_issue_time"] is not None
+                or row["source_release_time"] is not None
+                or row["expected_count"] != 51 * len(payload["product_steps"])
+                or row["observed_count"] != len(payload["messages"])
+                or row["source_cycle_time"] != payload["run_time_utc"] or payload["errors"]):
+            raise ValueError("NATIVE_2T_MANIFEST_OR_ROW_INVALID")
+        run = datetime.fromisoformat(payload["run_time_utc"])
+        steps = _native_temperature_steps(run, required_steps)
+        if steps != [s for s in range(steps[0], steps[-1] + 1) if s % (3 if s <= 144 else 6) == 0]:
+            raise ValueError("NATIVE_2T_SCOPE_NATIVE_GRID_GAP")
+        wanted = {(m, s) for s in steps for m in range(51)}
+        selected = [m for m in payload["messages"] if m["step_hours"] in steps]
+        if len(selected) != len(wanted) or {(m["member"], m["step_hours"]) for m in selected} != wanted:
+            return NativeTemperatureScope("INCOMPLETE", reason="NATIVE_2T_MEMBER_STEP_SET_INCOMPLETE")
+        if (qualified_prefix_cut_utc is None or qualified_prefix_cut_utc.tzinfo is None
+                or local_day_end_utc.tzinfo is None or not run <= qualified_prefix_cut_utc < local_day_end_utc
+                or run + timedelta(hours=steps[0]) > qualified_prefix_cut_utc
+                or run + timedelta(hours=steps[-1]) < local_day_end_utc):
+            raise ValueError("NATIVE_2T_QUALIFIED_PREFIX_OR_BRACKET_UNKNOWN")
+        mask = decoder._read_land_mask(mask_grib_path, mask_proof_path)
+        mask_capture = decoder._open_ens_original_surface_capture(mask_grib_path)
+        mask_gid = ec.codes_new_from_message(mask_grib_path.read_bytes())
+        try:
+            if (ec.codes_get(mask_gid, "paramId") != 172 or ec.codes_get(mask_gid, "shortName") != "lsm"
+                    or ec.codes_get(mask_gid, "units") != "(0 - 1)"
+                    or ec.codes_get(mask_gid, "typeOfLevel") != "surface"):
+                raise ValueError("NATIVE_2T_LSM_ORIGINAL_QUANTITY_INVALID")
+        finally:
+            ec.codes_release(mask_gid)
+        s3 = next(base64.b64decode(s["bytes_base64"], validate=True)
+                  for s in mask_capture["metadata_sections"] if s["section_number"] == 3)
+        if (hashlib.sha256(s3).hexdigest() != payload["grid_sha256"]
+                or decoder._open_ens_original_grid(s3) != mask["fields"]):
+            raise ValueError("NATIVE_2T_LSM_ORIGINAL_GRID_MISMATCH")
+        if not explicit_manifest or len({c["city"] for c in explicit_manifest}) != len(explicit_manifest):
+            raise ValueError("NATIVE_2T_CITY_SCOPE_INVALID")
+        points = decoder._select_land_grid_points(mask["fields"], explicit_manifest, mask["values"].__getitem__)
+        knots, clocks = [], []
+        for saved in selected:
+            record, raw = _read_native_temperature_record(Path(saved["path"]), run)
+            if record != saved:
+                raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
+            gid = ec.codes_new_from_message(raw)
+            try:
+                values = ec.codes_get_values(gid)
+                if len(values) != mask["fields"]["Ni"] * mask["fields"]["Nj"]:
+                    raise ValueError("NATIVE_2T_VALUES_GRID_INVALID")
+                for city in explicit_manifest:
+                    point = points[city["city"]]
+                    value = float(values[point["selected_flat_index"]])
+                    if not math.isfinite(value) or value == ec.codes_get(gid, "missingValue"):
+                        raise ValueError("NATIVE_2T_SELECTED_VALUE_INVALID")
+                    knots.append({"city": city["city"], "member": saved["member"],
+                        "step_hours": saved["step_hours"], "valid_time_utc": saved["valid_time_utc"],
+                        "value_k": value, "raw_message_sha256": saved["raw_message_sha256"],
+                        "selected_point": point, "lsm_raw_sha256": mask_capture["raw_message_sha256"],
+                        "surface_class": "PURE_LAND" if point["selected_land_fraction"] == 1 else "MIXED_LAND_WATER"})
+            finally:
+                ec.codes_release(gid)
+            clocks.append(saved["source_fetched_at"])
+        # Temperature possession only; unavailable geophysical transport must not be
+        # silently included in a fully qualified source clock or forecast witness.
+        return NativeTemperatureScope("AVAILABLE", tuple(knots),
+            temperature_first_possession_at=max(clocks, key=datetime.fromisoformat))
+    except Exception as exc:
+        return NativeTemperatureScope("UNKNOWN", reason=str(exc))
 
 
 def _write_runtime_coordinate_manifest(raw_root: Path, *, manifest_json: str | None = None) -> Path:
