@@ -563,8 +563,9 @@ def _bind_entry_fact(conn, command, raw_json, order_id):
     ``state`` is EXACT_TAKER, LEGACY_NON_TAKER or TAKER_UNVERIFIABLE exactly as
     exchange_reconcile._trade_fill_economics_binding returns it for this fact. A fact the binding
     cannot even be asked about (no command row, a missing table) is treated as TAKER_UNVERIFIABLE
-    only if it names a TAKER on this order, else it keeps its canonical price; an unreadable or
-    empty payload names no role and is LEGACY_NON_TAKER, as the ledger binds it.
+    only if it names a TAKER on this order, else it keeps its canonical price. A NULL or empty
+    payload names no role and is LEGACY_NON_TAKER, as the ledger binds it; a payload that does not
+    parse, or a binding that cannot be imported, proves no role and is TAKER_UNVERIFIABLE.
     """
     try:
         from src.execution.exchange_reconcile import (
@@ -575,7 +576,7 @@ def _bind_entry_fact(conn, command, raw_json, order_id):
         # a NULL or empty payload names no role, so the ledger binds it as LEGACY_NON_TAKER too
         raw = _trade_payload_for_maker_economics(json.loads(raw_json) if raw_json else {})
     except (TypeError, ValueError, ImportError):
-        return "LEGACY_NON_TAKER", None
+        return "TAKER_UNVERIFIABLE", None
     if command is None:
         return ("TAKER_UNVERIFIABLE" if _names_taker(raw, order_id) else "LEGACY_NON_TAKER"), None
     try:

@@ -1139,6 +1139,13 @@ def test_fact_with_neither_maker_legs_nor_a_taker_role_keeps_its_canonical_price
     assert [f[:2] for f in _fills(conn, ["c1"])["c1"]] == [(5.0, 0.3)]
 
 
+def test_unparseable_entry_payload_proves_no_role_and_is_unverifiable_not_priced():
+    conn = _facts_conn([("c1", "t1", "CONFIRMED", 5, 0.3, None, 1)])
+    conn.execute("UPDATE venue_trade_facts SET raw_payload_json = '{not json'")
+    fills, unverifiable = me.load_economic_fills(conn, ["c1"])
+    assert unverifiable == {"c1"} and fills == {}
+
+
 def test_unverifiable_entry_makes_every_sell_of_the_position_cost_unknown():
     buys = [(10.0, 0.20, "2026-10-01T10:00:00+00:00")]
     sells = [(5.0, 0.30, "2026-10-01T11:00:00+00:00"), (5.0, 0.40, "2026-10-01T12:00:00+00:00")]
