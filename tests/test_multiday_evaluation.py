@@ -36,6 +36,11 @@ def _entry(cid, pid, cond, hours_after_listing, *, metric="high", size=5.0, pric
     }
 
 
+def _fills(conn, ids):
+    """load_economic_fills' fills half (its second half, the unverifiable commands, is tested apart)."""
+    return me.load_economic_fills(conn, ids)[0]
+
+
 def _fill(price, size=5.0, *_ignored):
     """One economic fill as load_economic_fills returns it: (size, price, execution_ts)."""
     return (size, price, "2026-10-01T06:00:00+00:00")
@@ -191,8 +196,8 @@ def test_children_sharing_one_tx_hash_both_count():
         ("c1", "child-a", "CONFIRMED", 2, 0.2, TX, 1),
         ("c1", "child-b", "CONFIRMED", 3, 0.3, TX, 1),
     ])
-    assert sorted(f[:2] for f in me.load_economic_fills(conn, ["c1"])["c1"]) == [(2.0, 0.2), (3.0, 0.3)]
-    assert me.fill_totals(me.load_economic_fills(conn, ["c1"])["c1"], 5.0)[:2] == (5.0, pytest.approx(1.3))
+    assert sorted(f[:2] for f in _fills(conn, ["c1"])["c1"]) == [(2.0, 0.2), (3.0, 0.3)]
+    assert me.fill_totals(_fills(conn, ["c1"])["c1"], 5.0)[:2] == (5.0, pytest.approx(1.3))
 
 
 def test_equal_size_children_without_tx_hash_both_count():
@@ -201,7 +206,7 @@ def test_equal_size_children_without_tx_hash_both_count():
         ("c1", "child-a", "CONFIRMED", 5, 0.4, None, 1),
         ("c1", "child-b", "CONFIRMED", 5, 0.4, None, 1),
     ])
-    assert me.fill_totals(me.load_economic_fills(conn, ["c1"])["c1"], 10.0)[:2] == (10.0, pytest.approx(4.0))
+    assert me.fill_totals(_fills(conn, ["c1"])["c1"], 10.0)[:2] == (10.0, pytest.approx(4.0))
 
 
 def test_matched_without_tx_then_confirmed_with_tx_counts_once():
@@ -210,8 +215,8 @@ def test_matched_without_tx_then_confirmed_with_tx_counts_once():
         ("c1", "t1", "MATCHED", 5, 0.3, None, 1),
         ("c1", "t1", "CONFIRMED", 5, 0.3, TX, 2),
     ])
-    assert [f[:2] for f in me.load_economic_fills(conn, ["c1"])["c1"]] == [(5.0, 0.3)]
-    assert me.fill_totals(me.load_economic_fills(conn, ["c1"])["c1"], 5.0) == (5.0, pytest.approx(1.5), False)
+    assert [f[:2] for f in _fills(conn, ["c1"])["c1"]] == [(5.0, 0.3)]
+    assert me.fill_totals(_fills(conn, ["c1"])["c1"], 5.0) == (5.0, pytest.approx(1.5), False)
 
 
 def test_lifecycle_revisions_and_tx_aggregate_alias_count_once():
@@ -223,11 +228,11 @@ def test_lifecycle_revisions_and_tx_aggregate_alias_count_once():
         ("c1", "t2", "FAILED", 9, 0.9, None, 1),          # never an economic fill
         ("c2", "t3", "CONFIRMED", 1, 0.5, None, 1),
     ])
-    fills = me.load_economic_fills(conn, ["c1", "c2"])
+    fills = _fills(conn, ["c1", "c2"])
     assert [f[:2] for f in fills["c1"]] == [(4.0, pytest.approx(0.3012345))]
     assert [f[:2] for f in fills["c2"]] == [(1.0, 0.5)]
     assert all(f[2] for f in fills["c1"] + fills["c2"])  # canonical execution_ts is carried
-    assert me.load_economic_fills(conn, ["nope"]) == {}
+    assert me.load_economic_fills(conn, ["nope"]) == ({}, set())
 
 
 def test_sell_vs_hold_regret_sign_and_unresolved_exits():
@@ -816,11 +821,12 @@ def _leg_conn():
     conn.executescript(
         """
         CREATE TABLE venue_commands (command_id TEXT, snapshot_id TEXT, position_id TEXT, intent_kind TEXT,
-            size REAL, price REAL, state TEXT, created_at TEXT, venue_order_id TEXT, token_id TEXT,
+            side TEXT, size REAL, price REAL, state TEXT, created_at TEXT, venue_order_id TEXT, token_id TEXT,
             envelope_id TEXT);
-        CREATE TABLE venue_submission_envelopes (envelope_id TEXT, selected_outcome_token_id TEXT,
-            yes_token_id TEXT, no_token_id TEXT);
-        INSERT INTO venue_submission_envelopes VALUES ('env1', 'tok-yes', 'tok-yes', 'tok-no');
+        CREATE TABLE venue_submission_envelopes (envelope_id TEXT, condition_id TEXT, selected_outcome_token_id TEXT,
+            yes_token_id TEXT, no_token_id TEXT, side TEXT);
+        INSERT INTO venue_submission_envelopes VALUES ('env-buy', 'cond-1', 'tok-yes', 'tok-yes', 'tok-no', 'BUY');
+        INSERT INTO venue_submission_envelopes VALUES ('env-sell', 'cond-1', 'tok-yes', 'tok-yes', 'tok-no', 'SELL');
         """
     )
     return conn
@@ -828,7 +834,7 @@ def _leg_conn():
 
 def _taker_fact(conn, command_id, order_id, side, top_price, size, legs, *, trade_id="child", state="CONFIRMED"):
     raw = {"asset_id": YES_TOK, "side": side, "trader_side": "TAKER", "taker_order_id": order_id,
-           "filled_size": str(size), "price": str(top_price), "maker_orders": legs}
+           "market": "cond-1", "filled_size": str(size), "price": str(top_price), "maker_orders": legs}
     conn.execute(
         "INSERT INTO venue_trade_facts (trade_id, venue_order_id, command_id, state, filled_size, fill_price,"
         " tx_hash, source, observed_at, local_sequence, raw_payload_hash, raw_payload_json)"
@@ -838,70 +844,12 @@ def _taker_fact(conn, command_id, order_id, side, top_price, size, legs, *, trad
     )
 
 
-def test_taker_sell_proceeds_use_the_maker_leg_vwap_not_the_top_level_price():
-    """10 sh with top-level price 0.20 but legs 5@0.20 + 5@0.40: proceeds $3.00, not $2.00."""
-    conn = _leg_conn()
-    conn.execute(
-        "INSERT INTO venue_commands (command_id, position_id, intent_kind, size, price, state, created_at,"
-        " venue_order_id, token_id, envelope_id) VALUES ('x1','p1','EXIT',10,0.2,'FILLED',"
-        "'2026-10-02T09:00:00+00:00','ord-x1',?, 'env1')", (YES_TOK,),
-    )
-    _taker_fact(conn, "x1", "ord-x1", "SELL", 0.20, 10,
-                [{"asset_id": YES_TOK, "side": "BUY", "matched_amount": "5", "price": "0.20"},
-                 {"asset_id": YES_TOK, "side": "BUY", "matched_amount": "5", "price": "0.40"}])
-    raw_total = me.fill_totals(me.load_economic_fills(conn, ["x1"])["x1"], 10.0)[:2]
-    assert raw_total == (10.0, pytest.approx(2.0))                       # what the raw top-level price gives
-
-    fills, debt = me.load_exit_fills(conn, [{"command_id": "x1", "position_id": "p1", "size": 10.0}])
-    assert debt == []
-    (qty, price, ts), = fills["p1"]
-    assert qty == 10.0 and qty * price == pytest.approx(3.0)             # canonical economic exit fill
-    assert ts == "2026-10-02T09:00:00+00:00"                             # joined execution clock
-
-    # the report charges the sell its canonical proceeds, so the regret is off by exactly the $1 it was
-    entries = [_entry("c1", "p1", "A", 30, size=10.0)]
-    td = _td(entries, [_pos("p1", direction="buy_yes", pnl=1.0, phase="economically_closed",
-                            exit_reason=None, settled_at=None)],
-             {"c1": [(10.0, 0.20, "2026-10-01T10:00:00+00:00")]},
-             exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 10.0}])
-    td["exit_fills"] = fills
-    (row,) = _report(td, _listings("A"))["exits"]
-    assert row["proceeds_usd"] == pytest.approx(3.0) and row["cost_usd"] == pytest.approx(2.0)
-
-
 def test_exit_position_with_economics_debt_gets_no_proceeds_and_is_counted():
     entries = [_entry("c1", "p1", "A", 30)]
     td = _td(entries, [_pos("p1", direction="buy_yes", pnl=0.0)], {"c1": [_fill(0.2)]},
              exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 5.0}], exit_debt=["p1"])
     rep = _report(td, _listings("A"))
     assert rep["exits"] == [] and rep["coverage"]["exit_positions_economics_debt"] == 1
-
-
-def test_taker_buy_cost_uses_the_maker_leg_economics_when_the_ledger_has_not_repriced_it():
-    """Taker BUY of YES whose top-level price is the lowest leg: SELL YES 5@0.30 + BUY NO 5@0.60 (=0.40 YES)."""
-    conn = _leg_conn()
-    conn.execute(
-        "INSERT INTO venue_commands (command_id, position_id, intent_kind, size, price, state, created_at,"
-        " venue_order_id, token_id, envelope_id) VALUES ('b1','p1','ENTRY',10,0.3,'FILLED',"
-        "'2026-10-01T10:00:00+00:00','ord-b1',?, 'env1')", (YES_TOK,),
-    )
-    _taker_fact(conn, "b1", "ord-b1", "BUY", 0.30, 10,
-                [{"asset_id": YES_TOK, "side": "SELL", "matched_amount": "5", "price": "0.30"},
-                 {"asset_id": NO_TOK, "side": "BUY", "matched_amount": "5", "price": "0.60"}])
-    (qty, price, _ts), = me.load_economic_fills(conn, ["b1"])["b1"]
-    assert qty == 10.0 and qty * price == pytest.approx(3.5)             # not 10 x 0.30 = 3.00
-
-
-def test_taker_buy_without_exact_legs_keeps_the_canonical_price():
-    conn = _leg_conn()
-    conn.execute(
-        "INSERT INTO venue_commands (command_id, position_id, intent_kind, size, price, state, created_at,"
-        " venue_order_id, token_id, envelope_id) VALUES ('b1','p1','ENTRY',10,0.3,'FILLED',"
-        "'2026-10-01T10:00:00+00:00','ord-b1',?, 'env1')", (YES_TOK,),
-    )
-    _taker_fact(conn, "b1", "ord-b1", "BUY", 0.30, 10,
-                [{"asset_id": YES_TOK, "side": "SELL", "matched_amount": "4", "price": "0.30"}])   # legs cover 4 of 10
-    assert [f[:2] for f in me.load_economic_fills(conn, ["b1"])["b1"]] == [(10.0, 0.30)]
 
 
 def test_floor_counterexample_end_to_end_from_the_database(tmp_path):
@@ -1070,3 +1018,118 @@ def test_exit_fill_clock_map_and_economics_are_read_in_one_snapshot(tmp_path, mo
     # rather than a half-timed position priced wrongly
     assert fills["p9"][0][2] is None and debt == []
     assert me.sell_costs([(5, 0.2, T1)], fills["p9"])[0]["cost_usd"] is None
+
+
+def _cmd(conn, command_id, intent, side, size, price, order_id, envelope, position_id="p1",
+         created="2026-10-02T09:00:00+00:00"):
+    conn.execute(
+        "INSERT INTO venue_commands (command_id, position_id, intent_kind, side, size, price, state, created_at,"
+        " venue_order_id, token_id, envelope_id) VALUES (?,?,?,?,?,?,'FILLED',?,?,?,?)",
+        (command_id, position_id, intent, side, size, price, created, order_id, YES_TOK, envelope),
+    )
+
+
+_LEG_5_20 = {"asset_id": YES_TOK, "side": "BUY", "matched_amount": "5", "price": "0.20"}
+_LEG_5_40 = {"asset_id": YES_TOK, "side": "BUY", "matched_amount": "5", "price": "0.40"}
+
+
+def test_taker_sell_proceeds_use_the_maker_leg_vwap_not_the_top_level_price():
+    """10 sh with top-level price 0.20 but legs 5@0.20 + 5@0.40: proceeds $3.00, not $2.00."""
+    conn = _leg_conn()
+    _cmd(conn, "x1", "EXIT", "SELL", 10, 0.2, "ord-x1", "env-sell")
+    _taker_fact(conn, "x1", "ord-x1", "SELL", 0.20, 10, [_LEG_5_20, _LEG_5_40])
+    stored = conn.execute("SELECT filled_size, fill_price FROM venue_trade_facts WHERE command_id = 'x1'").fetchone()
+    assert (float(stored[0]), float(stored[1])) == (10.0, 0.20)          # the raw fact: $2.00 at the top-level price
+    # the ENTRY loader runs the ledger's binding on any fact with maker legs; a SELL command's
+    # fact is classified the same way and priced from its legs, never from the rounded top line
+    assert me.fill_totals(_fills(conn, ["x1"])["x1"], 10.0)[:2] == (10.0, pytest.approx(3.0))
+
+    fills, debt = me.load_exit_fills(conn, [{"command_id": "x1", "position_id": "p1", "size": 10.0}])
+    assert debt == []
+    (qty, price, ts), = fills["p1"]
+    assert qty == 10.0 and qty * price == pytest.approx(3.0)             # canonical economic exit fill
+    assert ts == "2026-10-02T09:00:00+00:00"                             # joined execution clock
+
+    # the report charges the sell its canonical proceeds, so the regret is off by exactly the $1 it was
+    entries = [_entry("c1", "p1", "A", 30, size=10.0)]
+    td = _td(entries, [_pos("p1", direction="buy_yes", pnl=1.0, phase="economically_closed",
+                            exit_reason=None, settled_at=None)],
+             {"c1": [(10.0, 0.20, "2026-10-01T10:00:00+00:00")]},
+             exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 10.0}])
+    td["exit_fills"] = fills
+    (row,) = _report(td, _listings("A"))["exits"]
+    assert row["proceeds_usd"] == pytest.approx(3.0) and row["cost_usd"] == pytest.approx(2.0)
+
+
+def test_taker_buy_cost_uses_the_maker_leg_economics_when_the_ledger_has_not_repriced_it():
+    """EXACT_TAKER: SELL YES 5@0.30 + BUY NO 5@0.60 (= 0.40 YES) is $3.50 for 10 shares, not 10 x 0.30."""
+    conn = _leg_conn()
+    _cmd(conn, "b1", "ENTRY", "BUY", 10, 0.3, "ord-b1", "env-buy", created="2026-10-01T10:00:00+00:00")
+    _taker_fact(conn, "b1", "ord-b1", "BUY", 0.30, 10,
+                [{"asset_id": YES_TOK, "side": "SELL", "matched_amount": "5", "price": "0.30"},
+                 {"asset_id": NO_TOK, "side": "BUY", "matched_amount": "5", "price": "0.60"}])
+    fills, unverifiable = me.load_economic_fills(conn, ["b1"])
+    (qty, price, _ts), = fills["b1"]
+    assert qty == 10.0 and qty * price == pytest.approx(3.5) and unverifiable == set()
+
+
+def test_recognized_taker_buy_whose_legs_do_not_prove_the_full_size_is_unverifiable_not_priced():
+    """TAKER_UNVERIFIABLE (exchange_reconcile:2477-2481): legs cover 4 of 10 shares, so the rounded
+    top-level price 0.30 must NOT become a known cost; the command is flagged and gets no fill."""
+    conn = _leg_conn()
+    _cmd(conn, "b1", "ENTRY", "BUY", 10, 0.3, "ord-b1", "env-buy", created="2026-10-01T10:00:00+00:00")
+    _taker_fact(conn, "b1", "ord-b1", "BUY", 0.30, 10,
+                [{"asset_id": YES_TOK, "side": "SELL", "matched_amount": "4", "price": "0.30"}])
+    fills, unverifiable = me.load_economic_fills(conn, ["b1"])
+    assert unverifiable == {"b1"} and fills == {}
+
+
+def test_non_taker_legacy_buy_with_maker_legs_keeps_its_canonical_price():
+    """LEGACY_NON_TAKER: we were the maker (our order is one of maker_orders), so the stored price stands."""
+    conn = _leg_conn()
+    _cmd(conn, "b1", "ENTRY", "BUY", 10, 0.3, "ord-b1", "env-buy", created="2026-10-01T10:00:00+00:00")
+    raw = {"asset_id": YES_TOK, "side": "SELL", "trader_side": "MAKER", "taker_order_id": "someone-else",
+           "market": "cond-1", "filled_size": "10", "price": "0.30",
+           "maker_orders": [{"order_id": "ord-b1", "asset_id": YES_TOK, "side": "BUY", "matched_amount": "10",
+                             "price": "0.30"}]}
+    conn.execute(
+        "INSERT INTO venue_trade_facts (trade_id, venue_order_id, command_id, state, filled_size, fill_price,"
+        " tx_hash, source, observed_at, local_sequence, raw_payload_hash, raw_payload_json)"
+        " VALUES ('t1','ord-b1','b1','CONFIRMED','10','0.30',NULL,'WS_USER','2026-10-01T10:00:05+00:00',1,'h',?)",
+        (json.dumps(raw),),
+    )
+    fills, unverifiable = me.load_economic_fills(conn, ["b1"])
+    assert [f[:2] for f in fills["b1"]] == [(10.0, 0.30)] and unverifiable == set()
+
+
+def test_fact_without_maker_legs_keeps_its_canonical_price_without_asking_the_binding():
+    conn = _facts_conn([("c1", "t1", "CONFIRMED", 5, 0.3, None, 1)])
+    fills, unverifiable = me.load_economic_fills(conn, ["c1"])
+    assert [f[:2] for f in fills["c1"]] == [(5.0, 0.3)] and unverifiable == set()
+
+
+def test_unverifiable_entry_makes_every_sell_of_the_position_cost_unknown():
+    buys = [(10.0, 0.20, "2026-10-01T10:00:00+00:00")]
+    sells = [(5.0, 0.30, "2026-10-01T11:00:00+00:00"), (5.0, 0.40, "2026-10-01T12:00:00+00:00")]
+    ok = me.sell_costs(buys, sells)
+    assert [round(s["cost_usd"], 6) for s in ok] == [1.0, 1.0]
+    bad = me.sell_costs(buys, sells, buys_unverifiable=True)
+    assert [s["cost_usd"] for s in bad] == [None, None]
+    assert [s["unknown"] for s in bad] == ["unverifiable_entry_cost"] * 2
+    assert bad[1]["proceeds_usd"] == pytest.approx(2.0)                    # proceeds still reported
+
+
+def test_report_counts_unverifiable_entry_positions_and_never_prices_their_sells():
+    entries = [_entry("c1", "p1", "A", 10, size=10.0)]
+    fills = {"c1": [(10.0, 0.30, "2026-10-01T10:00:00+00:00")], "x1": [(5.0, 0.50, "2026-10-01T14:00:00+00:00")]}
+    td = _td(entries, [_pos("p1", direction="buy_yes", pnl=0.0, phase="economically_closed", exit_reason=None,
+                            settled_at=None)], fills,
+             exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 5.0}])
+    td["entry_unverifiable"] = {"c1"}
+    rep = _report(td, _listings("A"))
+    (row,) = rep["exits"]
+    assert row["cost_usd"] is None and row["sells"][0]["unknown"] == "unverifiable_entry_cost"
+    total = next(t for t in rep["totals"] if t["metric"] == "high")
+    assert total["exit_cost_unknown"] == 1 and total["exit_pnl_usd"] == 0.0
+    assert rep["coverage"]["exit_positions_unverifiable_entry_cost"] == 1
+    assert rep["coverage"]["entry_commands_taker_unverifiable"] == 1

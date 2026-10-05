@@ -149,7 +149,9 @@ _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 _INVENTORY_EPS = 1e-9
 
 
-def sell_costs(buys: Iterable[Sequence[Any]], sells: Iterable[Sequence[Any]]) -> list[dict]:
+def sell_costs(
+    buys: Iterable[Sequence[Any]], sells: Iterable[Sequence[Any]], *, buys_unverifiable: bool = False
+) -> list[dict]:
     """Charge each SELL the average cost of the inventory held when it filled.
 
     ``buys``/``sells`` are economic (size, price, execution_ts) fills of ONE position.
@@ -169,8 +171,20 @@ def sell_costs(buys: Iterable[Sequence[Any]], sells: Iterable[Sequence[Any]]) ->
     the later sells are charged against (BUY 10@0.20, untimed SELL 10, BUY 10@0.80, SELL 5
     would price the last sell at $2.50 where the truth is $4.00). So EVERY sell of that
     position gets ``cost_usd`` None with ``unknown`` = "no_clock".
+
+    ``buys_unverifiable`` says one of the position's ENTRY facts is a recognized taker whose maker
+    legs do not prove its full size (the ledger's TAKER_UNVERIFIABLE): its cost cannot be known,
+    so, as with a missing clock, EVERY sell of the position gets ``cost_usd`` None with
+    ``unknown`` = "unverifiable_entry_cost". The ledger refuses to use that fact's rounded
+    top-level price, and so does this report.
     """
     buys, sells = list(buys), list(sells)
+    if buys_unverifiable:
+        return [
+            {"ts": ts, "shares": float(size), "proceeds_usd": float(size) * float(price),
+             "cost_usd": None, "unknown": "unverifiable_entry_cost"}
+            for size, price, ts in sells
+        ]
     if any(_utc(ts) is None for _, _, ts in [*buys, *sells]):
         return [
             {"ts": ts, "shares": float(size), "proceeds_usd": float(size) * float(price),
@@ -410,7 +424,7 @@ def _load_trades_data(conn, since: date) -> dict:
             pids,
         )
     ]
-    fills = load_economic_fills(conn, [e["command_id"] for e in td["entries"]])
+    fills, td["entry_unverifiable"] = load_economic_fills(conn, [e["command_id"] for e in td["entries"]])
     td["fills"] = fills
     td["exit_fills"], td["exit_fill_debt"] = load_exit_fills(conn, td["exit_cmds"])
     entry_ids = {e["command_id"] for e in td["entries"]}
@@ -468,8 +482,9 @@ def _load_trades_data(conn, since: date) -> dict:
     return td
 
 
-def load_economic_fills(conn, command_ids: Iterable[str]) -> dict[str, list[tuple[float, float, str]]]:
-    """command_id -> exactly-once [(filled_size, fill_price, execution_ts)] via the canonical fill law.
+def load_economic_fills(conn, command_ids: Iterable[str]):
+    """-> (fills, unverifiable): command_id -> exactly-once [(size, price, execution_ts)], and the
+    commands holding a taker fact the ledger calls TAKER_UNVERIFIABLE.
 
     ``execution_ts`` is fill_dedup's stable execution order (earliest venue timestamp across
     a trade's revisions, else earliest observed_at), the clock its own economic fold uses.
@@ -477,11 +492,23 @@ def load_economic_fills(conn, command_ids: Iterable[str]) -> dict[str, list[tupl
     Scoped to the given commands before ranking, as src.state.fill_dedup requires (its
     alias exclusion re-evaluates the canonical CTE, so an unscoped window rescans all
     history).
+
+    ENTRY economics follow the ledger's own taker binding, exchange_reconcile.
+    _trade_fill_economics_binding, imported rather than copied. A fact with no maker legs keeps
+    its canonical price without a call (a maker or legacy fact). A fact that carries them is
+    classified by the ledger:
+      EXACT_TAKER        size and price come from the exact maker legs (the tick-rounded top-level
+                         price is not cost-basis authority when they are present);
+      LEGACY_NON_TAKER   the canonical price stands;
+      TAKER_UNVERIFIABLE a recognized taker whose legs do not prove the full size. The ledger
+                         refuses its rounded top-level price (exchange_reconcile:2477-2481), so
+                         the fact is NOT returned as a fill: the command goes in ``unverifiable``
+                         and the report treats the position's cost as unknown, never a known cost.
     """
     from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
 
     fills: dict[str, list[tuple[float, float, str]]] = {}
-    legged: list[tuple[str, float, float, str, str, str]] = []   # facts a taker BUY may reprice
+    legged: list[tuple] = []     # facts that carry maker_orders: the ledger decides their economics
     ids = sorted(set(command_ids))
     for chunk in _chunks(ids):
         ph = ",".join("?" * len(chunk))
@@ -499,65 +526,70 @@ def load_economic_fills(conn, command_ids: Iterable[str]) -> dict[str, list[tupl
                 legged.append((command_id, *row, raw_json, order_id))
             else:
                 fills.setdefault(command_id, []).append(row)
-    tokens = _command_token_pairs(conn, {f[0] for f in legged})
+    commands = _command_rows(conn, {f[0] for f in legged})
+    unverifiable: set[str] = set()
     for command_id, size, price, ts, raw_json, order_id in legged:
-        selected, yes_id, no_id = tokens.get(command_id, ("", "", ""))
-        leg = _taker_buy_leg_economics(raw_json, order_id, selected, yes_id, no_id)
-        if leg is not None:
+        state, leg = _bind_entry_fact(conn, commands.get(command_id), raw_json, order_id)
+        if state == "TAKER_UNVERIFIABLE":
+            unverifiable.add(command_id)
+            continue
+        if state == "EXACT_TAKER" and leg is not None:
             size, price = leg
         fills.setdefault(command_id, []).append((size, price, ts))
-    return fills
+    return fills, unverifiable
 
 
-def _command_token_pairs(conn, command_ids: Iterable[str]) -> dict[str, tuple[str, str, str]]:
-    """command_id -> (selected token, yes token, no token) from the command's submission envelope."""
-    out: dict[str, tuple[str, str, str]] = {}
+def _command_rows(conn, command_ids: Iterable[str]) -> dict[str, dict]:
+    """command_id -> the venue_commands row, as the ledger's binding reads it."""
+    out: dict[str, dict] = {}
     ids = sorted(set(command_ids))
-    if not ids:
-        return out
+    cur = conn.cursor()
     for chunk in _chunks(ids):
         ph = ",".join("?" * len(chunk))
-        for command_id, token_id, selected, yes_id, no_id in conn.execute(
-            "SELECT cmd.command_id, cmd.token_id, env.selected_outcome_token_id, env.yes_token_id, env.no_token_id "
-            "FROM venue_commands cmd LEFT JOIN venue_submission_envelopes env ON env.envelope_id = cmd.envelope_id "
-            f"WHERE cmd.command_id IN ({ph})",
-            chunk,
-        ):
-            out[command_id] = (selected or token_id or "", yes_id or "", no_id or "")
+        cur.execute(f"SELECT * FROM venue_commands WHERE command_id IN ({ph})", chunk)
+        names = [d[0] for d in cur.description]
+        for row in cur.fetchall():
+            out[row[names.index("command_id")]] = dict(zip(names, row))
     return out
 
 
-def _taker_buy_leg_economics(raw_json, order_id, selected_token_id, yes_token_id, no_token_id):
-    """(shares, unit_cost) from a taker BUY's exact maker legs, else None.
+def _bind_entry_fact(conn, command, raw_json, order_id):
+    """(state, (shares, unit_cost) | None) from the ledger's own taker binding.
 
-    The ledger already rewrites such facts at ingest (exchange_reconcile), so on current data
-    this changes nothing; it only matters for a fact the ledger has not corrected yet. The
-    rule is exchange_reconcile._taker_buy_trade_economics itself, not a copy: a taker BUY can
-    match a SELL of the selected token at p or a BUY of the complement at 1-p, and the
-    tick-rounded top-level price is not cost-basis authority when those legs are present.
+    ``state`` is EXACT_TAKER, LEGACY_NON_TAKER or TAKER_UNVERIFIABLE exactly as
+    exchange_reconcile._trade_fill_economics_binding returns it for this fact. A fact the binding
+    cannot even be asked about (no command row, unreadable payload, a missing table) is treated as
+    TAKER_UNVERIFIABLE only if it names a TAKER on this order, else it keeps its canonical price.
     """
-    if not raw_json or "maker_orders" not in str(raw_json):
-        return None
     try:
         from src.execution.exchange_reconcile import (
-            _taker_buy_trade_economics,
+            _trade_fill_economics_binding,
             _trade_payload_for_maker_economics,
         )
 
         raw = _trade_payload_for_maker_economics(json.loads(raw_json))
-        legs = _taker_buy_trade_economics(
-            raw,
-            venue_order_id=order_id or "",
-            selected_token_id=selected_token_id or "",
-            yes_token_id=yes_token_id or "",
-            no_token_id=no_token_id or "",
-        )
     except (TypeError, ValueError, ImportError):
-        return None
-    if legs is None:
-        return None
-    shares, cost = legs
-    return float(shares), float(cost / shares)
+        return "LEGACY_NON_TAKER", None
+    if command is None:
+        return ("TAKER_UNVERIFIABLE" if _names_taker(raw, order_id) else "LEGACY_NON_TAKER"), None
+    try:
+        binding = _trade_fill_economics_binding(
+            conn, command=command, raw=raw, venue_order_id=order_id or command.get("venue_order_id") or ""
+        )
+    except sqlite3.Error:
+        return ("TAKER_UNVERIFIABLE" if _names_taker(raw, order_id) else "LEGACY_NON_TAKER"), None
+    if binding.state == "EXACT_TAKER" and binding.filled_size and binding.fill_price:
+        return "EXACT_TAKER", (float(binding.filled_size), float(binding.fill_price))
+    return binding.state, None
+
+
+def _names_taker(raw, order_id) -> bool:
+    """A payload that says its trader_side is TAKER or names this order as its taker order."""
+    if not isinstance(raw, Mapping):
+        return False
+    side = str(raw.get("trader_side") or raw.get("traderSide") or "").strip().upper()
+    taker_order = str(raw.get("taker_order_id") or raw.get("takerOrderId") or "").strip()
+    return side == "TAKER" or bool(order_id and taker_order == order_id)
 
 
 def load_exit_fills(conn, exit_cmds: Sequence[Mapping[str, Any]]):
@@ -753,7 +785,11 @@ def build_report(
     # ---- first filled entry + every ENTRY fill per position -------------
     first_fill: dict[str, dict] = {}
     buys_by_pos: dict[str, list] = {}
+    unverifiable_cmds = set(td.get("entry_unverifiable", ()))
+    unverifiable_pos: set[str] = {e["position_id"] for e in td["entries"] if e["command_id"] in unverifiable_cmds}
     for rec in entries:
+        if rec["command_id"] in unverifiable_cmds:
+            cov["entry_commands_taker_unverifiable"] += 1
         if rec["filled_shares"] <= 0:
             continue
         pid = rec["position_id"]
@@ -819,12 +855,14 @@ def build_report(
         sell_fills = td["exit_fills"].get(pid, ())
         if not sell_fills:
             continue
-        sells = sell_costs(buys_by_pos.get(pid, ()), sell_fills)
+        sells = sell_costs(buys_by_pos.get(pid, ()), sell_fills, buys_unverifiable=pid in unverifiable_pos)
         shares = sum(s["shares"] for s in sells)
         proceeds = sum(s["proceeds_usd"] for s in sells)
         costed = [s for s in sells if s["cost_usd"] is not None]
         if any(s["unknown"] == "no_clock" for s in sells):
             cov["exit_positions_untimed_fills"] += 1
+        if any(s["unknown"] == "unverifiable_entry_cost" for s in sells):
+            cov["exit_positions_unverifiable_entry_cost"] += 1
         cost = sum(s["cost_usd"] for s in costed)
         costed_proceeds = sum(s["proceeds_usd"] for s in costed)
         reason = reason_head(
