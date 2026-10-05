@@ -49,6 +49,7 @@ reported as a scalar.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import faulthandler
 import json
 import logging
@@ -161,7 +162,21 @@ def sell_costs(buys: Iterable[Sequence[Any]], sells: Iterable[Sequence[Any]]) ->
     sells. A sell larger than the inventory the loaded fills can account for (entry
     outside the loaded window, chain-only holdings) has ``cost_usd`` None, never a guess;
     it consumes the inventory it had.
+
+    The replay needs every fill's place in time. If ANY fill of the position (buy or sell)
+    has a missing or unparseable clock, the position's fills cannot be ordered, and a partial
+    answer would be wrong: an untimed SELL that is merely skipped still shapes the inventory
+    the later sells are charged against (BUY 10@0.20, untimed SELL 10, BUY 10@0.80, SELL 5
+    would price the last sell at $2.50 where the truth is $4.00). So EVERY sell of that
+    position gets ``cost_usd`` None with ``unknown`` = "no_clock".
     """
+    buys, sells = list(buys), list(sells)
+    if any(_utc(ts) is None for _, _, ts in [*buys, *sells]):
+        return [
+            {"ts": ts, "shares": float(size), "proceeds_usd": float(size) * float(price),
+             "cost_usd": None, "unknown": "no_clock"}
+            for size, price, ts in sells
+        ]
     events = [(_utc(ts) or _EPOCH, 0, float(size), float(price), ts) for size, price, ts in buys]
     events += [(_utc(ts) or _EPOCH, 1, float(size), float(price), ts) for size, price, ts in sells]
     events.sort(key=lambda e: (e[0], e[1]))
@@ -179,7 +194,10 @@ def sell_costs(buys: Iterable[Sequence[Any]], sells: Iterable[Sequence[Any]]) ->
         else:
             cost = None
             held = basis = 0.0
-        out.append({"ts": ts, "shares": size, "proceeds_usd": size * price, "cost_usd": cost})
+        out.append(
+            {"ts": ts, "shares": size, "proceeds_usd": size * price, "cost_usd": cost,
+             "unknown": None if cost is not None else "no_inventory"}
+        )
     return out
 
 
@@ -320,7 +338,34 @@ def _in_rows(conn, sql: str, ids: Iterable[str], tail: str = "") -> list:
     return rows
 
 
+@contextlib.contextmanager
+def _read_snapshot(conn):
+    """One read transaction: every SELECT inside sees the same committed state of the DB.
+
+    sqlite3 does not open a transaction for a SELECT, so without this each statement is its
+    own snapshot and a trade fact or command committed between two of them (the clock map and
+    the canonical economics, say) is seen by one and not the other. The connection is
+    mode=ro and the transaction is deferred, so it takes no write lock; it is held for the
+    duration of the load only. Nests: inside an open transaction it does nothing.
+    """
+    if conn.in_transaction:
+        yield
+        return
+    conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        if conn.in_transaction:
+            conn.execute("COMMIT")
+
+
 def load_trades_data(conn, since: date) -> dict:
+    """The whole trade-DB side of the report, read from one snapshot."""
+    with _read_snapshot(conn):
+        return _load_trades_data(conn, since)
+
+
+def _load_trades_data(conn, since: date) -> dict:
     conn.row_factory = sqlite3.Row
     since_s = since.isoformat()
     floor = (since - timedelta(days=ENTRY_FLOOR_DAYS)).isoformat()
@@ -524,11 +569,18 @@ def load_exit_fills(conn, exit_cmds: Sequence[Mapping[str, Any]]):
     price while ``maker_orders`` carries every leg (10 sh at 0.20 on top, legs 5@0.20 + 5@0.40,
     are $3.00 of proceeds, not $2.00). The raw fact row's fill_price must not be used for a SELL.
     The function exposes no fill clock, so each fill is joined on (command_id, trade_id) to the
-    canonical ``execution_ts`` of the same economic CTE; a fill without one orders before every
-    buy and so can only make a cost unknown, never wrong. A position whose economics the ledger
-    itself calls debt (PartialExitEconomicDebtError) is returned in the debt list and gets no
-    proceeds from this report.
+    canonical ``execution_ts`` of the same economic CTE; a fill left without one makes every sell
+    of its position cost-unknown (``sell_costs``), never a partial known cost. The clock map and
+    the canonical economics are two reads, so they run inside ONE read snapshot: a trade fact
+    committed between them can no longer appear in one and not the other. A position whose
+    economics the ledger itself calls debt (PartialExitEconomicDebtError) is returned in the
+    debt list and gets no proceeds from this report.
     """
+    with _read_snapshot(conn):
+        return _load_exit_fills(conn, exit_cmds)
+
+
+def _load_exit_fills(conn, exit_cmds):
     from src.state.fill_dedup import (
         PartialExitEconomicDebtError,
         canonical_trade_fact_cte,
@@ -771,6 +823,8 @@ def build_report(
         shares = sum(s["shares"] for s in sells)
         proceeds = sum(s["proceeds_usd"] for s in sells)
         costed = [s for s in sells if s["cost_usd"] is not None]
+        if any(s["unknown"] == "no_clock" for s in sells):
+            cov["exit_positions_untimed_fills"] += 1
         cost = sum(s["cost_usd"] for s in costed)
         costed_proceeds = sum(s["proceeds_usd"] for s in costed)
         reason = reason_head(
@@ -809,6 +863,7 @@ def build_report(
                         "shares": round(s["shares"], 6),
                         "proceeds_usd": round(s["proceeds_usd"], 6),
                         "cost_usd": None if s["cost_usd"] is None else round(s["cost_usd"], 6),
+                        "unknown": s["unknown"],
                     }
                     for s in sorted(sells, key=lambda s: _utc(s["ts"]) or _EPOCH)
                 ],

@@ -294,6 +294,49 @@ def test_sell_with_inventory_outside_the_loaded_fills_has_null_cost():
     assert short[0]["cost_usd"] is None and short[0]["proceeds_usd"] == pytest.approx(1.5)
 
 
+def test_one_untimed_fill_makes_every_sell_of_the_position_unknown():
+    """BUY 10@0.20 10:00, untimed SELL 10 (really 11:00), BUY 10@0.80 12:00, SELL 5 at 13:00.
+
+    Skipping the untimed sell used to leave the last sell 'known' at $2.50; the truth is $4.00
+    (the first sell consumed the 0.20 lot), so no sell of this position may carry a cost."""
+    buys = [_buy(T1, 10, 0.20), _buy(T3, 10, 0.80)]
+    sells = [(10, 0.30, None), _buy("2026-10-01T13:00:00+00:00", 5, 0.90)]
+    out = me.sell_costs(buys, sells)
+    assert [s["cost_usd"] for s in out] == [None, None]
+    assert [s["unknown"] for s in out] == ["no_clock", "no_clock"]
+    assert out[1]["proceeds_usd"] == pytest.approx(4.5)               # proceeds are still reported
+    # with the clock restored the same fills price correctly: first sell $2.00, second $4.00
+    ok = me.sell_costs(buys, [(10, 0.30, T2), _buy("2026-10-01T13:00:00+00:00", 5, 0.90)])
+    assert [round(s["cost_usd"], 6) for s in ok] == [2.0, 4.0]
+
+
+def test_untimed_buy_or_unparseable_clock_also_poisons_the_position():
+    assert [s["cost_usd"] for s in me.sell_costs([(5, 0.2, None)], [_buy(T2, 5, 0.3)])] == [None]
+    assert [s["cost_usd"] for s in me.sell_costs([_buy(T1, 5, 0.2)], [(5, 0.3, "not-a-time")])] == [None]
+    assert me.sell_costs([_buy(T1, 5, 0.2)], []) == []                 # no sells, nothing to poison
+
+
+def test_untimed_position_is_counted_and_costs_nothing_in_the_report():
+    entries = [_entry("c1", "p1", "A", 10), _entry("c2", "p1", "A", 20)]
+    fills = {
+        "c1": [(10.0, 0.20, "2026-10-01T10:00:00+00:00")],
+        "c2": [(10.0, 0.80, "2026-10-01T20:00:00+00:00")],
+        "x1": [(10.0, 0.30, None)],                                        # untimed
+        "x2": [(5.0, 0.90, "2026-10-01T22:00:00+00:00")],
+    }
+    positions = [_pos("p1", direction="buy_yes", pnl=0.0, phase="economically_closed", exit_reason=None, settled_at=None)]
+    rep = _report(
+        _td(entries, positions, fills, exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 10.0},
+                                                  {"command_id": "x2", "position_id": "p1", "size": 5.0}]),
+        _listings("A"),
+    )
+    (row,) = rep["exits"]
+    assert row["cost_usd"] is None and all(s["cost_usd"] is None and s["unknown"] == "no_clock" for s in row["sells"])
+    total = next(t for t in rep["totals"] if t["metric"] == "high")
+    assert total["exit_cost_unknown"] == 2 and total["exit_pnl_usd"] == 0.0
+    assert total["exits"] == 1 and rep["coverage"]["exit_positions_untimed_fills"] == 1
+
+
 def test_simultaneous_buy_and_sell_orders_buy_first():
     (sell,) = me.sell_costs([_buy(T1, 5, 0.20)], [_buy(T1, 5, 0.30)])
     assert sell["cost_usd"] == pytest.approx(1.0)
@@ -314,7 +357,9 @@ def test_exit_pnl_in_the_report_uses_per_sell_cost_not_lifecycle_vwap():
     )
     (row,) = rep["exits"]
     assert row["cost_usd"] == pytest.approx(1.0) and row["proceeds_usd"] == pytest.approx(1.5)
-    assert row["sells"] == [{"ts": "2026-10-01T15:00:00+00:00", "shares": 5.0, "proceeds_usd": 1.5, "cost_usd": 1.0}]
+    assert row["sells"] == [
+        {"ts": "2026-10-01T15:00:00+00:00", "shares": 5.0, "proceeds_usd": 1.5, "cost_usd": 1.0, "unknown": None}
+    ]
     total = next(t for t in rep["totals"] if t["metric"] == "high")
     assert total["exit_pnl_usd"] == pytest.approx(0.50) and total["exit_cost_unknown"] == 0
 
@@ -947,3 +992,81 @@ def test_importing_the_script_does_not_arm_a_watchdog():
 
     assert me.main.__kwdefaults__["watchdog"] is False
     faulthandler.cancel_dump_traceback_later()   # no-op; nothing was scheduled by importing
+
+
+# ------------------------------------------------------- one read snapshot for the loader
+def _wal_db(tmp_path):
+    db = tmp_path / "snap.db"
+    w = sqlite3.connect(db, isolation_level=None)
+    w.execute("PRAGMA journal_mode=WAL")
+    w.execute("CREATE TABLE t(x)")
+    w.execute("INSERT INTO t VALUES (1)")
+    ro = sqlite3.connect(f"file:{db}?mode=ro", uri=True, isolation_level=None)
+    return w, ro
+
+
+def test_read_snapshot_hides_a_commit_that_lands_between_two_reads(tmp_path):
+    w, ro = _wal_db(tmp_path)
+    # without it each SELECT is its own snapshot and straddles the commit
+    first = ro.execute("SELECT count(*) FROM t").fetchone()[0]
+    w.execute("INSERT INTO t VALUES (2)")
+    assert (first, ro.execute("SELECT count(*) FROM t").fetchone()[0]) == (1, 2)
+    w.execute("DELETE FROM t WHERE x = 2")
+    with me._read_snapshot(ro):
+        a = ro.execute("SELECT count(*) FROM t").fetchone()[0]
+        w.execute("INSERT INTO t VALUES (2)")             # the writer is never blocked by the reader
+        b = ro.execute("SELECT count(*) FROM t").fetchone()[0]
+    assert (a, b) == (1, 1) and not ro.in_transaction
+    assert ro.execute("SELECT count(*) FROM t").fetchone()[0] == 2     # the next read sees the commit
+    w.close()
+    ro.close()
+
+
+def test_read_snapshot_nests_and_always_ends_its_transaction(tmp_path):
+    _w, ro = _wal_db(tmp_path)
+    with me._read_snapshot(ro):
+        with me._read_snapshot(ro):                       # inner one joins, does not commit the outer
+            assert ro.in_transaction
+        assert ro.in_transaction
+    assert not ro.in_transaction
+    with pytest.raises(RuntimeError):
+        with me._read_snapshot(ro):
+            raise RuntimeError("boom")
+    assert not ro.in_transaction                          # released even on an exception
+
+
+def test_exit_fill_clock_map_and_economics_are_read_in_one_snapshot(tmp_path, monkeypatch):
+    """A trade fact committed between the clock-map read and the economics read must not make a
+    fill appear untimed: both reads of load_exit_fills run inside one transaction."""
+    import src.state.fill_dedup as fd
+
+    trades, _fc, _world = _make_dbs(tmp_path)
+    t = sqlite3.connect(trades, isolation_level=None)
+    t.execute("PRAGMA journal_mode=WAL")
+    t.execute(
+        "INSERT INTO venue_commands (command_id, snapshot_id, position_id, intent_kind, size, price, state, created_at,"
+        " venue_order_id, token_id) VALUES ('x9','s1','p9','EXIT',5,0.3,'FILLED','2026-10-02T09:00:00+00:00','o-x9','TOK')"
+    )
+    conn = me._open_ro(trades)
+    in_txn_at_economics: list[bool] = []
+
+    def economics(c, position_id, **_kw):
+        in_txn_at_economics.append(c.in_transaction)
+        # a writer commits the SELL fact only AFTER the clock map was read
+        t.execute(
+            "INSERT INTO venue_trade_facts (trade_id, venue_order_id, command_id, state, filled_size, fill_price,"
+            " tx_hash, observed_at, local_sequence) VALUES ('late','o-x9','x9','CONFIRMED','5','0.3',NULL,"
+            "'2026-10-02T09:01:00+00:00',1)"
+        )
+        return [fd.EconomicExitFill("id", "x9", "o-x9", "late", Decimal("5"), Decimal("0.3"), Decimal("1.5"))]
+
+    from decimal import Decimal
+    monkeypatch.setattr(fd, "economic_exit_fills_for_position", economics)
+    fills, debt = me.load_exit_fills(conn, [{"command_id": "x9", "position_id": "p9", "size": 5.0}])
+    conn.close()
+    t.close()
+    assert in_txn_at_economics == [True]                  # economics read inside the snapshot transaction
+    # the late fact is invisible to the snapshot, so its clock is None and sell_costs makes it unknown
+    # rather than a half-timed position priced wrongly
+    assert fills["p9"][0][2] is None and debt == []
+    assert me.sell_costs([(5, 0.2, T1)], fills["p9"])[0]["cost_usd"] is None
