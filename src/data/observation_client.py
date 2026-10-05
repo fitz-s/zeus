@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-10-04 (optional reported-product evidence DTO)
 # Authority basis: Day0 real-time observation; F3 PR 2/3 typed temperature
 #                  boundary per Path A (src/types/temperature.py);
 #                  live_entry_health_repair Slice B66.
@@ -83,6 +83,8 @@ class Day0ObservationContext:
     # being combined. Canonical DB contexts may leave this absent because they
     # already persist the derived gap proof above.
     sample_times_utc: Optional[tuple[str, ...]] = None
+    # Source-product provenance only; not absorbing settlement or q authority.
+    cumulative_prefix_evidence: Optional[dict] = None
 
     def __post_init__(self) -> None:
         if self.low_so_far is None:
@@ -117,6 +119,7 @@ class Day0ObservationContext:
             "raw_payload_hash": self.raw_payload_hash,
             "max_gap_minutes": self.max_gap_minutes,
             "gap_suspect_metrics": self.gap_suspect_metrics,
+            "cumulative_prefix_evidence": self.cumulative_prefix_evidence,
         }
 
     # Allow dict-style .get() used by legacy callers in evaluator / monitor_refresh

@@ -16761,3 +16761,94 @@ yet. Native2t helper remains dormant OFFLINE_ONLY/zero HTTP; no source-run/
 snapshot/oldraw rewrite or probability-regime activation. Unknown-past/domain/
 full physical representativeness and overall profit/readiness remain OPEN.
 Checkpoint only after runtime acceptance; no restart or live push for notes.
+
+BEFOREEDIT native cumulative qualification slice (not probability repair):
+reader read_day0_observed_extrema already supplies the live scalar context via
+read_day0_observation_context_from_instants. Day0ObservedExtrema.provenance has
+no replay-qualified native cumulative prefix, and Day0ObservationContext lacks
+an optional field to carry that source evidence. No class named CurrentDayState
+exists; the hourly Day0CurrentTemperatureState is instantaneous trajectory
+evidence and must never be manufactured from a cumulative maximum/minimum.
+Proposed three owned files: day0_observation_reader.py, existing
+test_day0_observation_reader.py and observation_client.py only a defaulted
+non-actuating DTO/as_dict evidence seam (ROOT subsequently approved this exact
+second-source interface, not a new CurrentDayState or instantaneous field).
+
+Only original base64/entitySHA/raw-response/unique HQ/nativeDateTime/metric pair,
+C unit, exact target HK local date and aware subsecond acquisition/import/cut
+can qualify [targetlocalmidnight,nativecut]. Source-issued stays UNKNOWN;
+quantity declares only the reported HKO since-midnight cumulative product,
+not instantaneous2m, CURRENT_ONLY1minmean or absorbing sensor equivalence.
+Missing/tampered/future/spot/legacyNULL remains qualification UNKNOWN while
+existing scalar availability is retained. HIGH/LOW bind separate metric/value
+identities to the same original body. Actual producer->private canonical->
+regular reader/context must RED before implementation and demonstrate new
+advancedcut changes evidence identity/RESET without any forced live cycle.
+SCOPE exact source/station/date/metric/body; DRAIN next normal valid original
+publication; RESET replay+causal clocks validate for that own row, not an
+always-newest equality gate. No global semrev/q/ENTRY/HELD/σ/μ/math/schema or
+native producer change. Required source roles/physical contract/schema and
+scoped data module routes were read; dated current_data_state is stale planning
+context, current source proof instead is actual9942197/body9ec19653 verified.
+
+Qualification implementation checkpoint (source not yet loaded): the actual
+selected HKO cumulative row now replays its original decoded entity/base64/SHA,
+unique Observatory station, Celsius since-midnight headers, native date/asof,
+both reported values and full-precision causal acquisition/write/decision clocks.
+The regular Day0ObservationContext carries optional high/low evidence, including
+separate metric identity hashes, through fields/as_dict without changing scalars,
+q, gates, native producer or schema. Qualified_for is HKO_REPORTED_PRODUCT_ONLY;
+PROVISIONAL, source-reported completeness only, settlement_equivalence UNPROVEN,
+absorbing_authority false. Official native documentation gives 1-minute mean,
+10-minute updates and '*' incomplete/N/A unavailable; it does not define a
+display-precision schema. Original lexemes are preserved; measurement resolution
+and precision schema stay unknown, not inherited from final DailyExtract or
+market resolution. Invalid evidence gives named UNKNOWN while legacy scalars
+remain available. A lawful advanced-asof original changes both metric identities;
+PIT re-read still qualifies its own older original rather than matching newest.
+
+True baseline producer->private canonical->regular context H/L failed twice
+because the context lacked source evidence (2RED, 2.05s,
+/tmp/zeus-hko-cumulative-reader-red.xml). Final owned reader file is 89P/0F in
+2.46s, /tmp/zeus-hko-cumulative-reader-owned-final.xml: new27 includes H/L,
+body/hash/rawNULL/station/duplicate/*/N/A/unit/spot/date/pair negatives, exact
+1-microsecond cut/clock negatives, offset representation, DTO JSON roundtrip
+and advanced-cut RESET; old62 controls retained. Four expected deprecated
+as_dict warnings remain visible. Compile3/AST3/YAML2/freshness/planning/diff pass.
+Existing source_rationale two WHY rows and test_topology existing row are the
+only governance deltas (INV-47/INV-16 role and causal-proof separation); broad
+unchanged data15/74-producer suites were not rerun under ROOT's bounded scope.
+This is product-source qualification, not final sensor equivalence or q repair.
+
+Separate one authorized native-2t readonly attempt actually fetched a partial
+packet under native_2t_run_audit/20261004T180000Z; do not overwrite or bulk commit.
+03:48:34.409->03:48:44.921Z ended UNKNOWN_PRIORITY_CHECK_TIMEOUT, without final
+receipt or a complete transferred-byte counter. Twelve original indices total
+12,259,667B; 306 planned body messages (51 members x6 steps) sum203,406,570B.
+Only three step9 messages (CF00/PF12/PF42) arrived: original bodies1,982,000B
+plus proofs4858B, retained lower bound14,246,525B, NOT final downloaded bytes.
+Independent original Section0/4 parameter167/K/2m/instant/process161/run18Z and
+Section3 match same-cycle LSM172/z129; index/range206/length/body hashes match.
+First possessions03:48:42.349064/.990901/43.513030Z; published-issued UNKNOWN,
+Last-Modified not substituted. Missing303 messages means no full51/sameX carrier
+or live activation. Subsequent readbacks03:50:17/03:52:01 did not fetch again.
+No collection retry, q/canonical write, source enable or second loader occurred.
+
+Independent qualification review accepted the frozen three source/test hashes:
+485e4a33(reader), bab6fc20(DTO), c64a5d93(test), checked04:13:10Z. Two actual
+producer->canonical->regular-context nodes passed2.07s; four non-mirror controls
+passed (other-station incomplete rows do not poison HQ, lexeme29.000 does not
+invent precision, H/L distinct identity/as_dict, futurewrite1us and LOW '*' or
+spot-header refusal). No new Critical/Important findings; ROOT accepted this
+reported-product-only slice. The independent Oct4 DailyExtract30.6/25.6 and
+resolved HIGH30/LOW25 cases support the existing oracle_truncate behavior, not
+a rounding defect or native provisional/final equivalence; no rounding changed.
+
+ROOT authorized a separately bounded native attempt-2 under the existing packet,
+with cumulative budget accounting and unchanged helper; old partial originals
+must remain immutable. Main confirmed no loader preparing/running and exact
+attempt-2 target absent, with private example configuration still ready. No
+second loader is authorized while this audit runs. A fresh origin/live check
+still returns97295949; no new peer semantic delta. Qualification code may be
+saved on the task branch, but neither code-save nor reported qualification is
+new probability consumption or whole-goal readiness.

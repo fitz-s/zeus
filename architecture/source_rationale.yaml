@@ -455,7 +455,7 @@ files:
   src/data/day0_observation_reader.py:
     zone: K2_runtime
     authority_role: day0_current_observation_and_revision_likelihood_reader
-    why: Reads source-typed current-day extrema without mixing provider roles. Only WU changed-payload observation_revisions that the writer actually applied to canonical observation state provide the causal, conservative Jeffreys estimate that the current hourly boundary survives through the remaining source updates; quarantined payload mismatches are disagreement evidence and never become probability transitions. This uncertainty stays inside q and prevents a revisable WU print from becoming exact payoff authority. If a city has zero applied changed-payload transitions in the bounded lookback, the Jeffreys zero-observation prior is available only to HELD_MONITOR/REDUCE_ONLY_EXIT so existing capital remains re-decidable; ENTRY still requires empirical history and fails closed. HKO cold-start pair confirmation retains the legacy exact fetch/import contract; a later honest import requires this row's original capture, identical confirmation/extrema/completion fetch clock and ordered acquisition/fact/import/decision proof. All receipt clocks are qualified at full stored precision by aware UTC Python comparison, not SQLite's truncated datetime. Raw-missing legacy or another row's receipt cannot use that ordered branch; metric/date/pair authority and probability mathematics are unchanged.
+    why: Reads source-typed current-day extrema without mixing provider roles. Only WU changed-payload observation_revisions that the writer actually applied to canonical observation state provide the causal, conservative Jeffreys estimate that the current hourly boundary survives through the remaining source updates; quarantined payload mismatches are disagreement evidence and never become probability transitions. This uncertainty stays inside q and prevents a revisable WU print from becoming exact payoff authority. If a city has zero applied changed-payload transitions in the bounded lookback, the Jeffreys zero-observation prior is available only to HELD_MONITOR/REDUCE_ONLY_EXIT so existing capital remains re-decidable; ENTRY still requires empirical history and fails closed. HKO cold-start pair confirmation retains the legacy exact fetch/import contract; a later honest import requires this row's original capture, identical confirmation/extrema/completion fetch clock and ordered acquisition/fact/import/decision proof. All receipt clocks are qualified at full stored precision by aware UTC Python comparison, not SQLite's truncated datetime. Raw-missing legacy or another row's receipt cannot use that ordered branch; metric/date/pair authority and probability mathematics are unchanged. The selected HKO cumulative row may carry independently replayed entity/hash, unique station/date/metric pair and exact causal-clock evidence into the regular observation context; this qualifies only the provisional reported since-midnight 1-minute-mean product. Missing or incomplete originals lose this optional qualification without deleting legacy scalars; final-settlement equivalence, absorbing authority and measurement resolution remain unproven.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1427,7 +1427,10 @@ files:
   src/data/observation_client.py:
     zone: K2_runtime
     authority_role: observation_reader
-    why: Reads current observations for Day0/monitor logic; exact configured
+    why: Reads current observations for Day0/monitor logic; carries the canonical
+      reader's optional replay-qualified provisional HKO reported-product prefix
+      in the regular DTO/as_dict without granting absorbing settlement or probability
+      authority. Exact configured
       WU stations may combine a strictly newer same-station fast tail only
       when it strengthens the monotone running HIGH or LOW, while canonical
       prefix coverage and source provenance remain explicit.

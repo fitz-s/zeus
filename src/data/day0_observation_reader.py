@@ -1,5 +1,5 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-10-04 (HKO same-capture ordered rollover clocks)
+# Last reused/audited: 2026-10-04 (HKO reported-product replay and ordered clocks)
 # Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
 #   docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md §5;
 #   docs/evidence/upstream_physical_2026_07_17/day0_mechanism_first_principles_audit.md §M-2/§H-3
@@ -63,6 +63,125 @@ from datetime import date, datetime, timedelta, timezone
 from math import isfinite
 from typing import Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
+
+
+def _hko_cumulative_prefix_evidence(
+    row: tuple | None, *, target_date: str, timezone_name: str,
+    decision_time: datetime,
+) -> dict:
+    """Replay a reported native product prefix, never a final-sensor claim.
+
+    SCOPE is the selected cumulative row. DRAIN/RESET is the next lawful native
+    publication, not scalar availability or an always-newest identity match.
+    """
+    import base64
+    import csv
+    import io
+    from decimal import Decimal, InvalidOperation
+
+    common = {"qualified_for": "HKO_REPORTED_PRODUCT_ONLY", "provisional": True,
+              "source_reported_complete": None,
+              "settlement_equivalence": "UNPROVEN", "absorbing_authority": False}
+    try:
+        if row is None:
+            raise ValueError("HKO_PREFIX_ORIGINAL_ROW_UNAVAILABLE")
+        high, low, row_id, row_target, fact_raw, imported_raw, unit, station, raw, prov_raw = row
+        if row_target != target_date or timezone_name != "Asia/Hong_Kong" or station != "HKO" or unit != "C":
+            raise ValueError("HKO_PREFIX_ROW_IDENTITY_INVALID")
+        provenance = json.loads(prov_raw)
+        if not isinstance(provenance, dict):
+            raise ValueError("HKO_PREFIX_PRODUCT_IDENTITY_INVALID")
+        source_url = "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_since_midnight_maxmin.csv"
+        if (provenance.get("source_url") != source_url or provenance.get("station_id") != "HKO"
+                or provenance.get("observation_basis") != _HKO_EXTREMA_BASIS):
+            raise ValueError("HKO_PREFIX_PRODUCT_IDENTITY_INVALID")
+        if not raw or not provenance.get("raw_body_base64"):
+            raise ValueError("HKO_PREFIX_ORIGINAL_BODY_MISSING")
+        body = base64.b64decode(provenance["raw_body_base64"], validate=True)
+        if (not body or len(body) > 1024 * 1024
+                or hashlib.sha256(body).hexdigest() != provenance.get("raw_body_sha256")
+                or body.decode("utf-8") != raw):
+            raise ValueError("HKO_PREFIX_ORIGINAL_BODY_MISMATCH")
+        parsed = csv.DictReader(io.StringIO(body.decode("utf-8-sig")))
+        high_header = "Maximum Air Temperature Since Midnight(degree Celsius)"
+        low_header = "Minimum Air Temperature Since Midnight(degree Celsius)"
+        if parsed.fieldnames != ["Date time", "Automatic Weather Station", high_header, low_header]:
+            raise ValueError("HKO_PREFIX_NATIVE_HEADERS_INVALID")
+        reports = [r for r in parsed if r.get("Automatic Weather Station") == "HK Observatory"]
+        if len(reports) != 1:
+            raise ValueError("HKO_PREFIX_NATIVE_STATION_NOT_UNIQUE")
+        report = reports[0]
+        if None in report:
+            raise ValueError("HKO_PREFIX_NATIVE_HEADERS_INVALID")
+        texts = (report[high_header], report[low_header])
+        if any(not isinstance(t, str) or not t.strip() or t.strip() == "N/A" for t in texts):
+            raise ValueError("HKO_PREFIX_NATIVE_VALUE_UNAVAILABLE")
+        if any("*" in t for t in texts):
+            raise ValueError("HKO_PREFIX_SOURCE_REPORTED_INCOMPLETE")
+        try:
+            values = tuple(Decimal(t) for t in texts)
+        except InvalidOperation as exc:
+            raise ValueError("HKO_PREFIX_NATIVE_VALUE_INVALID") from exc
+        if (any(not v.is_finite() for v in values) or values[0] < values[1]
+                or values != (Decimal(str(high)), Decimal(str(low)))
+                or values != (Decimal(str(provenance.get("official_running_high_c"))),
+                              Decimal(str(provenance.get("official_running_low_c"))))):
+            raise ValueError("HKO_PREFIX_NATIVE_VALUES_MISMATCH")
+        native = report["Date time"]
+        if len(native) != 12 or not native.isdigit() or native != provenance.get("native_datetime"):
+            raise ValueError("HKO_PREFIX_NATIVE_DATETIME_INVALID")
+        observed = datetime.strptime(native, "%Y%m%d%H%M").replace(tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        target = date.fromisoformat(target_date)
+        if observed.date() != target:
+            raise ValueError("HKO_PREFIX_NATIVE_TARGET_DATE_MISMATCH")
+        clocks = {}
+        for key, clock_raw in {
+            "fact": fact_raw, "imported": imported_raw,
+            "start": provenance.get("capture_started_at_utc"),
+            "finish": provenance.get("capture_completed_at_utc"),
+            "fetched": provenance.get("extrema_fetched_at"),
+            "written": provenance.get("written_at_utc"),
+        }.items():
+            if not isinstance(clock_raw, str):
+                raise ValueError("HKO_PREFIX_CAUSAL_CLOCK_INVALID")
+            clock = datetime.fromisoformat(clock_raw.replace("Z", "+00:00"))
+            if clock.tzinfo is None or clock.utcoffset() is None:
+                raise ValueError("HKO_PREFIX_CAUSAL_CLOCK_NAIVE")
+            clocks[key] = clock.astimezone(timezone.utc)
+        if (decision_time.tzinfo is None or decision_time.utcoffset() is None
+                or not (observed.astimezone(timezone.utc) == clocks["fact"] <= clocks["finish"]
+                        and clocks["start"] <= clocks["finish"] == clocks["fetched"]
+                        <= clocks["imported"] == clocks["written"] <= decision_time.astimezone(timezone.utc))):
+            raise ValueError("HKO_PREFIX_CAUSAL_CLOCK_ORDER_INVALID")
+        common.update({"qualification_status": "QUALIFIED", "reason": None,
+            "source": _HKO_SOURCE, "source_url": source_url, "station_id": "HKO",
+            "native_station_name": "HK Observatory", "target_date": target_date, "unit": "C",
+            "source_reported_complete": True, "native_datetime": native,
+            "statistic": "reported_since_midnight_1minute_mean_extrema",
+            "averaging_window_seconds": 60, "nominal_update_interval_seconds": 600,
+            "measurement_resolution_c": None, "precision_schema": "UNPROVEN",
+            "coverage_start_utc": datetime.combine(target, datetime.min.time(), tzinfo=ZoneInfo("Asia/Hong_Kong")).astimezone(timezone.utc).isoformat(),
+            "coverage_end_utc": observed.astimezone(timezone.utc).isoformat(),
+            "body_sha256": provenance["raw_body_sha256"], "body_base64": provenance["raw_body_base64"],
+            "source_issued_at_utc": None, "capture_started_at_utc": clocks["start"].isoformat(),
+            "capture_completed_at_utc": clocks["finish"].isoformat(), "written_at_utc": clocks["written"].isoformat(),
+            "original_row_id": row_id})
+        result = {}
+        for metric, value, text in zip(("high", "low"), values, texts):
+            proof = {**common, "temperature_metric": metric, "value_c": float(value),
+                     "reported_value_text": text}
+            proof["identity_hash"] = hashlib.sha256(json.dumps(proof,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+            result[metric] = proof
+        return result
+    except (ValueError, TypeError, KeyError, UnicodeError, InvalidOperation, csv.Error) as exc:
+        # Qualification loss does not delete a legacy scalar observation.
+        reason = str(exc)
+        if not reason.startswith("HKO_PREFIX_"):
+            reason = "HKO_PREFIX_ORIGINAL_PROOF_INVALID"
+        if reason == "HKO_PREFIX_SOURCE_REPORTED_INCOMPLETE":
+            common["source_reported_complete"] = False
+        return {m: {**common, "qualification_status": "UNKNOWN", "temperature_metric": m,
+                    "reason": reason} for m in ("high", "low")}
 
 from src.contracts.family_fault_scope import GlobalValueFault
 from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
@@ -1119,7 +1238,7 @@ _LATEST_CONTEXT_SQL = """
 """
 
 _LATEST_EXTREMA_SQL = """
-    SELECT running_max, running_min
+    SELECT running_max, running_min{prefix_columns}
     FROM {table_ref}
     WHERE city = ?
       AND target_date = ?
@@ -1382,6 +1501,7 @@ def read_day0_observed_extrema(
     agg_low: Optional[float] = None
     n_rows: int = 0
     last_observation_time_utc: Optional[str] = None
+    cumulative_prefix_row = None
 
     for source in source_priority:
         source_sql, source_vals = _source_semantics(source)
@@ -1412,16 +1532,25 @@ def read_day0_observed_extrema(
                 source_semantics=source_sql,
                 table_ref=table_ref,
                 observation_fact_time=_OBSERVATION_FACT_TIME_SQL,
+                prefix_columns=", id, target_date, " + _OBSERVATION_FACT_TIME_SQL
+                + ", imported_at, temp_unit, station_id, raw_response, provenance_json",
             )
-            latest_extrema = conn.execute(
-                latest_extrema_sql,
-                (city, target_date, source, decision_str, decision_str, decision_str)
-                + auth_vals
-                + source_vals,
-            ).fetchone()
+            latest_params = (city, target_date, source, decision_str, decision_str, decision_str) + auth_vals + source_vals
+            try:
+                latest_extrema = conn.execute(latest_extrema_sql, latest_params).fetchone()
+            except sqlite3.OperationalError as exc:
+                # Legacy scalar schemas cannot manufacture missing originals.
+                if "no such column" not in str(exc):
+                    raise
+                latest_extrema = conn.execute(_LATEST_EXTREMA_SQL.format(
+                    auth_placeholders=auth_ph, source_semantics=source_sql,
+                    table_ref=table_ref, observation_fact_time=_OBSERVATION_FACT_TIME_SQL,
+                    prefix_columns=""), latest_params).fetchone()
             if latest_extrema is None:
                 continue
             agg_high, agg_low = latest_extrema[0], latest_extrema[1]
+            if len(latest_extrema) == 10:
+                cumulative_prefix_row = tuple(latest_extrema)
         break
 
     # M-2/H-3: qualifying-row timeline for the chosen source only (never mixed).
@@ -1532,6 +1661,11 @@ def read_day0_observed_extrema(
         ),
         "reader": "src.data.day0_observation_reader.read_day0_observed_extrema",
     }
+    if hko_snapshot:
+        provenance["cumulative_prefix_evidence"] = _hko_cumulative_prefix_evidence(
+            cumulative_prefix_row, target_date=target_date, timezone_name=timezone_name,
+            decision_time=decision_time_utc,
+        )
 
     return Day0ObservedExtrema(
         city=city,
@@ -1755,6 +1889,7 @@ def read_day0_observation_context_from_instants(
         causality_status=latest_causality_status or "OK",
         max_gap_minutes=result.max_gap_minutes,
         gap_suspect_metrics=result.gap_suspect_metrics,
+        cumulative_prefix_evidence=result.provenance.get("cumulative_prefix_evidence"),
     )
 
 

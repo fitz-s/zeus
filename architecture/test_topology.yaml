@@ -37,7 +37,7 @@ test_trust_policy:
     tests/test_fast_obs_receipt_chain.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Terminal remainder monotonicity; actual live HTTP receipt cut without replay lookahead; civil-day DST bounds; optional physical station routing and shared FMI budget."}
     tests/test_station_forecast_live_ingest_wiring.py: {created: "2026-06-29", last_used: "2026-09-30", note: "Official station original-body writer and HKO same-issued legacy capture recovery; HIGH/LOW exact context, whole old tuple/clock preservation, old-cut rejection and bounded SQLite legacy precision versus exact new capture clocks."}
     tests/test_openmeteo_model_surface.py: {created: "2026-09-29", last_used: "2026-10-01", note: "102 local-loopback checks retain original36 and verify eight exact profiles, same-byte hash/decode, native domain/cell identity, immutable versions, causal cache recovery and no-network cut-aware reads; an unchanged asset is hashed once per file version and any in-place, mtime-forged or renamed rewrite is re-hashed and rejected; no city/probability readiness claim."}
-    tests/test_day0_observation_reader.py: {created: "2026-05-22", last_used: "2026-09-29", note: "Audited HKO reported observation/publication/availability clocks, invalid source unavailability and observation-order reader relationships."}
+    tests/test_day0_observation_reader.py: {created: "2026-05-22", last_used: "2026-10-04", note: "Audited original HKO provisional product replay, metric pair/native date/body/causal precision, regular DTO roundtrip and legacy scalar preservation."}
     tests/test_observation_prints_ledger.py: {created: "2026-07-16", last_used: "2026-09-29", note: "Audited HKO source transaction and append-only three-clock writer relationships."}
     tests/events/test_redemption_forecast_day0_authority.py: {created: "2026-05-24", last_used: "2026-09-29", note: "Audited Day0 authority and immutable old/current semantics revision boundaries."}
     tests/data/test_daily_obs_routing.py: {created: "2026-05-14", last_used: "2026-09-29", note: "Audited attached-world HKO source transaction routing with reported observation clocks."}
@@ -3660,6 +3660,7 @@ test_metadata:
     source_under_test:
       - src/data/day0_observation_reader.py
       - src/data/day0_hourly_vectors.py
+      - src/data/observation_client.py
     law_dependencies:
       - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
@@ -3667,8 +3668,11 @@ test_metadata:
       bucket max). high_so_far must be MAX(running_max) over all qualifying rows, not
       the running_max of the latest row. Amsterdam 2026-05-22 concrete case: peak=25.0
       at 15:00 local, latest row=17.0 at 23:00 — naive reader returns 17.0 (wrong).
+      Original HKO provisional cumulative-product evidence reaches the regular DTO
+      only after native entity/station/date/H-L pair and exact causal-clock replay;
+      invalid evidence preserves legacy scalars without absorbing/settlement authority.
     created: 2026-05-22
-    last_reused_or_audited: 2026-09-29
+    last_reused_or_audited: 2026-10-04
 
   tests/test_no_latest_hour_running_max_antipattern.py:
     modules: [data]

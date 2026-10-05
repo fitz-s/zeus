@@ -1,9 +1,9 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-04
 # Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
-# Lifecycle: created=2026-05-22; last_reviewed=2026-09-29; last_reused=2026-09-29
-# Purpose: Regression antibody for Root C — high_so_far must be MAX(running_max) not latest row's value.
-# Reuse: Run when day0_observation_reader.read_day0_high_so_far or observation_instants schema changes.
+# Lifecycle: created=2026-05-22; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Purpose: Source-typed extrema and original provisional HKO cumulative-prefix qualification/DTO antibodies.
+# Reuse: Run when the canonical Day0 reader, observation context or original cumulative-product proof changes.
 """Tests for src/data/day0_observation_reader.py — Root C regression antibody.
 
 Root C: observation_instants.running_max = per-hour bucket max (non-monotonic).
@@ -41,6 +41,208 @@ from src.data.day0_observation_reader import (
     same_station_preliminary_report_survival_likelihood,
     source_priority_for_city,
 )
+
+
+@pytest.fixture
+def native_cumulative_row(tmp_path, monkeypatch):
+    import httpx
+    from scripts import hko_ingest_tick as producer
+    from src.state.schema.v2_schema import apply_canonical_schema
+
+    body = (b"\xef\xbb\xbfDate time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),Minimum Air Temperature Since Midnight(degree Celsius)\r\n"
+            b"202610051130,HK Observatory,29.0,25.1\r\n")
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026,10,5,3,38,5,160841,tzinfo=timezone.utc).astimezone(tz or timezone.utc)
+    class Client:
+        def get(self,url,headers):
+            return httpx.Response(200 if url == producer.HKO_EXTREMA_URL else 304,
+                content=body if url == producer.HKO_EXTREMA_URL else b"",request=httpx.Request("GET",url))
+    monkeypatch.setattr(producer,"datetime",Clock)
+    captured,_ = producer.HkoExtremaPoller(client=Client()).prefetch_products()
+    assert captured is not None
+    row = producer._build_hko_extrema_row(captured.snapshot,temperature_c=28.8,
+        accumulator_fetched_at=None,data_version="v1.wu-native",imported_at="2026-10-05T03:38:06.449764+00:00")
+    conn = sqlite3.connect(tmp_path/"private-world.db")
+    try:
+        apply_canonical_schema(conn)
+        assert producer.insert_rows(conn,[row]) == 1
+        yield conn, body
+    finally:
+        conn.close()
+
+
+def _native_cumulative_context(conn, cut=None):
+    from src.config import cities_by_name
+
+    return read_day0_observation_context_from_instants(conn,city=cities_by_name["Hong Kong"],
+        target_date="2026-10-05",decision_time_utc=cut or datetime(2026,10,5,3,40,tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize("metric,value", [("high",29.0),("low",25.1)])
+def test_hko_native_cumulative_producer_reaches_regular_context(native_cumulative_row, metric, value):
+        conn, body = native_cumulative_row
+        cut = datetime(2026,10,5,3,40,tzinfo=timezone.utc)
+        read = read_day0_observed_extrema(conn,city="Hong Kong",target_date="2026-10-05",
+            timezone_name="Asia/Hong_Kong",decision_time_utc=cut,source_priority=("hko_hourly_accumulator",))
+        context = _native_cumulative_context(conn, cut)
+        assert context is not None
+        evidence = getattr(context,"cumulative_prefix_evidence",None)
+        assert evidence is not None, "regular context loses original cumulative qualification"
+        assert evidence == read.provenance["cumulative_prefix_evidence"]
+        proof = evidence[metric]
+        assert proof["qualification_status"] == "QUALIFIED", proof.get("reason")
+        assert proof["temperature_metric"] == metric and proof["value_c"] == value
+        assert proof["body_sha256"] == hashlib.sha256(body).hexdigest()
+        assert proof["coverage_start_utc"] == "2026-10-04T16:00:00+00:00"
+        assert proof["coverage_end_utc"] == "2026-10-05T03:30:00+00:00"
+        assert proof["source_issued_at_utc"] is None
+        assert proof["qualified_for"] == "HKO_REPORTED_PRODUCT_ONLY"
+        assert proof["provisional"] and proof["source_reported_complete"]
+        assert not proof["absorbing_authority"] and proof["settlement_equivalence"] == "UNPROVEN"
+        assert proof["precision_schema"] == "UNPROVEN" and proof["measurement_resolution_c"] is None
+        assert proof["statistic"] == "reported_since_midnight_1minute_mean_extrema"
+        assert proof["averaging_window_seconds"] == 60
+        assert proof["nominal_update_interval_seconds"] == 600
+        assert context.as_dict()["cumulative_prefix_evidence"] == evidence
+        assert json.loads(json.dumps(context.as_dict()))["cumulative_prefix_evidence"] == evidence
+        assert context.current_temp == 28.8  # Cumulative extrema never become an instant.
+
+
+@pytest.mark.parametrize("fault,reason", [
+    ("raw_missing", "ORIGINAL_BODY_MISSING"),
+    ("hash", "ORIGINAL_BODY_MISMATCH"),
+    ("row_unit", "ROW_IDENTITY_INVALID"),
+    ("row_station", "ROW_IDENTITY_INVALID"),
+    ("url", "PRODUCT_IDENTITY_INVALID"),
+    ("body", "ORIGINAL_BODY_MISMATCH"),
+    ("station", "NATIVE_STATION_NOT_UNIQUE"),
+    ("duplicate", "NATIVE_STATION_NOT_UNIQUE"),
+    ("star", "SOURCE_REPORTED_INCOMPLETE"),
+    ("unavailable", "NATIVE_VALUE_UNAVAILABLE"),
+    ("unit_header", "NATIVE_HEADERS_INVALID"),
+    ("spot_header", "NATIVE_HEADERS_INVALID"),
+    ("native_date", "NATIVE_TARGET_DATE_MISMATCH"),
+    ("native_clock", "NATIVE_DATETIME_INVALID"),
+    ("pair", "NATIVE_VALUES_MISMATCH"),
+    ("receipt_finish", "CAUSAL_CLOCK_ORDER_INVALID"),
+    ("write", "CAUSAL_CLOCK_ORDER_INVALID"),
+    ("reverse_start", "CAUSAL_CLOCK_ORDER_INVALID"),
+    ("naive", "CAUSAL_CLOCK_NAIVE"),
+    ("provenance_array", "PRODUCT_IDENTITY_INVALID"),
+])
+def test_native_cumulative_unknown_preserves_scalar(native_cumulative_row, fault, reason):
+    import base64
+
+    conn, body = native_cumulative_row
+    prov = json.loads(conn.execute("SELECT provenance_json FROM observation_instants").fetchone()[0])
+    raw = body.decode("utf-8")
+    if fault == "raw_missing":
+        raw = None
+    elif fault == "row_unit":
+        conn.execute("UPDATE observation_instants SET temp_unit='F'")
+    elif fault == "row_station":
+        conn.execute("UPDATE observation_instants SET station_id='VHHH'")
+    elif fault == "url":
+        prov["source_url"] = "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv"
+    elif fault == "hash":
+        prov["raw_body_sha256"] = "0" * 64
+    elif fault == "body":
+        prov["raw_body_base64"] = base64.b64encode(body + b" ").decode()
+    elif fault in ("station", "duplicate", "star", "unavailable", "unit_header", "spot_header", "native_date", "pair"):
+        if fault == "station":
+            body = body.replace(b"HK Observatory", b"Chek Lap Kok")
+        elif fault == "duplicate":
+            body += b"202610051130,HK Observatory,29.0,25.1\r\n"
+        elif fault == "star":
+            body = body.replace(b"29.0", b"29.0*")
+        elif fault == "unavailable":
+            body = body.replace(b"25.1", b"N/A")
+        elif fault == "unit_header":
+            body = body.replace(b"degree Celsius", b"degree Fahrenheit")
+        elif fault == "spot_header":
+            body = body.replace(b"Maximum Air Temperature Since Midnight", b"Air Temperature")
+        elif fault == "native_date":
+            body = body.replace(b"202610051130", b"202610041130")
+            prov["native_datetime"] = "202610041130"
+        else:
+            body = body.replace(b"29.0", b"28.9")
+        raw = body.decode("utf-8")
+        prov["raw_body_base64"] = base64.b64encode(body).decode()
+        prov["raw_body_sha256"] = hashlib.sha256(body).hexdigest()
+    elif fault == "native_clock":
+        prov["native_datetime"] = "202610051120"
+    elif fault == "receipt_finish":
+        prov["extrema_fetched_at"] = "2026-10-05T03:38:05.160842+00:00"
+    elif fault == "write":
+        prov["written_at_utc"] = "2026-10-05T03:38:06.449765+00:00"
+    elif fault == "reverse_start":
+        prov["capture_started_at_utc"] = "2026-10-05T03:38:05.160842+00:00"
+    elif fault == "naive":
+        prov["capture_started_at_utc"] = "2026-10-05T03:38:05.160841"
+    else:
+        prov = []
+    # Keep original routing metadata for the non-object case, but simulate its
+    # row-return shape at the evidence seam; normal SQL rejects invalid roles.
+    if fault == "provenance_array":
+        from src.data.day0_observation_reader import _hko_cumulative_prefix_evidence
+        row = conn.execute("SELECT running_max,running_min,id,target_date,utc_timestamp,imported_at,temp_unit,station_id,raw_response,provenance_json FROM observation_instants").fetchone()
+        evidence = _hko_cumulative_prefix_evidence((*row[:-1], "[]"), target_date="2026-10-05",
+            timezone_name="Asia/Hong_Kong",decision_time=datetime(2026,10,5,3,40,tzinfo=timezone.utc))
+    else:
+        conn.execute("UPDATE observation_instants SET raw_response=?,provenance_json=?", (raw,json.dumps(prov)))
+        context = _native_cumulative_context(conn)
+        assert context is not None
+        assert (context.high_so_far, context.low_so_far, context.current_temp) == (29.0,25.1,28.8)
+        evidence = context.cumulative_prefix_evidence
+    for metric in ("high", "low"):
+        assert evidence[metric]["qualification_status"] == "UNKNOWN"
+        assert evidence[metric]["reason"] == "HKO_PREFIX_" + reason
+        assert not evidence[metric]["absorbing_authority"]
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_native_cumulative_microsecond_cut(native_cumulative_row, offset):
+    conn, _ = native_cumulative_row
+    imported = datetime(2026,10,5,3,38,6,449764,tzinfo=timezone.utc)
+    context = _native_cumulative_context(conn, imported + timedelta(microseconds=offset))
+    assert context is not None  # Legacy scalar query is unchanged.
+    for proof in context.cumulative_prefix_evidence.values():
+        assert proof["qualification_status"] == ("UNKNOWN" if offset < 0 else "QUALIFIED")
+
+
+def test_native_cumulative_offset_clock_representation_is_qualified(native_cumulative_row):
+    conn, _ = native_cumulative_row
+    prov = json.loads(conn.execute("SELECT provenance_json FROM observation_instants").fetchone()[0])
+    for key in ("capture_started_at_utc", "capture_completed_at_utc", "extrema_fetched_at", "written_at_utc"):
+        prov[key] = datetime.fromisoformat(prov[key]).astimezone(timezone(timedelta(hours=8))).isoformat()
+    conn.execute("UPDATE observation_instants SET provenance_json=?", (json.dumps(prov),))
+    for proof in _native_cumulative_context(conn).cumulative_prefix_evidence.values():
+        assert proof["qualification_status"] == "QUALIFIED"
+        assert proof["capture_completed_at_utc"] == "2026-10-05T03:38:05.160841+00:00"
+
+
+def test_native_cumulative_advance_cut_resets_own_evidence(native_cumulative_row):
+    import base64
+    from scripts import hko_ingest_tick as producer
+
+    conn, body = native_cumulative_row
+    before = _native_cumulative_context(conn).cumulative_prefix_evidence
+    advanced = body.replace(b"202610051130", b"202610051140")
+    fetched = "2026-10-05T03:48:05.160841+00:00"
+    snapshot = producer._parse_hko_extrema_csv(advanced, fetched_at_utc=fetched,
+        capture_started_at_utc="2026-10-05T03:48:04.972792+00:00")
+    row = producer._build_hko_extrema_row(snapshot,temperature_c=28.8,accumulator_fetched_at=None,
+        data_version="v1.wu-native",imported_at="2026-10-05T03:48:06.449764+00:00")
+    assert producer.insert_rows(conn,[row]) == 1
+    after = _native_cumulative_context(conn, datetime(2026,10,5,3,50,tzinfo=timezone.utc)).cumulative_prefix_evidence
+    for metric in ("high", "low"):
+        assert after[metric]["qualification_status"] == "QUALIFIED"
+        assert after[metric]["coverage_end_utc"] == "2026-10-05T03:40:00+00:00"
+        assert after[metric]["identity_hash"] != before[metric]["identity_hash"]
+        assert base64.b64decode(after[metric]["body_base64"]) == advanced
+    assert _native_cumulative_context(conn).cumulative_prefix_evidence == before  # PIT selects its own old original.
 
 
 def test_hko_minute_mean_normal_writer_selects_observed_clock_and_preserves_raw_body():
