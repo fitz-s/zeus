@@ -16706,3 +16706,24 @@ source runs FAILED/MISSING,0members/0count/importNULL,503/NOT_RELEASED;
 next normal jobs were RUNNING with lock-acquired00:32:58.129/.173. The empty
 00:32:56 lsof sample is only an FD observation, not a proven OS-lock/audit
 window. No actual native2t audit/HTTP/body evidence or live q input activation.
+
+2026-10-05 source-only delivery is now explicitly authorized by the human via
+ROOT: land reviewed HKO original-entity/precision clocks and dormant native
+helper, then use the registered normal loader once; this does not restore
+reverted probability math or activate native HTTP acquisition. Exact archived
+parent restored at a5c5f4, branch fix/hko-native-audit-20261005; origin/live
+and actual loaded SHA6179 were freshly checked. No new peer delta; clean merge
+previewb668dcfc and all six source/test freeze hashes match. Compile6/YAML3/
+planning/freshness/diff PASS; unchanged74P/precision28P+independent8P and
+helper20P+independent3P remain inherited evidence, not claimed reruns.
+
+Pre-delivery current check03:33:57.936504Z: canonical obligations16 open,
+nonterminal0; whole16 handoff green,14 fresh plus2 probability-degraded,
+restart-blocking0/future0/no stale quote. Guard actual getterNone and no
+loader lock owner. MAIN51493/INGEST49356/FORECAST49426 current cwdlive with
+canonical DB handles; fixed boot6179, MAIN stamp23:46:32.891230. Configd7 is
+file proof only, not in-process readback. Live trackedclean/16 unrelated
+untracked artifact groups remain untouched. Native audit worker was told
+deployment preparation is busy and performed zero HTTP, no forced source.
+Normal initializer will arm its own guard and revalidate capital gates; no
+external durable-pauseFalse will be relabeled as admission or used to bypass.
