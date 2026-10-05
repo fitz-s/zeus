@@ -32,6 +32,11 @@ recorded on the submit path:
   condition_id         executable_market_snapshots.condition_id of the command's
                        snapshot (append-only), else position_current.condition_id.
 
+  exit cost            each SELL is charged the running-average cost of the inventory held
+                       when it filled (the ledger's allocated_cost = quantity * unit_cost
+                       law, on canonical fills ordered by fill_dedup's execution_ts), so
+                       a buy that fills after a sell never enters that sell's cost.
+
 Units: ENTRY commands are bucketed by their own market age. Positions (outcome,
 exits, exposure) are bucketed by the age of their first filled ENTRY command.
 Filtering is by target_date >= --since; open exposure older than the window is
@@ -117,17 +122,56 @@ def market_age_hours(submitted: datetime | None, listed: datetime | None) -> flo
 
 
 def fill_totals(rows: Iterable[Sequence[Any]], command_size: float) -> tuple[float, float, bool]:
-    """(shares, notional_usd, overshoot_flag) from economic (filled_size, fill_price) rows.
+    """(shares, notional_usd, overshoot_flag) from economic (size, price[, execution_ts]) rows.
 
     Rows are already exactly-once (see ``load_economic_fills``); several children may
     share one tx_hash and several equal-size children may carry no tx_hash, so no
     further identity folding happens here.
     """
     shares = notional = 0.0
-    for size, price in rows:
+    for size, price, *_ in rows:
         shares += float(size)
         notional += float(size) * float(price)
     return shares, notional, command_size > 0 and shares > FILL_OVERSHOOT * command_size
+
+
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+_INVENTORY_EPS = 1e-9
+
+
+def sell_costs(buys: Iterable[Sequence[Any]], sells: Iterable[Sequence[Any]]) -> list[dict]:
+    """Charge each SELL the average cost of the inventory held when it filled.
+
+    ``buys``/``sells`` are economic (size, price, execution_ts) fills of ONE position.
+    Events are replayed in execution order (a buy and a sell at the same instant order
+    buy first), so a buy that fills AFTER a sell never enters that sell's cost. This is
+    the position ledger's own allocation law (src/execution/exit_lifecycle.py:
+    ``allocated_cost = quantity * unit_cost``, unit cost = remaining basis / open
+    shares), applied to the canonical fills: selling at the running average leaves the
+    average unchanged, so only the buy/sell interleaving matters, never the order among
+    sells. A sell larger than the inventory the loaded fills can account for (entry
+    outside the loaded window, chain-only holdings) has ``cost_usd`` None, never a guess;
+    it consumes the inventory it had.
+    """
+    events = [(_utc(ts) or _EPOCH, 0, float(size), float(price), ts) for size, price, ts in buys]
+    events += [(_utc(ts) or _EPOCH, 1, float(size), float(price), ts) for size, price, ts in sells]
+    events.sort(key=lambda e: (e[0], e[1]))
+    held = basis = 0.0
+    out: list[dict] = []
+    for when, kind, size, price, ts in events:
+        if kind == 0:
+            held += size
+            basis += size * price
+            continue
+        if held > 0 and held + _INVENTORY_EPS >= size:
+            cost = basis * min(size, held) / held
+            held -= min(size, held)
+            basis -= cost
+        else:
+            cost = None
+            held = basis = 0.0
+        out.append({"ts": ts, "shares": size, "proceeds_usd": size * price, "cost_usd": cost})
+    return out
 
 
 def held_payoff(direction: str | None, settled_in_bin: int | None) -> float | None:
@@ -190,8 +234,9 @@ class Cell:
     closed_unsettled_pnl_usd: float = 0.0
     exits: int = 0
     exit_proceeds_usd: float = 0.0
+    exit_proceeds_costed_usd: float = 0.0   # proceeds of the sells whose cost is known
     exit_cost_usd: float = 0.0
-    exit_cost_unknown: int = 0
+    exit_cost_unknown: int = 0              # sells with no accountable inventory
     exits_resolved: int = 0
     resolved_sell_proceeds_usd: float = 0.0
     resolved_hold_value_usd: float = 0.0
@@ -223,7 +268,7 @@ class Cell:
         out["mean_q_minus_fill_price"] = None if mq is None else round(mq - mp, 6)
         out["win_rate"] = round(self.wins / decided, 6) if decided else None
         out["mean_settlement_lead_hours"] = round(self.lead_hours_sum / self.lead_n, 3) if self.lead_n else None
-        out["exit_pnl_usd"] = round(self.exit_proceeds_usd - self.exit_cost_usd, 6)
+        out["exit_pnl_usd"] = round(self.exit_proceeds_costed_usd - self.exit_cost_usd, 6)
         out["hold_minus_sell_usd"] = round(self.resolved_hold_value_usd - self.resolved_sell_proceeds_usd, 6)
         return out
 
@@ -353,8 +398,11 @@ def load_trades_data(conn, since: date) -> dict:
     return td
 
 
-def load_economic_fills(conn, command_ids: Iterable[str]) -> dict[str, list[tuple[float, float]]]:
-    """command_id -> exactly-once [(filled_size, fill_price)] via the canonical fill law.
+def load_economic_fills(conn, command_ids: Iterable[str]) -> dict[str, list[tuple[float, float, str]]]:
+    """command_id -> exactly-once [(filled_size, fill_price, execution_ts)] via the canonical fill law.
+
+    ``execution_ts`` is fill_dedup's stable execution order (earliest venue timestamp across
+    a trade's revisions, else earliest observed_at), the clock its own economic fold uses.
 
     Scoped to the given commands before ranking, as src.state.fill_dedup requires (its
     alias exclusion re-evaluates the canonical CTE, so an unscoped window rescans all
@@ -362,19 +410,19 @@ def load_economic_fills(conn, command_ids: Iterable[str]) -> dict[str, list[tupl
     """
     from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
 
-    fills: dict[str, list[tuple[float, float]]] = {}
+    fills: dict[str, list[tuple[float, float, str]]] = {}
     ids = sorted(set(command_ids))
     for chunk in _chunks(ids):
         ph = ",".join("?" * len(chunk))
         sql = (
             f"WITH {canonical_trade_fact_cte(source_clause_sql=f'WHERE fact.command_id IN ({ph})')}, "
             f"{economic_trade_fact_cte()} "
-            "SELECT command_id, filled_size, fill_price FROM economic_trade_fact "
+            "SELECT command_id, filled_size, fill_price, execution_ts FROM economic_trade_fact "
             "WHERE UPPER(COALESCE(state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED') "
             "AND CAST(COALESCE(filled_size, '0') AS REAL) > 0"
         )
-        for command_id, size, price in conn.execute(sql, chunk):
-            fills.setdefault(command_id, []).append((float(size), float(price)))
+        for command_id, size, price, ts in conn.execute(sql, chunk):
+            fills.setdefault(command_id, []).append((float(size), float(price), ts))
     return fills
 
 
@@ -514,18 +562,16 @@ def build_report(
                 c.q_x_shares += q * shares
                 c.price_x_shares += notional
 
-    # ---- first filled entry + average entry price per position ----------
+    # ---- first filled entry + every ENTRY fill per position -------------
     first_fill: dict[str, dict] = {}
-    entry_px: dict[str, list[float]] = {}
+    buys_by_pos: dict[str, list] = {}
     for rec in entries:
         if rec["filled_shares"] <= 0:
             continue
         pid = rec["position_id"]
         if pid not in first_fill or rec["_submitted"] < first_fill[pid]["_submitted"]:
             first_fill[pid] = rec
-        acc = entry_px.setdefault(pid, [0.0, 0.0])
-        acc[0] += rec["filled_notional_usd"]
-        acc[1] += rec["filled_shares"]
+        buys_by_pos.setdefault(pid, []).extend(td["fills"].get(rec["command_id"], ()))
 
     # ---- positions: outcome, exits, exposure ------------------------------
     exits_by_pos: dict[str, list[dict]] = {}
@@ -566,18 +612,18 @@ def build_report(
             c.open_positions += 1
             c.open_cost_usd += p["cost_basis_usd"] or 0.0
         # exits (sell legs), judged against settlement where known
-        shares = proceeds = 0.0
-        for x in exits_by_pos.get(pid, ()):
-            s, n, _ = fill_totals(td["fills"].get(x["command_id"], ()), float(x["size"]))
-            shares += s
-            proceeds += n
-        if shares <= 0:
+        sell_fills = [f for x in exits_by_pos.get(pid, ()) for f in td["fills"].get(x["command_id"], ())]
+        if not sell_fills:
             continue
+        sells = sell_costs(buys_by_pos.get(pid, ()), sell_fills)
+        shares = sum(s["shares"] for s in sells)
+        proceeds = sum(s["proceeds_usd"] for s in sells)
+        costed = [s for s in sells if s["cost_usd"] is not None]
+        cost = sum(s["cost_usd"] for s in costed)
+        costed_proceeds = sum(s["proceeds_usd"] for s in costed)
         reason = reason_head(
             td["exit_reasons"].get(pid) or (p["exit_reason"] if p["exit_reason"] != "SETTLEMENT" else None)
         )
-        avg = entry_px[pid][0] / entry_px[pid][1] if pid in entry_px else p["entry_price"]
-        cost = None if avg is None else shares * float(avg)
         payoff = held_payoff(
             (att or {}).get("direction") or p["direction"], att["settled_in_bin"] if att else None
         )
@@ -586,10 +632,9 @@ def build_report(
         c.exits += 1
         c.exit_proceeds_usd += proceeds
         c.exit_reasons[reason] += 1
-        if cost is None:
-            c.exit_cost_unknown += 1
-        else:
-            c.exit_cost_usd += cost
+        c.exit_cost_unknown += len(sells) - len(costed)
+        c.exit_cost_usd += cost
+        c.exit_proceeds_costed_usd += costed_proceeds
         hold = None if payoff is None else shares * payoff
         if hold is not None:
             c.exits_resolved += 1
@@ -605,7 +650,16 @@ def build_report(
                 "reason": reason,
                 "exit_shares": round(shares, 6),
                 "proceeds_usd": round(proceeds, 6),
-                "cost_usd": None if cost is None else round(cost, 6),
+                "cost_usd": round(cost, 6) if costed else None,
+                "sells": [
+                    {
+                        "ts": s["ts"],
+                        "shares": round(s["shares"], 6),
+                        "proceeds_usd": round(s["proceeds_usd"], 6),
+                        "cost_usd": None if s["cost_usd"] is None else round(s["cost_usd"], 6),
+                    }
+                    for s in sorted(sells, key=lambda s: _utc(s["ts"]) or _EPOCH)
+                ],
                 "held_token_payoff": payoff,
                 "hold_minus_sell_usd": None if hold is None else round(hold - proceeds, 6),
             }
@@ -661,6 +715,7 @@ def build_report(
             "market_listed_at": "min market_events.created_at (Gamma 'Z' createdAt) of the condition_id; null otherwise",
             "settlement_lead_hours": "selector horizon (local midnight ending target_date, city tz) - decision_time",
             "equity_date": "position_current.settled_at (UTC date), phase=settled, realized_pnl_usd not null",
+            "exit_cost": "per SELL: running-average cost of the inventory held at that fill (ENTRY and EXIT fills replayed by fill_dedup execution_ts); null when the loaded fills cannot account for the shares",
         },
         "coverage": dict(sorted(cov.items())),
         "warnings": list(warnings),

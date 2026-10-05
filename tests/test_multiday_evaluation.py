@@ -37,8 +37,8 @@ def _entry(cid, pid, cond, hours_after_listing, *, metric="high", size=5.0, pric
 
 
 def _fill(price, size=5.0, *_ignored):
-    """One economic fill as load_economic_fills returns it: (filled_size, fill_price)."""
-    return (size, price)
+    """One economic fill as load_economic_fills returns it: (size, price, execution_ts)."""
+    return (size, price, "2026-10-01T06:00:00+00:00")
 
 
 def _pos(pid, *, metric="high", phase="settled", direction="buy_yes", pnl=None, cost=1.0,
@@ -185,7 +185,7 @@ def test_children_sharing_one_tx_hash_both_count():
         ("c1", "child-a", "CONFIRMED", 2, 0.2, TX, 1),
         ("c1", "child-b", "CONFIRMED", 3, 0.3, TX, 1),
     ])
-    assert sorted(me.load_economic_fills(conn, ["c1"])["c1"]) == [(2.0, 0.2), (3.0, 0.3)]
+    assert sorted(f[:2] for f in me.load_economic_fills(conn, ["c1"])["c1"]) == [(2.0, 0.2), (3.0, 0.3)]
     assert me.fill_totals(me.load_economic_fills(conn, ["c1"])["c1"], 5.0)[:2] == (5.0, pytest.approx(1.3))
 
 
@@ -204,7 +204,7 @@ def test_matched_without_tx_then_confirmed_with_tx_counts_once():
         ("c1", "t1", "MATCHED", 5, 0.3, None, 1),
         ("c1", "t1", "CONFIRMED", 5, 0.3, TX, 2),
     ])
-    assert me.load_economic_fills(conn, ["c1"])["c1"] == [(5.0, 0.3)]
+    assert [f[:2] for f in me.load_economic_fills(conn, ["c1"])["c1"]] == [(5.0, 0.3)]
     assert me.fill_totals(me.load_economic_fills(conn, ["c1"])["c1"], 5.0) == (5.0, pytest.approx(1.5), False)
 
 
@@ -218,8 +218,9 @@ def test_lifecycle_revisions_and_tx_aggregate_alias_count_once():
         ("c2", "t3", "CONFIRMED", 1, 0.5, None, 1),
     ])
     fills = me.load_economic_fills(conn, ["c1", "c2"])
-    assert fills["c1"] == [(4.0, pytest.approx(0.3012345))]
-    assert fills["c2"] == [(1.0, 0.5)]
+    assert [f[:2] for f in fills["c1"]] == [(4.0, pytest.approx(0.3012345))]
+    assert [f[:2] for f in fills["c2"]] == [(1.0, 0.5)]
+    assert all(f[2] for f in fills["c1"] + fills["c2"])  # canonical execution_ts is carried
     assert me.load_economic_fills(conn, ["nope"]) == {}
 
 
@@ -252,6 +253,77 @@ def test_sell_vs_hold_regret_sign_and_unresolved_exits():
     assert b["exit_reasons"] == {"GLOBAL_CAPITAL_OPTIMAL_SELL": 4}
     assert b["open_positions"] == 1 and b["closed_unsettled"] == 1
     assert b["world_grade_pnl_usd"] == pytest.approx(0.0) and b["world_grade_n"] == 2
+
+
+def _buy(ts, size, price):
+    return (size, price, ts)
+
+
+T1, T2, T3 = ("2026-10-01T10:00:00+00:00", "2026-10-01T11:00:00+00:00", "2026-10-01T12:00:00+00:00")
+
+
+def test_sell_before_a_later_buy_is_charged_only_the_inventory_it_held():
+    """ENTRY 5@0.20, SELL 5@0.30, ENTRY 5@0.50: the sell gains +$0.50, not on the 0.35 VWAP."""
+    sells = me.sell_costs([_buy(T1, 5, 0.20), _buy(T3, 5, 0.50)], [_buy(T2, 5, 0.30)])
+    (sell,) = sells
+    assert sell["cost_usd"] == pytest.approx(1.0) and sell["proceeds_usd"] == pytest.approx(1.5)
+    assert sell["proceeds_usd"] - sell["cost_usd"] == pytest.approx(0.50)
+    assert 5 * 0.30 - 5 * ((5 * 0.20 + 5 * 0.50) / 10) == pytest.approx(-0.25)  # the lifecycle-VWAP answer
+
+
+def test_sell_after_both_buys_uses_the_blended_average():
+    (sell,) = me.sell_costs([_buy(T1, 5, 0.20), _buy(T2, 5, 0.50)], [_buy(T3, 5, 0.60)])
+    assert sell["cost_usd"] == pytest.approx(1.75)  # 5 of 10 held shares at the 0.35 running average
+
+
+def test_sell_order_is_irrelevant_and_basis_shrinks_proportionally():
+    sells = me.sell_costs([_buy(T1, 10, 0.20)], [_buy(T3, 4, 0.40), _buy(T2, 2, 0.30)])
+    assert [round(s["cost_usd"], 6) for s in sorted(sells, key=lambda s: s["ts"])] == [0.4, 0.8]
+
+
+def test_sell_with_inventory_outside_the_loaded_fills_has_null_cost():
+    """No accountable buy (or a buy smaller than the sell): never a guessed cost."""
+    assert me.sell_costs([], [_buy(T2, 5, 0.3)])[0]["cost_usd"] is None
+    short = me.sell_costs([_buy(T1, 2, 0.20)], [_buy(T2, 5, 0.30)])
+    assert short[0]["cost_usd"] is None and short[0]["proceeds_usd"] == pytest.approx(1.5)
+
+
+def test_simultaneous_buy_and_sell_orders_buy_first():
+    (sell,) = me.sell_costs([_buy(T1, 5, 0.20)], [_buy(T1, 5, 0.30)])
+    assert sell["cost_usd"] == pytest.approx(1.0)
+
+
+def test_exit_pnl_in_the_report_uses_per_sell_cost_not_lifecycle_vwap():
+    entries = [_entry("c1", "p1", "A", 10), _entry("c2", "p1", "A", 20)]
+    fills = {
+        "c1": [(5.0, 0.20, "2026-10-01T10:00:00+00:00")],
+        "c2": [(5.0, 0.50, "2026-10-01T20:00:00+00:00")],
+        "x1": [(5.0, 0.30, "2026-10-01T15:00:00+00:00")],      # between the two buys
+    }
+    positions = [_pos("p1", direction="buy_yes", pnl=0.0, phase="economically_closed", exit_reason=None, settled_at=None)]
+    rep = _report(
+        _td(entries, positions, fills, exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 5.0}],
+            exit_reasons={"p1": "GLOBAL_CAPITAL_OPTIMAL_SELL"}),
+        _listings("A"),
+    )
+    (row,) = rep["exits"]
+    assert row["cost_usd"] == pytest.approx(1.0) and row["proceeds_usd"] == pytest.approx(1.5)
+    assert row["sells"] == [{"ts": "2026-10-01T15:00:00+00:00", "shares": 5.0, "proceeds_usd": 1.5, "cost_usd": 1.0}]
+    total = next(t for t in rep["totals"] if t["metric"] == "high")
+    assert total["exit_pnl_usd"] == pytest.approx(0.50) and total["exit_cost_unknown"] == 0
+
+
+def test_uncostable_sell_is_counted_and_excluded_from_exit_pnl():
+    entries = [_entry("c1", "p1", "A", 10)]
+    fills = {"c1": [(2.0, 0.20, "2026-10-01T10:00:00+00:00")], "x1": [(5.0, 0.30, "2026-10-01T15:00:00+00:00")]}
+    positions = [_pos("p1", direction="buy_yes", pnl=0.0, phase="economically_closed", exit_reason=None, settled_at=None)]
+    rep = _report(
+        _td(entries, positions, fills, exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 5.0}]),
+        _listings("A"),
+    )
+    total = next(t for t in rep["totals"] if t["metric"] == "high")
+    assert total["exit_cost_unknown"] == 1 and total["exit_pnl_usd"] == 0.0 and total["exits"] == 1
+    assert rep["exits"][0]["cost_usd"] is None
 
 
 def test_outcome_win_rate_attribution_and_equity_series():
