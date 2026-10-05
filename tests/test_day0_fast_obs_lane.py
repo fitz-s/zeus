@@ -4560,27 +4560,41 @@ class TestMutexNoHttpSplit:
             ),
         )
 
-        def probe():
+        def probe(decision_time=now):
             return reactor_module._edli_day0_hourly_refresh_due_families(
-                cities=cities, decision_time=now,
+                cities=cities, decision_time=decision_time,
             )
+
+        def capture(vector_id, captured_at):
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO day0_hourly_vectors (vector_id, model, city, target_date, "
+                "timezone_name, captured_at, endpoint, request_hash, times_json, "
+                "temps_c_json) VALUES (?, 'ecmwf_ifs', 'Tokyo', ?, 'UTC', ?, "
+                "'e', 'h', '[]', '[]')",
+                (vector_id, target_date, captured_at.isoformat()),
+            )
+            conn.commit()
+            conn.close()
 
         due = probe()
         assert due.proved is True
         assert due.refresh_due_families == frozenset({("Tokyo", target_date, "low")})
 
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "INSERT INTO day0_hourly_vectors (vector_id, model, city, target_date, "
-            "timezone_name, captured_at, endpoint, request_hash, times_json, "
-            "temps_c_json) VALUES ('new-Tokyo', 'ecmwf_ifs', 'Tokyo', ?, 'UTC', ?, "
-            "'e', 'h', '[]', '[]')",
-            (target_date, (verdict_cutoff + timedelta(minutes=5)).isoformat()),
-        )
-        conn.commit()
-        conn.close()
+        # A capture after the request cut but before the verdict was written
+        # was already seen by the refusing run (its clock lifts past
+        # computed_at); it cannot clear the debt.
+        capture("seen-Tokyo", verdict_cutoff + timedelta(minutes=5))
+        assert probe().refresh_due_families == frozenset({("Tokyo", target_date, "low")})
 
-        assert probe().refresh_due_families == frozenset()
+        recorded_at = datetime.fromisoformat(
+            json.loads(
+                (tmp_path / "live" / "blocked_latest"
+                 / f"Tokyo.{target_date}.low.json").read_text()
+            )["recorded_at"]
+        )
+        capture("new-Tokyo", recorded_at + timedelta(seconds=1))
+        assert probe(recorded_at + timedelta(seconds=2)).refresh_due_families == frozenset()
 
     def test_hourly_refresh_preserves_full_missing_authority_priority_prefix(
         self, monkeypatch

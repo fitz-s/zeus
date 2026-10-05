@@ -4742,11 +4742,15 @@ def day0_carrier_vector_missing_cutoffs(
 ) -> dict[tuple[str, str, str], datetime]:
     """Families whose latest blocked receipt is the Day0 VECTOR_MISSING verdict.
 
-    Maps each to the verdict's ``computed_at`` cutoff.  The refresher treats a
-    family as due until a rolling capture newer than that cutoff exists, so the
-    materializer's own verdict reaches the producer without a new queue.  Reads
-    only the one compact per-family receipt the queue already keeps
-    (``blocked_latest``); an unreadable receipt names no debt.
+    Maps each to the receipt's ``recorded_at``: written after the verdict, so
+    it is never earlier than the materializer's effective decision clock
+    (``computed_at`` lifted to possession / anchor ``recorded_at``).  A capture
+    the refusing run already saw therefore cannot clear the debt; only a
+    capture newer than the verdict can.  The refresher treats a family as due
+    until such a capture exists, so the materializer's own verdict reaches the
+    producer without a new queue.  Reads only the one compact per-family
+    receipt the queue already keeps (``blocked_latest``); an unreadable
+    receipt names no debt.
     """
 
     receipt_dir = Path(processed_dir).parent / "blocked_latest"
@@ -4760,7 +4764,7 @@ def day0_carrier_vector_missing_cutoffs(
             receipt = json.loads(path.read_text(encoding="utf-8"))
             if _DAY0_CARRIER_VECTOR_MISSING_REASON not in receipt["reason_codes"]:
                 continue
-            cutoff = datetime.fromisoformat(str(receipt["computed_at"]))
+            cutoff = datetime.fromisoformat(str(receipt["recorded_at"]))
         except (OSError, KeyError, TypeError, ValueError):
             continue
         if cutoff.tzinfo is not None:
