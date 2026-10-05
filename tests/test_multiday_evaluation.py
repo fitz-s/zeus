@@ -338,11 +338,39 @@ def test_realized_and_hold_to_settlement_are_labelled_apart_and_never_equated():
     )
     total = next(t for t in rep["totals"] if t["metric"] == "high")
     assert total["realized_pnl_usd"] == pytest.approx(1.5) and total["hold_to_settlement_pnl_usd"] == pytest.approx(-2.0)
-    assert total["realized_minus_hold_to_settlement_usd"] == pytest.approx(3.5)
+    assert total["matched_n"] == 1 and total["matched_realized_minus_hold_usd"] == pytest.approx(3.5)
     assert total["hold_minus_sell_usd"] == pytest.approx(-3.5)  # the exit explains the whole gap
+    assert total["ungraded_settled_n"] == 0 and total["ungraded_realized_pnl_usd"] == 0.0
     md = me.render_markdown(rep)
     assert "realized $1.50" in md and "hold-to-settlement $-2.00" in md
     assert "cross-check" not in md and "world-grade" not in md and " vs " not in md.split("## Settlement")[1]
+
+
+def test_exits_effect_is_taken_over_matched_positions_only():
+    """No SELLs; one graded position +$4, one ungraded position -$2: the exits' effect is 0, not -2."""
+    entries = [_entry("c1", "p1", "A", 30), _entry("c2", "p2", "A", 30)]
+    fills = {"c1": [(5.0, 0.2, "2026-10-01T10:00:00+00:00")], "c2": [(5.0, 0.2, "2026-10-01T10:00:00+00:00")]}
+    positions = [_pos("p1", direction="buy_yes", pnl=4.0), _pos("p2", direction="buy_yes", pnl=-2.0)]
+    attribution = {"p1": {"category": "SKILL_WIN", "settled_in_bin": 1, "direction": "buy_yes", "world_pnl": 4.0}}
+    rep = _report(_td(entries, positions, fills), _listings("A"), attribution)
+    total = next(t for t in rep["totals"] if t["metric"] == "high")
+    assert total["realized_pnl_usd"] == pytest.approx(2.0)                      # all settled
+    assert total["hold_to_settlement_pnl_usd"] == pytest.approx(4.0) and total["hold_to_settlement_n"] == 1
+    assert total["matched_n"] == 1
+    assert total["matched_realized_minus_hold_usd"] == pytest.approx(0.0)       # truth: no exits, no effect
+    assert total["ungraded_settled_n"] == 1 and total["ungraded_realized_pnl_usd"] == pytest.approx(-2.0)
+    assert "realized_minus_hold_to_settlement_usd" not in total                  # the mixed-cohort field is gone
+    md = me.render_markdown(rep)
+    assert "= $0.00 over 1 positions settled AND graded" in md
+    assert "ungraded settled, kept out of that difference: 1 positions, realized $-2.00" in md
+
+
+def test_no_graded_position_leaves_the_matched_difference_null():
+    rep = _report(_td([_entry("c1", "p1", "A", 30)], [_pos("p1", pnl=-1.0)], {"c1": [_fill(0.2)]}), _listings("A"))
+    total = next(t for t in rep["totals"] if t["metric"] == "high")
+    assert total["matched_n"] == 0 and total["matched_realized_minus_hold_usd"] is None
+    assert total["ungraded_settled_n"] == 1 and total["ungraded_realized_pnl_usd"] == pytest.approx(-1.0)
+    assert "= $- over 0 positions" in me.render_markdown(rep)
 
 
 def test_entry_floor_is_named_in_the_report_and_counted():

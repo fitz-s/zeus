@@ -228,11 +228,21 @@ class Cell:
     flat: int = 0
     pnl_null: int = 0
     realized_pnl_usd: float = 0.0
-    # What the settled positions would have made had every share been held to settlement
-    # (settlement_attribution.world_grade_pnl_usd, src/analysis/settlement_skill_attribution.py).
-    # NOT a check of realized_pnl_usd, which also includes the actual SELLs.
+    # What the graded settled positions would have made had every share been held to
+    # settlement (settlement_attribution.world_grade_pnl_usd, src/analysis/
+    # settlement_skill_attribution.py). NOT a check of realized_pnl_usd, which also includes
+    # the actual SELLs and covers every settled position, graded or not.
     hold_to_settlement_pnl_usd: float = 0.0
     hold_to_settlement_n: int = 0
+    # The ONLY cohort on which realized and hold-to-settlement may be differenced: settled,
+    # realized_pnl_usd not null AND graded with a hold-to-settlement value.
+    matched_n: int = 0
+    matched_realized_usd: float = 0.0
+    matched_hold_to_settlement_usd: float = 0.0
+    # Settled positions with a realized PnL but no hold-to-settlement grade; kept out of the
+    # matched difference.
+    ungraded_settled_n: int = 0
+    ungraded_realized_pnl_usd: float = 0.0
     closed_unsettled: int = 0
     closed_unsettled_pnl_usd: float = 0.0
     exits: int = 0
@@ -273,8 +283,8 @@ class Cell:
         out["mean_settlement_lead_hours"] = round(self.lead_hours_sum / self.lead_n, 3) if self.lead_n else None
         out["exit_pnl_usd"] = round(self.exit_proceeds_costed_usd - self.exit_cost_usd, 6)
         out["hold_minus_sell_usd"] = round(self.resolved_hold_value_usd - self.resolved_sell_proceeds_usd, 6)
-        out["realized_minus_hold_to_settlement_usd"] = (
-            round(self.realized_pnl_usd - self.hold_to_settlement_pnl_usd, 6) if self.hold_to_settlement_n else None
+        out["matched_realized_minus_hold_usd"] = (
+            round(self.matched_realized_usd - self.matched_hold_to_settlement_usd, 6) if self.matched_n else None
         )
         return out
 
@@ -599,12 +609,20 @@ def build_report(
         if phase == "settled":
             c.settled += 1
             c.attribution[att["category"] if att else "UNGRADED"] += 1
-            if att and att["world_pnl"] is not None:
+            graded = att is not None and att["world_pnl"] is not None
+            if graded:
                 c.hold_to_settlement_n += 1
                 c.hold_to_settlement_pnl_usd += att["world_pnl"]
             if pnl is None:
                 c.pnl_null += 1
             else:
+                if graded:
+                    c.matched_n += 1
+                    c.matched_realized_usd += pnl
+                    c.matched_hold_to_settlement_usd += att["world_pnl"]
+                else:
+                    c.ungraded_settled_n += 1
+                    c.ungraded_realized_pnl_usd += pnl
                 c.realized_pnl_usd += pnl
                 c.wins += pnl > 0
                 c.losses += pnl < 0
@@ -723,7 +741,7 @@ def build_report(
             "market_listed_at": "min market_events.created_at (Gamma 'Z' createdAt) of the condition_id; null otherwise",
             "settlement_lead_hours": "selector horizon (local midnight ending target_date, city tz) - decision_time",
             "equity_date": "position_current.settled_at (UTC date), phase=settled, realized_pnl_usd not null",
-            "realized_vs_hold_to_settlement": "realized_pnl_usd includes actual SELLs; hold_to_settlement_pnl_usd (settlement_attribution.world_grade_pnl_usd) is the all-shares-held counterfactual; their difference is what the exits changed, not a reconciliation error",
+            "realized_vs_hold_to_settlement": "realized_pnl_usd includes actual SELLs and covers every settled position; hold_to_settlement_pnl_usd (settlement_attribution.world_grade_pnl_usd) is the all-shares-held counterfactual over graded positions only. matched_realized_minus_hold_usd differences them over the matched cohort only (settled, realized not null, graded: matched_n); ungraded_realized_pnl_usd/ungraded_settled_n are reported separately and never enter it",
             "exit_cost": "per SELL: running-average cost of the inventory held at that fill (ENTRY and EXIT fills replayed by fill_dedup execution_ts); null when the loaded fills cannot account for the shares",
         },
         "coverage": dict(sorted(cov.items())),
@@ -798,15 +816,24 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
         out += _table([r for r in rep["by_target_date"] if r["metric"] == metric], ["target_date"])
     out += ["", "## Settlement attribution / exit reasons / keep revaluations"]
     for t in rep["totals"]:
+        m = t["metric"].upper()
         out.append(
-            f"- {t['metric'].upper()} realized ${_f(t['realized_pnl_usd'])} "
+            f"- {m} realized ${_f(t['realized_pnl_usd'])} "
             f"(position_current, includes the actual SELLs; {t['settled']} settled)"
         )
         out.append(
-            f"- {t['metric'].upper()} hold-to-settlement ${_f(t['hold_to_settlement_pnl_usd'])} "
-            f"(settlement_attribution, every share held to settlement; {t['hold_to_settlement_n']} graded); "
-            f"realized minus hold-to-settlement ${_f(t['realized_minus_hold_to_settlement_usd'])}, "
-            f"the exits' effect (see the hold-sell$ column)"
+            f"- {m} hold-to-settlement ${_f(t['hold_to_settlement_pnl_usd'])} "
+            f"(settlement_attribution, every share held to settlement; {t['hold_to_settlement_n']} graded)"
+        )
+        out.append(
+            f"- {m} exits' effect on the matched cohort: realized ${_f(t['matched_realized_usd'])} minus "
+            f"hold-to-settlement ${_f(t['matched_hold_to_settlement_usd'])} = "
+            f"${_f(t['matched_realized_minus_hold_usd'])} over {t['matched_n']} positions settled AND graded "
+            f"(see the hold-sell$ column)"
+        )
+        out.append(
+            f"- {m} ungraded settled, kept out of that difference: {t['ungraded_settled_n']} positions, "
+            f"realized ${_f(t['ungraded_realized_pnl_usd'])}"
         )
         out.append(f"- {t['metric'].upper()} attribution: {t['attribution'] or '-'}")
         out.append(f"- {t['metric'].upper()} exit reasons: {t['exit_reasons'] or '-'}")
