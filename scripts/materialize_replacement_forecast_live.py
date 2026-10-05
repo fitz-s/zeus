@@ -1678,6 +1678,9 @@ def _resident_worker() -> int:
     """Private queue transport: reuse imports/caches, never reuse a transaction."""
     import contextlib
     import os
+    from src.runtime.warm_materializer import attach_trace_log
+
+    attach_trace_log()
     allowed = {"--input-json", "--batch-input-json", "--deadline-utc", "--commit"}
     for line in iter(lambda: sys.stdin.readline(1024 * 1024 + 1), ""):
         if len(line) > 1024 * 1024:
