@@ -79,6 +79,62 @@ def emit_observation_committed(row: Mapping[str, Any], *, world_committed_at_ms:
     except Exception:pass
 
 
+_PRINT_NAMES=('id','city','station_id','source_channel','publish_ts_utc','value_native','unit','fetched_at_utc','raw_report')
+
+
+def print_high_water(conn: Any) -> int | None:
+    """observation_prints high-water rowid. Read it inside the writing
+    transaction: every later rowid up to that commit is then its own print."""
+    try:return int(conn.execute('SELECT coalesce(max(rowid),0) FROM observation_prints').fetchone()[0])
+    except Exception:return None
+
+
+def last_print_id(conn: Any) -> int | None:
+    """Rowid of the print the immediately preceding insert on conn wrote."""
+    try:return int(conn.execute('SELECT last_insert_rowid()').fetchone()[0]) or None
+    except Exception:return None
+
+
+def print_revisions(conn: Any, *, after: int | None = None, ids: Iterable[int] = (),
+                    match: Mapping[str, Any] | None = None) -> list[tuple[dict[str, Any], str]]:
+    """New prints with their disposition against the same-key frontier
+    committed before the batch's first print (rowid order is commit order).
+
+    Seeks only: a rowid range or ids, then one index seek per row. A range read
+    after ``after`` is this writer's alone only when ``after`` was read under the
+    write lock; otherwise ``match`` must name fields only this write carries.
+    """
+    try:
+        from src.state.schema.observation_prints_schema import RECEIPT_ORDER_DESC_SQL
+        ids=tuple(int(i) for i in ids if i)
+        if after is None and not ids:return []
+        where,args=(('rowid>?',(int(after),)) if after is not None else
+                    ('rowid IN ('+','.join('?'*len(ids))+')',ids))
+        rows=[dict(zip(_PRINT_NAMES,r)) for r in conn.execute('SELECT rowid,'+','.join(_PRINT_NAMES[1:])
+            +' FROM observation_prints WHERE '+where+' ORDER BY rowid',args)]
+        rows=[r for r in rows if all(r.get(k)==v for k,v in (match or {}).items())]
+        result=[]
+        for row in rows:
+            prior=conn.execute('SELECT publish_ts_utc,value_native FROM observation_prints WHERE city=? AND station_id=? '
+                'AND source_channel=? AND rowid<? ORDER BY publish_ts_utc DESC, '+RECEIPT_ORDER_DESC_SQL+' LIMIT 1',
+                (row['city'],row['station_id'],row['source_channel'],rows[0]['id'])).fetchone()
+            clock=_utc(row['publish_ts_utc'])
+            advances=(prior is None or clock>_utc(prior[0])
+                      or (clock==_utc(prior[0]) and float(row['value_native'])!=float(prior[1])))
+            result.append((row,'ADVANCES_SOURCE_FRONTIER' if advances else 'BEHIND_SOURCE_FRONTIER'))
+        return result
+    except Exception:return []
+
+
+def emit_print_commits(revisions: Iterable[tuple[Mapping[str, Any], str]], *, world_committed_at_ms: int | None) -> None:
+    """One SOURCE_COMMITTED per committed print; call after commit and lock release."""
+    try:
+        if world_committed_at_ms is None:return
+        for row,disposition in revisions:
+            emit_observation_committed(row,world_committed_at_ms=world_committed_at_ms,disposition=disposition)
+    except Exception:pass
+
+
 def _readiness_reference(conn: Any, row: Any, posterior_id: int, readiness_id: str | None = None) -> dict[str, Any]:
     """A readiness UPSERT is not a history; preserve its exact pointer at publication.
 

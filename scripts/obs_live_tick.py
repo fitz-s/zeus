@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-17
-# Lifecycle: created=2026-05-17; last_reviewed=2026-07-23; last_reused=2026-07-23
-# Last reused or audited: 2026-07-23
+# Lifecycle: created=2026-05-17; last_reviewed=2026-10-05; last_reused=2026-10-05
+# Last reused or audited: 2026-10-05
 # Purpose: Live rolling-window writer for observation_instants WU/OGIMET hourly rows.
 # Reuse: Run when ingest_main obs_v2 live-tick, hourly payload identity, or obs_v2 writer relationships change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
@@ -382,7 +382,11 @@ def _write_rows(
     if conn_or_path is None:
         return 0
 
+    from src.runtime.observation_reaction_trace import emit_print_commits, print_high_water, print_revisions
+
     db_path = Path(conn_or_path)
+    committed_prints: list = []
+    world_committed_at_ms = None
     with db_writer_lock(db_path, WriteClass.BULK):
         conn = _open_obs_tick_connection(db_path)
         try:
@@ -392,6 +396,7 @@ def _write_rows(
             # committed after our snapshot, that upgrade fails immediately
             # with SQLITE_BUSY_SNAPSHOT — busy_timeout never applies to it.
             conn.execute("BEGIN IMMEDIATE")
+            prints_before = print_high_water(conn) if prints else None
             written = insert_rows(conn, rows)
             _append_hourly_prints_to_ledger(conn, prints)
             _emit_admitted_day0_events(
@@ -401,13 +406,17 @@ def _write_rows(
                 inserted_event_ids=inserted_event_ids,
                 inserted_event_families=inserted_event_families,
             )
+            if prints_before is not None:
+                committed_prints = print_revisions(conn, after=prints_before)
             conn.commit()
-            return written
+            world_committed_at_ms = time.time_ns() // 1_000_000
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+    emit_print_commits(committed_prints, world_committed_at_ms=world_committed_at_ms)
+    return written
 
 
 def _emit_admitted_day0_events(
