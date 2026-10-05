@@ -1056,7 +1056,9 @@ class FamilyOptimumCut:
     the reactor's cut and other passes clear and fill concurrently.
     ``occupied_tokens`` are the tokens of the family's open ENTRY rests: a
     fresh order there is the rest re-priced or re-sized, never an
-    alternative to it (live, the active-order lock refuses it too).
+    alternative to it (live, the active-order lock refuses it too). The
+    released world of one rest (``vacated``, its token) never placed it, so
+    there its token is free: a confirmed cancel frees it for the selector.
     """
 
     def __init__(
@@ -1128,8 +1130,12 @@ class FamilyOptimumCut:
             prepared, forecasts_conn
         )
 
-    def candidate_policy(self, candidate: Any) -> str | None:
-        """The live adapter's BUY candidate policy, in its order."""
+    def candidate_policy(self, candidate: Any, *, vacated: str | None = None) -> str | None:
+        """The live adapter's BUY candidate policy, in its order.
+
+        On ``vacated`` the rest's own exclusions (open rest, active-order
+        lock) do not apply: that world never placed it.
+        """
         from src.engine import event_reactor_adapter as adapter
 
         if str(getattr(candidate, "action", "BUY") or "BUY").upper() == "SELL":
@@ -1138,7 +1144,8 @@ class FamilyOptimumCut:
             return "STANDING_ENTRY_FRESH_BUY_ONLY"
         if self.gate.global_reason is not None:
             return self.gate.global_reason
-        if str(getattr(candidate, "token_id", "") or "") in self.occupied_tokens:
+        token = str(getattr(candidate, "token_id", "") or "")
+        if token in self.occupied_tokens and token != vacated:
             # A fresh order on an open rest's own token re-prices or re-sizes
             # that rest; neither is a reason to pull it.
             return "STANDING_ENTRY_TOKEN_HAS_OPEN_REST"
@@ -1147,7 +1154,7 @@ class FamilyOptimumCut:
         )
         if family_block is not None:
             return family_block
-        duplicate = adapter._global_active_entry_duplicate_reason(
+        duplicate = None if token == vacated else adapter._global_active_entry_duplicate_reason(
             candidate, trade_conn=self.trade_conn, live_cap_conn=self.trade_conn,
         )
         if duplicate is not None:
@@ -1189,13 +1196,15 @@ class FamilyOptimumCut:
         fractional_kelly_multiplier: Decimal,
         capital_authority: Any,
         payoff_q_correction_resolver: Any,
+        vacated: str | None = None,
     ) -> FamilyOptimum | None:
         """Run the selector itself on this one family over ``wealth``.
 
         ``select_prepared_global_auction`` on a one-family cut with the
         selector's maker-fill witnesses, capital resolver, correction
         resolver and Kelly multiplier, and the live adapter's candidate
-        policy (``candidate_policy``) and same-token re-post law. The best
+        policy (``candidate_policy``) and same-token re-post law, which a
+        ``vacated`` token, its rest never placed, does not meet. The best
         SCORED/SELECTED BUY by the selector's own ordering key, or None when
         no fresh BUY is scorable (no fresh order is then available).
         """
@@ -1253,9 +1262,10 @@ class FamilyOptimumCut:
             book_epoch=epoch,
             family_joint_plan_cache={},
             current_capital_limit_resolver=capital_limit,
-            candidate_policy_rejection_resolver=self.candidate_policy,
-            selected_order_rejection_resolver=lambda s, at: adapter.global_selected_order_same_token_rejection(
-                s, at, trade_conn=self.trade_conn,
+            candidate_policy_rejection_resolver=lambda c: self.candidate_policy(c, vacated=vacated),
+            selected_order_rejection_resolver=lambda s, at: (
+                None if s.candidate.token_id == vacated
+                else adapter.global_selected_order_same_token_rejection(s, at, trade_conn=self.trade_conn)
             ),
             payoff_q_lcb_by_candidate=runtime._prepared_candidate_payoff_q_lcb_caps(bound_family),
             payoff_q_correction_resolver=payoff_q_correction_resolver,
@@ -1375,6 +1385,12 @@ def family_optimum_dominates(
     the selector weighs it, so a plan's joint fill law is its fresh order's
     own. The rest is dominated only when CANCEL is strictly better; ties keep.
 
+    ``released`` is chosen with the rest's own token free, as a confirmed
+    cancel leaves it. Optimal there, it is that rest re-priced or re-sized:
+    no dominance. Book drift is not a pull reason, and the rest's size on its
+    token is ``entry_rest_disposition``'s (above its target it cancels;
+    below, it keeps working toward it).
+
     Nothing is dominated without that one outcome vector: no released
     optimum, a non-KEEP rest, a deterministic payoff witness (no MECE q), or
     an order scored on a calibrated q that is not the vector's own
@@ -1386,6 +1402,7 @@ def family_optimum_dominates(
     if (
         released is None
         or rest.action != "KEEP"
+        or released.token_id == rest.token_id
         or not isinstance(probability_witness, JointOutcomeProbabilityWitness)
     ):
         return False
@@ -1938,7 +1955,9 @@ def _capture_standing_entry_values(
         cuts: dict[FamilyKey, FamilyOptimumCut] = {}
         held_optimum: dict[FamilyKey, FamilyOptimum | None] = {}
 
-        def fresh_optimum(family: FamilyKey, event: Any, prepared: Any, on_wealth: Any) -> FamilyOptimum | None:
+        def fresh_optimum(
+            family: FamilyKey, event: Any, prepared: Any, on_wealth: Any, vacated: str | None = None,
+        ) -> FamilyOptimum | None:
             if family not in cuts:
                 if not maker_samples:
                     maker_samples.append(
@@ -1962,6 +1981,7 @@ def _capture_standing_entry_values(
                 fractional_kelly_multiplier=multiplier,
                 capital_authority=capital_authority,
                 payoff_q_correction_resolver=correction,
+                vacated=vacated,
             )
 
         for rest in active:
@@ -2028,7 +2048,9 @@ def _capture_standing_entry_values(
                         if family not in held_optimum:
                             held_optimum[family] = fresh_optimum(family, event, prepared, wealth)
                         held = held_optimum[family]
-                        released = fresh_optimum(family, event, prepared, own_wealth)
+                        released = fresh_optimum(
+                            family, event, prepared, own_wealth, vacated=str(rest["token_id"])
+                        )
                         dominated = family_optimum_dominates(
                             valuation,
                             held=held,

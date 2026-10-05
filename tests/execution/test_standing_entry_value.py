@@ -1220,8 +1220,11 @@ class TestFamilyOptimumDominance:
 
     def _optimum(self, witness, bin_id, shares, price, *, side="YES", du=0.0, fills=None, q=None):
         shares, price = D(shares), D(price)
+        binding = next(b for b in witness.bindings if b.bin_id == bin_id)
         return C.FamilyOptimum(
-            candidate_id=f"fresh-{bin_id}", token_id=f"yes-{bin_id}", execution_mode="TAKER_LIMIT",
+            candidate_id=f"fresh-{bin_id}",
+            token_id=binding.yes_token_id if side == "YES" else binding.no_token_id,
+            execution_mode="TAKER_LIMIT",
             shares=shares, limit_price=price, ruin_probability_reduction=0.0,
             expected_delta_log_wealth=du, fill_probability=1.0, bin_id=bin_id, side=side,
             acting_q=S.family_payoff_point_q(witness, bin_id=bin_id, side=side) if q is None else q,
@@ -1259,19 +1262,31 @@ class TestFamilyOptimumDominance:
         assert cancelled == pytest.approx(0.1759572, abs=1e-7)
         assert not self._dominates(keep, witness, endowment, held=held, released=released)
 
-    def test_dominates_only_when_the_cancel_plan_is_strictly_better(self):
+    def test_dominates_only_when_the_cancel_plan_is_strictly_better(self, monkeypatch):
         keep, witness, endowment = self._abc()
+        better = self._optimum(witness, "B", "33.60", "0.07")
         # Cash binds: with the rest held no fresh order fits at all.
-        assert self._dominates(
-            keep, witness, endowment, held=None, released=self._optimum(witness, "B", "33.60", "0.07"),
-        )
+        assert self._dominates(keep, witness, endowment, held=None, released=better)
         assert not self._dominates(
             keep, witness, endowment, held=None, released=self._optimum(witness, "B", "1", "0.07"),
         )
-        # The same plan either way is a tie, and a tie keeps.
-        assert not self._dominates(
-            keep, witness, endowment, held=None, released=self._optimum(witness, "A", "10", "0.06"),
+        # Equal plans: a tie keeps.
+        monkeypatch.setattr(C, "_plan_growth", lambda *_a, **_k: 0.1)
+        assert not self._dominates(keep, witness, endowment, held=None, released=better)
+
+    def test_a_released_optimum_on_the_rests_own_token_never_dominates(self):
+        # Released, the rest's token is free; the selector buying it again,
+        # even more of it or cheaper, is the rest re-priced or re-sized.
+        keep, witness, endowment = self._abc()
+        again = self._optimum(witness, "A", "40", "0.05")
+        assert again.token_id == keep.token_id
+        assert C._plan_growth(None, again, witness=witness, endowment=endowment) > C._plan_growth(
+            ("A", "YES", D("10"), D("0.6")), None, witness=witness, endowment=endowment,
         )
+        assert not self._dominates(keep, witness, endowment, held=None, released=again)
+        # The same order on the rest's NO token is another claim, not the rest.
+        other_side = self._optimum(witness, "B", "40", "0.05", side="NO")
+        assert self._dominates(keep, witness, endowment, held=None, released=other_side)
 
     def test_a_fresh_maker_is_weighted_by_its_fill_witness(self):
         keep, witness, endowment = self._abc()
@@ -1341,6 +1356,23 @@ class TestFreshEntryGateAndPassLocalEvidence:
     def test_the_rests_own_token_is_never_a_fresh_alternative(self):
         cut = self._cut(gate=C.FRESH_ENTRY_GATE_OPEN, occupied=frozenset({TOKEN}))
         assert cut.candidate_policy(self._candidate(token=TOKEN)) == "STANDING_ENTRY_TOKEN_HAS_OPEN_REST"
+
+    def test_the_released_world_frees_only_its_own_rests_token(self, monkeypatch):
+        # The rest never placed: its token meets neither the open-rest
+        # exclusion nor the active-order lock. Every other rest's token stays
+        # occupied and every other token still meets the lock.
+        from src.engine import event_reactor_adapter as adapter
+
+        monkeypatch.setattr(adapter, "_global_active_entry_duplicate_reason", lambda *_a, **_k: "ACTIVE_ORDER")
+        monkeypatch.setattr(
+            adapter, "_day0_candidate_ask_repricing_rejection_reason", lambda *_a, **_k: "PAST_REST_EXCLUSIONS",
+        )
+        cut = self._cut(gate=C.FRESH_ENTRY_GATE_OPEN, occupied=frozenset({TOKEN, "yes-sibling"}))
+        own, sibling, free = (self._candidate(token=t) for t in (TOKEN, "yes-sibling", "yes-free"))
+        assert cut.candidate_policy(own) == "STANDING_ENTRY_TOKEN_HAS_OPEN_REST"
+        assert cut.candidate_policy(own, vacated=TOKEN) == "PAST_REST_EXCLUSIONS"
+        assert cut.candidate_policy(sibling, vacated=TOKEN) == "STANDING_ENTRY_TOKEN_HAS_OPEN_REST"
+        assert cut.candidate_policy(free, vacated=TOKEN) == "ACTIVE_ORDER"
 
     def test_day0_ask_evidence_is_owned_by_the_pass(self, monkeypatch):
         from src.engine import event_reactor_adapter as adapter

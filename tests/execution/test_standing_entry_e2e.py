@@ -463,15 +463,53 @@ def test_a_dominating_sibling_the_selector_would_refuse_never_cancels_the_rest(
 
 
 def test_rest_beating_every_fresh_proposal_is_kept(tmp_path, monkeypatch, _noaa_native_sources):  # noqa: F811
-    # Every other leg is priced at 0.99: no fresh proposal is scorable.
+    # Every other leg is priced at 0.99: no other fresh proposal is scorable.
+    # Released, the rest's own token is free and the selector would buy it
+    # again: that is the rest re-priced or re-sized, never a reason to pull it.
     fx, trade, venue, result = _family_optimum_cycle(
         tmp_path, monkeypatch, asks_by_token={TOKEN: "0.56"},
     )
     try:
         valuation = result["valuations"][0]
-        assert valuation.action == "KEEP", valuation.reason
-        assert valuation.evidence["family_optimum"]["released"] is None
+        optimum = valuation.evidence["family_optimum"]
+        assert optimum["held"] is None
+        assert optimum["released"]["token_id"] == TOKEN
+        assert (valuation.action, valuation.reason) == ("KEEP", "CURRENT_ENTRY_REST_VALUE_POSITIVE")
         assert venue.calls == []
+    finally:
+        fx.conn.close()
+        fx.builtin.close()
+
+
+def test_the_released_world_examines_the_rests_own_token(
+    tmp_path, monkeypatch, _noaa_native_sources,  # noqa: F811
+):
+    # The cash-bound CANCEL above, with the rest's own token in the released
+    # world: it competes free of the rest's exclusions and loses to the 0.06
+    # NO, so the cancel is certified against every order the selector could
+    # place once it is confirmed. The held world still refuses that token.
+    seen = []
+    real = C.FamilyOptimumCut.candidate_policy
+
+    def spy(self, candidate, **kwargs):
+        reason = real(self, candidate, **kwargs)
+        if candidate.token_id == TOKEN:
+            seen.append((kwargs.get("vacated"), reason))
+        return reason
+
+    monkeypatch.setattr(C.FamilyOptimumCut, "candidate_policy", spy)
+    fx, trade, venue, result = _family_optimum_cycle(
+        tmp_path, monkeypatch, asks_by_token={"kord-no-0": "0.06", TOKEN: "0.56"}, size=5,
+        buy_commitment_limit_usd="3",
+    )
+    try:
+        valuation = result["valuations"][0]
+        assert valuation.evidence["family_optimum"]["released"]["token_id"] == "kord-no-0"
+        assert (valuation.action, valuation.reason) == ("CANCEL", "FAMILY_OPTIMUM_DOMINATES")
+        held = {reason for vacated, reason in seen if vacated is None}
+        released = {reason for vacated, reason in seen if vacated == TOKEN}
+        assert held == {"STANDING_ENTRY_TOKEN_HAS_OPEN_REST"}
+        assert released == {None}
     finally:
         fx.conn.close()
         fx.builtin.close()
