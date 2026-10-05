@@ -2071,13 +2071,15 @@ def _multiday_evaluation_tick() -> None:
     It runs in its own process, never in this daemon: the report's reads can pin a WAL
     snapshot and burn CPU for tens of seconds on a cold 200 GB DB, which in-process would
     contend for this process's GIL. The child is niced and killed at
-    ``_MULTIDAY_EVALUATION_TIMEOUT_S``. Yields to the live money-path cycle.
+    ``_MULTIDAY_EVALUATION_TIMEOUT_S``.
+
+    No money-path deferral on purpose. A child shares no GIL, lock or write transaction with
+    the reactor, and a once-a-day cron that yields to ``_edli_reactor_active`` loses most days:
+    the neighbouring skill-attribution tick skipped 9 of its 13 logged attempts on that guard
+    (2026-10-04 22:26 .. 2026-10-05 07:23 log window). ``_defer_for_held_position_monitor``
+    is not called either: its allowlist (``_HELD_POSITION_MONITOR_DEFER_JOBS``) never names
+    this job, so the call would always return False.
     """
-    if _defer_for_held_position_monitor("multiday_evaluation"):
-        return
-    if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
-        logger.info("multiday_evaluation skipped: live money-path cycle active")
-        return
     _run_multiday_evaluation_child()
 
 

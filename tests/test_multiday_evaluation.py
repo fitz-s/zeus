@@ -381,15 +381,11 @@ def test_sources_are_never_written(tmp_path):
 # ------------------------------------------------------- scheduler wiring
 @pytest.fixture
 def tick(monkeypatch):
+    """Only the health-file write is faked; the money-path predicates stay real."""
     import src.main as main_module
 
     health: list = []
     monkeypatch.setattr(main_module, "_write_scheduler_health", lambda name, **kw: health.append((name, kw)))
-    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: False)
-    monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: False)
-    monkeypatch.setattr(
-        main_module, "_edli_redecision_screen_lock", SimpleNamespace(locked=lambda: False)
-    )
     return main_module, health
 
 
@@ -498,18 +494,20 @@ def test_child_exits_75_when_a_database_is_locked(tmp_path):
     assert "database busy" in proc.stderr
 
 
-@pytest.mark.parametrize("busy", ["reactor", "screen", "monitor"])
-def test_tick_defers_to_the_money_path(tick, monkeypatch, busy):
-    main_module, _ = tick
-    if busy == "reactor":
-        monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: True)
-    elif busy == "screen":
-        monkeypatch.setattr(main_module, "_edli_redecision_screen_lock", SimpleNamespace(locked=lambda: True))
-    else:
-        monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: True)
+def test_tick_runs_even_while_the_money_path_is_busy(tick, monkeypatch):
+    """A child shares no GIL/lock/write txn with the reactor; yielding would skip most days."""
+    main_module, health = tick
     calls = _stub_child(monkeypatch, main_module)
-    main_module._multiday_evaluation_tick()
-    assert calls == []
+    assert main_module._defer_for_held_position_monitor("multiday_evaluation") is False  # never allowlisted
+    assert main_module._edli_reactor_active_lock.acquire(blocking=False)
+    assert main_module._edli_redecision_screen_lock.acquire(blocking=False)
+    try:
+        assert main_module._edli_reactor_active() and main_module._edli_redecision_screen_lock.locked()
+        main_module._multiday_evaluation_tick()
+    finally:
+        main_module._edli_redecision_screen_lock.release()
+        main_module._edli_reactor_active_lock.release()
+    assert len(calls) == 1 and health[-1] == ("multiday_evaluation", {"failed": False})
 
 
 def test_job_is_registered_daily_and_classified_non_collection():
