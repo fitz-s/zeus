@@ -6150,6 +6150,9 @@ class _Day0HourlyPriorityProbe:
     refresh_due_families: frozenset[tuple[str, str, str]] = frozenset()
     window_starts: tuple[tuple[str, str, datetime], ...] = ()
     proved: bool = False
+    # Leading cities of the given order whose scan completed; the caller
+    # resumes the next cycle's scan after them.
+    cities_scanned: int = 0
 
 
 def _edli_day0_hourly_refresh_due_families(
@@ -6165,6 +6168,15 @@ def _edli_day0_hourly_refresh_due_families(
     the money path consume.  A completed local day is excluded before any
     fact/readiness work, and one city/date remains one fetch target even when
     HIGH and LOW both expose a missing family.
+
+    Each city opens with one indexed seek for its newest rolling capture.
+    Every expected model is a rolling row, so a newest capture missing or
+    older than the producer horizon proves the strict read empty: that city
+    is due without the strict and ENS reads (measured live 2026-10-05: seek
+    0.005 ms warm / 0.4 ms cold p95; the full strict city ~33 ms).  A seek
+    that cannot decide falls back to the strict read.  The deadline is checked
+    between statements; ``cities_scanned`` lets the caller resume after the
+    completed prefix instead of rescanning it.
     """
     from src.config import runtime_cities_by_name
     from src.data.day0_hourly_vectors import (
@@ -6175,6 +6187,7 @@ def _edli_day0_hourly_refresh_due_families(
         day0_source_clock_ensemble_member_models,
         day0_source_clock_ensemble_target_dates,
         day0_conditional_high_run_proof,
+        newest_day0_rolling_capture_at,
         read_day0_current_temperature_state,
         read_freshest_day0_hourly_vectors,
     )
@@ -6204,6 +6217,10 @@ def _edli_day0_hourly_refresh_due_families(
             deadline_monotonic is not None
             and time.monotonic() >= float(deadline_monotonic)
         )
+
+    def check_deadline() -> None:
+        if deadline_expired():
+            raise TimeoutError("DAY0_HOURLY_PRIORITY_PROBE_DEADLINE_EXPIRED")
 
     def install_deadline(conn: Any) -> None:
         if deadline_monotonic is None:
@@ -6241,11 +6258,16 @@ def _edli_day0_hourly_refresh_due_families(
             close_errors,
         )
         return _Day0HourlyPriorityProbe()
+    producer_max_age_hours = (
+        DAY0_ROLLING_CAPTURE_MAX_AGE_HOURS - DAY0_HOURLY_REFRESH_HEADROOM_HOURS
+    )
+    cities = list(cities)
+    cities_scanned = 0
     read_error = None
     try:
-        for city in cities:
-            if deadline_expired():
-                raise TimeoutError("DAY0_HOURLY_PRIORITY_PROBE_DEADLINE_EXPIRED")
+        for city_index, city in enumerate(cities):
+            cities_scanned = city_index
+            check_deadline()
             city_name = str(getattr(city, "name", "") or "").strip()
             timezone_name = str(getattr(city, "timezone", "") or "").strip()
             city_obj = city_map.get(city_name)
@@ -6258,13 +6280,32 @@ def _edli_day0_hourly_refresh_due_families(
             expected_models = day0_hourly_models_for_city(city_obj)
             if not expected_models:
                 continue
-            source_clock_low_target_dates = set(
-                day0_source_clock_ensemble_target_dates(
-                    city=city_obj,
+            try:
+                newest_capture = newest_day0_rolling_capture_at(
+                    vector_conn,
+                    city=city_name,
+                    target_date=target_date,
                     decision_time=now,
-                    conn=vector_conn,
+                )
+                capture_stale = newest_capture is None or (
+                    now - newest_capture
+                ).total_seconds() / 3600.0 > producer_max_age_hours
+            except Exception:  # noqa: BLE001 -- a shortcut only; the strict read decides
+                check_deadline()  # an interrupted seek is the deadline, not a verdict
+                capture_stale = False
+            check_deadline()
+            source_clock_low_target_dates = (
+                set()
+                if capture_stale
+                else set(
+                    day0_source_clock_ensemble_target_dates(
+                        city=city_obj,
+                        decision_time=now,
+                        conn=vector_conn,
+                    )
                 )
             )
+            check_deadline()
             # The consumer's causal boundary is the latest same-station print
             # (materializer, held monitor), not the time of the running extreme
             # the authorized fact carries.  Scheduling on the extreme's time
@@ -6288,10 +6329,7 @@ def _edli_day0_hourly_refresh_due_families(
                     exc,
                 )
             for metric in ("high", "low"):
-                if deadline_expired():
-                    raise TimeoutError(
-                        "DAY0_HOURLY_PRIORITY_PROBE_DEADLINE_EXPIRED"
-                    )
+                check_deadline()
                 fact = _latest_authorized_day0_fact(
                     fact_conn,
                     city=city_name,
@@ -6330,6 +6368,12 @@ def _edli_day0_hourly_refresh_due_families(
                 # pass: 340 of 1,165 city-hours on 2026-09-05.
                 if prior_window_start is None or observation_time > prior_window_start:
                     window_starts[city_date] = observation_time
+                if capture_stale:
+                    # No expected model has a capture inside the producer
+                    # horizon: the strict read below is provably empty.
+                    missing.add((city_name, target_date, metric))
+                    continue
+                check_deadline()
                 vectors = read_freshest_day0_hourly_vectors(
                     city=city_name,
                     target_date=target_date,
@@ -6353,6 +6397,7 @@ def _edli_day0_hourly_refresh_due_families(
                 if not vectors:
                     missing.add((city_name, target_date, metric))
                 if metric == "high" and vectors:
+                    check_deadline()
                     high_ensemble = read_freshest_day0_hourly_vectors(
                         city=city_name, target_date=target_date, now=now,
                         expected_models=day0_source_clock_ensemble_member_models(),
@@ -6377,6 +6422,7 @@ def _edli_day0_hourly_refresh_due_families(
                     # not infer this from the deterministic bundle: it has a
                     # distinct 51-member identity, metadata domain and
                     # remaining-window proof.
+                    check_deadline()
                     source_clock_vectors = read_freshest_day0_hourly_vectors(
                         city=city_name,
                         target_date=target_date,
@@ -6391,6 +6437,7 @@ def _edli_day0_hourly_refresh_due_families(
                     )
                     if not source_clock_vectors:
                         missing.add((city_name, target_date, metric))
+        cities_scanned = len(cities)
     except Exception as exc:  # noqa: BLE001 -- priority is fail-closed, maintenance remains safe.
         read_error = exc
     close_errors = close_connections()
@@ -6417,6 +6464,7 @@ def _edli_day0_hourly_refresh_due_families(
                     )
                 ),
                 proved=False,
+                cities_scanned=cities_scanned,
             )
         return _Day0HourlyPriorityProbe()
     return _Day0HourlyPriorityProbe(
@@ -6426,6 +6474,7 @@ def _edli_day0_hourly_refresh_due_families(
             for (city_name, target_date), window_start in sorted(window_starts.items())
         ),
         proved=True,
+        cities_scanned=cities_scanned,
     )
 
 
@@ -6481,6 +6530,8 @@ def _edli_day0_hourly_priority_families(
 
 
 _DAY0_HOURLY_REFRESH_CURSOR = 0
+# Start of the next due-probe scan within the unheld city order.
+_DAY0_HOURLY_PROBE_CURSOR = 0
 
 
 def _day0_hourly_refresh_max_cities(*, priority_city_count: int) -> int:
@@ -6618,7 +6669,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     acquires those locks; an over-budget provider call therefore cannot block
     current-capital redecision.
     """
-    global _DAY0_HOURLY_REFRESH_CURSOR
+    global _DAY0_HOURLY_REFRESH_CURSOR, _DAY0_HOURLY_PROBE_CURSOR
 
     import logging as _logging
 
@@ -6661,17 +6712,35 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             if str(getattr(city, "name", "") or "").strip().casefold()
             in held_city_names
         ]
-        probe_cities = held_cities + [
+        unheld_cities = [
             city
             for city in cities
             if str(getattr(city, "name", "") or "").strip().casefold()
             not in held_city_names
         ]
+        # Held cities are probed first every cycle; the unheld scan resumes
+        # where the previous cycle's deadline stopped, so a bounded scan
+        # reaches every city within ceil(unheld / scanned-per-cycle) cycles
+        # instead of always losing the same alphabetical tail.
+        unheld_start = (
+            _DAY0_HOURLY_PROBE_CURSOR % len(unheld_cities) if unheld_cities else 0
+        )
+        unheld_cities = (
+            unheld_cities[unheld_start:] + unheld_cities[:unheld_start]
+        )
         priority_probe = _edli_day0_hourly_refresh_due_families(
-            cities=probe_cities,
+            cities=held_cities + unheld_cities,
             decision_time=decision_time,
             deadline_monotonic=preflight_deadline_monotonic,
         )
+        # Resume at the first unheld city whose scan did not complete, but
+        # always move at least one city once the scan reached the unheld
+        # segment: a city slower than the whole budget cannot pin the cursor.
+        unheld_scanned = priority_probe.cities_scanned - len(held_cities)
+        if unheld_cities and unheld_scanned >= 0:
+            _DAY0_HOURLY_PROBE_CURSOR = (
+                unheld_start + max(1, unheld_scanned)
+            ) % len(unheld_cities)
         # Strict due means the current consumer can no longer form probability
         # authority.  Preserve that distinction before provider HWM release
         # debt is unioned below: a newly available run should refresh promptly,

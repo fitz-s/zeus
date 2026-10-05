@@ -4327,6 +4327,169 @@ class TestMutexNoHttpSplit:
         else:
             assert fetched == ["Toronto", "Warsaw", "Wellington"]
 
+    @staticmethod
+    def _install_probe_universe(monkeypatch, tmp_path, names, *, slow_per_city_s):
+        """Real due-probe over a private vector DB; facts and the clock are fixed.
+
+        Each city reads one authorized fact; the strict per-city read costs
+        ``slow_per_city_s`` of a fake monotonic clock, as live strict reads do.
+        """
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        import src.data.replacement_forecast_current_target_plan as target_plan
+        import src.state.db as db_module
+        from src.events import reactor as reactor_module
+
+        cities = [SimpleNamespace(name=name, timezone="UTC") for name in names]
+        db_path = tmp_path / "probe-vectors.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(vectors_module._TABLE_DDL)
+        conn.execute(vectors_module._INDEX_DDL)
+        conn.commit()
+        conn.close()
+        clock = {"now": 0.0}
+        strict_reads = []
+
+        def connect(**_kwargs):
+            return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+        def strict_read(*, city, **_kwargs):
+            strict_reads.append(city)
+            clock["now"] += slow_per_city_s
+            return []
+
+        monkeypatch.setattr(reactor_module.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
+        monkeypatch.setattr(
+            config_module, "runtime_cities_by_name", lambda: {c.name: c for c in cities}
+        )
+        monkeypatch.setattr(db_module, "get_world_connection_read_only", connect)
+        monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", connect)
+        monkeypatch.setattr(
+            vectors_module, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"]
+        )
+        monkeypatch.setattr(
+            vectors_module, "day0_source_clock_ensemble_target_dates", lambda **_kw: ()
+        )
+        monkeypatch.setattr(
+            vectors_module, "read_day0_current_temperature_state", lambda **_kw: None
+        )
+        monkeypatch.setattr(vectors_module, "read_freshest_day0_hourly_vectors", strict_read)
+        monkeypatch.setattr(
+            target_plan,
+            "_latest_authorized_day0_fact",
+            lambda *_a, temperature_metric, decision_time, **_kw: (
+                {"observation_time": (decision_time - timedelta(minutes=5)).isoformat()}
+                if temperature_metric == "high" else None
+            ),
+        )
+        return cities, db_path, clock, strict_reads
+
+    def test_hourly_refresh_probe_reaches_alphabetical_tail_in_bounded_cycles(
+        self, monkeypatch, tmp_path
+    ):
+        """A deadline-bounded due-probe resumes where it stopped.
+
+        2026-10-04: the probe always restarted at the first city, its budget
+        expired after the same alphabetical prefix, and the 18 cities with
+        <60% bundle freshness were all index >= 26.  Every city must now be
+        proven due within ceil(N / cities-per-cycle) cycles.
+        """
+        import src.data.day0_hourly_vectors as vectors_module
+        import src.main  # noqa: F401 -- load settings consumers first
+        from src.events import reactor as reactor_module
+
+        names = [f"C{index:02d}" for index in range(12)]
+        _cities, db_path, _clock, _reads = self._install_probe_universe(
+            monkeypatch, tmp_path, names, slow_per_city_s=0.5,
+        )
+        # A fresh rolling capture per city forces the strict read (0.5 s each):
+        # the 2 s preflight budget completes three cities per cycle (the
+        # fourth expires mid-city and is rescanned next cycle).
+        now = datetime.now(UTC)
+        conn = sqlite3.connect(db_path)
+        for name in names:
+            conn.execute(
+                "INSERT INTO day0_hourly_vectors (vector_id, model, city, target_date, "
+                "timezone_name, captured_at, endpoint, request_hash, times_json, "
+                "temps_c_json) VALUES (?, 'ecmwf_ifs', ?, ?, 'UTC', ?, 'e', 'h', '[]', '[]')",
+                (f"v-{name}", name, now.date().isoformat(), now.isoformat()),
+            )
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(reactor_module, "_edli_current_held_position_family_keys", lambda: set())
+        monkeypatch.setattr(reactor_module, "_DAY0_HOURLY_REFRESH_CURSOR", 0)
+        monkeypatch.setattr(reactor_module, "_DAY0_HOURLY_PROBE_CURSOR", 0)
+        monkeypatch.setattr(reactor_module, "_day0_hourly_refresh_budget_seconds", lambda: 6.0)
+        monkeypatch.setattr(reactor_module, "_day0_hourly_fetch_timeout_seconds", lambda: 4.0)
+        proved_due = set()
+        real_probe = reactor_module._edli_day0_hourly_refresh_due_families
+
+        def probe(**kwargs):
+            result = real_probe(**kwargs)
+            proved_due.update(city for city, _date, _metric in result.refresh_due_families)
+            return result
+
+        monkeypatch.setattr(reactor_module, "_edli_day0_hourly_refresh_due_families", probe)
+        monkeypatch.setattr(
+            vectors_module,
+            "maybe_refresh_day0_hourly_vectors",
+            lambda *_a, **_kw: SimpleNamespace(
+                vectors_written=0, cities_attempted=0, cities_skipped_throttle=0,
+                cities_skipped_quota=0, incomplete_expected_bundles=0,
+                budget_exhausted=False,
+            ),
+        )
+
+        for _cycle in range(4):  # ceil(12 cities / 3 completed per cycle)
+            reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        assert proved_due == set(names)
+
+    def test_hourly_refresh_probe_stale_capture_skips_strict_reads(
+        self, monkeypatch, tmp_path
+    ):
+        """One indexed seek proves a city with no current rolling capture due.
+
+        The strict bundle read cannot succeed without a rolling row inside the
+        producer horizon, so the probe must not spend ~33 ms per city on it.
+        """
+        from src.events import reactor as reactor_module
+
+        names = ["Toronto", "Warsaw", "Wellington"]
+        cities, db_path, _clock, strict_reads = self._install_probe_universe(
+            monkeypatch, tmp_path, names, slow_per_city_s=0.0,
+        )
+        now = datetime.now(UTC)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO day0_hourly_vectors (vector_id, model, city, target_date, "
+            "timezone_name, captured_at, endpoint, request_hash, times_json, "
+            "temps_c_json) VALUES ('v1', 'ecmwf_ifs', 'Warsaw', ?, 'UTC', ?, 'e', 'h', '[]', '[]')",
+            (now.date().isoformat(), (now - timedelta(hours=2, minutes=5)).isoformat()),
+        )
+        conn.execute(
+            "INSERT INTO day0_hourly_vectors (vector_id, model, city, target_date, "
+            "timezone_name, captured_at, endpoint, request_hash, times_json, "
+            "temps_c_json) VALUES ('v2', 'ecmwf_ifs', 'Wellington', ?, 'UTC', ?, 'e', 'h', '[]', '[]')",
+            (now.date().isoformat(), (now - timedelta(minutes=10)).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+
+        probe = reactor_module._edli_day0_hourly_refresh_due_families(
+            cities=cities, decision_time=now,
+        )
+
+        target_date = now.date().isoformat()
+        assert probe.proved is True
+        assert probe.cities_scanned == 3
+        assert probe.refresh_due_families == frozenset(
+            (name, target_date, "high") for name in names
+        )
+        # Only the city with a current capture reaches the strict read.
+        assert strict_reads == ["Wellington"]
+
     def test_hourly_refresh_preserves_full_missing_authority_priority_prefix(
         self, monkeypatch
     ):

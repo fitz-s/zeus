@@ -3760,6 +3760,42 @@ def select_ready_day0_hourly_vectors(
     return selected
 
 
+def newest_day0_rolling_capture_at(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    decision_time: datetime,
+) -> datetime | None:
+    """Newest rolling (non-ENS-member) capture of one city/date at the cut.
+
+    One seek on ``idx_day0_hourly_vectors_city_date``.  Every expected
+    deterministic model is a rolling row, so when this capture is older than a
+    strict reader's ``max_age_hours`` that read is provably empty.  The fetcher
+    writes ``captured_at`` as UTC ISO-8601, so text order is time order (the
+    index order).  ``ValueError`` names an unparseable newest capture.
+    """
+    row = conn.execute(
+        """
+        SELECT captured_at FROM day0_hourly_vectors
+         WHERE city = ? AND target_date = ? AND captured_at <= ?
+           AND substr(model, 1, ?) <> ?
+         ORDER BY captured_at DESC
+         LIMIT 1
+        """,
+        (
+            str(city),
+            str(target_date),
+            decision_time.astimezone(UTC).isoformat(),
+            len(DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX),
+            DAY0_SOURCE_CLOCK_ENSEMBLE_MEMBER_PREFIX,
+        ),
+    ).fetchone()
+    if row is None:
+        return None
+    return _day0_parse_aware_clock(row[0], field_name="captured_at").astimezone(UTC)
+
+
 def read_freshest_day0_hourly_vectors(
     *,
     city: str,
