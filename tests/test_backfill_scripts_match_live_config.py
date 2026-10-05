@@ -1,8 +1,8 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-09-01; last_reused=2026-09-01
+# Lifecycle: created=2026-04-21; last_reviewed=2026-10-04; last_reused=2026-10-04
 # Purpose: Keep backfill scripts aligned with live config and obs_v2 provenance identity contracts.
 # Reuse: Inspect config/cities.json, tier_resolver, script manifest, and current source-validity posture first.
-# Last reused/audited: 2026-09-01
+# Last reused/audited: 2026-10-04
 # Authority basis: plan v3 antibody A7; P1 obs_v2 provenance identity packet.
 """Antibody A7: backfill scripts must match the live config.
 
@@ -610,6 +610,198 @@ def test_hko_ingest_parses_official_since_midnight_extrema(hko_ingest_tick_modul
     assert snapshot.low_c == 29.0
 
 
+def _native_hko_snapshot(module, native="202610050730"):
+    body = (b"\xef\xbb\xbfDate time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),"
+        b"Minimum Air Temperature Since Midnight(degree Celsius)\r\n"
+        + native.encode() + b",HK Observatory,26.6,25.1\r\n"
+        + native.encode() + b",Chek Lap Kok,27.3,25.4\r\n")
+    return module._parse_hko_extrema_csv(body, fetched_at_utc="2026-10-04T23:38:12+00:00",
+        capture_started_at_utc="2026-10-04T23:38:11+00:00",
+        response_headers={"Date":"Sun, 04 Oct 2026 23:38:12 GMT", "Authorization":"secret"})
+
+
+@pytest.mark.parametrize("metric,expected", [("high", 26.6), ("low", 25.1)])
+def test_hko_original_entity_roundtrips_canonical_row(hko_ingest_tick_module, tmp_path, metric, expected):
+    import base64
+    import hashlib
+    module = hko_ingest_tick_module
+    snapshot = _native_hko_snapshot(module)
+    assert hashlib.sha256(snapshot.raw_body).hexdigest() == "9fbb2a7a335966d10f6e2b4b2feaaf31a6de5afb30e2ead185245deb1631faae"
+    conn = sqlite3.connect(tmp_path / "private-world.db")
+    try:
+        apply_canonical_schema(conn)
+        row = module._build_hko_extrema_row(snapshot, temperature_c=25.0,
+            accumulator_fetched_at=None, data_version="v1.wu-native",
+            imported_at="2026-10-04T23:38:13+00:00")
+        assert module.insert_rows(conn, [row]) == 1
+        conn.commit()
+        saved = conn.execute("SELECT raw_response,provenance_json,running_max,running_min FROM observation_instants").fetchone()
+        proof = json.loads(saved[1])
+        body = base64.b64decode(proof["raw_body_base64"])
+        assert saved[0].encode("utf-8") == snapshot.raw_body == body
+        assert hashlib.sha256(body).hexdigest() == proof["raw_body_sha256"]
+        replay = module._parse_hko_extrema_csv(body, fetched_at_utc=proof["capture_completed_at_utc"],
+            capture_started_at_utc=proof["capture_started_at_utc"])
+        assert getattr(replay, "high_c" if metric == "high" else "low_c") == expected
+        assert proof["source_issued_at_utc"] is None
+        assert proof["written_at_utc"] == row.imported_at != snapshot.fetched_at_utc
+        assert "authorization" not in proof["response_headers"]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("change", ["date", "high", "low", "native", "fetched", "missing_finish", "start_after_finish", "early_write", "naive_write"])
+def test_hko_native_capture_tamper_is_rejected(hko_ingest_tick_module, change):
+    from dataclasses import replace
+    module = hko_ingest_tick_module
+    snapshot = _native_hko_snapshot(module)
+    edits = {"date":{"target_date":"2026-10-04"}, "high":{"high_c":27.0}, "low":{"low_c":25.0},
+        "native":{"native_datetime":"202610050731"}, "fetched":{"fetched_at_utc":"2026-10-04T23:39:00+00:00"},
+        "missing_finish":{"capture_completed_at_utc":None},
+        "start_after_finish":{"capture_started_at_utc":"2026-10-04T23:39:00+00:00"}}
+    snapshot = replace(snapshot, **edits.get(change,{}))
+    imported = "2026-10-04T23:38:13+00:00"
+    if change == "early_write": imported = "2026-10-04T23:38:11+00:00"
+    if change == "naive_write": imported = "2026-10-04T23:38:13"
+    with pytest.raises(ValueError):
+        module._build_hko_extrema_row(snapshot, temperature_c=None, accumulator_fetched_at=None,
+            data_version="v1.wu-native", imported_at=imported)
+
+
+@pytest.mark.parametrize("damage", ["wrong_station", "duplicate_station", "future_native", "malformed", "nan"])
+def test_hko_original_entity_rejects_invalid_native_row(hko_ingest_tick_module, damage):
+    module = hko_ingest_tick_module
+    body = _native_hko_snapshot(module).raw_body
+    if damage == "wrong_station": body = body.replace(b"HK Observatory",b"Other Station")
+    elif damage == "duplicate_station": body += b"202610050730,HK Observatory,26.6,25.1\r\n"
+    elif damage == "future_native": body = body.replace(b"202610050730",b"202610050800")
+    elif damage == "nan": body = body.replace(b"26.6",b"nan")
+    else: body = b"bad csv"
+    with pytest.raises(ValueError):
+        module._parse_hko_extrema_csv(body, fetched_at_utc="2026-10-04T23:38:12+00:00",
+            capture_started_at_utc="2026-10-04T23:38:11+00:00")
+
+
+def test_hko_forward_capture_does_not_rewrite_same_asof_legacy_row(hko_ingest_tick_module, tmp_path):
+    module = hko_ingest_tick_module
+    conn = sqlite3.connect(tmp_path / "private-world.db")
+    try:
+        apply_canonical_schema(conn)
+        conn.execute("CREATE TABLE hko_hourly_accumulator(target_date TEXT,hour_utc TEXT,temperature REAL,fetched_at TEXT)")
+        legacy = module.HkoExtremaSnapshot("2026-10-05","2026-10-04T23:30:00+00:00",26.6,25.1,"2026-10-04T23:35:00+00:00")
+        oldrow = module._build_hko_extrema_row(legacy, temperature_c=None, accumulator_fetched_at=None,
+            data_version="v1.wu-native", imported_at="2026-10-04T23:35:01+00:00")
+        prior = module.HkoExtremaSnapshot("2026-10-04","2026-10-04T15:59:00+00:00",30.6,26.1,"2026-10-04T15:59:01+00:00")
+        priorrow = module._build_hko_extrema_row(prior, temperature_c=None, accumulator_fetched_at=None,
+            data_version="v1.wu-native", imported_at="2026-10-04T15:59:02+00:00")
+        assert module.insert_rows(conn, [priorrow,oldrow]) == 2
+        conn.commit()
+        before = conn.execute("SELECT raw_response,provenance_json,imported_at FROM observation_instants WHERE utc_timestamp=?",(legacy.observed_at_utc,)).fetchone()
+        result = module.project_accumulator_to_v2(conn,"v1.wu-native",tmp_path/"log.jsonl",snapshot=_native_hko_snapshot(module))
+        assert result["written"] == 0
+        assert conn.execute("SELECT raw_response,provenance_json,imported_at FROM observation_instants WHERE utc_timestamp=?",(legacy.observed_at_utc,)).fetchone() == before
+        from src.data.observation_instants_writer import InvalidObsV2RowError
+        same_asof_raw = module._build_hko_extrema_row(_native_hko_snapshot(module), temperature_c=None,
+            accumulator_fetched_at=None, data_version="v1.wu-native", imported_at="2026-10-04T23:38:13+00:00")
+        with pytest.raises(InvalidObsV2RowError, match="payload_hash reused"):
+            module.insert_rows(conn,[same_asof_raw])
+        newer = _native_hko_snapshot(module,"202610050731")
+        result = module.project_accumulator_to_v2(conn,"v1.wu-native",tmp_path/"log.jsonl",snapshot=newer)
+        assert result["written"] == 1  # unchanged extrema with an advanced native coverage cut
+        saved = conn.execute("SELECT raw_response,imported_at FROM observation_instants WHERE utc_timestamp=?",(newer.observed_at_utc,)).fetchone()
+        assert saved[0].encode("utf-8") == newer.raw_body
+        assert datetime.fromisoformat(saved[1]) >= datetime.fromisoformat(newer.capture_completed_at_utc)
+        assert not conn.in_transaction
+    finally:
+        conn.close()
+
+
+def test_hko_native_forward_capture_outer_rollback_leaves_no_row(hko_ingest_tick_module, tmp_path):
+    module = hko_ingest_tick_module
+    conn = sqlite3.connect(tmp_path / "private-world.db")
+    try:
+        apply_canonical_schema(conn)
+        snapshot = _native_hko_snapshot(module)
+        row = module._build_hko_extrema_row(snapshot, temperature_c=None, accumulator_fetched_at=None,
+            data_version="v1.wu-native", imported_at="2026-10-04T23:38:13+00:00")
+        conn.execute("BEGIN")
+        assert module.insert_rows(conn,[row]) == 1
+        assert conn.in_transaction  # writer savepoint is not a canonical commit or validator ACK
+        conn.rollback()
+        assert conn.execute("SELECT COUNT(*) FROM observation_instants").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("damage", ["raw_missing", "fetch_mismatch", "completion_mismatch", "start_after_finish",
+    "write_before_fetch", "written_mismatch", "future_import", "future_fetch", "foreign_receipt",
+    "subsecond_future_import", "microsecond_future_import", "subsecond_receipt_mismatch",
+    "subsecond_completion_mismatch", "subsecond_reversed_start", "subsecond_written_mismatch",
+    "naive_import", "invalid_capture", "exact_subsecond_cut", "subsecond_observation_mismatch",
+    "subsecond_first_fetch_reversed", "legacy_subsecond_future_import", "offset_equivalent_clocks",
+    "subsecond_first_observation"])
+def test_hko_rollover_ordered_clock_requires_this_original_capture(hko_ingest_tick_module, tmp_path, monkeypatch, damage):
+    from src.data.day0_observation_reader import hko_rollover_carryover_status
+    module = hko_ingest_tick_module
+    class WriterClock(datetime):
+        @classmethod
+        def now(cls, tz=None): return datetime(2026,10,4,23,39,tzinfo=timezone.utc).astimezone(tz or timezone.utc)
+    monkeypatch.setattr(module,"datetime",WriterClock)
+    conn = sqlite3.connect(tmp_path / "private-world.db")
+    try:
+        apply_canonical_schema(conn)
+        conn.execute("CREATE TABLE hko_hourly_accumulator(target_date TEXT,hour_utc TEXT,temperature REAL,fetched_at TEXT)")
+        conn.commit()
+        first = _native_hko_snapshot(module)
+        assert module.project_accumulator_to_v2(conn,"v1.wu-native",tmp_path/"log.jsonl",snapshot=first)["source_not_ready"] == 1
+        body = first.raw_body.replace(b"202610050730",b"202610050731").replace(b"26.6",b"26.7")
+        second = module._parse_hko_extrema_csv(body,fetched_at_utc="2026-10-04T23:38:14+00:00",
+            capture_started_at_utc="2026-10-04T23:38:13+00:00")
+        assert module.project_accumulator_to_v2(conn,"v1.wu-native",tmp_path/"log.jsonl",snapshot=second)["written"] == 1
+        cut = datetime(2026,10,4,23,40,tzinfo=timezone.utc)
+        assert hko_rollover_carryover_status(conn,target_date="2026-10-05",decision_time=cut) == "RESET_CONFIRMED"
+        raw,prov,imported = conn.execute("SELECT raw_response,provenance_json,imported_at FROM observation_instants").fetchone()
+        p = json.loads(prov)
+        if damage == "raw_missing": raw = None
+        elif damage == "fetch_mismatch": p["extrema_fetched_at"] = "2026-10-04T23:38:12+00:00"
+        elif damage == "completion_mismatch": p["capture_completed_at_utc"] = "2026-10-04T23:38:12+00:00"
+        elif damage == "start_after_finish": p["capture_started_at_utc"] = "2026-10-04T23:38:15+00:00"
+        elif damage == "write_before_fetch": imported = "2026-10-04T23:38:12+00:00"
+        elif damage == "written_mismatch": p["written_at_utc"] = "2026-10-04T23:39:01+00:00"
+        elif damage == "future_import": imported = "2026-10-04T23:50:00+00:00"; p["written_at_utc"] = imported
+        elif damage == "future_fetch":
+            p["extrema_fetched_at"] = p["capture_completed_at_utc"] = p["rollover_reset_confirmation"]["confirmed_fetched_at_utc"] = "2026-10-04T23:50:00+00:00"
+        elif damage == "foreign_receipt": p["rollover_reset_confirmation"]["confirmed_observed_at_utc"] = "2026-10-04T23:30:00+00:00"
+        elif damage in {"subsecond_future_import", "microsecond_future_import", "exact_subsecond_cut"}:
+            cut = datetime(2026,10,4,23,39,0,100000,tzinfo=timezone.utc)
+            imported = "2026-10-04T23:39:00.900000+00:00" if damage == "subsecond_future_import" else "2026-10-04T23:39:00.100001+00:00"
+            if damage == "exact_subsecond_cut": imported = cut.isoformat()
+            p["written_at_utc"] = imported
+        elif damage == "subsecond_receipt_mismatch": p["rollover_reset_confirmation"]["confirmed_fetched_at_utc"] = "2026-10-04T23:38:14.000001+00:00"
+        elif damage == "subsecond_completion_mismatch": p["capture_completed_at_utc"] = "2026-10-04T23:38:14.000001+00:00"
+        elif damage == "subsecond_reversed_start": p["capture_started_at_utc"] = "2026-10-04T23:38:14.000001+00:00"
+        elif damage == "subsecond_written_mismatch": p["written_at_utc"] = "2026-10-04T23:39:00.000001+00:00"
+        elif damage == "naive_import": imported = "2026-10-04T23:39:00"; p["written_at_utc"] = imported
+        elif damage == "invalid_capture": p["capture_started_at_utc"] = "not-a-clock"
+        elif damage == "subsecond_observation_mismatch": p["rollover_reset_confirmation"]["confirmed_observed_at_utc"] = "2026-10-04T23:31:00.000001+00:00"
+        elif damage == "subsecond_first_fetch_reversed": p["rollover_reset_confirmation"]["first_probe_fetched_at_utc"] = "2026-10-04T23:38:14.000001+00:00"
+        elif damage == "legacy_subsecond_future_import":
+            raw = None
+            cut = datetime(2026,10,4,23,39,0,100000,tzinfo=timezone.utc)
+            imported = "2026-10-04T23:39:00.100001+00:00"
+            p["rollover_reset_confirmation"]["confirmed_fetched_at_utc"] = imported
+        elif damage == "offset_equivalent_clocks":
+            p["extrema_fetched_at"] = "2026-10-05T07:38:14+08:00"
+            p["capture_completed_at_utc"] = "2026-10-04T18:38:14-05:00"
+            p["written_at_utc"] = "2026-10-05T07:39:00+08:00"
+        elif damage == "subsecond_first_observation": p["rollover_reset_confirmation"]["first_probe_observed_at_utc"] = "2026-10-04T23:30:59.999999+00:00"
+        conn.execute("UPDATE observation_instants SET raw_response=?,provenance_json=?,imported_at=?",(raw,json.dumps(p),imported))
+        expected = "RESET_CONFIRMED" if damage in {"exact_subsecond_cut", "offset_equivalent_clocks", "subsecond_first_observation"} else "UNPROVEN"
+        assert hko_rollover_carryover_status(conn,target_date="2026-10-05",decision_time=cut) == expected
+    finally:
+        conn.close()
+
+
 def test_hko_ingest_repeated_provider_snapshot_is_idempotent(hko_ingest_tick_module):
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -826,11 +1018,18 @@ def test_hko_projection_rejects_unproven_rollover_schema(
 def test_hko_projection_unproven_probe_drains_after_source_pair_changes(
     hko_ingest_tick_module,
     tmp_path,
+    monkeypatch,
 ):
     from src.data.day0_observation_reader import (
         hko_provisional_revision_likelihood,
         hko_rollover_carryover_status,
     )
+
+    class WriterClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 7, 19, 1, 11, 5, tzinfo=timezone.utc).astimezone(tz or timezone.utc)
+    monkeypatch.setattr(hko_ingest_tick_module, "datetime", WriterClock)
 
     conn = sqlite3.connect(":memory:")
     conn.executescript(
@@ -938,12 +1137,10 @@ def test_hko_projection_unproven_probe_drains_after_source_pair_changes(
             "WHERE target_date = '2026-07-19'"
         ).fetchone()[0] == 0
 
-        changed = hko_ingest_tick_module.HkoExtremaSnapshot(
-            target_date="2026-07-19",
-            observed_at_utc="2026-07-19T01:10:00+00:00",
-            high_c=31.2,
-            low_c=25.0,
+        changed = hko_ingest_tick_module._parse_hko_extrema_csv(
+            b"Date time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),Minimum Air Temperature Since Midnight(degree Celsius)\r\n202607190910,HK Observatory,31.2,25.0\r\n",
             fetched_at_utc="2026-07-19T01:11:00+00:00",
+            capture_started_at_utc="2026-07-19T01:10:59+00:00",
         )
         second = hko_ingest_tick_module.project_accumulator_to_v2(
             conn,

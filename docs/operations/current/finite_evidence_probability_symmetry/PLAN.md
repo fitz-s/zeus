@@ -16484,3 +16484,182 @@ managed archive identities are exact native-ens-point-decoder and
 red-cancel-source-drain, not other tasks or old source children. Preserve the
 unfinished parent branch and external XML/log artifacts for the next authorized
 native-budget/physical-proof slice; no full-goal completion is recorded.
+
+### BEFOREEDIT: one bounded real native2t run audit, never live activation
+
+ROOT's changed authority permits one public native ECMWF index/Range audit
+attempt, at most512MiB actual downloaded bytes (indices included), absolute
+300s total from first request with independent headroom. All cities share one
+run/body set; no per-city downloads, API keys, rolling substitute, new daemon,
+canonical DB/source_run writes, source kick, reseed, venue action or restart.
+Normal collection has priority. Before network, verify enough free storage for
+raw plus concat with2GiB safety headroom, no collector/source-lock contention
+and current CPU/memory headroom; do not interrupt normal owners or delete data.
+At23:35Z disk90GiB passed storage but CPU0%idle/load123 on14cores and normal
+FORECAST15603 holding OpenData/mx2t6 locks failed independent-start readiness.
+Implement/test the isolated helper while actual collection remains unstarted.
+
+Parent exact archive was restored; checkpoint ede216 is preserved and rebased
+as5ed6a92 on current origin/live458fafddd. The only conflict was appended PLAN
+history: preserve both peer's reverted-deployment statement and our historical
+rc1/peer440 closeout, without reinstating old source/domain behavior. Current
+source API remains offline decoder ec2481; earlier440 runtime is historical,
+not current proof. Native worker owns a fresh child from458, only
+src/data/ecmwf_open_data.py and existing collect-cycle tests; main owns this
+PLAN/necessary existing registry rows and production acceptance. No old child
+dirty snapshot is restored or reused.
+
+Audit artifact destination is inside this existing registered packet:
+native_2t_run_audit/<exact-run>/ (raw original indices/ranges, capped partial
+output, headers, clock/byte-budget receipt). Keep raw evidence non-authoritative
+and out of canonical state; never commit bulk raw bodies. Bind actual raw
+Section0/1/3/4 quantity/process161, oper/fc control and pf1..50, exact cycle,
+steps, grid/selected positions, actual LSM and optional phi originals. Index
+length sums and actual streamed byte count decide fit before ranges, not guessed
+prior message size. Ref/init and HTTP Date/Last-Modified are not source-issued
+time; issue UNKNOWN stays UNKNOWN. Preserve first index/range possession clocks.
+
+SCOPE exact run/member/step/raw-quantity/coordinate proof; DRAIN this single
+bounded audit ends with actual proof or typed unavailable/budget/deadline reason;
+RESET only a newly authorized normal acquisition with real bytes, never reuse
+old fields as2t, silently retry exhausted budget, or upgrade OFFLINE_ONLY into q.
+Qualified HK X/whole-city support union and latest eligible published run must
+be established from current physical/native evidence before selecting ranges.
+Tests use fake HTTP/real synthetic GRIB for limits, identities and missing proof;
+those do not replace the one actual source attempt or prove forecast accuracy.
+
+23:38 actual runtime is458 MAIN20593/INGEST14927/FORECAST15603, fresh
+heartbeats, live cwd and MAIN canonical three-DB handles; config file-only d7
+and actual guard getter None. Current HK local Oct5 correct WORLD reader sees
+cumulative H26.6/L25.1, row9939630 fact23:30Z/import23:38:12.493717Z. Its raw
+response is NULL and parsed provenance alone does not prove original cumulative
+CSV coverage; do not upgrade that latest timestamp into qualified raw-prefix X.
+The FORECAST same-name observation shell was empty and is not the owning read.
+Current source has reverted the prior measurement-domain API; preserve that
+peer code, not resurrect old consumer qualification from the checkpoint.
+
+For the54 configured current local days, exact calendar union at23:39:40Z is
+[Oct4 03:00Z,Oct5 23:00Z); HK is[Oct4 16:00Z,Oct5 16:00Z). An unverified
+Oct4 18Z candidate would need forward native3h support0..30 inclusive across
+the shared future union, while leaving unknown pre-run gaps explicitly open.
+This is a range-selection plan, not same-X/published-run proof. No index was
+requested, so actual index-length sum, latest published2t run, process/member
+and original LSM/phi bindings remain unproven until the single bounded attempt.
+
+### BEFOREEDIT: HKO forward original entity preservation, not a q-law restore
+
+ROOT authorized scripts/hko_ingest_tick.py plus existing
+test_day0_obs_fastlane_optionbc.py/test_backfill_scripts_match_live_config.py
+and necessary existing owner rows. Actual current capture discards response
+bytes at prefetch->snapshot->_build, leaving WORLD9939630/31 raw_response NULL.
+Preserve exact HTTP200 content (BOM/CRLF included), independent SHA/base64,
+unique HK Observatory native DateTime and safe header allowlist in the existing
+raw_response/provenance fields. Capture start and completion come from the
+actual GET, source-issued remains UNKNOWN; native as-of, HTTP Date, possession,
+and actual projection import/write clock are distinct. Parsed payload_hash stays
+parsed identity. No new HTTP/table/schema/cross-DB write, reader/domain/math
+gate change, historical NULL-row rewrite, or same-asof materialization rewrite.
+
+SCOPE exact cumulative product/station/native-date/capture entity; DRAIN the
+existing normal next200 with advanced native as-of; RESET new raw evidence only
+for that publication, including unchanged H/L values with genuinely advanced
+as-of. A304, cached/legacy snapshot or old same-asof row cannot gain new body
+possession/proof. Both HIGH/LOW preserve independent official values; unrelated
+spot temperature can never supply cumulative coverage. Private actual producer
+to canonical-schema SQLite replay checks raw bytes/hash, wrong station/date,
+future/bad capture, malformed/304, same-asof idempotence and commit-before-ack
+rollback. Real generated native CSV loss must RED before patch; focused affected
+checks and named review freeze follow. No landing/restart before ROOT accepts.
+Native child owns disjoint ECMWF/collect files, and main does not replace that
+worker's example-config bootstrap. All private tests cap OMP/BLAS/MKL threads1;
+production environment is unchanged and no public collection starts while busy.
+
+ROOT approved a precisely scoped reader clock compatibility extension after
+the affected cold-start test proved that honest writer import time conflicts
+with the old confirmed-fetch==import contract. Do not broadly replace equality:
+preserve the legacy exact-equality branch unchanged. The new ordered branch
+requires this row's nonempty original capture, confirmed-fetch equal to its
+extrema_fetched_at and actual capture_completed_at, capture-start<=finish,
+same observation fact<=finish<=actual import, and written-at==import<=decision.
+Existing date/fact/high-low pair/hash/first-probe identity gates remain. Raw-NULL
+legacy rows cannot use the new ordered branch; no old receipt can acquire a
+new capture by replay. Update only _hko_rollover_reset_confirmation_present in
+src/data/day0_observation_reader.py, its existing WHY row and current tests.
+The historical cold-start fixture must supply a real private original CSV and
+private writer clock, not backdate production import or relax its RESET assert.
+
+HKO forward-capture freeze: original actual normal two-GET producer H/L both
+RED at raw_response=None,2FAIL2.04s, /tmp/zeus-hko-native-forward-red.xml.
+Current original entity9fbb2a7a335966d10f6e2b4b2feaaf31a6de5afb30e2ead185245deb1631faae
+roundtrips producer->canonical-schema private SQLite->raw/native H/L replay.
+The honest-writer-clock cold-start case also RED with the original6179 reader
+git-object overlay (1FAIL2.09s), /tmp/zeus-hko-native-clock-original6179-red.xml;
+not a pre-existing failure or an excuse to restore backdated imported_at.
+New affected HKO subset74PASS2.76s, /tmp/zeus-hko-native-affected-final2.xml;
+original owning reader5 rollover/revision controls PASS1.85s,
+/tmp/zeus-hko-rollover-original-controls.xml. Initial affected36P1F then62P1F
+are retained as the real clock-binding discovery, not called green. The final
+ordered branch passes nine private SQL wrong-capture/clock/foreign-receipt
+negatives. The same-asof legacy raw-NULL row stays unchanged and direct same-hash
+raw retrofit still raises the existing material guard; advanced native asof
+with unchanged extrema writes a new original row. Original commit/ACK,
+savepoint/rollback controls remain. HTTP content is decoded entity, not wire or
+compressed bytes; original UTF8 BOM/CRLF are retained, source-issued UNKNOWN,
+and projection-stage written_at is expressly not a commit timestamp.
+
+Frozen script50331a7c94b619bb9bf8e85be7080cb519c055e19fd0ceed0d0bc351d89e927d;
+reader2510980084c99be926c8948e3b69aded862ce277d9e21bc6d1364beacee47233;
+backfilltestd6895078f1c534e51b7ce1d25ee4dd3bcd39c6477092f93fc9a7426422bef20f;
+fastlanetest24263cdafef75a8d4b04d98347110f479252d56eae1c21fa706721a695e99fb3.
+Compile4/diff and planning/freshness changed-surface checks PASS with no issues;
+existing script/WHY/test rows alone describe the behavior. Private bootstrap
+is the exact tracked example config, not live config/DB. Named independent
+review is pending; no commit/push/restart or actual new source collection yet.
+Latest fetched origin6179 owns new peer branch binding/typed BLOCKED behavior;
+these untouched peer changes must survive eventual integration. Separate SG
+queue concern was refuted by its exact completed CAPITAL_REJECTED receipt and
+non-positive fixed SELL point objective, not claimed an orphan or profitable exit.
+
+ROOT approved the independent same-second causal-clock finding: SQLite datetime
+truncates subsecond precision, allowing an import at .900000 after a decision
+at .100000. BEFOREEDIT: retain SQL's identity/pair/hash predicates and coarse
+prefilter, but validate all receipt/fact/capture/import/decision clock relations
+in aware UTC Python datetimes at full stored precision. Invalid/naive clocks
+fail closed; the legacy exact-fetch==import route stays exact, not weakened.
+SCOPE this cumulative reset receipt; DRAIN next normally acquired lawful row;
+RESET exact causal and own-capture clocks. Add same-second future-import,
+capture mismatch/reversed start and microsecond/equality controls in the owned
+backfill test. No source/q/math/schema or production mutation expansion.
+
+Precision recovery evidence: seven actual same-second/naive illegal clock cases
+RED and exact-cut positive PASS against the previous reader (rc1),
+/tmp/zeus-hko-subsecond-clock-red.xml. Python aware-UTC receipt qualification
+now preserves microsecond order/equality; SQL retains only coarse time and
+identity/pair/hash prefilters. All23 private capture-clock cases plus5 original
+reader rollover/revision controls PASS (28P2.26s rc0),
+/tmp/zeus-hko-subsecond-clock-final.xml. Includes legacy exact-route future
+import rejection, +1us future/mismatch/reversal, offset-equivalent clocks and
+exact-cut equality. Earlier74 producer passes remain separate proof, not a
+claim of rerunning them. Final readera1ef8ed81920227df26a00f14d6fca408737cf1c74c21f1778f2daafae73c409,
+backfilltestf634468890e96a462bdffead2a6746e06576a6fccdfefdc6f837a168c8cbf0d6;
+script50331/fastlanetest24263 unchanged. Named precision review pending; no
+production write/HTTP/commit/push/restart performed.
+
+Native bounded audit preflight on2026-10-05T00:26:01Z and00:26:29Z stopped
+before any public HTTP: normal FORECAST49426 retained open total/mx/mn source
+lock FDs, so normal-priority clearance was not proved. CPU idle43.39->63.63%,
+memory-pressure free60->61%, disk91066928->90989696KiB were adequate resource
+headroom but cannot substitute for collector clearance. HTTP0/download0,
+no raw target/output created and no polling retry loop; eligible publication,
+actual index length sum and future2t body remain UNKNOWN. Worker evidence tool
+chunks321a4e/13a68f/564246/6cd425; offline-helper frozene78f/8c5e and named
+three-control review do not prove an actual source run. Normal live actors in
+those samples were MAIN51493/INGEST49356/FORECAST49426, all live cwd; this is
+not a claim of current loaded SHA or q qualification.
+
+Cheap fetched origin remains6179ad8b (peer82a853+6179). Compared with the458
+development base its five changed files are typed-block evidence, queue,
+materializer, a new typed-block test and topology's separate new trusted row.
+No same-file overlap with HKO source2/test2 or native helper source/test; future
+adaptation preserves peer BLOCKED/branch binding and both topology rows. No
+rebase, push or loader has yet occurred for this repair.

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-23; last_reviewed=2026-07-23; last_reused=2026-07-23
-# Purpose: Ingest HKO accumulator readings and project them into observation_instants.
+# Lifecycle: created=2026-04-23; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Purpose: Project HKO observations while retaining original cumulative entity bytes and separate source/capture/write clocks.
 # Reuse: Keep HKO source identity separate from WU/VHHH and preserve writer provenance identity.
 # Created: 2026-04-23
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-10-04
 # Authority basis: .omc/plans/observation-instants-migration-iter3.md Phase 1
 #                  L95 ("HK: no backfill; write accumulator-forward-only
 #                  starting now with data_version='v1.wu-native' + authority=
@@ -44,6 +44,7 @@ timestamp without inventing historical extrema.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import hashlib
 import io
@@ -100,11 +101,17 @@ HK_UTC_OFFSET_MINUTES = 480  # UTC+8, no DST
 
 @dataclass(frozen=True)
 class HkoExtremaSnapshot:
+    """Parsed HKO values plus original HTTP-decoded entity, never wire bytes."""
     target_date: str
     observed_at_utc: str
     high_c: float
     low_c: float
     fetched_at_utc: str
+    raw_body: bytes | None = None
+    capture_started_at_utc: str | None = None
+    capture_completed_at_utc: str | None = None
+    native_datetime: str | None = None
+    response_headers: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -166,8 +173,9 @@ class HkoExtremaPoller:
         executor = ThreadPoolExecutor(max_workers=2)
         jobs = []
         def fetch(url, headers):
+            started = datetime.now(timezone.utc)
             response = self._client.get(url,headers=headers)
-            return response,datetime.now(timezone.utc)
+            return response,started,datetime.now(timezone.utc)
         for url, etag, modified in (
             (HKO_EXTREMA_URL,self._etag,self._last_modified),
             (HKO_CURRENT_TEMPERATURE_URL,self._current_etag,self._current_last_modified),
@@ -180,13 +188,16 @@ class HkoExtremaPoller:
         try:
             for index, future in enumerate(jobs):
                 try:
-                    response, fetched = future.result(timeout=max(0,deadline-time.monotonic()))
+                    response, started, fetched = future.result(timeout=max(0,deadline-time.monotonic()))
                     if response.status_code == 304:
                         continue
                     response.raise_for_status()
                     if index == 0:
+                        if response.status_code != 200:
+                            raise ValueError("HKO extrema capture requires HTTP200")
                         values[index] = HkoExtremaPrefetch(
-                            _parse_hko_extrema_csv(response.text,fetched_at_utc=fetched.isoformat()),
+                            _parse_hko_extrema_csv(response.content,fetched_at_utc=fetched.isoformat(),
+                                capture_started_at_utc=started.isoformat(),response_headers=dict(response.headers)),
                             response.headers.get("etag"),response.headers.get("last-modified"))
                     else:
                         modified = response.headers.get("last-modified")
@@ -210,15 +221,20 @@ class HkoExtremaPoller:
             headers["If-None-Match"] = self._etag
         if self._last_modified:
             headers["If-Modified-Since"] = self._last_modified
+        started = datetime.now(timezone.utc).isoformat()
         response = self._bounded_get(headers)
         if response.status_code == 304:
             return None
         response.raise_for_status()
+        if response.status_code != 200:
+            raise ValueError("HKO extrema capture requires HTTP200")
         fetched_at = datetime.now(timezone.utc).isoformat()
         return HkoExtremaPrefetch(
             snapshot=_parse_hko_extrema_csv(
-                response.text,
+                response.content,
                 fetched_at_utc=fetched_at,
+                capture_started_at_utc=started,
+                response_headers=dict(response.headers),
             ),
             etag=response.headers.get("etag"),
             last_modified=response.headers.get("last-modified"),
@@ -357,17 +373,21 @@ def _append_committed_log(log_path: Path, entry: dict) -> None:
 
 
 def _parse_hko_extrema_csv(
-    payload: str,
+    payload: str | bytes,
     *,
     fetched_at_utc: str,
+    capture_started_at_utc: str | None = None,
+    response_headers: dict[str, str] | None = None,
 ) -> HkoExtremaSnapshot:
     """Parse the official HKO since-midnight extrema for Observatory HQ."""
 
-    reader = csv.DictReader(io.StringIO(payload.lstrip("\ufeff")))
-    for row in reader:
-        station = str(row.get("Automatic Weather Station") or "").strip()
-        if station != "HK Observatory":
-            continue
+    raw_body = payload if isinstance(payload, bytes) else None
+    text = payload.decode("utf-8") if raw_body is not None else payload
+    reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))
+    matching = [row for row in reader if str(row.get("Automatic Weather Station") or "").strip() == "HK Observatory"]
+    if len(matching) != 1:
+        raise ValueError("HKO extrema CSV requires one HK Observatory row")
+    for row in matching:
         raw_time = str(row.get("Date time") or "").strip()
         high_raw = row.get(
             "Maximum Air Temperature Since Midnight(degree Celsius)"
@@ -380,23 +400,38 @@ def _parse_hko_extrema_csv(
         )
         high_c = float(high_raw)
         low_c = float(low_raw)
-        if high_c < low_c:
+        if not math.isfinite(high_c) or not math.isfinite(low_c) or high_c < low_c:
             raise ValueError("HKO since-midnight maximum is below minimum")
+        if raw_body is not None:
+            finished = datetime.fromisoformat(fetched_at_utc.replace("Z", "+00:00"))
+            started = datetime.fromisoformat((capture_started_at_utc or "").replace("Z", "+00:00"))
+            if finished.tzinfo is None or started.tzinfo is None or started > finished or local.astimezone(timezone.utc) > finished:
+                raise ValueError("HKO native capture clocks invalid")
         return HkoExtremaSnapshot(
             target_date=local.date().isoformat(),
             observed_at_utc=local.astimezone(timezone.utc).isoformat(),
             high_c=high_c,
             low_c=low_c,
             fetched_at_utc=fetched_at_utc,
+            raw_body=raw_body,
+            capture_started_at_utc=capture_started_at_utc,
+            capture_completed_at_utc=fetched_at_utc if raw_body is not None else None,
+            native_datetime=raw_time,
+            response_headers={str(k).lower(): str(v) for k,v in (response_headers or {}).items()
+                if str(k).lower() in {"date", "etag", "last-modified", "content-type", "content-length", "content-encoding"}},
         )
     raise ValueError("HKO extrema CSV missing HK Observatory row")
 
 
 def _fetch_hko_extrema() -> HkoExtremaSnapshot:
+    started = datetime.now(timezone.utc).isoformat()
     response = httpx.get(HKO_EXTREMA_URL, timeout=30.0)
     response.raise_for_status()
+    if response.status_code != 200:
+        raise ValueError("HKO extrema capture requires HTTP200")
     fetched_at = proof_of_possession_available_at(datetime.now(timezone.utc))
-    return _parse_hko_extrema_csv(response.text, fetched_at_utc=fetched_at)
+    return _parse_hko_extrema_csv(response.content, fetched_at_utc=fetched_at,
+        capture_started_at_utc=started, response_headers=dict(response.headers))
 
 
 def _latest_accumulator_temperature(
@@ -524,6 +559,30 @@ def _build_hko_extrema_row(
             rollover_reset_confirmation
         )
     provenance_payload["payload_hash"] = _sha256_json(identity_payload)
+    raw_response = None
+    if snapshot.raw_body is not None:
+        if snapshot.capture_completed_at_utc != snapshot.fetched_at_utc:
+            raise ValueError("HKO fetched clock differs from actual capture completion")
+        replay = _parse_hko_extrema_csv(snapshot.raw_body, fetched_at_utc=snapshot.capture_completed_at_utc,
+            capture_started_at_utc=snapshot.capture_started_at_utc, response_headers=snapshot.response_headers)
+        if (replay.target_date, replay.observed_at_utc, replay.high_c, replay.low_c, replay.native_datetime) != (
+            snapshot.target_date, snapshot.observed_at_utc, snapshot.high_c, snapshot.low_c, snapshot.native_datetime):
+            raise ValueError("HKO native body identity mismatch")
+        written = datetime.fromisoformat(imported_at.replace("Z", "+00:00"))
+        if written.tzinfo is None or written < datetime.fromisoformat(snapshot.capture_completed_at_utc.replace("Z", "+00:00")):
+            raise ValueError("HKO import precedes capture completion")
+        raw_response = snapshot.raw_body.decode("utf-8")
+        provenance_payload.update({
+            "raw_body_sha256": hashlib.sha256(snapshot.raw_body).hexdigest(),
+            "raw_body_base64": base64.b64encode(snapshot.raw_body).decode("ascii"),
+            "native_datetime": replay.native_datetime,
+            "capture_started_at_utc": snapshot.capture_started_at_utc,
+            "capture_completed_at_utc": snapshot.capture_completed_at_utc,
+            # Projection-stage timestamp; the caller still owns commit/ACK.
+            "written_at_utc": imported_at,
+            "source_issued_at_utc": None,
+            "response_headers": replay.response_headers,
+        })
     provenance = json.dumps(provenance_payload, separators=(",", ":"))
     return ObsV2Row(
         city=HK_CITY_NAME,
@@ -548,6 +607,8 @@ def _build_hko_extrema_row(
         authority="ICAO_STATION_NATIVE",
         data_version=data_version,
         provenance_json=provenance,
+        raw_response=raw_response,
+        source_file=HKO_EXTREMA_URL,
     )
 
 
@@ -672,7 +733,7 @@ def project_accumulator_to_v2(
             temperature_c=temp_c,
             accumulator_fetched_at=accumulator_fetched_at,
             data_version=data_version,
-            imported_at=snapshot.fetched_at_utc,
+            imported_at=proof_of_possession_available_at(datetime.now(timezone.utc)),
             rollover_reset_confirmation=rollover_reset_confirmation,
         )
     except (httpx.HTTPError, InvalidObsV2RowError, ValueError) as exc:

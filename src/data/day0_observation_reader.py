@@ -1,5 +1,5 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-07-20 (source-specific HKO cumulative snapshots)
+# Last reused/audited: 2026-10-04 (HKO same-capture ordered rollover clocks)
 # Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
 #   docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md §5;
 #   docs/evidence/upstream_physical_2026_07_17/day0_mechanism_first_principles_audit.md §M-2/§H-3
@@ -362,14 +362,22 @@ def _hko_rollover_reset_confirmation_present(
     decision_time: datetime,
     table_ref: str | None = None,
 ) -> bool:
-    """Return whether a causal canonical row proves a cold-start pair change."""
+    """Prove a cold-start pair change, retaining legacy exact clock binding.
 
-    decision_utc = decision_time.astimezone(timezone.utc).isoformat()
+    Honest later imports need this row's original capture and matching fetch,
+    acquisition and writer clocks; raw-missing legacy receipts cannot take the
+    ordered-clock branch. Existing date/fact/pair identity remains mandatory.
+    """
+
+    if decision_time.tzinfo is None or decision_time.utcoffset() is None:
+        raise ValueError("HKO_PROVISIONAL_REVISION_DECISION_TIME_NAIVE")
+    decision_cut = decision_time.astimezone(timezone.utc)
+    decision_utc = decision_cut.isoformat()
     table_ref = table_ref or _hko_observation_table_ref(conn)
-    return (
-        conn.execute(
+    rows = conn.execute(
             f"""
-            SELECT 1
+            SELECT imported_at, {_OBSERVATION_FACT_TIME_SQL}, raw_response,
+                   provenance_json
               FROM {table_ref}
              WHERE city = 'Hong Kong'
                AND target_date = ?
@@ -431,29 +439,6 @@ def _hko_rollover_reset_confirmation_present(
                ) AS REAL) - CAST(json_extract(
                     provenance_json, '$.official_running_low_c'
                ) AS REAL)) <= 1e-9
-               AND datetime(json_extract(
-                    provenance_json,
-                    '$.rollover_reset_confirmation.first_probe_observed_at_utc'
-               )) < datetime(json_extract(
-                    provenance_json,
-                    '$.rollover_reset_confirmation.confirmed_observed_at_utc'
-               ))
-               AND datetime(json_extract(
-                    provenance_json,
-                    '$.rollover_reset_confirmation.confirmed_observed_at_utc'
-               )) = datetime({_OBSERVATION_FACT_TIME_SQL})
-               AND datetime(json_extract(
-                    provenance_json,
-                    '$.rollover_reset_confirmation.first_probe_fetched_at_utc'
-               )) <= datetime(json_extract(
-                    provenance_json,
-                    '$.rollover_reset_confirmation.confirmed_fetched_at_utc'
-               ))
-               AND datetime(json_extract(
-                    provenance_json,
-                    '$.rollover_reset_confirmation.confirmed_fetched_at_utc'
-               )) = datetime(imported_at)
-               AND datetime(imported_at) <= datetime(?)
                AND json_extract(
                     provenance_json,
                     '$.rollover_reset_confirmation.first_probe_payload_hash'
@@ -478,17 +463,51 @@ def _hko_rollover_reset_confirmation_present(
                     provenance_json,
                     '$.rollover_reset_confirmation.confirmed_payload_hash'
                ), 8) NOT GLOB '*[^0-9a-f]*'
-             LIMIT 1
             """,
             (
                 target_date.isoformat(),
                 decision_utc,
                 decision_utc,
-                decision_utc,
             ),
-        ).fetchone()
-        is not None
-    )
+        )
+    # SQLite datetime truncates fractions; SQL above is only a coarse prefilter.
+    # Check every clock at stored precision, without converting naive clocks.
+    def utc_clock(raw: object) -> datetime:
+        if not isinstance(raw, str):
+            raise ValueError("HKO_RESET_CLOCK_INVALID")
+        clock = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if clock.tzinfo is None or clock.utcoffset() is None:
+            raise ValueError("HKO_RESET_CLOCK_NAIVE")
+        return clock.astimezone(timezone.utc)
+
+    for imported_raw, fact_raw, raw_response, provenance_raw in rows:
+        try:
+            provenance = json.loads(provenance_raw)
+            receipt = provenance["rollover_reset_confirmation"]
+            imported, fact = utc_clock(imported_raw), utc_clock(fact_raw)
+            first_observed = utc_clock(receipt["first_probe_observed_at_utc"])
+            confirmed_observed = utc_clock(receipt["confirmed_observed_at_utc"])
+            first_fetched = utc_clock(receipt["first_probe_fetched_at_utc"])
+            confirmed_fetched = utc_clock(receipt["confirmed_fetched_at_utc"])
+            if not (
+                first_observed < confirmed_observed == fact <= decision_cut
+                and first_fetched <= confirmed_fetched <= imported <= decision_cut
+            ):
+                continue
+            if confirmed_fetched == imported:
+                return True  # Existing exact-clock legacy receipt contract.
+            if (
+                raw_response
+                and confirmed_fetched == utc_clock(provenance["extrema_fetched_at"])
+                == utc_clock(provenance["capture_completed_at_utc"])
+                and utc_clock(provenance["capture_started_at_utc"]) <= confirmed_fetched
+                and fact <= confirmed_fetched
+                and utc_clock(provenance["written_at_utc"]) == imported
+            ):
+                return True
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+    return False
 
 
 def hko_rollover_carryover_status(

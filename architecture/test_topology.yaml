@@ -421,7 +421,7 @@ test_trust_policy:
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-07-19"}
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
-    tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
+    tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-10-04", note: "HKO exact original cumulative entity roundtrip, same-asof immutability, advanced native coverage RESET and this-row acquisition/import clock binding."}
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-08-22", note: "B001/B047 structural and runtime antibodies, including cross-process scheduler-health read-merge-replace serialization so concurrent daemon upserts cannot erase sibling rows."}
     tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
@@ -435,7 +435,7 @@ test_trust_policy:
     tests/test_day0_admission.py: {created: "2026-06-17", last_used: "2026-09-29", note: "Day0 live admission contracts, including strict quote-after-observation ordering, current source-health classification, final-localday no-entry geometry, one-bin stress, maker-only routing, the absence of any diurnal-nowcast veto input (moved into q), and the held-ask repricing veto (>= 2 distinct asks in the prior 10 min) with its gate ordering, inert-without-a-count default, and day0-only scope."}
     tests/test_day0_extreme_updated_materialization_bridge.py: {created: "2026-07-19", last_used: "2026-10-04", note: "Non-blocking Day0 rematerialization preserves same-metric ENS, source clocks, scoped manifests/ownership/conditioning, typed zero, durable-event/backoff/ABA and bounded burst contracts. Actual preselector/reload preserves stable-family held/global/first-q rotation. Real wrapper/calendar controls reject expired nonheld fake urgency while preserving current debt/retry and UNKNOWN-to-known recovery. Exact-station real SQL HIGH/LOW YES/NO inventory qualifies independent of zero/NULL/missing cost, with phase/chain/quantity/local-only negatives; shared held scope includes paused-entry reduce-only nomination without granting financial/action/ENTRY authority. Diagnostic-only producer traces preserve old report fields, monotonic read count, cursor/inspection and twelve-record bounds; partial/locked/nested exception paths reset per-pass state, uninspected work is not a rejection, and parent-thread CPU is not worker CPU or a source clock."}
     tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-10-03", note: "Fast METAR publication persistence, duplicate-rendering canonicalization, Day0 hourly-vector cross-segment fairness, and measured same-station eligibility. Held capital keeps most critical-quota capacity while every active microbatch reserves independent discovery progress; a unit cursor over the longest segment prevents one failed provider or shorter held prefix from starving later cities. Beijing, Guangzhou, Wellington, Ankara, and Karachi/OPKC use bounded seven-day empirical zero-margin WU/METAR evidence instead of remaining excluded until the slower WU update. KMA RKPK/RKSI HIGH/LOW actual source emitter, derived bridge, raw-source reader and unmocked q guard preserve raw physical availability versus posterior dispatch delay; malformed source/window/station/date/unit and unknown/future/microsecond clocks produce station-scoped typed unavailable rather than stale AWC fallback, while true absence and new complete raw deltas retain normal RESET."}
-    tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-07-24", note: "Day0 METAR/HKO source-clock scheduling, conditional HKO validator commit coupling, isolated executor lanes, bounded commit retry, commit-before-wake ordering, and exact-station monotone WU-context strengthening."}
+    tests/test_day0_obs_fastlane_optionbc.py: {created: "2026-06-12", last_used: "2026-10-04", note: "Day0 METAR/HKO source-clock scheduling, exact original cumulative HTTP200 capture/304 rejection, conditional validator commit coupling, isolated executor lanes, bounded commit retry, commit-before-wake ordering, and exact-station monotone WU-context strengthening."}
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-08-20", note: "WU-settled hard-fact exits abstain for hourly WU and same-station METAR evidence: both remain statistical because the revisable Daily Observations product controls venue resolution. Station mismatch, bare scalars, intraday rows, and completed-hourly rows cannot force q=1 hold or exit."}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
@@ -2050,6 +2050,8 @@ test_metadata:
     notes: >
       Protects exact-station Day0 fast-tail freshness, monotone-extreme
       strengthening, coverage provenance, and source-clock scheduling.
+      HKO forward capture preserves original decoded entity bytes and true
+      acquisition clocks without extra HTTP or ACK before canonical commit.
   tests/test_tier_resolver.py:
     modules: [data]
     category: core_law_antibody
@@ -2100,6 +2102,9 @@ test_metadata:
     notes: >
       Keeps current backfill/write scripts aligned with the live routing/config
       contract so P2 module books can trust the named script surfaces.
+      Private HKO original-body replay binds HIGH/LOW/native DateTime; old
+      same-asof rows remain immutable and ordered rollover clocks require
+      this row's matching capture and writer-time evidence.
   tests/test_backfill_completeness_guardrails.py:
     modules: [scripts]
     category: useful_regression

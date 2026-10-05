@@ -1,6 +1,6 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-10-01 (HKO current-print replay publishes once per committed identity)
-# Lifecycle: created=2026-06-12; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Last reused/audited: 2026-10-04 (original cumulative entity capture without changing commit/ACK)
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-04; last_reused=2026-10-04
 # Purpose: Protect Day0 fast-observation source, coverage, and scheduler contracts.
 # Reuse: Run when WU, same-station fast-tail, or Day0 source-clock routing changes.
 # Authority basis: day0_obs_fastlane_plan.md §4.2 (Option B) and §4.3 (Option C);
@@ -53,6 +53,73 @@ import pytest
 import httpx
 
 UTC = timezone.utc
+
+
+@pytest.mark.parametrize("metric,expected", [("high", 26.6), ("low", 25.1)])
+def test_hko_normal_cumulative_capture_keeps_original_entity(monkeypatch, metric, expected):
+    import base64
+    import hashlib
+    import scripts.hko_ingest_tick as hko
+
+    body = ("\ufeffDate time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),"
+        "Minimum Air Temperature Since Midnight(degree Celsius)\r\n"
+        "202610050730,Chek Lap Kok,29.0,24.0\r\n"
+        "202610050730,HK Observatory,26.6,25.1\r\n").encode("utf-8")
+    calls = []
+    class Client:
+        def get(self, url, *, headers):
+            calls.append(url)
+            return httpx.Response(200 if url == hko.HKO_EXTREMA_URL else 304,
+                content=body if url == hko.HKO_EXTREMA_URL else b"",
+                headers={"date": "Sun, 04 Oct 2026 23:31:00 GMT", "etag": "native",
+                    "set-cookie": "must-not-persist"}, request=httpx.Request("GET", url))
+    prefetch, sibling = hko.HkoExtremaPoller(client=Client()).prefetch_products()
+    assert sibling is None and prefetch is not None and len(calls) == 2
+    row = hko._build_hko_extrema_row(prefetch.snapshot, temperature_c=25.0,
+        accumulator_fetched_at=None, data_version="v1.wu-native",
+        imported_at=datetime.now(UTC).isoformat())
+    assert row.raw_response == body.decode("utf-8")
+    proof = json.loads(row.provenance_json)
+    assert base64.b64decode(proof["raw_body_base64"]) == body
+    assert proof["raw_body_sha256"] == hashlib.sha256(body).hexdigest()
+    assert proof["native_datetime"] == "202610050730"
+    assert proof["source_issued_at_utc"] is None
+    assert datetime.fromisoformat(proof["capture_started_at_utc"]) <= datetime.fromisoformat(proof["capture_completed_at_utc"]) <= datetime.fromisoformat(row.imported_at)
+    assert "set-cookie" not in proof["response_headers"]
+    assert getattr(row, "running_max" if metric == "high" else "running_min") == expected
+    assert proof["payload_hash"] != "sha256:" + proof["raw_body_sha256"]
+
+
+@pytest.mark.parametrize("status", [206, 304, 400])
+def test_hko_non_200_never_produces_cumulative_original_capture(status):
+    import scripts.hko_ingest_tick as hko
+    class Client:
+        def get(self, url, *, headers):
+            return httpx.Response(status, content=b"partial or cached body", request=httpx.Request("GET",url))
+    poller = hko.HkoExtremaPoller(client=Client())
+    assert poller.prefetch_products()[0] is None
+    assert poller._etag is None and poller._last_modified is None
+
+
+@pytest.mark.parametrize("path", ["single_poller", "standalone"])
+def test_hko_other_normal_capture_paths_preserve_entity_not_response_text(monkeypatch, path):
+    import scripts.hko_ingest_tick as hko
+    body = ("\ufeffDate time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),"
+        "Minimum Air Temperature Since Midnight(degree Celsius)\r\n"
+        "202610050730,HK Observatory,26.6,25.1\r\n").encode("utf-8")
+    def response():
+        return httpx.Response(200,content=body,headers={"content-type":"text/csv; charset=iso-8859-1"},
+            request=httpx.Request("GET",hko.HKO_EXTREMA_URL))
+    class Client:
+        def get(self,url,**kwargs): return response()
+    if path == "single_poller": snapshot = hko.HkoExtremaPoller(client=Client()).prefetch().snapshot
+    else:
+        monkeypatch.setattr(hko.httpx,"get",Client().get)
+        snapshot = hko._fetch_hko_extrema()
+    assert snapshot.raw_body == body
+    assert snapshot.native_datetime == "202610050730"
+    assert datetime.fromisoformat(snapshot.capture_started_at_utc) <= datetime.fromisoformat(snapshot.capture_completed_at_utc)
+    assert snapshot.capture_completed_at_utc == snapshot.fetched_at_utc
 
 
 def test_hko_two_products_share_deadline_and_keep_completed_sibling(monkeypatch):
