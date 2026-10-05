@@ -161,6 +161,46 @@ class AuditTests(unittest.TestCase):
             self.assertTrue(rows[0]['fill_evidence_conflict']);self.assertEqual(len(details['positions']),1)
             self.assertEqual(details['settlement_commands'][0]['command_id'],'redeem')
             self.assertEqual(details['settlement_binding_residuals'],[])
+    def test_wake_receipt_joins_only_through_its_own_publication(self):
+        r=observation();ref=a.observation_ref(r);b=a.millis(r['fetched_at_utc'])
+        base=[dict(stage='SOURCE_COMMITTED',observation_ref=ref,world_committed_at_ms=b+1,recorded_at_ms=b+1),dict(stage='POSTERIOR_READY',observation_ref=ref,posterior_identity_hash='q',readiness_id='r1',posterior_ready_at_ms=b+10,recorded_at_ms=b+10),dict(stage='WAKE_RECEIVED',wake_id='w1',wake_received_at_ms=b+12,recorded_at_ms=b+12),dict(stage='Q_SERVED',posterior_identity_hash='q',q_served_at_ms=b+20,recorded_at_ms=b+20),dict(stage='VENUE_ACK_OBSERVED',q_version='q',command_id='c',event_id='ack',recorded_at_ms=b+30)]
+        ack=[dict(event_id='ack',command_id='c',event_type='SUBMIT_ACKED',occurred_at='2026-10-05T08:02:00.153Z')]
+        self.assertEqual(a.trace_distributions([r],copy.deepcopy(base),ack)['full_ack_chains'],0)
+        own=base+[dict(stage='WAKE_PUBLISHED',wake_id='w1',posterior_identity_hash='q',recorded_at_ms=b+11)]
+        report=a.trace_distributions([r],own,ack)
+        self.assertEqual(report['full_ack_chains'],1);self.assertEqual(report['hops']['posterior_to_wake']['p50_ms'],2)
+        foreign=base+[dict(stage='WAKE_PUBLISHED',wake_id='w1',posterior_identity_hash='later',recorded_at_ms=b+11)]
+        self.assertEqual(a.trace_distributions([r],foreign,ack)['full_ack_chains'],0)
+        both=own+[dict(stage='WAKE_PUBLISHED',wake_id='w1',posterior_identity_hash='later',recorded_at_ms=b+11)]
+        self.assertEqual(a.trace_distributions([r],both,ack)['full_ack_chains'],0)
+    def test_indexed_legacy_reconstruction_matches_full_scan(self):
+        c=sqlite3.connect(':memory:');c.row_factory=sqlite3.Row
+        c.execute('CREATE TABLE observation_prints(id INTEGER,city TEXT,station_id TEXT,source_channel TEXT,publish_ts_utc TEXT,value_native REAL,unit TEXT,fetched_at_utc TEXT,raw_report TEXT)')
+        rows=[observation(),observation(id=2,value_native=21.,fetched_at_utc='2026-10-05T08:03:00Z'),
+              observation(id=3,fetched_at_utc='2026-10-05T08:04:00Z'),observation(id=4,publish_ts_utc='2026-10-05T10:00:00+02:00',value_native=22.,fetched_at_utc='2026-10-05T08:05:00Z'),
+              observation(id=5,city='Osaka',fetched_at_utc='2026-10-05T08:06:00Z')]
+        for row in rows:c.execute('INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?,?)',tuple(row.values()))
+        def ident(v,at='2026-10-05T08:00:00Z'):return {'source':'jma_amedas_temperature','observed_at_utc':at,'value_native':v}
+        cases=[(20.,'2026-10-05T08:02:30Z'),(20.,'2026-10-05T08:05:00Z'),(21.,'2026-10-05T08:03:30Z'),(22.,'2026-10-05T08:06:00Z'),(23.,'2026-10-05T08:06:00Z'),(21.,'2026-10-05T08:02:59Z')]
+        es=[dict(stage='POSTERIOR_READY',city='Tokyo',input_identity=ident(v),posterior_ready_at_ms=a.millis(at)) for v,at in cases]
+        es+=[dict(stage='SOURCE_COMMITTED',city=x['city'],station_id='RJTT',input_identity=ident(x['value_native'],x['publish_ts_utc']),response_received_at_ms=a.millis(x['fetched_at_utc'])) for x in rows]
+        report=a.reconstruct_legacy_references(c,rows,es)
+        def full(e):
+            i=e['input_identity'];obs=a.instant(i['observed_at_utc']);v=a.decimal(i['value_native'])
+            if e['stage']=='SOURCE_COMMITTED':
+                m=[x for x in rows if x['city']==e['city'] and x['station_id']==e['station_id'] and x['source_channel']==i['source'] and a.instant(x['publish_ts_utc'])==obs and a.decimal(x['value_native'])==v and a.millis(x['fetched_at_utc'])==e['response_received_at_ms']]
+            else:
+                m=[x for x in rows if x['city']==e['city'] and x['source_channel']==i['source'] and a.instant(x['publish_ts_utc'])==obs and a.decimal(x['value_native'])==v and a.millis(x['fetched_at_utc'])<=e['posterior_ready_at_ms']]
+            return m[0]['id'] if len(m)==1 else None
+        self.assertEqual([e.get('observation_ref',{}).get('id') for e in es],[full(e) for e in es])
+        self.assertEqual(report['AMBIGUOUS_LEGACY_REVISION'],1)
+        c.close()
+    def test_nonfinite_evidence_value_is_named_not_a_dump_failure(self):
+        with tempfile.TemporaryDirectory() as t:
+            a.dump(Path(t)/'x.json',{'payload_json':'{"last_monitor_edge": NaN}','v':float('inf')})
+            out=json.loads((Path(t)/'x.json').read_text())
+        self.assertEqual(out['payload_json']['last_monitor_edge'],{'nonfinite_float':'nan'})
+        self.assertEqual(out['v'],{'nonfinite_float':'inf'})
     def test_wrong_sql_identifier_rejected(self):
         with self.assertRaises(ValueError):a.identifier('x; DROP TABLE y')
 
