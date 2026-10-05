@@ -17507,3 +17507,26 @@ probability/source-available qualification. Own exact e95 example test cfg was
 regular/nonlinked and removed after this check; no live config was read/copied.
 Fresh remote still e7 and named28a unchanged. Code-only candidate remains17
 exact approved paths; no new raw ancestry/tree or runtime claims are permitted.
+
+Actual local code-only preparation completed in the same task tree:
+fix/native-source-codeonly-20261005 first commit
+be68d2f58a181457fa65ddf86c5200ee7a15eca8 is rooted directly at e7, normal hooks,
+exact17 approved paths. Task-only symbolic HEAD and index-only restore left all
+working files untouched; code tree matched raw-bearing54164ac0 outside the raw
+path. Raw-bearing fix/hko-native-audit-20261005 still points exactly
+54164ac06272da6d5d209f1aa442f3f44af0e456; recovery0df and recovery359a unchanged.
+The new code-only tree, path-filtered full ancestry and reachable object list
+contain none of the123 audit originals. Every physical file still equals its
+original0df Git blob:123/57,227,944B/aggregate148d15a.../no symlink. They are now
+untracked needed inputs in place, not discarded, ignored, staged or uploaded.
+Remote named28a and origin/live e7 were freshly reconfirmed unchanged; no push,
+live checkout mutation or loader occurred. The four frozen source/test SHA256s
+remain188df/12b3/70f31/01a0. All changed Python parses/compiles and YAML4 pass;
+freshness/planning rc0/zero issues and diff PASS. Changed17-path plus decoder
+registry scope has zero issues; global source455/test542/script283 command rc1
+findings remain distinct, not all-green or automatically preexisting.
+Actual e7 integration13P is the acceptance evidence above; no old suite repeated.
+Native quantity/readback inventory may be complete while source-issued,
+source-available, static/model qualification remains UNKNOWN: no native q/math
+or action authority upgrade. This checkpoint is local-only preparation pending
+ROOT delivery acceptance, not a landing, load or whole-goal completion.
