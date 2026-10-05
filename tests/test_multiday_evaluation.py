@@ -307,6 +307,8 @@ def _make_dbs(tmp_path, *, with_market_events=True, with_attribution=True):
             local_sequence INTEGER, raw_payload_json TEXT);
         CREATE TABLE venue_command_events (command_id TEXT, event_type TEXT, payload_json TEXT);
         CREATE TABLE position_events (position_id TEXT, event_type TEXT, payload_json TEXT, sequence_no INTEGER);
+        CREATE INDEX idx_position_events_position_type_sequence
+            ON position_events(position_id, event_type, sequence_no);
         CREATE TABLE decision_log (mode TEXT, timestamp TEXT, artifact_json TEXT);
         """
     )
@@ -440,3 +442,21 @@ def test_job_is_registered_daily_and_classified_non_collection():
     from scripts.data_collection_inventory import _SRC_MAIN_NON_COLLECTION_JOB_IDS
 
     assert "multiday_evaluation" in _SRC_MAIN_NON_COLLECTION_JOB_IDS
+
+
+def test_exit_reason_probe_is_pinned_to_the_composite_index(tmp_path):
+    """Without the hint the planner walks the position_id autoindex (21-45 s live)."""
+    trades, _fc, _world = _make_dbs(tmp_path)
+    t = sqlite3.connect(trades)
+    t.execute("INSERT INTO venue_commands VALUES ('x1','s1','p1','EXIT',5,0.3,'FILLED','2026-10-02T06:00:00+00:00')")
+    t.execute("INSERT INTO position_events VALUES ('p1','EXIT_INTENT','{\"exit_reason\":\"GLOBAL_CAPITAL_OPTIMAL_SELL\"}',2)")
+    t.commit()
+    t.close()
+    seen: list[str] = []
+    conn = me._open_ro(trades)
+    conn.set_trace_callback(seen.append)
+    td = me.load_trades_data(conn, SINCE)
+    conn.close()
+    assert td["exit_reasons"] == {"p1": "GLOBAL_CAPITAL_OPTIMAL_SELL"}
+    probes = [q for q in seen if "FROM position_events" in q]
+    assert len(probes) == 3 and all("INDEXED BY idx_position_events_position_type_sequence" in q for q in probes)

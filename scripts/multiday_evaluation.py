@@ -304,15 +304,19 @@ def load_trades_data(conn, since: date) -> dict:
             [c for c in fills if c in entry_ids],
         )
     }
-    # One equality probe per event type: ``event_type IN (...)`` makes the planner
-    # scan the position_id autoindex and read every MONITOR_REFRESHED payload (~45 s
-    # live); equality rides idx_position_events_position_type_sequence (~0.1 s).
+    # Forced onto the composite index. Live EXPLAIN QUERY PLAN without the hint picks
+    # sqlite_autoindex_position_events_3 (position_id=?) for this shape (equality or IN
+    # on event_type, plus ORDER BY position_id, sequence_no), which walks every event of
+    # each position, ~20k MONITOR_REFRESHED payloads apiece: 21-45 s on 150 positions.
+    # With the hint it is (position_id=? AND event_type=?) at ~0.01 s. Same precedent as
+    # src/execution/exit_lifecycle.py's EXIT_INTENT lookups.
     reasons: dict[str, str] = {}
     exit_pids = [c["position_id"] for c in td["exit_cmds"]]
     for event_type in ("EXIT_INTENT", "EXIT_ORDER_POSTED", "EXIT_ORDER_FILLED"):
         for r in _in_rows(
             conn,
-            "SELECT position_id, json_extract(payload_json, '$.exit_reason') FROM position_events "
+            "SELECT position_id, json_extract(payload_json, '$.exit_reason') "
+            "FROM position_events INDEXED BY idx_position_events_position_type_sequence "
             f"WHERE event_type = '{event_type}' AND position_id IN ({{ph}})",
             exit_pids,
             " ORDER BY position_id, sequence_no",
