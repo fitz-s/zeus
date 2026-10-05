@@ -17079,3 +17079,32 @@ Compile/freshness/planning/diff passed. ROOT accepts the bounded correction for
 normal FF delivery and one registered loader, subject to current strict gates.
 Normal post-load q witness remains a separate unproved runtime requirement;
 private controls and the old743470/743472 certificates cannot satisfy it.
+
+Delivery checkpoint 2026-10-05T09:14Z: commit7130f26f97f50ab3f8b55311aec2057f1b9c10fb
+landed by normal FF push from4fc; ancestor check passed. Only the four tiny-fix
+paths were committed; pending forward-capture registry/workspace changes and
+needed native originals remain separate. Live FF refused existing index.lock
+(inode1120053733, zero bytes, mtime_epoch1791178508); no visible lsof owner or
+git/deployer process. No lock removal, repeated FF, loader or guard mutation.
+Already-started registered RO preflight returned actualrc0 at09:13:27.203056Z:
+ok=true/blockers=[], 16 open positions requiring executable quotes. Nonblocking
+scheduler-key/cycle-lag diagnostics remain; this is not global READY proof.
+Actual09:14:08 getter guard=None, loaded state still4fc/Main10282 stamp08:47:04;
+ingest1753/forecast1728 fixed4fc and all cwd live. Config file-only SHA remainsd7.
+Loaded7130 and new normal ancillary q propagation are NOT proved. Current
+delivery blocker is live git lock ownership/recovery authority, not a failed
+loader; no loader attempt was started. Existing live processes keep running.
+
+Independent non-production integration while lock authority is pending:
+native inventory commits b3ae0ca +84f7e5ad cherry-picked cleanly as dbbf704c9
+and fb88382fa onto7130. Source/test bytes exactly retain approved62a51f5b6b9aef2da1cea40aa0c6b6c83047183eb220da2de62cd91b5bcd5ab1
+and5185eb14c143a1940e1b5e19523709cf1a50b4bb483fc20451473b489f66c6b5.
+Private inventory only, explicit ARCHIVE_BACKFILL modes; actual existing46/306
+readback remains PARTIAL/missing260, typed qualified availability NULL and zero
+snapshots/hourly. Original18owner PASS, mode2RED→3GREEN and independent3PASS
+are inherited only for unchanged code/dependencies, not normal producer proof.
+No HTTP, runtime hook, live canonical write or extra loader is enabled.
+Child cleanup inventory: clean tracked84f, no worker/test activity or needed
+raw input; exact own ignored template settings SHAe95eb2066414092e2b4416cd24b94a9a08ff050493df2ebff1d38a543d519a3b.
+Ignored pytest cache/two historical extract-stderr diagnostics are not required
+source inputs; actual needed native originals remain only in parent packet.
