@@ -53,6 +53,7 @@ import time
 from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass
+from enum import Enum
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from functools import lru_cache
 from email.utils import parsedate_to_datetime
@@ -3608,6 +3609,30 @@ def _rolling_capture_age_at_window_close(
     return (close - captured).total_seconds() / 3600.0
 
 
+class Day0HourlyBundleRefusal(str, Enum):
+    """Why a strict Day0 hourly bundle read returned no bundle."""
+
+    ABSENT = "absent"  # an expected model has no row at all
+    STALE = "stale"  # rows exist but none is current (capture age / ENS run)
+    WINDOW_INCOMPLETE = "window_incomplete"  # current rows miss the remaining window
+
+
+class Day0HourlyBundle(list):
+    """A strict bundle read: the selected vectors, or empty with a typed refusal.
+
+    A ``list`` so every caller that tests truthiness or compares to ``[]`` is
+    unchanged; ``refusal`` is None exactly when the read selected a bundle.
+    """
+
+    refusal: Day0HourlyBundleRefusal | None = None
+
+    @classmethod
+    def refused(cls, refusal: Day0HourlyBundleRefusal) -> "Day0HourlyBundle":
+        out = cls()
+        out.refusal = refusal
+        return out
+
+
 def select_ready_day0_hourly_vectors(
     vectors: Iterable[Day0HourlyVector],
     *,
@@ -3619,7 +3644,7 @@ def select_ready_day0_hourly_vectors(
     max_bundle_skew_minutes: Optional[float] = None,
     remaining_window_start: datetime | None = None,
     require_complete_remaining_window: bool = False,
-) -> list[Day0HourlyVector]:
+) -> Day0HourlyBundle:
     """Pure strict-bundle predicate shared by producer and live readers.
 
     It is intentionally the one place that decides freshness, expected-model
@@ -3630,6 +3655,11 @@ def select_ready_day0_hourly_vectors(
     probes persisted readiness through ``read_freshest_day0_hourly_vectors``;
     health and money-path readers do the same, so a city cannot be prioritized
     by a weaker interpretation than the authority consumer accepts.
+
+    An empty result carries ``refusal``: ``ABSENT`` when an expected model has
+    no row, ``WINDOW_INCOMPLETE`` when a current row was rejected only for
+    remaining-window coverage, else ``STALE`` (no current row, or capture
+    skew).  The typing names the debt; it never admits a row.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     expected: list[str] = []
@@ -3641,10 +3671,13 @@ def select_ready_day0_hourly_vectors(
 
     run_refusals: dict[datetime, str | None] = {}
     parsed: list[tuple[datetime, Day0HourlyVector]] = []
+    seen_models: set[str] = set()
+    window_rejected = False
     for vector in vectors:
         model = str(vector.model or "").strip()
         if not model or (expected_set and model not in expected_set):
             continue
+        seen_models.add(model)
         if not _day0_source_clock_ensemble_metadata_is_current(vector):
             continue
         try:
@@ -3714,6 +3747,7 @@ def select_ready_day0_hourly_vectors(
                 )
             )
         ):
+            window_rejected = True
             continue
         parsed.append((captured, vector))
 
@@ -3721,7 +3755,13 @@ def select_ready_day0_hourly_vectors(
     for _captured, vector in sorted(parsed, key=lambda item: item[0], reverse=True):
         freshest.setdefault(str(vector.model), vector)
     if require_expected and expected and any(model not in freshest for model in expected):
-        return []
+        if any(model not in seen_models for model in expected):
+            return Day0HourlyBundle.refused(Day0HourlyBundleRefusal.ABSENT)
+        return Day0HourlyBundle.refused(
+            Day0HourlyBundleRefusal.WINDOW_INCOMPLETE
+            if window_rejected
+            else Day0HourlyBundleRefusal.STALE
+        )
     if (
         require_expected
         and expected
@@ -3735,14 +3775,14 @@ def select_ready_day0_hourly_vectors(
                     str(freshest[model].captured_at).replace("Z", "+00:00")
                 )
                 if captured.tzinfo is None:
-                    return []
+                    return Day0HourlyBundle.refused(Day0HourlyBundleRefusal.STALE)
                 captured_times.append(captured.astimezone(UTC))
         except (TypeError, ValueError):
-            return []
+            return Day0HourlyBundle.refused(Day0HourlyBundleRefusal.STALE)
         if (
             max(captured_times) - min(captured_times)
         ).total_seconds() / 60.0 > float(max_bundle_skew_minutes):
-            return []
+            return Day0HourlyBundle.refused(Day0HourlyBundleRefusal.STALE)
     selected = (
         [freshest[model] for model in expected if model in freshest]
         if expected
@@ -3756,8 +3796,18 @@ def select_ready_day0_hourly_vectors(
             window_start=remaining_window_start,
         )
     ):
-        return []
-    return selected
+        return Day0HourlyBundle.refused(
+            Day0HourlyBundleRefusal.WINDOW_INCOMPLETE
+        )
+    if not selected:
+        return Day0HourlyBundle.refused(
+            Day0HourlyBundleRefusal.ABSENT
+            if not seen_models
+            else Day0HourlyBundleRefusal.WINDOW_INCOMPLETE
+            if window_rejected
+            else Day0HourlyBundleRefusal.STALE
+        )
+    return Day0HourlyBundle(selected)
 
 
 def newest_day0_rolling_capture_at(
@@ -3811,6 +3861,11 @@ def read_freshest_day0_hourly_vectors(
     raise_on_db_error: bool = False,
 ) -> list[Day0HourlyVector]:
     """Freshest persisted vector per model for (city, target_date).
+
+    The result is ``select_ready_day0_hourly_vectors``'s typed
+    ``Day0HourlyBundle``: when empty it names why (absent / stale /
+    window-incomplete).  The SQL prefilter drops rows older than the capture
+    floor, so a city whose only rows are that old reads ``ABSENT``.
 
     Rolling vectors captured more than max_age_hours ago are EXCLUDED (a stale
     high-res "now" must not masquerade as the current remaining-day

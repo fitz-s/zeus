@@ -6145,6 +6145,51 @@ def _edli_latest_day0_hourly_blocked_families(
         return set()
 
 
+def _edli_day0_vector_missing_cutoffs(
+    cities: Iterable[Any],
+    *,
+    decision_time: datetime,
+) -> dict[tuple[str, str, str], datetime]:
+    """Current-local-day families the materializer last refused VECTOR_MISSING.
+
+    SCOPE: one exact city/current-local-date/metric whose own latest blocked
+    receipt is the verdict.  DRAIN: the hourly refresher fetches that city.
+    RESET: a rolling capture newer than the verdict's cutoff (the caller's
+    comparison), or the next request's own receipt.  A scheduling hint only:
+    an unreadable receipt directory names no debt.
+    """
+    from src.data.replacement_forecast_live_materialization_queue import (
+        day0_carrier_vector_missing_cutoffs,
+    )
+    from src.data.replacement_forecast_production import (
+        _replacement_forecast_live_materialization_queue_config,
+    )
+
+    try:
+        processed_dir = _replacement_forecast_live_materialization_queue_config()[
+            "processed_dir"
+        ]
+        families = []
+        for city in cities:
+            city_name = str(getattr(city, "name", "") or "").strip()
+            try:
+                target_date = decision_time.astimezone(
+                    ZoneInfo(str(getattr(city, "timezone", "") or "").strip())
+                ).date().isoformat()
+            except (ValueError, ZoneInfoNotFoundError):
+                continue
+            if city_name:
+                families.extend(
+                    (city_name, target_date, metric) for metric in ("high", "low")
+                )
+        return day0_carrier_vector_missing_cutoffs(processed_dir, families)
+    except Exception as exc:  # noqa: BLE001 -- scheduling hint, never authority
+        logging.getLogger("zeus.events.reactor").warning(
+            "edli_day0_hourly_refresh: VECTOR_MISSING receipt read failed: %s", exc
+        )
+        return {}
+
+
 @dataclass(frozen=True)
 class _Day0HourlyPriorityProbe:
     refresh_due_families: frozenset[tuple[str, str, str]] = frozenset()
@@ -6177,6 +6222,13 @@ def _edli_day0_hourly_refresh_due_families(
     that cannot decide falls back to the strict read.  The deadline is checked
     between statements; ``cities_scanned`` lets the caller resume after the
     completed prefix instead of rescanning it.
+
+    The materializer's own verdict is a third due source: a family whose
+    latest blocked receipt is ``DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING``
+    stays due until a rolling capture newer than that verdict's cutoff exists.
+    The strict read here judges at the producer's clock and boundary; the
+    consumer that refused judged at its own, so its refusal is the authority
+    that the bundle it needed is missing.
     """
     from src.config import runtime_cities_by_name
     from src.data.day0_hourly_vectors import (
@@ -6265,6 +6317,9 @@ def _edli_day0_hourly_refresh_due_families(
     cities_scanned = 0
     read_error = None
     try:
+        vector_missing_cutoffs = _edli_day0_vector_missing_cutoffs(
+            cities, decision_time=now
+        )
         for city_index, city in enumerate(cities):
             cities_scanned = city_index
             check_deadline()
@@ -6292,7 +6347,16 @@ def _edli_day0_hourly_refresh_due_families(
                 ).total_seconds() / 3600.0 > producer_max_age_hours
             except Exception:  # noqa: BLE001 -- a shortcut only; the strict read decides
                 check_deadline()  # an interrupted seek is the deadline, not a verdict
+                newest_capture = None
                 capture_stale = False
+            for metric in ("high", "low"):
+                verdict_cutoff = vector_missing_cutoffs.get(
+                    (city_name, target_date, metric)
+                )
+                if verdict_cutoff is not None and (
+                    newest_capture is None or newest_capture <= verdict_cutoff
+                ):
+                    missing.add((city_name, target_date, metric))
             check_deadline()
             source_clock_low_target_dates = (
                 set()

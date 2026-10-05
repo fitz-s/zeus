@@ -4736,6 +4736,38 @@ def _terminal_receipt_path(
     return receipt_dir / f"{city}.{target_date}.{metric}.json"
 
 
+def day0_carrier_vector_missing_cutoffs(
+    processed_dir: Path | str,
+    families: Iterable[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], datetime]:
+    """Families whose latest blocked receipt is the Day0 VECTOR_MISSING verdict.
+
+    Maps each to the verdict's ``computed_at`` cutoff.  The refresher treats a
+    family as due until a rolling capture newer than that cutoff exists, so the
+    materializer's own verdict reaches the producer without a new queue.  Reads
+    only the one compact per-family receipt the queue already keeps
+    (``blocked_latest``); an unreadable receipt names no debt.
+    """
+
+    receipt_dir = Path(processed_dir).parent / "blocked_latest"
+    out: dict[tuple[str, str, str], datetime] = {}
+    for city, target_date, metric in families:
+        path = _terminal_receipt_path(
+            receipt_dir,
+            {"city": city, "target_date": target_date, "temperature_metric": metric},
+        )
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            if _DAY0_CARRIER_VECTOR_MISSING_REASON not in receipt["reason_codes"]:
+                continue
+            cutoff = datetime.fromisoformat(str(receipt["computed_at"]))
+        except (OSError, KeyError, TypeError, ValueError):
+            continue
+        if cutoff.tzinfo is not None:
+            out[(city, target_date, metric)] = cutoff.astimezone(timezone.utc)
+    return out
+
+
 def _recent_unchanged_success(
     *,
     processed_path: Path,

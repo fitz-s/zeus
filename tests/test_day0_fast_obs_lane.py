@@ -4490,6 +4490,98 @@ class TestMutexNoHttpSplit:
         # Only the city with a current capture reaches the strict read.
         assert strict_reads == ["Wellington"]
 
+    def test_vector_missing_verdict_marks_city_due_until_newer_capture(
+        self, monkeypatch, tmp_path
+    ):
+        """The materializer's VECTOR_MISSING verdict wakes the hourly refresher.
+
+        2026-10-04: 3,061 VECTOR_MISSING blocks (71 families, 23 cities) never
+        reached the producer.  The producer's strict read judged a fresher
+        bundle at its own clock while the consumer, at its cut, had none: the
+        verdict is the authority.  It stays due until a capture newer than the
+        verdict's cutoff exists, then resets.
+        """
+        import src.data.replacement_forecast_live_materialization_queue as queue_mod
+        import src.data.replacement_forecast_production as production_mod
+        from src.events import reactor as reactor_module
+
+        names = ["Tokyo", "Warsaw"]
+        cities, db_path, _clock, strict_reads = self._install_probe_universe(
+            monkeypatch, tmp_path, names, slow_per_city_s=0.0,
+        )
+        now = datetime.now(UTC)
+        target_date = now.date().isoformat()
+        verdict_cutoff = now - timedelta(minutes=30)
+        processed = tmp_path / "live" / "processed"
+        processed.mkdir(parents=True)
+        monkeypatch.setattr(
+            production_mod,
+            "_replacement_forecast_live_materialization_queue_config",
+            lambda: {"processed_dir": processed},
+        )
+        # A current rolling capture for both cities, older than the verdict.
+        conn = sqlite3.connect(db_path)
+        for name in names:
+            conn.execute(
+                "INSERT INTO day0_hourly_vectors (vector_id, model, city, target_date, "
+                "timezone_name, captured_at, endpoint, request_hash, times_json, "
+                "temps_c_json) VALUES (?, 'ecmwf_ifs', ?, ?, 'UTC', ?, 'e', 'h', '[]', '[]')",
+                (f"old-{name}", name, target_date,
+                 (verdict_cutoff - timedelta(minutes=20)).isoformat()),
+            )
+        conn.commit()
+        conn.close()
+        # The strict read is satisfied at the producer clock: without the
+        # verdict nothing is due.
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **kwargs: strict_reads.append(kwargs["city"]) or [object()],
+        )
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.day0_conditional_high_run_proof",
+            lambda *_a, **_kw: None,
+        )
+        request = tmp_path / "live" / "requests" / "tokyo.json"
+        request.parent.mkdir(parents=True)
+        request.write_text("{}")
+        queue_mod._record_latest_terminal_request(
+            request,
+            processed_path=processed,
+            request_payload={
+                "city": "Tokyo", "target_date": target_date,
+                "temperature_metric": "low",
+                "computed_at": verdict_cutoff.isoformat(),
+            },
+            receipt_dir_name="blocked_latest",
+            status="BLOCKED_MISSING_PROBABILITY_AUTHORITY",
+            reason_codes=(
+                queue_mod._BLOCKED_INPUT_RECEIPT_REASON,
+                queue_mod._DAY0_CARRIER_VECTOR_MISSING_REASON,
+            ),
+        )
+
+        def probe():
+            return reactor_module._edli_day0_hourly_refresh_due_families(
+                cities=cities, decision_time=now,
+            )
+
+        due = probe()
+        assert due.proved is True
+        assert due.refresh_due_families == frozenset({("Tokyo", target_date, "low")})
+
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO day0_hourly_vectors (vector_id, model, city, target_date, "
+            "timezone_name, captured_at, endpoint, request_hash, times_json, "
+            "temps_c_json) VALUES ('new-Tokyo', 'ecmwf_ifs', 'Tokyo', ?, 'UTC', ?, "
+            "'e', 'h', '[]', '[]')",
+            (target_date, (verdict_cutoff + timedelta(minutes=5)).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+
+        assert probe().refresh_due_families == frozenset()
+
     def test_hourly_refresh_preserves_full_missing_authority_priority_prefix(
         self, monkeypatch
     ):
