@@ -1741,3 +1741,158 @@ class TestRestoredHeadroomNeverAboveTruePrefill:
             lot_state=lot_state, other=None,
         )
         assert restored == truth
+
+
+# ---------------------------------------------------------------------------
+# Pass fairness: a rest no earlier work can starve. Every rest's value check
+# runs before any family-optimum search, least recently valued first, so a
+# prefix that exhausts the pass budget on every pass delays a later rest's
+# CANCEL by at most one pass per open rest.
+# ---------------------------------------------------------------------------
+
+FAMILY_B = ("Paris", "2026-07-12", "high")
+FAMILY_B_KEY = "Paris|2026-07-12|high"
+
+
+def _token_snapshot(token):
+    depth = {"asset_id": token, "asks": [{"price": "0.56", "size": "500"}],
+             "bids": [{"price": "0.49", "size": "500"}]}
+    return {
+        **_snapshot(), "condition_id": f"cond-{token}", "yes_token_id": token, "no_token_id": f"{token}-no",
+        "selected_outcome_token_id": token, "orderbook_depth_json": json.dumps(depth),
+        "fee_details_json": json.dumps({"fee_rate_fraction": 0.0, "token_id": token}),
+    }
+
+
+def _two_family_harness(monkeypatch):
+    """Rest cmd-a (FAMILY, q 0.75: kept) then rest cmd-b (FAMILY_B, whose
+    posterior turned against it, q 0.30), each 10 @ 0.50 on its own token, on
+    the real wealth witness, allocator and venue batch path."""
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine import global_auction_universe as universe
+    from src.engine import global_batch_runtime as runtime
+    from src.engine.qkernel_spine_bridge import PreparedGlobalFamily
+    from src.execution import day0_hard_fact_exit
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table
+    from tests.execution.test_staleness_cancel import _seed_open_entry
+
+    conn = _trade_db()
+    at = datetime.now(UTC)
+    ensure_table(conn)
+    rests = {"cmd-a": (FAMILY, FAMILY_KEY, TOKEN, 0.75), "cmd-b": (FAMILY_B, FAMILY_B_KEY, "tok-b", 0.30)}
+    prepared = {}
+    for command_id, (family, family_key, token, q) in rests.items():
+        _seed_open_entry(conn, command_id=command_id, token_id=token, venue_order_id=f"venue-{command_id[-1]}",
+                         q_version="q-submitted", created_at=at - timedelta(hours=3))
+        conn.execute("INSERT INTO collateral_reservations (command_id, reservation_type, amount, created_at) "
+                     "VALUES (?, 'PUSD_BUY', 5000000, ?)", (command_id, at.isoformat()))
+        open_entry_exposure_obligation(conn, command_id=command_id, owner_domain="test", token_id=token,
+                                       condition_id=f"cond-{token}", shares=10.0, cost_basis_usd=5.0)
+        fields = {
+            **{name: getattr(_witness(q=q), name) for name in (
+                "q_version", "resolution_identity", "topology_identity", "posterior_identity_hash",
+                "source_truth_identity", "authority_certificate_hash", "band_alpha", "band_basis",
+                "yes_point_q", "yes_q_samples", "captured_at_utc")},
+            "family_key": family_key,
+            "bindings": (
+                S.OutcomeTokenBinding(bin_id="bin-rest", condition_id=f"cond-{token}",
+                                      yes_token_id=token, no_token_id=f"{token}-no"),
+                S.OutcomeTokenBinding(bin_id="bin-other", condition_id=f"cond-other-{token}",
+                                      yes_token_id=f"yes-other-{token}", no_token_id=f"no-other-{token}"),
+            ),
+        }
+        witness = S.JointOutcomeProbabilityWitness(
+            **fields, max_age=timedelta(minutes=3), witness_identity=S.joint_probability_witness_identity(**fields),
+        )
+        prepared[family[0]] = PreparedGlobalFamily(decision_id="d", probability_witness=witness, candidate_seeds=())
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots (pusd_balance_micro,pusd_allowance_micro,"
+        "usdc_e_legacy_balance_micro,ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,captured_at,authority_tier,"
+        "raw_balance_payload_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (100_000_000, 10**12, 0, "{}", "{}", 0, "{}", (at - timedelta(seconds=5)).isoformat(), "CHAIN", "h"),
+    )
+    conn.commit()
+    _publish_real_allocator(conn)
+    snapshots = {f"snap-{c}": _token_snapshot(token) for c, (_f, _k, token, _q) in rests.items()}
+    monkeypatch.setattr(C, "_snapshot_row", lambda _c, sid: snapshots[sid])
+    monkeypatch.setattr(C, "resolve_order_families", lambda *_a: {c: f for c, (f, *_r) in rests.items()})
+    events = tuple(
+        SimpleNamespace(event_id=f"evt-{f[0]}", payload_json=json.dumps(
+            {"city": f[0], "target_date": f[1], "metric": f[2]}))
+        for f, *_r in rests.values()
+    )
+    monkeypatch.setattr(universe, "scan_current_global_auction_scope", lambda **k: SimpleNamespace(
+        events=events,
+        resolution_at_by_family={k_: k["decision_at_utc"] + timedelta(hours=36) for _f, k_, *_r in rests.values()},
+    ))
+    monkeypatch.setattr(adapter, "_prepare_current_global_probability_family",
+                        lambda event, **_k: prepared[json.loads(event.payload_json)["city"]])
+    monkeypatch.setattr(adapter, "_runtime_kelly_multiplier", lambda: 0.125)
+    monkeypatch.setattr(runtime, "_market_anchored_correction_resolver", lambda *_a, **_k: (lambda *_c: None))
+    monkeypatch.setattr("src.runtime.bankroll_provider.current_zeus_capital_allocation_setting",
+                        lambda: {"mode": "wallet_total"})
+    monkeypatch.setattr(day0_hard_fact_exit, "classify_day0_dead_bin_entry_cancels", lambda *_a, **_k: [])
+    # This process has valued neither rest yet.
+    monkeypatch.setattr(C, "_LAST_VALUED", {}, raising=False)
+    monkeypatch.setattr(C, "_LAST_COMPARED", {}, raising=False)
+    return conn
+
+
+class TestNoPrefixStarvesALaterRest:
+    BUDGET = 60.0
+
+    @pytest.mark.parametrize("slow", ["value", "optimum"])
+    def test_a_later_rest_cancels_within_one_pass_per_open_rest(self, monkeypatch, slow):
+        # Family A's own work exhausts the pass budget on every pass: its
+        # rest's value check ("value"), or its kept rest's family-optimum
+        # search ("optimum"). Rest B, after it, must still reach its CANCEL.
+        conn = _two_family_harness(monkeypatch)
+        # The pass's monotonic clock moves only when A's work spends it.
+        clock = [1000.0]
+        monkeypatch.setattr(C, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+        def exhaust_budget():
+            clock[0] += self.BUDGET * 1.5
+
+        if slow == "value":
+            real = C.value_standing_entry
+
+            def slow_value(entry, **kwargs):
+                if entry["command_id"] == "cmd-a":
+                    exhaust_budget()
+                return real(entry, **kwargs)
+
+            monkeypatch.setattr(C, "value_standing_entry", slow_value)
+        else:
+            real_init = C.FamilyOptimumCut.__init__
+
+            def slow_cut(self, *args, **kwargs):
+                if kwargs["prepared"].probability_witness.family_key == FAMILY_KEY:
+                    exhaust_budget()
+                real_init(self, *args, **kwargs)
+
+            monkeypatch.setattr(C.FamilyOptimumCut, "__init__", slow_cut)
+        venue = _NoCancelVenue()
+        passes = []
+        for _ in range(2):  # the bound: one pass per open rest
+            result = C.run_c3_staleness_cancel_cycle(
+                conn, conn, sqlite3.connect(":memory:"), venue,
+                world_conn_ro=sqlite3.connect(":memory:"), clock=lambda: datetime.now(UTC),
+                budget_seconds=self.BUDGET,
+            )
+            passes.append({v.command_id: (v.action, v.reason) for v in result["valuations"]})
+            if ["venue-b"] in venue.calls:
+                break
+
+        assert ["venue-b"] in venue.calls, passes
+        b_action, b_reason = passes[-1]["cmd-b"]
+        assert b_action == "CANCEL" and b_reason.startswith(("CURRENT_MEAN_VALUE_NON_POSITIVE", "ENTRY_REST_BUY_REFUTED"))
+        # The expensive rest itself is valued, and kept, not starved in turn.
+        assert passes[0]["cmd-a"] == ("KEEP", "CURRENT_ENTRY_REST_VALUE_POSITIVE")
+        assert len(passes) == (2 if slow == "value" else 1), passes
+        if slow == "value":
+            assert passes[0]["cmd-b"] == ("DEFER", "ENTRY_REST_PASS_DEADLINE")
+        assert conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-b'").fetchone()[0] == "CANCELLED"
+        assert conn.execute("SELECT state FROM venue_commands WHERE command_id='cmd-a'").fetchone()[0] == "ACKED"

@@ -417,6 +417,13 @@ class StandingEntryValuation:
 # could not value (DEFER), and the next pass values on fresher inputs.
 STANDING_ENTRY_PASS_BUDGET_SECONDS = 60.0
 
+# When each open rest's value check, and its family-optimum comparison, last
+# completed in this process (monotonic). A pass takes rests least recently
+# done first, so one its deadline cuts short resumes where it stopped: no
+# expensive prefix starves a later rest. Full ticks drop closed rests.
+_LAST_VALUED: dict[str, float] = {}
+_LAST_COMPARED: dict[str, float] = {}
+
 
 def _deferred(entry: Mapping[str, Any], family: FamilyKey | None, reason: str) -> StandingEntryValuation:
     """Authority this process has not loaded yet: no decision, no venue action."""
@@ -1731,10 +1738,13 @@ def _capture_standing_entry_values(
 
     A rest the value law keeps is then compared against the family's own
     fresh optimum (``family_optimum_dominates``) under ``fresh_entry_gate``,
-    what the live selector would refuse a fresh BUY on. Authority not loaded
-    yet defers only until ``authority_pending_until_monotonic``; past it (or
-    without it) the rest cancels protectively
-    (``ENTRY_REST_AUTHORITY_NOT_LOADED_TIMEOUT``).
+    what the live selector would refuse a fresh BUY on. Every rest's value
+    check runs before any comparison, each phase least recently done first
+    (``_LAST_VALUED``, ``_LAST_COMPARED``): past ``deadline_monotonic`` an
+    unvalued rest DEFERs and an uncompared KEEP stays kept, and both go first
+    next pass. Authority not loaded yet defers only until
+    ``authority_pending_until_monotonic``; past it (or without it) the rest
+    cancels protectively (``ENTRY_REST_AUTHORITY_NOT_LOADED_TIMEOUT``).
     """
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
     from src.engine import event_reactor_adapter as adapter
@@ -1984,11 +1994,15 @@ def _capture_standing_entry_values(
                 vacated=vacated,
             )
 
-        for rest in active:
+        def expired() -> bool:
+            return deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
+
+        kept: dict[str, tuple[Any, Any, Any]] = {}
+        for rest in sorted(active, key=lambda r: _LAST_VALUED.get(str(r["command_id"]), float("-inf"))):
             command_id = str(rest["command_id"])
             family = families[command_id]
             event, prepared = prepared_by_family[family]
-            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            if expired():
                 values[command_id] = _deferred(rest, family, "ENTRY_REST_PASS_DEADLINE")
                 continue
             try:
@@ -2041,51 +2055,63 @@ def _capture_standing_entry_values(
                     resolution_at=resolution_at_by_key.get(prepared.probability_witness.family_key),
                     now=now,
                 )
-                if valuation.action == "KEEP":
-                    # Kept unless the family's plan with the rest released
-                    # beats the rest plus the optimum with it held.
-                    try:
-                        if family not in held_optimum:
-                            held_optimum[family] = fresh_optimum(family, event, prepared, wealth)
-                        held = held_optimum[family]
-                        released = fresh_optimum(
-                            family, event, prepared, own_wealth, vacated=str(rest["token_id"])
-                        )
-                        dominated = family_optimum_dominates(
-                            valuation,
-                            held=held,
-                            released=released,
-                            probability_witness=prepared.probability_witness,
-                            endowment=_family_portfolio_endowment(
-                                probability_witness=prepared.probability_witness,
-                                holdings_snapshot=bound.holdings_snapshot,
-                                wealth_witness=own_wealth,
-                            ),
-                        )
-                        optimum_evidence: dict[str, Any] = {
-                            "held": None if held is None else held.evidence(),
-                            "released": None if released is None else released.evidence(),
-                        }
-                    except Exception as exc:  # noqa: BLE001 - no fresh cut proves no dominance
-                        logger.warning(
-                            "standing ENTRY family optimum unavailable command=%s: %s: %s",
-                            command_id, type(exc).__name__, exc,
-                        )
-                        dominated = False
-                        optimum_evidence = {"error": f"{type(exc).__name__}:{exc}"}
-                    valuation = replace(
-                        valuation,
-                        action="CANCEL" if dominated else "KEEP",
-                        reason="FAMILY_OPTIMUM_DOMINATES" if dominated else valuation.reason,
-                        evidence={**dict(valuation.evidence), "family_optimum": optimum_evidence},
-                    )
                 values[command_id] = valuation
+                if valuation.action == "KEEP":
+                    kept[command_id] = (rest, own_wealth, bound)
             except Exception as exc:  # noqa: BLE001 - an unprovable valuation cancels protectively
                 values[command_id] = _protective(
                     rest,
                     family,
                     f"ENTRY_REST_VALUE_AUTHORITY_INVALID:{type(exc).__name__}:{exc}",
                 )
+            _LAST_VALUED[command_id] = time.monotonic()
+        for command_id in sorted(kept, key=lambda c: _LAST_COMPARED.get(c, float("-inf"))):
+            rest, own_wealth, bound = kept[command_id]
+            family = families[command_id]
+            event, prepared = prepared_by_family[family]
+            valuation = values[command_id]
+            if expired():
+                # The value law kept it; with no comparison, no dominance.
+                values[command_id] = replace(valuation, evidence={
+                    **dict(valuation.evidence), "family_optimum": {"deferred": "ENTRY_REST_PASS_DEADLINE"},
+                })
+                continue
+            # Kept unless the family's plan with the rest released beats the
+            # rest plus the optimum with it held.
+            try:
+                if family not in held_optimum:
+                    held_optimum[family] = fresh_optimum(family, event, prepared, wealth)
+                held = held_optimum[family]
+                released = fresh_optimum(family, event, prepared, own_wealth, vacated=str(rest["token_id"]))
+                dominated = family_optimum_dominates(
+                    valuation,
+                    held=held,
+                    released=released,
+                    probability_witness=prepared.probability_witness,
+                    endowment=_family_portfolio_endowment(
+                        probability_witness=prepared.probability_witness,
+                        holdings_snapshot=bound.holdings_snapshot,
+                        wealth_witness=own_wealth,
+                    ),
+                )
+                optimum_evidence: dict[str, Any] = {
+                    "held": None if held is None else held.evidence(),
+                    "released": None if released is None else released.evidence(),
+                }
+            except Exception as exc:  # noqa: BLE001 - no fresh cut proves no dominance
+                logger.warning(
+                    "standing ENTRY family optimum unavailable command=%s: %s: %s",
+                    command_id, type(exc).__name__, exc,
+                )
+                dominated = False
+                optimum_evidence = {"error": f"{type(exc).__name__}:{exc}"}
+            values[command_id] = replace(
+                valuation,
+                action="CANCEL" if dominated else "KEEP",
+                reason="FAMILY_OPTIMUM_DOMINATES" if dominated else valuation.reason,
+                evidence={**dict(valuation.evidence), "family_optimum": optimum_evidence},
+            )
+            _LAST_COMPARED[command_id] = time.monotonic()
         return now, [values[c] for c in order]
     finally:
         if owns_txn and trade_conn.in_transaction:
@@ -2231,7 +2257,8 @@ def run_c3_staleness_cancel_cycle(
     ``clock`` supplies the decision instant; the capture reads it after its
     trade read snapshot is pinned, so the instant is never earlier than any
     fact the pass reads. ``budget_seconds`` bounds the read snapshot and the
-    correction resolver; a rest left unvalued when it runs out is DEFERRED.
+    correction resolver; a rest left unvalued when it runs out is DEFERRED
+    and goes first next pass.
     ``fresh_entry_gate`` is what the live selector would refuse a fresh BUY
     on (a refused fresh order never dominates a rest).
     ``authority_pending_until_monotonic`` bounds the deferral on authority
@@ -2271,6 +2298,11 @@ def run_c3_staleness_cancel_cycle(
         ]
     pending = [e for e in entries if e.get("pending_cancel")]
     active = [e for e in entries if not e.get("pending_cancel")]
+    if full_tick:
+        open_ids = {str(e["command_id"]) for e in active}
+        for progress in (_LAST_VALUED, _LAST_COMPARED):
+            for closed in progress.keys() - open_ids:
+                del progress[closed]
 
     day0_cancel_set: list[dict[str, Any]] = []
     if active and full_tick:
