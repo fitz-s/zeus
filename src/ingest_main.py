@@ -2188,6 +2188,7 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         return {"status": "WORLD_WRITER_BUSY"}
     inserted = 0
     advanced = False
+    committed_rows: list[tuple[dict[str, object], str]] = []
     try:
         with default_runtime_write_coordinator().lease(
             (DBIdentity.WORLD,), owner="day0_fmi_temperature",
@@ -2217,10 +2218,23 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
                         raw_report=sample.raw_report,
                     ):
                         inserted += 1
-                        if clock > newest or (clock == newest and native_value != newest_value):
-                            advanced = True
+                        row_advanced = clock > newest or (clock == newest and native_value != newest_value)
+                        advanced = advanced or row_advanced
+                        try:  # Telemetry: the exact inserted revision, never a write input.
+                            committed_rows.append(({
+                                "id": conn.execute("SELECT last_insert_rowid()").fetchone()[0],
+                                "city": city.name, "station_id": station_id,
+                                "source_channel": source_channel, "publish_ts_utc": clock,
+                                "value_native": native_value, "unit": route.unit,
+                                "fetched_at_utc": sample.fetched_at.isoformat(),
+                                "raw_report": sample.raw_report,
+                            }, "ADVANCES_SOURCE_FRONTIER" if row_advanced else "BEHIND_SOURCE_FRONTIER"))
+                        except Exception:  # noqa: BLE001 - telemetry never changes the write
+                            pass
                 started = time.monotonic()
                 conn.commit()
+                world_committed_ns = time.monotonic_ns()
+                world_committed_at_ms = time.time_ns() // 1_000_000
                 lease.record_commit(
                     commit_ms=(time.monotonic() - started) * 1000,
                     rows_changed=conn.total_changes - before,
@@ -2236,8 +2250,6 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
     finally:
         mutex.release()
 
-    world_committed_ns = time.monotonic_ns()
-    world_committed_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     wake_status = "NO_NEW_SOURCE_REVISION"
     wake_key = (city.name, station_id, source_channel)
     if advanced:
@@ -2289,12 +2301,10 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         # actually occur and completed_trace can prove the identity join.
         "completion_trace": "OBSERVATION_REACTION_TRACE",
     }
-    if advanced:
-        from src.runtime.observation_reaction_trace import emit_stage
-        emit_stage("SOURCE_COMMITTED", city=city.name, station_id=station_id,
-            source_channel=source_channel, input_identity=input_identity,
-            response_received_at_ms=trace["response_received_at_ms"],
-            world_committed_at_ms=world_committed_at_ms)
+    from src.runtime.observation_reaction_trace import emit_observation_committed
+    for row, disposition in committed_rows:
+        emit_observation_committed(row, world_committed_at_ms=world_committed_at_ms,
+                                   disposition=disposition)
     if advanced or wake_status != "NO_NEW_SOURCE_REVISION":
         logger.info("PHYSICAL_CURRENT_CHAIN_TRACE %s", json.dumps(trace, sort_keys=True))
     return {"status": "COMMITTED", "inserted": inserted, "advanced": advanced, "clock_trace": trace}

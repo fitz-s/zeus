@@ -25,7 +25,7 @@ _FIELDS = frozenset({'city','target_date','metric','station_id','source_channel'
     'event_id','venue_ack_at_ms','q_served_at_ms','posterior_ready_at_ms','wake_published',
     'observation_ref','input_reference_status','readiness_id','readiness_computed_at_utc',
     'wake_id','wake_received_at_ms','wake_published_at_ms','decision_id','decision_outcome',
-    'decision_reason','decision_at_ms','command_at_ms'})
+    'decision_reason','decision_at_ms','command_at_ms','commit_disposition'})
 
 
 def _utc(value: Any) -> datetime:
@@ -65,7 +65,8 @@ def emit_stage(stage: str, **fields: Any) -> dict[str, Any]:
     return record
 
 
-def emit_observation_committed(row: Mapping[str, Any], *, world_committed_at_ms: int) -> None:
+def emit_observation_committed(row: Mapping[str, Any], *, world_committed_at_ms: int,
+                               disposition: str | None = None) -> None:
     """Call only after the owning WORLD transaction commits, with its actual row."""
     try:
         ref=observation_revision_reference(row)
@@ -74,7 +75,7 @@ def emit_observation_committed(row: Mapping[str, Any], *, world_committed_at_ms:
             input_identity={'source':row['source_channel'],'observed_at_utc':ref['publish_ts_utc'],
                             'value_native':row['value_native']},
             response_received_at_ms=int(_utc(row['fetched_at_utc']).timestamp()*1000),
-            world_committed_at_ms=world_committed_at_ms)
+            world_committed_at_ms=world_committed_at_ms,commit_disposition=disposition)
     except Exception:pass
 
 
