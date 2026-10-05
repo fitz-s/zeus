@@ -53246,7 +53246,7 @@ _LOST = "basis=current_value_serving_consumed_proof_unverifiable:"
 @pytest.mark.parametrize("producer",("legacy","recorded"))
 @pytest.mark.parametrize("fault",("healthy","nbm_deleted","nbm_body_changed","nbm_model_mutated",
     "nbm_model_mutated_to_used","width_icon_deleted","width_icon_deleted_stale_substitute","width_icon_body_changed",
-    "width_icon_model_mutated"))
+    "width_icon_model_mutated","nbm_digest_empty","nbm_endpoint_mode_unknown"))
 def test_one_no_scheme_lineage_classifies_every_unroled_row_by_its_recorded_identity(
         tmp_path,monkeypatch,fault,producer,_noaa_native_sources):
     """The lead's bar on one lineage. Legacy (no cohort role): a row whose
@@ -53259,7 +53259,9 @@ def test_one_no_scheme_lineage_classifies_every_unroled_row_by_its_recorded_iden
     to a used model is claimed and its by-id proof refuses. Recorded: the
     cohort role is re-proven by id and NBM is never read. The stale
     substitution (ICON@c0 also gone, so a re-derived cohort would be the stale
-    center rows) changes nothing here."""
+    center rows) changes nothing here. An unused row whose recorded identity is
+    malformed on both sides (empty digest, or no endpoint mode and no URL)
+    proves no model either, so it refuses on legacy like a mutated one."""
     fixture, row, cut, ids = _chicago_no_scheme_lineage(tmp_path,monkeypatch,record_role=producer == "recorded")
     restore = None
     try:
@@ -53269,6 +53271,14 @@ def test_one_no_scheme_lineage_classifies_every_unroled_row_by_its_recorded_iden
                 fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(gone,))
         elif fault.endswith("body_changed"):
             restore = _change_raw_body(fixture.conn,victim)
+        elif fault == "nbm_digest_empty":
+            fixture.conn.execute("UPDATE raw_forecast_artifacts SET sha256='' WHERE artifact_id="
+                "(SELECT artifact_id FROM raw_model_forecasts WHERE raw_model_forecast_id=?)",(victim,))
+            fixture.conn.execute("UPDATE raw_model_forecasts SET raw_sha256='' WHERE raw_model_forecast_id=?",(victim,))
+        elif fault == "nbm_endpoint_mode_unknown":
+            fixture.conn.execute("UPDATE raw_forecast_artifacts SET request_url=NULL WHERE artifact_id="
+                "(SELECT artifact_id FROM raw_model_forecasts WHERE raw_model_forecast_id=?)",(victim,))
+            fixture.conn.execute("UPDATE raw_model_forecasts SET endpoint_mode=NULL WHERE raw_model_forecast_id=?",(victim,))
         elif "model_mutated" in fault:
             # A model with no row at this natural key, outside used_models or
             # (to_used) a used one: UKMO's only rows are at c0.
@@ -53290,6 +53300,7 @@ def test_one_no_scheme_lineage_classifies_every_unroled_row_by_its_recorded_iden
                 else f"{_LOST}model=icon_global:consumed_raw_id={ids.width}:role={role}"),
         }
         expected["width_icon_deleted_stale_substitute"] = expected["width_icon_deleted"]
+        expected["nbm_digest_empty"] = expected["nbm_endpoint_mode_unknown"] = expected["nbm_model_mutated"]
         assert reason == expected[fault], reason
     finally:
         if restore is not None:

@@ -906,3 +906,31 @@ def test_live_grade_memo_is_per_purpose_and_canonical_only(_shanghai_reader_curr
         def execute(self,*a):return normal.conn.execute(*a)
     B.read_replacement_forecast_bundle(View(),**{**normal.kwargs,"raw_input_hwm_conn":normal.conn})
     assert calls
+
+def _recorded_identity(**changes):
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL
+    params={"models":"icon_global","hourly":"temperature_2m"}
+    row={"raw_sha256":"a"*64,"endpoint_mode":"single_runs","source_id":"openmeteo","product_id":"icon",
+         "source_cycle_time":CYCLE.isoformat(),"model":"icon_global","model_name":"icon_global"}
+    artifact={"sha256":"a"*64,"data_version":"openmeteo_single_model_entity_body_v1",
+              "request_url":SINGLE_RUNS_FORECAST_URL,"source_id":"openmeteo","product_id":"icon",
+              "source_cycle_time":CYCLE.isoformat(),"request_params_json":json.dumps(params),
+              "metadata":json.dumps({"physical_response":{"revision":"openmeteo_single_model_entity_body_v1",
+                                                          "request_params":params,"model":"icon_global"}})}
+    for key,value in changes.items():
+        side,field=key.split("__")
+        (row if side=="row" else artifact)[field]=value
+    return row,artifact
+
+@pytest.mark.parametrize("changes",[
+    {"row__raw_sha256":"","artifact__sha256":""},
+    {"row__raw_sha256":None,"artifact__sha256":None},
+    {"row__raw_sha256":"abc","artifact__sha256":"abc"},
+    {"row__endpoint_mode":None,"artifact__request_url":None},
+    {"row__endpoint_mode":"unknown_mode","artifact__request_url":None}],
+    ids=["empty_digest","null_digest","short_digest","null_mode","unknown_mode"])
+def test_recorded_identity_needs_a_digest_and_a_recognized_endpoint_mode(changes):
+    # Equal malformed values on both sides bind nothing: an empty digest or an
+    # unknown mode (whose expected URL is None) never matches by coincidence.
+    assert C.recorded_openmeteo_identity_has_authority(*_recorded_identity())
+    assert not C.recorded_openmeteo_identity_has_authority(*_recorded_identity(**changes))

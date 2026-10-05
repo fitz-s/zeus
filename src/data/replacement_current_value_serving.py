@@ -59,6 +59,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import math
+import re
 import sqlite3
 import threading
 import time
@@ -1150,8 +1151,9 @@ def _remaining_window_boundary(row: Mapping[str, object]) -> str:
 def recorded_openmeteo_identity_has_authority(row: Mapping[str, object], artifact: object) -> bool:
     """The body-free half of the Open-Meteo proof: the row's recorded product.
 
-    The row is bound to its recorded entity body (sha, source, product, cycle),
-    fetched from its endpoint mode's URL; that capture recorded this row's model
+    The row is bound to its recorded entity body (a sha256 hex digest, source,
+    product, cycle), fetched from its recognized endpoint mode's URL; an empty
+    digest or an unknown mode binds nothing. That capture recorded this row's model
     and requested the matching Open-Meteo model, which is the row's model_name.
     Only DB-recorded fields are read: no body bytes, no clocks against a
     decision, no current live request policy.
@@ -1160,12 +1162,14 @@ def recorded_openmeteo_identity_has_authority(row: Mapping[str, object], artifac
         from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
         from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL, STANDARD_FORECAST_URL
         from src.data.openmeteo_client import PREVIOUS_RUNS_URL
-        if not isinstance(artifact, dict) or artifact["sha256"] != row["raw_sha256"]:
+        if (not isinstance(artifact, dict) or re.fullmatch("[0-9a-f]{64}", str(artifact["sha256"])) is None
+                or artifact["sha256"] != row["raw_sha256"]):
             return False
         expected_url = {"single_runs": SINGLE_RUNS_FORECAST_URL,
             "standard_api_meta_stamped": STANDARD_FORECAST_URL,
             "previous_runs": PREVIOUS_RUNS_URL}.get(str(row["endpoint_mode"]))
-        if artifact.get("data_version") != "openmeteo_single_model_entity_body_v1" or artifact["request_url"] != expected_url:
+        if (expected_url is None or artifact.get("data_version") != "openmeteo_single_model_entity_body_v1"
+                or artifact["request_url"] != expected_url):
             return False
         if any(artifact[key] != row[key] for key in ("source_id", "product_id", "source_cycle_time")):
             return False
