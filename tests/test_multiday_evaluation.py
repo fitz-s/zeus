@@ -198,6 +198,16 @@ def test_equal_size_children_without_tx_hash_both_count():
     assert me.fill_totals(me.load_economic_fills(conn, ["c1"])["c1"], 10.0)[:2] == (10.0, pytest.approx(4.0))
 
 
+def test_matched_without_tx_then_confirmed_with_tx_counts_once():
+    """Same trade_id, tx_hash filled in on the later revision: one fill, not two."""
+    conn = _facts_conn([
+        ("c1", "t1", "MATCHED", 5, 0.3, None, 1),
+        ("c1", "t1", "CONFIRMED", 5, 0.3, TX, 2),
+    ])
+    assert me.load_economic_fills(conn, ["c1"])["c1"] == [(5.0, 0.3)]
+    assert me.fill_totals(me.load_economic_fills(conn, ["c1"])["c1"], 5.0) == (5.0, pytest.approx(1.5), False)
+
+
 def test_lifecycle_revisions_and_tx_aggregate_alias_count_once():
     conn = _facts_conn([
         ("c1", "t1", "MATCHED", 4, 0.30, TX, 1),
