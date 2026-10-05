@@ -49,6 +49,7 @@ reported as a scalar.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import logging
 import os
@@ -70,6 +71,10 @@ logger = logging.getLogger("multiday_evaluation")
 
 SCHEMA = "multiday_evaluation.v1"
 EXIT_DB_BUSY = 75  # EX_TEMPFAIL: the scheduler tick treats it as "try the next cadence"
+# The child's own wall-clock deadline. src/main.py's subprocess.run timeout (300 s) is the
+# parent's backstop and must stay above this, so a hung child dies by its own watchdog first
+# and still dies when the parent daemon is gone and nothing is left to kill it.
+CHILD_DEADLINE_S = 270.0
 AGE_BUCKETS = ("<12h", "12-24h", "24-48h", ">=48h", "unknown")
 OPEN_PHASES = ("active", "day0_window", "pending_exit")
 POSITION_PHASES = OPEN_PHASES + ("economically_closed", "settled")
@@ -1051,7 +1056,7 @@ def run_multiday_evaluation(
     return report
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, watchdog: bool = False) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--since", type=date.fromisoformat, help="target_date lower bound (default: today - 14d)")
     ap.add_argument("--trades-db")
@@ -1060,7 +1065,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--out-dir", help="default: the runtime state dir")
     ap.add_argument("--no-write", action="store_true")
     ap.add_argument("--quiet", action="store_true", help="do not print the markdown (the scheduler child)")
+    ap.add_argument("--deadline-s", type=float, default=CHILD_DEADLINE_S,
+                    help="self-imposed wall-clock limit of a CLI run, in seconds (default %(default)s)")
     args = ap.parse_args(argv)
+    if watchdog:
+        # faulthandler's watchdog is a C thread that needs no GIL, so it fires even while the
+        # main thread is blocked inside a sqlite lock wait (a Python SIGALRM handler would
+        # not run until that C call returned). It dumps every thread's stack to stderr and
+        # exits the process with status 1, with no parent involved.
+        faulthandler.dump_traceback_later(args.deadline_s, exit=True)
+        logger.info("watchdog armed deadline_s=%.0f", args.deadline_s)
     try:
         report = run_multiday_evaluation(
             since=args.since,
@@ -1075,6 +1089,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             logger.warning("database busy, no report this cadence: %s", exc)
             return EXIT_DB_BUSY
         raise
+    finally:
+        if watchdog:
+            faulthandler.cancel_dump_traceback_later()
     logger.info(
         "done since=%s entries=%s coverage=%s warnings=%s",
         report["since_target_date"], len(report["entries"]), report["coverage"], report["warnings"],
@@ -1095,4 +1112,4 @@ if __name__ == "__main__":
         os.nice(10)  # a background report must never outrank the trading daemon
     except OSError:
         pass
-    raise SystemExit(main())
+    raise SystemExit(main(watchdog=True))

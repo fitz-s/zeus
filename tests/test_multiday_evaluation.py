@@ -894,3 +894,56 @@ def test_floor_counterexample_end_to_end_from_the_database(tmp_path):
     assert rep["coverage"]["positions_entry_history_read_beyond_floor"] == 1
     total = next(x for x in rep["totals"] if x["metric"] == "high")
     assert total["exit_cost_unknown"] == 0
+
+
+# ------------------------------------------------------- the child's own deadline (no parent)
+def test_child_dies_on_its_own_deadline_while_blocked_in_a_sqlite_lock_wait(tmp_path):
+    """Parent gone / hung: the child must not keep reading. An exclusive lock plus a 60 s busy
+    timeout parks the main thread inside sqlite's C wait; only a GIL-free watchdog can end it."""
+    import subprocess
+
+    dbs = _make_dbs(tmp_path)
+    holder = sqlite3.connect(dbs[0], isolation_level=None)
+    holder.execute("PRAGMA journal_mode=DELETE")
+    holder.execute("BEGIN EXCLUSIVE")
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(me.PROJECT_ROOT / "scripts" / "multiday_evaluation.py"), "--quiet",
+             "--since", "2026-09-28", "--trades-db", str(dbs[0]), "--forecasts-db", str(dbs[1]),
+             "--world-db", str(dbs[2]), "--no-write", "--deadline-s", "2"],
+            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,   # 60 s is only the test's safety net
+            env={**os.environ, "ZEUS_DB_READ_BUSY_TIMEOUT_MS": "60000"},
+        )
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 1, (proc.returncode, proc.stderr[-500:])
+    assert elapsed < 20, f"the child outlived its 2 s deadline by far: {elapsed:.1f}s"
+    assert "watchdog armed deadline_s=2" in proc.stderr
+    assert "Timeout (0:00:02)!" in proc.stderr and "most recent call first" in proc.stderr   # stacks were dumped
+
+
+def test_deadline_is_below_the_parents_timeout_and_a_normal_run_cancels_the_watchdog(tmp_path):
+    import subprocess
+    import src.main as main_module
+
+    assert me.CHILD_DEADLINE_S < main_module._MULTIDAY_EVALUATION_TIMEOUT_S
+    dbs = _make_dbs(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, str(me.PROJECT_ROOT / "scripts" / "multiday_evaluation.py"), "--quiet",
+         "--since", "2026-09-28", "--trades-db", str(dbs[0]), "--forecasts-db", str(dbs[1]),
+         "--world-db", str(dbs[2]), "--no-write", "--deadline-s", "30"],
+        capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "watchdog armed deadline_s=30" in proc.stderr and "Timeout (" not in proc.stderr
+
+
+def test_importing_the_script_does_not_arm_a_watchdog():
+    """Only a CLI run arms it; library callers (the tests, the report API) never get killed."""
+    import faulthandler
+
+    assert me.main.__kwdefaults__["watchdog"] is False
+    faulthandler.cancel_dump_traceback_later()   # no-op; nothing was scheduled by importing

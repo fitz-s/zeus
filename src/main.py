@@ -2040,6 +2040,11 @@ def _run_multiday_evaluation_child(
     so ``_scheduler_job`` records FAILED. ``subprocess.run`` kills the child when the
     timeout fires; the child holds no non-daemon worker thread and writes only two
     fixed-name atomic temp files, so a kill leaves nothing to clean up.
+
+    The child also carries its own deadline (``scripts.multiday_evaluation.CHILD_DEADLINE_S``,
+    270 s, enforced by a faulthandler watchdog that dumps the stacks and exits 1), so it ends
+    by itself when this daemon has died and nothing is left to kill it. The 300 s timeout here
+    is only the backstop above it.
     """
     argv = [sys.executable, str(_MULTIDAY_EVALUATION_SCRIPT), "--quiet", *extra_args]
     started = time.monotonic()
@@ -2056,7 +2061,7 @@ def _run_multiday_evaluation_child(
         logger.warning("multiday_evaluation deferred: database busy (child %.1fs)\n%s", elapsed, tail)
         return
     if proc.returncode != 0:
-        raise RuntimeError(f"multiday_evaluation child exit={proc.returncode}: {tail[-1000:]}")
+        raise RuntimeError(f"multiday_evaluation child exit={proc.returncode}: {tail[-2000:]}")
     logger.info("multiday_evaluation child ok in %.1fs\n%s", elapsed, tail)
 
 
