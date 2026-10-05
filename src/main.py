@@ -2023,6 +2023,37 @@ def _settlement_guard_report_tick() -> None:
     run_settlement_guard_report()
 
 
+@_scheduler_job("multiday_evaluation")
+def _multiday_evaluation_tick() -> None:
+    """Daily multi-day evaluation report (operator 2026-10-05: records + continuous evaluation).
+
+    Read-only over the trade, forecast and world DBs (each its own ``mode=ro``
+    connection, INV-37); writes only state/multiday_evaluation.{json,md}. A
+    report, never a gate: nothing here can change what trades. Yields to the live
+    money-path cycle and to a busy DB (skips until the next cadence; no retry).
+    Import is local to keep src.main import-light.
+    """
+    if _defer_for_held_position_monitor("multiday_evaluation"):
+        return
+    if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
+        logger.info("multiday_evaluation skipped: live money-path cycle active")
+        return
+    from scripts.multiday_evaluation import run_multiday_evaluation
+
+    try:
+        report = run_multiday_evaluation()
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if "locked" in message or "busy" in message:
+            logger.warning("multiday_evaluation deferred: database busy")
+            return
+        raise
+    logger.info(
+        "multiday_evaluation: since=%s entries=%s coverage=%s",
+        report["since_target_date"], len(report["entries"]), report["coverage"],
+    )
+
+
 @_scheduler_job("settlement_skill_attribution")
 def _settlement_skill_attribution_tick() -> None:
     """Grade every SETTLED position into a skill category (operator 2026-06-12 law).
@@ -11467,6 +11498,14 @@ def main():
         _settlement_skill_attribution_tick, "interval", minutes=30,
         id="settlement_skill_attribution", max_instances=1, coalesce=True,
         next_run_time=_utc_run_time_after(120.0),
+    )
+    # Daily multi-day evaluation report — 09:45 UTC, after the 09:15 settlement guard
+    # and the 30-min skill-attribution grading it reads. Read-only report-only
+    # (state/multiday_evaluation.{json,md}); skips while the money path is active.
+    scheduler.add_job(
+        _multiday_evaluation_tick, "cron", hour=9, minute=45,
+        id="multiday_evaluation", max_instances=1, coalesce=True,
+        misfire_grace_time=3600,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER

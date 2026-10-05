@@ -74,6 +74,7 @@ file_naming:
         code_review_graph_mcp_readonly.py: Zeus-safe Code Review Graph MCP facade; intentionally omits source-writing apply_refactor
         edge_observation_weekly.py: packet-reviewed weekly edge-observation runner; noun-first name retained to match `edge_observation` package/operator terminology
         equity_curve.py: established telemetry report command
+        multiday_evaluation.py: operator-named continuous multi-day evaluation report (directive 2026-10-05); read-only, report-only, scheduled daily from src/main.py
         force_lifecycle.py: established repair command name; dangerous and packet-gated
         fill_obs_dst_gaps.py: established obs_v2 targeted fill helper; fill_ prefix kept for explicit gap-repair semantics
         fit_bias_scale.py: joint per-city bias + global scale calibration fitter; fit_ prefix retained to mirror fit_sigma_scale.py / fit_settlement_sigma_floor.py operator-facing calibration artifact terminology (statistical_calibration_authority_2026-06-12 Task 1.1)

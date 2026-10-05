@@ -311,3 +311,72 @@ def test_sources_are_never_written(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         ro.execute("INSERT INTO venue_commands (command_id) VALUES ('x')")
     ro.close()
+
+
+# ------------------------------------------------------- scheduler wiring
+@pytest.fixture
+def tick(monkeypatch):
+    import src.main as main_module
+
+    health: list = []
+    monkeypatch.setattr(main_module, "_write_scheduler_health", lambda name, **kw: health.append((name, kw)))
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: False)
+    monkeypatch.setattr(
+        main_module, "_edli_redecision_screen_lock", SimpleNamespace(locked=lambda: False)
+    )
+    return main_module, health
+
+
+def _stub_run(monkeypatch, fn):
+    monkeypatch.setattr(me, "run_multiday_evaluation", fn)
+
+
+def test_tick_runs_the_report_when_money_path_is_idle(tick, monkeypatch):
+    main_module, health = tick
+    calls = []
+    _stub_run(monkeypatch, lambda: calls.append(1) or {"since_target_date": "x", "entries": [], "coverage": {}})
+    main_module._multiday_evaluation_tick()
+    assert calls == [1] and health[-1] == ("multiday_evaluation", {"failed": False})
+
+
+@pytest.mark.parametrize("busy", ["reactor", "screen", "monitor"])
+def test_tick_defers_to_the_money_path(tick, monkeypatch, busy):
+    main_module, _ = tick
+    if busy == "reactor":
+        monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: True)
+    elif busy == "screen":
+        monkeypatch.setattr(main_module, "_edli_redecision_screen_lock", SimpleNamespace(locked=lambda: True))
+    else:
+        monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: True)
+    _stub_run(monkeypatch, lambda: pytest.fail("report must not run while the money path is active"))
+    main_module._multiday_evaluation_tick()
+
+
+def test_tick_never_raises_into_the_daemon(tick, monkeypatch):
+    main_module, health = tick
+
+    def busy():
+        raise sqlite3.OperationalError("database is locked")
+
+    _stub_run(monkeypatch, busy)
+    main_module._multiday_evaluation_tick()
+    assert health[-1] == ("multiday_evaluation", {"failed": False})  # deferred, not failed
+
+    def broken():
+        raise RuntimeError("boom")
+
+    _stub_run(monkeypatch, broken)
+    main_module._multiday_evaluation_tick()  # _scheduler_job swallows and records
+    assert health[-1][1]["failed"] is True and health[-1][1]["reason"] == "boom"
+
+
+def test_job_is_registered_daily_and_classified_non_collection():
+    import re
+    from pathlib import Path
+
+    src = (Path(me.PROJECT_ROOT) / "src" / "main.py").read_text()
+    assert re.search(r'_multiday_evaluation_tick, "cron", hour=9, minute=45,\s+id="multiday_evaluation"', src)
+    from scripts.data_collection_inventory import _SRC_MAIN_NON_COLLECTION_JOB_IDS
+
+    assert "multiday_evaluation" in _SRC_MAIN_NON_COLLECTION_JOB_IDS
