@@ -738,6 +738,10 @@ def _capture_custody_valid(row: dict[str, Any]) -> bool:
 
 def _custody_compatible_views(existing, incoming):
     """Strip exactly validated owned custody for comparison, not for persistence."""
+    # An old/non-versioned caller cannot acquire this forward-writer exception
+    # merely because the stored row happens to have captured custody.
+    if not _capture_custody_valid(incoming):
+        return existing, incoming
     views = []
     owned = False
     for row in (existing, incoming):
@@ -757,6 +761,31 @@ def _custody_compatible_views(existing, incoming):
         view['provenance_json'] = json.dumps(provenance)
         views.append(view)
     return tuple(views) if owned else (existing, incoming)
+
+
+def _custody_revision_core_matches(existing, incoming):
+    """Narrow counterpart of the existing hourly widening/correction law.
+
+    The normal hourly translator derives only these fields from the permitted
+    extrema/count/latest-report advance. Raw clocks already bind the exact
+    captured contributors; latest scalar/count must also bind the row values.
+    Everything else, including unknown keys, remains identical. This check is
+    used only when validated custody enabled a source_file exception.
+    """
+    derived = {'payload_hash', 'hour_max_raw_ts', 'hour_min_raw_ts',
+               'latest_raw_ts', 'latest_temp', 'raw_obs_count'}
+    cores = []
+    for row in (existing, incoming):
+        provenance = _normalize_material_value('provenance_json', row['provenance_json'])
+        if not isinstance(provenance, dict):
+            return False
+        if ('latest_temp' in provenance and provenance['latest_temp'] != row['temp_current'] or
+                'raw_obs_count' in provenance and (
+                    type(provenance['raw_obs_count']) is not int or
+                    provenance['raw_obs_count'] != row['observation_count'])):
+            return False
+        cores.append({key: value for key, value in provenance.items() if key not in derived})
+    return _json_dumps(cores[0]) == _json_dumps(cores[1])
 
 
 def _material_differences(
@@ -799,7 +828,10 @@ def _monotone_widening(existing: dict[str, Any], incoming: dict[str, Any]) -> bo
     must still match exactly, or this is a different reading and must NOT be
     trusted here.
     """
+    prior_existing = existing
     existing, incoming = _custody_compatible_views(existing, incoming)
+    if existing is not prior_existing and not _custody_revision_core_matches(existing, incoming):
+        return False
     for column in set(_INSERT_COLUMNS) - _WIDENING_VARIABLE_COLUMNS:
         if _normalize_material_value(column, existing.get(column)) != _normalize_material_value(
             column, incoming.get(column)
@@ -860,7 +892,10 @@ def _wu_source_revision_supersedes(
     payload; the immutable revision table preserves the displaced view.
     """
 
+    prior_existing = existing
     existing, incoming = _custody_compatible_views(existing, incoming)
+    if existing is not prior_existing and not _custody_revision_core_matches(existing, incoming):
+        return False
     if str(incoming.get("source") or "") != "wu_icao_history":
         return False
     for column in set(_INSERT_COLUMNS) - _WIDENING_VARIABLE_COLUMNS:

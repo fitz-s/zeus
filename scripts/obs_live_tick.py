@@ -175,11 +175,13 @@ def _publish_entity(capture: CapturedEntity) -> tuple[dict | None, str | None]:
             except FileExistsError:
                 if not _verify_entity_file(path, capture.entity, sha):
                     return None, 'CORRUPT_EXISTING'
-            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+        # A prior link may survive a failed directory fsync. Verified bytes
+        # alone cannot RESET that durability failure, even on identical reuse.
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
         return {'sha256': sha, 'byte_count': len(capture.entity), 'source_file': str(path),
             'started_at': capture.started_at, 'finished_at': capture.finished_at,
             'request_url': capture.request_url, 'request_params': capture.request_params,

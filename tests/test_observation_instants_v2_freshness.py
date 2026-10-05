@@ -118,6 +118,43 @@ def test_normal_wu_producer_private_canonical_entity_once_and_receipt(monkeypatc
     assert json.loads(log.read_text())['capture_receipts'][0]['finished_at'] == repeat.capture_receipts[0]['finished_at']
 
 
+@pytest.mark.parametrize('metric', ['HIGH', 'LOW'])
+@pytest.mark.parametrize('revision', ['widening', 'correction'])
+def test_normal_wu_new_body_legal_revision_keeps_core_and_matching_ref(monkeypatch, tmp_path, metric, revision):
+    import json
+    import httpx
+    import scripts.obs_live_tick as tick
+    import src.data.wu_hourly_client as client
+    db = _entity_test_db(tmp_path)
+    directory = tmp_path / 'observation_raw' / 'sha256'
+    monkeypatch.setattr(tick, 'RAW_ENTITY_DIR', directory)
+    bodies = [_wu_entity_fixture()]
+    monkeypatch.setattr(client.httpx, 'get', lambda *a, **k: httpx.Response(200, content=bodies[0]))
+    first = tick._tick_wu_city('Taipei', db, start_date=date(2026, 9, 13), end_date=date(2026, 9, 13), dry_run=False)
+    assert first.rows_written == 2
+    with sqlite3.connect(db) as conn:
+        old = conn.execute('SELECT running_max,running_min,source_file,provenance_json FROM observation_instants ORDER BY utc_timestamp').fetchall()
+    payload = json.loads(bodies[0].decode('utf-8-sig'))
+    if revision == 'widening':
+        ts = int(datetime(2026, 9, 13, 12, 45, tzinfo=timezone.utc).timestamp())
+        payload['observations'].append({'key': 'RCSS', 'obs_id': 'RCSS',
+            'valid_time_gmt': ts, 'temp': 32 if metric == 'HIGH' else 28})
+    else:
+        payload['observations'][0 if metric == 'HIGH' else 1]['temp'] = 30 if metric == 'HIGH' else 29.5
+    bodies[0] = b'\xef\xbb\xbf' + json.dumps(payload).encode() + b'\r\n'
+    result = tick._tick_wu_city('Taipei', db, start_date=date(2026, 9, 13), end_date=date(2026, 9, 13), dry_run=False)
+    assert result.rows_ready == 2 and result.row_build_errors == 0
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute('SELECT running_max,running_min,source_file,provenance_json FROM observation_instants ORDER BY utc_timestamp').fetchall()
+        reason = conn.execute('SELECT reason FROM observation_revisions').fetchone()[0]
+    expected = ((32,29) if metric == 'HIGH' else (31,28)) if revision == 'widening' else ((30,29) if metric == 'HIGH' else (31,29.5))
+    assert rows[0][:2] == expected
+    assert rows[0][2] != old[0][2] and Path(rows[0][2]).read_bytes() == bodies[0]
+    assert rows[1] == old[1]  # unrelated unchanged hour retains first custody
+    assert reason == 'payload_hash_mismatch_' + ('monotone_widening_applied' if revision == 'widening' else 'source_revision_applied')
+    assert len(list(directory.glob('*.body'))) == 2
+
+
 def test_normal_ogimet_multichunk_original_contributors(monkeypatch, tmp_path):
     import json
     import httpx
@@ -260,6 +297,43 @@ def test_forward_capture_clock_regression_does_not_gate_legacy_scalars(monkeypat
         path, provenance = conn.execute('SELECT source_file,provenance_json FROM observation_instants ORDER BY utc_timestamp LIMIT 1').fetchone()
     assert path is None
     assert json.loads(provenance)['captured_entity_custody_v1']['reason'] == 'CLOCK_INVALID'
+
+
+def test_entity_reuse_requires_directory_durability_before_reset(monkeypatch, tmp_path):
+    import errno
+    import os
+    import stat
+    import scripts.obs_live_tick as tick
+    from src.data.wu_hourly_client import CapturedEntity
+    directory = tmp_path / 'observation_raw' / 'sha256'
+    monkeypatch.setattr(tick, 'RAW_ENTITY_DIR', directory)
+    capture = CapturedEntity(b'private-decoded-entity\r\n',
+        '2026-09-13T13:00:00+00:00', '2026-09-13T13:00:01+00:00',
+        'https://www.ogimet.com/cgi-bin/getmetar',
+        {'icao': 'EGLC', 'begin': '202609131200', 'end': '202609131400'}, 'C', {})
+    original_fsync = os.fsync
+    syncs = []
+    fail = [True]
+    def directory_failure(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            syncs.append('directory')
+            if fail[0]:
+                raise OSError(errno.EIO, 'private directory durability failure')
+        else:
+            syncs.append('file')
+        original_fsync(fd)
+    monkeypatch.setattr(tick.os, 'fsync', directory_failure)
+    assert tick._publish_entity(capture) == (None, 'IO_ERROR')
+    assert len(list(directory.glob('*.body'))) == 1
+    monkeypatch.setattr(tick, 'RAW_ENTITY_MAX_BYTES', 0)
+    monkeypatch.setattr(tick, 'RAW_ENTITY_MAX_BODIES', 0)
+    assert tick._publish_entity(capture) == (None, 'IO_ERROR')
+    assert syncs == ['file', 'directory', 'directory']
+    fail[0] = False
+    reference, reason = tick._publish_entity(capture)
+    assert reason is None and Path(reference['source_file']).read_bytes() == capture.entity
+    assert syncs == ['file', 'directory', 'directory', 'directory']
+    assert len(list(directory.glob('*.body'))) == 1
 
 
 # ---------------------------------------------------------------------------

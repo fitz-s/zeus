@@ -133,6 +133,35 @@ def test_owned_capture_lawful_widening_updates_matching_file(mem_db, tmp_path, m
 
 
 @pytest.mark.parametrize('metric', ['HIGH', 'LOW'])
+@pytest.mark.parametrize('key', ['foreign_authority', 'metric', 'source_url', 'parser_version', 'tier'])
+def test_owned_revision_non_custody_core_is_not_licensed(mem_db, tmp_path, metric, key):
+    first = _captured_row(tmp_path, running_max=34.0, running_min=30.0)
+    provenance = json.loads(_valid_provenance(payload_hash='sha256:'+'b'*64))
+    provenance[key] = 'unlicensed-new-context'
+    revised = _captured_row(tmp_path, body=b'new-provider-body\r\n',
+        running_max=35.0 if metric == 'HIGH' else 34.0,
+        running_min=29.0 if metric == 'LOW' else 30.0,
+        provenance_json=json.dumps(provenance))
+    insert_rows(mem_db, [first])
+    insert_rows(mem_db, [revised])
+    assert mem_db.execute('SELECT running_max,running_min,source_file,provenance_json FROM observation_instants').fetchone() == (34.0,30.0,first.source_file,first.provenance_json)
+    assert mem_db.execute('SELECT reason FROM observation_revisions').fetchone()[0] == 'payload_hash_mismatch'
+
+
+@pytest.mark.parametrize('metric', ['HIGH', 'LOW'])
+def test_owned_revision_does_not_coerce_foreign_json_core_types(mem_db, tmp_path, metric):
+    first = _captured_row(tmp_path, running_max=34.0, running_min=30.0,
+        provenance_json=_valid_provenance(foreign_authority=True))
+    revised = _captured_row(tmp_path, body=b'new-provider-body\r\n',
+        running_max=35.0 if metric == 'HIGH' else 34.0,
+        running_min=29.0 if metric == 'LOW' else 30.0,
+        provenance_json=_valid_provenance(payload_hash='sha256:'+'b'*64, foreign_authority=1))
+    insert_rows(mem_db, [first])
+    insert_rows(mem_db, [revised])
+    assert mem_db.execute('SELECT running_max,running_min,source_file FROM observation_instants').fetchone() == (34.0,30.0,first.source_file)
+
+
+@pytest.mark.parametrize('metric', ['HIGH', 'LOW'])
 def test_owned_custody_does_not_license_same_hash_value_change(mem_db, tmp_path, metric):
     first = _captured_row(tmp_path, running_max=34.0, running_min=30.0)
     forged = _captured_row(tmp_path, running_max=35.0 if metric == 'HIGH' else 34.0,
@@ -143,12 +172,14 @@ def test_owned_custody_does_not_license_same_hash_value_change(mem_db, tmp_path,
     assert mem_db.execute('SELECT running_max,running_min FROM observation_instants').fetchone() == (34.0, 30.0)
 
 
-@pytest.mark.parametrize('mutation', ['station', 'date', 'unit', 'hash', 'parsedhash', 'future', 'naive', 'issued', 'authority', 'unknownkey', 'unsafeurl'])
-def test_owned_custody_rejects_invalid_binding(tmp_path, mutation):
+@pytest.mark.parametrize('metric', ['HIGH', 'LOW'])
+@pytest.mark.parametrize('mutation', ['source', 'station', 'date', 'unit', 'hash', 'parsedhash', 'future', 'naive', 'issued', 'authority', 'unknownkey', 'unsafeurl'])
+def test_owned_custody_rejects_invalid_binding(tmp_path, mutation, metric):
     from dataclasses import replace
-    row = _captured_row(tmp_path)
+    row = _captured_row(tmp_path, running_max=34.0, running_min=30.0)
     provenance = json.loads(row.provenance_json)
     custody = provenance['captured_entity_custody_v1']
+    if mutation == 'source': custody['source'] = 'ogimet_metar_kord'
     if mutation == 'station': custody['station_id'] = 'KLGA'
     if mutation == 'date': custody['target_date'] = '2024-01-16'
     if mutation == 'unit': custody['temp_unit'] = 'C'
@@ -162,6 +193,33 @@ def test_owned_custody_rejects_invalid_binding(tmp_path, mutation):
     if mutation == 'unsafeurl': custody['captures'][0]['request_params']['apiKey'] = 'never-retain-fixture'
     with pytest.raises(InvalidObsV2RowError, match='custody'):
         replace(row, provenance_json=json.dumps(provenance))
+
+
+@pytest.mark.parametrize('metric', ['HIGH', 'LOW'])
+def test_owned_stored_custody_does_not_license_nonversioned_revision(mem_db, tmp_path, metric):
+    first = _captured_row(tmp_path, running_max=34.0, running_min=30.0)
+    revised = _make_row(running_max=35.0 if metric == 'HIGH' else 34.0,
+        running_min=29.0 if metric == 'LOW' else 30.0,
+        provenance_json=_valid_provenance(payload_hash='sha256:'+'b'*64))
+    insert_rows(mem_db, [first])
+    insert_rows(mem_db, [revised])
+    assert mem_db.execute('SELECT running_max,running_min,source_file FROM observation_instants').fetchone() == (34.0,30.0,first.source_file)
+    assert mem_db.execute('SELECT reason FROM observation_revisions').fetchone()[0] == 'payload_hash_mismatch'
+
+
+@pytest.mark.parametrize('metric', ['HIGH', 'LOW'])
+@pytest.mark.parametrize('derived', ['latest_temp', 'raw_obs_count'])
+def test_owned_revision_derived_fields_must_bind_row_values(mem_db, tmp_path, metric, derived):
+    first = _captured_row(tmp_path, running_max=34.0, running_min=30.0)
+    provenance = json.loads(_valid_provenance(payload_hash='sha256:'+'b'*64))
+    provenance[derived] = 999
+    revised = _captured_row(tmp_path, body=b'new-provider-body\r\n',
+        running_max=35.0 if metric == 'HIGH' else 34.0,
+        running_min=29.0 if metric == 'LOW' else 30.0,
+        provenance_json=json.dumps(provenance))
+    insert_rows(mem_db, [first])
+    insert_rows(mem_db, [revised])
+    assert mem_db.execute('SELECT running_max,running_min,source_file FROM observation_instants').fetchone() == (34.0,30.0,first.source_file)
 
 
 @pytest.mark.parametrize('key', ['foreign_key', 'captured_entity_custody_v0'])
