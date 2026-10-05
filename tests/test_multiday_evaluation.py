@@ -1108,10 +1108,35 @@ def test_non_taker_legacy_buy_with_maker_legs_keeps_its_canonical_price():
     assert [f[:2] for f in fills["b1"]] == [(10.0, 0.30)] and unverifiable == set()
 
 
-def test_fact_without_maker_legs_keeps_its_canonical_price_without_asking_the_binding():
-    conn = _facts_conn([("c1", "t1", "CONFIRMED", 5, 0.3, None, 1)])
+def test_taker_on_our_order_with_no_maker_orders_field_is_unverifiable_not_priced():
+    """Sol's case: names TAKER on our order, carries NO maker_orders, top-level 10@0.3. The ledger's
+    binding returns TAKER_UNVERIFIABLE; the report must not price it at the rounded top-level price."""
+    from src.execution.exchange_reconcile import _trade_fill_economics_binding
+
+    conn = _leg_conn()
+    _cmd(conn, "b1", "ENTRY", "BUY", 10, 0.3, "ord-b1", "env-buy", created="2026-10-01T10:00:00+00:00")
+    raw = {"asset_id": YES_TOK, "side": "BUY", "trader_side": "TAKER", "taker_order_id": "ord-b1",
+           "market": "cond-1", "filled_size": "10", "price": "0.30"}                  # no maker_orders at all
+    conn.execute(
+        "INSERT INTO venue_trade_facts (trade_id, venue_order_id, command_id, state, filled_size, fill_price,"
+        " tx_hash, source, observed_at, local_sequence, raw_payload_hash, raw_payload_json)"
+        " VALUES ('t1','ord-b1','b1','CONFIRMED','10','0.30',NULL,'WS_USER','2026-10-01T10:00:05+00:00',1,'h',?)",
+        (json.dumps(raw),),
+    )
+    cmd = me._command_rows(conn, ["b1"])["b1"]
+    assert _trade_fill_economics_binding(conn, command=cmd, raw=raw, venue_order_id="ord-b1").state == "TAKER_UNVERIFIABLE"
+    fills, unverifiable = me.load_economic_fills(conn, ["b1"])
+    assert unverifiable == {"b1"} and fills == {}
+
+
+def test_fact_with_neither_maker_legs_nor_a_taker_role_keeps_its_canonical_price():
+    conn = _facts_conn([("c1", "t1", "CONFIRMED", 5, 0.3, None, 1)])        # raw_payload_json is NULL
     fills, unverifiable = me.load_economic_fills(conn, ["c1"])
     assert [f[:2] for f in fills["c1"]] == [(5.0, 0.3)] and unverifiable == set()
+    conn.execute("UPDATE venue_trade_facts SET raw_payload_json = ''")
+    assert [f[:2] for f in _fills(conn, ["c1"])["c1"]] == [(5.0, 0.3)]
+    conn.execute("UPDATE venue_trade_facts SET raw_payload_json = '{\"price\": \"0.3\"}'")      # no role named
+    assert [f[:2] for f in _fills(conn, ["c1"])["c1"]] == [(5.0, 0.3)]
 
 
 def test_unverifiable_entry_makes_every_sell_of_the_position_cost_unknown():

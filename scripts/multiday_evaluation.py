@@ -494,9 +494,9 @@ def load_economic_fills(conn, command_ids: Iterable[str]):
     history).
 
     ENTRY economics follow the ledger's own taker binding, exchange_reconcile.
-    _trade_fill_economics_binding, imported rather than copied. A fact with no maker legs keeps
-    its canonical price without a call (a maker or legacy fact). A fact that carries them is
-    classified by the ledger:
+    _trade_fill_economics_binding, imported rather than copied, and EVERY fact goes through it:
+    a TAKER on our order that carries no maker_orders field at all is TAKER_UNVERIFIABLE too, and
+    must not fall through to its rounded top-level price. The ledger classifies:
       EXACT_TAKER        size and price come from the exact maker legs (the tick-rounded top-level
                          price is not cost-basis authority when they are present);
       LEGACY_NON_TAKER   the canonical price stands;
@@ -508,7 +508,7 @@ def load_economic_fills(conn, command_ids: Iterable[str]):
     from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
 
     fills: dict[str, list[tuple[float, float, str]]] = {}
-    legged: list[tuple] = []     # facts that carry maker_orders: the ledger decides their economics
+    facts: list[tuple] = []      # every fact: the ledger decides its economics
     ids = sorted(set(command_ids))
     for chunk in _chunks(ids):
         ph = ",".join("?" * len(chunk))
@@ -521,14 +521,10 @@ def load_economic_fills(conn, command_ids: Iterable[str]):
             "AND CAST(COALESCE(filled_size, '0') AS REAL) > 0"
         )
         for command_id, size, price, ts, raw_json, order_id in conn.execute(sql, chunk):
-            row = (float(size), float(price), ts)
-            if raw_json and "maker_orders" in str(raw_json):
-                legged.append((command_id, *row, raw_json, order_id))
-            else:
-                fills.setdefault(command_id, []).append(row)
-    commands = _command_rows(conn, {f[0] for f in legged})
+            facts.append((command_id, float(size), float(price), ts, raw_json, order_id))
+    commands = _command_rows(conn, {f[0] for f in facts})
     unverifiable: set[str] = set()
-    for command_id, size, price, ts, raw_json, order_id in legged:
+    for command_id, size, price, ts, raw_json, order_id in facts:
         state, leg = _bind_entry_fact(conn, commands.get(command_id), raw_json, order_id)
         if state == "TAKER_UNVERIFIABLE":
             unverifiable.add(command_id)
@@ -544,12 +540,18 @@ def _command_rows(conn, command_ids: Iterable[str]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     ids = sorted(set(command_ids))
     cur = conn.cursor()
-    for chunk in _chunks(ids):
-        ph = ",".join("?" * len(chunk))
-        cur.execute(f"SELECT * FROM venue_commands WHERE command_id IN ({ph})", chunk)
-        names = [d[0] for d in cur.description]
-        for row in cur.fetchall():
-            out[row[names.index("command_id")]] = dict(zip(names, row))
+    try:
+        for chunk in _chunks(ids):
+            ph = ",".join("?" * len(chunk))
+            cur.execute(f"SELECT * FROM venue_commands WHERE command_id IN ({ph})", chunk)
+            names = [d[0] for d in cur.description]
+            for row in cur.fetchall():
+                out[row[names.index("command_id")]] = dict(zip(names, row))
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        # no command table: the binding cannot be asked, so _bind_entry_fact falls back to the
+        # payload's own role (a named TAKER is unverifiable, anything else keeps its price)
     return out
 
 
@@ -558,8 +560,9 @@ def _bind_entry_fact(conn, command, raw_json, order_id):
 
     ``state`` is EXACT_TAKER, LEGACY_NON_TAKER or TAKER_UNVERIFIABLE exactly as
     exchange_reconcile._trade_fill_economics_binding returns it for this fact. A fact the binding
-    cannot even be asked about (no command row, unreadable payload, a missing table) is treated as
-    TAKER_UNVERIFIABLE only if it names a TAKER on this order, else it keeps its canonical price.
+    cannot even be asked about (no command row, a missing table) is treated as TAKER_UNVERIFIABLE
+    only if it names a TAKER on this order, else it keeps its canonical price; an unreadable or
+    empty payload names no role and is LEGACY_NON_TAKER, as the ledger binds it.
     """
     try:
         from src.execution.exchange_reconcile import (
@@ -567,7 +570,8 @@ def _bind_entry_fact(conn, command, raw_json, order_id):
             _trade_payload_for_maker_economics,
         )
 
-        raw = _trade_payload_for_maker_economics(json.loads(raw_json))
+        # a NULL or empty payload names no role, so the ledger binds it as LEGACY_NON_TAKER too
+        raw = _trade_payload_for_maker_economics(json.loads(raw_json) if raw_json else {})
     except (TypeError, ValueError, ImportError):
         return "LEGACY_NON_TAKER", None
     if command is None:
