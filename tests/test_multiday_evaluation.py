@@ -51,10 +51,16 @@ def _pos(pid, *, metric="high", phase="settled", direction="buy_yes", pnl=None, 
     }
 
 
-def _td(entries, positions, fills, *, entry_q=None, exit_cmds=(), exit_reasons=None, revals=()):
+def _td(entries, positions, fills, *, entry_q=None, exit_cmds=(), exit_reasons=None, revals=(), exit_debt=()):
+    """Test fixture: SELL fills given per EXIT command are re-keyed by position like the loader does."""
+    exit_cmds = list(exit_cmds)
+    exit_fills: dict = {}
+    for x in exit_cmds:
+        exit_fills.setdefault(x["position_id"], []).extend(fills.get(x["command_id"], ()))
     return {
         "entries": entries, "positions": positions, "fills": fills,
-        "entry_q": entry_q or {}, "exit_cmds": list(exit_cmds),
+        "entry_q": entry_q or {}, "exit_cmds": exit_cmds,
+        "exit_fills": exit_fills, "exit_fill_debt": list(exit_debt),
         "exit_reasons": exit_reasons or {}, "revaluations": list(revals),
         "open_older_than_window": (0, 0.0),
     }
@@ -383,6 +389,19 @@ def test_entry_floor_is_named_in_the_report_and_counted():
     assert "positions_without_filled_entry_in_window" in md and "exit_cost_unknown" in md
 
 
+def test_position_whose_history_cannot_be_loaded_is_unknown_with_null_cost():
+    """No filled ENTRY in the DB at all (chain-only holding): bucket unknown, cost null, counted."""
+    positions = [_pos("p1", direction="buy_yes", pnl=1.0)]
+    fills = {"x1": [(5.0, 0.30, "2026-10-02T09:00:00+00:00")]}
+    rep = _report(
+        _td([], positions, fills, exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 5.0}]), {},
+    )
+    (row,) = rep["exits"]
+    assert row["cost_usd"] is None and row["age_bucket"] == "unknown"
+    total = next(t for t in rep["totals"] if t["metric"] == "high")
+    assert total["exit_cost_unknown"] == 1 and rep["coverage"]["positions_without_filled_entry_in_window"] == 1
+
+
 def test_outcome_win_rate_attribution_and_equity_series():
     entries = [_entry("c1", "p1", "A", 30), _entry("c2", "p2", "A", 30, metric="low"), _entry("c3", "p3", "A", 30)]
     fills = {e["command_id"]: [_fill(0.2, 5.0, "0x" + e["command_id"][1] * 64)] for e in entries}
@@ -438,7 +457,10 @@ def _make_dbs(tmp_path, *, with_market_events=True, with_attribution=True):
     t.executescript(
         """
         CREATE TABLE venue_commands (command_id TEXT, snapshot_id TEXT, position_id TEXT, intent_kind TEXT,
-            size REAL, price REAL, state TEXT, created_at TEXT);
+            size REAL, price REAL, state TEXT, created_at TEXT, venue_order_id TEXT, token_id TEXT,
+            envelope_id TEXT);
+        CREATE TABLE venue_submission_envelopes (envelope_id TEXT, selected_outcome_token_id TEXT,
+            yes_token_id TEXT, no_token_id TEXT);
         CREATE TABLE executable_market_snapshots (snapshot_id TEXT, condition_id TEXT);
         CREATE TABLE position_current (position_id TEXT, phase TEXT, city TEXT, target_date TEXT,
             temperature_metric TEXT, direction TEXT, cost_basis_usd REAL, entry_price REAL, condition_id TEXT,
@@ -454,7 +476,10 @@ def _make_dbs(tmp_path, *, with_market_events=True, with_attribution=True):
         CREATE TABLE decision_log (mode TEXT, timestamp TEXT, artifact_json TEXT);
         """
     )
-    t.execute("INSERT INTO venue_commands VALUES ('c1','s1','p1','ENTRY',5,0.2,'FILLED','2026-10-01T06:00:00+00:00')")
+    t.execute(
+        "INSERT INTO venue_commands (command_id, snapshot_id, position_id, intent_kind, size, price, state, created_at)"
+        " VALUES ('c1','s1','p1','ENTRY',5,0.2,'FILLED','2026-10-01T06:00:00+00:00')"
+    )
     t.execute("INSERT INTO executable_market_snapshots VALUES ('s1','A')")
     t.execute("INSERT INTO position_current VALUES ('p1','settled','Tokyo','2026-10-02','high','buy_yes',1.0,0.2,'A',4.0,"
               "'2026-10-03T01:00:00+00:00',1.0,'SETTLEMENT')")
@@ -664,7 +689,10 @@ def test_exit_reason_probe_is_pinned_to_the_composite_index(tmp_path):
     """Without the hint the planner walks the position_id autoindex (21-45 s live)."""
     trades, _fc, _world = _make_dbs(tmp_path)
     t = sqlite3.connect(trades)
-    t.execute("INSERT INTO venue_commands VALUES ('x1','s1','p1','EXIT',5,0.3,'FILLED','2026-10-02T06:00:00+00:00')")
+    t.execute(
+        "INSERT INTO venue_commands (command_id, snapshot_id, position_id, intent_kind, size, price, state, created_at,"
+        " venue_order_id, token_id) VALUES ('x1','s1','p1','EXIT',5,0.3,'FILLED','2026-10-02T06:00:00+00:00','o-x1','TOK')"
+    )
     t.execute("INSERT INTO position_events VALUES ('p1','EXIT_INTENT','{\"exit_reason\":\"GLOBAL_CAPITAL_OPTIMAL_SELL\"}',2)")
     t.commit()
     t.close()
@@ -676,3 +704,102 @@ def test_exit_reason_probe_is_pinned_to_the_composite_index(tmp_path):
     assert td["exit_reasons"] == {"p1": "GLOBAL_CAPITAL_OPTIMAL_SELL"}
     probes = [q for q in seen if "FROM position_events" in q]
     assert len(probes) == 3 and all("INDEXED BY idx_position_events_position_type_sequence" in q for q in probes)
+
+
+# ---- finding 9: SELL proceeds and ENTRY cost use the canonical taker-leg economics -------------
+YES_TOK, NO_TOK = "tok-yes", "tok-no"
+
+
+def _leg_conn():
+    """Minimal real-column schema: commands + envelope + trade facts, as fill_dedup reads them."""
+    conn = _facts_conn([])
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (command_id TEXT, snapshot_id TEXT, position_id TEXT, intent_kind TEXT,
+            size REAL, price REAL, state TEXT, created_at TEXT, venue_order_id TEXT, token_id TEXT,
+            envelope_id TEXT);
+        CREATE TABLE venue_submission_envelopes (envelope_id TEXT, selected_outcome_token_id TEXT,
+            yes_token_id TEXT, no_token_id TEXT);
+        INSERT INTO venue_submission_envelopes VALUES ('env1', 'tok-yes', 'tok-yes', 'tok-no');
+        """
+    )
+    return conn
+
+
+def _taker_fact(conn, command_id, order_id, side, top_price, size, legs, *, trade_id="child", state="CONFIRMED"):
+    raw = {"asset_id": YES_TOK, "side": side, "trader_side": "TAKER", "taker_order_id": order_id,
+           "filled_size": str(size), "price": str(top_price), "maker_orders": legs}
+    conn.execute(
+        "INSERT INTO venue_trade_facts (trade_id, venue_order_id, command_id, state, filled_size, fill_price,"
+        " tx_hash, source, observed_at, local_sequence, raw_payload_hash, raw_payload_json)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, order_id, command_id, state, str(size), str(top_price), None, "WS_USER",
+         "2026-10-02T09:00:00+00:00", 1, "h-" + command_id, json.dumps(raw)),
+    )
+
+
+def test_taker_sell_proceeds_use_the_maker_leg_vwap_not_the_top_level_price():
+    """10 sh with top-level price 0.20 but legs 5@0.20 + 5@0.40: proceeds $3.00, not $2.00."""
+    conn = _leg_conn()
+    conn.execute(
+        "INSERT INTO venue_commands (command_id, position_id, intent_kind, size, price, state, created_at,"
+        " venue_order_id, token_id, envelope_id) VALUES ('x1','p1','EXIT',10,0.2,'FILLED',"
+        "'2026-10-02T09:00:00+00:00','ord-x1',?, 'env1')", (YES_TOK,),
+    )
+    _taker_fact(conn, "x1", "ord-x1", "SELL", 0.20, 10,
+                [{"asset_id": YES_TOK, "side": "BUY", "matched_amount": "5", "price": "0.20"},
+                 {"asset_id": YES_TOK, "side": "BUY", "matched_amount": "5", "price": "0.40"}])
+    raw_total = me.fill_totals(me.load_economic_fills(conn, ["x1"])["x1"], 10.0)[:2]
+    assert raw_total == (10.0, pytest.approx(2.0))                       # what the raw top-level price gives
+
+    fills, debt = me.load_exit_fills(conn, [{"command_id": "x1", "position_id": "p1", "size": 10.0}])
+    assert debt == []
+    (qty, price, ts), = fills["p1"]
+    assert qty == 10.0 and qty * price == pytest.approx(3.0)             # canonical economic exit fill
+    assert ts == "2026-10-02T09:00:00+00:00"                             # joined execution clock
+
+    # the report charges the sell its canonical proceeds, so the regret is off by exactly the $1 it was
+    entries = [_entry("c1", "p1", "A", 30, size=10.0)]
+    td = _td(entries, [_pos("p1", direction="buy_yes", pnl=1.0, phase="economically_closed",
+                            exit_reason=None, settled_at=None)],
+             {"c1": [(10.0, 0.20, "2026-10-01T10:00:00+00:00")]},
+             exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 10.0}])
+    td["exit_fills"] = fills
+    (row,) = _report(td, _listings("A"))["exits"]
+    assert row["proceeds_usd"] == pytest.approx(3.0) and row["cost_usd"] == pytest.approx(2.0)
+
+
+def test_exit_position_with_economics_debt_gets_no_proceeds_and_is_counted():
+    entries = [_entry("c1", "p1", "A", 30)]
+    td = _td(entries, [_pos("p1", direction="buy_yes", pnl=0.0)], {"c1": [_fill(0.2)]},
+             exit_cmds=[{"command_id": "x1", "position_id": "p1", "size": 5.0}], exit_debt=["p1"])
+    rep = _report(td, _listings("A"))
+    assert rep["exits"] == [] and rep["coverage"]["exit_positions_economics_debt"] == 1
+
+
+def test_taker_buy_cost_uses_the_maker_leg_economics_when_the_ledger_has_not_repriced_it():
+    """Taker BUY of YES whose top-level price is the lowest leg: SELL YES 5@0.30 + BUY NO 5@0.60 (=0.40 YES)."""
+    conn = _leg_conn()
+    conn.execute(
+        "INSERT INTO venue_commands (command_id, position_id, intent_kind, size, price, state, created_at,"
+        " venue_order_id, token_id, envelope_id) VALUES ('b1','p1','ENTRY',10,0.3,'FILLED',"
+        "'2026-10-01T10:00:00+00:00','ord-b1',?, 'env1')", (YES_TOK,),
+    )
+    _taker_fact(conn, "b1", "ord-b1", "BUY", 0.30, 10,
+                [{"asset_id": YES_TOK, "side": "SELL", "matched_amount": "5", "price": "0.30"},
+                 {"asset_id": NO_TOK, "side": "BUY", "matched_amount": "5", "price": "0.60"}])
+    (qty, price, _ts), = me.load_economic_fills(conn, ["b1"])["b1"]
+    assert qty == 10.0 and qty * price == pytest.approx(3.5)             # not 10 x 0.30 = 3.00
+
+
+def test_taker_buy_without_exact_legs_keeps_the_canonical_price():
+    conn = _leg_conn()
+    conn.execute(
+        "INSERT INTO venue_commands (command_id, position_id, intent_kind, size, price, state, created_at,"
+        " venue_order_id, token_id, envelope_id) VALUES ('b1','p1','ENTRY',10,0.3,'FILLED',"
+        "'2026-10-01T10:00:00+00:00','ord-b1',?, 'env1')", (YES_TOK,),
+    )
+    _taker_fact(conn, "b1", "ord-b1", "BUY", 0.30, 10,
+                [{"asset_id": YES_TOK, "side": "SELL", "matched_amount": "4", "price": "0.30"}])   # legs cover 4 of 10
+    assert [f[:2] for f in me.load_economic_fills(conn, ["b1"])["b1"]] == [(10.0, 0.30)]

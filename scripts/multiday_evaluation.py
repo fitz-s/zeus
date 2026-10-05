@@ -317,22 +317,16 @@ def load_trades_data(conn, since: date) -> dict:
     floor = (since - timedelta(days=ENTRY_FLOOR_DAYS)).isoformat()
     phases = ",".join(f"'{p}'" for p in POSITION_PHASES)
     td: dict[str, Any] = {}
-    td["entries"] = [
-        dict(r)
-        for r in conn.execute(
-            """
-            SELECT c.command_id, c.position_id, c.state, c.size, c.price, c.created_at,
-                   s.condition_id AS snap_cond, p.condition_id AS pos_cond,
-                   p.city AS pos_city, p.target_date AS pos_date,
-                   p.temperature_metric AS pos_metric
-            FROM venue_commands c
-            LEFT JOIN executable_market_snapshots s ON s.snapshot_id = c.snapshot_id
-            LEFT JOIN position_current p ON p.position_id = c.position_id
-            WHERE c.intent_kind = 'ENTRY' AND c.created_at >= ?
-            """,
-            (floor,),
-        )
-    ]
+    entry_sql = (
+        "SELECT c.command_id, c.position_id, c.state, c.size, c.price, c.created_at, "
+        "       s.condition_id AS snap_cond, p.condition_id AS pos_cond, "
+        "       p.city AS pos_city, p.target_date AS pos_date, p.temperature_metric AS pos_metric "
+        "FROM venue_commands c "
+        "LEFT JOIN executable_market_snapshots s ON s.snapshot_id = c.snapshot_id "
+        "LEFT JOIN position_current p ON p.position_id = c.position_id "
+        "WHERE c.intent_kind = 'ENTRY' AND {where}"
+    )
+    td["entries"] = [dict(r) for r in conn.execute(entry_sql.format(where="c.created_at >= ?"), (floor,))]
     td["positions"] = [
         dict(r)
         for r in conn.execute(
@@ -356,9 +350,9 @@ def load_trades_data(conn, since: date) -> dict:
             pids,
         )
     ]
-    fill_cmds = [e["command_id"] for e in td["entries"]] + [c["command_id"] for c in td["exit_cmds"]]
-    fills = load_economic_fills(conn, fill_cmds)
+    fills = load_economic_fills(conn, [e["command_id"] for e in td["entries"]])
     td["fills"] = fills
+    td["exit_fills"], td["exit_fill_debt"] = load_exit_fills(conn, td["exit_cmds"])
     entry_ids = {e["command_id"] for e in td["entries"]}
     td["entry_q"] = {
         r[0]: _entry_q_live(r[1])
@@ -427,19 +421,130 @@ def load_economic_fills(conn, command_ids: Iterable[str]) -> dict[str, list[tupl
     from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
 
     fills: dict[str, list[tuple[float, float, str]]] = {}
+    legged: list[tuple[str, float, float, str, str, str]] = []   # facts a taker BUY may reprice
     ids = sorted(set(command_ids))
     for chunk in _chunks(ids):
         ph = ",".join("?" * len(chunk))
         sql = (
             f"WITH {canonical_trade_fact_cte(source_clause_sql=f'WHERE fact.command_id IN ({ph})')}, "
             f"{economic_trade_fact_cte()} "
-            "SELECT command_id, filled_size, fill_price, execution_ts FROM economic_trade_fact "
+            "SELECT command_id, filled_size, fill_price, execution_ts, raw_payload_json, venue_order_id "
+            "FROM economic_trade_fact "
             "WHERE UPPER(COALESCE(state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED') "
             "AND CAST(COALESCE(filled_size, '0') AS REAL) > 0"
         )
-        for command_id, size, price, ts in conn.execute(sql, chunk):
-            fills.setdefault(command_id, []).append((float(size), float(price), ts))
+        for command_id, size, price, ts, raw_json, order_id in conn.execute(sql, chunk):
+            row = (float(size), float(price), ts)
+            if raw_json and "maker_orders" in str(raw_json):
+                legged.append((command_id, *row, raw_json, order_id))
+            else:
+                fills.setdefault(command_id, []).append(row)
+    tokens = _command_token_pairs(conn, {f[0] for f in legged})
+    for command_id, size, price, ts, raw_json, order_id in legged:
+        selected, yes_id, no_id = tokens.get(command_id, ("", "", ""))
+        leg = _taker_buy_leg_economics(raw_json, order_id, selected, yes_id, no_id)
+        if leg is not None:
+            size, price = leg
+        fills.setdefault(command_id, []).append((size, price, ts))
     return fills
+
+
+def _command_token_pairs(conn, command_ids: Iterable[str]) -> dict[str, tuple[str, str, str]]:
+    """command_id -> (selected token, yes token, no token) from the command's submission envelope."""
+    out: dict[str, tuple[str, str, str]] = {}
+    ids = sorted(set(command_ids))
+    if not ids:
+        return out
+    for chunk in _chunks(ids):
+        ph = ",".join("?" * len(chunk))
+        for command_id, token_id, selected, yes_id, no_id in conn.execute(
+            "SELECT cmd.command_id, cmd.token_id, env.selected_outcome_token_id, env.yes_token_id, env.no_token_id "
+            "FROM venue_commands cmd LEFT JOIN venue_submission_envelopes env ON env.envelope_id = cmd.envelope_id "
+            f"WHERE cmd.command_id IN ({ph})",
+            chunk,
+        ):
+            out[command_id] = (selected or token_id or "", yes_id or "", no_id or "")
+    return out
+
+
+def _taker_buy_leg_economics(raw_json, order_id, selected_token_id, yes_token_id, no_token_id):
+    """(shares, unit_cost) from a taker BUY's exact maker legs, else None.
+
+    The ledger already rewrites such facts at ingest (exchange_reconcile), so on current data
+    this changes nothing; it only matters for a fact the ledger has not corrected yet. The
+    rule is exchange_reconcile._taker_buy_trade_economics itself, not a copy: a taker BUY can
+    match a SELL of the selected token at p or a BUY of the complement at 1-p, and the
+    tick-rounded top-level price is not cost-basis authority when those legs are present.
+    """
+    if not raw_json or "maker_orders" not in str(raw_json):
+        return None
+    try:
+        from src.execution.exchange_reconcile import (
+            _taker_buy_trade_economics,
+            _trade_payload_for_maker_economics,
+        )
+
+        raw = _trade_payload_for_maker_economics(json.loads(raw_json))
+        legs = _taker_buy_trade_economics(
+            raw,
+            venue_order_id=order_id or "",
+            selected_token_id=selected_token_id or "",
+            yes_token_id=yes_token_id or "",
+            no_token_id=no_token_id or "",
+        )
+    except (TypeError, ValueError, ImportError):
+        return None
+    if legs is None:
+        return None
+    shares, cost = legs
+    return float(shares), float(cost / shares)
+
+
+def load_exit_fills(conn, exit_cmds: Sequence[Mapping[str, Any]]):
+    """position_id -> canonical SELL fills [(quantity, unit_price, execution_ts)], plus debt ids.
+
+    SELL economics come from src.state.fill_dedup.economic_exit_fills_for_position, the one
+    intake the ledger books partial exits and settlement from. It applies the taker-SELL
+    maker-leg VWAP: a taker trade can report only its lowest matched leg in the top-level
+    price while ``maker_orders`` carries every leg (10 sh at 0.20 on top, legs 5@0.20 + 5@0.40,
+    are $3.00 of proceeds, not $2.00). The raw fact row's fill_price must not be used for a SELL.
+    The function exposes no fill clock, so each fill is joined on (command_id, trade_id) to the
+    canonical ``execution_ts`` of the same economic CTE; a fill without one orders before every
+    buy and so can only make a cost unknown, never wrong. A position whose economics the ledger
+    itself calls debt (PartialExitEconomicDebtError) is returned in the debt list and gets no
+    proceeds from this report.
+    """
+    from src.state.fill_dedup import (
+        PartialExitEconomicDebtError,
+        canonical_trade_fact_cte,
+        economic_exit_fills_for_position,
+        economic_trade_fact_cte,
+    )
+
+    ts_by_fill: dict[tuple[str, str], str] = {}
+    for chunk in _chunks(sorted({c["command_id"] for c in exit_cmds})):
+        ph = ",".join("?" * len(chunk))
+        sql = (
+            f"WITH {canonical_trade_fact_cte(source_clause_sql=f'WHERE fact.command_id IN ({ph})')}, "
+            f"{economic_trade_fact_cte()} "
+            "SELECT command_id, trade_id, execution_ts FROM economic_trade_fact"
+        )
+        for command_id, trade_id, ts in conn.execute(sql, chunk):
+            ts_by_fill[(command_id, trade_id)] = ts
+    fills: dict[str, list[tuple[float, float, str | None]]] = {}
+    debt: list[str] = []
+    for position_id in sorted({c["position_id"] for c in exit_cmds}):
+        try:
+            canonical = economic_exit_fills_for_position(conn, position_id)
+        except PartialExitEconomicDebtError:
+            debt.append(position_id)
+            continue
+        if canonical:
+            fills[position_id] = [
+                (float(f.quantity), float(f.unit_price), ts_by_fill.get((f.command_id, f.trade_id)))
+                for f in canonical
+            ]
+    return fills, debt
 
 
 def load_listings(conn, condition_ids: Iterable[str]) -> dict[str, dict]:
@@ -590,9 +695,7 @@ def build_report(
         buys_by_pos.setdefault(pid, []).extend(td["fills"].get(rec["command_id"], ()))
 
     # ---- positions: outcome, exits, exposure ------------------------------
-    exits_by_pos: dict[str, list[dict]] = {}
-    for x in td["exit_cmds"]:
-        exits_by_pos.setdefault(x["position_id"], []).append(x)
+    exit_debt = set(td["exit_fill_debt"])
     equity: dict[str, Counter] = {}
     exit_rows: list[dict] = []
     for p in td["positions"]:
@@ -636,7 +739,10 @@ def build_report(
             c.open_positions += 1
             c.open_cost_usd += p["cost_basis_usd"] or 0.0
         # exits (sell legs), judged against settlement where known
-        sell_fills = [f for x in exits_by_pos.get(pid, ()) for f in td["fills"].get(x["command_id"], ())]
+        if pid in exit_debt:
+            cov["exit_positions_economics_debt"] += 1
+            continue
+        sell_fills = td["exit_fills"].get(pid, ())
         if not sell_fills:
             continue
         sells = sell_costs(buys_by_pos.get(pid, ()), sell_fills)
