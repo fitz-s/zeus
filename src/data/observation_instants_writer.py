@@ -1,6 +1,6 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-10-03; last_reused=2026-10-03
-# Last reused/audited: 2026-10-03
+# Lifecycle: created=2026-04-21; last_reviewed=2026-10-05; last_reused=2026-10-05
+# Last reused/audited: 2026-10-05 (strict versioned custody compatibility)
 # Authority basis: plan v3 antibodies A1/A2/A6 (.omc/plans/observation-
 #                  instants-migration-iter3.md L119-124); step2 Phase 0 file #3.
 #   docs/operations/current/finite_evidence_probability_symmetry/PLAN.md HKO station-binding defect.
@@ -277,6 +277,8 @@ class ObsV2Row:
 
         self._validate_local_time_identity()
         self._validate_possession_causality(parsed)
+        if 'captured_entity_custody_v1' in parsed and not _capture_custody_valid(vars(self)):
+            raise InvalidObsV2RowError('Invalid captured_entity_custody_v1 binding')
 
         # B4 antibody (2026-04-26): physical bounds on temp_current /
         # running_max / running_min. Skip None inputs (nullable per schema).
@@ -493,7 +495,7 @@ _REVISION_INSERT_SQL = """
 _UPDATE_CURRENT_SQL = """
     UPDATE observation_instants
     SET temp_current = ?, running_max = ?, running_min = ?, observation_count = ?,
-        provenance_json = ?, imported_at = ?
+        provenance_json = ?, imported_at = ?, source_file = ?
     WHERE id = ?
 """
 _REVISION_WRITER = "src.data.observation_instants_writer.insert_rows"
@@ -621,10 +623,176 @@ def _normalize_material_value(column: str, value: Any) -> Any:
     return value
 
 
+def _capture_custody_valid(row: dict[str, Any]) -> bool:
+    """Validate only this forward writer's owned custody, never general provenance.
+
+    Publication verifies entity SHA/length before the DB transaction. This
+    comparison witness binds that published reference to the exact parsed hour;
+    it confers no source completeness, issued-clock or settlement authority.
+    """
+    import re
+    from pathlib import Path
+    try:
+        provenance = json.loads(row['provenance_json'])
+        custody = provenance['captured_entity_custody_v1']
+        if not isinstance(custody, dict) or set(custody) != {
+            'status', 'reason', 'city', 'source', 'station_id', 'target_date',
+            'utc_timestamp', 'temp_unit', 'payload_hash', 'source_issued_at_utc', 'completeness',
+            'settlement_equivalence', 'absorbing_authority', 'captures',
+        }:
+            return False
+        if row['source'] not in ('wu_icao_history', 'ogimet_metar_' + str(row['station_id']).lower()):
+            return False
+        if any(custody[key] != row[key] for key in
+               ('city', 'source', 'station_id', 'target_date', 'utc_timestamp', 'temp_unit')):
+            return False
+        if custody['payload_hash'] != provenance.get('payload_hash'):
+            return False
+        if (custody['source_issued_at_utc'] is not None or
+                custody['completeness'] != 'UNPROVEN' or
+                custody['settlement_equivalence'] != 'UNPROVEN' or
+                custody['absorbing_authority'] is not False or row['raw_response'] is not None):
+            return False
+        captures = custody['captures']
+        if not isinstance(captures, list):
+            return False
+        if custody['status'] == 'UNAVAILABLE':
+            return (not captures and row['source_file'] is None and
+                    custody['reason'] in {'ENTITY_BYTES_UNAVAILABLE', 'CREDENTIAL_BEARING_ENTITY',
+                        'CAPACITY', 'STORE_BUSY', 'IO_ERROR', 'CORRUPT_EXISTING',
+                        'CLOCK_INVALID', 'CONTRIBUTOR_UNAVAILABLE', 'DRY_RUN'})
+        if custody['status'] != 'OBSERVED' or custody['reason'] is not None or not captures or len(captures) > 32:
+            return False
+
+        def aware(value):
+            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            if dt.tzinfo is None or dt.utcoffset() is None:
+                raise ValueError('naive capture clock')
+            return dt
+
+        written = aware(row['imported_at'])
+        reports = {provenance[key] for key in ('hour_max_raw_ts', 'hour_min_raw_ts', 'latest_raw_ts')
+                   if provenance.get(key) is not None}
+        covered = set()
+        for capture in captures:
+            if not isinstance(capture, dict) or set(capture) != {
+                'sha256', 'byte_count', 'source_file', 'started_at', 'finished_at',
+                'request_url', 'request_params', 'native_unit', 'headers', 'report_timestamps',
+            }:
+                return False
+            sha = capture['sha256']
+            if not isinstance(sha, str) or re.fullmatch('[0-9a-f]{64}', sha) is None:
+                return False
+            path = Path(capture['source_file'])
+            if not path.is_absolute() or path.parts[-3:] != ('observation_raw', 'sha256', sha + '.body') or '..' in path.parts:
+                return False
+            if type(capture['byte_count']) is not int or not 0 < capture['byte_count'] <= 512 * 1024 * 1024:
+                return False
+            start, finish = aware(capture['started_at']), aware(capture['finished_at'])
+            if not start <= finish <= written:
+                return False
+            timestamps = capture['report_timestamps']
+            if not isinstance(timestamps, list) or not set(timestamps) <= reports:
+                return False
+            if any(aware(ts) > finish for ts in timestamps):
+                return False
+            covered.update(timestamps)
+            params, headers = capture['request_params'], capture['headers']
+            if not isinstance(params, dict) or not isinstance(headers, dict):
+                return False
+            if not all(isinstance(v, str) for v in (*params.values(), *headers.values())):
+                return False
+            if not set(headers) <= {'content-type', 'content-length', 'date', 'last-modified', 'etag'}:
+                return False
+            if re.search(r'(?i)(api[_-]?key|access[_-]?token|authorization|password|bearer)', json.dumps([params, headers])):
+                return False
+            if row['source'] == 'wu_icao_history':
+                from urllib.parse import urlsplit
+                url = urlsplit(capture['request_url'])
+                if (url.scheme != 'https' or url.netloc != 'api.weather.com' or url.query or url.fragment or
+                        re.fullmatch('/v1/location/' + re.escape(row['station_id']) + r':9:[A-Z]{2}/observations/historical.json', url.path) is None or
+                        set(params) != {'units', 'startDate', 'endDate'} or
+                        params['units'] != ('e' if row['temp_unit'] == 'F' else 'm') or
+                        not params['startDate'] <= row['target_date'].replace('-', '') <= params['endDate'] or
+                        capture['native_unit'] != row['temp_unit']):
+                    return False
+                for key in ('startDate', 'endDate'):
+                    if re.fullmatch('[0-9]{8}', params[key]) is None:
+                        return False
+                    datetime.strptime(params[key], '%Y%m%d')
+            else:
+                if (capture['request_url'] != 'https://www.ogimet.com/cgi-bin/getmetar' or
+                        set(params) != {'icao', 'begin', 'end'} or params['icao'] != row['station_id'] or
+                        capture['native_unit'] != 'C' or any(not params['begin'] <= aware(ts).strftime('%Y%m%d%H%M') <= params['end'] for ts in timestamps)):
+                    return False
+                for key in ('begin', 'end'):
+                    if re.fullmatch('[0-9]{12}', params[key]) is None:
+                        return False
+                    datetime.strptime(params[key], '%Y%m%d%H%M')
+                if params['begin'] > params['end']:
+                    return False
+        return covered == reports and row['source_file'] == captures[0]['source_file']
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        return False
+
+
+def _custody_compatible_views(existing, incoming):
+    """Strip exactly validated owned custody for comparison, not for persistence."""
+    # An old/non-versioned caller cannot acquire this forward-writer exception
+    # merely because the stored row happens to have captured custody.
+    if not _capture_custody_valid(incoming):
+        return existing, incoming
+    views = []
+    owned = False
+    for row in (existing, incoming):
+        provenance = _normalize_material_value('provenance_json', row.get('provenance_json'))
+        if not isinstance(provenance, dict):
+            return existing, incoming
+        view = dict(row)
+        if 'captured_entity_custody_v1' in provenance:
+            if not _capture_custody_valid(row):
+                return existing, incoming
+            owned = True
+            provenance = dict(provenance)
+            provenance.pop('captured_entity_custody_v1')
+            view['source_file'] = None
+        elif row.get('source_file') is not None:
+            return existing, incoming
+        view['provenance_json'] = json.dumps(provenance)
+        views.append(view)
+    return tuple(views) if owned else (existing, incoming)
+
+
+def _custody_revision_core_matches(existing, incoming):
+    """Narrow counterpart of the existing hourly widening/correction law.
+
+    The normal hourly translator derives only these fields from the permitted
+    extrema/count/latest-report advance. Raw clocks already bind the exact
+    captured contributors; latest scalar/count must also bind the row values.
+    Everything else, including unknown keys, remains identical. This check is
+    used only when validated custody enabled a source_file exception.
+    """
+    derived = {'payload_hash', 'hour_max_raw_ts', 'hour_min_raw_ts',
+               'latest_raw_ts', 'latest_temp', 'raw_obs_count'}
+    cores = []
+    for row in (existing, incoming):
+        provenance = _normalize_material_value('provenance_json', row['provenance_json'])
+        if not isinstance(provenance, dict):
+            return False
+        if ('latest_temp' in provenance and provenance['latest_temp'] != row['temp_current'] or
+                'raw_obs_count' in provenance and (
+                    type(provenance['raw_obs_count']) is not int or
+                    provenance['raw_obs_count'] != row['observation_count'])):
+            return False
+        cores.append({key: value for key, value in provenance.items() if key not in derived})
+    return _json_dumps(cores[0]) == _json_dumps(cores[1])
+
+
 def _material_differences(
     existing: dict[str, Any],
     incoming: dict[str, Any],
 ) -> list[str]:
+    existing, incoming = _custody_compatible_views(existing, incoming)
     differences: list[str] = []
     for column in _INSERT_COLUMNS:
         if column in _MATERIAL_COMPARISON_EXEMPT_COLUMNS:
@@ -660,6 +828,10 @@ def _monotone_widening(existing: dict[str, Any], incoming: dict[str, Any]) -> bo
     must still match exactly, or this is a different reading and must NOT be
     trusted here.
     """
+    prior_existing = existing
+    existing, incoming = _custody_compatible_views(existing, incoming)
+    if existing is not prior_existing and not _custody_revision_core_matches(existing, incoming):
+        return False
     for column in set(_INSERT_COLUMNS) - _WIDENING_VARIABLE_COLUMNS:
         if _normalize_material_value(column, existing.get(column)) != _normalize_material_value(
             column, incoming.get(column)
@@ -720,6 +892,10 @@ def _wu_source_revision_supersedes(
     payload; the immutable revision table preserves the displaced view.
     """
 
+    prior_existing = existing
+    existing, incoming = _custody_compatible_views(existing, incoming)
+    if existing is not prior_existing and not _custody_revision_core_matches(existing, incoming):
+        return False
     if str(incoming.get("source") or "") != "wu_icao_history":
         return False
     for column in set(_INSERT_COLUMNS) - _WIDENING_VARIABLE_COLUMNS:
@@ -950,6 +1126,7 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
                         row_dict["observation_count"],
                         _widened_provenance_json(existing, row_dict),
                         row_dict["imported_at"],
+                        row_dict["source_file"],
                         existing["id"],
                     ),
                 )
@@ -973,6 +1150,7 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
                         row_dict["observation_count"],
                         _revised_provenance_json(existing, row_dict),
                         row_dict["imported_at"],
+                        row_dict["source_file"],
                         existing["id"],
                     ),
                 )

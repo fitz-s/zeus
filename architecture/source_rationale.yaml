@@ -1215,8 +1215,14 @@ files:
       Audit selection maps both registered full-horizon and short-horizon tracks to the same base-cache stem and metric; exact complete source-run indexed coverage resolves bounded snapshot primary keys and validates their identity. One absolute budget starts before the read-only connection and propagates through SQLite busy/progress, discovery, existing HTTP/spawn and decode/publication checkpoints, with bounded raw/declared-grid inputs and phase elapsed evidence. Native/OS operations are not forcibly preempted, so no unconditional whole-call 40-second hard guarantee is claimed; expired work cannot publish late evidence.
       The first normal ENS extract may acquire bounded same-cycle surface evidence while reserving the existing mandatory extract timeout. Source-only proof binds its immutable original bytes/run/grid/phi before extraction and is carried only explicitly into the committed snapshot identity. Failed or future evidence stays UNKNOWN; it does not reuse an implicit cache, renew temperature clocks, modify q or promote distribution-grid geopotential to sensor ground.
       The explicit offline native-temperature packet helper is not wired to a collector, scheduler or probability consumer. It first checks normal collector priority, then plans original global-run index ranges before bounded ephemeral transport, retaining raw entity/range hashes and distinct acquisition clocks within the total byte/deadline cap. Missing publication or physical evidence remains UNKNOWN/OFFLINE_ONLY. No canonical source-run/snapshot writes, new production acquisition, conditional-shape activation or station correction is enabled.
+      Dormant native inventory APIs validate existing original manifests/bodies/proofs on each readback and may persist only explicitly supplied private/archive source_run inventory with nullable metric and ARCHIVE_BACKFILL modes. Global product/run/grid identity stays separate from target scope; incomplete member/step inventory, pruning, tampering and unknown transport/model validity remain PARTIAL/UNKNOWN with no qualified availability, snapshots, hourly vectors or probability activation.
+      A separate normal native-temperature entry resumes verified member-step originals for the scheduler's current-target transport union, after mandatory HIGH/LOW collection, on the unchanged remaining deadline and rate budget. Nonblocking singleflight defers busy work and releases on every exit; retained body/index/range identity and first-possession clocks are not reminted. SCHEDULED_LIVE inventory is isolated from archive inventory and cannot overwrite mandatory source runs. Missing originals, unknown prefix, publication, transport or static/model eligibility remain explicit UNKNOWN/PARTIAL; native source inventory does not emit probability-ready snapshots, hourly vectors or q.
+      An existing normal run's canonical manifest ID/hash/role must bind before any new HTTP; missing or unbound originals yield UNKNOWN without rewriting its row or first-possession clocks. Inventory persistence likewise refuses replacement when an existing normal/archive identity has lost its previous manifest. Restoring the actual canonical-bound manifest and original proofs resets admission; a verified step append may update its manifest hash without renewing retained originals, while an independent new run remains distinct.
     downstream:
     - src/main.py
+    - src/data/replacement_forecast_source_run_identity.py
+    - src/ingest/forecast_live_daemon.py
+    - src/ingest_main.py
   src/data/ensemble_client.py:
     zone: K2_runtime
     authority_role: forecast_reader
@@ -1747,6 +1753,8 @@ files:
     authority_role: forecast_live_daemon_entry
     why: Dedicated OpenData live forecast producer daemon; schedules ECMWF OpenData HIGH/LOW ingest plus replacement source-clock recovery, heartbeat, and source-health refresh. Broad recovery discovery yields while request, seed, or inflight work exists, preventing universe-wide HWM scans from contending with exact-family posterior production; its revision remains unacknowledged so the first idle minute resumes recovery. Each poll admits the configured bounded seed micro-batch into request-level global priority while still claiming only the single safe SQLite writer tranche, so admission breadth cannot be mistaken for writer concurrency. The optional current-posterior boot catch-up runs only after scheduler-ready heartbeat on a daemon thread; a slow append-tail read cannot suppress forecast-live readiness or exact-family periodic production. A committed verified ENS run wakes only its exact eligible scopes and passes its immutable source_run_id as the causal baseline identity for same-cycle late-shape reseeding.
       After normal reachability retention, its existing independent retention executor invokes optional completed-cycle surface capture with an absolute deadline created before the audit call, outside mandatory producer locks and budgets. Budget exhaustion/read failure is phase-visible UNKNOWN and does not change source-run state, current q or historical receipts; no prefetch or persistent actor is added, and automatic snapshot consumption remains a distinct proof obligation. A wall budget uses SQLite/HTTP bounds and decode/publication checkpoints, not a claim of forcibly preemptible native/OS work.
+      Every normal HIGH/LOW safe-poll collector branch inherits the original absolute poll deadline, including migration/newest/probe/retry routes. Expired admission performs no new lock/RUNNING/HTTP/attempt work and preserves prior partial/journal identity for the next normal poll; lock-wait expiry also refuses collector work. Cooperative checks do not promise preemption of blocking requests or executor threads within 59 seconds, and do not enable native inventory or probability consumers.
+      The optional native source drain follows committed same-run mandatory HIGH/LOW raw collection, including already-journaled polls, and rechecks their actual journal/download priority before each request. Existing active current-local-day coverage supplies only a transport step plan, not full-Y qualification or a native-X authority gate; target-required knots are unioned across cities on the run, with only the native adjoining endpoint added. Unknown scope or exhausted original poll budget defers to the next ordinary poll without a new executor, cadence, global horizon fetch or q/semantics activation.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1790,6 +1798,7 @@ files:
       the observation bucket or raw source print) before every observation_instants INSERT. A causally newer same-hour WU
       payload supersedes the current row in either direction while the displaced view remains immutable in observation_revisions;
       append-only-extremum assumptions cannot preserve a provider value after WU has corrected it.
+      The bounded forward-capture seam handles only validated captured_entity_custody_v1 metadata; same parsed identity keeps the original row/NULL/first custody, while an otherwise lawful revision synchronizes the new body reference and custody in the same transaction. Other provenance, identity, scalar and causal-clock material guards remain unchanged; raw custody does not grant prefix or action authority.
   src/data/meteostat_bulk_client.py:
     zone: K2_runtime
     authority_role: meteostat_bulk_boundary
@@ -1816,6 +1825,7 @@ files:
     why: Ogimet METAR hourly fetch + extremum-preserving UTC-hour buckets for every configured NOAA-settled ICAO. Mirror of
       NOAA's METAR bulletins; temperature parsed through src/data/metar_temperature.py (T-group tenths first); C->F only
       after aggregation when settlement_unit=='F'.
+      Forward rows retain exact decoded response entity bytes and actual acquisition clocks for the existing live writer's immutable CAS custody; safe metadata excludes credentials and source-issued time remains unknown when absent. Custody does not grant complete-prefix or probability authority.
   src/data/solar_append.py:
     zone: K2_runtime
     authority_role: live_solar_append
@@ -1834,6 +1844,7 @@ files:
     authority_role: wu_icao_hourly_boundary
     why: WU ICAO historical.json hourly fetch + snap-to-UTC-hour for 47 wu_icao cities. Reuses WU_API_KEY public-key fallback
       from daily_obs_append to avoid the Day-0 ghost-trade regression (commit 65921ed).
+      Forward rows retain exact decoded response entity bytes and actual acquisition clocks for immutable CAS custody. Public-key query credentials are never stored in URL/params/headers; source-issued time is not inferred from acquisition or server clocks, and custody alone cannot authorize prefix/q.
     downstream:
     - src/data/meteostat_bulk_client.py
     - src/data/ogimet_hourly_client.py

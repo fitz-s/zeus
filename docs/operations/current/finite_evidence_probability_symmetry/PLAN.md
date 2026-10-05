@@ -17079,3 +17079,431 @@ Compile/freshness/planning/diff passed. ROOT accepts the bounded correction for
 normal FF delivery and one registered loader, subject to current strict gates.
 Normal post-load q witness remains a separate unproved runtime requirement;
 private controls and the old743470/743472 certificates cannot satisfy it.
+
+Delivery checkpoint 2026-10-05T09:14Z: commit7130f26f97f50ab3f8b55311aec2057f1b9c10fb
+landed by normal FF push from4fc; ancestor check passed. Only the four tiny-fix
+paths were committed; pending forward-capture registry/workspace changes and
+needed native originals remain separate. Live FF refused existing index.lock
+(inode1120053733, zero bytes, mtime_epoch1791178508); no visible lsof owner or
+git/deployer process. No lock removal, repeated FF, loader or guard mutation.
+Already-started registered RO preflight returned actualrc0 at09:13:27.203056Z:
+ok=true/blockers=[], 16 open positions requiring executable quotes. Nonblocking
+scheduler-key/cycle-lag diagnostics remain; this is not global READY proof.
+Actual09:14:08 getter guard=None, loaded state still4fc/Main10282 stamp08:47:04;
+ingest1753/forecast1728 fixed4fc and all cwd live. Config file-only SHA remainsd7.
+Loaded7130 and new normal ancillary q propagation are NOT proved. Current
+delivery blocker is live git lock ownership/recovery authority, not a failed
+loader; no loader attempt was started. Existing live processes keep running.
+
+Independent non-production integration while lock authority is pending:
+native inventory commits b3ae0ca +84f7e5ad cherry-picked cleanly as dbbf704c9
+and fb88382fa onto7130. Source/test bytes exactly retain approved62a51f5b6b9aef2da1cea40aa0c6b6c83047183eb220da2de62cd91b5bcd5ab1
+and5185eb14c143a1940e1b5e19523709cf1a50b4bb483fc20451473b489f66c6b5.
+Private inventory only, explicit ARCHIVE_BACKFILL modes; actual existing46/306
+readback remains PARTIAL/missing260, typed qualified availability NULL and zero
+snapshots/hourly. Original18owner PASS, mode2RED→3GREEN and independent3PASS
+are inherited only for unchanged code/dependencies, not normal producer proof.
+No HTTP, runtime hook, live canonical write or extra loader is enabled.
+Child cleanup inventory: clean tracked84f, no worker/test activity or needed
+raw input; exact own ignored template settings SHAe95eb2066414092e2b4416cd24b94a9a08ff050493df2ebff1d38a543d519a3b.
+Ignored pytest cache/two historical extract-stderr diagnostics are not required
+source inputs; actual needed native originals remain only in parent packet.
+
+Generic forward entity slice named acceptance: original0c6 independent review
+found two Important defects, foreign non-custody context accepted during lawful
+widening and fsync-failed orphan reuse incorrectly OBSERVED. Child7316fde fixes
+strict non-custody/core JSON type binding for owned-custody revisions and applies
+successful directory fsync to every verified publication/reuse. Original private
+REDs retained; 182 changed cases PASS plus 10 baseline writer controls, then
+independent10 PASS/2.44s with exact seven hashes unchanged closed both findings.
+Parent clean disjoint cherry-picks0c6+7316 as f1e69d613/d396ed25f; no change to
+materializer, q/math/core/semrev or native raw. Four source/three test bytes
+match child final review exactly. Existing source/script/test/lifecycle/workspace
+registries declare state/observation_raw/sha256 immutable decoded entity owner,
+normal512MiB/10000-body cap, no auto-GC/overwrite/historical retrofit and no
+prefix/action authority. Legacy NULL/first custody preserved; otherwise lawful
+H/L widening/correction synchronizes actual current reference and custody.
+SCOPE exact captured response; DRAIN normal next response or durable verified
+reuse; RESET directory durability succeeds and strict custody binds, not cached
+file existence or new unrelated provenance. Runtime forward capture remains
+UNPROVEN until a normal post-load response/current canonical row is observed.
+Live remains4fc while origin7130 waits human authorization for exact git-lock
+quarantine; no live FF retry, loader, raw acquisition or guard action in this
+independent integration stage. Parent123 needed originals remain untracked.
+
+Parent integration controls30 PASS/2.83s, actualrc0, including strict foreign
+HIGH/LOW core rejection, custody repeat/widening, fsync-failed reuse and normal
+producer/private canonical path plus original ingest-admission suite:
+/tmp/zeus-forward-integrator-named.xml. Compile AST7/YAML4 passed. Changed-surface
+freshness initially found two missing Purpose/Reuse headers on the existing
+freshness test; added only those comments after the tests finished, leaving its
+entire executable body identical to reviewed7316. Test-topology had no row for
+that pre-existing file; now explicit lifecycle/category/law dependencies and
+required script-test routing cover the changed surface, not unrelated drift.
+
+Final governance verification: freshness/planning OK zero issues, AST7/YAML4
+and diff checks PASS. Source/test/script registry tools report zero changed-path
+issues; whole-repo issue counts455/542/283 are not declared globally clean or
+repaired here. Header-only freshness test SHA nowb58dee3d1689d73b09e97630abfd535e6131a9008a3d41f93ffd0b7e370e9fa7;
+removing exactly the two new comments reproduces reviewed7316 bytes exactly.
+No further behavioral tests needed for these comments/registry descriptions.
+Exact child own regular template settings SHAe95 was deleted after tests;
+no active handles or required ignored input, tracked7316 clean before managed
+archive. Recoverable archive receipt01a10b74-4b37-7172-9494-5f2fd6bfcaa8 is for
+/Users/leofitz/.codex/worktrees/forward-observation-raw-capture-7781/zeus only.
+The older forward-observation-raw-capture attachment points to a missing directory
+and is stale, not restoration/cleanup evidence. Child branch can be removed only
+after this verified integration/snapshot; parent raw originals remain untouched.
+
+Current-only RO refresh 2026-10-05T10:23–10:25Z: parent/remote task5a8fedf,
+fresh origin/live7130, actual live checkout/loaded4fc stamp08:47:04.715638.
+MAIN10282/INGEST1753/FORECAST1728 all cwd /Users/leofitz/zeus; MAIN three canonical
+DB files observed, ingest WORLD/FORECAST and forecast FORECAST observed. Fresh
+heartbeats main10:23:24, ingest10:24:38, forecast10:23:50 carry the same4fc boot.
+Config SHA d7 is file-only proof; actual control-plane guard getter None10:24.
+No lock mutation/re-poll, live FF retry, loader, source HTTP or canonical writes.
+
+Narrow indexed current HK Oct5 H/L read disproves the old no-refresh assumption:
+HIGH743903 computed10:11:35.205469/recorded10:12:05 selects HKO10:00 high31.2C;
+LOW743960 computed10:20:46.486336/recorded10:21:15 selects HKO10:10 low25.1C.
+Both top day0_source_witness and causal source_witness absent. HIGH trigger
+instrument_set_expansion; LOW held_belief_computed_age_expired. Current certificate
+operator remains typed_remaining_and_final_extreme_gaussian_v3, shape semantics
+ensemble_center_scenarios_v6. Query uses existing
+idx_forecast_posteriors_runtime_layer_target with exact live/city/date/metric
+and computed_at DESC LIMIT1; no historical/full-table scan or price inference.
+Scheduler discovery/materialize last success10:23:50/52; priority currently
+RUNNING10:24:01, not proof that every lane is green or no new rejection exists.
+Normal source-witness propagation still UNPROVEN. This is NOT a failure of
+running7130 code: it has not been loaded. Live remains4fc pending the separately
+requested exact git-lock recovery authority; current lock state was not polled.
+Next executable delivery after that authority is registered FF/preflight/sole
+load, followed by actual normal new H/L ancillary receipts, not forced seeds.
+The123 needed originals remain in this packet; saved task branch is not raw backup.
+
+BEFOREEDIT ROOT-approved normal collector deadline propagation slice. Sole
+source/test owner all_city_truth_twin_audit owns shared parent
+src/ingest/forecast_live_daemon.py + existing tests/test_forecast_live_daemon.py;
+only if an actual fake-GET expiry antibody needs it, existing
+tests/test_ecmwf_open_data_collect_cycle.py is the third owned file. MAIN owns
+this existing PLAN and related source/test registry descriptions only; no
+concurrent source edits. Preserve generic CAS/native inventory/HKO bridge work
+and the123 original packet files. CodeGraph attempted parent route lookup but
+index is uninitialized; exact source confirms existing safe-cycle constants
+60s poll/1s handoff and collector cycle_deadline_monotonic seam. This is a
+navigation gap, not authority or justification to initialize a new index.
+
+Target: pass the original absolute monotonic poll deadline, not a fresh relative
+59s budget at dispatch, through normal HIGH/LOW collector call twins. Check
+expiry before beginning new acquisition, marking RUNNING, issuing HTTP or
+recording an attempt; preserve old partial/source/journal/status/reason fields
+when no work is admitted. Avoid deadline renewal during queued/executor wait.
+No cadence/executor/quota/config/quantity/roles/schema/native activation or q
+consumer change. A running blocking request/thread is not claimed preempted
+or guaranteed <=59s; only cooperative admission/deadline behavior is proved.
+
+SCOPE exact normal track/run poll work; DRAIN existing next safe poll after
+mandatory priority and current leases permit it; RESET a genuinely fresh
+absolute budget admits the preserved partial work, not a new source clock or
+old journal overwrite. Required private true RED→GREEN covers both tracks,
+exact deadline passthrough, expired-before-lock/RUNNING/HTTP/attempt negatives,
+queued expiry, preserved previous partial/journal and next-poll RESET, plus
+necessary owning normal-call controls. All tests private TI1/no actual HTTP or
+live DB writes. After frozen hashes/named acceptance, MAIN performs only affected
+integration/registry checks and saves the task branch. No origin/live push,
+live lock action, FF retry or loader is authorized by this slice. Mathematics
+and unimplemented normal native producer remain separate pending interfaces;
+do not create an unused private probability kernel or claim q readiness.
+
+Received probability-reader design result, not implementation/activation:
+current day0_hourly_vectors carrier and point/confidence draws have a single
+path/instrument width; materializer emits one path width and typed final-daily
+centers currently share it, while bundle_reader reproduces that single-width
+contract. Adding producer-only X/Y widths cannot create a valid current
+certificate or JIT replay. No unused private kernel is commissioned here.
+Owning authority §1e still explicitly preserves LOW/closed-day computation,
+V3 source-current width, existing instrument/latency handling and a semantics
+revision gate (current paragraphs near532/548/569/580, read directly).
+Any eventual coupled X/Y repair needs an approved law and producer/consumer/JIT
+plan plus complete original qualified source roles, not empty semrev cutover.
+Equal-provider-center X mixture already includes between variance; component
+noise cannot add it a second time. Singleton final-daily Y does not waive the
+whole-proposal provider law. The interval endpoint construction proves variance
+supremum, not automatically q_ucb supremum; preserve the owning bounds route.
+Temperature-width conversion follows settlement-native units with its centers.
+These are pending contracts/design obligations, not verified new live math or
+permission to promote provisional HKO reported prefix to absorbing authority.
+
+Normal collector deadline owner freeze at parent5a8fedf: source
+db9737543855e82a6f7911a92f7eec4643e809e5beb7641fbde450aa32f9ed18,
+initial test0f8337cb36b69fe885efa8935645f0f055c7d285c3554c65be23b5bb10ea18e8.
+Actual original18 FAIL/2 PASS /tmp/zeus-forecast-deadline-red.xml →20 PASS/1.84s
+/tmp/zeus-forecast-deadline-green.xml. Source adds26 lines: shared expired-result
+admission and original-deadline forwarding on six HIGH/LOW branches, no behavior
+outside the bounded source seam. MAIN read the actual diff and confirmed exact
+hashes, no conflicts with preserved source/HKO/CAS/native inventory changes.
+Only owner may repair missing Purpose/Reuse/old date headers; comments do not
+justify another20-test run, but final hash and executable-body equivalence must
+be recorded. Named independent review pending; no approval or runtime guarantee
+is inferred from this freeze. Existing source/test owner rows now describe the
+cooperative contract, preserving prior held-SELL and retention-audit roles.
+
+Remaining critical path, not implementation permission: (1) exact live git-lock
+authority then7130 registered delivery and actual normal HKO ancillary witness;
+(2) normal native source producer/readback/scheduling with verified complete51
+required-domain originals, stable global raw identity/first possession and
+mandatory-budget/retention protection, inventory alone is not that producer;
+(3) approved coupled X/Y source-law/producer/consumer/JIT probability interface
+with complete source roles, no empty global semrev switch or unused kernel;
+(4) normal newly-loaded WU/Ogimet CAS custody current canonical receipt proof.
+All source-only code remains saved on task branch until separately authorized
+delivery; parent123 raw originals remain present and are not a remote backup.
+
+Deadline metadata final freeze test0271aa4e041083169539f4d3fe94bb8ff5073cb209e35566ce5dd2de91d83fe1;
+source db973 unchanged. Reconstructing its old metadata prefix reproduces the
+initial reviewed20-test bytes SHA0f833 exactly, and every byte from the future
+import onward is identical. Header changes include comments and module docstring;
+the first all-AST assertion detected that docstring difference, not a behavior
+regression. Excluding only the explicitly verified module docstring gives exact
+executable AST equality. Freshness/planning now OK zero issues; no repeat20.
+AST2/YAML2/diff and changed source/test registry checks passed; whole-repo
+455/540 issue counts remain separate, not blanket preexisting or all-green.
+Independent handoff was delayed because a send to a completed reviewer did not
+start it; ROOT explicit followup then initiated the actual review. No independent
+PASS is asserted before its actual verdict, and no deadline wall guarantee or
+acceptance relaxation follows from that coordination delay.
+
+Named independent deadline review APPROVE: actual8 PASS/rc0/1.80s,
+/tmp/zeus-forecast-deadline-independent-20261005.xml, finaldb973/0271 before/after
+exact. Non-mirror registered wrapper after58s committed-wake work sends original
+cut69 with one second left, not a new59s; equality-expired admission invokes
+zero locks/collectors and preserves actual PARTIAL until next normal poll RESET.
+Six caller routes and probe/late-lock H/L controls verified, no in-flight hardwall
+claim. Source owner confirmed its exact regular test settings SHAe95 and deleted
+only that template with apply_patch after review; path absent, no other inputs
+changed. Final five owned paths save on named task branch only, not origin/live.
+No runtime recheck/load/native or q activation, lock change, HTTP or live SQL.
+
+Recovery/current-fact correction 2026-10-05T23:13Z: the old red-cancel-source-drain
+physical tree is gone; app active metadata is stale, not a restore receipt.
+Local converge commit0df9f44507bf0e0da9ab69f29e6a69dca329d505 adds ONLY the123
+previous raw files to code checkpoint28a90b64, no extra PLAN/source code. Remote
+named checkpoint28a has zero raw files and is not raw backup. Before restoration,
+per-path size/SHA256 aggregate from original Git blobs exactly reproduced
+148d15a84e80aa50c445ea70b81fa93d995694b3e068d6be1de0d83a79055350,
+123 files/57,227,944B/all100644. Same task restored via managed operation
+73df9318-9a40-4bf2-9c21-6b3b9bf213e1 at
+/Users/leofitz/.codex/worktrees/source-drain-resume/zeus, not a second task.
+Every restored physical file is byte-identical to its Git blob; no symlink.
+
+ROOT-approved clean local rebase after virtual merge39205a33ce32fd27656e80229a526e11ed234bb8:
+exact0df remains create-only recovery ref recovery/hko-native-raw-20261005-0df9f445.
+Replayed all8 commits onto live16c95b3ed3b3bd850b22d99178d7f78902eaf8a2,
+without dropping the raw commit, resetting old checkpoint or resolving any
+semantic conflict. New local task HEAD0e0392c620072b32bc103208ab8019e8968b3496;
+remote28a unchanged, no push/force/raw upload/live write. Result tree equals the
+clean virtual merge. Only overlapping registries merge peer multiday report and
+typed bundle-refusal test additions (20 lines); related task source/test bodies
+unchanged, YAML2/diff PASS. Post-rebase123 physical raw files still equal original
+blobs/count/bytes, not reminted clocks. New owner receives this exact shared tree;
+normal native source edit waits its CURRENT-law bounded plan acceptance.
+
+Single current local runtime read23:13:23 (not loader): actual loaded16c95b3e,
+stamp16:31:05.471071; MAIN63793/INGEST55952/FORECAST58950 fixed16c and cwd live.
+MAIN three canonical DB files and ingest WORLD/FORECAST observed; forecast DB
+FD not observed in that instant, a gap not failure. Fresh main/ingest/forecast
+heartbeats23:12:23/23:12:33/23:13:02; config SHA d7 is file-only proof.
+Hong Kong local target is Oct6, not Oct5. Normal HIGH749631 computed23:11:15.603359
+and LOW749617 computed23:09:21.661679 use native23:00 H25.1C/L23.3C. Both actual
+q provenance top day0_source_witness and causal source_witness are QUALIFIED,
+same original bodySHA73a515ba25b815e2b0f1d04cbf29d01dc90162f439faf450d3ad4bed398d0361,
+distinct metric identities5cff94fc...df0a /eca9f4d0...40ff1; top/causal per metric
+match. Provisional=true/absorbing_authority=false; shared V3 remains unchanged.
+This closes the observed ancillary field-propagation gap at a normal new q;
+it is not a physical full-source/X-Y math/ENTRY-held action/profit completion,
+and raw qualification was not independently replayed in this snapshot.
+Old statements that live remains4fc and7130 is not loaded are HISTORICAL,
+not current blockers. Current git lock state was not sampled, removed or inferred.
+
+BEFOREEDIT READY — ROOT-approved bounded normal native producer slice:
+sole source/test owner native_normal_producer owns src/data/ecmwf_open_data.py,
+src/ingest/forecast_live_daemon.py, tests/test_ecmwf_open_data_collect_cycle.py
+and tests/test_forecast_live_daemon.py in this shared task tree at local0e0392c6,
+base16c95b3e. MAIN owns this PLAN and the existing source_rationale/test_topology
+rows; no new report, source download, live change or fifth file is authorized
+by this entry. Owner reads current scoped law and records actual RED before fix.
+
+SCOPE is the native product/run and the existing active city/date target scope.
+Targets are active current local days only, start <= now < end. Required steps
+derive from exact current HIGH/LOW source_run_coverage expected_steps_json /
+existing normal required-step plan, plus the necessary native adjoining starting
+knot. Coverage supplies the transport plan, not a readiness filter or authority
+upgrade. Union those target-required knots across cities
+on the same run; unknown/invalid scope defers, never silently fetches a fixed
+0..240h or 0..90h horizon. Product/run/grid raw identity stays global and immutable;
+city, prefix cut and required-step view cannot remint raw identity or old clocks.
+Qualified-prefix-to-end geometry must not treat a spot time as complete prefix.
+
+DRAIN uses the existing normal poll, original absolute deadline and original
+budget, after same-run mandatory HIGH/LOW collection succeeds. Check actual
+same-run source_run collection and missing-download plan; RUNNING or unfinished
+raw work defers native. Per-city full-Y qualification is not a prerequisite for
+native-X drainage. Already-journaled mandatory work must still permit native
+debt drainage. Step0 and six-hour boundary knots are only native knot evidence,
+not a substitute for unknown prefix as-of. Optional minimal nonblocking
+singleflight may defer on busy, with finally-release RESET, no new daemon,
+executor/cadence or mandatory resource reservation. Completed durable native
+originals resume by verified identity; partial/missing evidence stays typed
+PARTIAL/UNKNOWN. Source-issued, source-available and static/transport eligibility
+remain UNKNOWN where unproved; no q, mu/sigma, semantics revision, snapshot or
+absorbing-authority activation is licensed. Archive and normal roles stay
+explicitly isolated; old original first-possession timestamps are not relabeled.
+
+Acceptance: private true RED→GREEN for required target union/unknown-scope defer,
+mandatory precedence and already-journaled DRAIN, original deadline/budget,
+busy singleflight/no new attempt plus finally-release/next-poll RESET,
+partial/resume immutable identity/clocks and native/archive role separation.
+Use only affected existing tests and changed registries; freeze actual hashes
+for named review before delivery. Exact123 raw originals/recovery0df ref remain
+untouched. No named push/raw upload, origin/live push, live lock action or loader
+is authorized in this phase; actual runtime16c report-only witness RESET is
+already recorded above and is not a complete probability/profit verdict.
+
+Normal native first freeze (not independent acceptance): owner reported actual
+entry-missing RED1F→source9P and already-journaled-hook RED1F→daemon7P; final40P
+26.54s plus unknown-prefix1P2.89s in /tmp/zeus-native-normal-tests.FPVEXT/
+native-source.xml and native-prefix-unknown.xml. MAIN verified frozen source
+1b3b01f6e69729e37bd78eff649d0bac5d53fa7963d6b0bd9af7d4e21f4c7272,
+daemon12b387344d8a2993b0a9ac42b12ea015665a0279ad86371d154058c0f0a039cc,
+collect test612fab96abd342f088dff62c66621f2cd4406c4b888e75a214250735e7328378
+and daemon test01a0aeb9bd4fb9104ad1f72dfab29502197f3d09f3d6e41112419dfa32aab11f.
+Compile4/YAML2/freshness/planning PASS; initial source registry check found the
+new daemon importer crossing the downstream-drift threshold, so MAIN adds its
+exact AST importer routes to this owning row. Other repo-wide source456/tests540/
+scripts283 findings are separate, not a clean repository claim. Existing decoder
+script row remains unchanged: its pure decode/interval CLI authority is not
+promoted by this source collector. Named reviewer is evaluating retained-original
+loss and canonical first-possession behavior; no APPROVE, commit or HEAD switch
+is inferred from green owner tests.
+
+ROOT-approved local code-only delivery mechanism, PLAN ONLY until review PASS:
+first ordinary local commit saves approved frozen source/test and related
+governance on current raw-bearing fix/hko-native-audit-20261005. Preserve that
+branch and recovery/hko-native-raw-20261005-0df9f445 exactly, with the original
+123 physical files/57,227,944B/aggregate148d15a84e80aa50c445ea70b81fa93d995694b3e068d6be1de0d83a79055350.
+Create-only fix/native-source-codeonly-20261005 starts at freshly verified
+origin/live. Before this, preview any newer peer delta and rebase/prove affected
+code; old16c whole-file staging cannot override newer peer changes. In the same
+task tree, after verifying no foreign staged/user edits, task-only symbolic-ref
+changes HEAD to the new branch and restore --staged --source=<exact live SHA>
+rebuilds only the index. This does not reset any ref, delete or move raw working
+files, create another tree, or change the live checkout. The needed originals
+become untracked here but remain byte-identical in place and recoverable in the
+old branch/ref; do not add-A, glob-stage, ignore-away or archive them.
+
+At current16c the explicit code-only candidate list is these17 existing paths:
+architecture/artifact_lifecycle.yaml, architecture/script_manifest.yaml,
+architecture/source_rationale.yaml, architecture/test_topology.yaml,
+docs/operations/current/finite_evidence_probability_symmetry/PLAN.md,
+scripts/obs_live_tick.py, src/data/ecmwf_open_data.py,
+src/data/observation_instants_writer.py, src/data/ogimet_hourly_client.py,
+src/data/wu_hourly_client.py, src/ingest/forecast_live_daemon.py,
+tests/test_ecmwf_open_data_collect_cycle.py, tests/test_forecast_live_daemon.py,
+tests/test_hourly_clients_parse.py, tests/test_obs_v2_writer.py,
+tests/test_observation_instants_v2_freshness.py, workspace_map.md.
+Revalidate this exact list against fresh live/peer scope before staging. Normal
+hooks commit, no skip-invariant; prove both new tree and full ancestor reachable
+object path list contain no native_2t_run_audit originals. Reprove physical raw
+hash/count/bytes and old refs, without changing receipts/source clocks. Named
+remote28a remains unchanged; no forcepush/raw upload. Current approval is local
+prepare/verify only, not pushlive, loader or automatic cleanup. Any review
+Important remains with its original owner on the raw-bearing tree until fixed
+and refrozen; do not prematurely switch code-only HEAD.
+
+MAIN changed-surface recheck after the exact importer-row correction:
+source455/tests540/scripts283 global findings, zero findings for the changed
+source/test/registry/PLAN paths and unchanged decoder script row. Those command
+global rc1 values are not hidden or called all-green. Freshness and planning
+each rc0/zero issues; compile4/YAML2/diff PASS. Four frozen source/test hashes
+remain exactly the first-freeze values above; no owner behavior test repeated.
+Independent source review has not yet APPROVED this freeze, so no local save,
+code-only HEAD/index switch, push or runtime activation occurred.
+
+Named review definitive FAIL / Important, pre-delivery native patch only:
+actual same-ID AVAILABLE102 readback re-fetched one missing range and changed
+member0 first-possession from23:39:48.385087 to23:39:49.041179. Actual1F/3.17s
+evidence /tmp/zeus-native-review-e95.Y6DZ3g/clock-readback.xml. This is not a
+current16c production defect or failure of its report-only witness RESET.
+Source owner is fixing same-run canonical-manifest-loss admission, preserving
+old original clocks and proving genuine next-poll RESET. Delivery is paused:
+no local source save, code-only HEAD/index switch, push or loader until new
+freeze and independent acceptance. MAIN does not repeat the counterexample or
+edit owner source/tests; existing WHY/test notes will be reconciled with the
+accepted fix. Source/publication/static qualification stays UNKNOWN meanwhile.
+
+Native manifest-anchor recovery re-freeze, independent acceptance still pending:
+source188df4e1ff4da1ab534b16bf52b8af86235bdc55968cf7a22ab181e1b9516a2d,
+collect test70f31dc8a1ff04c01014d1adff4312fb6256285467b7d5632bc71c802ef7d76c;
+daemon12b38734/testdaemon01a0aeb9 unchanged. MAIN fresh hash reads match all four.
+The guard binds an existing exact-run/normal-origin canonical manifest hash,
+identity and role before HTTP: missing/unbound manifest returns UNKNOWN with
+zero HTTP and no row/clock replacement. Persistence also rejects an existing
+normal/archive source_run without its prior bound manifest. DRAIN is genuine
+canonical-bound original manifest/member-proof restoration; RESET admits that
+restoration or an independent new run, and a valid new-step append may update
+the manifest hash without renewing retained raw/first-possession clocks.
+Owner actual focused7P9.60s and normal00/06 entry2P9.54s are in
+/tmp/zeus-native-normal-tests.FPVEXT/native-anchor-green.xml and
+native-anchor-normal-entry.xml; original reviewer1F remains recorded above.
+No repeat40/18 or claim of independent APPROVE. Current16c candidate code-only
+path list remains exactly17, with no source/test peer overlap previously found;
+fresh origin/peer preview still required before any delivery. HEAD0e0392c6 and
+raw-bearing branch/recovery refs remain, no local commit/HEAD switch/raw upload.
+
+ROOT accepted actual named native source-only review APPROVE:20P/0fail/error/
+skip in /tmp/zeus-native-review-e95.Y6DZ3g/review-anchor-green.xml,
+review-remaining-risk.xml, review-consumers-green.xml and review-union-limiter.xml.
+The original remint case now refuses UNKNOWN/zero HTTP with canonical row exact;
+actual original restoration resets, and valid append preserves old clocks.
+Remaining risk10P, consumer4P and union/shared-real-session bucket3P are separate
+named evidence, not a repeat40. Four re-freeze hashes stayed exact and reviewer
+confirmed its own cfg deletion. This permits normal local save and code-only
+preparation, not pushlive, runtime activation or q/physical qualification.
+
+Fresh origin/live is now e7bfbef2716275aa4a7e28c6413c28d703340f37; old named
+remote28a remains unchanged. Before any branch switch, merge-tree HEAD0e vs e7
+produced251895d6b111d237892f7a9ead6c0fa1ebf941cf/rc1 with one obs_live_tick
+conflict: only Last reused/audited header wording. Peer changes add exact print
+high-water/revision commit telemetry, then lock-external emission; the CAS entity
+capture/storage functions are separate automatically merged hunks. Preserve
+both peer telemetry behavior and task custody. Native four source/test paths
+were not changed by this peer delta. e7 also changes materializer/hourly/runtime
+consumer surfaces: inherited native review alone is not final affected-consumer
+proof. After the ordinary raw-bearing7-path save, actual rebase/resolution waits
+ROOT acceptance; narrow producer/canonical custody, commit-trace and HIGH/LOW
+native pollution/normal-entry affected checks must pass on the merged bytes.
+No whole-file overwrite, source clocks remint, raw deletion or new tree.
+
+Actual local saved commit359a4c0ea719aa17e40e5b41e5abbddd82c04aee passed normal
+hooks on exactly7 reviewed paths. ROOT then approved rebase onto e7: all9 commits
+replayed, with only the obs_live_tick audit-date comment manually resolved;
+peer commit telemetry and CAS custody both remain. Rebased raw-bearing HEAD
+a41806b38ecb972772bcaa258bb6b0d03b99a46b, e7 ancestor. Recovery ref
+recovery/native-normal-approved-20261005-359a4c0e retains the exact first save,
+and original recovery0df remains. Native four frozen hashes are unchanged.
+The first raw aggregate check incorrectly used packet-relative names; every
+physical file already matched its recovery Git blob, and using the historical
+repo-relative name/size/SHA256 serialization reproduces aggregate148d15a... exactly:
+123 files/57,227,944B/no symlinks. No raw mutation was needed or performed.
+
+Actual e7 affected proof:13P/rc0/12.23s, /tmp/zeus-native-e7-integration.xml,
+normal WU/OGIMET producer→private canonical custody, legal HIGH/LOW revisions,
+obs-tick commit trace, exact current-row identity equality and posterior A-B-A
+trace, HIGH/LOW native inventory cannot replace ENS consumers, normal00/06
+already-journaled native entry. No actual HTTP/live DB or broad old suite.
+e7 consumer delta specifically adds compare=False current-temperature input_ref
+and its telemetry provenance; native source-only proof remains distinct from
+probability/source-available qualification. Own exact e95 example test cfg was
+regular/nonlinked and removed after this check; no live config was read/copied.
+Fresh remote still e7 and named28a unchanged. Code-only candidate remains17
+exact approved paths; no new raw ancestry/tree or runtime claims are permitted.

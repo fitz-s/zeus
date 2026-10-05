@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-04-21
+# Last reused/audited: 2026-10-05 (forward decoded entity custody)
 # Authority basis: plan v3 Phase 0 file #4 (.omc/plans/observation-instants-
 #                  migration-iter3.md L86-93); step2_phase0_pilot_plan.md.
 """WU ICAO hourly-observation client for observation_instants backfill.
@@ -38,6 +38,8 @@ Public API
 from __future__ import annotations
 
 import logging
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -63,6 +65,54 @@ logger = logging.getLogger(__name__)
 #: Canonical source tag for WU hourly rows. Must match
 #: ``tier_resolver.EXPECTED_SOURCE_BY_CITY`` for WU cities.
 WU_HOURLY_SOURCE = "wu_icao_history"
+
+
+@dataclass(frozen=True)
+class CapturedEntity:
+    """Decoded HTTP entity, not wire bytes or evidence of archive completeness."""
+    entity: bytes | None
+    started_at: str
+    finished_at: str
+    request_url: str
+    request_params: dict[str, str]
+    native_unit: str
+    headers: dict[str, str]
+    report_timestamps: frozenset[str] = frozenset()
+    unavailable_reason: str | None = None
+
+
+def _credential_bearing(value: bytes | str) -> bool:
+    text = value.decode('utf-8', errors='replace') if isinstance(value, bytes) else value
+    # JSON may escape a credential key or its value. Inspect its decoded
+    # representation too, but retain/reject the original bytes as one entity.
+    try:
+        text += json.dumps(json.loads(text.lstrip('\ufeff')), ensure_ascii=False)
+    except (TypeError, ValueError):
+        pass
+    return bool(re.search(r'(?i)(api[_-]?key|access[_-]?token|authorization|password|bearer)', text)
+                or (WU_API_KEY and WU_API_KEY in text))
+
+
+def capture_entity(resp, *, started_at: datetime, finished_at: datetime,
+                   request_url: str, request_params: dict[str, str], native_unit: str,
+                   report_timestamps=()) -> CapturedEntity:
+    """Keep original bytes; credential-bearing bodies are unavailable, never redacted."""
+    entity = getattr(resp, 'content', None)
+    reason = None
+    if not isinstance(entity, bytes) or not entity:
+        entity, reason = None, 'ENTITY_BYTES_UNAVAILABLE'
+    elif _credential_bearing(entity):
+        entity, reason = None, 'CREDENTIAL_BEARING_ENTITY'
+    safe_headers = {}
+    for key, value in getattr(resp, 'headers', {}).items():
+        if key.lower() in {'content-type', 'content-length', 'date', 'last-modified', 'etag'}:
+            # Headers are provider labels, not source-issued proof. Never retain
+            # credential-like values even inside an otherwise permitted header.
+            if not _credential_bearing(str(value)):
+                safe_headers[key.lower()] = str(value)
+    return CapturedEntity(entity, started_at.isoformat(), finished_at.isoformat(),
+        request_url, dict(request_params), native_unit, safe_headers,
+        frozenset(report_timestamps), reason)
 
 
 @dataclass(frozen=True)
@@ -112,6 +162,7 @@ class WuHourlyFetchResult:
     retryable: bool = False
     auth_failed: bool = False
     error: Optional[str] = None
+    captures: tuple[CapturedEntity, ...] = ()
 
     @property
     def failed(self) -> bool:
@@ -169,6 +220,7 @@ def fetch_wu_hourly(
     url = WU_ICAO_HISTORY_URL.format(icao=icao, cc=cc)
     unit_code = "m" if unit == "C" else "e"
 
+    capture_started = datetime.now(timezone.utc)
     try:
         resp = httpx.get(
             url,
@@ -181,6 +233,7 @@ def fetch_wu_hourly(
             timeout=timeout_seconds,
             headers=WU_HEADERS,
         )
+        capture_finished = datetime.now(timezone.utc)
     except (httpx.HTTPError, httpx.RequestError) as exc:
         logger.warning(
             "WU hourly fetch raised %s for %s:%s %s..%s: %s",
@@ -249,6 +302,12 @@ def fetch_wu_hourly(
     return WuHourlyFetchResult(
         observations=aggregated,
         raw_observation_count=len(raw_observations),
+        captures=(capture_entity(resp, started_at=capture_started,
+            finished_at=capture_finished, request_url=url,
+            request_params={'units': unit_code, 'startDate': start_date.strftime('%Y%m%d'),
+                            'endDate': end_date.strftime('%Y%m%d')}, native_unit=unit,
+            report_timestamps={ts for obs in aggregated for ts in
+                (obs.hour_max_raw_ts, obs.hour_min_raw_ts, obs.latest_raw_ts) if ts}),),
     )
 
 
