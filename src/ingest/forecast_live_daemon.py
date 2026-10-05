@@ -1096,6 +1096,17 @@ def _latest_job_run_current_for_identity(conn, identity: dict[str, object]) -> t
     return True, metadata
 
 
+def _opendata_expired_cycle_result(track: str, deadline_monotonic: float | None) -> dict | None:
+    if deadline_monotonic is None or time.monotonic() < deadline_monotonic:
+        return None
+    from src.data.ecmwf_open_data import SOURCE_ID
+
+    # A spent poll is a spectator: preserve the prior attempt and partial files.
+    # The next scheduled poll obtains its own budget; no persistent gate is set.
+    return {"status": "download_failed", "reason": "CYCLE_DEADLINE_EXCEEDED",
+            "source": SOURCE_ID, "track": track, "snapshots_inserted": 0}
+
+
 def run_opendata_track(
     track: str,
     *,
@@ -1124,6 +1135,9 @@ def run_opendata_track(
     identity = _identity or _forecast_work_identity(track, now_utc=now)
     if identity.get("track") != track:
         raise ValueError("forecast-live identity track mismatch")
+    expired = _opendata_expired_cycle_result(track, _cycle_deadline_monotonic)
+    if expired is not None:
+        return expired
     track_lock_key = opendata_track_lock_key(track)
     decision = identity["decision"]
     if _job_conn is not None and decision is not FetchDecision.FETCH_ALLOWED:
@@ -1160,6 +1174,9 @@ def run_opendata_track(
             # the active RUNNING or completed FAILED/PARTIAL clock and prevent
             # fair held-cycle migration. The existing journal remains intact.
             return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
+        expired = _opendata_expired_cycle_result(track, _cycle_deadline_monotonic)
+        if expired is not None:
+            return expired
         collector = _collector or collect_open_ens_cycle
         lock_acquired_at = _utcnow()
         if _job_conn is not None:
@@ -1256,6 +1273,9 @@ def _run_opendata_track_if_due(
         else time.monotonic()
         + max(0, FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS - FORECAST_LIVE_SAFE_CYCLE_HANDOFF_SECONDS)
     )
+    expired = _opendata_expired_cycle_result(track, poll_deadline_monotonic)
+    if expired is not None:
+        return expired
     identity = _forecast_work_identity(track, now_utc=now)
     source_paused = _source_paused or _is_source_paused
 
@@ -1305,6 +1325,7 @@ def _run_opendata_track_if_due(
             track, _locks_dir_override=_locks_dir_override,
             _collector=_collector, _source_paused=_source_paused,
             _job_conn=_job_conn, _now_utc=now, _identity=migration_identity,
+            _cycle_deadline_monotonic=poll_deadline_monotonic,
         )
         return {**result, "revision_migration_debt": migration_debt}
 
@@ -1369,6 +1390,7 @@ def _run_opendata_track_if_due(
             _source_paused=_source_paused,
             _job_conn=_job_conn,
             _now_utc=now,
+            _cycle_deadline_monotonic=poll_deadline_monotonic,
         )
 
     if _use_availability_probe:
@@ -1385,6 +1407,7 @@ def _run_opendata_track_if_due(
                 _source_paused=_source_paused,
                 _job_conn=_job_conn,
                 _now_utc=now,
+                _cycle_deadline_monotonic=poll_deadline_monotonic,
             )
         if availability_status != "not_released":
             logger.warning(
@@ -1399,6 +1422,7 @@ def _run_opendata_track_if_due(
                 _source_paused=_source_paused,
                 _job_conn=_job_conn,
                 _now_utc=now,
+                _cycle_deadline_monotonic=poll_deadline_monotonic,
             )
             return {**newest_result, "availability_probe": availability}
         newest_result = {
@@ -1416,6 +1440,7 @@ def _run_opendata_track_if_due(
             _source_paused=_source_paused,
             _job_conn=_job_conn,
             _now_utc=now,
+            _cycle_deadline_monotonic=poll_deadline_monotonic,
         )
         if str(newest_result.get("status") or "").lower() != "skipped_not_released":
             return newest_result
@@ -1441,6 +1466,7 @@ def _run_opendata_track_if_due(
         _job_conn=_job_conn,
         _now_utc=retry_now,
         _identity=retry_identity,
+        _cycle_deadline_monotonic=poll_deadline_monotonic,
     )
     return {
         **retry_result,

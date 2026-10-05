@@ -17154,3 +17154,132 @@ archive. Recoverable archive receipt01a10b74-4b37-7172-9494-5f2fd6bfcaa8 is for
 The older forward-observation-raw-capture attachment points to a missing directory
 and is stale, not restoration/cleanup evidence. Child branch can be removed only
 after this verified integration/snapshot; parent raw originals remain untouched.
+
+Current-only RO refresh 2026-10-05T10:23–10:25Z: parent/remote task5a8fedf,
+fresh origin/live7130, actual live checkout/loaded4fc stamp08:47:04.715638.
+MAIN10282/INGEST1753/FORECAST1728 all cwd /Users/leofitz/zeus; MAIN three canonical
+DB files observed, ingest WORLD/FORECAST and forecast FORECAST observed. Fresh
+heartbeats main10:23:24, ingest10:24:38, forecast10:23:50 carry the same4fc boot.
+Config SHA d7 is file-only proof; actual control-plane guard getter None10:24.
+No lock mutation/re-poll, live FF retry, loader, source HTTP or canonical writes.
+
+Narrow indexed current HK Oct5 H/L read disproves the old no-refresh assumption:
+HIGH743903 computed10:11:35.205469/recorded10:12:05 selects HKO10:00 high31.2C;
+LOW743960 computed10:20:46.486336/recorded10:21:15 selects HKO10:10 low25.1C.
+Both top day0_source_witness and causal source_witness absent. HIGH trigger
+instrument_set_expansion; LOW held_belief_computed_age_expired. Current certificate
+operator remains typed_remaining_and_final_extreme_gaussian_v3, shape semantics
+ensemble_center_scenarios_v6. Query uses existing
+idx_forecast_posteriors_runtime_layer_target with exact live/city/date/metric
+and computed_at DESC LIMIT1; no historical/full-table scan or price inference.
+Scheduler discovery/materialize last success10:23:50/52; priority currently
+RUNNING10:24:01, not proof that every lane is green or no new rejection exists.
+Normal source-witness propagation still UNPROVEN. This is NOT a failure of
+running7130 code: it has not been loaded. Live remains4fc pending the separately
+requested exact git-lock recovery authority; current lock state was not polled.
+Next executable delivery after that authority is registered FF/preflight/sole
+load, followed by actual normal new H/L ancillary receipts, not forced seeds.
+The123 needed originals remain in this packet; saved task branch is not raw backup.
+
+BEFOREEDIT ROOT-approved normal collector deadline propagation slice. Sole
+source/test owner all_city_truth_twin_audit owns shared parent
+src/ingest/forecast_live_daemon.py + existing tests/test_forecast_live_daemon.py;
+only if an actual fake-GET expiry antibody needs it, existing
+tests/test_ecmwf_open_data_collect_cycle.py is the third owned file. MAIN owns
+this existing PLAN and related source/test registry descriptions only; no
+concurrent source edits. Preserve generic CAS/native inventory/HKO bridge work
+and the123 original packet files. CodeGraph attempted parent route lookup but
+index is uninitialized; exact source confirms existing safe-cycle constants
+60s poll/1s handoff and collector cycle_deadline_monotonic seam. This is a
+navigation gap, not authority or justification to initialize a new index.
+
+Target: pass the original absolute monotonic poll deadline, not a fresh relative
+59s budget at dispatch, through normal HIGH/LOW collector call twins. Check
+expiry before beginning new acquisition, marking RUNNING, issuing HTTP or
+recording an attempt; preserve old partial/source/journal/status/reason fields
+when no work is admitted. Avoid deadline renewal during queued/executor wait.
+No cadence/executor/quota/config/quantity/roles/schema/native activation or q
+consumer change. A running blocking request/thread is not claimed preempted
+or guaranteed <=59s; only cooperative admission/deadline behavior is proved.
+
+SCOPE exact normal track/run poll work; DRAIN existing next safe poll after
+mandatory priority and current leases permit it; RESET a genuinely fresh
+absolute budget admits the preserved partial work, not a new source clock or
+old journal overwrite. Required private true RED→GREEN covers both tracks,
+exact deadline passthrough, expired-before-lock/RUNNING/HTTP/attempt negatives,
+queued expiry, preserved previous partial/journal and next-poll RESET, plus
+necessary owning normal-call controls. All tests private TI1/no actual HTTP or
+live DB writes. After frozen hashes/named acceptance, MAIN performs only affected
+integration/registry checks and saves the task branch. No origin/live push,
+live lock action, FF retry or loader is authorized by this slice. Mathematics
+and unimplemented normal native producer remain separate pending interfaces;
+do not create an unused private probability kernel or claim q readiness.
+
+Received probability-reader design result, not implementation/activation:
+current day0_hourly_vectors carrier and point/confidence draws have a single
+path/instrument width; materializer emits one path width and typed final-daily
+centers currently share it, while bundle_reader reproduces that single-width
+contract. Adding producer-only X/Y widths cannot create a valid current
+certificate or JIT replay. No unused private kernel is commissioned here.
+Owning authority §1e still explicitly preserves LOW/closed-day computation,
+V3 source-current width, existing instrument/latency handling and a semantics
+revision gate (current paragraphs near532/548/569/580, read directly).
+Any eventual coupled X/Y repair needs an approved law and producer/consumer/JIT
+plan plus complete original qualified source roles, not empty semrev cutover.
+Equal-provider-center X mixture already includes between variance; component
+noise cannot add it a second time. Singleton final-daily Y does not waive the
+whole-proposal provider law. The interval endpoint construction proves variance
+supremum, not automatically q_ucb supremum; preserve the owning bounds route.
+Temperature-width conversion follows settlement-native units with its centers.
+These are pending contracts/design obligations, not verified new live math or
+permission to promote provisional HKO reported prefix to absorbing authority.
+
+Normal collector deadline owner freeze at parent5a8fedf: source
+db9737543855e82a6f7911a92f7eec4643e809e5beb7641fbde450aa32f9ed18,
+initial test0f8337cb36b69fe885efa8935645f0f055c7d285c3554c65be23b5bb10ea18e8.
+Actual original18 FAIL/2 PASS /tmp/zeus-forecast-deadline-red.xml →20 PASS/1.84s
+/tmp/zeus-forecast-deadline-green.xml. Source adds26 lines: shared expired-result
+admission and original-deadline forwarding on six HIGH/LOW branches, no behavior
+outside the bounded source seam. MAIN read the actual diff and confirmed exact
+hashes, no conflicts with preserved source/HKO/CAS/native inventory changes.
+Only owner may repair missing Purpose/Reuse/old date headers; comments do not
+justify another20-test run, but final hash and executable-body equivalence must
+be recorded. Named independent review pending; no approval or runtime guarantee
+is inferred from this freeze. Existing source/test owner rows now describe the
+cooperative contract, preserving prior held-SELL and retention-audit roles.
+
+Remaining critical path, not implementation permission: (1) exact live git-lock
+authority then7130 registered delivery and actual normal HKO ancillary witness;
+(2) normal native source producer/readback/scheduling with verified complete51
+required-domain originals, stable global raw identity/first possession and
+mandatory-budget/retention protection, inventory alone is not that producer;
+(3) approved coupled X/Y source-law/producer/consumer/JIT probability interface
+with complete source roles, no empty global semrev switch or unused kernel;
+(4) normal newly-loaded WU/Ogimet CAS custody current canonical receipt proof.
+All source-only code remains saved on task branch until separately authorized
+delivery; parent123 raw originals remain present and are not a remote backup.
+
+Deadline metadata final freeze test0271aa4e041083169539f4d3fe94bb8ff5073cb209e35566ce5dd2de91d83fe1;
+source db973 unchanged. Reconstructing its old metadata prefix reproduces the
+initial reviewed20-test bytes SHA0f833 exactly, and every byte from the future
+import onward is identical. Header changes include comments and module docstring;
+the first all-AST assertion detected that docstring difference, not a behavior
+regression. Excluding only the explicitly verified module docstring gives exact
+executable AST equality. Freshness/planning now OK zero issues; no repeat20.
+AST2/YAML2/diff and changed source/test registry checks passed; whole-repo
+455/540 issue counts remain separate, not blanket preexisting or all-green.
+Independent handoff was delayed because a send to a completed reviewer did not
+start it; ROOT explicit followup then initiated the actual review. No independent
+PASS is asserted before its actual verdict, and no deadline wall guarantee or
+acceptance relaxation follows from that coordination delay.
+
+Named independent deadline review APPROVE: actual8 PASS/rc0/1.80s,
+/tmp/zeus-forecast-deadline-independent-20261005.xml, finaldb973/0271 before/after
+exact. Non-mirror registered wrapper after58s committed-wake work sends original
+cut69 with one second left, not a new59s; equality-expired admission invokes
+zero locks/collectors and preserves actual PARTIAL until next normal poll RESET.
+Six caller routes and probe/late-lock H/L controls verified, no in-flight hardwall
+claim. Source owner confirmed its exact regular test settings SHAe95 and deleted
+only that template with apply_patch after review; path absent, no other inputs
+changed. Final five owned paths save on named task branch only, not origin/live.
+No runtime recheck/load/native or q activation, lock change, HTTP or live SQL.

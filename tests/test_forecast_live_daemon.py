@@ -1,8 +1,10 @@
 # Created: 2026-07-30
-# Last reused/audited: 2026-08-22
-# Lifecycle: created=2026-07-30; last_reviewed=2026-08-22; last_reused=2026-08-22
-# Authority basis: operator-directed held SELL terminal-wake hotfix.
-"""Held SELL terminal-wake completion antibodies."""
+# Last reused/audited: 2026-10-05
+# Lifecycle: created=2026-07-30; last_reviewed=2026-10-05; last_reused=2026-10-05
+# Authority basis: operator-directed held SELL terminal-wake hotfix and approved collector deadline slice.
+# Purpose: prove held SELL wake completion and absolute OpenData poll-budget propagation.
+# Reuse: private HIGH/LOW journal expiry, six collector routes and next-poll RESET; no network/live state.
+"""Held SELL terminal-wake and OpenData absolute-budget antibodies."""
 
 from __future__ import annotations
 
@@ -2478,3 +2480,151 @@ def test_degraded_day0_wake_retires_hint_after_held_monitor(
         assert main._edli_reactor_wake_poll_once() is False
     finally:
         main._day0_exit_monitor_attempts.clear()
+
+
+@pytest.fixture
+def opendata_poll_budget(monkeypatch):
+    """Private journal and collector; no production lock, source or DB access."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data import job_lock
+    from src.data.release_calendar import FetchDecision
+    from src.state.db import _create_job_run
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _create_job_run(conn)
+    now = datetime(2026, 10, 5, tzinfo=timezone.utc)
+    clock = [10.0]
+    calls, locks = [], []
+    identities = {}
+    for track in ("mx2t6_high", "mn2t6_low"):
+        identities[track] = {
+            "track": track, "decision": FetchDecision.FETCH_ALLOWED,
+            "scheduled_for": now, "job_name": "private-budget-" + track,
+            "source_id": "ecmwf_open_data", "release_calendar_key": "private:" + track,
+            "coordinate_manifest_json": "{}", "data_version": "private-budget-v1",
+            "metadata": {},
+        }
+
+    @contextmanager
+    def acquire(track, **kwargs):
+        locks.append(track)
+        yield True, "private-budget-lock"
+
+    def collector(**kwargs):
+        calls.append(kwargs)
+        return {"status": "ok", "snapshots_inserted": 1}
+
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(daemon, "_forecast_work_identity", lambda track, **kw: identities[track])
+    monkeypatch.setattr(daemon, "_latest_job_run_current_for_identity", lambda *a: (False, {}))
+    monkeypatch.setattr(daemon, "_held_revision_migration_identity", lambda *a, **kw: None)
+    monkeypatch.setattr(daemon, "_retry_identity_for_failed_prior_run", lambda *a, **kw: None)
+    monkeypatch.setattr(job_lock, "acquire_opendata_track_lock", acquire)
+    state = SimpleNamespace(daemon=daemon, conn=conn, now=now, clock=clock,
+                            calls=calls, locks=locks, identities=identities,
+                            collector=collector, decisions=FetchDecision)
+    yield state
+    conn.close()
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("route", ("newest", "released", "unknown", "unreleased", "held", "prior"))
+def test_opendata_poll_original_deadline_all_routes(opendata_poll_budget, monkeypatch, track, route):
+    s = opendata_poll_budget
+    passed_deadlines = []
+    run = s.daemon.run_opendata_track
+    def record_run(*args, **kwargs):
+        passed_deadlines.append(kwargs.get("_cycle_deadline_monotonic"))
+        return run(*args, **kwargs)
+    monkeypatch.setattr(s.daemon, "run_opendata_track", record_run)
+    probe = None
+    if route in {"released", "unknown", "prior"}:
+        probe = lambda *a, **kw: {"status": "not_released" if route == "prior" else route}
+    if route == "unreleased":
+        s.identities[track]["decision"] = s.decisions.SKIPPED_NOT_RELEASED
+    if route == "held":
+        monkeypatch.setattr(s.daemon, "_latest_job_run_current_for_identity", lambda *a: (True, {}))
+        monkeypatch.setattr(s.daemon, "_held_revision_migration_identity",
+                            lambda *a, **kw: (s.identities[track], {}))
+    if route == "prior":
+        older = {**s.identities[track], "scheduled_for": s.now - timedelta(hours=6)}
+        monkeypatch.setattr(s.daemon, "_retry_identity_for_failed_prior_run",
+                            lambda *a, **kw: (older, {}))
+    s.daemon._run_opendata_track_if_due(
+        track, _job_conn=s.conn, _collector=s.collector, _source_paused=lambda _: False,
+        _now_utc=s.now, _poll_deadline_monotonic=50.0,
+        _use_availability_probe=probe is not None, _availability_probe=probe,
+    )
+    assert passed_deadlines == [50.0]
+    if route == "unreleased":
+        # The non-fetch branch also receives the budget before journal mutation.
+        assert not s.calls
+    else:
+        assert len(s.calls) == 1
+        assert s.calls[0]["cycle_deadline_monotonic"] == 50.0
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("expiry", ("before_poll", "during_probe", "during_lock"))
+def test_opendata_expired_poll_preserves_partial_then_resets(opendata_poll_budget, monkeypatch, track, expiry):
+    from contextlib import contextmanager
+    from src.data import job_lock
+    s = opendata_poll_budget
+    s.daemon._write_job_run(s.conn, identity=s.identities[track], status="PARTIAL",
+                            now_utc=s.now, result={"status": "partial", "snapshots_inserted": 1},
+                            reason_code="PRIVATE_PARTIAL", started_at=s.now, lock_acquired_at=s.now)
+    s.conn.commit()
+    before = tuple(tuple(row) for row in s.conn.execute("SELECT * FROM job_run"))
+    if expiry == "before_poll":
+        s.clock[0] = 50.0
+    if expiry == "during_lock":
+        @contextmanager
+        def late_acquire(*a, **kw):
+            s.locks.append(track)
+            s.clock[0] = 50.0
+            yield True, "private-budget-lock"
+        monkeypatch.setattr(job_lock, "acquire_opendata_track_lock", late_acquire)
+    def probe(*a, **kw):
+        if expiry == "during_probe":
+            s.clock[0] = 50.0
+        return {"status": "released"}
+    result = s.daemon._run_opendata_track_if_due(
+        track, _job_conn=s.conn, _collector=s.collector, _source_paused=lambda _: False,
+        _now_utc=s.now, _poll_deadline_monotonic=50.0,
+        _use_availability_probe=expiry != "before_poll", _availability_probe=probe,
+    )
+    assert result["reason"] == "CYCLE_DEADLINE_EXCEEDED"
+    assert not s.calls
+    assert s.locks == ([track] if expiry == "during_lock" else [])
+    assert tuple(tuple(row) for row in s.conn.execute("SELECT * FROM job_run")) == before
+    s.clock[0] = 60.0
+    if expiry == "during_lock":
+        @contextmanager
+        def reset_acquire(*a, **kw):
+            s.locks.append(track)
+            yield True, "private-budget-lock"
+        monkeypatch.setattr(job_lock, "acquire_opendata_track_lock", reset_acquire)
+    result = s.daemon._run_opendata_track_if_due(
+        track, _job_conn=s.conn, _collector=s.collector, _source_paused=lambda _: False,
+        _now_utc=s.now,
+    )
+    assert result["status"] == "ok"
+    assert len(s.calls) == 1
+    assert s.calls[0]["cycle_deadline_monotonic"] == 119.0
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_opendata_expired_nonfetch_does_not_replace_journal(opendata_poll_budget, track):
+    s = opendata_poll_budget
+    s.identities[track]["decision"] = s.decisions.SKIPPED_NOT_RELEASED
+    s.clock[0] = 50.0
+    result = s.daemon._run_opendata_track_if_due(
+        track, _job_conn=s.conn, _collector=s.collector, _source_paused=lambda _: False,
+        _now_utc=s.now, _poll_deadline_monotonic=50.0,
+    )
+    assert result["reason"] == "CYCLE_DEADLINE_EXCEEDED"
+    assert s.conn.execute("SELECT COUNT(*) FROM job_run").fetchone()[0] == 0
+    assert not s.locks and not s.calls
