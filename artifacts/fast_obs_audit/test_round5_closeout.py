@@ -201,6 +201,27 @@ class AuditTests(unittest.TestCase):
             out=json.loads((Path(t)/'x.json').read_text())
         self.assertEqual(out['payload_json']['last_monitor_edge'],{'nonfinite_float':'nan'})
         self.assertEqual(out['v'],{'nonfinite_float':'inf'})
+    def test_kma_event_joins_only_its_named_posterior(self):
+        kev=dict(event_id='k1',source='day0_extreme_updated_trigger',available_at='2026-10-05T08:00:52Z',received_at='2026-10-05T08:00:56Z')
+        derived=dict(kev,event_id='k2',source='day0_posterior_advanced')
+        a0=a.millis(kev['available_at'])
+        es=[dict(stage='POSTERIOR_READY',input_ref={'kma_event_id':'k1'},posterior_identity_hash='q',readiness_id='r',posterior_ready_at_ms=a0+9000,recorded_at_ms=a0+9000),
+            dict(stage='WAKE_PUBLISHED',wake_id='w',posterior_identity_hash='q',recorded_at_ms=a0+9001),
+            dict(stage='WAKE_RECEIVED',wake_id='w',wake_received_at_ms=a0+9002,recorded_at_ms=a0+9002),
+            dict(stage='Q_SERVED',posterior_identity_hash='q',q_served_at_ms=a0+9010,recorded_at_ms=a0+9010),
+            dict(stage='VENUE_ACK_OBSERVED',q_version='q',command_id='c',event_id='ack',recorded_at_ms=a0+9020),
+            # Content alone, or a derived re-dispatch, never binds a KMA posterior.
+            dict(stage='POSTERIOR_READY',input_ref={'kma_event_id':'k2'},posterior_identity_hash='z',posterior_ready_at_ms=a0+1,recorded_at_ms=a0+1)]
+        ack=[dict(event_id='ack',command_id='c',event_type='SUBMIT_ACKED',occurred_at='2026-10-05T08:01:01.020Z')]
+        r=a.trace_distributions([],es,ack,[kev,derived])
+        self.assertEqual(r['kma_source_events'],1);self.assertEqual(r['kma_events_with_exact_posterior'],1)
+        self.assertEqual(r['hops']['kma_available_to_received']['p50_ms'],4000)
+        self.assertEqual(r['hops']['kma_available_to_posterior']['p50_ms'],9000)
+        self.assertEqual(r['hops']['receipt_to_ack']['p50_ms'],9020)
+        self.assertEqual(r['hops']['receipt_to_world']['n'],0)
+        self.assertEqual(r['full_ack_chains'],1);self.assertEqual(r['paired'][0]['input_kind'],'KMA_EVENT')
+        none=a.trace_distributions([],es[:1],[],[dict(kev,event_id='k9')])
+        self.assertEqual(none['residual_counts'],{'KMA_EVENT_NO_EXACT_POSTERIOR_READY':1})
     def test_wrong_sql_identifier_rejected(self):
         with self.assertRaises(ValueError):a.identifier('x; DROP TABLE y')
 

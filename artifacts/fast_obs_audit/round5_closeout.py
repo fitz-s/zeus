@@ -414,19 +414,36 @@ def reconstruct_legacy_references(conn, observations: list[dict], events: list[d
     return dict(counts)
 
 
-def trace_distributions(observations: list[dict], events: list[dict], ack_events: list[dict]) -> dict:
+KMA_SOURCE_EVENTS = frozenset(('day0_extreme_updated_trigger', 'day0_kma_conflict'))
+
+
+def _kma_key(event: dict) -> str | None:
+    """A POSTERIOR_READY that names the exact KMA source event its reader consumed."""
+    ref = event.get('input_ref')
+    return 'kma:' + ref['kma_event_id'] if isinstance(ref, dict) and isinstance(ref.get('kma_event_id'), str) else None
+
+
+def trace_distributions(observations: list[dict], events: list[dict], ack_events: list[dict],
+                        kma_events: list[dict] = ()) -> dict:
     """Only explicit immutable print references license production hop statistics.
 
     Legacy source hints require prior exact native-row reconstruction; never use
     nearest publication time or the newest A->B->A revision retrospectively.
+    KMA inputs are opportunity_events, joined only by the exact event id the
+    reader recorded. Their receipt clock is the event's available_at (the
+    report's LOCAL_FIRST_SEEN_AFTER_COMPLETE_RESPONSE possession clock);
+    received_at is the tick's post-HTTP cut, reported separately, never a
+    WORLD commit clock.
     """
     refs = {observation_ref(r)['identity']:r for r in observations}
     if len(refs)!=len(observations): raise ValueError('DUPLICATE_OBSERVATION_REVISION')
+    kma = {'kma:'+e['event_id']:e for e in kma_events if e.get('source') in KMA_SOURCE_EVENTS}
     records = defaultdict(list); not_referenced=0
     for event in events:
         ref = event.get('observation_ref')
         key = ref.get('identity') if isinstance(ref,dict) else ref
         if key in refs: records[key].append(event)
+        elif event.get('stage')=='POSTERIOR_READY' and _kma_key(event) in kma: records[_kma_key(event)].append(event)
         else: not_referenced+=1
     ready_hash = {}
     for key, es in records.items():
@@ -457,7 +474,7 @@ def trace_distributions(observations: list[dict], events: list[dict], ack_events
             if e not in bucket:bucket.append(e);records[key].append(e)
     native_acks = {e['event_id']:e for e in ack_events if e.get('event_type') in ('SUBMIT_ACKED','POST_ACKED')}
     residuals=Counter(); hops=defaultdict(list); paired=[]
-    for key,row in refs.items():
+    for key,row in (*refs.items(),*kma.items()):
         es=records.get(key,[])
         source=[e for e in es if e.get('stage')=='SOURCE_COMMITTED' and e.get('world_committed_at_ms') is not None]
         ready=[e for e in es if e.get('stage')=='POSTERIOR_READY']
@@ -468,13 +485,21 @@ def trace_distributions(observations: list[dict], events: list[dict], ack_events
             if stage=='Q_SERVED':served[e.get('posterior_identity_hash')].append(e)
             elif stage=='WAKE_RECEIVED' and e.get('wake_id'):woken[label(e)].append(e)
             elif stage=='VENUE_ACK_OBSERVED':acked[e.get('q_version')].append(e)
-        if not source:residuals['MISSING_EXACT_REVISION_SOURCE_COMMIT']+=1;continue
-        commits={e['world_committed_at_ms'] for e in source}
-        if len(commits)!=1:residuals['CONFLICTING_SOURCE_COMMIT_CLOCKS']+=1;continue
-        commit=next(iter(commits));receipt=millis(row['fetched_at_utc'])
-        if commit<receipt:residuals['SOURCE_CLOCK_ORDER_VIOLATION']+=1;continue
-        hops['receipt_to_world'].append(commit-receipt)
-        if not ready:residuals['NO_EXACT_REVISION_POSTERIOR_READY']+=1;continue
+        if key in kma:
+            try:receipt=millis(row['available_at']);received=millis(row['received_at'])
+            except (KeyError,TypeError,ValueError):residuals['KMA_EVENT_CLOCK_INVALID']+=1;continue
+            if received<receipt:residuals['KMA_EVENT_CLOCK_ORDER_VIOLATION']+=1;continue
+            hops['kma_available_to_received'].append(received-receipt)
+            commit=receipt  # Lower bound for each posterior; no WORLD commit clock is claimed.
+            if not ready:residuals['KMA_EVENT_NO_EXACT_POSTERIOR_READY']+=1;continue
+        else:
+            if not source:residuals['MISSING_EXACT_REVISION_SOURCE_COMMIT']+=1;continue
+            commits={e['world_committed_at_ms'] for e in source}
+            if len(commits)!=1:residuals['CONFLICTING_SOURCE_COMMIT_CLOCKS']+=1;continue
+            commit=next(iter(commits));receipt=millis(row['fetched_at_utc'])
+            if commit<receipt:residuals['SOURCE_CLOCK_ORDER_VIOLATION']+=1;continue
+            hops['receipt_to_world'].append(commit-receipt)
+            if not ready:residuals['NO_EXACT_REVISION_POSTERIOR_READY']+=1;continue
         # A print may cause multiple families/posteriors: preserve each distinct hash.
         seen=set()
         for r in sorted(ready,key=lambda e:e.get('posterior_ready_at_ms',e['recorded_at_ms'])):
@@ -482,7 +507,7 @@ def trace_distributions(observations: list[dict], events: list[dict], ack_events
             if h in seen:continue
             seen.add(h);rt=r.get('posterior_ready_at_ms',r['recorded_at_ms'])
             if rt<commit:residuals['POSTERIOR_CLOCK_ORDER_VIOLATION']+=1;continue
-            hops['world_to_posterior'].append(rt-commit)
+            hops['kma_available_to_posterior' if key in kma else 'world_to_posterior'].append(rt-commit)
             q=[e for e in served.get(h,()) if e.get('q_served_at_ms',-1)>=rt]
             if not q:residuals['POSTERIOR_NOT_PROVED_SERVED']+=1;continue
             serve=min(q,key=lambda e:e['q_served_at_ms']);qt=serve['q_served_at_ms'];hops['posterior_to_q'].append(qt-rt)
@@ -500,12 +525,15 @@ def trace_distributions(observations: list[dict], events: list[dict], ack_events
                 if at>=qt:ack.append((at,native['command_id'],native['event_id']))
             if ack:
                 at,cid,eid=min(ack);hops['q_to_ack'].append(at-qt);hops['receipt_to_ack'].append(at-receipt)
-                paired.append({'observation_identity':key,'posterior_identity_hash':h,'command_id':cid,'ack_event_id':eid,'wake_proven':bool(wake),'readiness_proven':bool(r.get('readiness_id'))})
+                paired.append({'observation_identity':key,'input_kind':'KMA_EVENT' if key in kma else 'WORLD_PRINT','posterior_identity_hash':h,'command_id':cid,'ack_event_id':eid,'wake_proven':bool(wake),'readiness_proven':bool(r.get('readiness_id'))})
             else:
                 # Not an outage assertion: the lawful policy may choose KEEP/HOLD/NO_TRADE.
                 residuals['Q_SERVED_NO_CANONICAL_ACK_OR_NO_ACTION_PROOF']+=1
-    names=('receipt_to_world','world_to_posterior','posterior_to_wake','wake_to_q','posterior_to_q','q_to_ack','receipt_to_ack')
+    names=('receipt_to_world','world_to_posterior','kma_available_to_received','kma_available_to_posterior',
+        'posterior_to_wake','wake_to_q','posterior_to_q','q_to_ack','receipt_to_ack')
     return {'window_observation_rows':len(observations),'trace_rows':len(events),
+        'kma_source_events':len(kma),'kma_events_with_exact_posterior':sum(bool(records.get(k)) for k in kma),
+        'kma_clock_contract':'receipt=available_at (report first-seen possession); received_at=post-HTTP tick cut; no KMA WORLD commit clock',
         'explicit_revision_source_rows':sum(bool(records.get(k)) for k in refs),
         'events_without_direct_revision_reference':not_referenced,
         'ack_lineages':len(paired),'full_ack_chains':sum(p['wake_proven'] and p['readiness_proven'] for p in paired),'paired':paired,'residual_counts':dict(residuals),'residual_grain':'source failures per observation; downstream failures per distinct observation/posterior pair',
@@ -516,7 +544,7 @@ def trace_distributions(observations: list[dict], events: list[dict], ack_events
 
 
 def production(root: Path, out: Path, start: datetime, end: datetime) -> dict:
-    stamps={};residuals=[];observations=[];ack=[];reconstruction={}
+    stamps={};residuals=[];observations=[];ack=[];reconstruction={};kma={}
     events,coverage=read_logs(root,start,end)
     try:
         # KMA transport is written only on DAY0_EXTREME_UPDATED for the RKSI/RKPK
@@ -534,7 +562,7 @@ def production(root: Path, out: Path, start: datetime, end: datetime) -> dict:
             else:residuals.append('WORLD_OBSERVATION_PRINTS_UNAVAILABLE')
             kma={'by_station':{'RKSI':[],'RKPK':[]},'station_identity_unresolved':[]}
             if columns(conn,'opportunity_events'):
-                kr=conn.execute("""SELECT event_id,event_type,entity_key,observed_at,available_at,received_at,payload_json
+                kr=conn.execute("""SELECT event_id,event_type,source,entity_key,observed_at,available_at,received_at,payload_json
                     FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED'
                     AND json_extract(payload_json,'$.city') IN ("""+','.join('?'*len(kma_cities))+""")
                     AND julianday(received_at)>=julianday(?) AND julianday(received_at)<julianday(?)
@@ -581,7 +609,8 @@ def production(root: Path, out: Path, start: datetime, end: datetime) -> dict:
     with gzip.open(out/'observation_rows.jsonl.gz','wt') as stream:
         for row in observations:stream.write(json.dumps(scrub(dict(row,observation_ref=observation_ref(row))))+'\n')
     dump(out/'trace_events.json',events)
-    result=trace_distributions(observations,events,ack)
+    kma_rows=[e for rows in kma.get('by_station',{}).values() for e in rows]+kma.get('station_identity_unresolved',[])
+    result=trace_distributions(observations,events,ack,kma_rows)
     result.update(window_start=start.isoformat(),window_end_exclusive=end.isoformat(),database_snapshots=stamps,
         snapshot_contract='separate read-only transactions, not a cross-database atomic snapshot',
         collection_residuals=residuals,log_coverage=coverage,legacy_reference_reconstruction=reconstruction,
