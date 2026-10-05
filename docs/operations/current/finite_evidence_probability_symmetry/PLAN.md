@@ -17003,3 +17003,79 @@ before staging; needed native raw packet remains untouched/untracked.
 Fresh capital preflight currently15 open/15 fresh held+fullbook, zero nonterminal
 commands/blockers. Origin remains baf with no peer delta. ROOT authorized normal
 FF delivery and one registered loader; actual outcome is not yet recorded.
+
+BEFOREEDIT separate generic forward entity-capture child, ROOT authorized:
+src/data/wu_hourly_client.py, src/data/ogimet_hourly_client.py,
+scripts/obs_live_tick.py; existing tests/test_hourly_clients_parse.py,
+tests/test_observation_instants_v2_freshness.py, tests/test_obs_v2_writer.py.
+Child forward-observation-raw-capture owns only these six files; parent owns
+registries/PLAN. Explicit new raw path is state/observation_raw/sha256/**,
+normal observation forward writer owns immutable decoded response entities;
+hourly rows retain small exact-body refs, not duplicated blobs or new tables.
+Original source-issued UNKNOWN remains UNKNOWN; body capture confers no prefix,
+settlement, q or action authority. Safe headers exclude credentials/cookies.
+Storage has separate normal cap512MiB/10000bodies; no automatic GC, age deletion,
+historical-row rewrite, new daemon/HTTP request or collection-budget inheritance.
+SCOPE exact response/source/body; DRAIN next lawful normal response; RESET
+existing verified identical body reuse or valid next publication, with narrow
+unavailable capture status and legacy scalars preserved. Parent classification
+and workspace visibility declare this path before production-source edits;
+private fixtures/RED first, no live writes. Needed native attempt1/3 originals
+are outside this slice and remain immutable in the existing packet.
+
+ROOT approved necessary fourth source for that child only:
+src/data/observation_instants_writer.py. This is existing WORLD canonical writer
+custody compatibility, not schema/quantity/authority migration. The worker must
+read full scoped data law and K0 truth/ownership/transaction references before
+editing: zeus_current_architecture, kernel_manifest, zero_context_entry and
+authority_index. Same parsed identity repeats preserve the original row, rawNULL
+and first custody; only the strictly versioned owned capture-custody object gets
+the declared compatibility handling. Legacy/non-versioned/other provenance core
+still uses the old material guard. Only a revision already permitted by existing
+widening/correction and identity/causal rules synchronizes new source_file and
+custody in its existing transaction. No historical retrofit or cross-DB write.
+The existing three child tests cover unchanged repeat, lawful revision, hostile
+non-owned/provenance/material changes and commit-before-ack. Registry/data-dir
+classification is unchanged; no new path or retention permission is added.
+The owned custody object is explicitly captured_entity_custody_v1, never a
+generic provenance exemption. Its existing writer rationale and exact CAS-dir
+owner/cap/no-GC classification are prepared; source implementation stays in the
+single child, with ordinary template-only/private-state bootstrap.
+
+Current08:56:57Z parent/live/origin remain4fc; actual MAIN10282 stamp08:47:04.715638,
+INGEST1753/FORECAST1728 are newer normal boots, not the prior05:27 deployment
+processes. Private bridge20P/independent7P and loader actualrc0 are historical
+executed proof, not current normal q propagation. HK743470/743472 post05:27stamp
+remain without ancillary evidence. Named RO found the ordinary cycle-advance
+producer at replacement_cycle_advance_trigger2695/2704-2709 strips witness into
+old scalar fields, while materializer918 incomingNone exits without replay.
+
+BEFOREEDIT ROOT-approved final-owner correction, only
+src/data/replacement_forecast_materializer.py + existing
+tests/test_replacement_forecast_materializer.py. Replay final selected canonical
+HKO original even when an old/ordinary producer serialized no witness. Optional
+incoming None must preserve q/core/posterior/bundle identity/semrev/scalars,
+not freeze audit metadata forever empty. Non-HKO None stays inert; missing or
+invalid exact HKO original yields ancillary UNKNOWN, no probability gate.
+No cycle-trigger change, new global revision, old-row rewrite, forced seed or
+new source HTTP. Old incoming tamper still cannot self-qualify, and selection
+changes replace/clear provenance against the owning original-body reader.
+SCOPE exact selected source/date/metric/asof/value; DRAIN ordinary materialize
+even from existing READY/request; RESET own canonical original replays, not
+incoming field availability or always-newest row equality. H/L legacy request
+actual frontier RED and all core-byte/non-HKO controls precede patch/freeze.
+
+Executed final-owner correction: actual H/L old-field requests produced 2 RED
+on original4fc (3.26s, /tmp/zeus-day0-legacy-final-witness-red.xml), then 19 PASS
+(4.27s, /tmp/zeus-day0-legacy-final-witness-green.xml). The first core harness
+assumed an already-enriched request was an unannotated baseline; corrected it
+to compare the identical scalar request with only ancillary evidence removed.
+Actual q/config/dependency/posterior/core byte equality remains asserted.
+Independent named review APPROVE: 6 PASS/4.00s, source/test hashes unchanged,
+/tmp/zeus-day0-legacy-final-independent6.xml. Source scalar reducer AST equals
+original4fc. Exact source SHA e85d073d5075a5182953cbb7e97a8e53b4eb4e0f5be6473580c6f7394b345c94;
+test SHA 79697464a838488526fe04241f0a332881777bbc798fe66912896bd3f339e2fb.
+Compile/freshness/planning/diff passed. ROOT accepts the bounded correction for
+normal FF delivery and one registered loader, subject to current strict gates.
+Normal post-load q witness remains a separate unproved runtime requirement;
+private controls and the old743470/743472 certificates cannot satisfy it.

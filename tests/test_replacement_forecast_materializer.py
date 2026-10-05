@@ -1583,11 +1583,12 @@ def test_reported_ancillary_provenance_keeps_q_and_all_core_hashes(monkeypatch):
     original_compute = materializer_mod._compute_posterior_payload
     comparisons = []
     def compare(conn, request, **kwargs):
-        original = original_compute(conn, request, **kwargs)
-        witness = {"qualification_status":"UNKNOWN", "qualified_for":"HKO_REPORTED_PRODUCT_ONLY",
-                   "provisional":True, "absorbing_authority":False,
-                   "settlement_equivalence":"UNPROVEN", "reason":"ORIGINAL_BODY_MISSING"}
-        ancillary = original_compute(conn, replace(request, day0_source_witness=witness), **kwargs)
+        # Final owner may now enrich a legacy request. Compare its actual
+        # annotation against the same scalar compute with reporting removed.
+        witness = request.day0_source_witness
+        assert witness is not None and not witness["absorbing_authority"]
+        original = original_compute(conn, replace(request, day0_source_witness=None), **kwargs)
+        ancillary = original_compute(conn, request, **kwargs)
         left, right = asdict(original), asdict(ancillary)
         assert "day0_source_witness" not in left["provenance_payload"]
         assert right["provenance_payload"].pop("day0_source_witness") == witness
@@ -1599,6 +1600,50 @@ def test_reported_ancillary_provenance_keeps_q_and_all_core_hashes(monkeypatch):
     monkeypatch.setattr(materializer_mod, "_compute_posterior_payload", compare)
     test_materializer_hko_provisional_observation_does_not_truncate_support(monkeypatch)
     assert len(comparisons) == 2
+
+
+@pytest.mark.parametrize("metric,value", [("high",29.0),("low",25.1)])
+def test_legacy_hko_request_acquires_final_selected_reported_witness(native_cumulative_row, metric, value):
+    conn, _ = native_cumulative_row
+    apply_canonical_schema(conn, forecast_tables=True)
+    conn.row_factory = sqlite3.Row
+    request = replace(_request(), city="Hong Kong", city_id="Hong Kong", city_timezone="Asia/Hong_Kong",
+        target_date=date(2026,10,5), temperature_metric=metric,
+        computed_at=datetime(2026,10,5,3,40,tzinfo=UTC), day0_observed_extreme_c=value,
+        day0_observed_extreme_source="hko_hourly_accumulator",
+        day0_observed_extreme_observation_time="2026-10-05T03:30:00+00:00",
+        day0_observed_extreme_sample_count=1, day0_observed_extreme_unit="C",
+        day0_source_witness=None)
+    # The normal cycle-advance producer historically serializes these old fields.
+    rebound = materializer_mod._request_with_day0_physical_frontier(conn, request, metric=metric)
+    assert isinstance(rebound, ReplacementForecastMaterializeRequest), rebound
+    assert rebound.day0_source_witness is not None, "ordinary legacy request permanently drops canonical product proof"
+    assert rebound.day0_source_witness["qualification_status"] == "QUALIFIED", rebound.day0_source_witness
+    assert rebound.day0_source_witness["value_c"] == value
+    assert asdict(replace(rebound,day0_source_witness=None)) == asdict(request)
+
+
+@pytest.mark.parametrize("fault", ["raw_missing", "future_write", "non_hko"])
+def test_legacy_final_report_rejects_missing_or_future_without_scalar_gate(native_cumulative_row, fault):
+    conn, _ = native_cumulative_row
+    request = replace(_request(), city="Hong Kong", city_id="Hong Kong", city_timezone="Asia/Hong_Kong",
+        target_date=date(2026,10,5), computed_at=datetime(2026,10,5,3,40,tzinfo=UTC),
+        day0_observed_extreme_c=29.0, day0_observed_extreme_source="hko_hourly_accumulator",
+        day0_observed_extreme_observation_time="2026-10-05T03:30:00+00:00",
+        day0_observed_extreme_unit="C", day0_source_witness=None)
+    if fault == "raw_missing":
+        conn.execute("UPDATE observation_instants SET raw_response=NULL")
+    elif fault == "future_write":
+        conn.execute("UPDATE observation_instants SET imported_at='2026-10-05T03:40:00.000001+00:00'")
+    else:
+        request = replace(request, day0_observed_extreme_source="wu_icao_history")
+    annotated = materializer_mod._request_with_day0_source_witness(conn, request, metric="high")
+    if fault == "non_hko":
+        assert annotated is request and annotated.day0_source_witness is None
+    else:
+        assert annotated.day0_source_witness["qualification_status"] == "UNKNOWN"
+        assert not annotated.day0_source_witness["absorbing_authority"]
+    assert asdict(replace(annotated, day0_source_witness=None)) == asdict(request)
 
 
 def _request(

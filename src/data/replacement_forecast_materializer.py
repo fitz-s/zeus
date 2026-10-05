@@ -915,7 +915,7 @@ def _selected_day0_source_witness(
 
 
 def _request_with_day0_source_witness(conn, request, *, metric, previous=None):
-    if request.day0_source_witness is None and (previous is None or previous.day0_source_witness is None):
+    if request.day0_source_witness is None and request.day0_observed_extreme_source != "hko_hourly_accumulator":
         return request
     proof = _selected_day0_source_witness(conn, city=request.city,
         target_date=_date_text(request.target_date), timezone_name=request.city_timezone,
@@ -928,7 +928,8 @@ def _request_with_day0_source_witness(conn, request, *, metric, previous=None):
         getattr(previous, key) != getattr(request, key) for key in (
             "day0_observed_extreme_source", "day0_observed_extreme_observation_time",
             "day0_observed_extreme_c", "target_date", "temperature_metric"))
-    if proof is not None and not selection_changed and request.day0_source_witness != proof:
+    if (proof is not None and request.day0_source_witness is not None
+            and not selection_changed and request.day0_source_witness != proof):
         proof = {**proof, "qualification_status": "UNKNOWN",
                  "reason": "HKO_PREFIX_INCOMING_WITNESS_MISMATCH"}
         proof.pop("identity_hash", None)
@@ -938,8 +939,9 @@ def _request_with_day0_source_witness(conn, request, *, metric, previous=None):
 def _request_with_day0_physical_frontier(
     conn: sqlite3.Connection, request: ReplacementForecastMaterializeRequest, *, metric: str,
 ):
-    selected = _request_with_day0_source_witness(conn, request, metric=metric)
-    frontier = _request_with_day0_physical_frontier_scalar(conn, selected, metric=metric)
+    # The scalar reducer does not consume ancillary evidence. Replay only its
+    # final selection, including ordinary producers that serialized no witness.
+    frontier = _request_with_day0_physical_frontier_scalar(conn, request, metric=metric)
     if isinstance(frontier, ReplacementForecastMaterializeResult):
         return frontier
     return _request_with_day0_source_witness(conn, frontier, metric=metric, previous=request)
