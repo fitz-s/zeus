@@ -1035,6 +1035,23 @@ scripts:
     class: utility
     reason: "Read-only harness-debate audit utility for module_manifest auto-derivability and bidirectional grep evidence; report artifacts are non-authority."
     write_targets: [stdout, temp, docs/operations]
+  multiday_evaluation.py:
+    class: evidence_report_writer
+    dangerous_if_run: false
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: null
+    read_targets: [state/zeus_trades.db, state/zeus-forecasts.db, state/zeus-world.db]
+    write_targets: [state/multiday_evaluation.json, state/multiday_evaluation.md, stdout]
+    authority_scope: multiday_evaluation_report_only
+    reuse_when: "Continuous multi-day report of live entries (by market age at entry, HIGH/LOW separate), settled outcomes, exits with sell-vs-hold regret, keep revaluations, open exposure and the cumulative equity series; run daily by src/main.py:_multiday_evaluation_tick."
+    do_not_use_when: "Never treat the report as a verdict, gate, calibration input or order authority; it carries no thresholds and cannot change what trades."
+    canonical_command: "python3 scripts/multiday_evaluation.py [--since YYYY-MM-DD] [--no-write] [--out-dir DIR]"
+    external_inputs: []
+    promotion_barrier: "Report only: every DB is opened mode=ro on its own connection (INV-37, no ATTACH); writes only the two atomic state/ artifacts."
+    required_helpers: [src.state.db.get_connection_read_only, src.engine.global_auction_universe._payload_resolution_at_utc]
+    required_tests: [tests/test_multiday_evaluation.py]
+    unguarded_write_rationale: "Writes only non-authority state/multiday_evaluation.{json,md} via temp-file + os.replace; no canonical DB is opened writable."
   nuke_rebuild_projections.py: {class: repair, apply_flag: implicit, target_db: "--db-path", unguarded_write_rationale: "Existing repair writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
   onboard_cities.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing onboarding pipeline writes unless --dry-run is provided; manifest marks it dangerous pending hardening."}
   parse_change_log.py: {class: utility}
