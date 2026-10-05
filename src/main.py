@@ -2023,35 +2023,62 @@ def _settlement_guard_report_tick() -> None:
     run_settlement_guard_report()
 
 
+_MULTIDAY_EVALUATION_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "multiday_evaluation.py"
+# Cold reads on the 200 GB trade DB took up to ~65 s; the parent kill is the hard bound.
+_MULTIDAY_EVALUATION_TIMEOUT_S = 300.0
+_MULTIDAY_EVALUATION_EXIT_DB_BUSY = 75  # scripts.multiday_evaluation.EXIT_DB_BUSY
+
+
+def _run_multiday_evaluation_child(
+    extra_args: Iterable[str] = (),
+    *,
+    timeout_s: float = _MULTIDAY_EVALUATION_TIMEOUT_S,
+) -> None:
+    """Run scripts/multiday_evaluation.py as a bounded child process.
+
+    Raises on a non-zero exit (except DB-busy, which skips this cadence) and on timeout,
+    so ``_scheduler_job`` records FAILED. ``subprocess.run`` kills the child when the
+    timeout fires; the child holds no non-daemon worker thread and writes only two
+    fixed-name atomic temp files, so a kill leaves nothing to clean up.
+    """
+    argv = [sys.executable, str(_MULTIDAY_EVALUATION_SCRIPT), "--quiet", *extra_args]
+    started = time.monotonic()
+    proc = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+        stdin=subprocess.DEVNULL,
+    )
+    elapsed = time.monotonic() - started
+    tail = (proc.stderr or "").strip()
+    if proc.returncode == _MULTIDAY_EVALUATION_EXIT_DB_BUSY:
+        logger.warning("multiday_evaluation deferred: database busy (child %.1fs)\n%s", elapsed, tail)
+        return
+    if proc.returncode != 0:
+        raise RuntimeError(f"multiday_evaluation child exit={proc.returncode}: {tail[-1000:]}")
+    logger.info("multiday_evaluation child ok in %.1fs\n%s", elapsed, tail)
+
+
 @_scheduler_job("multiday_evaluation")
 def _multiday_evaluation_tick() -> None:
     """Daily multi-day evaluation report (operator 2026-10-05: records + continuous evaluation).
 
-    Read-only over the trade, forecast and world DBs (each its own ``mode=ro``
-    connection, INV-37); writes only state/multiday_evaluation.{json,md}. A
-    report, never a gate: nothing here can change what trades. Yields to the live
-    money-path cycle and to a busy DB (skips until the next cadence; no retry).
-    Import is local to keep src.main import-light.
+    Read-only over the trade, forecast and world DBs; writes only
+    state/multiday_evaluation.{json,md}. A report, never a gate: nothing here can change
+    what trades.
+
+    It runs in its own process, never in this daemon: the report's reads can pin a WAL
+    snapshot and burn CPU for tens of seconds on a cold 200 GB DB, which in-process would
+    contend for this process's GIL. The child is niced and killed at
+    ``_MULTIDAY_EVALUATION_TIMEOUT_S``. Yields to the live money-path cycle.
     """
     if _defer_for_held_position_monitor("multiday_evaluation"):
         return
     if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
         logger.info("multiday_evaluation skipped: live money-path cycle active")
         return
-    from scripts.multiday_evaluation import run_multiday_evaluation
-
-    try:
-        report = run_multiday_evaluation()
-    except sqlite3.OperationalError as exc:
-        message = str(exc).lower()
-        if "locked" in message or "busy" in message:
-            logger.warning("multiday_evaluation deferred: database busy")
-            return
-        raise
-    logger.info(
-        "multiday_evaluation: since=%s entries=%s coverage=%s",
-        report["since_target_date"], len(report["entries"]), report["coverage"],
-    )
+    _run_multiday_evaluation_child()
 
 
 @_scheduler_job("settlement_skill_attribution")
@@ -11501,7 +11528,7 @@ def main():
     )
     # Daily multi-day evaluation report — 09:45 UTC, after the 09:15 settlement guard
     # and the 30-min skill-attribution grading it reads. Read-only report-only
-    # (state/multiday_evaluation.{json,md}); skips while the money path is active.
+    # (state/multiday_evaluation.{json,md}); runs as a bounded child process.
     scheduler.add_job(
         _multiday_evaluation_tick, "cron", hour=9, minute=45,
         id="multiday_evaluation", max_instances=1, coalesce=True,

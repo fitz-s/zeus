@@ -41,9 +41,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
+import sqlite3
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
@@ -54,7 +57,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+logger = logging.getLogger("multiday_evaluation")
+
 SCHEMA = "multiday_evaluation.v1"
+EXIT_DB_BUSY = 75  # EX_TEMPFAIL: the scheduler tick treats it as "try the next cadence"
 AGE_BUCKETS = ("<12h", "12-24h", "24-48h", ">=48h", "unknown")
 OPEN_PHASES = ("active", "day0_window", "pending_exit")
 POSITION_PHASES = OPEN_PHASES + ("economically_closed", "settled")
@@ -245,8 +251,6 @@ def _in_rows(conn, sql: str, ids: Iterable[str], tail: str = "") -> list:
 
 
 def load_trades_data(conn, since: date) -> dict:
-    import sqlite3
-
     conn.row_factory = sqlite3.Row
     since_s = since.isoformat()
     floor = (since - timedelta(days=ENTRY_FLOOR_DAYS)).isoformat()
@@ -403,8 +407,6 @@ def load_attribution(conn, position_ids: Iterable[str]) -> dict[str, dict]:
 
 
 def _safe(fn: Callable[[], Any], default: Any, warnings: list[str], what: str) -> Any:
-    import sqlite3
-
     try:
         return fn()
     except sqlite3.OperationalError as exc:
@@ -767,18 +769,27 @@ def run_multiday_evaluation(
     now = now or datetime.now(timezone.utc)
     since = since or (now.date() - timedelta(days=DEFAULT_DAYS))
     warnings: list[str] = []
+    started = last = time.monotonic()
+
+    def lap(phase: str) -> None:
+        nonlocal last
+        t = time.monotonic()
+        logger.info("phase=%s phase_s=%.2f total_s=%.2f", phase, t - last, t - started)
+        last = t
 
     conn = _open_ro(trades_db or _zeus_trade_db_path())
     try:
         td = load_trades_data(conn, since)
     finally:
         conn.close()
+    lap("trades")
     conds = {e["snap_cond"] or e["pos_cond"] for e in td["entries"]} - {None}
     conn = _open_ro(forecasts_db or ZEUS_FORECASTS_DB_PATH)
     try:
         listings = _safe(lambda: load_listings(conn, conds), {}, warnings, "forecasts.market_events")
     finally:
         conn.close()
+    lap("forecasts")
     conn = _open_ro(world_db or ZEUS_WORLD_DB_PATH)
     try:
         attribution = _safe(
@@ -789,6 +800,7 @@ def run_multiday_evaluation(
         )
     finally:
         conn.close()
+    lap("world")
 
     report = build_report(
         td,
@@ -800,12 +812,14 @@ def run_multiday_evaluation(
         warnings=warnings,
     )
     report["markdown"] = render_markdown(report)
+    lap("build")
     if write:
         out = Path(out_dir) if out_dir else Path(STATE_DIR)
         out.mkdir(parents=True, exist_ok=True)
         _atomic_write(out / "multiday_evaluation.md", report["markdown"])
         body = {k: v for k, v in report.items() if k != "markdown"}
         _atomic_write(out / "multiday_evaluation.json", json.dumps(body, indent=1))
+        lap("write")
     return report
 
 
@@ -817,18 +831,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--world-db")
     ap.add_argument("--out-dir", help="default: the runtime state dir")
     ap.add_argument("--no-write", action="store_true")
+    ap.add_argument("--quiet", action="store_true", help="do not print the markdown (the scheduler child)")
     args = ap.parse_args(argv)
-    report = run_multiday_evaluation(
-        since=args.since,
-        trades_db=args.trades_db,
-        forecasts_db=args.forecasts_db,
-        world_db=args.world_db,
-        out_dir=args.out_dir,
-        write=not args.no_write,
+    try:
+        report = run_multiday_evaluation(
+            since=args.since,
+            trades_db=args.trades_db,
+            forecasts_db=args.forecasts_db,
+            world_db=args.world_db,
+            out_dir=args.out_dir,
+            write=not args.no_write,
+        )
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            logger.warning("database busy, no report this cadence: %s", exc)
+            return EXIT_DB_BUSY
+        raise
+    logger.info(
+        "done since=%s entries=%s coverage=%s warnings=%s",
+        report["since_target_date"], len(report["entries"]), report["coverage"], report["warnings"],
     )
-    sys.stdout.write(report["markdown"])
+    if not args.quiet:
+        sys.stdout.write(report["markdown"])
     return 0
 
 
 if __name__ == "__main__":
+    # A bare child has no logging setup, so its lines would reach stderr as untimestamped
+    # lastResort text; give it the daemon's own format.
+    logging.basicConfig(
+        level=logging.INFO, stream=sys.stderr,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+    try:
+        os.nice(10)  # a background report must never outrank the trading daemon
+    except OSError:
+        pass
     raise SystemExit(main())

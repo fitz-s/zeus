@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import sys
+import time
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
@@ -390,16 +393,109 @@ def tick(monkeypatch):
     return main_module, health
 
 
-def _stub_run(monkeypatch, fn):
-    monkeypatch.setattr(me, "run_multiday_evaluation", fn)
+def _stub_child(monkeypatch, main_module, **kw):
+    """Replace subprocess.run inside src.main; returns the recorded invocations."""
+    import subprocess
+
+    calls: list = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if "raise" in kw:
+            raise kw["raise"]
+        return subprocess.CompletedProcess(argv, kw.get("rc", 0), stdout="", stderr=kw.get("stderr", ""))
+
+    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
+    return calls
 
 
-def test_tick_runs_the_report_when_money_path_is_idle(tick, monkeypatch):
+def test_tick_runs_the_report_in_a_bounded_child(tick, monkeypatch):
     main_module, health = tick
-    calls = []
-    _stub_run(monkeypatch, lambda: calls.append(1) or {"since_target_date": "x", "entries": [], "coverage": {}})
+    calls = _stub_child(monkeypatch, main_module)
     main_module._multiday_evaluation_tick()
-    assert calls == [1] and health[-1] == ("multiday_evaluation", {"failed": False})
+    (argv, kwargs), = calls
+    assert argv[0] == sys.executable and argv[1].endswith("scripts/multiday_evaluation.py") and "--quiet" in argv
+    assert kwargs["timeout"] == main_module._MULTIDAY_EVALUATION_TIMEOUT_S and kwargs["stdin"] is not None
+    assert health[-1] == ("multiday_evaluation", {"failed": False})
+
+
+def test_child_db_busy_exit_skips_the_cadence_without_failing(tick, monkeypatch):
+    main_module, health = tick
+    _stub_child(monkeypatch, main_module, rc=me.EXIT_DB_BUSY, stderr="database busy")
+    assert main_module._MULTIDAY_EVALUATION_EXIT_DB_BUSY == me.EXIT_DB_BUSY
+    main_module._multiday_evaluation_tick()
+    assert health[-1] == ("multiday_evaluation", {"failed": False})
+
+
+def test_child_failure_and_timeout_are_recorded_and_never_raise_into_the_daemon(tick, monkeypatch):
+    import subprocess
+
+    main_module, health = tick
+    _stub_child(monkeypatch, main_module, rc=1, stderr="Traceback ... boom")
+    main_module._multiday_evaluation_tick()  # _scheduler_job swallows and records
+    assert health[-1][1]["failed"] is True and "boom" in health[-1][1]["reason"]
+
+    _stub_child(monkeypatch, main_module, **{"raise": subprocess.TimeoutExpired("x", 300)})
+    main_module._multiday_evaluation_tick()
+    assert health[-1][1]["failed"] is True and "timed out" in health[-1][1]["reason"]
+
+
+def test_real_child_times_out_and_is_killed(tmp_path):
+    """The parent's timeout is the hard bound: a hung child must be gone, not orphaned."""
+    import src.main as main_module
+    import subprocess
+
+    hang = tmp_path / "hang.py"
+    hang.write_text("import time\ntime.sleep(60)\n")
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        subprocess.run([sys.executable, str(hang)], timeout=1.5, capture_output=True)
+    assert time.monotonic() - started < 10
+    assert main_module._MULTIDAY_EVALUATION_TIMEOUT_S >= 60  # cold-I/O runs reach ~65 s
+
+
+def test_real_child_logs_with_timestamps_and_exits_cleanly(tmp_path):
+    import re
+    import subprocess
+
+    dbs = _make_dbs(tmp_path)
+    out = tmp_path / "out"
+    proc = subprocess.run(
+        [sys.executable, str(me.PROJECT_ROOT / "scripts" / "multiday_evaluation.py"), "--quiet",
+         "--since", "2026-09-28", "--trades-db", str(dbs[0]), "--forecasts-db", str(dbs[1]),
+         "--world-db", str(dbs[2]), "--out-dir", str(out)],
+        capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""  # --quiet
+    lines = [ln for ln in proc.stderr.splitlines() if ln.strip()]
+    stamp = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} \[multiday_evaluation\] INFO: ")
+    assert lines and all(stamp.match(ln) for ln in lines), lines
+    phases = [re.search(r"phase=(\w+)", ln).group(1) for ln in lines if "phase=" in ln]
+    assert phases == ["trades", "forecasts", "world", "build", "write"]
+    assert (out / "multiday_evaluation.json").exists() and (out / "multiday_evaluation.md").exists()
+
+
+def test_child_exits_75_when_a_database_is_locked(tmp_path):
+    import subprocess
+
+    dbs = _make_dbs(tmp_path)
+    holder = sqlite3.connect(dbs[0], isolation_level=None)
+    holder.execute("PRAGMA journal_mode=DELETE")
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(me.PROJECT_ROOT / "scripts" / "multiday_evaluation.py"), "--quiet",
+             "--since", "2026-09-28", "--trades-db", str(dbs[0]), "--forecasts-db", str(dbs[1]),
+             "--world-db", str(dbs[2]), "--no-write"],
+            capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+            env={**os.environ, "ZEUS_DB_READ_BUSY_TIMEOUT_MS": "200"},
+        )
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert proc.returncode == me.EXIT_DB_BUSY, proc.stderr
+    assert "database busy" in proc.stderr
 
 
 @pytest.mark.parametrize("busy", ["reactor", "screen", "monitor"])
@@ -411,26 +507,9 @@ def test_tick_defers_to_the_money_path(tick, monkeypatch, busy):
         monkeypatch.setattr(main_module, "_edli_redecision_screen_lock", SimpleNamespace(locked=lambda: True))
     else:
         monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: True)
-    _stub_run(monkeypatch, lambda: pytest.fail("report must not run while the money path is active"))
+    calls = _stub_child(monkeypatch, main_module)
     main_module._multiday_evaluation_tick()
-
-
-def test_tick_never_raises_into_the_daemon(tick, monkeypatch):
-    main_module, health = tick
-
-    def busy():
-        raise sqlite3.OperationalError("database is locked")
-
-    _stub_run(monkeypatch, busy)
-    main_module._multiday_evaluation_tick()
-    assert health[-1] == ("multiday_evaluation", {"failed": False})  # deferred, not failed
-
-    def broken():
-        raise RuntimeError("boom")
-
-    _stub_run(monkeypatch, broken)
-    main_module._multiday_evaluation_tick()  # _scheduler_job swallows and records
-    assert health[-1][1]["failed"] is True and health[-1][1]["reason"] == "boom"
+    assert calls == []
 
 
 def test_job_is_registered_daily_and_classified_non_collection():
