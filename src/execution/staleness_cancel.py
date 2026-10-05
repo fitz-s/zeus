@@ -990,7 +990,13 @@ def value_standing_entry(
 
 @dataclass(frozen=True)
 class FamilyOptimum:
-    """The selector's own best fresh BUY for one family on the common axis."""
+    """The selector's own best fresh BUY for one family on the common axis.
+
+    ``bin_id``/``side`` is its claim and ``acting_q`` the payoff q it was
+    scored on. ``fills`` are its terminal outcomes as the selector's growth
+    law weighs them, (probability, filled shares, cost): one certain full
+    fill for a taker, its fill witness's outcomes for a maker.
+    """
 
     candidate_id: str
     token_id: str
@@ -1000,6 +1006,10 @@ class FamilyOptimum:
     ruin_probability_reduction: float
     expected_delta_log_wealth: float
     fill_probability: float
+    bin_id: str
+    side: str
+    acting_q: float
+    fills: tuple[tuple[Decimal, Decimal, Decimal], ...]
 
     def evidence(self) -> dict[str, Any]:
         return {
@@ -1011,6 +1021,10 @@ class FamilyOptimum:
             "ruin_probability_reduction": self.ruin_probability_reduction,
             "expected_delta_log_wealth": self.expected_delta_log_wealth,
             "fill_probability": self.fill_probability,
+            "bin_id": self.bin_id,
+            "side": self.side,
+            "acting_q": self.acting_q,
+            "fills": [[str(value) for value in fill] for fill in self.fills],
         }
 
 
@@ -1189,6 +1203,7 @@ class FamilyOptimumCut:
         from src.engine import global_auction_universe as universe
         from src.engine import global_batch_runtime as runtime
         from src.engine.global_single_order_auction import select_prepared_global_auction
+        from src.solve.solver import family_payoff_point_q
 
         if self.epoch is None or self.gate.global_reason is not None:
             return None
@@ -1264,6 +1279,20 @@ class FamilyOptimumCut:
                 row.candidate_id,
             ),
         )
+        if best.execution_mode == "MAKER_REST":
+            maker = next(
+                w for w in bound_family[self.event.event_id].maker_fill_witnesses.values()
+                if w.witness_identity == best.fill_probability_source
+            )
+            # The selector's maker law: each outcome fills its fraction at
+            # the limit (proceeds per share is the signed BUY outlay).
+            fills = tuple(
+                (o.probability, best.shares * o.fill_fraction,
+                 -best.shares * o.fill_fraction * o.proceeds_per_share_usd)
+                for o in maker.outcomes
+            )
+        else:
+            fills = ((Decimal("1"), best.shares, best.cost_usd),)
         return FamilyOptimum(
             candidate_id=best.candidate_id,
             token_id=best.token_id,
@@ -1273,13 +1302,55 @@ class FamilyOptimumCut:
             ruin_probability_reduction=float(best.expected_growth.ruin_probability_reduction),
             expected_delta_log_wealth=float(best.expected_growth.expected_delta_log_wealth),
             fill_probability=float(best.fill_probability),
+            bin_id=best.bin_id,
+            side=best.side,
+            acting_q=(
+                best.q_served if best.q_served is not None
+                else family_payoff_point_q(witness, bin_id=best.bin_id, side=best.side)
+            ),
+            fills=fills,
         )
 
 
-def _growth_key(optimum: FamilyOptimum | None) -> tuple[float, float]:
-    if optimum is None:
-        return 0.0, 0.0
-    return optimum.ruin_probability_reduction, optimum.expected_delta_log_wealth
+def _plan_growth(
+    rest: tuple[str, str, Decimal, Decimal] | None,
+    fresh: FamilyOptimum | None,
+    *,
+    witness: Any,
+    endowment: Any,
+) -> float:
+    """Expected log growth of one fixed family plan, valued whole.
+
+    The plan is ``rest`` (bin, side, shares, cost), filled for certain, plus
+    each of ``fresh``'s fill outcomes, weighted by its probability. Every bin
+    of the witness's MECE posterior-mean vector pays the plan's YES/NO claims
+    on ``endowment``'s per-bin wealth, through the joint planner's own
+    objective (``_objective`` on that one mean draw): a plan that empties a
+    bin of positive probability is -inf, so ruin is the plan's own.
+    """
+    import numpy as np
+
+    from src.solve.solver import _objective
+
+    bins = tuple(witness.bin_ids)
+    payout = dict(endowment.payout_by_bin_usd)
+    w0 = np.asarray([float(endowment.wealth_floor_usd + payout[b]) for b in bins], dtype=np.float64)
+    q = np.asarray(witness.yes_point_q, dtype=np.float64)[None, :]
+
+    def claim(bin_id: str, side: str, shares: Decimal, cost: Decimal):
+        won = np.asarray([(b == bin_id) == (side == "YES") for b in bins], dtype=np.float64)
+        return won * float(shares) - float(cost)
+
+    def growth(net) -> float:
+        return _objective(np.ones(1), w0, net[None, :], q, np.ones(1), witness.band_alpha)
+
+    kept = claim(*rest) if rest is not None else np.zeros(len(bins))
+    if fresh is None:
+        return growth(kept)
+    return sum(
+        float(p) * growth(kept + claim(fresh.bin_id, fresh.side, shares, cost))
+        for p, shares, cost in fresh.fills
+    )
 
 
 def family_optimum_dominates(
@@ -1287,32 +1358,55 @@ def family_optimum_dominates(
     *,
     held: FamilyOptimum | None,
     released: FamilyOptimum | None,
+    probability_witness: Any,
+    endowment: Any,
 ) -> bool:
-    """Whether keeping the rest costs the family more than the rest is worth.
+    """Whether the family is better off with the rest cancelled.
 
-    ``held`` is the selector's best fresh BUY for the family on live wealth,
-    with the rest's reservation and entry obligation held; ``released`` is
-    the same on the wealth in which the rest was never placed. Keeping the
-    rest yields the rest plus ``held`` (live siblings coexist: nothing
-    family-level blocks a fresh order while a rest is open); cancelling it
-    yields ``released``. The rest is dominated only when
-    ``released - (held + rest) > 0`` on the selector's ordering key (ruin
-    reduction, then expected growth). The cancel/replace cost is zero on
-    this axis: a cancel has no fee, the replacement's fee and fill
-    probability are priced in its own growth, and the rest's growth is
-    conditional on fill (an upper bound on its realized value). When the
-    optimum is the same with and without the rest, the rest is never
-    dominated.
+    Two fixed plans on one common wealth, ``endowment`` (the selector's family
+    endowment on the wealth in which the rest was never placed). KEEP is the
+    rest's open remainder plus ``held``, the selector's best fresh BUY with the
+    rest's reservation and obligation held (live siblings coexist); CANCEL is
+    ``released``, the same where the rest was never placed. Each plan is
+    valued whole (``_plan_growth``): per-order growths each on its own binary
+    endowment projection do not add up to the family's terminal wealth. The
+    rest's remainder counts as filled, as its value does (conditional on
+    fill, an upper bound); a fresh maker is weighted by its fill witness, as
+    the selector weighs it, so a plan's joint fill law is its fresh order's
+    own. The rest is dominated only when CANCEL is strictly better; ties keep.
+
+    Nothing is dominated without that one outcome vector: no released
+    optimum, a non-KEEP rest, a deterministic payoff witness (no MECE q), or
+    an order scored on a calibrated q that is not the vector's own
+    (per-claim calibration is not a joint law, as the selector's family
+    planner also holds).
     """
-    growth = rest.evidence.get("expected_growth") or {}
-    if released is None or rest.action != "KEEP" or not growth:
+    from src.solve.solver import JointOutcomeProbabilityWitness, family_payoff_point_q
+
+    if (
+        released is None
+        or rest.action != "KEEP"
+        or not isinstance(probability_witness, JointOutcomeProbabilityWitness)
+    ):
         return False
-    held_ruin, held_du = _growth_key(held)
-    kept = (
-        float(growth.get("ruin_probability_reduction") or 0.0) + held_ruin,
-        float(growth["expected_delta_log_wealth"]) + held_du,
+    evidence = rest.evidence
+    claim = (str(evidence["bin_id"]), str(evidence["side"]))
+    acting = [(claim, float(evidence["acting_q"]))] + [
+        ((o.bin_id, o.side), o.acting_q) for o in (held, released) if o is not None
+    ]
+    if any(
+        q != family_payoff_point_q(probability_witness, bin_id=bin_id, side=side)
+        for (bin_id, side), q in acting
+    ):
+        return False
+    remainder = (
+        *claim,
+        Decimal(str(evidence["open_remaining"])),
+        Decimal(str(evidence["remainder_cost_usd"])),
     )
-    return _growth_key(released) > kept
+    kept = _plan_growth(remainder, held, witness=probability_witness, endowment=endowment)
+    cancelled = _plan_growth(None, released, witness=probability_witness, endowment=endowment)
+    return cancelled > kept
 
 
 def _prefill_allocator_capacity_usd(
@@ -1629,6 +1723,7 @@ def _capture_standing_entry_values(
     from src.engine import event_reactor_adapter as adapter
     from src.engine import global_auction_universe as universe
     from src.engine import global_batch_runtime as runtime
+    from src.engine.global_single_order_auction import _family_portfolio_endowment
     from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
     from src.state.portfolio import load_runtime_open_portfolio
     from src.state.venue_command_repo import get_command
@@ -1927,14 +2022,24 @@ def _capture_standing_entry_values(
                     now=now,
                 )
                 if valuation.action == "KEEP":
-                    # Kept unless the family's fresh optimum with the rest
-                    # released beats the rest plus the optimum with it held.
+                    # Kept unless the family's plan with the rest released
+                    # beats the rest plus the optimum with it held.
                     try:
                         if family not in held_optimum:
                             held_optimum[family] = fresh_optimum(family, event, prepared, wealth)
                         held = held_optimum[family]
                         released = fresh_optimum(family, event, prepared, own_wealth)
-                        dominated = family_optimum_dominates(valuation, held=held, released=released)
+                        dominated = family_optimum_dominates(
+                            valuation,
+                            held=held,
+                            released=released,
+                            probability_witness=prepared.probability_witness,
+                            endowment=_family_portfolio_endowment(
+                                probability_witness=prepared.probability_witness,
+                                holdings_snapshot=bound.holdings_snapshot,
+                                wealth_witness=own_wealth,
+                            ),
+                        )
                         optimum_evidence: dict[str, Any] = {
                             "held": None if held is None else held.evidence(),
                             "released": None if released is None else released.evidence(),

@@ -1166,59 +1166,137 @@ class TestRealAllocatorLifecycle:
         )
 
 
+def _abc_witness(q=(0.20, 0.42, 0.38)) -> S.JointOutcomeProbabilityWitness:
+    """Three mutually exclusive outcomes A/B/C; the rest's token is YES-A."""
+    bindings = tuple(
+        S.OutcomeTokenBinding(
+            bin_id=bin_id, condition_id=CONDITION if bin_id == "A" else f"cond-{bin_id}",
+            yes_token_id=TOKEN if bin_id == "A" else f"yes-{bin_id}", no_token_id=f"no-{bin_id}",
+        )
+        for bin_id in "ABC"
+    )
+    samples = np.tile(np.asarray(q, dtype=np.float64), (400, 1))
+    fields = dict(
+        family_key=FAMILY_KEY, bindings=bindings, q_version="q-abc", resolution_identity="resolution",
+        topology_identity="topology", posterior_identity_hash="posterior-abc", source_truth_identity="source",
+        authority_certificate_hash="certificate-abc", band_alpha=0.05, band_basis="joint_q_band_samples",
+        yes_point_q=np.mean(samples, axis=0), yes_q_samples=samples, captured_at_utc=NOW,
+    )
+    return S.JointOutcomeProbabilityWitness(
+        **fields, max_age=timedelta(minutes=3), witness_identity=S.joint_probability_witness_identity(**fields),
+    )
+
+
 class TestFamilyOptimumDominance:
-    """C1: the rest is dominated only when cancelling it changes what the
-    selector funds by more than the rest is worth: released optimum >
-    held optimum + the rest, on the selector's ordering key."""
+    """C1: the rest is dominated only when the family's plan with it cancelled
+    (the released optimum) beats the plan with it kept (its remainder plus the
+    held optimum), both valued whole on one wealth and one outcome vector."""
 
-    def _optimum(self, *, du, ruin=0.0):
+    def _abc(self, *, cash="49.4", size="10", price="0.06"):
+        """A real KEEP of ``size`` YES-A @ ``price`` on $``cash`` + its own
+        reservation, and the family endowment of the world without it."""
+        from src.engine.global_single_order_auction import _family_portfolio_endowment
+
+        witness = _abc_witness()
+        cost = str(D(size) * D(price))
+        rows = [_obligation_row(shares=size, cost=cost)]
+        own = C._own_reservation_wealth(
+            _wealth(cash=cash, reservation=cost, rows=rows),
+            _own(size=size, price=price, at_risk_micro=int(D(cost) * 1_000_000)),
+            obligation_rows=rows, positions=(), native_holdings_micro={},
+        )
+        holdings = _holdings(witness, own)
+        keep = C.value_standing_entry(
+            _rest(size=size, price=price), family=FAMILY, snapshot=_snapshot(),
+            prepared=_prepared(witness), wealth=own, holdings_snapshot=holdings,
+            fractional_kelly_multiplier=D("0.125"), capital_limit_usd=D("100"),
+            payoff_q_correction_resolver=None, resolution_at=RESOLUTION_AT, now=NOW,
+        )
+        assert keep.action == "KEEP", keep.reason
+        endowment = _family_portfolio_endowment(
+            probability_witness=witness, holdings_snapshot=holdings, wealth_witness=own,
+        )
+        return keep, witness, endowment
+
+    def _optimum(self, witness, bin_id, shares, price, *, side="YES", du=0.0, fills=None, q=None):
+        shares, price = D(shares), D(price)
         return C.FamilyOptimum(
-            candidate_id="fresh", token_id="other", execution_mode="MAKER_REST",
-            shares=D("5"), limit_price=D("0.3"), ruin_probability_reduction=ruin,
-            expected_delta_log_wealth=du, fill_probability=0.4,
+            candidate_id=f"fresh-{bin_id}", token_id=f"yes-{bin_id}", execution_mode="TAKER_LIMIT",
+            shares=shares, limit_price=price, ruin_probability_reduction=0.0,
+            expected_delta_log_wealth=du, fill_probability=1.0, bin_id=bin_id, side=side,
+            acting_q=S.family_payoff_point_q(witness, bin_id=bin_id, side=side) if q is None else q,
+            fills=fills or ((D("1"), shares, shares * price),),
         )
 
-    def test_the_same_optimum_either_way_never_dominates(self):
-        # The reviewer's e2e case: the fresh optimum is the same order with
-        # or without the rest's cash; cancelling buys nothing.
-        keep = _value(q=0.75)
+    def _dominates(self, keep, witness, endowment, *, held, released):
+        return C.family_optimum_dominates(
+            keep, held=held, released=released, probability_witness=witness, endowment=endowment,
+        )
+
+    def test_keep_plan_is_valued_on_the_family_outcomes_not_a_sum_of_order_growths(self):
+        # The reviewer's counterexample: $50, 10 YES-A @ 0.06 rest, held 27.14
+        # YES-B @ 0.07, released 33.60 YES-B @ 0.07, certain fills. Each
+        # order's growth on its own binary projection sums below the released
+        # one (the additive comparator cancelled), but on the actual A/B/C
+        # wealth states {10 A, 27.14 B} beats {33.60 B}.
+        import math
+
+        keep, witness, endowment = self._abc()
+        assert endowment.wealth_floor_usd == D("50")
+
+        def binary_du(q, shares, cost, floor):
+            return q * math.log((floor - cost + shares) / floor) + (1 - q) * math.log((floor - cost) / floor)
+
+        held_du = binary_du(0.42, 27.14, 27.14 * 0.07, 49.4)  # the rest's $0.60 held
+        released_du = binary_du(0.42, 33.60, 33.60 * 0.07, 50.0)
         rest_du = keep.evidence["expected_growth"]["expected_delta_log_wealth"]
-        same = self._optimum(du=rest_du * 10)
-        assert not C.family_optimum_dominates(keep, held=same, released=same)
+        assert rest_du + held_du < released_du  # the additive key's CANCEL
+        held = self._optimum(witness, "B", "27.14", "0.07", du=held_du)
+        released = self._optimum(witness, "B", "33.60", "0.07", du=released_du)
+        kept = C._plan_growth(("A", "YES", D("10"), D("0.6")), held, witness=witness, endowment=endowment)
+        cancelled = C._plan_growth(None, released, witness=witness, endowment=endowment)
+        assert kept == pytest.approx(0.1767388, abs=1e-7)
+        assert cancelled == pytest.approx(0.1759572, abs=1e-7)
+        assert not self._dominates(keep, witness, endowment, held=held, released=released)
 
-    def test_a_worse_sibling_never_dominates_a_partly_filled_rest(self):
-        # A small remainder against a full-size worse sibling: the old
-        # remainder-vs-fresh comparison cancelled here and stranded dust.
-        partial = _value(q=0.75, size="5", matched="4")
-        rest_du = partial.evidence["expected_growth"]["expected_delta_log_wealth"]
-        sibling = self._optimum(du=rest_du * 3)
-        assert not C.family_optimum_dominates(partial, held=sibling, released=sibling)
-
-    def test_dominates_only_when_releasing_the_rest_funds_more_than_it_is_worth(self):
-        keep = _value(q=0.75)
-        rest_du = keep.evidence["expected_growth"]["expected_delta_log_wealth"]
-        held = self._optimum(du=0.01)
-        assert C.family_optimum_dominates(
-            keep, held=held, released=self._optimum(du=0.01 + rest_du * 1.01)
-        )
-        assert not C.family_optimum_dominates(
-            keep, held=held, released=self._optimum(du=0.01 + rest_du)
-        )
+    def test_dominates_only_when_the_cancel_plan_is_strictly_better(self):
+        keep, witness, endowment = self._abc()
         # Cash binds: with the rest held no fresh order fits at all.
-        assert C.family_optimum_dominates(keep, held=None, released=self._optimum(du=rest_du * 2))
-        assert not C.family_optimum_dominates(keep, held=None, released=self._optimum(du=rest_du / 2))
-
-    def test_no_fresh_optimum_or_a_non_keep_never_dominates(self):
-        keep = _value(q=0.75)
-        assert not C.family_optimum_dominates(keep, held=None, released=None)
-        cancel = _value(q=0.30)
-        assert not C.family_optimum_dominates(cancel, held=None, released=self._optimum(du=1.0))
-
-    def test_ruin_reduction_ranks_first(self):
-        keep = _value(q=0.75)
-        assert C.family_optimum_dominates(
-            keep, held=None, released=self._optimum(du=0.0, ruin=0.01)
+        assert self._dominates(
+            keep, witness, endowment, held=None, released=self._optimum(witness, "B", "33.60", "0.07"),
         )
+        assert not self._dominates(
+            keep, witness, endowment, held=None, released=self._optimum(witness, "B", "1", "0.07"),
+        )
+        # The same plan either way is a tie, and a tie keeps.
+        assert not self._dominates(
+            keep, witness, endowment, held=None, released=self._optimum(witness, "A", "10", "0.06"),
+        )
+
+    def test_a_fresh_maker_is_weighted_by_its_fill_witness(self):
+        keep, witness, endowment = self._abc()
+        shares, price = D("33.60"), D("0.07")
+        certain = self._optimum(witness, "B", shares, price)
+        assert self._dominates(keep, witness, endowment, held=None, released=certain)
+        # Filled one time in ten, the replacement is worth less than the rest.
+        rarely = self._optimum(witness, "B", shares, price, fills=(
+            (D("0.9"), D("0"), D("0")), (D("0.1"), shares, shares * price),
+        ))
+        assert not self._dominates(keep, witness, endowment, held=None, released=rarely)
+
+    def test_no_shared_outcome_vector_never_dominates(self):
+        keep, witness, endowment = self._abc()
+        better = self._optimum(witness, "B", "33.60", "0.07")
+        assert not self._dominates(keep, witness, endowment, held=None, released=None)
+        cancel = replace(keep, action="CANCEL")
+        assert not self._dominates(cancel, witness, endowment, held=None, released=better)
+        # An order scored on a calibrated q is not on the vector's own law.
+        calibrated = self._optimum(witness, "B", "33.60", "0.07", q=0.40)
+        assert not self._dominates(keep, witness, endowment, held=None, released=calibrated)
+        recalibrated = replace(keep, evidence={**keep.evidence, "acting_q": 0.25})
+        assert not self._dominates(recalibrated, witness, endowment, held=None, released=better)
+        exact = SimpleNamespace(family_key=FAMILY_KEY, bin_ids=witness.bin_ids)
+        assert not self._dominates(keep, exact, endowment, held=None, released=better)
 
 
 class TestFreshEntryGateAndPassLocalEvidence:
