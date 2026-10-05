@@ -16887,3 +16887,119 @@ Before qualification delivery, actual registered readonly capital checks showed
 17 open/nonterminal0, complete handoff GREEN,16 fresh+1 typed probability degraded,
 no stale/future/book/missing-monitor blockers (tool2817ce). No independent q or
 whole physical readiness claim follows from this deployment-admission evidence.
+
+Independent attempt-3 protocol audit confirms all12 index/46 body/46 proof
+hashes, index lines, ranges and causal clocks. Step9 specifically lacks members
+20/25/31/32/37; remaining five steps lack all51. The 503 response's own body and
+headers were not durably captured (only exception text/URL), an explicit gap;
+no refetch to fill it. Cumulative267,036,264B combines attempt-1's conservative
+whole-plan charge with attempt-3's actual42,981,419B; it is NOT total actual
+downloaded bytes. Remaining269,834,648B is accounting only, not retry authority.
+
+Qualification batch FF landed asbaf71aa72ae900e37f1a32f4839c8741691d6b41,
+including code4acd; live checkout only972->baf FF. Immediately-before-loader
+registered capital evidence was17open/nonterminal0,17fresh/GREEN/no blockers.
+One normal loader04:36:13Z/session20649/PID79870 endedactualrc0 (toold65dd3),
+artifact/tmp/zeus-hko-qualified-context-loader-20261005.qF4YJP/normal-loader.log.
+Own guard issued04:36:14.529663 expectedbaf; normal arm/warm/full-handoff/zero-main
+and code-identity/monitor gates passed without waiver. MAIN81112 actualstamp
+04:38:15.043937Z/baf, INGEST79988/FORECAST80063 fixedgitheadbaf; cwd all live.
+Main canonical WORLD/FORECAST/TRADE handles observed; ingest WORLD/FORECAST,
+forecast FORECAST/TRADE handles observed. FreshHB main04:39:33, ingest04:40:28,
+forecast04:41:27. Config file d7d28bd3 remains exact; in-process config object
+readback not obtained. Actual guard getterNone at04:40, not historical loader
+'restart_guard_not_selected'. PoststartCLI17fresh/fullbook/0degraded verified;
+EDLI908367 is scope1, not whole-universe or HK consumption proof. No another
+restart or source HTTP occurs merely to improve evidence. Qualification DTO
+and normal q propagation independent checks are pending; source-only loaded
+does not change q/semantics/math or qualify the incomplete native2t input.
+
+Independent postload source replay first saw9942497 (native04:30, H29.8/L25.1,
+body930c4dbd...ca89), captured04:38:00 before MAINstamp but after new ingestboot.
+Later9942498 is genuinely post-mainstamp: native04:40/H30.0/L25.1, acquisition
+04:48:04.821347->05.004389 <= written05.601183; original body
+961119b6fe6a5ab724369717c4ccf69a1fed565518d9eb55a662f7392bdacc21.
+Regular reader/DTO.as_dict independent replay passes reported-only roles and
+separate H/L identities. This is RO replay, not an actor DTO/q receipt. Actual
+normal H743198/L743195 consumed9942497 scalars but certificate provenance lost
+the cumulative row/body identity at seed/request serialization: a verified
+non-actuating reporting seam gap, not proof of revised probability behavior.
+
+BEFOREEDIT ancillary bridge, ROOT approved exact four source files:
+replacement_forecast_seed_discovery.py,
+replacement_forecast_materialization_seed_builder.py,
+replacement_forecast_materialization_request_builder.py,
+replacement_forecast_materializer.py; existing two tests are
+test_replacement_forecast_materialization_request_builder.py and
+test_replacement_forecast_materializer.py. Add one optional report-only source
+witness from regular reader evidence through the normal seed/request path.
+Reuse owning reader original replay for the exact final selected canonical HKO
+source/date/metric/asof/value row (including final official rebind/frontier),
+never arbitrary incoming JSON or whichever row is newest. Ambiguous or absent
+selected row, rawNULL, tampering and future clocks report UNKNOWN/clear evidence
+without changing the old scalar behavior. Old None emits no additional field.
+Ancillary provenance/causal source_witness is outside observation_context core,
+bundle_identity/posterior_hash/q/semrev/μ/σ/actions/JIT identity. Controls must
+prove original core/q/hash bytes, final selection replacement/clearing, actual
+producer->seed->request->posterior source identity and hostile-input refusal.
+SCOPE selected source/date/metric/asof/body; DRAIN next normal valid original
+and materialization; RESET own original row replay, not always-newest equality.
+
+Separate parallel native prototype is ROOT-authorized in one managed child,
+only ecmwf_open_data.py + test_ecmwf_open_data_collect_cycle.py: typed native
+durablemanifest/readback/private source_run with nullable metric and distinct
+quantity/track, no ensemble/hourly/q writes or normal scheduler activation.
+Stable raw identity is global product/run/grid, not city/coords/spotcut; scope
+views hold target/coords/prefix/required steps. Complete requires every required
+step's51 original members and physical/custody proof. Actual46/51 remainsPARTIAL;
+mock503 resume preserves first possession. Existing parent attempt1/3 inputs
+stay readonly/not copied/deleted. Later scheduling/retention is separately scoped:
+normal4RPS/two-worker59s continuity cannot finish302 ranges in a single tick.
+No audit budget inheritance or empty q-semantic switch is permitted.
+
+Ancillary bridge implementation frozen: four approved sources and two existing
+tests only. Actual request transport baseline loses day0_source_witness (1RED,
+/tmp/zeus-day0-ancillary-bridge-red.xml); H/L selected-original interface is
+absent on the old code (2RED, /tmp/zeus-day0-ancillary-selected-red.xml).
+Final named20P/0F in4.21s (/tmp/zeus-day0-ancillary-final-named.xml), plus existing
+three physical-frontier controls3P in4.87s. Producer-created earlier cumulative
+publication supplies the existing rollover RESET history in the private
+normal-discovery H/L positives; single-snapshot fixture's prior UNPROVEN was
+not a source-code defect and no rollover qualification was bypassed.
+Original-own replay survives a newer row; advanced nativecut changes its own
+identity. Wrong date/value/unit/asof, rawNULL, altered body and future1us write
+remain UNKNOWN; final official selection replaces proof and a non-HKO winner
+clears it. Actual posterior-compute/control path confirms q, config/dependency
+and other core bytes unchanged, with source_witness outside causal core.
+None adds no JSON field. These private proofs are not normal actor/q receipt
+propagation or a new probability law. Independent named review is underway.
+Only required owner-row gaps for the two existing builders and request test are
+registered, alongside the two touched existing WHY/notes; unrelated drift is
+not repaired. Source/test six hashes are frozen for the independent reviewer.
+
+Current independent matrix supersedes the old blanket phi-missing hypothesis:
+nested receipts102/108 OBSERVED, six LOW UNKNOWN (Atlanta, BuenosAires, Miami,
+NYC, SaoPaulo, Toronto). HK18Z H/L have actualphi604.8818/z129/grid/raw18c1 proof,
+explicitly AUDIT_ONLY/LOCAL_CACHE_POSSESSION/issuedNULL, not sensor height or
+live q authority. Provider94/94 from15entity-body/coordinate replays does not
+prove native-surface/grid-height/representativeness. No blanket phi gate or
+orographic correction is added. Generic WU/Ogimet entity-capture gaps are a
+separate future owning-client/obs_live_tick slice, not this ancillary bridge.
+The parallel native two-file prototype was narrowed to dormant inventory-only
+writer/readback: no fetch/update/normalhook. available_at remains NULL because
+static transport/model validity is unproven; only temperature first possession
+is recorded. Its partial inventory and all needed attempt1/3 originals remain
+non-qualified for shape/q, with no public collection retry enabled.
+
+Named ancillary review APPROVE: seven independent private cases PASS3.91s,
+/tmp/zeus-day0-ancillary-independent7.xml; all six frozen hashes unchanged.
+Old frontier scalar-body AST equals baf; actual normal/readonly three compute
+routes share validated final-selection replay. Compile/AST6, YAML2, freshness
+and planning pass. Scoped source/test registry checks have zero changed issues
+after registering the two existing builders/request test and actual importers
+of these four owned sources. Remaining repo-wide registry issues are unrelated,
+not a global-clean claim. The private exact-example settings file was removed
+before staging; needed native raw packet remains untouched/untracked.
+Fresh capital preflight currently15 open/15 fresh held+fullbook, zero nonterminal
+commands/blockers. Origin remains baf with no peer delta. ROOT authorized normal
+FF delivery and one registered loader; actual outcome is not yet recorded.

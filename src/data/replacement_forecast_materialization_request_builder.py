@@ -283,6 +283,7 @@ def build_replacement_forecast_materialization_request(
         "day0_observed_extreme_observation_time",
         "day0_observed_extreme_sample_count",
         "day0_observed_extreme_unit",
+        "day0_source_witness",
         "day0_observation_state",
         "day0_current_temperature_state",
         # Task #32: honest re-materialization provenance. When the seed was written by the
@@ -293,7 +294,7 @@ def build_replacement_forecast_materialization_request(
         # reaches the single writer, so queue priority survives the seed bridge.
         "input_revision_sources",
     ):
-        if optional_key in payload:
+        if optional_key in payload and not (optional_key == "day0_source_witness" and payload[optional_key] is None):
             request[optional_key] = payload[optional_key]
     if "openmeteo_manifest_json" in payload:
         request["openmeteo_manifest_json"] = _existing_path(
@@ -449,6 +450,7 @@ def build_materialize_request_dataclass(
         day0_observed_extreme_observation_time=_opt_text("day0_observed_extreme_observation_time"),
         day0_observed_extreme_sample_count=_opt_int("day0_observed_extreme_sample_count"),
         day0_observed_extreme_unit=_opt_text("day0_observed_extreme_unit"),
+        day0_source_witness=request_json.get("day0_source_witness"),
         day0_observation_state=_opt_text("day0_observation_state"),
         upgrade_trigger=_opt_text("upgrade_trigger"),
     )

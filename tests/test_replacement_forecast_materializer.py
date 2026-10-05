@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-10-02
-# Lifecycle: created=2026-06-06; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Last reused/audited: 2026-10-05
+# Lifecycle: created=2026-06-06; last_reviewed=2026-10-05; last_reused=2026-10-05
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -50,6 +50,7 @@ from src.data.replacement_forecast_materializer import (
     materialize_replacement_forecast_live,
 )
 import src.data.replacement_forecast_materializer as materializer_mod
+from tests.test_day0_observation_reader import native_cumulative_row
 from src.data import replacement_cycle_advance_trigger as cycle_advance
 from src.data.replacement_forecast_source_run_identity import (
     expected_replacement_dependency_identity_by_role,
@@ -1450,6 +1451,154 @@ def _assert_wu_fast_pinned_contract(
         "identity_hash": "1" * 64,
     }
     assert reason(wrong_top_level) == "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_SHAPE_INVALID"
+
+
+@pytest.mark.parametrize("metric,value", [("high", 29.0), ("low", 25.1)])
+def test_selected_reported_source_witness_replays_original_not_latest(native_cumulative_row, metric, value):
+    from src.data.replacement_forecast_materializer import _selected_day0_source_witness
+    conn, body = native_cumulative_row
+    proof = _selected_day0_source_witness(conn, city="Hong Kong", target_date="2026-10-05",
+        timezone_name="Asia/Hong_Kong", metric=metric, source="hko_hourly_accumulator",
+        observation_time="2026-10-05T03:30:00+00:00", observed_extreme_c=value,
+        decision_time=datetime(2026, 10, 5, 3, 40, tzinfo=timezone.utc))
+    assert proof["qualification_status"] == "QUALIFIED", proof
+    assert proof["body_sha256"] == __import__("hashlib").sha256(body).hexdigest()
+    assert proof["value_c"] == value and proof["temperature_metric"] == metric
+    assert not proof["absorbing_authority"] and proof["provisional"]
+
+
+@pytest.mark.parametrize("metric,old_value,new_value", [("high",29.0,29.2),("low",25.1,25.0)])
+def test_reported_witness_keeps_original_and_resets_on_advanced_asof(native_cumulative_row, monkeypatch, metric, old_value, new_value):
+    import httpx
+    from scripts import hko_ingest_tick as producer
+    conn, body = native_cumulative_row
+    cut = datetime(2026,10,5,3,40,tzinfo=UTC)
+    selected = dict(city="Hong Kong", target_date="2026-10-05", timezone_name="Asia/Hong_Kong",
+        metric=metric, source="hko_hourly_accumulator", observation_time="2026-10-05T03:30:00+00:00",
+        observed_extreme_c=old_value, decision_time=cut)
+    original = materializer_mod._selected_day0_source_witness(conn, **selected)
+    advanced_body = body.replace(b"202610051130",b"202610051135").replace(b"29.0,25.1",b"29.2,25.0")
+    class Client:
+        def get(self, url, headers):
+            return httpx.Response(200 if url == producer.HKO_EXTREMA_URL else 304,
+                content=advanced_body if url == producer.HKO_EXTREMA_URL else b"", request=httpx.Request("GET",url))
+    captured, _ = producer.HkoExtremaPoller(client=Client()).prefetch_products()
+    row = producer._build_hko_extrema_row(captured.snapshot, temperature_c=28.8,
+        accumulator_fetched_at=None, data_version="v1.wu-native", imported_at="2026-10-05T03:38:07+00:00")
+    assert producer.insert_rows(conn,[row]) == 1
+    assert materializer_mod._selected_day0_source_witness(conn, **selected) == original
+    advanced = materializer_mod._selected_day0_source_witness(conn, **{
+        **selected, "observation_time":"2026-10-05T03:35:00+00:00", "observed_extreme_c":new_value})
+    assert advanced["qualification_status"] == "QUALIFIED"
+    assert advanced["identity_hash"] != original["identity_hash"]
+    assert advanced["original_row_id"] != original["original_row_id"]
+
+
+@pytest.mark.parametrize("fault", ["future_write", "wrong_value", "wrong_date", "raw_missing", "body_tamper", "wrong_asof", "selected_unit"])
+def test_selected_reported_source_witness_rejects_wrong_original(native_cumulative_row, fault):
+    conn, _ = native_cumulative_row
+    kwargs = dict(city="Hong Kong", target_date="2026-10-05", timezone_name="Asia/Hong_Kong",
+        metric="high", source="hko_hourly_accumulator", observation_time="2026-10-05T03:30:00+00:00",
+        observed_extreme_c=29.0, decision_time=datetime(2026, 10, 5, 3, 40, tzinfo=UTC))
+    if fault == "future_write":
+        conn.execute("UPDATE observation_instants SET imported_at='2026-10-05T03:40:00.000001+00:00'")
+    elif fault == "wrong_value":
+        kwargs["observed_extreme_c"] = 28.9
+    elif fault == "wrong_date":
+        kwargs["target_date"] = "2026-10-04"
+    elif fault == "raw_missing":
+        conn.execute("UPDATE observation_instants SET raw_response=NULL")
+    elif fault == "body_tamper":
+        conn.execute("UPDATE observation_instants SET raw_response=raw_response||' '")
+    elif fault == "selected_unit":
+        kwargs["selected_unit"] = "F"
+    else:
+        kwargs["observation_time"] = "2026-10-05T03:30:00.000001+00:00"
+    proof = materializer_mod._selected_day0_source_witness(conn, **kwargs)
+    assert proof["qualification_status"] == "UNKNOWN", proof
+    assert not proof["absorbing_authority"]
+
+
+@pytest.mark.parametrize("metric,value", [("high", 29.0), ("low", 25.1)])
+def test_normal_seed_discovery_forwards_selected_reported_product(native_cumulative_row, monkeypatch, metric, value):
+    import httpx
+    from scripts import hko_ingest_tick as producer
+    import src.data.replacement_forecast_seed_discovery as discovery
+    conn, body = native_cumulative_row
+    earlier_body = body.replace(b"202610051130", b"202610051120").replace(b"29.0", b"28.9")
+    class Client:
+        def get(self,url,headers):
+            return httpx.Response(200 if url == producer.HKO_EXTREMA_URL else 304,
+                content=earlier_body if url == producer.HKO_EXTREMA_URL else b"", request=httpx.Request("GET",url))
+    captured, _ = producer.HkoExtremaPoller(client=Client()).prefetch_products()
+    earlier = producer._build_hko_extrema_row(captured.snapshot, temperature_c=28.8,
+        accumulator_fetched_at=None, data_version="v1.wu-native", imported_at="2026-10-05T03:38:06.449764+00:00")
+    assert producer.insert_rows(conn,[earlier]) == 1
+    conn.commit()
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    conn.row_factory = sqlite3.Row
+    selected_fact = discovery._latest_authorized_day0_fact(conn, city="Hong Kong",
+        target_date="2026-10-05", temperature_metric=metric,
+        decision_time=datetime(2026,10,5,3,40,tzinfo=UTC), require_settlement_channel=True)
+    monkeypatch.setattr(discovery, "get_world_connection_read_only", lambda: sqlite3.connect(f"file:{path}?mode=ro", uri=True))
+    payload = discovery._day0_observed_extreme_seed_payload(city="Hong Kong", target_date="2026-10-05",
+        metric=metric, computed_at=datetime(2026, 10, 5, 3, 40, tzinfo=UTC))
+    assert payload is not None, selected_fact
+    assert payload["day0_observed_extreme_c"] == value
+    assert payload["day0_source_witness"]["qualification_status"] == "QUALIFIED", payload
+    assert payload["day0_source_witness"]["value_c"] == value
+
+
+@pytest.mark.parametrize("metric,value", [("high", 29.0), ("low", 25.1)])
+def test_reported_witness_final_rebind_and_clear(native_cumulative_row, monkeypatch, metric, value):
+    conn, _ = native_cumulative_row
+    from src.state.schema.v2_schema import apply_canonical_schema
+    apply_canonical_schema(conn, forecast_tables=True)
+    conn.row_factory = sqlite3.Row
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    request = replace(_request(), city="Hong Kong", city_id="Hong Kong", city_timezone="Asia/Hong_Kong",
+        target_date=date(2026,10,5), temperature_metric=metric,
+        computed_at=datetime(2026,10,5,3,40,tzinfo=UTC),
+        day0_observed_extreme_source="hko_rhrread_spot", day0_observed_extreme_c=28.8,
+        day0_observed_extreme_observation_time="2026-10-05T03:20:00+00:00",
+        day0_source_witness={"qualification_status":"UNKNOWN", "reason":"SPOT_IS_NOT_CUMULATIVE"})
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *a, **kw: {
+        "observation_source":"hko_hourly_accumulator", "observation_time":"2026-10-05T03:30:00+00:00",
+        "observed_extreme_native":value, "sample_count":1, "unit":"C"})
+    rebound = materializer_mod._request_with_day0_physical_frontier(conn, request, metric=metric)
+    assert isinstance(rebound, ReplacementForecastMaterializeRequest), rebound
+    assert rebound.day0_observed_extreme_c == value
+    assert rebound.day0_source_witness["qualification_status"] == "QUALIFIED"
+    tampered = replace(rebound, day0_source_witness={**rebound.day0_source_witness,"body_sha256":"0"*64})
+    rejected = materializer_mod._request_with_day0_physical_frontier(conn, tampered, metric=metric)
+    assert rejected.day0_source_witness["qualification_status"] == "UNKNOWN"
+    ordinary = replace(rebound, day0_observed_extreme_source="wu_icao_history")
+    cleared = materializer_mod._request_with_day0_source_witness(conn, ordinary, metric=metric, previous=rebound)
+    assert cleared.day0_source_witness is None
+    assert cleared.day0_observed_extreme_c == ordinary.day0_observed_extreme_c
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_reported_ancillary_provenance_keeps_q_and_all_core_hashes(monkeypatch):
+    original_compute = materializer_mod._compute_posterior_payload
+    comparisons = []
+    def compare(conn, request, **kwargs):
+        original = original_compute(conn, request, **kwargs)
+        witness = {"qualification_status":"UNKNOWN", "qualified_for":"HKO_REPORTED_PRODUCT_ONLY",
+                   "provisional":True, "absorbing_authority":False,
+                   "settlement_equivalence":"UNPROVEN", "reason":"ORIGINAL_BODY_MISSING"}
+        ancillary = original_compute(conn, replace(request, day0_source_witness=witness), **kwargs)
+        left, right = asdict(original), asdict(ancillary)
+        assert "day0_source_witness" not in left["provenance_payload"]
+        assert right["provenance_payload"].pop("day0_source_witness") == witness
+        if "day0_causal_evidence_bundle" in right["provenance_payload"]:
+            assert right["provenance_payload"]["day0_causal_evidence_bundle"].pop("source_witness") == witness
+        assert json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+        comparisons.append(original.posterior_config_hash)
+        return ancillary
+    monkeypatch.setattr(materializer_mod, "_compute_posterior_payload", compare)
+    test_materializer_hko_provisional_observation_does_not_truncate_support(monkeypatch)
+    assert len(comparisons) == 2
 
 
 def _request(

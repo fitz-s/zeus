@@ -202,6 +202,8 @@ class ReplacementForecastMaterializeRequest:
     day0_observed_extreme_observation_time: datetime | str | None = None
     day0_observed_extreme_sample_count: int | None = None
     day0_observed_extreme_unit: str | None = None
+    # Report-only original product evidence, excluded from probability identity.
+    day0_source_witness: Mapping[str, object] | None = None
     day0_observation_state: str | None = None
     # Task #32 honest provenance: set to "instrument_set_expansion" when this materialization was
     # enqueued by the fusion-upgrade trigger (a re-materialization because a strictly-larger
@@ -862,7 +864,88 @@ def _day0_absorbing_observed_extreme_c(
     return value if absorbing else None
 
 
+def _selected_day0_source_witness(
+    conn: sqlite3.Connection, *, city: str, target_date: str, timezone_name: str,
+    metric: str, source: str | None, observation_time: datetime | str | None,
+    observed_extreme_c: float | None, decision_time: datetime, selected_unit: str | None = "C",
+) -> dict[str, object] | None:
+    """Replay only the scalar's own canonical original; never the newest row.
+
+    SCOPE selected HKO family/asof. DRAIN/RESET normal original publication and
+    materialization. This ancillary report grants no probability/action authority.
+    """
+    if city != "Hong Kong" or source != "hko_hourly_accumulator" or metric not in {"high", "low"}:
+        return None
+    from src.data.day0_observation_reader import (
+        _hko_cumulative_prefix_evidence, _OBSERVATION_FACT_TIME_SQL,
+    )
+    from src.data.replacement_forecast_current_target_plan import _world_table_ref
+
+    unknown = {"qualification_status": "UNKNOWN", "qualified_for": "HKO_REPORTED_PRODUCT_ONLY",
+               "provisional": True, "absorbing_authority": False,
+               "settlement_equivalence": "UNPROVEN", "temperature_metric": metric,
+               "source": source, "target_date": target_date,
+               "reason": "HKO_PREFIX_SELECTED_ROW_UNAVAILABLE"}
+    try:
+        selected = datetime.fromisoformat(str(observation_time).replace("Z", "+00:00"))
+        if selected.tzinfo is None or decision_time.tzinfo is None:
+            return unknown
+        table = _world_table_ref(conn, "observation_instants")
+        if table is None:
+            return unknown
+        rows = conn.execute(f"""SELECT running_max, running_min, id, target_date,
+                {_OBSERVATION_FACT_TIME_SQL}, imported_at, temp_unit, station_id,
+                raw_response, provenance_json FROM {table}
+                WHERE city=? AND target_date=? AND source=?
+                  AND julianday({_OBSERVATION_FACT_TIME_SQL})=julianday(?) LIMIT 3""",
+                (city, target_date, source, selected.isoformat())).fetchall()
+        # SQLite is merely a coarse prefilter; exact aware clocks decide identity.
+        exact = [tuple(r) for r in rows if isinstance(r[4], str)
+                 and datetime.fromisoformat(r[4].replace("Z", "+00:00")).tzinfo is not None
+                 and datetime.fromisoformat(r[4].replace("Z", "+00:00")) == selected]
+        if len(exact) != 1 or len(rows) == 3:
+            return unknown
+        row = exact[0]
+        if selected_unit != "C" or row[6] != "C" or row[0 if metric == "high" else 1] != observed_extreme_c:
+            return {**unknown, "reason": "HKO_PREFIX_SELECTED_SCALAR_MISMATCH"}
+        return _hko_cumulative_prefix_evidence(row, target_date=target_date,
+            timezone_name=timezone_name, decision_time=decision_time)[metric]
+    except (sqlite3.Error, ValueError, TypeError, OverflowError):
+        return unknown
+
+
+def _request_with_day0_source_witness(conn, request, *, metric, previous=None):
+    if request.day0_source_witness is None and (previous is None or previous.day0_source_witness is None):
+        return request
+    proof = _selected_day0_source_witness(conn, city=request.city,
+        target_date=_date_text(request.target_date), timezone_name=request.city_timezone,
+        metric=metric, source=request.day0_observed_extreme_source,
+        observation_time=request.day0_observed_extreme_observation_time,
+        observed_extreme_c=_day0_observed_extreme_c(request),
+        selected_unit=request.day0_observed_extreme_unit,
+        decision_time=_to_utc(request.computed_at, field_name="computed_at"))
+    selection_changed = previous is not None and any(
+        getattr(previous, key) != getattr(request, key) for key in (
+            "day0_observed_extreme_source", "day0_observed_extreme_observation_time",
+            "day0_observed_extreme_c", "target_date", "temperature_metric"))
+    if proof is not None and not selection_changed and request.day0_source_witness != proof:
+        proof = {**proof, "qualification_status": "UNKNOWN",
+                 "reason": "HKO_PREFIX_INCOMING_WITNESS_MISMATCH"}
+        proof.pop("identity_hash", None)
+    return replace(request, day0_source_witness=proof)
+
+
 def _request_with_day0_physical_frontier(
+    conn: sqlite3.Connection, request: ReplacementForecastMaterializeRequest, *, metric: str,
+):
+    selected = _request_with_day0_source_witness(conn, request, metric=metric)
+    frontier = _request_with_day0_physical_frontier_scalar(conn, selected, metric=metric)
+    if isinstance(frontier, ReplacementForecastMaterializeResult):
+        return frontier
+    return _request_with_day0_source_witness(conn, frontier, metric=metric, previous=request)
+
+
+def _request_with_day0_physical_frontier_scalar(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
     *,
@@ -8790,6 +8873,12 @@ def _compute_posterior_payload(
                 vector_witness=_day0_remaining_witness,
             )
         )
+    if request.day0_source_witness is not None:
+        provenance_payload["day0_source_witness"] = dict(request.day0_source_witness)
+        causal = provenance_payload.get("day0_causal_evidence_bundle")
+        if isinstance(causal, dict):
+            # Ancillary: added after the core bundle identity was constructed.
+            causal["source_witness"] = dict(request.day0_source_witness)
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
     # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
     # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.

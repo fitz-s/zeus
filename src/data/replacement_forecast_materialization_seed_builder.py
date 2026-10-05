@@ -190,6 +190,7 @@ def build_replacement_forecast_materialization_seed(
     day0_observed_extreme_observation_time: str | None = None,
     day0_observed_extreme_sample_count: int | None = None,
     day0_observed_extreme_unit: str | None = None,
+    day0_source_witness: Mapping[str, object] | None = None,
     day0_observation_state: str | None = None,
 ) -> ReplacementForecastMaterializationSeedResult:
     city_name = _reject_alias(city, field_name="city")
@@ -308,6 +309,8 @@ def build_replacement_forecast_materialization_seed(
         "latitude": getattr(city_config, "lat", None),
         "longitude": getattr(city_config, "lon", None),
     }
+    if day0_source_witness is not None:
+        seed["day0_source_witness"] = json.loads(json.dumps(day0_source_witness))
     if day0_observed_extreme_c is not None:
         seed.update(
             {

@@ -1230,6 +1230,7 @@ categories:
     - tests/test_exit_market_anchored_q.py
 
   useful_regression:
+    - tests/test_replacement_forecast_materialization_request_builder.py
     - tests/test_bpf_possessed_response_memo.py
     - tests/test_openmeteo_burn_spike_alarm.py
     - tests/test_station_forecast_live_ingest_wiring.py
@@ -2025,6 +2026,15 @@ test_metadata:
       held/global/first-q READY slots within the existing twelve-item window;
       other charged paths, real deadline expiry/RESET, fast-lane partial handoff
       and typed successful-move trace remain behavioral controls, not an SLA.
+  tests/test_replacement_forecast_materialization_request_builder.py:
+    modules: [data]
+    category: relationship_protection
+    blocks_commit: true
+    law_dependencies: [architecture/invariants.yaml]
+    notes: >
+      Protects validated seed/request transport, distinct carrier/anchor clocks,
+      and optional reported-product ancillary evidence. None emits no field;
+      adding evidence leaves all pre-existing request and seed fields unchanged.
   tests/test_replacement_forecast_materializer.py:
     modules: [data, state]
     category: core_law_antibody
@@ -2040,6 +2050,11 @@ test_metadata:
       evidence, final-writer races, and the sanctioned forecasts-main plus
       world-attached connection required to reproduce canonical observation
       evidence without splitting the transaction boundary.
+      Reported-product source witnesses replay the exact selected original,
+      replace/clear with official rebind and frontier changes, and reject
+      tampered or future originals without changing scalar behavior. Actual
+      posterior computations prove q and every core identity byte-identical
+      when ancillary reporting is added; no absorbing permission is created.
   tests/test_day0_obs_fastlane_optionbc.py:
     modules: [data, engine]
     category: core_law_antibody

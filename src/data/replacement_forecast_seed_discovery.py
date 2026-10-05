@@ -272,7 +272,7 @@ def _day0_observed_extreme_seed_payload(
             return None
         if sample_count <= 0 or not observation_time:
             return None
-        return {
+        payload = {
             "day0_observed_extreme_c": float(observed_c),
             "day0_observed_extreme_source": str(
                 fact.get("observation_source") or fact.get("source") or "unknown"
@@ -281,6 +281,14 @@ def _day0_observed_extreme_seed_payload(
             "day0_observed_extreme_sample_count": sample_count,
             "day0_observed_extreme_unit": unit,
         }
+        from src.data.replacement_forecast_materializer import _selected_day0_source_witness
+        witness = _selected_day0_source_witness(world_conn, city=city,
+            target_date=target_date, timezone_name=str(city_obj.timezone), metric=metric_norm,
+            source=payload["day0_observed_extreme_source"], observation_time=observation_time,
+            observed_extreme_c=observed_c, decision_time=computed_at)
+        if witness is not None:
+            payload["day0_source_witness"] = witness
+        return payload
     except Exception:  # noqa: BLE001 - unreadable authority remains fail-closed
         return None
     finally:

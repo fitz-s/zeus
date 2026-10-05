@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-09-29
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-29; last_reused=2026-09-29
+# Last reused/audited: 2026-10-05
+# Lifecycle: created=2026-06-06; last_reviewed=2026-10-05; last_reused=2026-10-05
 # Purpose: Protect validated request generation for replacement live materialization.
 # Reuse: Run before changing queue input contract or live simple-switch request production.
 # Authority basis: Simple switch must not depend on hand-built unvalidated materialization JSON.
@@ -140,6 +140,25 @@ def test_request_builder_outputs_materializer_ready_json(tmp_path) -> None:
     assert request["anchor_weight"] == 0.80
     assert request["anchor_sigma_c"] == 3.00
     assert request["input_revision_sources"] == ["hko_fnd"]
+
+
+def test_reported_source_witness_survives_request_without_changing_old_fields(tmp_path):
+    seed = _write_inputs(tmp_path)
+    payload_path = tmp_path / "openmeteo_payload.json"
+    payload = json.loads(payload_path.read_text())
+    payload["utc_offset_seconds"] = 28800
+    payload_path.write_text(json.dumps(payload))
+    original = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+    witness = {"qualification_status": "UNKNOWN", "reason": "ORIGINAL_BODY_MISSING",
+               "qualified_for": "HKO_REPORTED_PRODUCT_ONLY", "absorbing_authority": False}
+    seed["day0_source_witness"] = witness
+    forwarded = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+    assert forwarded.ok and original.ok
+    assert forwarded.request["day0_source_witness"] == witness
+    assert {k: v for k, v in forwarded.request.items() if k != "day0_source_witness"} == original.request
+    typed = build_materialize_request_dataclass(forwarded.request, base_dir=tmp_path)
+    assert typed.day0_source_witness == witness
+    assert "day0_source_witness" not in original.request
 
 
 @pytest.mark.parametrize("metric", ["high", "low"])
@@ -607,3 +626,12 @@ def test_seed_requires_the_explicit_current_ens_carrier_without_relabeling_basel
     assert ready.ok, ready.reason_codes
     assert ready.seed["source_cycle_time"] == coverage["source_cycle_time"]
     assert ready.seed["openmeteo_source_cycle_time"] == "2026-06-06T00:00:00+00:00"
+    witness = {"qualification_status":"UNKNOWN", "absorbing_authority":False,
+               "qualified_for":"HKO_REPORTED_PRODUCT_ONLY", "reason":"ORIGINAL_BODY_MISSING"}
+    reported = build_replacement_forecast_materialization_seed(
+        **kwargs, carrier_cycle_time=coverage["source_cycle_time"], day0_source_witness=witness)
+    assert reported.ok and reported.seed["day0_source_witness"] == witness
+    assert {k:v for k,v in reported.seed.items() if k != "day0_source_witness"} == ready.seed
+    assert "day0_source_witness" not in ready.seed
+    witness["reason"] = "EXTERNAL_MUTATION"
+    assert reported.seed["day0_source_witness"]["reason"] == "ORIGINAL_BODY_MISSING"
