@@ -309,6 +309,274 @@ def test_native_temperature_knots_never_relabels_original_extrema_as_instant(tmp
     assert result["extrema_status"] == "NOT_COMPUTED"
 
 
+def _native_temperature_transport_fixture(tmp_path, *, fault=None, land_mask=False):
+    """Mock HTTP serves only actual synthetic GRIB/index originals."""
+    inputs = _native_temperature_knots_fixture(tmp_path, steps=(0, 3))
+    sources, indexes = {}, {}
+    for proof in inputs["message_source_evidence"].values():
+        url = proof["source_url"].replace("https://data.ecmwf.int/forecasts", "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com")
+        row = json.loads(proof["original_index_bytes"])
+        if fault in ("grib_dewpoint", "grib_grid", "grib_process") and row.get("number") == "50" and row["step"] == "3":
+            ec = pytest.importorskip("eccodes")
+            gid = ec.codes_new_from_message(proof["original_range_bytes"])
+            try:
+                key, value = {"grib_dewpoint": ("paramId", 168),
+                    "grib_grid": ("longitudeOfLastGridPointInDegrees", .5),
+                    "grib_process": ("generatingProcessIdentifier", 158)}[fault]
+                ec.codes_set(gid, key, value)
+                proof["original_range_bytes"] = ec.codes_get_message(gid)
+                row["_length"] = len(proof["original_range_bytes"])
+            finally:
+                ec.codes_release(gid)
+        if fault == "missing_member" and row.get("number") == "50":
+            continue
+        if fault == "wrong_run":
+            row["date"] = "20261002"
+        if fault == "duplicate" and row.get("number") == "50":
+            indexes.setdefault(url[:-6] + ".index", []).append(json.dumps(row).encode())
+        indexes.setdefault(url[:-6] + ".index", []).append(json.dumps(row).encode())
+        body = sources.setdefault(url, bytearray())
+        end = row["_offset"] + row["_length"]
+        if len(body) < end:
+            body.extend(b"\0" * (end - len(body)))
+        body[row["_offset"]:end] = proof["original_range_bytes"]
+    if land_mask:
+        ec = pytest.importorskip("eccodes")
+        gid = ec.codes_new_from_message(inputs["mask_grib_path"].read_bytes())
+        try:
+            ec.codes_set(gid, "dataType", "fc")
+            raw = ec.codes_get_message(gid)
+        finally:
+            ec.codes_release(gid)
+        url = next(url for url in sources if url.endswith("-0h-oper-fc.grib2"))
+        row = dict(param="lsm", levtype="sfc", date="20261003", time="0000", step="0",
+                   stream="oper", type="fc", _offset=0, _length=len(raw), **{"class": "od"})
+        sources[url][:len(raw)] = raw
+        indexes[url[:-6] + ".index"].append(json.dumps(row).encode())
+    calls = []
+    class Response:
+        def __init__(self, body, status, headers):
+            self.body, self.status_code, self.headers = body, status, headers
+        def iter_content(self, chunk_size):
+            for offset in range(0, len(self.body), chunk_size):
+                yield self.body[offset:offset + chunk_size]
+        def close(self):
+            pass
+    class Session:
+        def get(self, url, **kwargs):
+            calls.append((url, kwargs))
+            if url.endswith(".index"):
+                body = b"\n".join(indexes[url]) + b"\n"
+                return Response(body, 404 if fault == "http404" else 200, {"Content-Length": str(len(body))})
+            start, end = map(int, kwargs["headers"]["Range"][6:].split("-"))
+            body = bytes(sources[url][start:end + 1])
+            if fault == "truncated":
+                body = body[:-1]
+            return Response(body, 200 if fault == "full200" else 206,
+                {"Content-Range": f"bytes {start}-{end}/{len(sources[url])}", "Content-Length": str(end - start + 1)})
+        def close(self):
+            pass
+    output = tmp_path / "packet"
+    output.mkdir()
+    return inputs["expected_run_utc"], output, Session(), calls
+
+
+def test_native_temperature_capture_original_index_range_global_once(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    run, output, session, calls = _native_temperature_transport_fixture(tmp_path)
+    result = module._capture_native_temperature_bytes(run, [0, 3], output,
+        byte_budget=8 * 1024 * 1024, deadline=time.monotonic() + 30,
+        _session=session, _request_gate=lambda **kw: None)
+    assert result["capture_status"] == "OBSERVED", result
+    assert result["qualification_status"] == "OFFLINE_ONLY"
+    assert result["observed_steps"] == [0, 3]
+    assert len(result["messages"]) == 102
+    assert len(calls) == 8  # four original indexes, two CF ranges, two coalesced PF ranges
+    assert result["first_source_publication_at"] is None
+    for message in result["messages"]:
+        assert hashlib.sha256((output / message["path"]).read_bytes()).hexdigest() == message["raw_message_sha256"]
+        assert message["native_capture"]["observed_headers"]["paramId"] == 167
+
+
+def test_native_temperature_capture_lsm_has_independent_original_proof(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    run, output, session, calls = _native_temperature_transport_fixture(tmp_path, land_mask=True)
+    result = module._capture_native_temperature_bytes(run, [0, 3], output,
+        byte_budget=8 * 1024 * 1024, deadline=time.monotonic() + 30,
+        _session=session, _request_gate=lambda **kw: None)
+    assert result["capture_status"] == "OBSERVED", result
+    mask = result["land_mask"]
+    assert mask["native_capture"]["observed_headers"]["paramId"] == 172
+    assert (output / "lsm.grib2.proof.json").exists()
+    assert result["surface_geopotential_status"] == "UNKNOWN"
+    assert result["sensor_agl_status"] == "UNPROVEN"
+    assert len(calls) == 9
+
+
+@pytest.mark.parametrize("fault", ("missing_member", "wrong_run", "duplicate", "http404", "full200", "truncated",
+    "grib_dewpoint", "grib_grid", "grib_process"))
+def test_native_temperature_capture_gap_never_claims_complete(tmp_path, fault):
+    from src.data import ecmwf_open_data as module
+
+    run, output, session, calls = _native_temperature_transport_fixture(tmp_path, fault=fault)
+    result = module._capture_native_temperature_bytes(run, [0, 3], output,
+        byte_budget=8 * 1024 * 1024, deadline=time.monotonic() + 30,
+        _session=session, _request_gate=lambda **kw: None)
+    assert result["capture_status"] == "UNKNOWN", result
+    assert result["unavailable_reason"]
+    if fault in ("missing_member", "wrong_run", "duplicate", "http404"):
+        assert all(url.endswith(".index") for url, _ in calls)
+
+
+@pytest.mark.parametrize("limit,expired", ((10000, False), (8 * 1024 * 1024, True)))
+def test_native_temperature_capture_whole_plan_budget_deadline_before_ranges(tmp_path, limit, expired):
+    from src.data import ecmwf_open_data as module
+
+    run, output, session, calls = _native_temperature_transport_fixture(tmp_path)
+    result = module._capture_native_temperature_bytes(run, [0, 3], output, byte_budget=limit,
+        deadline=time.monotonic() + (-1 if expired else 30), _session=session, _request_gate=lambda **kw: None)
+    assert result["capture_status"] == "UNKNOWN", result
+    assert all(url.endswith(".index") for url, _ in calls)
+    if expired:
+        assert calls == []
+
+
+def test_native_temperature_capture_priority_precedes_output_or_worker(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    output = tmp_path / "not-created"
+    result = module.capture_open_ens_temperature_run(run_utc=datetime(2026, 10, 3, 18, tzinfo=timezone.utc),
+        steps=[0, 3], output_dir=output, normal_collector_busy=lambda: True)
+    assert result["unavailable_reason"] == "NATIVE_2T_NORMAL_COLLECTOR_PRIORITY"
+    assert not output.exists()
+
+
+def _native_temperature_partial_frame_worker(run_iso, steps, output_dir, byte_budget, deadline, writer):
+    del run_iso, steps, byte_budget, deadline
+    Path(output_dir, "partial-frame-started").touch()
+    os.write(writer.fileno(), struct.pack("!i", 100) + b"{")
+    time.sleep(30)
+
+
+def _native_temperature_request_intent_worker(run_iso, steps, output_dir, byte_budget, deadline, writer):
+    del run_iso, steps, byte_budget, deadline
+    writer.send_bytes(b'{"request_intent":true}')
+    if writer.recv_bytes(maxlength=16) == b"OK":
+        Path(output_dir, "request-permitted").touch()
+        writer.send_bytes(json.dumps({"capture_status": "UNKNOWN", "qualification_status": "OFFLINE_ONLY",
+                                     "transferred_body_bytes": 0}).encode())
+    writer.close()
+
+
+def test_native_temperature_capture_per_request_intent_checks_priority(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    result = module.capture_open_ens_temperature_run(run_utc=datetime(2026, 10, 3, 18, tzinfo=timezone.utc),
+        steps=[0, 3], output_dir=tmp_path / "packet", normal_collector_busy=lambda: False, timeout_seconds=4.,
+        _worker=_native_temperature_request_intent_worker)
+    assert result["capture_status"] == "UNKNOWN", result
+    assert result["transferred_body_bytes"] == 0
+    assert tmp_path.joinpath("packet", "request-permitted").exists()
+
+
+def test_native_temperature_capture_spawn_wall_bound_handles_partial_ipc(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    started = time.monotonic()
+    output = tmp_path / "packet"
+    result = module.capture_open_ens_temperature_run(run_utc=datetime(2026, 10, 3, 18, tzinfo=timezone.utc),
+        steps=[0, 3], output_dir=output, normal_collector_busy=lambda: False, timeout_seconds=4.,
+        _worker=_native_temperature_partial_frame_worker)
+    assert output.joinpath("partial-frame-started").exists(), "worker must actually enter partial IPC counterexample"
+    assert result["unavailable_reason"] == "NATIVE_2T_DEADLINE_EXCEEDED", result
+    assert time.monotonic() - started < 4.5
+    assert not output.joinpath("capture_receipt.json").exists()
+
+
+def test_native_temperature_capture_yields_to_normal_before_publication(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    started = time.monotonic()
+    def busy():
+        return time.monotonic() - started >= .2
+    result = module.capture_open_ens_temperature_run(run_utc=datetime(2026, 10, 3, 18, tzinfo=timezone.utc),
+        steps=[0, 3], output_dir=tmp_path / "packet", normal_collector_busy=busy, timeout_seconds=4.,
+        _worker=_native_temperature_partial_frame_worker)
+    assert result["unavailable_reason"] == "NATIVE_2T_NORMAL_COLLECTOR_PRIORITY"
+    assert not tmp_path.joinpath("packet", "capture_receipt.json").exists()
+
+
+def test_native_temperature_capture_slow_priority_probe_consumes_total_deadline(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    def slow_busy():
+        time.sleep(.08)
+        return True
+    started = time.monotonic()
+    output = tmp_path / "packet"
+    result = module.capture_open_ens_temperature_run(run_utc=datetime(2026, 10, 3, 18, tzinfo=timezone.utc),
+        steps=[0], output_dir=output, normal_collector_busy=slow_busy, timeout_seconds=.02)
+    assert result["capture_status"] == "UNKNOWN", result
+    assert result["unavailable_reason"] in ("NATIVE_2T_PRIORITY_CHECK_TIMEOUT", "NATIVE_2T_DEADLINE_EXCEEDED")
+    assert time.monotonic() - started < .05
+    assert not output.exists()
+
+
+def _native_temperature_invalid_index_worker(run_iso, steps, output_dir, byte_budget, deadline, writer):
+    from src.data import ecmwf_open_data as module
+    class Response:
+        status_code = 200
+        headers = {"Content-Length": "75"}
+        def iter_content(self, chunk_size):
+            yield b"x" * 75
+        def close(self):
+            pass
+    class Session:
+        def get(self, *args, **kwargs):
+            return Response()
+        def close(self):
+            pass
+    report = module._capture_native_temperature_bytes(datetime.fromisoformat(run_iso), steps, Path(output_dir),
+        byte_budget=byte_budget, deadline=deadline, _session=Session(), _request_gate=lambda **kw: None)
+    writer.send_bytes(json.dumps(report).encode())
+    writer.close()
+
+
+def test_native_temperature_capture_unknown_receipt_cannot_exceed_total_byte_cap(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    output = tmp_path / "packet"
+    result = module.capture_open_ens_temperature_run(run_utc=datetime(2026, 10, 3, 18, tzinfo=timezone.utc),
+        steps=[0], output_dir=output, normal_collector_busy=lambda: False, byte_budget=100, timeout_seconds=4.,
+        _worker=_native_temperature_invalid_index_worker)
+    receipt = output.joinpath("capture_receipt.json")
+    assert not receipt.exists(), f"parent published receipt: {receipt.stat().st_size} bytes + original index 75 > cap 100"
+    assert sum(p.stat().st_size for p in output.iterdir()) == 75
+    assert result["unavailable_reason"] == "NATIVE_2T_RECEIPT_BYTE_BUDGET_EXCEEDED", result
+
+
+def test_native_temperature_capture_original_dewpoint_rejects_header_echo(tmp_path, monkeypatch):
+    from scripts import extract_open_ens_localday as extractor
+    from src.data import ecmwf_open_data as module
+
+    run, output, session, _ = _native_temperature_transport_fixture(tmp_path, fault="grib_dewpoint")
+    original_get = extractor.codes_get
+    def echo(gid, key):
+        if original_get(gid, "paramId") == 168 and key in ("paramId", "shortName"):
+            return 167 if key == "paramId" else "2t"
+        return original_get(gid, key)
+    monkeypatch.setattr(extractor, "codes_get", echo)
+    result = module._capture_native_temperature_bytes(run, [0, 3], output,
+        byte_budget=8 * 1024 * 1024, deadline=time.monotonic() + 30,
+        _session=session, _request_gate=lambda **kw: None)
+    assert result["capture_status"] == "UNKNOWN", result
+    assert result["unavailable_reason"] == "NATIVE_2T_ORIGINAL_PARAMETER_MEMBER_INVALID"
+    assert (output / "step003-member50.grib2").exists()  # original counterevidence survives rejection
+    assert (output / "step003-member50.grib2.proof.json").exists()
+
+
 def _terrain_audit_fixture(tmp_path, monkeypatch, *, tracks=("mx2t6_high", "mn2t6_low"), issue=None):
     """Real GRIB + immutable private snapshot identities; only transport is fake."""
     from scripts import extract_open_ens_localday as extractor

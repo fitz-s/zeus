@@ -1246,6 +1246,411 @@ def _fetch_cycle_land_mask(
     raise ValueError(f"ENS_LAND_MASK_UNAVAILABLE:{type(last_error).__name__ if last_error else 'NO_MIRROR'}")
 
 
+def _native_temperature_index_parts(body: bytes, run: datetime, step: int, *, control: bool) -> list[dict]:
+    """Exact original-index 2t fields; control follows the 50r1 oper/fc envelope."""
+    wanted = {"param": "2t", "levtype": "sfc", "class": "od", "date": run.strftime("%Y%m%d"),
+              "time": run.strftime("%H%M"), "step": str(step),
+              "stream": "oper" if control else "enfo", "type": "fc" if control else "pf"}
+    parts = []
+    for line in body.splitlines():
+        row = json.loads(line)
+        if row.get("param") != "2t":
+            continue
+        if any(str(row.get(k)) != v for k, v in wanted.items()):
+            raise ValueError("NATIVE_2T_INDEX_IDENTITY_MISMATCH")
+        number = str(row.get("number", "0"))
+        if not re.fullmatch(r"\d+", number):
+            raise ValueError("NATIVE_2T_INDEX_MEMBER_INVALID")
+        member = int(number)
+        offset, length = row["_offset"], row["_length"]
+        if (type(offset) is not int or offset < 0 or type(length) is not int
+                or not 100 <= length <= 32 * 1024 * 1024):
+            raise ValueError("NATIVE_2T_INDEX_RANGE_INVALID")
+        parts.append({"member": member, "source_index_offset": offset, "source_index_length": length,
+                      "source_index_line_sha256": hashlib.sha256(line).hexdigest(), "index_record": row})
+    expected = [0] if control else list(range(1, 51))
+    if sorted(p["member"] for p in parts) != expected:
+        raise ValueError("NATIVE_2T_INDEX_MEMBER_SET_INCOMPLETE")
+    ordered = sorted(parts, key=lambda p: p["source_index_offset"])
+    if any(a["source_index_offset"] + a["source_index_length"] > b["source_index_offset"]
+           for a, b in zip(ordered, ordered[1:])):
+        raise ValueError("NATIVE_2T_INDEX_RANGES_OVERLAP")
+    return ordered
+
+
+def _capture_native_temperature_bytes(run: datetime, steps: list[int], output_dir: Path,
+    *, byte_budget: int, deadline: float, _session: Any = None, _request_gate: Any = None) -> dict:
+    """One ephemeral transport owner; immutable packet artifacts, no DB access."""
+    session = _session or requests.Session()
+    gate = _request_gate or _TokenBucket(min(2., _DOWNLOAD_RPS), capacity=1.).acquire
+    transferred = metadata_written = 0
+    started = datetime.now(timezone.utc).isoformat()
+    report: dict[str, Any] = {"capture_status": "UNKNOWN", "qualification_status": "OFFLINE_ONLY",
+        "source_run_utc": run.isoformat(), "requested_steps": steps, "observed_steps": [],
+        "first_source_publication_at": None, "fetch_started_at": started, "messages": [], "indexes": [],
+        "surface_geopotential_status": "UNKNOWN", "static_model_validity_status": "NOT_EVALUATED",
+        "station_ground_status": "UNPROVEN", "sensor_agl_status": "UNPROVEN"}
+    reserve = min(4 * 1024 * 1024, byte_budget // 8)
+
+    def checkpoint():
+        if time.monotonic() >= deadline:
+            raise requests.Timeout("NATIVE_2T_DEADLINE_EXCEEDED")
+
+    def get(url, *, offset=None, length=None):
+        nonlocal transferred
+        checkpoint()
+        gate(deadline=deadline)
+        remaining = deadline - time.monotonic()
+        checkpoint()
+        limit = min(2 * 1024 * 1024 if length is None else length, byte_budget - reserve - transferred)
+        if limit <= 0 or (length is not None and length > limit):
+            raise ValueError("NATIVE_2T_BYTE_BUDGET_EXCEEDED")
+        headers = {} if offset is None else {"Range": f"bytes={offset}-{offset + length - 1}"}
+        response = session.get(url, headers=headers, stream=True, timeout=min(10., remaining), allow_redirects=False)
+        try:
+            if offset is None:
+                if response.status_code != 200:
+                    raise ValueError(f"NATIVE_2T_INDEX_HTTP_{response.status_code}")
+            else:
+                _validate_range_response(response, offset=offset, length=length)
+            chunks, size = [], 0
+            for chunk in response.iter_content(chunk_size=65536):
+                transferred += len(chunk)
+                size += len(chunk)
+                checkpoint()
+                if size > limit or transferred > byte_budget - reserve:
+                    raise ValueError("NATIVE_2T_BYTE_BUDGET_EXCEEDED")
+                chunks.append(chunk)
+            body = b"".join(chunks)
+            if length is not None and len(body) != length:
+                raise ValueError("NATIVE_2T_RANGE_TRUNCATED")
+            checkpoint()
+            http = {"status": response.status_code, "headers": {str(k): str(v) for k, v in response.headers.items()}}
+            if len(json.dumps(http)) > 16384:
+                raise ValueError("NATIVE_2T_HTTP_METADATA_OVERSIZED")
+            return body, http, datetime.now(timezone.utc).isoformat()
+        finally:
+            response.close()
+
+    def original(name, body):
+        checkpoint()
+        with (output_dir / name).open("xb") as handle:
+            handle.write(body)
+        return name
+
+    try:
+        plans = []
+        for step in steps:
+            for control in (True, False):
+                stream, kind = ("oper", "fc") if control else ("enfo", "ef")
+                stem = f"{run:%Y%m%d%H}0000-{step}h-{stream}-{kind}"
+                url = (f"https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{run:%Y%m%d}/"
+                       f"{run:%H}z/ifs/0p25/{stream}/{stem}.grib2")
+                index_url = url[:-6] + ".index"
+                index, index_http, fetched = get(index_url)
+                index_path = original(stem + ".index", index)
+                parts = _native_temperature_index_parts(index, run, step, control=control)
+                for part in parts:
+                    part["param"] = "2t"
+                if step == 0 and control:
+                    mask_rows = [(line, json.loads(line)) for line in index.splitlines()
+                                 if json.loads(line).get("param") == "lsm"]
+                    if len(mask_rows) == 1:
+                        line, row = mask_rows[0]
+                        if (all(str(row.get(k)) == v for k, v in {"class": "od", "levtype": "sfc",
+                            "type": "fc", "stream": "oper", "step": "0", "date": run.strftime("%Y%m%d"),
+                            "time": run.strftime("%H%M")}.items())
+                            and type(row.get("_offset")) is int and row["_offset"] >= 0
+                            and type(row.get("_length")) is int and 100 <= row["_length"] <= 1024 * 1024):
+                            parts.append({"member": 0, "param": "lsm", "source_index_offset": row["_offset"],
+                                "source_index_length": row["_length"], "index_record": row,
+                                "source_index_line_sha256": hashlib.sha256(line).hexdigest()})
+                    report["surface_geopotential_index_records"] = [json.loads(line) for line in index.splitlines()
+                        if json.loads(line).get("param") in ("z", "gh")]
+                    parts.sort(key=lambda p: p["source_index_offset"])
+                plans.append((step, url, index_url, index_path, hashlib.sha256(index).hexdigest(), index_http, parts))
+                report["indexes"].append({"path": index_path, "source_url": index_url,
+                    "sha256": hashlib.sha256(index).hexdigest(), "body_bytes": len(index),
+                    "source_fetched_at": fetched, "http": index_http})
+        planned = sum(p["source_index_length"] for plan in plans for p in plan[-1])
+        report["planned_grib_bytes"] = planned
+        if transferred + planned + reserve > byte_budget:
+            raise ValueError("NATIVE_2T_PLANNED_BYTE_BUDGET_EXCEEDED")
+        # Coalesce only contiguous selected original messages, never gap bytes.
+        # Single requests and at most 32MiB per response keep memory/connection costs bounded.
+        original_grid = None
+        for step, url, index_url, index_path, index_hash, index_http, parts in plans:
+            groups: list[list[dict]] = []
+            for part in parts:
+                if (groups and groups[-1][-1]["source_index_offset"] + groups[-1][-1]["source_index_length"]
+                        == part["source_index_offset"]
+                        and sum(p["source_index_length"] for p in groups[-1]) + part["source_index_length"] <= 32 * 1024 * 1024):
+                    groups[-1].append(part)
+                else:
+                    groups.append([part])
+            for group in groups:
+                offset = group[0]["source_index_offset"]
+                length = sum(p["source_index_length"] for p in group)
+                body, range_http, fetched = get(url, offset=offset, length=length)
+                cursor = 0
+                for part in group:
+                    raw = body[cursor:cursor + part["source_index_length"]]
+                    cursor += len(raw)
+                    if (raw[:4] != b"GRIB" or raw[-4:] != b"7777" or len(raw) < 20
+                            or raw[7] != 2 or int.from_bytes(raw[8:16], "big") != len(raw)):
+                        raise ValueError("NATIVE_2T_ORIGINAL_GRIB_FRAMING_INVALID")
+                    name = ("lsm.grib2" if part["param"] == "lsm"
+                            else f"step{step:03d}-member{part['member']:02d}.grib2")
+                    original(name, raw)
+                    report["last_received_original"] = {"path": name, "source_url": url,
+                        "source_index_offset": part["source_index_offset"], "source_index_length": len(raw),
+                        "raw_message_sha256": hashlib.sha256(raw).hexdigest()}
+                    transport_proof = {**part, "step_hours": step, "source_url": url,
+                        "source_index_url": index_url, "index_path": index_path,
+                        "source_index_sha256": index_hash, "raw_message_sha256": hashlib.sha256(raw).hexdigest(),
+                        "source_fetched_at": fetched, "range_http": range_http,
+                        "first_source_publication_at": None, "qualification_status": "OFFLINE_ONLY"}
+                    proof_bytes = json.dumps(transport_proof, sort_keys=True).encode()
+                    if metadata_written + len(proof_bytes) > reserve:
+                        raise ValueError("NATIVE_2T_METADATA_BYTE_BUDGET_EXCEEDED")
+                    original(name + ".proof.json", proof_bytes)
+                    metadata_written += len(proof_bytes)
+                    import base64
+                    import eccodes as ec
+                    from scripts.extract_open_ens_localday import _native_message_capture, _open_ens_original_grid, _GRID_KEYS
+                    gid = ec.codes_new_from_message(raw)
+                    try:
+                        capture = _native_message_capture(gid, instantaneous=True)
+                        if capture["capture_status"] != "OBSERVED":
+                            raise ValueError("NATIVE_2T_ORIGINAL_METADATA_UNAVAILABLE")
+                        h = capture["observed_headers"]
+                        sections = {s["section_number"]: base64.b64decode(s["bytes_base64"], validate=True)
+                                    for s in capture["metadata_sections"]}
+                        s1, s4 = sections[1], sections[4]
+                        expected_type = "fc" if part["member"] == 0 else "pf"
+                        if ((h["dataDate"], h["dataTime"], h["endStep"], h["centre"], h["dataType"])
+                                != (int(run.strftime("%Y%m%d")), run.hour * 100, step, "ecmf", expected_type)):
+                            raise ValueError("NATIVE_2T_ORIGINAL_RUN_MEMBER_STEP_MISMATCH")
+                        valid = run + timedelta(hours=step)
+                        if (h["stepUnits"] != 1 or h["startStep"] != step or h["endStep"] != step
+                            or (h["validityDate"], h["validityTime"]) != (int(valid.strftime("%Y%m%d")), valid.hour * 100)
+                            or int.from_bytes(s1[5:7], "big") != 98
+                            or int.from_bytes(s1[12:14], "big") != run.year
+                            or tuple(s1[14:19]) != (run.month, run.day, run.hour, 0, 0)
+                            or s4[17] != 1 or int.from_bytes(s4[18:22], "big") != step
+                            or s4[13] != h["generatingProcessIdentifier"]
+                            or _open_ens_original_grid(sections[3]) != {k: h[k] for k in _GRID_KEYS}):
+                            raise ValueError("NATIVE_2T_ORIGINAL_SECTIONS_HEADER_MISMATCH")
+                        if original_grid is None:
+                            original_grid = sections[3]
+                        elif original_grid != sections[3]:
+                            raise ValueError("NATIVE_2T_ORIGINAL_GRID_MISMATCH")
+                        if part["param"] == "2t" and (
+                            h["paramId"] != 167 or h["units"] != "K" or h["typeOfLevel"] != "heightAboveGround"
+                            or h["level"] != 2 or h["stepType"] != "instant" or h["generatingProcessIdentifier"] != 161
+                            or (part["member"] != 0 and h.get("number") != part["member"])):
+                            raise ValueError("NATIVE_2T_ORIGINAL_PARAMETER_MEMBER_INVALID")
+                        if part["param"] == "2t" and (
+                            raw[6] != 0 or s4[9:11] != b"\x00\x00" or s4[22] != 103 or s4[23] != 0
+                            or int.from_bytes(s4[24:28], "big") != 2
+                            or int.from_bytes(s4[7:9], "big") != (0 if part["member"] == 0 else 1)
+                            or s1[20] != (1 if part["member"] == 0 else 4)
+                            or (part["member"] != 0 and s4[35] != part["member"])):
+                            raise ValueError("NATIVE_2T_ORIGINAL_PARAMETER_MEMBER_INVALID")
+                        if part["param"] == "lsm" and (h["paramId"] != 172 or h["typeOfLevel"] != "surface"):
+                            raise ValueError("NATIVE_2T_ORIGINAL_LSM_INVALID")
+                    finally:
+                        ec.codes_release(gid)
+                    captured = {**part, "step_hours": step, "path": name, "native_capture": capture,
+                        "source_url": url, "source_index_url": index_url, "index_path": index_path,
+                        "source_index_sha256": index_hash, "raw_message_sha256": hashlib.sha256(raw).hexdigest(),
+                        "source_fetched_at": fetched, "range_http": range_http}
+                    if part["param"] == "lsm":
+                        report["land_mask"] = captured
+                    else:
+                        report["messages"].append(captured)
+        report["observed_steps"] = [s for s in steps if sorted(m["member"] for m in report["messages"]
+            if m["step_hours"] == s) == list(range(51))]
+        report["capture_status"] = "OBSERVED" if report["observed_steps"] == steps else "UNKNOWN"
+    except Exception as exc:
+        report["unavailable_reason"] = str(exc)[:300] or type(exc).__name__
+    finally:
+        session.close()
+        report["observed_steps"] = [s for s in steps if sorted(m["member"] for m in report["messages"]
+            if m["step_hours"] == s) == list(range(51))]
+        report.update(transferred_body_bytes=transferred, written_proof_bytes=metadata_written,
+                      fetch_finished_at=datetime.now(timezone.utc).isoformat())
+    return report
+
+
+def _native_temperature_capture_worker(run_iso, steps, output_dir, byte_budget, deadline, writer):
+    """Spawn-only packet transport; parent owns completion and absolute wall bound."""
+    try:
+        os.nice(10)
+        bucket = _TokenBucket(min(2., _DOWNLOAD_RPS), capacity=1.)
+        def request_permission(*, deadline):
+            bucket.acquire(deadline=deadline)
+            writer.send_bytes(b'{"request_intent":true}')
+            remaining = max(0., deadline - time.monotonic())
+            if not writer.poll(remaining) or writer.recv_bytes(maxlength=16) != b"OK":
+                raise requests.Timeout("NATIVE_2T_PRIORITY_PERMISSION_UNAVAILABLE")
+            if time.monotonic() >= deadline:
+                raise requests.Timeout("NATIVE_2T_DEADLINE_EXCEEDED")
+        report = _capture_native_temperature_bytes(datetime.fromisoformat(run_iso), steps, Path(output_dir),
+            byte_budget=byte_budget, deadline=deadline, _request_gate=request_permission)
+        packet = json.dumps(report).encode()
+        if len(packet) <= 4 * 1024 * 1024:
+            if report["transferred_body_bytes"] + report["written_proof_bytes"] + len(packet) > byte_budget:
+                report["capture_status"] = "UNKNOWN"
+                report["unavailable_reason"] = "NATIVE_2T_RECEIPT_BYTE_BUDGET_EXCEEDED"
+                packet = json.dumps(report).encode()
+            writer.send_bytes(packet)
+    finally:
+        writer.close()
+
+
+def _native_temperature_priority_probe(check, deadline: float) -> bool:
+    """Only an affirmative idle result from an ephemeral, killable read-only probe."""
+    context = multiprocessing.get_context("fork")
+    reader, writer = context.Pipe(duplex=False)
+    def inspect():
+        try:
+            writer.send_bytes(b"FALSE" if check() is False else b"BUSY")
+        except Exception:
+            writer.send_bytes(b"UNKNOWN")
+        finally:
+            writer.close()
+    process = context.Process(target=inspect)
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise requests.Timeout("NATIVE_2T_DEADLINE_EXCEEDED")
+        probe_deadline = time.monotonic() + min(.5, remaining / 2)
+        process.start()
+        writer.close()
+        if not reader.poll(max(0., probe_deadline - time.monotonic())):
+            raise requests.Timeout("NATIVE_2T_PRIORITY_CHECK_TIMEOUT")
+        answer = reader.recv_bytes(maxlength=8)
+        if time.monotonic() >= deadline:
+            raise requests.Timeout("NATIVE_2T_DEADLINE_EXCEEDED")
+        return answer == b"FALSE"
+    finally:
+        reader.close()
+        writer.close()
+        if process.pid is not None:
+            if process.is_alive():
+                process.kill()
+            process.join(timeout=max(0., deadline - time.monotonic()))
+            if process.is_alive():
+                raise RuntimeError("NATIVE_2T_PRIORITY_PROBE_REAP_UNCONFIRMED")
+        process.close()
+
+
+def capture_open_ens_temperature_run(*, run_utc: datetime, steps: list[int], output_dir: Path,
+    normal_collector_busy: Any, byte_budget: int = 512 * 1024 * 1024,
+    timeout_seconds: float = 300., _worker: Any = None) -> dict:
+    """Explicit offline preparation only: global run capture, no scheduled/live hook.
+
+    SCOPE: this run's requested native 2t members. DRAIN: a later explicitly
+    authorized packet attempt after normal collection/budget/source gaps clear.
+    RESET: each attempt uses fresh original indexes in an empty packet directory.
+    A required current busy check yields to normal collectors before HTTP and
+    throughout the ephemeral worker. Neither the worker nor this parent touches DBs.
+    """
+    started = time.monotonic()
+    unavailable = {"capture_status": "UNKNOWN", "qualification_status": "OFFLINE_ONLY"}
+    process = reader = writer = None
+    try:
+        if (not callable(normal_collector_busy) or type(byte_budget) is not int
+                or not 0 < byte_budget <= 512 * 1024 * 1024
+                or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 300.):
+            raise ValueError("NATIVE_2T_BUDGET_OR_PRIORITY_INVALID")
+        deadline = started + max(0., timeout_seconds - min(.5, timeout_seconds / 4))
+        if (run_utc.tzinfo is None or run_utc.utcoffset() != timedelta(0) or run_utc.minute or run_utc.second
+                or run_utc.microsecond or run_utc.hour not in (0, 6, 12, 18)
+                or run_utc > datetime.now(timezone.utc)):
+            raise ValueError("NATIVE_2T_RUN_INVALID")
+        horizon = 240 if run_utc.hour in (0, 12) else 90
+        if (not steps or len(set(steps)) != len(steps)
+                or any(type(s) is not int or s < 0 or s > horizon or (s % 3 if s <= 144 else s % 6) for s in steps)):
+            raise ValueError("NATIVE_2T_NATIVE_STEP_SET_INVALID")
+        if not _native_temperature_priority_probe(normal_collector_busy, deadline):
+            raise ValueError("NATIVE_2T_NORMAL_COLLECTOR_PRIORITY")
+        output_dir = Path(output_dir)
+        if (not output_dir.is_absolute() or "state" in output_dir.resolve().parts
+                or output_dir.is_symlink()
+                or (output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())))):
+            raise ValueError("NATIVE_2T_PACKET_OUTPUT_NOT_EMPTY")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Reserve bounded reap time within the operator's total wall allowance.
+        context = multiprocessing.get_context("spawn")
+        reader, writer = context.Pipe(duplex=True)
+        process = context.Process(target=_worker or _native_temperature_capture_worker,
+            args=(run_utc.isoformat(), sorted(steps), str(output_dir), byte_budget, deadline, writer))
+        process.start()
+        writer.close()
+        os.set_blocking(reader.fileno(), False)
+        received, expected = bytearray(), None
+        while time.monotonic() < deadline:
+            if not _native_temperature_priority_probe(normal_collector_busy, deadline):
+                raise ValueError("NATIVE_2T_NORMAL_COLLECTOR_PRIORITY")
+            if reader.poll(min(.1, max(0., deadline - time.monotonic()))):
+                try:
+                    chunk = os.read(reader.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    raise ValueError("NATIVE_2T_WORKER_INCOMPLETE")
+                received.extend(chunk)
+                if expected is None and len(received) >= 4:
+                    expected = struct.unpack("!i", received[:4])[0]
+                    if not 0 < expected <= 4 * 1024 * 1024:
+                        raise ValueError("NATIVE_2T_IPC_BOUNDS_INVALID")
+                if len(received) > 4 * 1024 * 1024 + 4 or (expected is not None and len(received) > expected + 4):
+                    raise ValueError("NATIVE_2T_IPC_BOUNDS_INVALID")
+                if expected is None or len(received) != expected + 4:
+                    continue
+                report = json.loads(received[4:])
+                if time.monotonic() >= deadline:
+                    raise requests.Timeout("NATIVE_2T_DEADLINE_EXCEEDED")
+                if report == {"request_intent": True}:
+                    if not _native_temperature_priority_probe(normal_collector_busy, deadline):
+                        raise ValueError("NATIVE_2T_NORMAL_COLLECTOR_PRIORITY")
+                    reader.send_bytes(b"OK")
+                    received, expected = bytearray(), None
+                    continue
+                if report.get("transferred_body_bytes", byte_budget + 1) > byte_budget:
+                    raise ValueError("NATIVE_2T_BYTE_BUDGET_EXCEEDED")
+                receipt_bytes = json.dumps(report, sort_keys=True).encode()
+                if (type(report.get("written_proof_bytes", 0)) is not int
+                        or report.get("written_proof_bytes", 0) < 0
+                        or report.get("transferred_body_bytes", byte_budget + 1)
+                           + report.get("written_proof_bytes", 0) + len(receipt_bytes) > byte_budget):
+                    raise ValueError("NATIVE_2T_RECEIPT_BYTE_BUDGET_EXCEEDED")
+                if not _native_temperature_priority_probe(normal_collector_busy, deadline):
+                    raise ValueError("NATIVE_2T_NORMAL_COLLECTOR_PRIORITY")
+                with (output_dir / "capture_receipt.json").open("xb") as handle:
+                    handle.write(receipt_bytes)
+                return {**report, "elapsed_seconds": time.monotonic() - started, "output_dir": str(output_dir)}
+            if not process.is_alive():
+                raise ValueError("NATIVE_2T_WORKER_INCOMPLETE")
+        raise requests.Timeout("NATIVE_2T_DEADLINE_EXCEEDED")
+    except Exception as exc:
+        return {**unavailable, "unavailable_reason": str(exc)[:300] or type(exc).__name__,
+                "elapsed_seconds": time.monotonic() - started, "output_dir": str(output_dir)}
+    finally:
+        if reader is not None:
+            reader.close()
+        if writer is not None:
+            writer.close()
+        if process is not None:
+            if process.pid is not None:
+                if process.is_alive():
+                    process.kill()
+                process.join(timeout=min(.5, max(0., started + timeout_seconds - time.monotonic())))
+            process.close()
+
+
 def _surface_audit_http(session: Any, url: str, *, deadline: float,
                         offset: int | None = None, length: int | None = None) -> tuple[bytes, dict]:
     """One bounded, non-retrying audit request, isolated from forecast transports."""
