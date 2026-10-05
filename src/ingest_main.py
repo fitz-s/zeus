@@ -674,7 +674,10 @@ def _persist_day0_metar_ledger_after_wake(prefetch: Any) -> bool:
     conn = None
     mutex = None
     acquired = False
+    committed_prints: list = []
+    world_committed_at_ms = None
     try:
+        from src.runtime.observation_reaction_trace import print_high_water, print_revisions
         from src.state.db import get_world_connection, world_write_mutex
 
         conn = get_world_connection(write_class="live")
@@ -684,10 +687,13 @@ def _persist_day0_metar_ledger_after_wake(prefetch: Any) -> bool:
         if not acquired:
             return False
         conn.execute("BEGIN IMMEDIATE")
+        prints_before = print_high_water(conn)
         if not persist(world_conn=conn, prefetch=prefetch):
             conn.rollback()
             return False
+        committed_prints = print_revisions(conn, after=prints_before) if prints_before is not None else []
         conn.commit()
+        world_committed_at_ms = time.time_ns() // 1_000_000
         return True
     except Exception as exc:  # noqa: BLE001 - additive history never blocks alpha
         if conn is not None:
@@ -706,6 +712,10 @@ def _persist_day0_metar_ledger_after_wake(prefetch: Any) -> bool:
             mutex.release()
         if conn is not None:
             conn.close()
+        if world_committed_at_ms is not None:
+            from src.runtime.observation_reaction_trace import emit_print_commits
+
+            emit_print_commits(committed_prints, world_committed_at_ms=world_committed_at_ms)
 
 
 def _commit_pending_day0_metar(*, origin: str) -> dict:
@@ -725,6 +735,8 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
         tuple[str, str, str], tuple[int | None, int | None, str | None]
     ] = {}
     pending_reports = 0
+    committed_prints: list = []
+    world_committed_at_ms = None
     try:
         if not _DAY0_METAR_PENDING_COMMITS:
             return {"status": "SOURCE_CURRENT"}
@@ -783,6 +795,9 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                 conn.execute(f"PRAGMA busy_timeout = {max(1, remaining_ms)}")
                 before_changes = int(conn.total_changes)
                 conn.execute("BEGIN IMMEDIATE")
+                from src.runtime.observation_reaction_trace import print_high_water, print_revisions
+
+                prints_before = print_high_water(conn)  # Telemetry: one PK seek.
                 emitted = emitter.emit_prefetched(
                     world_conn=conn,
                     prefetch=prefetch,
@@ -795,8 +810,10 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
                     deferred_memo_updates=deferred_memo_updates,
                     persist_ledger=True,
                 )
+                committed_prints = print_revisions(conn, after=prints_before) if prints_before is not None else []
                 commit_started = time.monotonic()
                 conn.commit()
+                world_committed_at_ms = time.time_ns() // 1_000_000
                 write_lease.record_commit(
                     commit_ms=(time.monotonic() - commit_started) * 1000.0,
                     rows_changed=max(0, int(conn.total_changes) - before_changes),
@@ -868,6 +885,9 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
             conn.close()
         _DAY0_METAR_COMMIT_LOCK.release()
 
+    from src.runtime.observation_reaction_trace import emit_print_commits
+
+    emit_print_commits(committed_prints, world_committed_at_ms=world_committed_at_ms)
     if emitted:
         _bridge_committed_day0_events(
             source="day0_metar_source_clock",
@@ -2188,6 +2208,7 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         return {"status": "WORLD_WRITER_BUSY"}
     inserted = 0
     advanced = False
+    committed_rows: list[tuple[dict[str, object], str]] = []
     try:
         with default_runtime_write_coordinator().lease(
             (DBIdentity.WORLD,), owner="day0_fmi_temperature",
@@ -2217,10 +2238,23 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
                         raw_report=sample.raw_report,
                     ):
                         inserted += 1
-                        if clock > newest or (clock == newest and native_value != newest_value):
-                            advanced = True
+                        row_advanced = clock > newest or (clock == newest and native_value != newest_value)
+                        advanced = advanced or row_advanced
+                        try:  # Telemetry: the exact inserted revision, never a write input.
+                            committed_rows.append(({
+                                "id": conn.execute("SELECT last_insert_rowid()").fetchone()[0],
+                                "city": city.name, "station_id": station_id,
+                                "source_channel": source_channel, "publish_ts_utc": clock,
+                                "value_native": native_value, "unit": route.unit,
+                                "fetched_at_utc": sample.fetched_at.isoformat(),
+                                "raw_report": sample.raw_report,
+                            }, "ADVANCES_SOURCE_FRONTIER" if row_advanced else "BEHIND_SOURCE_FRONTIER"))
+                        except Exception:  # noqa: BLE001 - telemetry never changes the write
+                            pass
                 started = time.monotonic()
                 conn.commit()
+                world_committed_ns = time.monotonic_ns()
+                world_committed_at_ms = time.time_ns() // 1_000_000
                 lease.record_commit(
                     commit_ms=(time.monotonic() - started) * 1000,
                     rows_changed=conn.total_changes - before,
@@ -2236,8 +2270,6 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
     finally:
         mutex.release()
 
-    world_committed_ns = time.monotonic_ns()
-    world_committed_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     wake_status = "NO_NEW_SOURCE_REVISION"
     wake_key = (city.name, station_id, source_channel)
     if advanced:
@@ -2289,12 +2321,10 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         # actually occur and completed_trace can prove the identity join.
         "completion_trace": "OBSERVATION_REACTION_TRACE",
     }
-    if advanced:
-        from src.runtime.observation_reaction_trace import emit_stage
-        emit_stage("SOURCE_COMMITTED", city=city.name, station_id=station_id,
-            source_channel=source_channel, input_identity=input_identity,
-            response_received_at_ms=trace["response_received_at_ms"],
-            world_committed_at_ms=world_committed_at_ms)
+    from src.runtime.observation_reaction_trace import emit_observation_committed
+    for row, disposition in committed_rows:
+        emit_observation_committed(row, world_committed_at_ms=world_committed_at_ms,
+                                   disposition=disposition)
     if advanced or wake_status != "NO_NEW_SOURCE_REVISION":
         logger.info("PHYSICAL_CURRENT_CHAIN_TRACE %s", json.dumps(trace, sort_keys=True))
     return {"status": "COMMITTED", "inserted": inserted, "advanced": advanced, "clock_trace": trace}
@@ -2567,6 +2597,9 @@ def _k2_hko_tick():
     current_written_at = None
     current_redecision = ()
     project_result = {"written":0}
+    current_print_id = None
+    committed_prints: list = []
+    world_committed_at_ms = None
     try:
         with acquire_lock("hko_tick") as source_acquired:
             if not source_acquired:
@@ -2602,6 +2635,10 @@ def _k2_hko_tick():
                             body=current_prefetch.body,last_modified=current_prefetch.last_modified,
                             fetched_at=current_prefetch.fetched_at,written_at=current_written_at,
                             response_headers=current_prefetch.response_headers)
+                        if current_written:
+                            from src.runtime.observation_reaction_trace import last_print_id
+
+                            current_print_id = last_print_id(conn)  # Telemetry only.
                     except (ValueError, TypeError, UnicodeError):
                         # SCOPE: one invalid CURRENT_ONLY representation. DRAIN:
                         # next source tick. RESET: valid clocks/body; extrema and
@@ -2642,7 +2679,12 @@ def _k2_hko_tick():
                             inserted_event_ids,
                         ).fetchall()
                     )
+                if current_print_id is not None:
+                    from src.runtime.observation_reaction_trace import print_revisions
+
+                    committed_prints = print_revisions(conn, ids=(current_print_id,))
                 conn.commit()
+                world_committed_at_ms = time.time_ns() // 1_000_000
                 write_lease.record_commit(
                     commit_ms=(time.monotonic() - commit_started) * 1000.0,
                     rows_changed=max(
@@ -2668,6 +2710,9 @@ def _k2_hko_tick():
         if acquired and mutex is not None:
             mutex.release()
 
+    from src.runtime.observation_reaction_trace import emit_print_commits
+
+    emit_print_commits(committed_prints, world_committed_at_ms=world_committed_at_ms)
     _bridge_committed_day0_events(
         source="day0_hko_source_clock",
         event_ids=inserted_event_ids,

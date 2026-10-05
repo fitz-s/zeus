@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-01
+# Last reused/audited: 2026-10-05
 # Authority: REQ-20260930-114240-ee2a70; isolated observation/auction/executor integration.
 """Controlled forecast inputs, real Day0 integration and posterior persistence.
 
@@ -24,7 +24,8 @@ from src.data.day0_hourly_vectors import Day0HourlyVector, day0_source_clock_ens
 from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
 from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
 from src.runtime.observation_reaction_trace import (
-    completed_trace, emit_posterior_ready, emit_stage, emit_venue_ack,
+    completed_trace, emit_observation_committed, emit_posterior_ready, emit_stage, emit_venue_ack,
+    emit_wake_received,
 )
 
 _hko_native_surfaces = fixtures._hko_native_surfaces
@@ -422,10 +423,12 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     world_committed_at_ms=time.time_ns()//1_000_000
     input_identity={"source":"aviationweather_metar",
         "observed_at_utc":fixtures._dt(18,5).isoformat(),"value_native":30.0}
-    emit_stage("SOURCE_COMMITTED",city="Shanghai",station_id="ZSPD",
-        source_channel="aviationweather_metar",input_identity=input_identity,
-        response_received_at_ms=response_received_at_ms,
-        world_committed_at_ms=world_committed_at_ms)
+    # The production per-row hook, over the exact committed revision.
+    world.row_factory=sqlite3.Row
+    committed_row=dict(world.execute("SELECT * FROM observation_prints WHERE raw_report LIKE 'METAR ZSPD%'").fetchone())
+    world.row_factory=None
+    emit_observation_committed(committed_row,world_committed_at_ms=world_committed_at_ms,
+                               disposition="ADVANCES_SOURCE_FRONTIER")
     vector=Day0HourlyVector(model="ecmwf_ifs",city="Shanghai",target_date="2026-06-07",
         timezone_name="Asia/Shanghai",captured_at=fixtures._dt(18,8).isoformat(),
         times=tuple(f"2026-06-07T{hour:02d}:00" for hour in range(24)),
@@ -480,6 +483,7 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
         wake_received_at_ms=time.time_ns()//1_000_000
         wake=reactor_wake.read_reactor_wake(path=wake_path)
         assert wake is not None and wake.reason=='forecast_posterior_advanced'
+        emit_wake_received(wake_id=wake.wake_id)  # The main.py consumer hook, wake_id only.
     assert wake.forecast_families == (('Shanghai','2026-06-07','high'),)
     # Exercise the production held-family selector against a separate read-only
     # TRADE connection; an ended local date does not erase money at risk.
@@ -571,6 +575,12 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
             events.append(json.loads(message[len(prefix):]))
     trace=completed_trace(events,posterior_identity_hash=row["posterior_identity_hash"])
     assert trace["status"]=="OBSERVED_COMPLETE",trace
+    (ready,)=[e for e in events if e["stage"]=="POSTERIOR_READY"]
+    assert ready["input_reference_status"]=="CONSUMED_LEDGER_REVISION"
+    assert ready["observation_ref"]["id"]==committed_row["id"]
+    assert [(e["wake_id"],e["posterior_identity_hash"]) for e in events if e["stage"]=="WAKE_PUBLISHED"]==[
+        (wake.wake_id,row["posterior_identity_hash"])]
+    assert trace["all_hops_observed"] and trace["lineage_grade"]=="EXPLICIT_REVISION",trace
     assert isinstance(trace["q_served_at_ms"],int)
     assert isinstance(trace["venue_ack_at_ms"],int)
     assert trace["q_served_at_ms"]>=trace["posterior_ready_at_ms"]>=trace["world_committed_at_ms"]
@@ -595,3 +605,463 @@ def test_observation_revision_materializes_then_serves(monkeypatch,caplog,tmp_pa
     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='observation_prints'").fetchone()[0]==0
     assert world.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='forecast_posteriors'").fetchone()[0]==0
     conn.close();world.close();trade.close()
+
+
+# ---------------------------------------------------------------------------
+# Production stage hooks: each emits once with exact ids and never raises.
+# ---------------------------------------------------------------------------
+
+def _trace_events(caplog):
+    prefix="OBSERVATION_REACTION_TRACE "
+    return [json.loads(r.getMessage()[len(prefix):]) for r in caplog.records
+            if r.getMessage().startswith(prefix)]
+
+
+def test_source_tick_emits_one_source_commit_per_inserted_row(monkeypatch,tmp_path,caplog):
+    import threading
+    from src.config import cities_by_name
+    from src.data import station_temperature_adapters as adapters
+    from src.data import replacement_forecast_production as production
+    from src.data.physical_current_sources import load_physical_current_sources
+    from src.runtime.observation_reaction_trace import observation_revision_reference
+    from src.state import db, write_coordinator as coordinator
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+    import src.ingest_main as ingest
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    city=cities_by_name["Ankara"]
+    route=next(r for r in load_physical_current_sources()[0] if r.provider=="mgm_metar" and r.station_id==city.wu_station)
+    now=datetime.now(timezone.utc)
+    newest,older=now-timedelta(minutes=2),now-timedelta(minutes=40)
+    path=tmp_path/"world.sqlite"
+    with sqlite3.connect(path) as conn:
+        ensure_table(conn)
+        # Already-ledgered sample: suppressed by append_print, so no stage line.
+        append_print(conn,city=city.name,station_id=route.station_id,source_channel=route.source_channel,
+            publish_ts_utc=(now-timedelta(minutes=20)).isoformat(),value_native=12.0,unit=route.unit,
+            fetched_at_utc=(now-timedelta(minutes=19)).isoformat(),raw_report="seed")
+    samples=(adapters._sample(route,newest,13.0,now,"a"*64),adapters._sample(route,older,11.0,now,"b"*64),
+             adapters._sample(route,now-timedelta(minutes=20),12.0,now,"c"*64))
+    class Lease:
+        def __enter__(self):return self
+        def __exit__(self,*_):return False
+        def record_commit(self,**kw):pass
+    monkeypatch.setattr(adapters,"fetch_station_temperature",lambda *a,**kw:samples)
+    monkeypatch.setattr(db,"world_write_mutex",lambda:threading.Lock())
+    monkeypatch.setattr(db,"get_world_connection",lambda **kw:sqlite3.connect(path))
+    monkeypatch.setattr(coordinator,"default_runtime_write_coordinator",lambda:SimpleNamespace(lease=lambda *a,**kw:Lease()))
+    monkeypatch.setattr(production,"_replacement_forecast_live_materialization_queue_config",lambda:{})
+    monkeypatch.setattr("src.data.physical_current_delivery.current_temperature_priority_families",lambda:{})
+    monkeypatch.setattr(production,"_enqueue_fusion_upgrade_reseeds_if_needed",lambda cfg,**kw:{"status":"FUSION_UPGRADE_TRIGGER"})
+    monkeypatch.setattr(ingest,"_physical_current_pending_wakes",set())
+    before=time.time_ns()//1_000_000
+    result=ingest._day0_current_temperature_source_tick(city,route)
+    assert result["status"]=="COMMITTED" and result["inserted"]==2
+    commits=[e for e in _trace_events(caplog) if e["stage"]=="SOURCE_COMMITTED"]
+    with sqlite3.connect(path) as conn:
+        conn.row_factory=sqlite3.Row
+        rows={r["publish_ts_utc"]:dict(r) for r in conn.execute("SELECT * FROM observation_prints WHERE raw_report!='seed'")}
+    assert len(commits)==2
+    by_clock={e["observation_ref"]["publish_ts_utc"]:e for e in commits}
+    for clock,row in rows.items():
+        event=by_clock[datetime.fromisoformat(clock).astimezone(timezone.utc).isoformat()]
+        # The full immutable revision, rebuilt from the committed row itself.
+        assert event["observation_ref"]==observation_revision_reference(row)
+        assert event["input_reference_status"]=="EXPLICIT_LEDGER_REVISION"
+    assert by_clock[newest.isoformat()]["commit_disposition"]=="ADVANCES_SOURCE_FRONTIER"
+    assert by_clock[older.isoformat()]["commit_disposition"]=="BEHIND_SOURCE_FRONTIER"
+    clocks={e["world_committed_at_ms"] for e in commits}
+    assert len(clocks)==1 and before<=next(iter(clocks))<=min(e["recorded_at_ms"] for e in commits)
+
+
+def test_source_commit_hook_never_raises_and_skips_invalid_rows(caplog):
+    from src.runtime.observation_reaction_trace import emit_observation_committed
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    emit_observation_committed({"id":0},world_committed_at_ms=1)
+    emit_observation_committed({},world_committed_at_ms=1)
+    assert _trace_events(caplog)==[]
+
+
+def _posterior_db(tmp_path,*,provenance,prints=()):
+    conn=sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE forecast_posteriors(posterior_id INTEGER PRIMARY KEY,city TEXT,target_date TEXT,"
+                 "temperature_metric TEXT,posterior_identity_hash TEXT,provenance_json TEXT,computed_at TEXT)")
+    conn.execute("CREATE TABLE readiness_state(readiness_id TEXT PRIMARY KEY,computed_at TEXT,dependency_json TEXT,"
+                 "city TEXT,target_local_date TEXT,temperature_metric TEXT,status TEXT)")
+    conn.execute("INSERT INTO forecast_posteriors VALUES(7,'Tokyo','2026-10-05','high','hash-7',?,'2026-10-05T08:10:00+00:00')",
+                 (json.dumps(provenance),))
+    conn.execute("INSERT INTO readiness_state VALUES('ready-7','2026-10-05T08:10:00+00:00',?,'Tokyo','2026-10-05','high','READY')",
+                 (json.dumps({"dependencies":[{"role":"soft_anchor_posterior","posterior_id":7}]}),))
+    tmp_path.mkdir(parents=True,exist_ok=True)
+    conn.execute("ATTACH DATABASE ? AS world",(str(tmp_path/"world.db"),))
+    conn.execute("CREATE TABLE world.observation_prints(id INTEGER PRIMARY KEY,city TEXT,station_id TEXT,source_channel TEXT,"
+                 "publish_ts_utc TEXT,value_native REAL,unit TEXT,fetched_at_utc TEXT,raw_report TEXT)")
+    conn.executemany("INSERT INTO world.observation_prints VALUES(?,?,?,?,?,?,?,?,?)",prints)
+    return conn
+
+
+_PRINT_A=(1,'Tokyo','RJTT','x','2026-10-05T08:00:00+00:00',20.0,'C','2026-10-05T08:01:00+00:00','a')
+_PRINT_B=(2,'Tokyo','RJTT','x','2026-10-05T08:00:00+00:00',21.0,'C','2026-10-05T08:02:00+00:00','b')
+_PRINT_A2=(3,'Tokyo','RJTT','x','2026-10-05T08:00:00+00:00',20.0,'C','2026-10-05T08:03:00+00:00','a2')
+_STATE={"source":"x","observed_at_utc":"2026-10-05T08:00:00+00:00","value_native":20.0}
+
+
+def test_posterior_ready_carries_the_consumed_row_through_a_b_a(tmp_path,caplog):
+    from src.runtime.observation_reaction_trace import emit_posterior_ready, observation_revision_reference
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    names=('id','city','station_id','source_channel','publish_ts_utc','value_native','unit','fetched_at_utc','raw_report')
+    for consumed in (_PRINT_A,_PRINT_A2):
+        caplog.clear()
+        conn=_posterior_db(tmp_path/str(consumed[0]),prints=(_PRINT_A,_PRINT_B,_PRINT_A2),provenance={
+            "day0_current_temperature_state":_STATE,
+            "day0_current_temperature_input_ref":{"print_id":consumed[0]}})
+        assert emit_posterior_ready(conn,7,wake_published=False,readiness_id="ready-7")=="hash-7"
+        (ready,)=_trace_events(caplog)
+        assert ready["stage"]=="POSTERIOR_READY" and ready["posterior_identity_hash"]=="hash-7"
+        assert ready["input_reference_status"]=="CONSUMED_LEDGER_REVISION"
+        assert ready["observation_ref"]==observation_revision_reference(dict(zip(names,consumed)))
+        assert ready["readiness_id"]=="ready-7"
+        conn.close()
+
+
+def test_posterior_ready_without_carried_row_leaves_a_b_a_unresolved(tmp_path,caplog):
+    from src.runtime.observation_reaction_trace import emit_posterior_ready
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    conn=_posterior_db(tmp_path,prints=(_PRINT_A,_PRINT_B,_PRINT_A2),
+                       provenance={"day0_current_temperature_state":_STATE})
+    assert emit_posterior_ready(conn,7,wake_published=False)=="hash-7"
+    (ready,)=_trace_events(caplog)
+    assert ready["observation_ref"] is None and ready["input_reference_status"]=="AMBIGUOUS_INPUT_REVISION"
+    conn.close()
+
+
+def test_posterior_ready_kma_event_reference_is_named_not_guessed(tmp_path,caplog):
+    from src.runtime.observation_reaction_trace import emit_posterior_ready
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    carried={"kma_event_id":"kma-1"}
+    conn=_posterior_db(tmp_path,provenance={"day0_current_temperature_state":_STATE,
+                                            "day0_current_temperature_input_ref":carried})
+    emit_posterior_ready(conn,7,wake_published=False)
+    (ready,)=_trace_events(caplog)
+    assert ready["input_ref"]==carried and ready["observation_ref"] is None
+    assert ready["input_reference_status"]=="CONSUMED_KMA_EVENT_REVISION"
+    conn.close()
+
+
+def test_posterior_ready_never_raises_into_the_materializer(caplog):
+    from src.runtime.observation_reaction_trace import emit_posterior_ready
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    conn=sqlite3.connect(":memory:")
+    assert emit_posterior_ready(conn,7,wake_published=False) is None
+    conn.close()
+    assert emit_posterior_ready(conn,7,wake_published=False) is None
+    assert _trace_events(caplog)==[]
+
+
+def test_reader_records_the_exact_row_without_changing_state_identity(tmp_path):
+    from src.config import cities_by_name
+    from src.data.day0_hourly_vectors import Day0CurrentTemperatureState, read_day0_current_temperature_state
+    from src.data.physical_current_sources import load_physical_current_sources
+    from src.data import station_temperature_adapters as adapters
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+    city=cities_by_name["Ankara"]
+    route=next(r for r in load_physical_current_sources()[0] if r.provider=="mgm_metar" and r.station_id==city.wu_station)
+    now=datetime.now(timezone.utc);observed=now-timedelta(minutes=2)
+    sample=adapters._sample(route,observed,12.0,now,"a"*64)
+    conn=sqlite3.connect(tmp_path/"world.sqlite");ensure_table(conn)
+    assert append_print(conn,city=city.name,station_id=route.station_id,source_channel=route.source_channel,
+        publish_ts_utc=observed.isoformat(),value_native=12.0,unit=route.unit,
+        fetched_at_utc=now.isoformat(),raw_report=sample.raw_report)
+    conn.commit()
+    (row_id,)=conn.execute("SELECT id FROM observation_prints").fetchone()
+    from zoneinfo import ZoneInfo
+    state=read_day0_current_temperature_state(conn=conn,city=city,
+        target_date=observed.astimezone(ZoneInfo(city.timezone)).date().isoformat(),decision_time=now)
+    assert state is not None and state.input_ref=={"print_id":row_id}
+    # Telemetry-only field: identity and equality stay exactly the old content law.
+    assert set(state.identity())=={"value_native","observed_at_utc","source"}
+    assert state==Day0CurrentTemperatureState(value_native=state.value_native,observed_at=state.observed_at,
+        source=state.source,clock_evidence=state.clock_evidence)
+    conn.close()
+
+
+def test_wake_published_names_its_own_posterior_and_hooks_never_raise(caplog,monkeypatch):
+    import scripts.materialize_replacement_forecast_live as cli
+    from src.runtime import reactor_wake
+    from src.runtime import observation_reaction_trace as trace
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    monkeypatch.setattr(reactor_wake,"publish_reactor_wake",lambda **kw:SimpleNamespace(wake_id="wake-9"))
+    request=fixtures._request()
+    assert cli._publish_materialization_wake(request,posterior_identity_hash="hash-7") is True
+    assert [(e["stage"],e["wake_id"],e["posterior_identity_hash"]) for e in _trace_events(caplog)]==[
+        ("WAKE_PUBLISHED","wake-9","hash-7")]
+    caplog.clear()
+    # A missing posterior identity never labels the wake with anything else.
+    assert cli._publish_materialization_wake(request) is True
+    assert _trace_events(caplog)==[]
+    monkeypatch.setattr(trace._LOG,"info",lambda *a,**k:(_ for _ in ()).throw(RuntimeError("sink")))
+    trace.emit_wake_published(wake_id="w",posterior_identity_hash="h")
+    trace.emit_wake_received(wake_id="w-raise")
+
+
+def test_wake_received_once_per_wake_and_joined_only_through_its_publication(caplog,monkeypatch):
+    from src.runtime import observation_reaction_trace as trace
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    monkeypatch.setattr(trace,"_RECEIVED",{})
+    trace.emit_wake_received(wake_id="wake-9")
+    trace.emit_wake_received(wake_id="wake-9")
+    trace.emit_wake_received(wake_id="")
+    received=_trace_events(caplog)
+    assert [(e["stage"],e["wake_id"]) for e in received]==[("WAKE_RECEIVED","wake-9")]
+    assert "posterior_identity_hash" not in received[0] or received[0]["posterior_identity_hash"] is None
+    published=[{"stage":"WAKE_PUBLISHED","wake_id":"wake-9","posterior_identity_hash":"hash-7"}]
+    labels=trace.published_wake_hashes(published)
+    assert trace.wake_posterior_hash(received[0],labels)=="hash-7"
+    # A second, different publication label for one wake_id is ambiguity, not latest-wins.
+    assert trace.published_wake_hashes(published+[dict(published[0],posterior_identity_hash="hash-8")])=={}
+
+
+def test_main_consumer_records_wake_receipt_before_dispatch(monkeypatch,caplog):
+    import src.main as main_module
+    from src.runtime import reactor_wake as wake_module
+    from src.runtime import observation_reaction_trace as trace
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    monkeypatch.setattr(trace,"_RECEIVED",{})
+    wake=wake_module.ReactorWake("wake-consumed","2026-10-05T08:00:00+00:00","replacement_forecast_materializer",
+        "forecast_posterior_advanced",forecast_families=(("Tokyo","2026-10-05","high"),))
+    seen=[]
+    def reactor(**kwargs):
+        seen.append([e["wake_id"] for e in _trace_events(caplog) if e["stage"]=="WAKE_RECEIVED"])
+        return False
+    class IdleLock:
+        def locked(self):return False
+    monkeypatch.setattr(main_module,"_defer_for_held_position_monitor",lambda _job:False)
+    monkeypatch.setattr(main_module,"_exit_monitor_excluded_wake_ids",lambda:frozenset())
+    monkeypatch.setattr(main_module,"_forecast_wake_held_families",lambda _f:frozenset())
+    monkeypatch.setattr(wake_module,"exact_held_sell_completion_wake_ids",lambda **_k:frozenset())
+    monkeypatch.setattr(wake_module,"strict_generic_held_family_completion_wakes",lambda **_k:())
+    monkeypatch.setattr(wake_module,"read_reactor_wake",lambda **_k:wake)
+    monkeypatch.setattr(wake_module,"coalescible_reactor_wakes",lambda _w:(wake,))
+    monkeypatch.setattr(main_module,"_edli_reactor_active_lock",IdleLock())
+    monkeypatch.setattr(main_module,"_edli_event_reactor_cycle",reactor)
+    monkeypatch.setattr(main_module,"_edli_last_reactor_wake_id",None)
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert seen==[["wake-consumed"],["wake-consumed"]]
+    assert [e["wake_id"] for e in _trace_events(caplog) if e["stage"]=="WAKE_RECEIVED"]==["wake-consumed"]
+
+
+# ---------------------------------------------------------------------------
+# Every WORLD observation_prints writer a posterior reads: one SOURCE_COMMITTED
+# per committed print, after the commit, with its exact revision.
+# ---------------------------------------------------------------------------
+
+def _world_db(path):
+    from src.state.schema.observation_prints_schema import ensure_table
+    with sqlite3.connect(path) as conn:
+        ensure_table(conn)
+    return path
+
+
+def _seed_print(path,**row):
+    from src.state.schema.observation_prints_schema import append_print
+    with sqlite3.connect(path) as conn:
+        assert append_print(conn,**row)
+
+
+def _committed(caplog,path,channel):
+    """SOURCE_COMMITTED lines and the rows actually committed on the channel."""
+    from src.runtime.observation_reaction_trace import observation_revision_reference
+    commits=[e for e in _trace_events(caplog) if e["stage"]=="SOURCE_COMMITTED"]
+    with sqlite3.connect(path) as conn:
+        conn.row_factory=sqlite3.Row
+        rows=[dict(r) for r in conn.execute(
+            "SELECT * FROM observation_prints WHERE source_channel=? AND raw_report IS NOT 'seed' ORDER BY id",(channel,))]
+    return commits,[observation_revision_reference(r) for r in rows]
+
+
+def _metar_report(raw,*,obs,first_seen):
+    from src.data.day0_fast_obs import parse_metar_report
+    report=parse_metar_report(raw,obs_time=obs,receipt_time=obs)
+    return replace(report,first_seen_at=first_seen) if hasattr(report,"first_seen_at") else report
+
+
+class _Lease:
+    def __init__(self,log=None):self.log=log
+    def __enter__(self):return SimpleNamespace(record_commit=lambda **_kw:None)
+    def __exit__(self,*_):return False
+
+
+def _metar_rows(now):
+    base=dict(city="Denver",station_id="KBKF",source_channel="aviationweather_metar",unit="C")
+    return [dict(base,publish_ts_utc=(now-timedelta(minutes=5)).isoformat(),value_native=21.0,
+                 fetched_at_utc=now.isoformat(),raw_report="KBKF A"),
+            dict(base,publish_ts_utc=(now-timedelta(minutes=65)).isoformat(),value_native=19.0,
+                 fetched_at_utc=now.isoformat(),raw_report="KBKF B")]
+
+
+def test_metar_alpha_commit_emits_each_inserted_print_after_release(monkeypatch,tmp_path,caplog):
+    import threading
+    import src.ingest_main as im
+    from src.state.schema.observation_prints_schema import append_print
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    path=_world_db(tmp_path/"world.db");now=datetime.now(timezone.utc)
+    _seed_print(path,city="Denver",station_id="KBKF",source_channel="aviationweather_metar",unit="C",
+        publish_ts_utc=(now-timedelta(minutes=35)).isoformat(),value_native=20.0,
+        fetched_at_utc=(now-timedelta(minutes=34)).isoformat(),raw_report="seed")
+    released=[]
+    class Mutex:
+        def acquire(self,**_k):return True
+        def release(self):released.append(time.time_ns()//1_000_000)
+    class Emitter:
+        def emit_prefetched(self,*,world_conn,**_kw):
+            for row in _metar_rows(now):append_print(world_conn,**row)
+            # A repeat of an existing revision is suppressed and is not a commit.
+            append_print(world_conn,**_metar_rows(now)[0])
+            return 0
+    monkeypatch.setattr(im,"_DAY0_METAR_PENDING_COMMITS",[])
+    monkeypatch.setattr(im,"_DAY0_METAR_COMMIT_LOCK",threading.Lock())
+    monkeypatch.setattr(im,"_day0_metar_emitter",lambda:Emitter())
+    monkeypatch.setattr("src.state.db.get_world_connection",lambda **_k:sqlite3.connect(path))
+    monkeypatch.setattr("src.state.db.world_write_mutex",lambda:Mutex())
+    monkeypatch.setattr("src.state.write_coordinator.default_runtime_write_coordinator",
+        lambda:SimpleNamespace(lease=lambda *_a,**_k:_Lease()))
+    im._DAY0_METAR_PENDING_COMMITS.append((SimpleNamespace(ledger_reports=(object(),),eligible=()),now.isoformat(),None))
+    assert im._commit_pending_day0_metar(origin="test")["status"]=="COMMITTED"
+    commits,refs=_committed(caplog,path,"aviationweather_metar")
+    assert [e["observation_ref"] for e in commits]==refs and len(refs)==2
+    assert [e["commit_disposition"] for e in commits]==["ADVANCES_SOURCE_FRONTIER","BEHIND_SOURCE_FRONTIER"]
+    assert all(e["recorded_at_ms"]>=released[0]>=e["world_committed_at_ms"]-1 for e in commits)
+
+
+def test_metar_ledger_flush_after_wake_emits_once_and_rollback_emits_nothing(monkeypatch,tmp_path,caplog):
+    import src.ingest_main as im
+    from src.state.schema.observation_prints_schema import append_print
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    path=_world_db(tmp_path/"world.db");now=datetime.now(timezone.utc)
+    outcome={"ok":False}
+    class Emitter:
+        def persist_prefetched_ledger(self,*,world_conn,prefetch):
+            for row in _metar_rows(now):append_print(world_conn,**row)
+            return outcome["ok"]
+    monkeypatch.setattr(im,"_day0_metar_emitter",lambda:Emitter())
+    monkeypatch.setattr("src.state.db.get_world_connection",lambda **_k:sqlite3.connect(path))
+    monkeypatch.setattr("src.state.db.world_write_mutex",lambda:SimpleNamespace(acquire=lambda **_k:True,release=lambda:None))
+    prefetch=SimpleNamespace(ledger_reports=(object(),))
+    assert im._persist_day0_metar_ledger_after_wake(prefetch) is False
+    assert _trace_events(caplog)==[]
+    outcome["ok"]=True
+    assert im._persist_day0_metar_ledger_after_wake(prefetch) is True
+    commits,refs=_committed(caplog,path,"aviationweather_metar")
+    assert [e["observation_ref"] for e in commits]==refs and len(refs)==2
+
+
+def test_obs_live_tick_write_emits_each_wu_print_after_commit(tmp_path,caplog):
+    import scripts.obs_live_tick as obs_tick
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    path=_world_db(tmp_path/"world.db");now=datetime.now(timezone.utc)
+    _seed_print(path,city="Denver",station_id="KBKF",source_channel="wu_icao_history",unit="F",
+        publish_ts_utc=(now-timedelta(minutes=35)).isoformat(),value_native=80.0,
+        fetched_at_utc=(now-timedelta(minutes=34)).isoformat(),raw_report="seed")
+    prints=[dict(city="Denver",station_id="KBKF",source_channel="wu_icao_history",unit="F",
+                 publish_ts_utc=(now-timedelta(minutes=m)).isoformat(),value_native=70.0+m,
+                 fetched_at_utc=now.isoformat(),raw_report=None) for m in (5,65)]
+    import unittest.mock as um
+    with um.patch.object(obs_tick,"insert_rows",lambda conn,rows:len(rows)), \
+         um.patch.object(obs_tick,"_emit_admitted_day0_events",lambda *a,**k:None):
+        assert obs_tick._write_rows(path,[object()],prints)==1
+    commits,refs=_committed(caplog,path,"wu_icao_history")
+    assert [e["observation_ref"] for e in commits]==refs and len(refs)==2
+    assert {e["commit_disposition"] for e in commits}=={"ADVANCES_SOURCE_FRONTIER","BEHIND_SOURCE_FRONTIER"}
+
+
+def test_noaa_wrh_prints_emit_only_this_requests_rows(monkeypatch,tmp_path,caplog):
+    from src.data import daily_obs_append as dao
+    from src.runtime.observation_reaction_trace import print_high_water, print_revisions
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    path=_world_db(tmp_path/"world.db");now=datetime.now(timezone.utc)
+    conn=sqlite3.connect(path)
+    before=print_high_water(conn)
+    from src.state.schema.observation_prints_schema import append_print
+    mine=dict(city="Chicago",station_id="KORD",source_channel="noaa_wrh_kord",unit="F",
+              publish_ts_utc=(now-timedelta(minutes=5)).isoformat(),value_native=61.0,fetched_at_utc=now.isoformat())
+    append_print(conn,**mine)
+    # A concurrent writer's row past the unlocked high-water is not this request's.
+    append_print(conn,**dict(mine,city="Austin",station_id="KAUS",source_channel="noaa_wrh_kaus"))
+    got=print_revisions(conn,after=before,match={"city":"Chicago","station_id":"KORD",
+        "source_channel":"noaa_wrh_kord","fetched_at_utc":now.isoformat()})
+    assert [r["city"] for r,_ in got]==["Chicago"]
+    conn.close()
+
+
+def test_hko_rhrread_print_emits_on_the_commit_that_makes_it_durable(monkeypatch,tmp_path,caplog):
+    from src.data import daily_obs_append as dao
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    path=_world_db(tmp_path/"world.db");now=datetime.now(timezone.utc)
+    conn=sqlite3.connect(path)
+    committed=[]
+    def accumulate(c,schema="main"):
+        dao._append_hko_rhrread_print_to_ledger(c,temp_c=29.0,now_utc=now,
+            source_issued_at=now-timedelta(minutes=5),raw_report="{}")
+        return True
+    def extract(c,**_k):
+        assert _trace_events(caplog)==[]  # Not durable yet: no stage line.
+        c.commit();committed.append(time.time_ns()//1_000_000)
+        return {}
+    monkeypatch.setattr(dao,"_accumulate_hko_reading",accumulate)
+    monkeypatch.setattr(dao,"append_hko_daily_extract_yesterday",extract)
+    monkeypatch.setattr(dao,"_noaa_daily_target_dates_due",lambda _now:{})
+    monkeypatch.setattr(dao,"cities_by_name",{})
+    dao.daily_tick(conn,now_utc=now.replace(hour=5))
+    commits,refs=_committed(caplog,path,"hko_rhrread_spot")
+    assert [e["observation_ref"] for e in commits]==refs and len(refs)==1
+    assert commits[0]["world_committed_at_ms"]>=committed[0]
+    conn.close()
+
+
+def test_print_commit_helpers_never_raise(caplog):
+    from src.runtime import observation_reaction_trace as trace
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    closed=sqlite3.connect(":memory:");closed.close()
+    assert trace.print_high_water(closed) is None and trace.last_print_id(closed) is None
+    assert trace.print_revisions(closed,after=0)==[] and trace.print_revisions(sqlite3.connect(":memory:"),after=0)==[]
+    trace.emit_print_commits([({"id":0},"X")],world_committed_at_ms=1)
+    trace.emit_print_commits(object(),world_committed_at_ms=1)
+    trace.emit_print_commits([({"id":1},"X")],world_committed_at_ms=None)
+    assert _trace_events(caplog)==[]
+
+
+def test_hko_current_print_emits_its_own_row_after_the_source_clock_commit(monkeypatch,tmp_path,caplog):
+    from email.utils import format_datetime
+    from zoneinfo import ZoneInfo
+    import src.ingest_main as im
+    from src.data import job_lock
+    caplog.set_level(logging.INFO,logger="zeus.observation_reaction")
+    path=_world_db(tmp_path/"world.db")
+    observed=datetime.now(timezone.utc).replace(second=0,microsecond=0)-timedelta(minutes=3)
+    body=("Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
+        f"{observed.astimezone(ZoneInfo('Asia/Hong_Kong')).strftime('%Y%m%d%H%M')},HK Observatory,28.4\n").encode()
+    current=SimpleNamespace(body=body,last_modified=format_datetime(observed+timedelta(seconds=10),usegmt=True),
+        fetched_at=observed+timedelta(seconds=40),response_headers=None)
+    released=[]
+    class Poller:
+        def prefetch_products(self):return None,current
+        def acknowledge_current(self,_p):pass
+    class Mutex:
+        def acquire(self,**_k):return True
+        def release(self):released.append(time.time_ns()//1_000_000)
+    from contextlib import contextmanager
+    @contextmanager
+    def lock(_name):yield True
+    monkeypatch.setattr(im,"_day0_hko_poller",lambda:Poller())
+    monkeypatch.setattr(job_lock,"acquire_lock",lock)
+    monkeypatch.setattr("src.state.db.get_world_connection",lambda **_k:sqlite3.connect(path))
+    monkeypatch.setattr("src.state.db.world_write_mutex",lambda:Mutex())
+    monkeypatch.setattr("src.state.write_coordinator.default_runtime_write_coordinator",
+        lambda:SimpleNamespace(lease=lambda *_a,**_k:_Lease()))
+    monkeypatch.setattr(im,"_bridge_committed_day0_events",lambda **_k:None)
+    monkeypatch.setattr(im,"_bridge_committed_hko_current_temperature",lambda **_k:())
+    monkeypatch.setattr(im,"_day0_family_admission_for_scopes",lambda _s:None)
+    im._k2_hko_tick()
+    commits,refs=_committed(caplog,path,"hko_current_1min_mean")
+    assert len(refs)==1 and [e["observation_ref"] for e in commits]==refs
+    assert commits[0]["recorded_at_ms"]>=released[0]>=commits[0]["world_committed_at_ms"]-1

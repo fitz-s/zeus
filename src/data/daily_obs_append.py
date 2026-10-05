@@ -2270,6 +2270,11 @@ def append_noaa_wrh_city(
             conn.commit()
             continue
 
+        from src.runtime.observation_reaction_trace import (
+            emit_print_commits, print_high_water, print_revisions,
+        )
+
+        prints_before = None
         try:
             _write_atom_with_coverage(conn, atom_high, atom_low, data_source=source_tag)
             stats["inserted"] += 1
@@ -2279,6 +2284,7 @@ def append_noaa_wrh_city(
             # reconstruction. A ledger failure must not discard the settlement
             # row that already succeeded, so it is logged and counted, never
             # raised.
+            prints_before = print_high_water(conn)  # Telemetry: one PK seek.
             try:
                 stats["prints_written"] = stats.get("prints_written", 0) + (
                     _append_noaa_wrh_prints(
@@ -2309,7 +2315,14 @@ def append_noaa_wrh_city(
                 reason=CoverageReason.NETWORK_ERROR,
                 retry_after=_retry_embargo(hours=1),
             )
+        # The high-water read is outside the write lock: keep only this request's rows.
+        committed_prints = print_revisions(conn, after=prints_before, match={
+            "city": city_name, "station_id": station,
+            "source_channel": noaa_wrh_source_tag(station), "fetched_at_utc": fetch_utc.isoformat(),
+        }) if prints_before is not None else []
         conn.commit()
+        # Exact commit clock; the caller's whole-batch flock is not released per date.
+        emit_print_commits(committed_prints, world_committed_at_ms=time.time_ns() // 1_000_000)
 
     conn.commit()
     return stats
@@ -2498,7 +2511,23 @@ def daily_tick(
     # temperature and store it. This builds up hourly readings throughout
     # the day so we can compute daily max/min even when CLMMAXT/CLMMINT
     # archives aren't yet available (they lag by weeks/months).
+    from src.runtime.observation_reaction_trace import (
+        emit_print_commits, print_high_water, print_revisions,
+    )
+
+    # Unqualified observation_prints resolves to the attached WORLD here.
+    rhrread_before = print_high_water(conn)
     _accumulate_hko_reading(conn, schema=hko_accumulator_schema)
+    # Read outside the write lock: only this writer appends this channel.
+    rhrread_prints = (
+        print_revisions(conn, after=rhrread_before,
+                        match={"city": "Hong Kong", "source_channel": "hko_rhrread_spot"})
+        if rhrread_before is not None else []
+    )
+    # An outermost RELEASE outside any transaction is itself the commit.
+    rhrread_pending = bool(rhrread_prints) and conn.in_transaction
+    if rhrread_prints and not rhrread_pending:
+        emit_print_commits(rhrread_prints, world_committed_at_ms=time.time_ns() // 1_000_000)
 
     # HKO's current-month Daily Extract is the market-named final source. Poll
     # only while yesterday lacks a source-correct VERIFIED row; once published,
@@ -2508,6 +2537,10 @@ def daily_tick(
         now_utc=now_utc,
         rebuild_run_id=rebuild_run_id,
     )
+    if rhrread_pending and not conn.in_transaction:
+        # The first commit after the append made the rhrread print durable.
+        emit_print_commits(rhrread_prints, world_committed_at_ms=time.time_ns() // 1_000_000)
+        rhrread_pending = False
 
     # HKO refresh: gate to once per day at UTC hour 2 (=10:00 HKT). Running
     # every hourly tick produced ~720 fetches/month with near-zero marginal

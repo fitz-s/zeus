@@ -878,6 +878,8 @@ def _template() -> dict[str, object]:
 
 def _publish_materialization_wake(
     request: ReplacementForecastMaterializeRequest,
+    *,
+    posterior_identity_hash: str | None = None,
 ) -> bool:
     """Wake the reactor immediately after this family's durable commit."""
     try:
@@ -907,6 +909,10 @@ def _publish_materialization_wake(
         request.temperature_metric,
         wake.wake_id,
     )
+    from src.runtime.observation_reaction_trace import emit_wake_published
+
+    # This wake's own posterior, never a later family-latest lookup.
+    emit_wake_published(wake_id=wake.wake_id, posterior_identity_hash=posterior_identity_hash)
     return True
 
 
@@ -1468,6 +1474,7 @@ def _materialize_request(
     anchor_artifact_id: int | None,
 ) -> tuple[int, dict[str, object]]:
     wake_published = False
+    posterior_hash: str | None = None
     receipt: _DurablePreparationReceipt | None = None
     try:
         if commit:
@@ -1511,11 +1518,14 @@ def _materialize_request(
                 # notification. A socket consumer can serve q inside publish;
                 # recording READY afterwards incorrectly reverses causality.
                 from src.runtime.observation_reaction_trace import emit_posterior_ready
-                emit_posterior_ready(conn, result.posterior_id, wake_published=False)
+                posterior_hash = emit_posterior_ready(conn, result.posterior_id, wake_published=False,
+                                                      readiness_id=result.readiness_id)
             if result.ok and publish_wake:
                 stage_receipt.mark("wake")
                 stage_receipt.require_budget()
-                wake_published = _publish_materialization_wake(request)
+                wake_published = _publish_materialization_wake(
+                    request, posterior_identity_hash=posterior_hash,
+                )
         else:
             if anchor_artifact_id is not None:
                 request = replace(request, anchor_artifact_id=anchor_artifact_id)
@@ -1678,6 +1688,9 @@ def _resident_worker() -> int:
     """Private queue transport: reuse imports/caches, never reuse a transaction."""
     import contextlib
     import os
+    from src.runtime.warm_materializer import attach_trace_log
+
+    attach_trace_log()
     allowed = {"--input-json", "--batch-input-json", "--deadline-utc", "--commit"}
     for line in iter(lambda: sys.stdin.readline(1024 * 1024 + 1), ""):
         if len(line) > 1024 * 1024:
