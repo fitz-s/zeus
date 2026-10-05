@@ -5,8 +5,9 @@
 #   records and continuous evaluation only; no calibration, proof study, gate or
 #   trade-affecting change. Provenance audit 2026-10-05: reuses the selector's own
 #   resolution horizon (src.engine.global_auction_universe._payload_resolution_at_utc,
-#   CURRENT) and the venue_trade_facts dedup law (tx_hash identity, CONFIRMED over
-#   MATCHED, sum(fills) <= 1.05 x command size else flagged).
+#   CURRENT) and the canonical venue_trade_facts dedup (src.state.fill_dedup:
+#   one row per (command_id, trade_id) by proof strength then local_sequence, tx-hash
+#   aggregate aliases excluded once an exact child exists).
 """Read-only multi-day evaluation of live entries, outcomes and exits.
 
 A report, never a verdict: no thresholds, no pass/fail, nothing here can change
@@ -61,7 +62,6 @@ POSITION_PHASES = OPEN_PHASES + ("economically_closed", "settled")
 ENTRY_FLOOR_DAYS = 7
 DEFAULT_DAYS = 14
 FILL_OVERSHOOT = 1.05
-_FILL_RANK = {"MATCHED": 1, "MINED": 2, "CONFIRMED": 3}
 _BATCH = 400
 
 
@@ -110,26 +110,17 @@ def market_age_hours(submitted: datetime | None, listed: datetime | None) -> flo
     return age if age is not None and age >= 0 else None
 
 
-def dedup_fills(rows: Iterable[Sequence[Any]], command_size: float) -> tuple[float, float, bool]:
-    """(shares, notional_usd, overshoot_flag) from venue_trade_facts rows.
+def fill_totals(rows: Iterable[Sequence[Any]], command_size: float) -> tuple[float, float, bool]:
+    """(shares, notional_usd, overshoot_flag) from economic (filled_size, fill_price) rows.
 
-    Rows are (state, filled_size, fill_price, tx_hash, observed_at, local_sequence).
-    The same physical fill is re-observed under several trade_ids and prices, so
-    identity is the 66-char tx_hash (round(size, 6) per command when absent) and
-    the best-state, latest observation wins. FAILED/RETRYING never count.
+    Rows are already exactly-once (see ``load_economic_fills``); several children may
+    share one tx_hash and several equal-size children may carry no tx_hash, so no
+    further identity folding happens here.
     """
-    best: dict[Any, tuple[tuple, float, float]] = {}
-    for state, size, price, tx, observed_at, seq in rows:
-        rank = _FILL_RANK.get(state)
-        if rank is None:
-            continue
-        shares = float(size)
-        key = tx if isinstance(tx, str) and tx.startswith("0x") and len(tx) == 66 else ("size", round(shares, 6))
-        cand = ((rank, observed_at or "", seq or 0), shares, float(price))
-        if key not in best or cand[0] > best[key][0]:
-            best[key] = cand
-    shares = sum(b[1] for b in best.values())
-    notional = sum(b[1] * b[2] for b in best.values())
+    shares = notional = 0.0
+    for size, price in rows:
+        shares += float(size)
+        notional += float(size) * float(price)
     return shares, notional, command_size > 0 and shares > FILL_OVERSHOOT * command_size
 
 
@@ -301,14 +292,7 @@ def load_trades_data(conn, since: date) -> dict:
         )
     ]
     fill_cmds = [e["command_id"] for e in td["entries"]] + [c["command_id"] for c in td["exit_cmds"]]
-    fills: dict[str, list] = {}
-    for r in _in_rows(
-        conn,
-        "SELECT command_id, state, filled_size, fill_price, tx_hash, observed_at, local_sequence "
-        "FROM venue_trade_facts WHERE command_id IN ({ph})",
-        fill_cmds,
-    ):
-        fills.setdefault(r[0], []).append(tuple(r)[1:])
+    fills = load_economic_fills(conn, fill_cmds)
     td["fills"] = fills
     entry_ids = {e["command_id"] for e in td["entries"]}
     td["entry_q"] = {
@@ -359,6 +343,31 @@ def load_trades_data(conn, since: date) -> dict:
         ).fetchone()
     )
     return td
+
+
+def load_economic_fills(conn, command_ids: Iterable[str]) -> dict[str, list[tuple[float, float]]]:
+    """command_id -> exactly-once [(filled_size, fill_price)] via the canonical fill law.
+
+    Scoped to the given commands before ranking, as src.state.fill_dedup requires (its
+    alias exclusion re-evaluates the canonical CTE, so an unscoped window rescans all
+    history).
+    """
+    from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
+
+    fills: dict[str, list[tuple[float, float]]] = {}
+    ids = sorted(set(command_ids))
+    for chunk in _chunks(ids):
+        ph = ",".join("?" * len(chunk))
+        sql = (
+            f"WITH {canonical_trade_fact_cte(source_clause_sql=f'WHERE fact.command_id IN ({ph})')}, "
+            f"{economic_trade_fact_cte()} "
+            "SELECT command_id, filled_size, fill_price FROM economic_trade_fact "
+            "WHERE UPPER(COALESCE(state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED') "
+            "AND CAST(COALESCE(filled_size, '0') AS REAL) > 0"
+        )
+        for command_id, size, price in conn.execute(sql, chunk):
+            fills.setdefault(command_id, []).append((float(size), float(price)))
+    return fills
 
 
 def load_listings(conn, condition_ids: Iterable[str]) -> dict[str, dict]:
@@ -457,7 +466,7 @@ def build_report(
             lead = None
         if lead is None:
             cov["settlement_lead_unknown"] += 1
-        shares, notional, flagged = dedup_fills(td["fills"].get(e["command_id"], ()), float(e["size"]))
+        shares, notional, flagged = fill_totals(td["fills"].get(e["command_id"], ()), float(e["size"]))
         q = td["entry_q"].get(e["command_id"])
         rec = {
             "command_id": e["command_id"],
@@ -553,7 +562,7 @@ def build_report(
         # exits (sell legs), judged against settlement where known
         shares = proceeds = 0.0
         for x in exits_by_pos.get(pid, ()):
-            s, n, _ = dedup_fills(td["fills"].get(x["command_id"], ()), float(x["size"]))
+            s, n, _ = fill_totals(td["fills"].get(x["command_id"], ()), float(x["size"]))
             shares += s
             proceeds += n
         if shares <= 0:

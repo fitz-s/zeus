@@ -33,8 +33,9 @@ def _entry(cid, pid, cond, hours_after_listing, *, metric="high", size=5.0, pric
     }
 
 
-def _fill(price, size=5.0, tx="0x" + "a" * 64, state="CONFIRMED", observed="2026-10-01T00:00:01+00:00", seq=1):
-    return (state, size, price, tx, observed, seq)
+def _fill(price, size=5.0, *_ignored):
+    """One economic fill as load_economic_fills returns it: (filled_size, fill_price)."""
+    return (size, price)
 
 
 def _pos(pid, *, metric="high", phase="settled", direction="buy_yes", pnl=None, cost=1.0,
@@ -144,16 +145,69 @@ def test_mean_q_vs_price_is_share_weighted_and_counts_missing_q():
     assert b["mean_q_minus_fill_price"] == pytest.approx(0.3)
 
 
-def test_fill_dedup_counts_a_refilled_trade_once():
-    rows = [
-        _fill(0.30, 5.0, "0x" + "a" * 64, "MATCHED", "2026-10-01T00:00:01+00:00", 1),
-        _fill(0.3012345678, 5.0, "0x" + "a" * 64, "CONFIRMED", "2026-10-01T00:00:09+00:00", 2),
-        _fill(0.30, 5.0, "0x" + "a" * 64, "FAILED", "2026-10-01T00:00:10+00:00", 3),
-    ]
-    shares, notional, flagged = me.dedup_fills(rows, 5.0)
-    assert shares == 5.0 and notional == pytest.approx(5.0 * 0.3012345678) and flagged is False
-    _, _, flagged = me.dedup_fills(rows + [_fill(0.3, 5.0, "0x" + "b" * 64)], 5.0)
-    assert flagged is True
+def test_fill_totals_flags_overshoot_only():
+    assert me.fill_totals([(2.0, 0.2), (3.0, 0.3)], 5.0) == (5.0, pytest.approx(1.3), False)
+    assert me.fill_totals([(5.0, 0.3), (5.0, 0.3)], 5.0)[2] is True
+    assert me.fill_totals([], 5.0) == (0.0, 0.0, False)
+
+
+def _facts_conn(rows):
+    """In-memory venue_trade_facts (real column set) holding (command, trade, state, size, price, tx, seq)."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id TEXT NOT NULL,
+            venue_order_id TEXT NOT NULL, command_id TEXT NOT NULL, state TEXT NOT NULL,
+            filled_size TEXT NOT NULL, fill_price TEXT NOT NULL, fee_paid_micro INTEGER,
+            tx_hash TEXT, block_number INTEGER, confirmation_count INTEGER DEFAULT 0,
+            source TEXT NOT NULL, observed_at TEXT NOT NULL, venue_timestamp TEXT,
+            ingested_at TEXT, local_sequence INTEGER NOT NULL, raw_payload_hash TEXT NOT NULL,
+            raw_payload_json TEXT, UNIQUE (trade_id, local_sequence))"""
+    )
+    for i, (cmd, trade, state, size, price, tx, seq) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO venue_trade_facts (trade_id, venue_order_id, command_id, state, filled_size, fill_price,"
+            " tx_hash, source, observed_at, local_sequence, raw_payload_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (trade, "o-" + cmd, cmd, state, str(size), str(price), tx, "REST", f"2026-10-01T00:00:{i:02d}+00:00", seq, f"h{i}"),
+        )
+    return conn
+
+
+TX = "0x" + "c" * 64
+
+
+def test_children_sharing_one_tx_hash_both_count():
+    """Counterexample 1: two exact children (2@0.2, 3@0.3) under ONE tx are 5 sh / $1.30."""
+    conn = _facts_conn([
+        ("c1", "child-a", "CONFIRMED", 2, 0.2, TX, 1),
+        ("c1", "child-b", "CONFIRMED", 3, 0.3, TX, 1),
+    ])
+    assert sorted(me.load_economic_fills(conn, ["c1"])["c1"]) == [(2.0, 0.2), (3.0, 0.3)]
+    assert me.fill_totals(me.load_economic_fills(conn, ["c1"])["c1"], 5.0)[:2] == (5.0, pytest.approx(1.3))
+
+
+def test_equal_size_children_without_tx_hash_both_count():
+    """Counterexample 2: two 5@0.4 children with no tx_hash are two fills, not one."""
+    conn = _facts_conn([
+        ("c1", "child-a", "CONFIRMED", 5, 0.4, None, 1),
+        ("c1", "child-b", "CONFIRMED", 5, 0.4, None, 1),
+    ])
+    assert me.fill_totals(me.load_economic_fills(conn, ["c1"])["c1"], 10.0)[:2] == (10.0, pytest.approx(4.0))
+
+
+def test_lifecycle_revisions_and_tx_aggregate_alias_count_once():
+    conn = _facts_conn([
+        ("c1", "t1", "MATCHED", 4, 0.30, TX, 1),
+        ("c1", "t1", "MINED", 4, 0.30, TX, 2),
+        ("c1", "t1", "CONFIRMED", 4, 0.3012345, TX, 3),   # lifecycle revisions of ONE trade
+        ("c1", TX, "MATCHED", 4, 0.30, TX, 1),            # tx-hash aggregate alias of that child
+        ("c1", "t2", "FAILED", 9, 0.9, None, 1),          # never an economic fill
+        ("c2", "t3", "CONFIRMED", 1, 0.5, None, 1),
+    ])
+    fills = me.load_economic_fills(conn, ["c1", "c2"])
+    assert fills["c1"] == [(4.0, pytest.approx(0.3012345))]
+    assert fills["c2"] == [(1.0, 0.5)]
+    assert me.load_economic_fills(conn, ["nope"]) == {}
 
 
 def test_sell_vs_hold_regret_sign_and_unresolved_exits():
@@ -247,8 +301,10 @@ def _make_dbs(tmp_path, *, with_market_events=True, with_attribution=True):
         CREATE TABLE position_current (position_id TEXT, phase TEXT, city TEXT, target_date TEXT,
             temperature_metric TEXT, direction TEXT, cost_basis_usd REAL, entry_price REAL, condition_id TEXT,
             realized_pnl_usd REAL, settled_at TEXT, settlement_price REAL, exit_reason TEXT);
-        CREATE TABLE venue_trade_facts (command_id TEXT, state TEXT, filled_size TEXT, fill_price TEXT,
-            tx_hash TEXT, observed_at TEXT, local_sequence INTEGER);
+        CREATE TABLE venue_trade_facts (trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id TEXT,
+            venue_order_id TEXT, command_id TEXT, state TEXT, filled_size TEXT, fill_price TEXT,
+            fee_paid_micro INTEGER, tx_hash TEXT, observed_at TEXT, venue_timestamp TEXT,
+            local_sequence INTEGER, raw_payload_json TEXT);
         CREATE TABLE venue_command_events (command_id TEXT, event_type TEXT, payload_json TEXT);
         CREATE TABLE position_events (position_id TEXT, event_type TEXT, payload_json TEXT, sequence_no INTEGER);
         CREATE TABLE decision_log (mode TEXT, timestamp TEXT, artifact_json TEXT);
@@ -258,7 +314,11 @@ def _make_dbs(tmp_path, *, with_market_events=True, with_attribution=True):
     t.execute("INSERT INTO executable_market_snapshots VALUES ('s1','A')")
     t.execute("INSERT INTO position_current VALUES ('p1','settled','Tokyo','2026-10-02','high','buy_yes',1.0,0.2,'A',4.0,"
               "'2026-10-03T01:00:00+00:00',1.0,'SETTLEMENT')")
-    t.execute("INSERT INTO venue_trade_facts VALUES ('c1','CONFIRMED','5','0.2','0x" + "a" * 64 + "','2026-10-01T06:00:05+00:00',1)")
+    t.execute(
+        "INSERT INTO venue_trade_facts (trade_id, venue_order_id, command_id, state, filled_size, fill_price,"
+        " tx_hash, observed_at, local_sequence) VALUES ('t1','o1','c1','CONFIRMED','5','0.2','0x" + "a" * 64
+        + "','2026-10-01T06:00:05+00:00',1)"
+    )
     payload = {"execution_capability": {"components": [{"component": "entry_economics", "details": {"q_live": 0.61}}]}}
     t.execute("INSERT INTO venue_command_events VALUES ('c1','SUBMIT_REQUESTED',?)", (json.dumps(payload),))
     t.commit(); t.close()
