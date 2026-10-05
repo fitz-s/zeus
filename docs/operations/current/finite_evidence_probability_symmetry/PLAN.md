@@ -16684,3 +16684,25 @@ and has no production caller; total index/range/receipt budget, native quantity
 validation and normal-priority checks are not a live data qualification.
 Child regular ignored example-config bootstrap needs exact cleanup, not live
 config changes; no needed raw inputs or running child commands were reported.
+
+Task-only preservation completed on fix/hko-native-audit-20261005: create-only
+named branch push40d3cadf7, origin/live remains6179; old remoteede216 checkpoint
+is preserved, never force-updated. HKO four and native two file hashes match all
+named freezes after rebase/cherry-pick; compile6/YAML3/diff/planning/freshness
+PASS. Unchanged owner tests were not repeated for counts. No live push/load.
+
+Completed child native-2t-run-audit was recoverably archived under managed
+identity /Users/leofitz/.codex/worktrees/native-2t-run-audit/zeus,
+artifact01a1097b-4bba-7f50-93b7-f0bf6f68145d (confirmed archived_worktree).
+Original child commite9b720930 is retained by recovery; identical source/test
+are parent263d634f0. Its known regular example-config dc944640 was precisely
+removed (not a live target/link); only disposable pytest cache remained and no
+handles/needed ignored inputs existed. Exact task/native-2t-run-audit local
+branch was deleted with expected-old-SHA CAS after archive confirmation.
+Parent remains active and unfinished, with private example bootstrap intact.
+
+Latest native worker RO normal-phase facts00:31:24->00:33:17Z: 18Z HIGH/LOW
+source runs FAILED/MISSING,0members/0count/importNULL,503/NOT_RELEASED;
+next normal jobs were RUNNING with lock-acquired00:32:58.129/.173. The empty
+00:32:56 lsof sample is only an FD observation, not a proven OS-lock/audit
+window. No actual native2t audit/HTTP/body evidence or live q input activation.
