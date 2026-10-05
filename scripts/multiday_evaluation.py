@@ -50,7 +50,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import faulthandler
+import fcntl
 import json
 import logging
 import os
@@ -1077,6 +1079,37 @@ def render_markdown(rep: Mapping[str, Any]) -> str:
 # Entry points
 # --------------------------------------------------------------------------
 ARTIFACT_NAMES = ("multiday_evaluation.md", "multiday_evaluation.json")
+WRITE_LOCK_NAME = "multiday_evaluation.write.lock"
+
+
+class OutputBusy(RuntimeError):
+    """Another run holds the output directory's write lock; this run must not touch the artifacts."""
+
+
+@contextlib.contextmanager
+def _write_lock(out_dir: Path):
+    """Exclusive, non-blocking flock on a fixed lock file for the whole cleanup + write phase.
+
+    The artifacts use fixed temp names, so two runs writing at once (a CLI beside the daemon's
+    child) can unlink or replace each other's ``.tmp`` and the first writer's os.replace then raises
+    FileNotFoundError. One lock serializes the whole phase and is also what makes stale-``.tmp``
+    cleanup safe: while it is held no other run is between write_text and replace, so any ``.tmp``
+    present belongs to a run that died. flock is advisory, released by the kernel when the holder
+    exits or is killed (watchdog, SIGKILL included), and never leaves a stale lock to clear.
+    Contention raises OutputBusy at once instead of waiting; the lock file itself is never removed
+    (removing it would let two runs lock different inodes).
+    """
+    fd = os.open(out_dir / WRITE_LOCK_NAME, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                raise OutputBusy(f"{out_dir / WRITE_LOCK_NAME} is held by another run") from exc
+            raise
+        yield
+    finally:
+        os.close(fd)      # closing the descriptor releases the flock
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -1087,6 +1120,9 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def clear_stale_tmp(out_dir: Path) -> list[str]:
     """Unlink the fixed-name ``.tmp`` of each artifact left by a killed run; returns what it removed.
+
+    Call it only while holding ``_write_lock``: without it a concurrent run's live ``.tmp`` is
+    indistinguishable from a dead run's, and unlinking it makes that run's os.replace fail.
 
     The faulthandler watchdog (and a parent SIGKILL) exit without running ``finally`` or atexit,
     so a kill between ``write_text`` and ``os.replace`` leaves at most one ``<artifact>.tmp`` per
@@ -1171,12 +1207,13 @@ def run_multiday_evaluation(
     if write:
         out = Path(out_dir) if out_dir else Path(STATE_DIR)
         out.mkdir(parents=True, exist_ok=True)
-        stale = clear_stale_tmp(out)
-        if stale:
-            logger.warning("removed stale temp artifacts from a killed run: %s", stale)
-        _atomic_write(out / "multiday_evaluation.md", report["markdown"])
-        body = {k: v for k, v in report.items() if k != "markdown"}
-        _atomic_write(out / "multiday_evaluation.json", json.dumps(body, indent=1))
+        with _write_lock(out):
+            stale = clear_stale_tmp(out)
+            if stale:
+                logger.warning("removed stale temp artifacts from a killed run: %s", stale)
+            _atomic_write(out / "multiday_evaluation.md", report["markdown"])
+            body = {k: v for k, v in report.items() if k != "markdown"}
+            _atomic_write(out / "multiday_evaluation.json", json.dumps(body, indent=1))
         lap("write")
     return report
 
@@ -1209,6 +1246,9 @@ def main(argv: Sequence[str] | None = None, *, watchdog: bool = False) -> int:
             out_dir=args.out_dir,
             write=not args.no_write,
         )
+    except OutputBusy as exc:
+        logger.warning("output busy, no report this cadence: %s", exc)
+        return EXIT_DB_BUSY
     except sqlite3.OperationalError as exc:
         if "locked" in str(exc).lower() or "busy" in str(exc).lower():
             logger.warning("database busy, no report this cadence: %s", exc)

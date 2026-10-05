@@ -1184,7 +1184,9 @@ def test_a_run_clears_a_stale_tmp_before_writing_and_leaves_only_the_artifacts(t
     out.mkdir()
     (out / "multiday_evaluation.json.tmp").write_text("left by a watchdog kill")
     _run(tmp_path, dbs)
-    assert sorted(p.name for p in out.iterdir()) == ["multiday_evaluation.json", "multiday_evaluation.md"]
+    # the two artifacts, plus the lock file that is deliberately never removed
+    assert sorted(p.name for p in out.iterdir()) == [
+        "multiday_evaluation.json", "multiday_evaluation.md", me.WRITE_LOCK_NAME]
 
 
 def test_watchdog_kill_between_write_and_replace_leaves_the_tmp_and_the_next_run_removes_it(tmp_path):
@@ -1207,3 +1209,164 @@ def test_watchdog_kill_between_write_and_replace_leaves_the_tmp_and_the_next_run
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 1 and (out / "multiday_evaluation.json.tmp").exists()   # the claim 'nothing left' was false
     assert me.clear_stale_tmp(out) == ["multiday_evaluation.json.tmp"]
+
+
+# ------------------------------------------------------- one writer at a time (flock)
+def test_write_lock_is_exclusive_non_blocking_and_released_on_exit(tmp_path):
+    with me._write_lock(tmp_path):
+        with pytest.raises(me.OutputBusy):
+            with me._write_lock(tmp_path):                      # a second holder is refused at once
+                pytest.fail("two holders of the same lock")
+    with me._write_lock(tmp_path):                              # released: acquirable again
+        pass
+    assert (tmp_path / me.WRITE_LOCK_NAME).exists()            # the lock file is never removed
+
+
+def test_write_lock_is_released_by_the_kernel_when_its_holder_is_killed(tmp_path):
+    import subprocess
+
+    code = (
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(me.PROJECT_ROOT)!r})\n"
+        "from pathlib import Path\n"
+        "from scripts import multiday_evaluation as me\n"
+        f"with me._write_lock(Path({str(tmp_path)!r})):\n"
+        "    print('held', flush=True)\n"
+        "    time.sleep(60)\n"
+    )
+    holder = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        with pytest.raises(me.OutputBusy):
+            with me._write_lock(tmp_path):
+                pass
+    finally:
+        holder.kill()                                           # SIGKILL: no finally, no atexit
+        holder.wait()
+    with me._write_lock(tmp_path):                              # no stale lock to clear
+        pass
+
+
+def test_a_run_that_cannot_take_the_lock_touches_nothing_and_exits_busy(tmp_path):
+    import subprocess
+
+    dbs = _make_dbs(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "multiday_evaluation.json.tmp").write_text("a live writer's temp file")
+    with me._write_lock(out):                                   # another run is mid-write
+        proc = subprocess.run(
+            [sys.executable, str(me.PROJECT_ROOT / "scripts" / "multiday_evaluation.py"), "--quiet",
+             "--since", "2026-09-28", "--trades-db", str(dbs[0]), "--forecasts-db", str(dbs[1]),
+             "--world-db", str(dbs[2]), "--out-dir", str(out)],
+            capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+        )
+        assert proc.returncode == me.EXIT_DB_BUSY, proc.stderr
+        assert "output busy" in proc.stderr
+        # the busy run neither cleaned up the live .tmp nor wrote anything
+        assert (out / "multiday_evaluation.json.tmp").read_text() == "a live writer's temp file"
+        assert not (out / "multiday_evaluation.json").exists() and not (out / "multiday_evaluation.md").exists()
+
+
+def test_cleanup_only_runs_inside_the_lock_so_a_live_tmp_is_never_unlinked(tmp_path):
+    """Sol's race: run B cleans up between run A's write_text and replace. With the lock, B cannot
+    reach cleanup while A holds it, and A's replace never sees a missing .tmp."""
+    out = tmp_path / "out"
+    out.mkdir()
+    with me._write_lock(out):                                   # run A, between write_text and replace
+        tmp = out / "multiday_evaluation.json.tmp"
+        tmp.write_text("A's half-written artifact")
+        with pytest.raises(me.OutputBusy):                      # run B is refused before any cleanup
+            with me._write_lock(out):
+                me.clear_stale_tmp(out)
+        assert tmp.exists()
+        os.replace(tmp, out / "multiday_evaluation.json")        # A's replace succeeds
+    assert (out / "multiday_evaluation.json").read_text() == "A's half-written artifact"
+
+
+def test_two_concurrent_real_writers_never_corrupt_or_unlink_each_others_output(tmp_path):
+    """Two processes write the same output dir at once, many times over: every run either writes both
+    artifacts completely or exits 75 having touched nothing; the artifacts are always valid and no
+    run ever dies on a FileNotFoundError."""
+    import subprocess
+
+    dbs = _make_dbs(tmp_path)
+    out = tmp_path / "out"
+    cmd = [sys.executable, str(me.PROJECT_ROOT / "scripts" / "multiday_evaluation.py"), "--quiet",
+           "--since", "2026-09-28", "--trades-db", str(dbs[0]), "--forecasts-db", str(dbs[1]),
+           "--world-db", str(dbs[2]), "--out-dir", str(out)]
+    codes: list[int] = []
+    errs: list[str] = []
+    for _ in range(4):
+        procs = [subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  stdin=subprocess.DEVNULL) for _ in range(3)]
+        for p in procs:
+            _o, e = p.communicate(timeout=120)
+            codes.append(p.returncode)
+            errs.append(e)
+        assert all(c in (0, me.EXIT_DB_BUSY) for c in codes), (codes, errs[-3:])
+        doc = json.loads((out / "multiday_evaluation.json").read_text())
+        assert doc["schema"] == me.SCHEMA                                  # never a torn file
+        assert (out / "multiday_evaluation.md").read_text().startswith("# Multi-day evaluation")
+        assert not list(out.glob("*.tmp"))                                 # no temp left after clean exits
+    assert 0 in codes and not any("FileNotFoundError" in e for e in errs)
+
+
+def test_deterministic_interleaving_of_two_runs_write_phases(tmp_path, monkeypatch):
+    """A writes its .tmp and pauses before os.replace; B then tries its whole cleanup + write phase.
+    B must be refused before cleanup (so A's .tmp survives) and A's replace must succeed.
+    Against the pre-lock code this exact interleaving made A die with FileNotFoundError."""
+    import threading
+
+    out = tmp_path / "out"
+    out.mkdir()
+    a_wrote, b_done = threading.Event(), threading.Event()
+    result: dict = {}
+    real_replace = os.replace
+
+    def paused_replace(src, dst):
+        a_wrote.set()
+        assert b_done.wait(10)
+        return real_replace(src, dst)
+
+    def run_a():
+        try:
+            with me._write_lock(out):
+                monkeypatch.setattr(me.os, "replace", paused_replace)
+                me._atomic_write(out / "multiday_evaluation.json", '{"schema": "A"}')
+            result["A"] = "ok"
+        except Exception as exc:                                   # noqa: BLE001
+            result["A"] = type(exc).__name__
+        finally:
+            monkeypatch.setattr(me.os, "replace", real_replace)
+
+    def run_b():
+        assert a_wrote.wait(10)
+        try:
+            with me._write_lock(out):
+                me.clear_stale_tmp(out)
+                result["B"] = "cleaned"
+        except me.OutputBusy:
+            result["B"] = "busy"
+        finally:
+            b_done.set()
+
+    ta, tb = threading.Thread(target=run_a), threading.Thread(target=run_b)
+    ta.start()
+    tb.start()
+    ta.join(20)
+    tb.join(20)
+    assert result == {"A": "ok", "B": "busy"}
+    assert json.loads((out / "multiday_evaluation.json").read_text()) == {"schema": "A"}
+
+
+def test_unlocked_concurrent_cleanup_reproduces_the_race_this_lock_prevents(tmp_path):
+    """Pins the failure being fixed: without the lock, cleanup between write_text and replace makes the
+    first writer's replace raise FileNotFoundError."""
+    out = tmp_path / "out"
+    out.mkdir()
+    tmp = out / "multiday_evaluation.json.tmp"
+    tmp.write_text("A")                                         # A: write_text done
+    me.clear_stale_tmp(out)                                     # B: cleanup, no lock held
+    with pytest.raises(FileNotFoundError):
+        os.replace(tmp, out / "multiday_evaluation.json")       # A: replace
