@@ -16727,3 +16727,37 @@ untracked artifact groups remain untouched. Native audit worker was told
 deployment preparation is busy and performed zero HTTP, no forced source.
 Normal initializer will arm its own guard and revalidate capital gates; no
 external durable-pauseFalse will be relabeled as admission or used to bypass.
+
+Executed delivery: normal FF6179->97295949ae093acc6c7a200046e318a3846ef45e
+and landed-ancestor proof passed; live checkout only FF, unrelated16 artifact
+groups retained. One registered loader started03:35:24Z, PID22599/session18410,
+/tmp/zeus-hko-native-forward-loader-20261005.D3k6aN/normal-loader.log;
+actualCLIrc0 (final toolchunk9f148e). Normal pre-stop arm/revalidation proved
+16 open/nonterminal0/bookcomplete/2typed probability degraded before STOP.
+NewMAIN23519 stamp03:37:11.024942Z loaded972; INGEST22772/FORECAST22823 fixed
+boot972. FreshHB03:40:23/03:39:34/03:40:08, all cwdlive; MAIN has canonical
+WORLD/FORECAST/TRADE handles, INGEST WORLD/FORECAST. FORECAST22823's transient
+DB handles were not observed in the two instantaneous FD samples; fixed boot,
+heartbeat and cwd alone are not relabeled as that FD proof. Config file remainsd7,
+in-process config readback not obtained. Current actual guard getterNone at
+03:40:54, not inferred from historical loader restart_guard_not_selected.
+Post-start queue receipt907951 is scope1 and not a full-global authority proof.
+
+New normal HKO cumulative row9942197 production original verified: Oct5 native
+202610051130/asofUTC03:30, HIGH29.0/LOW25.1; actual acquisition03:38:04.972792
+to03:38:05.160841 <= import/projection-write03:38:06.449764. Original decoded
+entity1527B, base64/SHA9ec196538eb1b095839125a88a67b3e25ca0f973dcc570a8ade780b175cd867a
+and raw_response UTF8 exact-byte replay agree, unique HK Observatory CSV row
+contains both official fields/nativeDateTime. Actual owning live parser replays
+H/L/target/fact exactly at03:40:54.786085Z; source-issuedNone remainsUNKNOWN,
+not HTTP Date or nativecut. Earlier row9942196 remainsrawNULL, not retrofitted.
+An initial RO parser check used the nonexistent snapshot field
+official_running_high_c and failedAttributeError; correcting the checker to
+actual high_c/low_c gave actualrc0, not counted as source RED or mutation.
+
+Source byte/clock slice loaded and naturally captured; currentprob03:38 saw
+latestq742707H/742708L still using old03:20 input, no new-q consumption proof
+yet. Native2t helper remains dormant OFFLINE_ONLY/zero HTTP; no source-run/
+snapshot/oldraw rewrite or probability-regime activation. Unknown-past/domain/
+full physical representativeness and overall profit/readiness remain OPEN.
+Checkpoint only after runtime acceptance; no restart or live push for notes.
