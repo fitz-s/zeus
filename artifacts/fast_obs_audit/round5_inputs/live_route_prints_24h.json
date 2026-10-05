@@ -1,0 +1,1157 @@
+[
+{
+"station": "CYYZ",
+"channel": "aviationweather_metar",
+"n": 72,
+"first": "2026-10-04T00:07:25.060327+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "CYYZ",
+"channel": "eccc_swob_temperature",
+"n": 33,
+"first": "2026-10-04T00:02:20.835417+00:00",
+"last": "2026-10-05T09:01:52.291855+00:00"
+},
+{
+"station": "CYYZ",
+"channel": "noaa_wrh_cyyz",
+"n": 49,
+"first": "2026-10-04T05:05:51.713373+00:00",
+"last": "2026-10-05T05:05:47.548125+00:00"
+},
+{
+"station": "CYYZ",
+"channel": "ogimet_metar_cyyz",
+"n": 48,
+"first": "2026-10-04T05:16:58.443594+00:00",
+"last": "2026-10-05T05:16:44.164059+00:00"
+},
+{
+"station": "DNMM",
+"channel": "aviationweather_metar",
+"n": 42,
+"first": "2026-10-04T00:13:56.001807+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "DNMM",
+"channel": "wu_icao_history",
+"n": 23,
+"first": "2026-10-04T00:22:12.558880+00:00",
+"last": "2026-10-05T09:00:53.262982+00:00"
+},
+{
+"station": "EDDM",
+"channel": "aviationweather_metar",
+"n": 106,
+"first": "2026-10-04T00:23:19.931273+00:00",
+"last": "2026-10-05T08:54:12.488621+00:00"
+},
+{
+"station": "EDDM",
+"channel": "dwd_cdc_temperature",
+"n": 187,
+"first": "2026-10-04T00:23:44.208279+00:00",
+"last": "2026-10-05T08:50:40.276132+00:00"
+},
+{
+"station": "EDDM",
+"channel": "noaa_wrh_eddm",
+"n": 48,
+"first": "2026-10-05T01:05:30.525688+00:00",
+"last": "2026-10-05T01:05:30.525688+00:00"
+},
+{
+"station": "EDDM",
+"channel": "ogimet_metar_eddm",
+"n": 48,
+"first": "2026-10-04T23:17:18.939683+00:00",
+"last": "2026-10-04T23:17:18.939683+00:00"
+},
+{
+"station": "EFHK",
+"channel": "aviationweather_metar",
+"n": 104,
+"first": "2026-10-04T00:22:20.386592+00:00",
+"last": "2026-10-05T08:51:17.272775+00:00"
+},
+{
+"station": "EFHK",
+"channel": "fmi_airport_temperature",
+"n": 191,
+"first": "2026-10-04T00:02:45.690995+00:00",
+"last": "2026-10-05T09:02:41.222514+00:00"
+},
+{
+"station": "EFHK",
+"channel": "noaa_wrh_efhk",
+"n": 96,
+"first": "2026-10-04T01:05:05.732973+00:00",
+"last": "2026-10-05T01:05:05.411415+00:00"
+},
+{
+"station": "EFHK",
+"channel": "ogimet_metar_efhk",
+"n": 48,
+"first": "2026-10-04T22:15:43.993000+00:00",
+"last": "2026-10-04T22:15:43.993000+00:00"
+},
+{
+"station": "EGLC",
+"channel": "aviationweather_metar",
+"n": 87,
+"first": "2026-10-04T00:24:20.134606+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "EGLC",
+"channel": "noaa_wrh_eglc",
+"n": 96,
+"first": "2026-10-04T00:05:06.859771+00:00",
+"last": "2026-10-05T00:05:04.249561+00:00"
+},
+{
+"station": "EGLC",
+"channel": "ogimet_metar_eglc",
+"n": 96,
+"first": "2026-10-04T00:22:16.772970+00:00",
+"last": "2026-10-05T00:15:51.415455+00:00"
+},
+{
+"station": "EHAM",
+"channel": "aviationweather_metar",
+"n": 102,
+"first": "2026-10-04T00:27:25.222401+00:00",
+"last": "2026-10-05T08:58:22.658091+00:00"
+},
+{
+"station": "EHAM",
+"channel": "noaa_wrh_eham",
+"n": 48,
+"first": "2026-10-04T23:05:05.828417+00:00",
+"last": "2026-10-04T23:05:05.828417+00:00"
+},
+{
+"station": "EHAM",
+"channel": "ogimet_metar_eham",
+"n": 48,
+"first": "2026-10-04T23:15:29.751204+00:00",
+"last": "2026-10-04T23:15:29.751204+00:00"
+},
+{
+"station": "EPWA",
+"channel": "aviationweather_metar",
+"n": 127,
+"first": "2026-10-04T00:02:33.227882+00:00",
+"last": "2026-10-05T09:02:22.266003+00:00"
+},
+{
+"station": "EPWA",
+"channel": "imgw_synop_temperature",
+"n": 26,
+"first": "2026-10-04T00:15:46.060100+00:00",
+"last": "2026-10-05T08:48:54.100877+00:00"
+},
+{
+"station": "EPWA",
+"channel": "noaa_wrh_epwa",
+"n": 48,
+"first": "2026-10-04T23:07:21.476823+00:00",
+"last": "2026-10-04T23:07:21.476823+00:00"
+},
+{
+"station": "EPWA",
+"channel": "ogimet_metar_epwa",
+"n": 48,
+"first": "2026-10-04T23:18:22.110386+00:00",
+"last": "2026-10-04T23:18:22.110386+00:00"
+},
+{
+"station": "FACT",
+"channel": "aviationweather_metar",
+"n": 63,
+"first": "2026-10-04T00:05:39.989653+00:00",
+"last": "2026-10-05T09:05:07.211214+00:00"
+},
+{
+"station": "FACT",
+"channel": "noaa_wrh_fact",
+"n": 48,
+"first": "2026-10-04T01:05:04.687194+00:00",
+"last": "2026-10-04T23:05:32.308826+00:00"
+},
+{
+"station": "FACT",
+"channel": "ogimet_metar_fact",
+"n": 24,
+"first": "2026-10-04T23:15:50.833202+00:00",
+"last": "2026-10-04T23:15:50.833202+00:00"
+},
+{
+"station": "HKO",
+"channel": "hko_current_1min_mean",
+"n": 180,
+"first": "2026-10-04T00:08:31.632187+00:00",
+"last": "2026-10-05T08:58:05.930521+00:00"
+},
+{
+"station": "HKO",
+"channel": "hko_rhrread_spot",
+"n": 30,
+"first": "2026-10-04T00:05:01.145216+00:00",
+"last": "2026-10-05T09:05:00.642183+00:00"
+},
+{
+"station": "KATL",
+"channel": "aviationweather_metar",
+"n": 82,
+"first": "2026-10-04T00:40:24.110599+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "KATL",
+"channel": "noaa_wrh_katl",
+"n": 41,
+"first": "2026-10-04T00:56:22.510374+00:00",
+"last": "2026-10-05T08:57:02.673474+00:00"
+},
+{
+"station": "KATL",
+"channel": "ogimet_metar_katl",
+"n": 61,
+"first": "2026-10-04T05:15:32.029938+00:00",
+"last": "2026-10-05T05:15:19.867431+00:00"
+},
+{
+"station": "KAUS",
+"channel": "aviationweather_metar",
+"n": 85,
+"first": "2026-10-04T00:40:24.110599+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "KAUS",
+"channel": "noaa_wrh_kaus",
+"n": 43,
+"first": "2026-10-04T00:56:22.510374+00:00",
+"last": "2026-10-05T08:57:02.673474+00:00"
+},
+{
+"station": "KAUS",
+"channel": "ogimet_metar_kaus",
+"n": 27,
+"first": "2026-10-04T06:15:29.395749+00:00",
+"last": "2026-10-04T06:15:29.395749+00:00"
+},
+{
+"station": "KBKF",
+"channel": "aviationweather_metar",
+"n": 69,
+"first": "2026-10-04T00:15:40.601490+00:00",
+"last": "2026-10-05T05:26:13.782610+00:00"
+},
+{
+"station": "KBKF",
+"channel": "noaa_wrh_kbkf",
+"n": 30,
+"first": "2026-10-04T00:20:55.555414+00:00",
+"last": "2026-10-05T05:11:51.760551+00:00"
+},
+{
+"station": "KBKF",
+"channel": "ogimet_metar_kbkf",
+"n": 25,
+"first": "2026-10-04T08:15:50.704098+00:00",
+"last": "2026-10-04T08:15:50.704098+00:00"
+},
+{
+"station": "KDAL",
+"channel": "aviationweather_metar",
+"n": 92,
+"first": "2026-10-04T00:40:24.110599+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "KDAL",
+"channel": "noaa_wrh_kdal",
+"n": 47,
+"first": "2026-10-04T00:47:32.742643+00:00",
+"last": "2026-10-05T08:57:02.673474+00:00"
+},
+{
+"station": "KDAL",
+"channel": "ogimet_metar_kdal",
+"n": 32,
+"first": "2026-10-04T06:16:11.588420+00:00",
+"last": "2026-10-04T06:16:11.588420+00:00"
+},
+{
+"station": "KHOU",
+"channel": "aviationweather_metar",
+"n": 56,
+"first": "2026-10-04T00:40:24.110599+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "KHOU",
+"channel": "noaa_wrh_khou",
+"n": 32,
+"first": "2026-10-04T00:57:32.084229+00:00",
+"last": "2026-10-05T08:57:02.673474+00:00"
+},
+{
+"station": "KHOU",
+"channel": "ogimet_metar_khou",
+"n": 25,
+"first": "2026-10-04T06:16:32.795716+00:00",
+"last": "2026-10-04T06:16:32.795716+00:00"
+},
+{
+"station": "KLAX",
+"channel": "aviationweather_metar",
+"n": 51,
+"first": "2026-10-04T00:40:24.110599+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "KLAX",
+"channel": "noaa_wrh_klax",
+"n": 32,
+"first": "2026-10-04T00:57:32.084229+00:00",
+"last": "2026-10-05T08:57:02.673474+00:00"
+},
+{
+"station": "KLAX",
+"channel": "ogimet_metar_klax",
+"n": 24,
+"first": "2026-10-04T08:16:11.748220+00:00",
+"last": "2026-10-04T08:16:11.748220+00:00"
+},
+{
+"station": "KLGA",
+"channel": "aviationweather_metar",
+"n": 75,
+"first": "2026-10-04T00:55:06.003839+00:00",
+"last": "2026-10-05T08:54:12.488621+00:00"
+},
+{
+"station": "KLGA",
+"channel": "noaa_wrh_klga",
+"n": 44,
+"first": "2026-10-04T00:57:32.084229+00:00",
+"last": "2026-10-05T08:57:02.673474+00:00"
+},
+{
+"station": "KLGA",
+"channel": "ogimet_metar_klga",
+"n": 55,
+"first": "2026-10-04T05:16:37.426772+00:00",
+"last": "2026-10-05T05:16:23.098869+00:00"
+},
+{
+"station": "KMIA",
+"channel": "aviationweather_metar",
+"n": 56,
+"first": "2026-10-04T00:40:24.110599+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "KMIA",
+"channel": "noaa_wrh_kmia",
+"n": 35,
+"first": "2026-10-04T00:57:32.084229+00:00",
+"last": "2026-10-05T08:57:02.673474+00:00"
+},
+{
+"station": "KMIA",
+"channel": "ogimet_metar_kmia",
+"n": 50,
+"first": "2026-10-04T05:16:16.301408+00:00",
+"last": "2026-10-05T05:16:01.969399+00:00"
+},
+{
+"station": "KORD",
+"channel": "aviationweather_metar",
+"n": 44,
+"first": "2026-10-04T00:55:06.003839+00:00",
+"last": "2026-10-05T08:54:12.488621+00:00"
+},
+{
+"station": "KORD",
+"channel": "noaa_wrh_kord",
+"n": 31,
+"first": "2026-10-04T00:56:22.510374+00:00",
+"last": "2026-10-05T08:57:02.673474+00:00"
+},
+{
+"station": "KORD",
+"channel": "ogimet_metar_kord",
+"n": 24,
+"first": "2026-10-04T06:15:50.588647+00:00",
+"last": "2026-10-04T06:15:50.588647+00:00"
+},
+{
+"station": "KSEA",
+"channel": "aviationweather_metar",
+"n": 86,
+"first": "2026-10-04T00:40:24.110599+00:00",
+"last": "2026-10-05T08:58:22.658091+00:00"
+},
+{
+"station": "KSEA",
+"channel": "noaa_wrh_ksea",
+"n": 48,
+"first": "2026-10-04T00:57:32.084229+00:00",
+"last": "2026-10-05T08:58:05.243104+00:00"
+},
+{
+"station": "KSEA",
+"channel": "ogimet_metar_ksea",
+"n": 30,
+"first": "2026-10-04T08:17:35.982781+00:00",
+"last": "2026-10-04T08:17:35.982781+00:00"
+},
+{
+"station": "KSFO",
+"channel": "aviationweather_metar",
+"n": 62,
+"first": "2026-10-04T00:40:24.110599+00:00",
+"last": "2026-10-05T08:59:57.670511+00:00"
+},
+{
+"station": "KSFO",
+"channel": "noaa_wrh_ksfo",
+"n": 32,
+"first": "2026-10-04T00:59:48.832090+00:00",
+"last": "2026-10-05T08:59:36.431913+00:00"
+},
+{
+"station": "KSFO",
+"channel": "ogimet_metar_ksfo",
+"n": 24,
+"first": "2026-10-04T08:17:14.930614+00:00",
+"last": "2026-10-04T08:17:14.930614+00:00"
+},
+{
+"station": "LEMD",
+"channel": "aviationweather_metar",
+"n": 118,
+"first": "2026-10-04T00:04:16.777543+00:00",
+"last": "2026-10-05T09:04:47.260242+00:00"
+},
+{
+"station": "LEMD",
+"channel": "noaa_wrh_lemd",
+"n": 48,
+"first": "2026-10-04T23:05:37.528191+00:00",
+"last": "2026-10-04T23:05:37.528191+00:00"
+},
+{
+"station": "LEMD",
+"channel": "ogimet_metar_lemd",
+"n": 48,
+"first": "2026-10-04T23:16:32.988734+00:00",
+"last": "2026-10-04T23:16:32.988734+00:00"
+},
+{
+"station": "LFPB",
+"channel": "aviationweather_metar",
+"n": 112,
+"first": "2026-10-04T00:02:33.227882+00:00",
+"last": "2026-10-05T09:02:22.311688+00:00"
+},
+{
+"station": "LFPB",
+"channel": "noaa_wrh_lfpb",
+"n": 48,
+"first": "2026-10-04T23:06:39.424426+00:00",
+"last": "2026-10-04T23:06:39.424426+00:00"
+},
+{
+"station": "LFPB",
+"channel": "ogimet_metar_lfpb",
+"n": 48,
+"first": "2026-10-04T23:18:01.133315+00:00",
+"last": "2026-10-04T23:18:01.133315+00:00"
+},
+{
+"station": "LIMC",
+"channel": "aviationweather_metar",
+"n": 108,
+"first": "2026-10-04T00:25:19.973503+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "LIMC",
+"channel": "noaa_wrh_limc",
+"n": 48,
+"first": "2026-10-04T23:05:57.038179+00:00",
+"last": "2026-10-04T23:05:57.038179+00:00"
+},
+{
+"station": "LIMC",
+"channel": "ogimet_metar_limc",
+"n": 48,
+"first": "2026-10-04T23:16:54.020209+00:00",
+"last": "2026-10-04T23:16:54.020209+00:00"
+},
+{
+"station": "LLBG",
+"channel": "aviationweather_metar",
+"n": 95,
+"first": "2026-10-04T00:20:41.340251+00:00",
+"last": "2026-10-05T08:52:42.517475+00:00"
+},
+{
+"station": "LLBG",
+"channel": "noaa_wrh_llbg",
+"n": 47,
+"first": "2026-10-05T01:05:51.628063+00:00",
+"last": "2026-10-05T01:05:51.628063+00:00"
+},
+{
+"station": "LLBG",
+"channel": "ogimet_metar_llbg",
+"n": 47,
+"first": "2026-10-04T22:18:00.216340+00:00",
+"last": "2026-10-04T22:18:00.216340+00:00"
+},
+{
+"station": "LTAC",
+"channel": "aviationweather_metar",
+"n": 105,
+"first": "2026-10-04T00:25:04.853723+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "LTAC",
+"channel": "mgm_metar_temperature",
+"n": 64,
+"first": "2026-10-04T00:24:42.870529+00:00",
+"last": "2026-10-05T08:55:01.870602+00:00"
+},
+{
+"station": "LTAC",
+"channel": "noaa_wrh_ltac",
+"n": 96,
+"first": "2026-10-04T00:05:04.727136+00:00",
+"last": "2026-10-05T01:05:03.158864+00:00"
+},
+{
+"station": "LTAC",
+"channel": "ogimet_metar_ltac",
+"n": 48,
+"first": "2026-10-04T22:15:22.938839+00:00",
+"last": "2026-10-04T22:15:22.938839+00:00"
+},
+{
+"station": "LTFM",
+"channel": "aviationweather_metar",
+"n": 90,
+"first": "2026-10-04T00:25:09.910932+00:00",
+"last": "2026-10-05T08:55:44.213653+00:00"
+},
+{
+"station": "LTFM",
+"channel": "mgm_metar_temperature",
+"n": 58,
+"first": "2026-10-04T05:05:45.909012+00:00",
+"last": "2026-10-05T08:55:01.870602+00:00"
+},
+{
+"station": "LTFM",
+"channel": "noaa_wrh_ltfm",
+"n": 96,
+"first": "2026-10-04T01:05:07.897191+00:00",
+"last": "2026-10-05T01:05:07.513979+00:00"
+},
+{
+"station": "LTFM",
+"channel": "ogimet_metar_ltfm",
+"n": 48,
+"first": "2026-10-04T22:16:05.130976+00:00",
+"last": "2026-10-04T22:16:05.130976+00:00"
+},
+{
+"station": "MMMX",
+"channel": "aviationweather_metar",
+"n": 87,
+"first": "2026-10-04T00:00:05.220450+00:00",
+"last": "2026-10-05T08:59:57.670511+00:00"
+},
+{
+"station": "MMMX",
+"channel": "noaa_wrh_mmmx",
+"n": 44,
+"first": "2026-10-04T07:05:11.028568+00:00",
+"last": "2026-10-04T07:05:11.028568+00:00"
+},
+{
+"station": "MMMX",
+"channel": "ogimet_metar_mmmx",
+"n": 35,
+"first": "2026-10-04T07:16:14.879502+00:00",
+"last": "2026-10-04T07:16:14.879502+00:00"
+},
+{
+"station": "MPMG",
+"channel": "aviationweather_metar",
+"n": 56,
+"first": "2026-10-04T00:00:55.722896+00:00",
+"last": "2026-10-05T03:36:02.295489+00:00"
+},
+{
+"station": "MPMG",
+"channel": "noaa_wrh_mpmg",
+"n": 26,
+"first": "2026-10-04T06:06:11.864283+00:00",
+"last": "2026-10-04T06:06:11.864283+00:00"
+},
+{
+"station": "MPMG",
+"channel": "ogimet_metar_mpmg",
+"n": 28,
+"first": "2026-10-04T00:23:00.490200+00:00",
+"last": "2026-10-05T03:16:08.826757+00:00"
+},
+{
+"station": "NZAA",
+"channel": "aviationweather_metar",
+"n": 116,
+"first": "2026-10-04T00:04:35.100199+00:00",
+"last": "2026-10-05T09:04:47.260242+00:00"
+},
+{
+"station": "NZAA",
+"channel": "wu_icao_history",
+"n": 60,
+"first": "2026-10-04T00:22:07.227275+00:00",
+"last": "2026-10-05T05:15:10.953955+00:00"
+},
+{
+"station": "NZWN",
+"channel": "aviationweather_metar",
+"n": 116,
+"first": "2026-10-04T00:04:35.100199+00:00",
+"last": "2026-10-05T09:04:47.260242+00:00"
+},
+{
+"station": "NZWN",
+"channel": "noaa_wrh_nzwn",
+"n": 48,
+"first": "2026-10-04T12:05:06.604683+00:00",
+"last": "2026-10-04T12:05:06.604683+00:00"
+},
+{
+"station": "NZWN",
+"channel": "ogimet_metar_nzwn",
+"n": 46,
+"first": "2026-10-04T12:16:37.596662+00:00",
+"last": "2026-10-04T12:16:37.596662+00:00"
+},
+{
+"station": "OEJN",
+"channel": "aviationweather_metar",
+"n": 62,
+"first": "2026-10-04T00:00:19.897229+00:00",
+"last": "2026-10-05T09:00:32.316722+00:00"
+},
+{
+"station": "OEJN",
+"channel": "noaa_wrh_oejn",
+"n": 48,
+"first": "2026-10-04T00:44:49.111604+00:00",
+"last": "2026-10-04T22:05:49.286021+00:00"
+},
+{
+"station": "OEJN",
+"channel": "ogimet_metar_oejn",
+"n": 24,
+"first": "2026-10-04T22:16:26.199654+00:00",
+"last": "2026-10-04T22:16:26.199654+00:00"
+},
+{
+"station": "OPKC",
+"channel": "aviationweather_metar",
+"n": 125,
+"first": "2026-10-04T00:01:25.139014+00:00",
+"last": "2026-10-05T09:01:27.245031+00:00"
+},
+{
+"station": "OPKC",
+"channel": "noaa_wrh_opkc",
+"n": 48,
+"first": "2026-10-04T20:05:08.193042+00:00",
+"last": "2026-10-04T20:05:08.193042+00:00"
+},
+{
+"station": "OPKC",
+"channel": "ogimet_metar_opkc",
+"n": 48,
+"first": "2026-10-04T20:15:45.931286+00:00",
+"last": "2026-10-04T20:15:45.931286+00:00"
+},
+{
+"station": "RCSS",
+"channel": "aviationweather_metar",
+"n": 123,
+"first": "2026-10-04T00:06:30.196521+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "RCSS",
+"channel": "wu_icao_history",
+"n": 62,
+"first": "2026-10-04T00:22:15.206959+00:00",
+"last": "2026-10-05T09:00:54.425335+00:00"
+},
+{
+"station": "RJTT",
+"channel": "aviationweather_metar",
+"n": 126,
+"first": "2026-10-04T00:06:20.162248+00:00",
+"last": "2026-10-05T09:05:32.310373+00:00"
+},
+{
+"station": "RJTT",
+"channel": "jma_amedas_temperature",
+"n": 190,
+"first": "2026-10-04T00:07:13.899970+00:00",
+"last": "2026-10-05T08:58:13.666546+00:00"
+},
+{
+"station": "RJTT",
+"channel": "noaa_wrh_rjtt",
+"n": 48,
+"first": "2026-10-04T18:09:43.184635+00:00",
+"last": "2026-10-04T18:09:43.184635+00:00"
+},
+{
+"station": "RJTT",
+"channel": "ogimet_metar_rjtt",
+"n": 48,
+"first": "2026-10-04T16:17:03.710302+00:00",
+"last": "2026-10-04T16:17:03.710302+00:00"
+},
+{
+"station": "RKPK",
+"channel": "aviationweather_metar",
+"n": 64,
+"first": "2026-10-04T00:04:29.998023+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "RKPK",
+"channel": "noaa_wrh_rkpk",
+"n": 25,
+"first": "2026-10-04T18:09:35.343535+00:00",
+"last": "2026-10-04T18:09:35.343535+00:00"
+},
+{
+"station": "RKPK",
+"channel": "ogimet_metar_rkpk",
+"n": 25,
+"first": "2026-10-04T16:15:39.484888+00:00",
+"last": "2026-10-04T16:15:39.484888+00:00"
+},
+{
+"station": "RKSI",
+"channel": "aviationweather_metar",
+"n": 120,
+"first": "2026-10-04T00:04:29.998023+00:00",
+"last": "2026-10-05T09:04:47.260242+00:00"
+},
+{
+"station": "RKSI",
+"channel": "noaa_wrh_rksi",
+"n": 48,
+"first": "2026-10-04T18:09:38.931666+00:00",
+"last": "2026-10-04T18:09:38.931666+00:00"
+},
+{
+"station": "RKSI",
+"channel": "ogimet_metar_rksi",
+"n": 48,
+"first": "2026-10-04T16:16:42.591398+00:00",
+"last": "2026-10-04T16:16:42.591398+00:00"
+},
+{
+"station": "RPLL",
+"channel": "aviationweather_metar",
+"n": 82,
+"first": "2026-10-04T00:04:35.007601+00:00",
+"last": "2026-10-05T09:05:32.252579+00:00"
+},
+{
+"station": "RPLL",
+"channel": "noaa_wrh_rpll",
+"n": 22,
+"first": "2026-10-04T17:06:34.943734+00:00",
+"last": "2026-10-04T17:06:34.943734+00:00"
+},
+{
+"station": "RPLL",
+"channel": "ogimet_metar_rpll",
+"n": 25,
+"first": "2026-10-04T17:18:57.623201+00:00",
+"last": "2026-10-04T17:18:57.623201+00:00"
+},
+{
+"station": "SAEZ",
+"channel": "aviationweather_metar",
+"n": 94,
+"first": "2026-10-04T00:04:10.721647+00:00",
+"last": "2026-10-05T09:04:47.260242+00:00"
+},
+{
+"station": "SAEZ",
+"channel": "noaa_wrh_saez",
+"n": 67,
+"first": "2026-10-04T06:05:08.041838+00:00",
+"last": "2026-10-05T04:05:03.232759+00:00"
+},
+{
+"station": "SAEZ",
+"channel": "ogimet_metar_saez",
+"n": 66,
+"first": "2026-10-04T04:15:11.301774+00:00",
+"last": "2026-10-05T04:15:22.543156+00:00"
+},
+{
+"station": "SBGR",
+"channel": "aviationweather_metar",
+"n": 75,
+"first": "2026-10-04T00:00:55.722896+00:00",
+"last": "2026-10-05T09:01:33.737866+00:00"
+},
+{
+"station": "SBGR",
+"channel": "noaa_wrh_sbgr",
+"n": 55,
+"first": "2026-10-04T04:05:09.337274+00:00",
+"last": "2026-10-05T04:05:08.100684+00:00"
+},
+{
+"station": "SBGR",
+"channel": "ogimet_metar_sbgr",
+"n": 56,
+"first": "2026-10-04T04:16:14.446446+00:00",
+"last": "2026-10-05T04:16:25.609518+00:00"
+},
+{
+"station": "UUWW",
+"channel": "aviationweather_metar",
+"n": 166,
+"first": "2026-10-04T00:04:29.998023+00:00",
+"last": "2026-10-05T09:04:47.260242+00:00"
+},
+{
+"station": "UUWW",
+"channel": "noaa_wrh_uuww",
+"n": 96,
+"first": "2026-10-04T00:44:50.872185+00:00",
+"last": "2026-10-04T22:06:11.115231+00:00"
+},
+{
+"station": "UUWW",
+"channel": "ogimet_metar_uuww",
+"n": 48,
+"first": "2026-10-04T22:17:10.191110+00:00",
+"last": "2026-10-04T22:17:10.191110+00:00"
+},
+{
+"station": "VILK",
+"channel": "aviationweather_metar",
+"n": 132,
+"first": "2026-10-04T00:34:29.934288+00:00",
+"last": "2026-10-05T09:02:22.311688+00:00"
+},
+{
+"station": "VILK",
+"channel": "imd_olbs_metar_temperature",
+"n": 59,
+"first": "2026-10-04T00:32:00.958488+00:00",
+"last": "2026-10-05T08:48:18.942377+00:00"
+},
+{
+"station": "VILK",
+"channel": "noaa_wrh_vilk",
+"n": 47,
+"first": "2026-10-04T21:05:13.860426+00:00",
+"last": "2026-10-04T21:05:13.860426+00:00"
+},
+{
+"station": "VILK",
+"channel": "ogimet_metar_vilk",
+"n": 61,
+"first": "2026-10-04T00:22:38.872439+00:00",
+"last": "2026-10-05T05:15:40.900296+00:00"
+},
+{
+"station": "WIHH",
+"channel": "aviationweather_metar",
+"n": 114,
+"first": "2026-10-04T00:05:20.206097+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "WIHH",
+"channel": "wu_icao_history",
+"n": 62,
+"first": "2026-10-04T00:22:10.859177+00:00",
+"last": "2026-10-05T09:00:51.314401+00:00"
+},
+{
+"station": "WMKK",
+"channel": "aviationweather_metar",
+"n": 126,
+"first": "2026-10-04T00:08:30.887947+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "WMKK",
+"channel": "noaa_wrh_wmkk",
+"n": 48,
+"first": "2026-10-04T17:06:12.457736+00:00",
+"last": "2026-10-04T17:06:12.457736+00:00"
+},
+{
+"station": "WMKK",
+"channel": "ogimet_metar_wmkk",
+"n": 48,
+"first": "2026-10-04T17:18:15.285562+00:00",
+"last": "2026-10-04T17:18:15.285562+00:00"
+},
+{
+"station": "WSSS",
+"channel": "aviationweather_metar",
+"n": 119,
+"first": "2026-10-04T00:00:47.518875+00:00",
+"last": "2026-10-05T09:01:33.737866+00:00"
+},
+{
+"station": "WSSS",
+"channel": "noaa_wrh_wsss",
+"n": 48,
+"first": "2026-10-04T17:07:57.639378+00:00",
+"last": "2026-10-04T17:07:57.639378+00:00"
+},
+{
+"station": "WSSS",
+"channel": "ogimet_metar_wsss",
+"n": 48,
+"first": "2026-10-04T17:20:42.978547+00:00",
+"last": "2026-10-04T17:20:42.978547+00:00"
+},
+{
+"station": "ZBAA",
+"channel": "aviationweather_metar",
+"n": 120,
+"first": "2026-10-04T00:06:30.262478+00:00",
+"last": "2026-10-05T09:05:22.308154+00:00"
+},
+{
+"station": "ZBAA",
+"channel": "noaa_wrh_zbaa",
+"n": 48,
+"first": "2026-10-04T17:05:05.113135+00:00",
+"last": "2026-10-04T17:05:05.113135+00:00"
+},
+{
+"station": "ZBAA",
+"channel": "ogimet_metar_zbaa",
+"n": 48,
+"first": "2026-10-04T17:16:31.814672+00:00",
+"last": "2026-10-04T17:16:31.814672+00:00"
+},
+{
+"station": "ZGGG",
+"channel": "aviationweather_metar",
+"n": 125,
+"first": "2026-10-04T00:06:30.117412+00:00",
+"last": "2026-10-05T09:05:22.308154+00:00"
+},
+{
+"station": "ZGGG",
+"channel": "noaa_wrh_zggg",
+"n": 50,
+"first": "2026-10-04T17:05:52.453206+00:00",
+"last": "2026-10-04T17:05:52.453206+00:00"
+},
+{
+"station": "ZGGG",
+"channel": "ogimet_metar_zggg",
+"n": 48,
+"first": "2026-10-04T17:17:54.217214+00:00",
+"last": "2026-10-04T17:17:54.217214+00:00"
+},
+{
+"station": "ZGSZ",
+"channel": "aviationweather_metar",
+"n": 61,
+"first": "2026-10-04T00:06:30.194092+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "ZGSZ",
+"channel": "noaa_wrh_zgsz",
+"n": 24,
+"first": "2026-10-04T18:09:41.146869+00:00",
+"last": "2026-10-04T18:09:41.146869+00:00"
+},
+{
+"station": "ZGSZ",
+"channel": "ogimet_metar_zgsz",
+"n": 24,
+"first": "2026-10-04T17:20:21.813239+00:00",
+"last": "2026-10-04T17:20:21.813239+00:00"
+},
+{
+"station": "ZHCC",
+"channel": "aviationweather_metar",
+"n": 58,
+"first": "2026-10-04T00:06:30.262478+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "ZHCC",
+"channel": "noaa_wrh_zhcc",
+"n": 24,
+"first": "2026-10-04T17:09:00.396365+00:00",
+"last": "2026-10-04T17:09:00.396365+00:00"
+},
+{
+"station": "ZHCC",
+"channel": "ogimet_metar_zhcc",
+"n": 24,
+"first": "2026-10-04T17:21:38.093173+00:00",
+"last": "2026-10-04T17:21:38.093173+00:00"
+},
+{
+"station": "ZHHH",
+"channel": "aviationweather_metar",
+"n": 63,
+"first": "2026-10-04T00:06:30.262478+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "ZHHH",
+"channel": "noaa_wrh_zhhh",
+"n": 24,
+"first": "2026-10-04T17:08:39.980496+00:00",
+"last": "2026-10-04T17:08:39.980496+00:00"
+},
+{
+"station": "ZHHH",
+"channel": "ogimet_metar_zhhh",
+"n": 24,
+"first": "2026-10-04T17:21:16.955797+00:00",
+"last": "2026-10-04T17:21:16.955797+00:00"
+},
+{
+"station": "ZSJN",
+"channel": "wu_icao_history",
+"n": 40,
+"first": "2026-10-04T00:22:09.052577+00:00",
+"last": "2026-10-05T09:00:40.165894+00:00"
+},
+{
+"station": "ZSJN",
+"channel": "wu_station_current_temperature",
+"n": 180,
+"first": "2026-10-04T00:01:39.370385+00:00",
+"last": "2026-10-05T09:03:07.460344+00:00"
+},
+{
+"station": "ZSJN",
+"channel": "wu_station_history_temperature",
+"n": 32,
+"first": "2026-10-04T00:03:25.231649+00:00",
+"last": "2026-10-05T08:51:45.696380+00:00"
+},
+{
+"station": "ZSPD",
+"channel": "aviationweather_metar",
+"n": 120,
+"first": "2026-10-04T00:06:30.262478+00:00",
+"last": "2026-10-05T09:05:22.308154+00:00"
+},
+{
+"station": "ZSPD",
+"channel": "noaa_wrh_zspd",
+"n": 48,
+"first": "2026-10-04T17:07:15.509823+00:00",
+"last": "2026-10-04T17:07:15.509823+00:00"
+},
+{
+"station": "ZSPD",
+"channel": "ogimet_metar_zspd",
+"n": 48,
+"first": "2026-10-04T17:20:00.827229+00:00",
+"last": "2026-10-04T17:20:00.827229+00:00"
+},
+{
+"station": "ZSQD",
+"channel": "aviationweather_metar",
+"n": 59,
+"first": "2026-10-04T00:06:30.262478+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "ZSQD",
+"channel": "noaa_wrh_zsqd",
+"n": 24,
+"first": "2026-10-04T17:06:54.637151+00:00",
+"last": "2026-10-04T17:06:54.637151+00:00"
+},
+{
+"station": "ZSQD",
+"channel": "ogimet_metar_zsqd",
+"n": 24,
+"first": "2026-10-04T17:19:39.602173+00:00",
+"last": "2026-10-04T17:19:39.602173+00:00"
+},
+{
+"station": "ZUCK",
+"channel": "aviationweather_metar",
+"n": 59,
+"first": "2026-10-04T00:06:30.262478+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "ZUCK",
+"channel": "noaa_wrh_zuck",
+"n": 24,
+"first": "2026-10-04T17:05:38.615563+00:00",
+"last": "2026-10-04T17:05:38.615563+00:00"
+},
+{
+"station": "ZUCK",
+"channel": "ogimet_metar_zuck",
+"n": 24,
+"first": "2026-10-04T17:17:14.001237+00:00",
+"last": "2026-10-04T17:17:14.001237+00:00"
+},
+{
+"station": "ZUUU",
+"channel": "aviationweather_metar",
+"n": 59,
+"first": "2026-10-04T00:06:30.117928+00:00",
+"last": "2026-10-05T08:46:13.911862+00:00"
+},
+{
+"station": "ZUUU",
+"channel": "noaa_wrh_zuuu",
+"n": 24,
+"first": "2026-10-04T17:05:17.775528+00:00",
+"last": "2026-10-04T17:05:17.775528+00:00"
+},
+{
+"station": "ZUUU",
+"channel": "ogimet_metar_zuuu",
+"n": 24,
+"first": "2026-10-04T17:16:52.897823+00:00",
+"last": "2026-10-04T17:16:52.897823+00:00"
+}
+]

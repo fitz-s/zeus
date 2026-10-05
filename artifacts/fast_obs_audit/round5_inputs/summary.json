@@ -1,0 +1,566 @@
+{
+  "source_ref": "4fc49964784b4bf25fd68fac0b8a05c128793d09",
+  "configuration_sha256": "0415319997103e603f9a9a017902dd52300806907805024cf6f6e6e538ca3dfb",
+  "read_started_at": "2026-10-05T09:04:47.571210+00:00",
+  "trade_snapshot_established_at": "2026-10-05T09:04:49.047117+00:00",
+  "trade_read_finished_at": "2026-10-05T09:04:50.680061+00:00",
+  "forecast_metadata_read_at": "2026-10-05T09:04:52.573982+00:00",
+  "metadata_error": null,
+  "snapshot_note": "TRADE is one consistent read transaction; FORECAST metadata is a later sequential immutable-identity annotation, not a cross-DB atomic snapshot.",
+  "local_endpoint": "exclusive midnight after target_date in pinned city timezone; 1 microsecond later than datetime.time.max",
+  "expected_grain": "one row per venue_commands.command_id, both ENTRY and EXIT; no P&L allocation",
+  "commands": 5352,
+  "buckets": [
+    {
+      "clock": "venue",
+      "intent": "ENTRY",
+      "bucket": "<6h",
+      "total": 702,
+      "states": {
+        "CANCELLED": 310,
+        "EXPIRED": 149,
+        "FILLED": 216,
+        "REJECTED": 27
+      },
+      "venue_acknowledged": 662,
+      "confirmed_fill_fact": 277
+    },
+    {
+      "clock": "venue",
+      "intent": "ENTRY",
+      "bucket": "6-24h",
+      "total": 1205,
+      "states": {
+        "CANCELLED": 573,
+        "EXPIRED": 157,
+        "FILLED": 442,
+        "REJECTED": 31,
+        "SUBMIT_REJECTED": 2
+      },
+      "venue_acknowledged": 1144,
+      "confirmed_fill_fact": 521
+    },
+    {
+      "clock": "venue",
+      "intent": "ENTRY",
+      "bucket": "24-48h",
+      "total": 1165,
+      "states": {
+        "CANCELLED": 520,
+        "EXPIRED": 139,
+        "FILLED": 454,
+        "REJECTED": 41,
+        "SUBMIT_REJECTED": 11
+      },
+      "venue_acknowledged": 1068,
+      "confirmed_fill_fact": 500
+    },
+    {
+      "clock": "venue",
+      "intent": "ENTRY",
+      "bucket": "48-96h",
+      "total": 165,
+      "states": {
+        "CANCELLED": 111,
+        "EXPIRED": 15,
+        "FILLED": 37,
+        "REJECTED": 2
+      },
+      "venue_acknowledged": 157,
+      "confirmed_fill_fact": 47
+    },
+    {
+      "clock": "venue",
+      "intent": "ENTRY",
+      "bucket": ">96h",
+      "total": 0,
+      "states": {},
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 0
+    },
+    {
+      "clock": "venue",
+      "intent": "ENTRY",
+      "bucket": "UNKNOWN_ENDPOINT",
+      "total": 1084,
+      "states": {
+        "CANCELLED": 386,
+        "EXPIRED": 174,
+        "FILLED": 506,
+        "REJECTED": 14,
+        "SUBMIT_REJECTED": 4
+      },
+      "venue_acknowledged": 1006,
+      "confirmed_fill_fact": 578
+    },
+    {
+      "clock": "venue",
+      "intent": "ENTRY",
+      "bucket": "NO_SUBMIT_WITNESS",
+      "total": 35,
+      "states": {
+        "SUBMIT_REJECTED": 35
+      },
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 0
+    },
+    {
+      "clock": "venue",
+      "intent": "EXIT",
+      "bucket": "<6h",
+      "total": 317,
+      "states": {
+        "CANCELLED": 13,
+        "EXPIRED": 15,
+        "FILLED": 256,
+        "REJECTED": 31,
+        "SUBMIT_REJECTED": 2
+      },
+      "venue_acknowledged": 277,
+      "confirmed_fill_fact": 265
+    },
+    {
+      "clock": "venue",
+      "intent": "EXIT",
+      "bucket": "6-24h",
+      "total": 277,
+      "states": {
+        "CANCELLED": 4,
+        "EXPIRED": 7,
+        "FILLED": 240,
+        "REJECTED": 25,
+        "SUBMIT_REJECTED": 1
+      },
+      "venue_acknowledged": 246,
+      "confirmed_fill_fact": 245
+    },
+    {
+      "clock": "venue",
+      "intent": "EXIT",
+      "bucket": "24-48h",
+      "total": 64,
+      "states": {
+        "CANCELLED": 1,
+        "EXPIRED": 1,
+        "FILLED": 49,
+        "REJECTED": 13
+      },
+      "venue_acknowledged": 50,
+      "confirmed_fill_fact": 48
+    },
+    {
+      "clock": "venue",
+      "intent": "EXIT",
+      "bucket": "48-96h",
+      "total": 2,
+      "states": {
+        "FILLED": 2
+      },
+      "venue_acknowledged": 2,
+      "confirmed_fill_fact": 2
+    },
+    {
+      "clock": "venue",
+      "intent": "EXIT",
+      "bucket": ">96h",
+      "total": 0,
+      "states": {},
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 0
+    },
+    {
+      "clock": "venue",
+      "intent": "EXIT",
+      "bucket": "UNKNOWN_ENDPOINT",
+      "total": 331,
+      "states": {
+        "CANCELLED": 24,
+        "EXPIRED": 19,
+        "FILLED": 254,
+        "REJECTED": 31,
+        "SUBMIT_REJECTED": 3
+      },
+      "venue_acknowledged": 292,
+      "confirmed_fill_fact": 267
+    },
+    {
+      "clock": "venue",
+      "intent": "EXIT",
+      "bucket": "NO_SUBMIT_WITNESS",
+      "total": 5,
+      "states": {
+        "CANCELLED": 2,
+        "EXPIRED": 1,
+        "FILLED": 2
+      },
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 3
+    },
+    {
+      "clock": "local",
+      "intent": "ENTRY",
+      "bucket": "<6h",
+      "total": 72,
+      "states": {
+        "CANCELLED": 22,
+        "EXPIRED": 13,
+        "FILLED": 31,
+        "REJECTED": 6
+      },
+      "venue_acknowledged": 64,
+      "confirmed_fill_fact": 33
+    },
+    {
+      "clock": "local",
+      "intent": "ENTRY",
+      "bucket": "6-24h",
+      "total": 1687,
+      "states": {
+        "CANCELLED": 729,
+        "EXPIRED": 301,
+        "FILLED": 613,
+        "REJECTED": 40,
+        "SUBMIT_REJECTED": 4
+      },
+      "venue_acknowledged": 1608,
+      "confirmed_fill_fact": 762
+    },
+    {
+      "clock": "local",
+      "intent": "ENTRY",
+      "bucket": "24-48h",
+      "total": 2058,
+      "states": {
+        "CANCELLED": 866,
+        "EXPIRED": 274,
+        "FILLED": 846,
+        "REJECTED": 61,
+        "SUBMIT_REJECTED": 11
+      },
+      "venue_acknowledged": 1892,
+      "confirmed_fill_fact": 939
+    },
+    {
+      "clock": "local",
+      "intent": "ENTRY",
+      "bucket": "48-96h",
+      "total": 504,
+      "states": {
+        "CANCELLED": 283,
+        "EXPIRED": 46,
+        "FILLED": 165,
+        "REJECTED": 8,
+        "SUBMIT_REJECTED": 2
+      },
+      "venue_acknowledged": 473,
+      "confirmed_fill_fact": 189
+    },
+    {
+      "clock": "local",
+      "intent": "ENTRY",
+      "bucket": ">96h",
+      "total": 0,
+      "states": {},
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 0
+    },
+    {
+      "clock": "local",
+      "intent": "ENTRY",
+      "bucket": "UNKNOWN_ENDPOINT",
+      "total": 0,
+      "states": {},
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 0
+    },
+    {
+      "clock": "local",
+      "intent": "ENTRY",
+      "bucket": "NO_SUBMIT_WITNESS",
+      "total": 35,
+      "states": {
+        "SUBMIT_REJECTED": 35
+      },
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 0
+    },
+    {
+      "clock": "local",
+      "intent": "EXIT",
+      "bucket": "<6h",
+      "total": 17,
+      "states": {
+        "EXPIRED": 2,
+        "FILLED": 15
+      },
+      "venue_acknowledged": 17,
+      "confirmed_fill_fact": 17
+    },
+    {
+      "clock": "local",
+      "intent": "EXIT",
+      "bucket": "6-24h",
+      "total": 793,
+      "states": {
+        "CANCELLED": 27,
+        "EXPIRED": 36,
+        "FILLED": 644,
+        "REJECTED": 80,
+        "SUBMIT_REJECTED": 6
+      },
+      "venue_acknowledged": 690,
+      "confirmed_fill_fact": 665
+    },
+    {
+      "clock": "local",
+      "intent": "EXIT",
+      "bucket": "24-48h",
+      "total": 174,
+      "states": {
+        "CANCELLED": 15,
+        "EXPIRED": 4,
+        "FILLED": 135,
+        "REJECTED": 20
+      },
+      "venue_acknowledged": 153,
+      "confirmed_fill_fact": 138
+    },
+    {
+      "clock": "local",
+      "intent": "EXIT",
+      "bucket": "48-96h",
+      "total": 7,
+      "states": {
+        "FILLED": 7
+      },
+      "venue_acknowledged": 7,
+      "confirmed_fill_fact": 7
+    },
+    {
+      "clock": "local",
+      "intent": "EXIT",
+      "bucket": ">96h",
+      "total": 0,
+      "states": {},
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 0
+    },
+    {
+      "clock": "local",
+      "intent": "EXIT",
+      "bucket": "UNKNOWN_ENDPOINT",
+      "total": 0,
+      "states": {},
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 0
+    },
+    {
+      "clock": "local",
+      "intent": "EXIT",
+      "bucket": "NO_SUBMIT_WITNESS",
+      "total": 5,
+      "states": {
+        "CANCELLED": 2,
+        "EXPIRED": 1,
+        "FILLED": 2
+      },
+      "venue_acknowledged": 0,
+      "confirmed_fill_fact": 3
+    }
+  ],
+  "command_counts": {
+    "ENTRY/CANCELLED": 1900,
+    "ENTRY/EXPIRED": 634,
+    "ENTRY/FILLED": 1655,
+    "ENTRY/REJECTED": 115,
+    "ENTRY/SUBMIT_REJECTED": 52,
+    "EXIT/CANCELLED": 44,
+    "EXIT/EXPIRED": 43,
+    "EXIT/FILLED": 803,
+    "EXIT/REJECTED": 100,
+    "EXIT/SUBMIT_REJECTED": 6
+  },
+  "submission_counts": {
+    "FILL_WITNESSED_WITHOUT_ACK_EVENT": 126,
+    "NO_SUBMIT_WITNESS": 37,
+    "SUBMIT_REQUESTED_UNACKNOWLEDGED": 285,
+    "VENUE_ACKNOWLEDGED": 4904
+  },
+  "fill_evidence_counts": {
+    "COMMAND_FILL_EVENT_ONLY": 3,
+    "CONFIRMED_TRADE_FACT": 2753,
+    "NO_POSITIVE_FILL_EVIDENCE": 315,
+    "TERMINAL_ZERO_MATCH_WITNESS": 2281
+  },
+  "order_position_phase_counts": {
+    "NO_POSITION_RECORD": 151,
+    "active": 4,
+    "admin_closed": 4,
+    "day0_window": 16,
+    "economically_closed": 3,
+    "settled": 3456,
+    "voided": 1718
+  },
+  "metadata_counts": {
+    "forecast.market_events_exact_condition_yes_token": 151,
+    "position_current": 5201
+  },
+  "evidence_flag_counts": {
+    "BOUND_SNAPSHOT_MISSING": 3,
+    "POSITION_PROJECTION_EVENT_PHASE_MISMATCH": 3
+  },
+  "fill_evidence_conflicts": 6,
+  "review_row_counts": {
+    "position_current/OPEN": 37,
+    "position_current/RESOLVED": 42,
+    "token_suppression/OPEN": 228,
+    "token_suppression/RESOLVED": 115
+  },
+  "settlement_row_counts": {
+    "REDEEM_CONFIRMED": 25,
+    "REDEEM_INTENT_CREATED": 139,
+    "REDEEM_REVIEW_REQUIRED": 19
+  },
+  "invalid_settlement_maps": [],
+  "witnesses": [
+    {
+      "command_id": "0e9c7e5c66684838",
+      "intent_kind": "ENTRY",
+      "state": "CANCELLED",
+      "command_created_at": "2026-09-29T14:23:12.894931+00:00",
+      "command_updated_at": "2026-09-29T14:46:02.657000+00:00",
+      "submit_at": "2026-09-29T14:23:12.894931+00:00",
+      "venue_ack_at": "2026-09-29T14:23:17.581871+00:00",
+      "submission_evidence": "VENUE_ACKNOWLEDGED",
+      "venue_order_id": "0x3321d4f895a503965207469e54aa6d458647d0f0650d3d719edfede380874800",
+      "position_id": "90af6c40-741",
+      "snapshot_id": "abccc77ce9a922c9d0efca5dc486501d947467f6476f05e360d8f300efa0a049",
+      "token_id": "43851969341624776565112680403310439766050981773851731092772338644580631971219",
+      "condition_id": "0x96f61f351840c9108ac1b671a810f8b1e31c16d439ffc0e0af06cfc7e51b46a4",
+      "market_end_at": "2026-10-01T12:00:00+00:00",
+      "raw_market_end_at": "2026-10-01T12:00:00+00:00",
+      "city": "Moscow",
+      "target_date": "2026-10-01",
+      "temperature_metric": "high",
+      "identity_source": "position_current",
+      "city_timezone": "Europe/Moscow",
+      "local_end_exclusive": "2026-10-01T21:00:00+00:00",
+      "lead_venue_hours": 45.61308474138889,
+      "lead_local_hours": 54.61308474138889,
+      "lead_venue_at_ack_hours": 45.61178281361111,
+      "lead_local_at_ack_hours": 54.61178281361111,
+      "venue_bucket": "24-48h",
+      "local_bucket": "48-96h",
+      "submit_after_venue_endpoint": false,
+      "submit_after_local_endpoint": false,
+      "position_phase": "voided",
+      "latest_position_event": {
+        "event_id": "90af6c40-741:entry_order_voided:0e9c7e5c66684838",
+        "event_type": "ENTRY_ORDER_VOIDED",
+        "phase_after": "voided",
+        "sequence_no": 3
+      },
+      "command_event_types": [
+        "INTENT_CREATED",
+        "SUBMIT_REQUESTED",
+        "SUBMIT_ACKED",
+        "CANCEL_REQUESTED",
+        "CANCEL_ACKED"
+      ],
+      "command_event_reasons": [
+        "venue_terminal_no_fill"
+      ],
+      "direct_review_states": [],
+      "direct_review_ids": [],
+      "open_family_review_ids": [],
+      "open_token_review_ids": [],
+      "asset_settlement_states": [],
+      "asset_settlement_ids": [],
+      "evidence_flags": [],
+      "fill_evidence": "TERMINAL_ZERO_MATCH_WITNESS",
+      "confirmed_trade_count": 0,
+      "confirmed_shares": 0,
+      "fill_event_present": false,
+      "partial_fill_event_present": false,
+      "terminal_zero_match_witness": true,
+      "fill_evidence_conflict": false,
+      "latest_trade_states": [],
+      "latest_order_states": [
+        "CANCEL_CONFIRMED"
+      ]
+    },
+    {
+      "command_id": "acb475b4949a4730",
+      "intent_kind": "ENTRY",
+      "state": "FILLED",
+      "command_created_at": "2026-06-06T19:27:08.555965+00:00",
+      "command_updated_at": "2026-06-06T19:27:31.830843+00:00",
+      "submit_at": "2026-06-06T19:27:08.555965+00:00",
+      "venue_ack_at": "2026-06-06T19:27:31.830843+00:00",
+      "submission_evidence": "VENUE_ACKNOWLEDGED",
+      "venue_order_id": "0xc5afd0be58bc6c295dc2de009ab90c263ac02a42369cbb2672ee9fbc5ab7127d",
+      "position_id": "1090d54b-c95",
+      "snapshot_id": "ems2-82f9bbc1226d7f2074799bd4893585a675a77b6b",
+      "token_id": "110652908852636952535312179198710842432266135219285401809158034533604212812218",
+      "condition_id": "0x7f2bfe8ef965c87671b2f987bf20547732cb9f95aa513f7e1dd28aa079c2eb88",
+      "market_end_at": "2026-06-08T12:00:00+00:00",
+      "raw_market_end_at": "2026-06-08T12:00:00+00:00",
+      "city": "Madrid",
+      "target_date": "2026-06-08",
+      "temperature_metric": "high",
+      "identity_source": "position_current",
+      "city_timezone": "Europe/Madrid",
+      "local_end_exclusive": "2026-06-08T22:00:00+00:00",
+      "lead_venue_hours": 40.547623343055555,
+      "lead_local_hours": 50.547623343055555,
+      "lead_venue_at_ack_hours": 40.541158099166665,
+      "lead_local_at_ack_hours": 50.541158099166665,
+      "venue_bucket": "24-48h",
+      "local_bucket": "48-96h",
+      "submit_after_venue_endpoint": false,
+      "submit_after_local_endpoint": false,
+      "position_phase": "settled",
+      "latest_position_event": {
+        "event_id": "1090d54b-c95:settled:1280",
+        "event_type": "SETTLED",
+        "phase_after": "settled",
+        "sequence_no": 1280
+      },
+      "command_event_types": [
+        "INTENT_CREATED",
+        "SUBMIT_REQUESTED",
+        "SUBMIT_ACKED",
+        "FILL_CONFIRMED"
+      ],
+      "command_event_reasons": [
+        "place_limit_order_matched_submit"
+      ],
+      "direct_review_states": [],
+      "direct_review_ids": [],
+      "open_family_review_ids": [],
+      "open_token_review_ids": [],
+      "asset_settlement_states": [
+        "REDEEM_CONFIRMED"
+      ],
+      "asset_settlement_ids": [
+        "c117f38f09e14682b11ec1e8c876f502",
+        "77f71b9d5e464f38990afd3d8bd5f22d"
+      ],
+      "evidence_flags": [],
+      "fill_evidence": "CONFIRMED_TRADE_FACT",
+      "confirmed_trade_count": 1,
+      "confirmed_shares": 8.0,
+      "fill_event_present": true,
+      "partial_fill_event_present": false,
+      "terminal_zero_match_witness": false,
+      "fill_evidence_conflict": false,
+      "latest_trade_states": [
+        "CONFIRMED"
+      ],
+      "latest_order_states": [
+        "MATCHED"
+      ]
+    }
+  ],
+  "csv_sha256": "e48f32e5ff7d55d2a04665dc2f6f10c06b16f4b3b90413e7bd144a068b222196"
+}
