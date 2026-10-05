@@ -246,7 +246,28 @@ def _pinned_complete_bundle_matches_current_day0_event(
     current bundle path must establish a new source identity.
     """
 
-    provenance = getattr(bundle, "provenance_json", None) or {}
+    return _pinned_carrier_provenance_matches_current_day0_event(
+        getattr(bundle, "provenance_json", None) or {},
+        event,
+        metric=metric,
+        settlement_unit=settlement_unit,
+    )
+
+
+def _pinned_carrier_provenance_matches_current_day0_event(
+    provenance: object,
+    event: object,
+    *,
+    metric: str,
+    settlement_unit: str,
+) -> bool:
+    """The same overlay law on the carrier's persisted provenance alone.
+
+    Pure: the pinned reader asks it before paying for the carrier's raw-input
+    proof, so a carrier this event cannot overlay is never proven only to be
+    discarded (live 10-05: 79-88% of a contended held Day0 read).
+    """
+
     provisional = (
         provenance.get("day0_provisional_observation")
         if isinstance(provenance, Mapping)
@@ -4188,6 +4209,16 @@ def _build_current_global_day0_family_snapshot(
                     decision_time=now,
                 )
             )
+            settlement_unit = str(getattr(city, "settlement_unit", "") or "")
+
+            def overlaid_by_event(provenance: Mapping[str, object]) -> bool:
+                return _pinned_carrier_provenance_matches_current_day0_event(
+                    provenance,
+                    event,
+                    metric=metric,
+                    settlement_unit=settlement_unit,
+                )
+
             pinned_result = read_prior_complete_replacement_forecast_bundle(
                 forecasts,
                 city=str(position.city),
@@ -4225,6 +4256,7 @@ def _build_current_global_day0_family_snapshot(
                     raw_input_hwm_conn=hwm_forecasts,
                     raw_input_hwm_deadline_monotonic=float(hwm_deadline[0]),
                     raw_input_hwm_read_max_seconds=HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
+                    consumable=overlaid_by_event,
                 )
                 if (
                     pinned_result.status == "BLOCKED"
@@ -4244,9 +4276,7 @@ def _build_current_global_day0_family_snapshot(
                     pinned_complete_bundle,
                     event,
                     metric=metric,
-                    settlement_unit=str(
-                        getattr(city, "settlement_unit", "") or ""
-                    ),
+                    settlement_unit=settlement_unit,
                 )
             ):
                 # The latest authorized Day0 event is the observation authority.

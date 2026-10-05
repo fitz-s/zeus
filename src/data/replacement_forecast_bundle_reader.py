@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import StrEnum
@@ -2054,12 +2054,18 @@ def read_prior_complete_replacement_forecast_bundle(
     authority_purpose: ReplacementForecastAuthorityPurpose = (
         ReplacementForecastAuthorityPurpose.HELD_REDECISION
     ),
+    consumable: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> ReplacementForecastBundleReadResult:
     """Select the prior complete carrier only across a newer incomplete wave.
 
     A newer complete row returns ``NOT_APPLICABLE`` so the caller resets to the
     ordinary current-cycle path.  A missing/invalid prior carrier remains blocked;
     it is never replaced with a stale or mixed-clock source.
+
+    ``consumable`` is the caller's pure test of whether it could use the
+    selected carrier's provenance at all.  A carrier it would discard returns
+    ``NOT_APPLICABLE`` before its raw-input proof is paid for; it neither
+    serves nor blocks.
     """
 
     if authority_purpose is not ReplacementForecastAuthorityPurpose.HELD_REDECISION:
@@ -2157,6 +2163,11 @@ def read_prior_complete_replacement_forecast_bundle(
                 return ReplacementForecastBundleReadResult(
                     "NOT_APPLICABLE",
                     "REPLACEMENT_PINNED_CURRENT_CARRIER_NOT_CLAIMED",
+                )
+            if consumable is not None and not consumable(latest_provenance):
+                return ReplacementForecastBundleReadResult(
+                    "NOT_APPLICABLE",
+                    "REPLACEMENT_PINNED_CARRIER_NOT_CONSUMABLE",
                 )
             try:
                 provenance_reason = _held_pinned_provenance_reason(
@@ -2318,6 +2329,11 @@ def read_prior_complete_replacement_forecast_bundle(
         return ReplacementForecastBundleReadResult(
             "NOT_APPLICABLE",
             "REPLACEMENT_PINNED_COMPLETE_CARRIER_NOT_CLAIMED",
+        )
+    if consumable is not None and not consumable(candidate_provenance):
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE",
+            "REPLACEMENT_PINNED_CARRIER_NOT_CONSUMABLE",
         )
     if not _decorrelated_providers_complete(candidate_provenance):
         return ReplacementForecastBundleReadResult(

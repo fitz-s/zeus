@@ -52158,6 +52158,65 @@ def test_hko_held_pin_serves_on_its_consumed_proof_whatever_the_successor_fronti
         fixture.conn.close()
 
 
+def test_held_pin_skips_the_proof_of_a_carrier_its_caller_cannot_consume(
+        tmp_path,monkeypatch,_hko_clock_native_sources):
+    """The held monitor discards a pinned carrier the current Day0 event cannot
+    overlay. Live 10-05 every held WU-fast family did, after paying the carrier's
+    raw-input proof: 79-88% of a contended held Day0 read. The caller's pure
+    predicate now rejects it first: no proof read, NOT_APPLICABLE (never BLOCKED).
+    """
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_input_hwm as hwm
+    from tests.test_replacement_forecast_bundle_reader import _reader_anchor_from_provider_body
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,"high")
+    try:
+        row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+                                        (fixture.result.posterior_id,)).fetchone())
+        cut = fixture.cut
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
+        class ReaderClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",ReaderClock)
+        new_cycle = _dt.datetime.fromisoformat(row["source_cycle_time"])+_dt.timedelta(hours=6)
+        fixture.write_provider_cohort(new_cycle,cut-_dt.timedelta(minutes=5))
+        fixture.row = row
+        _reader_anchor_from_provider_body(fixture,json.loads(fixture.request.openmeteo_raw_payload_bytes),
+            target=fixture.request.target_date,cycle=new_cycle,captured=cut-_dt.timedelta(minutes=5))
+        fixture.conn.commit()
+        proof_reads = []
+        continuity = reader._latest_complete_held_continuity
+        def counted(*args,**kwargs):
+            proof_reads.append(int(kwargs["row"]["posterior_id"]))
+            return continuity(*args,**kwargs)
+        monkeypatch.setattr(reader,"_latest_complete_held_continuity",counted)
+        ro = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
+        ro.row_factory = sqlite3.Row
+        kwargs = dict(city=row["city"],target_date=row["target_date"],temperature_metric=row["temperature_metric"],
+            decision_time=cut,current_bin_topology_hash=row["bin_topology_hash"],raw_input_hwm_conn=ro)
+        try:
+            seen = []
+            def not_consumable(provenance):
+                seen.append(provenance.get("day0_provisional_observation"))
+                return False
+            skipped = reader.read_prior_complete_replacement_forecast_bundle(ro,consumable=not_consumable,**kwargs)
+            assert (skipped.ok,skipped.status,skipped.reason_code) == (
+                False,"NOT_APPLICABLE","REPLACEMENT_PINNED_CARRIER_NOT_CONSUMABLE")
+            assert proof_reads == []
+            assert len(seen) == 1 and seen[0].get("active") is True
+            hwm.clear_consumed_proof_memo()
+            reader._LIVE_GRADE_MEMO.clear()
+            served = reader.read_prior_complete_replacement_forecast_bundle(
+                ro,consumable=lambda _provenance: True,**kwargs)
+            assert served.ok and served.bundle.posterior_id == row["posterior_id"], served.reason_code
+            assert proof_reads == [row["posterior_id"]]
+        finally:
+            ro.close()
+    finally:
+        fixture.conn.close()
+
+
 def test_hko_held_refresh_is_not_hard_blocked_when_the_raw_frontier_is_unknown(
         tmp_path,monkeypatch,_hko_clock_native_sources):
     """Round-2 blocker 2 at the held monitor (monitor_refresh ~4180).
