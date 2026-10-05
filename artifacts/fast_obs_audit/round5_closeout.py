@@ -74,6 +74,8 @@ def scrub(value: Any) -> Any:
         return [scrub(v) for v in value]
     if isinstance(value, bytes):
         return {'bytes': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
+    if isinstance(value, float) and not math.isfinite(value):
+        return {'nonfinite_float': repr(value)}  # Named, never clamped or silently dropped.
     if isinstance(value, str):
         if value[:1] in ('{', '['):
             try:
@@ -119,19 +121,18 @@ def table_rows(conn, table: str, *, where: str = '', args=()) -> list[dict]:
 
 def observation_ref(row: dict) -> dict:
     """Use the one pure telemetry reference constructor, not a second hash law."""
-    import importlib.util
-    from functools import lru_cache
-    return _reference_constructor()(row)
+    return _trace().observation_revision_reference(row)
 
 
 from functools import lru_cache
 @lru_cache(maxsize=1)
-def _reference_constructor():
+def _trace():
+    """The pure telemetry module itself: one reference and wake-label law."""
     import importlib.util
     path=Path(__file__).resolve().parents[2]/'src/runtime/observation_reaction_trace.py'
     spec=importlib.util.spec_from_file_location('_round5_pure_trace',path)
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-    return module.observation_revision_reference
+    return module
 
 
 def stats(values: list[float]) -> dict:
@@ -264,7 +265,9 @@ def live_command_rows(conn) -> tuple[list[dict], dict]:
     commands = table_rows(conn,'venue_commands')
     positions = {r['position_id']:r for r in table_rows(conn,'position_current')}
     snapshot_fields = [k for k in ('snapshot_id','condition_id','selected_outcome_token_id') if k in columns(conn,'executable_market_snapshots')]
-    bindings = {r['snapshot_id']:dict(r) for r in conn.execute('SELECT '+','.join(snapshot_fields)+' FROM executable_market_snapshots')}
+    # Only command-bound snapshots are ever looked up; never scan the whole book history.
+    bindings = {r['snapshot_id']:dict(r) for r in conn.execute('SELECT '+','.join(snapshot_fields)
+        +' FROM executable_market_snapshots WHERE snapshot_id IN (SELECT snapshot_id FROM venue_commands)')}
     snapshots = set(bindings)
     groups = {}
     for table in ('venue_command_events','venue_trade_facts','venue_order_facts'):
@@ -359,6 +362,11 @@ def reconstruct_legacy_references(conn, observations: list[dict], events: list[d
     This is not a nearest-time join. Explicit references remain preferable.
     """
     counts=Counter()
+    # Exact-key indexes, built on first use: identical predicates, no per-event scan.
+    by_receipt=None
+    retained={}
+    def julian(value):
+        return conn.execute('SELECT julianday(?)',(value,)).fetchone()[0]
     for event in events:
         if event.get('observation_ref'):continue
         identity=event.get('input_identity')
@@ -369,15 +377,30 @@ def reconstruct_legacy_references(conn, observations: list[dict], events: list[d
         except (KeyError,ValueError,TypeError,InvalidOperation):
             counts['INVALID_LEGACY_INPUT_IDENTITY']+=1;continue
         if event.get('stage')=='SOURCE_COMMITTED':
-            candidates=[r for r in observations if r['city']==city
-                and r['station_id']==event.get('station_id') and r['source_channel']==source
-                and instant(r['publish_ts_utc'])==observed and decimal(r['value_native'])==value
+            if by_receipt is None:
+                by_receipt=defaultdict(list)
+                for r in observations:by_receipt[(r['city'],r['station_id'],r['source_channel'])].append(r)
+            # The original predicate, evaluated only over its own exact string key.
+            candidates=[r for r in by_receipt.get((city,event.get('station_id'),source),())
+                if instant(r['publish_ts_utc'])==observed and decimal(r['value_native'])==value
                 and millis(r['fetched_at_utc'])==event.get('response_received_at_ms')]
         elif event.get('stage')=='POSTERIOR_READY':
             cutoff=event.get('posterior_ready_at_ms',event.get('recorded_at_ms'))
             if not isinstance(cutoff,int):counts['INVALID_READY_CLOCK']+=1;continue
             stamp=datetime.fromtimestamp(cutoff/1000,UTC).isoformat()
-            candidates=table_rows(conn,'observation_prints',where=' WHERE city=? AND source_channel=? AND value_native=? AND julianday(publish_ts_utc)=julianday(?) AND julianday(fetched_at_utc)<=julianday(?)',args=(city,source,float(value),observed.isoformat(),stamp))
+            if (city,source) not in retained:
+                # One read per city/channel. SQLite computes the same julianday
+                # values the per-event predicate compared; REAL equality is unchanged.
+                index=defaultdict(list)
+                for r in conn.execute('SELECT *,julianday(publish_ts_utc) AS _publish_jd,julianday(fetched_at_utc) AS _receipt_jd '
+                        'FROM observation_prints WHERE city=? AND source_channel=?',(city,source)):
+                    r=dict(r);publish_jd,receipt_jd=r.pop('_publish_jd'),r.pop('_receipt_jd')
+                    if publish_jd is not None and receipt_jd is not None:
+                        index[(r['value_native'],publish_jd)].append((receipt_jd,r))
+                retained[(city,source)]=index
+            limit=julian(stamp)
+            candidates=[r for receipt_jd,r in retained[(city,source)].get((float(value),julian(observed.isoformat())),())
+                if limit is not None and receipt_jd<=limit]
             candidates=[r for r in candidates if instant(r['publish_ts_utc'])==observed and decimal(r['value_native'])==value and millis(r['fetched_at_utc'])<=cutoff]
         else:continue
         unique={observation_ref(r)['identity']:r for r in candidates}
@@ -410,19 +433,41 @@ def trace_distributions(observations: list[dict], events: list[dict], ack_events
         for e in es:
             if e.get('stage')=='POSTERIOR_READY' and e.get('posterior_identity_hash'):
                 ready_hash.setdefault(e['posterior_identity_hash'],set()).add(key)
+    # A consumer wake carries only its wake_id; its label is that wake's own
+    # publication record, never a family's latest posterior.
+    published=_trace().published_wake_hashes(events)
+    def label(e):
+        return _trace().wake_posterior_hash(e,published) if e.get('stage')=='WAKE_RECEIVED' else e.get('posterior_identity_hash')
     # q/command/ACK can join through the exact posterior identity, not time proximity.
+    # Membership keeps list `in` (==) semantics; equal records share these scalars,
+    # so bucketing by them only removes comparisons that could never match.
+    def signature(e):
+        value=tuple(e.get(k) for k in ('stage','recorded_at_ms','trace_event_id','_log_file','_log_line'))
+        try:hash(value);return value
+        except TypeError:return None
+    members={}
+    for key,es in records.items():
+        buckets=members[key]=defaultdict(list)
+        for e in es:buckets[signature(e)].append(e)
     for e in events:
-        h=e.get('posterior_identity_hash') or e.get('q_version')
+        h=label(e) or e.get('q_version')
         keys=ready_hash.get(h,set())
         if len(keys)==1:
-            key=next(iter(keys))
-            if e not in records[key]:records[key].append(e)
+            key=next(iter(keys));bucket=members[key][signature(e)]
+            if e not in bucket:bucket.append(e);records[key].append(e)
     native_acks = {e['event_id']:e for e in ack_events if e.get('event_type') in ('SUBMIT_ACKED','POST_ACKED')}
     residuals=Counter(); hops=defaultdict(list); paired=[]
     for key,row in refs.items():
         es=records.get(key,[])
         source=[e for e in es if e.get('stage')=='SOURCE_COMMITTED' and e.get('world_committed_at_ms') is not None]
         ready=[e for e in es if e.get('stage')=='POSTERIOR_READY']
+        # Per-key stage indexes keep each posterior's lookups exact and O(1).
+        served,woken,acked=defaultdict(list),defaultdict(list),defaultdict(list)
+        for e in es:
+            stage=e.get('stage')
+            if stage=='Q_SERVED':served[e.get('posterior_identity_hash')].append(e)
+            elif stage=='WAKE_RECEIVED' and e.get('wake_id'):woken[label(e)].append(e)
+            elif stage=='VENUE_ACK_OBSERVED':acked[e.get('q_version')].append(e)
         if not source:residuals['MISSING_EXACT_REVISION_SOURCE_COMMIT']+=1;continue
         commits={e['world_committed_at_ms'] for e in source}
         if len(commits)!=1:residuals['CONFLICTING_SOURCE_COMMIT_CLOCKS']+=1;continue
@@ -438,18 +483,18 @@ def trace_distributions(observations: list[dict], events: list[dict], ack_events
             seen.add(h);rt=r.get('posterior_ready_at_ms',r['recorded_at_ms'])
             if rt<commit:residuals['POSTERIOR_CLOCK_ORDER_VIOLATION']+=1;continue
             hops['world_to_posterior'].append(rt-commit)
-            q=[e for e in es if e.get('stage')=='Q_SERVED' and e.get('posterior_identity_hash')==h and e.get('q_served_at_ms',-1)>=rt]
+            q=[e for e in served.get(h,()) if e.get('q_served_at_ms',-1)>=rt]
             if not q:residuals['POSTERIOR_NOT_PROVED_SERVED']+=1;continue
             serve=min(q,key=lambda e:e['q_served_at_ms']);qt=serve['q_served_at_ms'];hops['posterior_to_q'].append(qt-rt)
-            wake=[e for e in es if e.get('stage')=='WAKE_RECEIVED' and e.get('wake_id') and e.get('posterior_identity_hash')==h and rt<=e.get('wake_received_at_ms',-1)<=qt]
+            wake=[e for e in woken.get(h,()) if rt<=e.get('wake_received_at_ms',-1)<=qt]
             if wake:
                 wt=min(e['wake_received_at_ms'] for e in wake)
                 hops['posterior_to_wake'].append(wt-rt);hops['wake_to_q'].append(qt-wt)
             else:residuals['WAKE_RECEIPT_IDENTITY_OR_CLOCK_MISSING']+=1
             ack=[]
-            for e in es:
+            for e in acked.get(h,()):
                 native=native_acks.get(e.get('event_id'))
-                if e.get('stage')!='VENUE_ACK_OBSERVED' or e.get('q_version')!=h or not native:continue
+                if not native:continue
                 if native['command_id']!=e.get('command_id'):continue
                 at=millis(native['occurred_at'])
                 if at>=qt:ack.append((at,native['command_id'],native['event_id']))
@@ -473,6 +518,13 @@ def trace_distributions(observations: list[dict], events: list[dict], ack_events
 def production(root: Path, out: Path, start: datetime, end: datetime) -> dict:
     stamps={};residuals=[];observations=[];ack=[];reconstruction={}
     events,coverage=read_logs(root,start,end)
+    try:
+        # KMA transport is written only on DAY0_EXTREME_UPDATED for the RKSI/RKPK
+        # cities (src/data/day0_fast_obs.py); this scope rides the indexed city key.
+        kma_cities=tuple(c['name'] for c in json.loads((root/'config/cities.json').read_text())['cities']
+            if c.get('wu_station') in ('RKSI','RKPK'))
+    except (OSError,ValueError,KeyError,TypeError):kma_cities=()
+    if not kma_cities:residuals.append('KMA_CITY_SCOPE_UNRESOLVED')
     world=root/'state/zeus-world.db';trade=root/'state/zeus_trades.db';forecast=root/'state/zeus-forecasts.db'
     try:
         with open_ro(world) as conn:
@@ -483,9 +535,11 @@ def production(root: Path, out: Path, start: datetime, end: datetime) -> dict:
             kma={'by_station':{'RKSI':[],'RKPK':[]},'station_identity_unresolved':[]}
             if columns(conn,'opportunity_events'):
                 kr=conn.execute("""SELECT event_id,event_type,entity_key,observed_at,available_at,received_at,payload_json
-                    FROM opportunity_events WHERE json_valid(payload_json)
-                    AND json_extract(payload_json,'$.observation_transport')='kma_amo_raw_metar'
-                    AND julianday(received_at)>=julianday(?) AND julianday(received_at)<julianday(?)""",(start.isoformat(),end.isoformat()))
+                    FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED'
+                    AND json_extract(payload_json,'$.city') IN ("""+','.join('?'*len(kma_cities))+""")
+                    AND julianday(received_at)>=julianday(?) AND julianday(received_at)<julianday(?)
+                    AND json_valid(payload_json)
+                    AND json_extract(payload_json,'$.observation_transport')='kma_amo_raw_metar'""",(*kma_cities,start.isoformat(),end.isoformat()))
                 for raw in kr:
                     event=dict(raw);payload=json.loads(event['payload_json'])
                     names={str(payload.get(k) or '') for k in ('station_id','station','source_station_id','settlement_station_id')}
@@ -499,15 +553,23 @@ def production(root: Path, out: Path, start: datetime, end: datetime) -> dict:
     try:
         with open_ro(trade) as conn:
             stamps['trade']=datetime.now(UTC).isoformat()
-            rows,details=live_command_rows(conn);dump(out/'command_summary.json',summarize_commands(rows));dump(out/'flagged_evidence.json',details)
+            # Latency ACK proof first: an evidence-dump refusal must not erase it.
             ack=table_rows(conn,'venue_command_events',where=" WHERE event_type IN ('SUBMIT_ACKED','POST_ACKED') AND julianday(occurred_at)>=julianday(?) AND julianday(occurred_at)<julianday(?)",args=(start.isoformat(),end.isoformat()))
+            rows,details=live_command_rows(conn);dump(out/'command_summary.json',summarize_commands(rows));dump(out/'flagged_evidence.json',details)
     except (OSError,sqlite3.Error,ValueError,KeyError) as exc:residuals.append('TRADE_READ_FAILED:'+type(exc).__name__)
     try:
         with open_ro(forecast) as conn:
             stamps['forecast']=datetime.now(UTC).isoformat()
-            posts=table_rows(conn,'forecast_posteriors',where=' WHERE julianday(computed_at)>=julianday(?) AND julianday(computed_at)<julianday(?)',args=(start.isoformat(),end.isoformat()))
-            keep=('posterior_id','posterior_identity_hash','city','target_date','temperature_metric','computed_at','source_available_at','provenance_json','dependency_source_run_ids_json')
-            dump(out/'posterior_rows.json',[{k:p.get(k) for k in keep} for p in posts])
+            # Only the trace-joined provenance keys; the full multi-GB provenance is not lineage.
+            posts=[dict(r) for r in conn.execute("""SELECT posterior_id,posterior_identity_hash,city,target_date,
+                temperature_metric,computed_at,source_available_at,
+                json_extract(provenance_json,'$.day0_current_temperature_state') AS day0_current_temperature_state,
+                json_extract(provenance_json,'$.day0_current_temperature_input_ref') AS day0_current_temperature_input_ref,
+                dependency_source_run_ids_json FROM forecast_posteriors WHERE posterior_id IN (
+                SELECT posterior_id FROM forecast_posteriors
+                WHERE julianday(computed_at)>=julianday(?) AND julianday(computed_at)<julianday(?))""",
+                (start.isoformat(),end.isoformat()))]
+            dump(out/'posterior_rows.json',posts)
             readiness={}
             for name in ('readiness_state','source_readiness'):
                 cs=columns(conn,name)

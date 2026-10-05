@@ -149,10 +149,44 @@ def emit_venue_ack(conn: Any, *, command_id: str, event_id: str, occurred_at: st
     except Exception:pass
 
 
-def emit_wake_received(*, wake_id: str, posterior_identity_hash: str) -> None:
-    """Consumer hook. A queue/socket publication is not a receipt by the reactor."""
-    if not wake_id or not posterior_identity_hash:return
-    emit_stage('WAKE_RECEIVED',wake_id=wake_id,posterior_identity_hash=posterior_identity_hash)
+def emit_wake_published(*, wake_id: str, posterior_identity_hash: str | None) -> None:
+    """Publisher hook: the only wake_id -> exact posterior label, recorded at publication."""
+    try:
+        if wake_id and posterior_identity_hash:
+            emit_stage('WAKE_PUBLISHED',wake_id=wake_id,posterior_identity_hash=posterior_identity_hash)
+    except Exception:pass
+
+
+_RECEIVED: dict[str, None] = {}  # Bounded per-process receipt memory; a re-poll is not a receipt.
+
+
+def emit_wake_received(*, wake_id: str, posterior_identity_hash: str | None = None) -> None:
+    """Consumer hook. A queue/socket publication is not a receipt by the reactor.
+
+    Records the first take per wake_id in this process. A consumer that cannot
+    know the posterior carries only wake_id; joins resolve it through that
+    wake's own WAKE_PUBLISHED, never a family's latest posterior.
+    """
+    try:
+        if not wake_id or wake_id in _RECEIVED:return
+        _RECEIVED[wake_id]=None
+        if len(_RECEIVED)>4096:del _RECEIVED[next(iter(_RECEIVED))]
+        emit_stage('WAKE_RECEIVED',wake_id=wake_id,posterior_identity_hash=posterior_identity_hash)
+    except Exception:pass
+
+
+def published_wake_hashes(events: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    """wake_id -> posterior hash, only where the publisher named exactly one."""
+    hashes: dict[str, set] = {}
+    for r in events:
+        if r.get('stage')=='WAKE_PUBLISHED' and r.get('wake_id') and r.get('posterior_identity_hash'):
+            hashes.setdefault(r['wake_id'],set()).add(r['posterior_identity_hash'])
+    return {w:next(iter(h)) for w,h in hashes.items() if len(h)==1}
+
+
+def wake_posterior_hash(record: Mapping[str, Any], published: Mapping[str, str]) -> Any:
+    """The consumer's own label, else its wake's publication label."""
+    return record.get('posterior_identity_hash') or published.get(record.get('wake_id'))
 
 
 def _ref_key(value: Any) -> str | None:
@@ -214,7 +248,8 @@ def completed_trace(events: Iterable[Mapping[str, Any]], *, posterior_identity_h
     serve=min(serves,key=lambda r:r['q_served_at_ms'])
     result.update({k:src[k] for k in ('response_received_at_ms','world_committed_at_ms')})
     result['q_served_at_ms']=serve['q_served_at_ms']
-    wakes=[r for r in rows if r.get('stage')=='WAKE_RECEIVED' and r.get('posterior_identity_hash')==posterior_identity_hash
+    published=published_wake_hashes(rows)
+    wakes=[r for r in rows if r.get('stage')=='WAKE_RECEIVED' and wake_posterior_hash(r,published)==posterior_identity_hash
         and r.get('wake_id') and parent['posterior_ready_at_ms']<=r.get('wake_received_at_ms',-1)<=serve['q_served_at_ms']]
     if wakes:result['wake_received_at_ms']=min(r['wake_received_at_ms'] for r in wakes)
     versions={posterior_identity_hash}
