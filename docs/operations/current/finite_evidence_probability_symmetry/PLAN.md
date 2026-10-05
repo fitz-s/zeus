@@ -16852,3 +16852,38 @@ second loader is authorized while this audit runs. A fresh origin/live check
 still returns97295949; no new peer semantic delta. Qualification code may be
 saved on the task branch, but neither code-save nor reported qualification is
 new probability consumption or whole-goal readiness.
+
+Code saved as4acd26fa110d513cbdb9015b88fd60f7f0986faf (six exact tracked paths),
+origin972 remains its ancestor and all three qualification/helper hashes remain
+frozen. No live push or additional loader executed. Native attempt-2 did not
+dispatch: at acknowledgment04:21:23Z the unchanged04:22:43 absolute deadline
+had only80s, whereas302 body ranges plus12 fresh indices at2RPS require at
+least156.5s before decode/publication. New HTTP/bytes0 and attempt-2 remains
+absent; no new300s clock was started. This is a measured wall-budget refusal,
+not normal-busy or source-publication failure. Original partial needed raw
+evidence remains in the registered packet and forbids destructive cleanup.
+
+ROOT replaced the communication-bound attempt-2 preparation with one sole-main
+attempt-3 execution, new entry clock300s and cumulative remaining cap312,816,067B.
+Actual entry04:30:24.210989Z; fresh two samples04:30:26/37 had idle63.49/53.30%,
+memoryfree53%, no swapout increase/throttling, disk102.12GB, three actors in live,
+normal-currentboot/allplanes idle and no loader/guard. Normal00 possession was
+not established; 18 H/L actual SUCCESS/COMPLETE51 selected steps9/12/15/18/21/24.
+Actual source fetch04:30:39.058824->04:31:10.269110Z; main ended04:31:12.151024Z,
+rc1/47.94s due S3 HTTP503 Slow Down on the18Z step9 perturbed body. Zero retry,
+no clock renewal, no production hook or canonical/q write. Final actual receipt
+is attempt-3/capture_receipt.json SHA385a7420603e0e25058e4bbdc8585df2a18fbfcb7cd4c0c7b0d55484beb76e44.
+Reported transferred_body_bytes42,760,947, written_proof_bytes74,105 and final
+receipt146,367 bytes give total charged42,981,419B, below the new cap. Twelve
+original indices and46 valid step9 messages survived; missing5 that step plus
+all255 other-step messages. Observed_steps=[]/OFFLINE_ONLY/UNKNOWN/issuedNULL,
+not51-member sameX. Independent readback all retained body/index SHA checks P;
+original attempt-1 and attempt-3 remain create-only preserved/untracked, never
+bulk committed or interpreted as a complete model input. CodeGraph lookup of
+the exact deployment handoff symbol returned no indexed result; actual source
+was read instead (navigation gap, not relaxed operator authority).
+
+Before qualification delivery, actual registered readonly capital checks showed
+17 open/nonterminal0, complete handoff GREEN,16 fresh+1 typed probability degraded,
+no stale/future/book/missing-monitor blockers (tool2817ce). No independent q or
+whole physical readiness claim follows from this deployment-admission evidence.
