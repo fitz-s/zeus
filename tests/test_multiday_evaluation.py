@@ -1139,9 +1139,29 @@ def test_fact_with_neither_maker_legs_nor_a_taker_role_keeps_its_canonical_price
     assert [f[:2] for f in _fills(conn, ["c1"])["c1"]] == [(5.0, 0.3)]
 
 
-def test_unparseable_entry_payload_proves_no_role_and_is_unverifiable_not_priced():
+@pytest.mark.parametrize("payload", ["{not json", "[1, 2]", '"a string"', "3", "true"])
+def test_unparseable_or_non_object_entry_payload_is_unverifiable_not_priced(payload):
+    """No role is proven, so no price is trusted; and it must not crash the report (the ledger helper
+    raises AttributeError on a payload that parses to a list, string or number)."""
     conn = _facts_conn([("c1", "t1", "CONFIRMED", 5, 0.3, None, 1)])
-    conn.execute("UPDATE venue_trade_facts SET raw_payload_json = '{not json'")
+    conn.execute("UPDATE venue_trade_facts SET raw_payload_json = ?", (payload,))
+    fills, unverifiable = me.load_economic_fills(conn, ["c1"])
+    assert unverifiable == {"c1"} and fills == {}
+
+
+def test_binding_that_cannot_be_imported_is_unverifiable_not_priced(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_exchange_reconcile(name, *args, **kwargs):
+        if name == "src.execution.exchange_reconcile":
+            raise ImportError("simulated")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_exchange_reconcile)
+    conn = _facts_conn([("c1", "t1", "CONFIRMED", 5, 0.3, None, 1)])
+    conn.execute("UPDATE venue_trade_facts SET raw_payload_json = '{\"price\": \"0.3\"}'")
     fills, unverifiable = me.load_economic_fills(conn, ["c1"])
     assert unverifiable == {"c1"} and fills == {}
 
