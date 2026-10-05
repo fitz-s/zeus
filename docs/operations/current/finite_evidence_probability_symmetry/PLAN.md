@@ -16663,3 +16663,24 @@ materializer, a new typed-block test and topology's separate new trusted row.
 No same-file overlap with HKO source2/test2 or native helper source/test; future
 adaptation preserves peer BLOCKED/branch binding and both topology rows. No
 rebase, push or loader has yet occurred for this repair.
+
+ROOT now accepts HKO capture/precision and authorizes task-branch-only code
+preservation, pending the human's separate choice on source-only loading before
+full q repair. Independent precision8 controls PASS; final four HKO hashes
+50331/a1ef8/f634/24263 are unchanged. HKO separate commitd7ca3d1ae rebased
+cleanly onto6179 as08fb32943; merge preview32c9272d was clean and peer typed
+BLOCKED/branch-binding changes were preserved, including topology's new row.
+No live push/loader or live checkout mutation is authorized or performed.
+
+Native offline-helper child commit e9b7209309377add9a2e197ef111fa84d3b4b750
+was cherry-picked as263d634f0. Exact sourcee78fca8e89b29d45258029913b42c3a9d05658624d7cf0361b885addeb0dae19
+and test8c5e18f5b29a43802d99ea3e4a6b43683c02dcb47cd24cf694ac7c76eedb7d99
+match the reviewed child. Private20P9.54s and named independent3 controls are
+separate from actual source acquisition (HTTP0). Original budget RED against
+the parent-unknown receipt cap is retained at
+/tmp/zeus-native-2t-parent-budget-red.xml; corrected controls are at
+/tmp/zeus-native-2t-helper-recovery-green.xml. The helper is explicitly offline
+and has no production caller; total index/range/receipt budget, native quantity
+validation and normal-priority checks are not a live data qualification.
+Child regular ignored example-config bootstrap needs exact cleanup, not live
+config changes; no needed raw inputs or running child commands were reported.
