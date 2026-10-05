@@ -42140,8 +42140,21 @@ def _prepare_current_global_probability_family(
                         exact_family = _prepare_exact_family()
                         if exact_family is not None:
                             return exact_family
+                    fallback_reason = {
+                        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE": (
+                            "current_remaining_vectors_unavailable"
+                        ),
+                        # The carrier was built from an older current-state
+                        # print or hourly-vector capture than this clock reads
+                        # (live 10-04/05: 102 of 150 successors were already
+                        # computed when the held read refused).  A newer input
+                        # never revokes the last validated carrier.
+                        "DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH": (
+                            "current_inputs_newer_than_carrier"
+                        ),
+                    }.get(str(exc))
                     if (
-                        str(exc) != "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+                        fallback_reason is None
                         or not held_day0_current_bundle_pin_eligible
                         or pinned_complete_bundle is not None
                         or bundle is None
@@ -42149,14 +42162,18 @@ def _prepare_current_global_probability_family(
                         raise
                     # The current source-clock posterior can remain a valid,
                     # immutable reduce-only carrier while its successor hourly
-                    # vector tranche is temporarily incomplete.  Revalidate
-                    # that exact carrier with the strict held-pin contract,
-                    # then overlay the latest authorized monotone observation.
-                    # ENTRY never reaches this branch.  SCOPE: this held
-                    # city/date/metric family only.  DRAIN: the next complete
-                    # current vector revision restores the primary remaining-
-                    # path rebuild.  RESET: every monitor/submit redecision
-                    # retries current vectors before this typed fallback.
+                    # vector tranche is temporarily incomplete, or while the
+                    # successor built from a newer input is not yet visible.
+                    # Revalidate that exact carrier with the strict held-pin
+                    # contract (byte-exact replay at its own cut), then overlay
+                    # the latest authorized monotone observation.  It is typed
+                    # as the held pinned recompute, never as current-remaining
+                    # q.  ENTRY never reaches this branch.  SCOPE: this held
+                    # city/date/metric family only.  DRAIN: the successor
+                    # posterior from the newer input / complete vector revision
+                    # restores the primary remaining-path rebuild.  RESET: every
+                    # monitor/submit redecision retries the current remaining
+                    # path before this typed fallback.
                     held_pin = read_pinned_replacement_forecast_bundle(
                         forecast_conn,
                         posterior_id=int(bundle.posterior_id),
@@ -42184,7 +42201,7 @@ def _prepare_current_global_probability_family(
                     if day0_payload_out is not None:
                         day0_payload_out[
                             "_edli_day0_held_pinned_fallback_reason"
-                        ] = "current_remaining_vectors_unavailable"
+                        ] = fallback_reason
                     return prepared
                 probability_authority = (
                     "day0_remaining_day_global_probability_v1"
