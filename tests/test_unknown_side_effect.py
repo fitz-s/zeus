@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-10
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused/audited: 2026-10-06
+# Lifecycle: created=2026-04-27; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: R3 M2 unknown-side-effect semantics for post-POST submit uncertainty.
 # Reuse: Run when executor submit exception handling, venue command recovery,
 #        or idempotency/economic-intent duplicate blocking changes.
@@ -163,6 +163,11 @@ def conn(monkeypatch, tmp_path):
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
 
+    # A simulated 403 owns only this test's venue-access state, never the next
+    # test's POST eligibility or the machine's diagnostic route probe.
+    monkeypatch.setattr("src.control.venue_access._path", lambda: tmp_path / "venue-access.json")
+    monkeypatch.setattr("src.control.venue_access.egress_evidence", lambda **_kwargs: {})
+
     # ENTRY admission resolves the current weather family from the canonical
     # forecasts DB, independently of the trade connection. Keep that authority
     # surface real in this fixture: use an isolated on-disk DB under tmp_path,
@@ -208,6 +213,10 @@ def conn(monkeypatch, tmp_path):
     try:
         from src.state.db import init_schema_world_only
 
+        # Match normal canonical startup before ENTRY takes its attached write
+        # transaction; the independent durable-pause reader must not switch
+        # journal mode while that transaction already owns the writer lock.
+        world_conn.execute("PRAGMA journal_mode=WAL")
         init_schema_world_only(world_conn)
     finally:
         world_conn.close()
@@ -256,24 +265,25 @@ def conn(monkeypatch, tmp_path):
         },
     )
 
-    def _seed_submit_collateral(conn: sqlite3.Connection, **_kwargs) -> dict:
+    def _seed_submit_collateral(
+        conn: sqlite3.Connection, *, token_balances: dict | None = None, **_kwargs
+    ) -> dict:
+        # EXIT preflight keeps its positive inventory. ENTRY obtains the exact
+        # canonical holdings below, rather than inventing unrelated chain assets.
+        if token_balances is None:
+            token_balances = {
+                "tok-m2": 1_000_000_000,
+                "tok-m2-exit-init": 1_000_000_000,
+                "tok-m2-exit-lazy": 1_000_000_000,
+                "tok-m2-exit-submit-pre": 1_000_000_000,
+            }
         CollateralLedger(conn).set_snapshot(
             CollateralSnapshot(
                 pusd_balance_micro=1_000_000_000,
                 pusd_allowance_micro=1_000_000_000,
                 usdc_e_legacy_balance_micro=0,
-                ctf_token_balances={
-                    "tok-m2": 1_000_000_000,
-                    "tok-m2-exit-init": 1_000_000_000,
-                    "tok-m2-exit-lazy": 1_000_000_000,
-                    "tok-m2-exit-submit-pre": 1_000_000_000,
-                },
-                ctf_token_allowances={
-                    "tok-m2": 1_000_000_000,
-                    "tok-m2-exit-init": 1_000_000_000,
-                    "tok-m2-exit-lazy": 1_000_000_000,
-                    "tok-m2-exit-submit-pre": 1_000_000_000,
-                },
+                ctf_token_balances=token_balances,
+                ctf_token_allowances=token_balances,
                 reserved_pusd_for_buys_micro=0,
                 reserved_tokens_for_sells={},
                 captured_at=datetime.now(timezone.utc),
@@ -289,7 +299,22 @@ def conn(monkeypatch, tmp_path):
             "captured_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    monkeypatch.setattr("src.execution.executor._refresh_entry_collateral_snapshot_for_submit", _seed_submit_collateral)
+    def _seed_entry_collateral(conn: sqlite3.Connection) -> dict:
+        from src.engine.global_auction_universe import _position_token
+        from src.state.portfolio import (
+            current_tradable_exposure_shares,
+            load_runtime_open_portfolio,
+        )
+
+        balances = {}
+        for position in load_runtime_open_portfolio(conn).positions:
+            token = _position_token(position)
+            shares = Decimal(str(current_tradable_exposure_shares(position)))
+            if token and shares > 0:
+                balances[token] = balances.get(token, 0) + int(shares * 1_000_000)
+        return _seed_submit_collateral(conn, token_balances=balances)
+
+    monkeypatch.setattr("src.execution.executor._refresh_entry_collateral_snapshot_for_submit", _seed_entry_collateral)
     monkeypatch.setattr("src.execution.executor._refresh_exit_collateral_snapshot_for_submit", _seed_submit_collateral)
     yield c
     c.close()
@@ -752,6 +777,34 @@ def test_network_timeout_after_POST_creates_unknown_not_rejected(conn):
     assert "SUBMIT_REJECTED" not in _events(conn, cmd["command_id"])
 
 
+def test_entry_chain_inventory_mismatch_rejects_before_sdk(conn, monkeypatch):
+    from dataclasses import replace
+    from src.execution.executor import _live_order
+    from src.state.collateral_ledger import CollateralLedger
+
+    original_set_snapshot = CollateralLedger.set_snapshot
+
+    def _set_mismatched_snapshot(ledger, snapshot):
+        return original_set_snapshot(
+            ledger,
+            replace(snapshot, ctf_token_balances={"unrepresented-token": 1_000_000}),
+        )
+
+    monkeypatch.setattr(CollateralLedger, "set_snapshot", _set_mismatched_snapshot)
+    intent = _make_entry_intent(conn)
+    mock_client = MagicMock()
+    with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
+        result = _live_order(
+            "trade-m2-inventory-mismatch", intent, shares=18.0,
+            conn=conn, decision_id="dec-m2-inventory-mismatch",
+        )
+
+    assert result.status == "rejected"
+    assert "CURRENT_WEALTH_CHAIN_POSITION_SET_MISMATCH" in (result.reason or "")
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    assert mock_client.method_calls == []
+
+
 def test_ambiguous_submit_persists_deterministic_order_identity(conn):
     from src.execution.executor import _live_order
     from src.venue.polymarket_v2_adapter import AmbiguousSubmitError
@@ -880,7 +933,9 @@ def test_marketable_buy_min_size_polyapi_exception_creates_terminal_rejection(co
         result = _live_order(
             "trade-m2-marketable-buy-min",
             intent,
-            shares=3.0,
+            # The locally admitted request is legal ($1). The opaque venue
+            # exception's $0.30 text is classifier input, not our order fact.
+            shares=10.0,
             conn=conn,
             decision_id="dec-m2-marketable-buy-min",
         )
@@ -899,6 +954,9 @@ def test_marketable_buy_min_size_polyapi_exception_creates_terminal_rejection(co
     assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
     assert payload["venue_order_created"] is False
     assert "SUBMIT_TIMEOUT_UNKNOWN" not in [row["event_type"] for row in events]
+    mock_client.place_limit_order.assert_called_once()
+    submitted = mock_client.place_limit_order.call_args.kwargs
+    assert Decimal(str(submitted["size"])) * Decimal(str(submitted["price"])) == Decimal("1")
 
 
 def test_marketable_buy_min_size_without_currency_polyapi_exception_creates_terminal_rejection(conn):
@@ -919,7 +977,7 @@ def test_marketable_buy_min_size_without_currency_polyapi_exception_creates_term
         result = _live_order(
             "trade-m2-marketable-buy-min-no-currency",
             intent,
-            shares=3.0,
+            shares=10.0,
             conn=conn,
             decision_id="dec-m2-marketable-buy-min-no-currency",
         )
@@ -938,6 +996,30 @@ def test_marketable_buy_min_size_without_currency_polyapi_exception_creates_term
     assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
     assert payload["venue_order_created"] is False
     assert "SUBMIT_TIMEOUT_UNKNOWN" not in [row["event_type"] for row in events]
+    mock_client.place_limit_order.assert_called_once()
+    submitted = mock_client.place_limit_order.call_args.kwargs
+    assert Decimal(str(submitted["size"])) * Decimal(str(submitted["price"])) == Decimal("1")
+
+
+def test_marketable_buy_below_minimum_rejects_before_sdk(conn):
+    from src.engine.event_bound_final_intent import PreVenueSubmitError
+    from src.execution.executor import _live_order
+
+    intent = _make_entry_intent(conn, price=0.10)
+    mock_client = MagicMock()
+    with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
+        with pytest.raises(PreVenueSubmitError, match="marketable BUY notional is below venue minimum"):
+            _live_order(
+                "trade-m2-below-minimum", intent, shares=3.0,
+                conn=conn, decision_id="dec-m2-below-minimum",
+            )
+
+    # This executor seam raises the owning pre-venue type rather than an
+    # OrderResult; the real call trace proves venue_call_started is false.
+    venue_call_started = bool(mock_client.place_limit_order.call_count)
+    assert venue_call_started is False
+    assert mock_client.method_calls == []
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
 
 def test_risk_allocator_pre_submit_exception_does_not_create_unknown_side_effect(conn, monkeypatch):
