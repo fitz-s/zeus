@@ -18117,3 +18117,26 @@ No live HTTP, source fetch, DB mutation, cycle, load or precision change ran.
 ROOT directs one applicable scoped data10 aggregate after native-CAS integration,
 not a repeated child batch; that final check and independent HKO review remain
 pending. Existing 123 raw files and example-config SHA e95 remain unchanged.
+
+### Final role-custody integration checkpoint
+
+Source-only commit433237badce515206caca4bdd466a720ae691078 was previewed clean
+and normally picked as 0a3d092299e331714f31505d1419e88f3ff0472e after HKOd488;
+its three file bytes equal the independent source freeze. Scoped data10 ran
+once on this aggregate: 386 passed, 4.80s, /tmp/zeus-final-hko-cas-data10.xml.
+The existing H/L full-consumer fixture now creates actual private canonical
+WORLD/TRADE and requested Oct4 market references before normal retention,
+without a private no-delete seam. Initial integration stopped before q because
+its varied synthetic interval source was PARTIAL/MISSING_EXPECTED_MEMBERS
+(observed_members0); no production COMPLETE gate was changed. The source owner
+confirmed its accepted positive uses actual original 2t/mn/mx IEEE2 values11C
+before any body/index/hash/capture, so boundary intervals11..11 have 51 countable
+members. The integrated fixture adopts this same controlled original field;
+provider centers10/12 retain a positive global width. It asserts real APPLIED
+aggregate deletion, exact original-message CAS readback and then the existing
+normal materializer/public-reader/ENTRY/held/JIT/revision-DRAIN contract.
+This is a private fixture, not current Hong Kong source readiness.
+Latest origin/live is 1cea70065401dd775bd7aaa5c84b6d99dab78d25, adding only the
+hourly-probe city-refusal isolation and its fast-observation test. The task
+will normally rebase and run those affected controls plus scoped engine6;
+no live checkout change, push or load is authorized by this checkpoint.

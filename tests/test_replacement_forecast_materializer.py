@@ -1072,9 +1072,51 @@ def test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkey
     from src.data import ecmwf_open_data as native
     from src.data.replacement_forecast_source_run_identity import coordinate_bound_data_version
 
+    # Exact synthetic source fields, before original body/index/capture: all
+    # 51 members have matched 2t/mn/mx=11C, so straddling intervals are 11..11
+    # and the normal collector can prove COMPLETE rather than null members.
+    # Provider centers remain 10/12, yielding a real positive global width.
+    set_values = ec.codes_set_values
+    def original_temperature_values(gid, values):
+        if ec.codes_get(gid, "paramId") in {167, 228026, 228027}:
+            ec.codes_set(gid, "packingType", "grid_ieee")
+            ec.codes_set(gid, "precision", 2)
+            values = np.full(len(values), 284.15)
+        return set_values(gid, values)
+    monkeypatch.setattr(ec, "codes_set_values", original_temperature_values)
     s = _normal_native_http(tmp_path, monkeypatch, steps=tuple(range(0, 37, 3)), hour=12)
     from src.state.db import init_schema_world_only
     init_schema_world_only(s.conn)
+    # Real requested full-Y market references exist before normal zero-grace
+    # cleanup. Custody authority is private canonical WORLD/TRADE, not a
+    # mocked references result or a no-delete retention seam.
+    from src import config
+    from src.state import db as state_db
+    from src.data import replacement_forecast_production as production
+    ledgers = tmp_path / "custody-ledgers"
+    ledgers.mkdir()
+    world_path, trade_path = ledgers / "zeus-world.db", ledgers / "zeus_trades.db"
+    for path, initialize in ((world_path, state_db.init_schema_world_only),
+                             (trade_path, state_db.init_schema_trade_only)):
+        with sqlite3.connect(path) as ledger:
+            initialize(ledger)
+        ledger.close()
+    monkeypatch.setattr(config, "STATE_DIR", ledgers)
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
+    queued = {name: tmp_path / name for name in ("seed_dir", "request_dir", "inflight_dir")}
+    for directory in queued.values():
+        directory.mkdir()
+    monkeypatch.setattr(production, "_replacement_forecast_live_materialization_queue_config", lambda: queued)
+    for target in ("2026-10-04",):
+        for scope_metric in ("high", "low"):
+            for index, (label, lower, upper) in enumerate((("10°C or below", None, 10.), ("11°C", 11., 11.), ("12°C or higher", 12., None))):
+                primary = target == "2026-10-04" and scope_metric == metric
+                s.conn.execute("""INSERT INTO market_events(market_slug,city,target_date,temperature_metric,
+                    condition_id,token_id,range_label,range_low,range_high,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""", (f"private-london-{target}-{scope_metric}-{index}", "London", target, scope_metric,
+                    "0x" + f"{index + 101:064x}", f"private-london-yes-{index}" if primary else f"custody-{target}-{scope_metric}-{index}",
+                    label, lower, upper, (s.run + timedelta(hours=10)).isoformat()))
+    s.conn.commit()
     fixture_clock = [s.run + timedelta(hours=10)]
     class ClockType(type):
         def __instancecheck__(cls, value):
@@ -1132,6 +1174,16 @@ def test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkey
                 skip_extract=True, conn=s.conn, now_utc=s.run + timedelta(hours=10), _paths=paths,
                 grid_surface_source_evidence=sample["grid_surface_evidence"])
             assert collected["status"] == "ok", collected
+            assert collected["raw_retention"]["status"] == "APPLIED", collected["raw_retention"]
+            assert collected["raw_retention"]["deleted_file_count"] > 0
+            assert not target.exists()  # No assembled originals survive cleanup.
+            snapshot = s.conn.execute("SELECT provenance_json FROM ensemble_snapshots WHERE city='London' AND temperature_metric=? ORDER BY snapshot_id DESC LIMIT 1",
+                                      (native_metric,)).fetchone()
+            captures = json.loads(snapshot[0])["native_capture_receipt"]["messages"]
+            for capture in captures:
+                original = native._read_role_message_bytes(paths.raw_root, capture)
+                assert hashlib.sha256(original).hexdigest() == capture["raw_message_sha256"]
+                assert native._role_message_path(paths.raw_root, capture["raw_message_sha256"]).is_file()
         city = runtime_cities_by_name()["London"]
         fixture_clock[0] = s.run + timedelta(hours=10, seconds=1)
         cut = fixture_clock[0]
@@ -1177,11 +1229,6 @@ def test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkey
         from src.data.replacement_forecast_materialization_seed_builder import market_bins_for_replacement_seed, _market_bins_to_celsius
         from src.data.replacement_forecast_materialization_request_builder import _bins_to_temperature_bins
         from src.contracts.settlement_semantics import SettlementSemantics
-        for index, (label, lower, upper) in enumerate((("10°C or below", None, 10.), ("11°C", 11., 11.), ("12°C or higher", 12., None))):
-            s.conn.execute("""INSERT INTO market_events(market_slug,city,target_date,temperature_metric,
-                condition_id,token_id,range_label,range_low,range_high,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?)""", (f"private-london-{metric}-{index}", city.name, "2026-10-04", metric,
-                "0x" + f"{index + 101:064x}", f"private-london-yes-{index}", label, lower, upper, cut.isoformat()))
         public_bins = _bins_to_temperature_bins(_market_bins_to_celsius(
             market_bins_for_replacement_seed(s.conn, city=city.name, target_date="2026-10-04", temperature_metric=metric),
             settlement_unit=city.settlement_unit, rounding_rule=SettlementSemantics.for_city(city).rounding_rule))
