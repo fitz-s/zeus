@@ -18543,3 +18543,39 @@ Re-land requirements:
   not fall below the pre-change rate;
 - a native role that is absent leaves the existing shape path serving, never
   CURRENT_SHAPE_ENS_UNAVAILABLE (data never blocks serving).
+ROOT authorized exacta5778a88927fb15e15ae08595fe93503415acb82. Ordinary
+FF pushaf77->a577 succeeded and live checkout normally FF'd6->a577, retaining
+the peer's two audit files. The sole registered deploy_live.py restart
+live-trading session47047 ended actualrc0. New MAIN24819 loaded fulla577 at
+2026-10-06T08:28:01.842157Z; FORECAST2481/INGEST2377 reporta577 and all three
+cwd=/Users/leofitz/zeus. Live config remainsSHAd7d28bd3...25ae and daemon
+bytes remainSHA9869d386...442c2d. Loader preSTOP14held/zero commands/fullbooks
+had7 probability-degraded; poststart7fresh/14open/fullbook still has7 degraded,
+EDLI916488 candidates101/scope198/claimable138. Shared entry posture returned
+restart_guard_not_selected and actual RO selected guard isNone, no manual clear.
+The loader's informational worktree_freshness=mismatch is recorded: subsequent
+actual live HEAD/origin/loaded were all exacta577 with no tracked dirty files.
+Its separate observation cause was not diagnosed or used to authorize a retry.
+
+Online normal fairness DRAIN now has direct canonical evidence. Native job
+row765, forecast_live_native_2t_mn2t6_low, started08:26:12.719416 and finished
+08:26:13.101874 with FAILED/HTTP503 for
+https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/20261005/12z/ifs/0p25/oper/20261005120000-3h-oper-fc.index.
+Its persisted scope explicitly includes HKOct6 HIGH/LOW full-Y. This attempt
+occurred under the new FORECAST code before the MAIN BOOT, and is not mislabeled
+as a post-MAIN event. Old18Z receipt row764 remains, with no HK target; its
+earlier failure no longer prevents the distinct12Z normal turn. No manual HTTP,
+seed, wake, clock renewal or row deletion produced this transition. The repair
+has actual scheduling/attempt evidence, not a qualified native original or q.
+
+Independent once-only postBOOT cut08:29:47: HK HIGH238/LOW1099 and Shanghai1714
+are new MAIN monitor events but still missingfresh_prob; HK retains
+READINESS_NOT_LIVE_GRADE and Shanghai bounded reseed debt. Current held bids
+.001/.006/.03 are out of the legal submission band and do not authorize an
+immediate SELL. Their short monitor wall times are not successful probability
+reconstruction or market-speed proof. HK12's own observed503 is now a real
+external acquisition blocker, unlike the prior unsupported inference from
+18Z's non-HK failure. New qualified original/native role and normalv7/v35
+materialization/current ENTRY-held-JIT restoration remain OPEN. Existing normal
+turns may RESET after exact original parts become available; no source-mirror
+change, extra restart, forced collection or stale-certificate reuse is admitted.
