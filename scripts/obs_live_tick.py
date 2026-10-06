@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-17
-# Lifecycle: created=2026-05-17; last_reviewed=2026-10-06; last_reused=2026-10-06
-# Last reused or audited: 2026-10-06 (bounded forward decoded entity custody)
+# Lifecycle: created=2026-05-17; last_reviewed=2026-10-05; last_reused=2026-10-05
+# Last reused or audited: 2026-10-05
 # Purpose: Live rolling-window writer for observation_instants WU/OGIMET hourly rows.
 # Reuse: Run when ingest_main obs_v2 live-tick, hourly payload identity, or obs_v2 writer relationships change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
@@ -49,7 +49,6 @@ historical backfill, per obs-migration-iter3.md Phase 0 provenance contract).
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import logging
@@ -57,8 +56,6 @@ import os
 import sqlite3
 import sys
 import time
-import tempfile
-import stat
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -81,7 +78,7 @@ from src.data.tier_resolver import (  # noqa: E402
     expected_source_for_city,
     tier_for_city,
 )
-from src.data.wu_hourly_client import HourlyObservation, CapturedEntity, fetch_wu_hourly  # noqa: E402
+from src.data.wu_hourly_client import HourlyObservation, fetch_wu_hourly  # noqa: E402
 from src.engine.time_context import (  # noqa: E402
     city_local_day_end_target_date,
     city_local_fetch_window,
@@ -95,143 +92,6 @@ DEFAULT_LOG_PATH = STATE_DIR / "obs_v2_live_tick_log.jsonl"
 DEFAULT_DAYS_BACK = 7
 DATA_VERSION = "v1.wu-native"
 LIVE_TICK_PARSER_VERSION = "obs_v2_live_tick_v1"
-RAW_ENTITY_DIR = STATE_DIR / 'observation_raw' / 'sha256'
-RAW_ENTITY_MAX_BYTES = 512 * 1024 * 1024
-RAW_ENTITY_MAX_BODIES = 10000
-
-
-def _verify_entity_file(path: Path, entity: bytes, sha: str) -> bool:
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size != len(entity):
-            return False
-        digest = hashlib.sha256()
-        with os.fdopen(fd, 'rb', closefd=False) as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b''):
-                digest.update(block)
-        return digest.hexdigest() == sha
-    finally:
-        os.close(fd)
-
-
-def _publish_entity(capture: CapturedEntity) -> tuple[dict | None, str | None]:
-    """Publish once before opening a DB transaction; no GC or authority gate.
-
-    SCOPE one response. DRAIN next scheduled fetch; RESET verified existing
-    body reuse or budget/IO recovery. Only our own temporary file is removed.
-    """
-    if capture.entity is None:
-        return None, capture.unavailable_reason or 'ENTITY_BYTES_UNAVAILABLE'
-    if len(capture.entity) > 512 * 1024 * 1024:
-        return None, 'CAPACITY'
-    try:
-        start = datetime.fromisoformat(capture.started_at)
-        finish = datetime.fromisoformat(capture.finished_at)
-    except (TypeError, ValueError):
-        return None, 'CLOCK_INVALID'
-    if start.utcoffset() is None or finish.utcoffset() is None or start > finish:
-        return None, 'CLOCK_INVALID'
-    sha = hashlib.sha256(capture.entity).hexdigest()
-    directory = Path(RAW_ENTITY_DIR)
-    path = directory / (sha + '.body')
-    lock_fd = None
-    temporary = None
-    try:
-        for ancestor in (directory, *directory.parents):
-            if ancestor.is_symlink():
-                return None, 'IO_ERROR'
-        directory.mkdir(parents=True, exist_ok=True)
-        lock_fd = os.open(directory / '.publish.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return None, 'STORE_BUSY'
-        # Identical bytes already in custody do not consume fresh capacity.
-        if path.exists() or path.is_symlink():
-            if not _verify_entity_file(path, capture.entity, sha):
-                return None, 'CORRUPT_EXISTING'
-        else:
-            total = count = 0
-            for entry in directory.iterdir():
-                if entry.name.endswith('.body'):
-                    info = entry.lstat()
-                    if not stat.S_ISREG(info.st_mode):
-                        return None, 'CORRUPT_EXISTING'
-                    count += 1
-                    total += info.st_size
-                    if count >= RAW_ENTITY_MAX_BODIES or total + len(capture.entity) > RAW_ENTITY_MAX_BYTES:
-                        return None, 'CAPACITY'
-            if len(capture.entity) + total > RAW_ENTITY_MAX_BYTES or count >= RAW_ENTITY_MAX_BODIES:
-                return None, 'CAPACITY'
-            fd, name = tempfile.mkstemp(prefix='.entity-', dir=directory)
-            temporary = Path(name)
-            with os.fdopen(fd, 'wb') as stream:
-                stream.write(capture.entity)
-                stream.flush()
-                os.fsync(stream.fileno())
-            try:
-                os.link(temporary, path)
-            except FileExistsError:
-                if not _verify_entity_file(path, capture.entity, sha):
-                    return None, 'CORRUPT_EXISTING'
-        # A prior link may survive a failed directory fsync. Verified bytes
-        # alone cannot RESET that durability failure, even on identical reuse.
-        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-        return {'sha256': sha, 'byte_count': len(capture.entity), 'source_file': str(path),
-            'started_at': capture.started_at, 'finished_at': capture.finished_at,
-            'request_url': capture.request_url, 'request_params': capture.request_params,
-            'native_unit': capture.native_unit, 'headers': capture.headers}, None
-    except OSError:
-        return None, 'IO_ERROR'
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                logger.warning('Owned capture temporary cleanup unavailable')
-        if lock_fd is not None:
-            os.close(lock_fd)
-
-
-def _hour_custody(obs, captures, published, *, written_at):
-    reports = {ts for ts in (obs.hour_max_raw_ts, obs.hour_min_raw_ts, _latest_raw_ts(obs)) if ts}
-    refs, covered, reason = [], set(), None
-    for capture, (reference, unavailable) in zip(captures, published):
-        contributors = reports & capture.report_timestamps
-        if not contributors:
-            continue
-        if reference is None:
-            reason = unavailable
-            continue
-        refs.append({**reference, 'report_timestamps': sorted(contributors)})
-        covered.update(contributors)
-    if covered != reports:
-        refs = []
-        reason = reason or 'CONTRIBUTOR_UNAVAILABLE'
-    if refs and any(datetime.fromisoformat(ref['finished_at']) > datetime.fromisoformat(written_at)
-                    for ref in refs):
-        refs, reason = [], 'CLOCK_INVALID'
-    return {'status': 'OBSERVED' if refs else 'UNAVAILABLE', 'reason': reason if not refs else None,
-        'city': obs.city, 'source': expected_source_for_city(obs.city, target_date=obs.target_date),
-        'station_id': obs.station_id, 'target_date': obs.target_date, 'utc_timestamp': obs.utc_timestamp,
-        'temp_unit': obs.temp_unit, 'source_issued_at_utc': None, 'completeness': 'UNPROVEN',
-        'settlement_equivalence': 'UNPROVEN', 'absorbing_authority': False, 'captures': refs}
-
-
-def _prepare_captures(fetch, result, *, dry_run):
-    captures = getattr(fetch, 'captures', ())
-    published = [(_publish_entity(capture) if not dry_run else (None, 'DRY_RUN'))
-                 for capture in captures]
-    result.capture_receipts = tuple({
-        'status': 'OBSERVED' if ref else 'UNAVAILABLE', 'reason': reason,
-        'reference': ref, 'started_at': capture.started_at, 'finished_at': capture.finished_at,
-    } for capture, (ref, reason) in zip(captures, published))
-    return captures, published
 
 # WU: single request per city covers up to 30 days comfortably.
 WU_WINDOW_DAYS = DEFAULT_DAYS_BACK
@@ -288,7 +148,6 @@ class TickResult:
     failure_reason: Optional[str] = None
     day0_event_ids: tuple[str, ...] = ()
     day0_event_families: tuple[tuple[str, str, str], ...] = ()
-    capture_receipts: tuple[dict, ...] = ()
 
     def __str__(self) -> str:
         if self.skipped_hko:
@@ -344,7 +203,6 @@ def _hourly_obs_to_v2_row(
     *,
     imported_at: str,
     tier_name: str,
-    custody: dict | None = None,
 ) -> ObsV2Row:
     """Build ObsV2Row from HourlyObservation. Mirrors backfill_obs semantics.
 
@@ -382,9 +240,6 @@ def _hourly_obs_to_v2_row(
         "payload_scope": "obs_v2_hour_bucket_source_identity",
         "parser_version": LIVE_TICK_PARSER_VERSION,
     }
-    if custody is not None:
-        custody = {**custody, 'payload_hash': provenance['payload_hash']}
-        provenance['captured_entity_custody_v1'] = custody
     return ObsV2Row(
         city=obs.city,
         target_date=obs.target_date,
@@ -408,7 +263,6 @@ def _hourly_obs_to_v2_row(
         authority="VERIFIED",
         data_version=DATA_VERSION,
         provenance_json=json.dumps(provenance, separators=(",", ":")),
-        source_file=custody['captures'][0]['source_file'] if custody and custody['captures'] else None,
     )
 
 
@@ -433,7 +287,6 @@ def _hourly_observation_prints(
     *,
     source_channel: str,
     fetched_at_utc: str,
-    custody: dict | None = None,
 ) -> list[dict]:
     """Return append-only extrema and latest-report facts for one hour bucket."""
 
@@ -452,7 +305,7 @@ def _hourly_observation_prints(
             "value_native": value,
             "unit": obs.temp_unit,
             "fetched_at_utc": fetched_at_utc,
-            "raw_report": json.dumps({'captured_entity_custody_v1': custody}, separators=(',', ':')) if custody else None,
+            "raw_report": None,
         }
         for publish_ts, value in facts
     ]
@@ -665,7 +518,6 @@ def _tick_wu_city(
     if fetch.failed:
         result.failure_reason = fetch.failure_reason
         return result
-    captures, published = _prepare_captures(fetch, result, dry_run=dry_run)
     imported_at = proof_of_possession_available_at(datetime.now(timezone.utc))
 
     rows: list[ObsV2Row] = []
@@ -675,11 +527,8 @@ def _tick_wu_city(
     # inside the bucket (not the bucket floor) — see _aggregate_hourly.
     prints: list[dict] = []
     for obs in fetch.observations:
-        custody = _hour_custody(obs, captures, published, written_at=imported_at) if captures else None
         try:
-            rows.append(_hourly_obs_to_v2_row(obs, imported_at=imported_at, tier_name="WU_ICAO", custody=custody))
-            if custody is not None:
-                custody = json.loads(rows[-1].provenance_json)['captured_entity_custody_v1']
+            rows.append(_hourly_obs_to_v2_row(obs, imported_at=imported_at, tier_name="WU_ICAO"))
         except (InvalidObsV2RowError, ValueError) as exc:
             logger.warning("Row build error %s %s: %s", city_name, obs.utc_timestamp, exc)
             result.row_build_errors += 1
@@ -688,8 +537,7 @@ def _tick_wu_city(
             _hourly_observation_prints(
                 obs,
                 source_channel="wu_icao_history",
-                fetched_at_utc=max(c.finished_at for c in captures) if captures else imported_at,
-                custody=custody,
+                fetched_at_utc=imported_at,
             )
         )
 
@@ -739,17 +587,13 @@ def _tick_ogimet_city(
     if fetch.failed:
         result.failure_reason = fetch.failure_reason
         return result
-    captures, published = _prepare_captures(fetch, result, dry_run=dry_run)
     imported_at = proof_of_possession_available_at(datetime.now(timezone.utc))
 
     rows: list[ObsV2Row] = []
     prints: list[dict] = []
     for obs in fetch.observations:
-        custody = _hour_custody(obs, captures, published, written_at=imported_at) if captures else None
         try:
-            rows.append(_hourly_obs_to_v2_row(obs, imported_at=imported_at, tier_name="OGIMET_METAR", custody=custody))
-            if custody is not None:
-                custody = json.loads(rows[-1].provenance_json)['captured_entity_custody_v1']
+            rows.append(_hourly_obs_to_v2_row(obs, imported_at=imported_at, tier_name="OGIMET_METAR"))
         except (InvalidObsV2RowError, ValueError) as exc:
             logger.warning("Row build error %s %s: %s", city_name, obs.utc_timestamp, exc)
             result.row_build_errors += 1
@@ -758,8 +602,7 @@ def _tick_ogimet_city(
             _hourly_observation_prints(
                 obs,
                 source_channel=source_tag,
-                fetched_at_utc=max(c.finished_at for c in captures) if captures else imported_at,
-                custody=custody,
+                fetched_at_utc=imported_at,
             )
         )
 
@@ -1230,7 +1073,6 @@ def _append_log(log_path: Path, result: TickResult, *, start_date: date, end_dat
             "row_build_errors": result.row_build_errors,
             "skipped_hko": result.skipped_hko,
             "failure_reason": result.failure_reason,
-            "capture_receipts": result.capture_receipts,
         }
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, separators=(",", ":")) + "\n")

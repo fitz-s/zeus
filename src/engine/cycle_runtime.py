@@ -3532,7 +3532,6 @@ def _emit_monitor_refreshed_canonical_if_available(
     final_exit_trigger: str | None = None,
     decision_unavailable_reason: str | None = None,
     decision_unavailable_trigger: str | None = None,
-    monitor_attempt_timing: Mapping[str, object] | None = None,
 ) -> bool:
     if conn is None:
         return True
@@ -3540,21 +3539,6 @@ def _emit_monitor_refreshed_canonical_if_available(
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
     from src.state.db import append_many_and_project
     from src.state.write_coordinator import WriteLeaseTimeout
-
-    # Diagnostic facts belong to this frozen attempt, never its action authority.
-    attempt_timing: dict[str, object] = {}
-    if isinstance(monitor_attempt_timing, Mapping):
-        raw_seconds = monitor_attempt_timing.get("primary_belief_seconds")
-        seconds = None if isinstance(raw_seconds, bool) else _finite_float_or_none(raw_seconds)
-        if seconds is not None and seconds >= 0.0:
-            attempt_timing["primary_belief_seconds"] = seconds
-        for key, allowed in (
-            ("deadline_scope", {"none", "position", "global"}),
-            ("stage", {"refresh", "pending_exit_retry_quote"}),
-        ):
-            value = monitor_attempt_timing.get(key)
-            if isinstance(value, str) and value in allowed:
-                attempt_timing[key] = value
 
     position_id = str(getattr(pos, "trade_id", "") or "").strip()
     if not position_id:
@@ -3702,8 +3686,6 @@ def _emit_monitor_refreshed_canonical_if_available(
             for event in events:
                 payload = json.loads(str(event.get("payload_json") or "{}"))
                 if isinstance(payload, dict):
-                    if attempt_timing:
-                        payload["monitor_attempt_timing"] = attempt_timing
                     payload["held_sell_full_depth_action_authority"] = bool(
                         getattr(
                             pos,
@@ -3920,7 +3902,6 @@ def _record_monitor_data_degraded_attempt(
     summary: dict,
     stage: str,
     preserve_current_attempt_axes: bool = False,
-    monitor_attempt_timing: Mapping[str, object] | None = None,
 ) -> bool:
     """Persist one attempted redecision without inventing action authority.
 
@@ -3976,7 +3957,6 @@ def _record_monitor_data_degraded_attempt(
         deps=deps,
         decision_unavailable_reason=reason,
         decision_unavailable_trigger="MONITOR_INPUTS_UNAVAILABLE",
-        monitor_attempt_timing=monitor_attempt_timing,
     )
     if not canonical_written:
         summary["monitor_canonical_write_failed"] = (
@@ -8679,7 +8659,6 @@ def execute_monitoring_phase(
     if read_conn is None:
         read_conn = conn
     for position_index, pos in enumerate(monitor_positions):
-        monitor_attempt_timing = None
         armed_obligation = None
         completion_request = None
         if urgent_preemption_requested():
@@ -9805,14 +9784,12 @@ def execute_monitoring_phase(
                     ].append(str(getattr(pos, "trade_id", "") or ""))
                     edge_ctx = refresh_position(read_conn, clob, pos, quote_conn=conn)
                     admitted_child_stage = None
-                    monitor_attempt_timing = {"stage": "refresh", "deadline_scope": "none"}
                     _primary_read_elapsed = getattr(
                         pos,
                         _MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR,
                         None,
                     )
                     if _primary_read_elapsed is not None:
-                        monitor_attempt_timing["primary_belief_seconds"] = _primary_read_elapsed
                         _record_held_monitor_primary_belief_read_elapsed_seconds(
                             _primary_read_elapsed
                         )
@@ -9851,8 +9828,6 @@ def execute_monitoring_phase(
                 ),
             )
             if deadline_expiry is not None:
-                if monitor_attempt_timing is not None:
-                    monitor_attempt_timing["deadline_scope"] = deadline_expiry
                 _record_monitor_data_degraded_attempt(
                     conn,
                     pos,
@@ -9861,7 +9836,6 @@ def execute_monitoring_phase(
                     summary=summary,
                     stage="refresh_deadline",
                     preserve_current_attempt_axes=True,
-                    monitor_attempt_timing=monitor_attempt_timing,
                 )
                 if deadline_expiry == "global":
                     break
@@ -9945,10 +9919,6 @@ def execute_monitoring_phase(
                     ),
                 )
                 if deadline_expiry is not None:
-                    if monitor_attempt_timing is not None:
-                        monitor_attempt_timing.update(
-                            stage="pending_exit_retry_quote", deadline_scope=deadline_expiry
-                        )
                     _record_monitor_data_degraded_attempt(
                         conn,
                         pos,
@@ -9957,7 +9927,6 @@ def execute_monitoring_phase(
                         summary=summary,
                         stage="pending_exit_retry_quote_deadline",
                         preserve_current_attempt_axes=True,
-                        monitor_attempt_timing=monitor_attempt_timing,
                     )
                     if deadline_expiry == "global":
                         break
@@ -10875,7 +10844,6 @@ def execute_monitoring_phase(
                         deps=deps,
                         decision_unavailable_reason=_incomplete_reason,
                         decision_unavailable_trigger="INCOMPLETE_EXIT_CONTEXT",
-                        monitor_attempt_timing=monitor_attempt_timing,
                     )
                 )
             elif red_handoff is None and not red_handoff_failed:
@@ -10888,7 +10856,6 @@ def execute_monitoring_phase(
                         final_should_exit=should_exit,
                         final_exit_reason=exit_reason,
                         final_exit_trigger=exit_trigger,
-                        monitor_attempt_timing=monitor_attempt_timing,
                     )
                 )
             if not monitor_canonical_written:

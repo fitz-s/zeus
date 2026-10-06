@@ -43,7 +43,7 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # revision (a provisional carrier that cannot compose fails closed rather than
 # fall back).
 DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = (
-    "day0_native_domain_roles_v35_point_interval_confidence_v1"
+    "day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
 )
 DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
     "day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
@@ -51,9 +51,13 @@ DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
 
 
 def _current_day0_probability_semantics_revision() -> str:
-    # The fitted resolver composition remains a historical replay namespace,
-    # not a second current probability law selected by a configuration switch.
-    return DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL
+    from src.config import day0_resolver_terminal_residual_enabled
+
+    return (
+        DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER
+        if day0_resolver_terminal_residual_enabled()
+        else DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL
+    )
 
 
 DAY0_PROBABILITY_SEMANTICS_REVISION = _current_day0_probability_semantics_revision()

@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Lifecycle: created=2026-03-31; last_reviewed=2026-10-02; last_reused=2026-10-02
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-10-06
+# Last reused/audited: 2026-10-02
 # Authority basis: held-monitor canonical append liveness and atomicity incidents
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -26617,34 +26617,16 @@ def test_completed_position_commit_uses_outer_monitor_deadline(monkeypatch):
     assert commit_deadlines == [pytest.approx(20.0)]
 
 
-@pytest.mark.parametrize("primary_seconds", [0.18, None, -0.18, float("nan"), float("inf")])
-@pytest.mark.parametrize("first_metric,first_direction", [("high", "buy_yes"), ("low", "buy_no")])
-def test_one_position_deadline_does_not_blind_remaining_held_book(
-    monkeypatch, tmp_path, primary_seconds, first_metric, first_direction
-):
-    """One slow family retains current facts without action; later positions decide."""
-    from contextlib import nullcontext
-
+def test_one_position_deadline_does_not_blind_remaining_held_book(monkeypatch):
+    """One slow family loses only its own snapshot; later positions still decide."""
     from src.engine import cycle_runtime
-    from src.engine.lifecycle_events import build_entry_canonical_write
-    from src.state.db import append_many_and_project, get_connection, init_schema
 
     positions = [
         _make_position(
             trade_id=f"isolated-position-deadline-{index}",
             token_id=f"isolated-position-token-{index}",
-            no_token_id=f"isolated-position-no-token-{index}",
-            condition_id=f"0x{index + 1:064x}",
             state="holding",
             chain_state="synced",
-            strategy_key="forecast_qkernel_entry",
-            entered_at="2026-07-02T17:00:00+00:00",
-            temperature_metric=first_metric if index == 0 else (
-                "low" if first_metric == "high" else "high"
-            ),
-            direction=first_direction if index == 0 else (
-                "buy_no" if first_direction == "buy_yes" else "buy_yes"
-            ),
         )
         for index in range(2)
     ]
@@ -26652,20 +26634,6 @@ def test_one_position_deadline_does_not_blind_remaining_held_book(
     refreshes = []
     canonical_emits = []
     evaluated = []
-    conn = get_connection(tmp_path / "monitor-attempt-timing.db")
-    init_schema(conn)
-    for position in positions:
-        events, projection = build_entry_canonical_write(
-            position, phase_after="active", decision_id=f"seed-{position.trade_id}"
-        )
-        append_many_and_project(conn, events, projection)
-    conn.commit()
-    real_emit_monitor = cycle_runtime._emit_monitor_refreshed_canonical_if_available
-    monkeypatch.setattr(
-        cycle_runtime,
-        "_fresh_canonical_trade_write_transaction",
-        lambda *_args, **_kwargs: nullcontext((conn, False)),
-    )
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
         cycle_runtime,
@@ -26680,15 +26648,12 @@ def test_one_position_deadline_does_not_blind_remaining_held_book(
 
     def refresh(_conn, _clob, position, **_kwargs):
         refreshes.append(position.trade_id)
-        position.last_monitor_at = f"2026-07-02T18:00:0{len(refreshes)}+00:00"
+        position.last_monitor_at = f"attempt-{len(refreshes)}"
         position.last_monitor_prob = 0.60
         position.last_monitor_prob_is_fresh = True
         position.last_monitor_best_bid = 0.40
         position.last_monitor_market_price = 0.40
         position.last_monitor_market_price_is_fresh = True
-        measured_seconds = primary_seconds if len(refreshes) == 1 else 0.27
-        if measured_seconds is not None:
-            position._monitor_primary_belief_read_elapsed_seconds = measured_seconds
         if len(refreshes) == 1:
             position.concurrent_evidence = "must-survive-refresh-rollback"
             clock[0] = 6.0
@@ -26703,30 +26668,12 @@ def test_one_position_deadline_does_not_blind_remaining_held_book(
             or ExitDecision(False, "CI_OVERLAP_HOLD")
         ),
     )
-    def emit_monitor(_conn, position, *, deps, **kwargs):
-        attempt_at = datetime.fromisoformat(position.last_monitor_at)
-        emit_deps = SimpleNamespace(logger=deps.logger, _utcnow=lambda: attempt_at)
-        if kwargs.get("monitor_attempt_timing") is not None:
-            kwargs["monitor_attempt_timing"] = {
-                **kwargs["monitor_attempt_timing"],
-                "exit_decision_available": True,
-                "exit_decision_should_exit": True,
-            }
-        assert real_emit_monitor(conn, position, deps=emit_deps, **kwargs) is True
-        assert conn.in_transaction is False
-        row = conn.execute(
-            "SELECT payload_json FROM position_events "
-            "WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED' "
-            "ORDER BY sequence_no DESC LIMIT 1",
-            (position.trade_id,),
-        ).fetchone()
-        canonical_emits.append(
-            (position.trade_id, kwargs, json.loads(row[0]))
-        )
-        return True
-
     monkeypatch.setattr(
-        cycle_runtime, "_emit_monitor_refreshed_canonical_if_available", emit_monitor
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda _conn, position, **_kwargs: (
+            canonical_emits.append(position.trade_id) or True
+        ),
     )
     summary = {"monitors": 0, "exits": 0}
 
@@ -26744,43 +26691,16 @@ def test_one_position_deadline_does_not_blind_remaining_held_book(
 
     assert refreshes == [position.trade_id for position in positions]
     assert evaluated == [positions[1].trade_id]
-    assert [emission[0] for emission in canonical_emits] == [
-        position.trade_id for position in positions
-    ]
-    assert positions[0].last_monitor_at == "2026-07-02T18:00:01+00:00"
+    assert canonical_emits == [position.trade_id for position in positions]
+    assert positions[0].last_monitor_at != "attempt-1"
     assert positions[0].concurrent_evidence == "must-survive-refresh-rollback"
-    assert positions[0].last_monitor_prob_is_fresh is True
-    assert positions[0].last_monitor_market_price_is_fresh is True
-    assert positions[0].last_monitor_prob == pytest.approx(0.61)
-    assert positions[0].last_monitor_market_price == pytest.approx(0.49)
-    assert positions[0].last_monitor_edge is None
-    first_kwargs, first_payload = canonical_emits[0][1:]
-    assert first_kwargs.get("exit_decision") is None
-    assert first_kwargs["decision_unavailable_reason"] == (
-        "MONITOR_INPUTS_UNAVAILABLE:REFRESH_DEADLINE"
-    )
-    assert first_payload["exit_decision_available"] is False
-    assert first_payload["exit_decision_should_exit"] is False
-    assert first_payload["exit_decision_reason"] == first_kwargs["decision_unavailable_reason"]
-    expected_first_timing = {"deadline_scope": "position", "stage": "refresh"}
-    if primary_seconds == 0.18:
-        expected_first_timing["primary_belief_seconds"] = 0.18
-    assert first_payload["monitor_attempt_timing"] == expected_first_timing
-    assert canonical_emits[1][2]["monitor_attempt_timing"] == {
-        "primary_belief_seconds": 0.27,
-        "deadline_scope": "none",
-        "stage": "refresh",
-    }
-    assert all(
-        not hasattr(position, "_monitor_primary_belief_read_elapsed_seconds")
-        for position in positions
-    )
+    assert positions[0].last_monitor_prob_is_fresh is False
+    assert positions[0].last_monitor_market_price_is_fresh is False
     assert summary["held_monitor_per_position_deadline_deferred"] == 1
     assert summary["held_monitor_positions_deferred"] == 1
     assert summary["held_monitor_primary_belief_read_completed"] == 1
     assert summary["monitor_data_degraded_attempts"] == 1
     assert summary["monitors"] == 2
-    conn.close()
 
 
 def test_refresh_exception_restores_owned_state_and_continues_held_book(monkeypatch):

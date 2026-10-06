@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-10-06
+# Last reused/audited: 2026-10-01
 # Authority basis: K2 live ingestion; F3 PR 2/3 typed temperature boundary
 #                  per Path A (src/types/temperature.py).
 """K2 live daily-observation appender (WU ICAO + HKO + Ogimet METAR/SYNOP).
@@ -354,49 +354,19 @@ HKO_FETCH_RETRY_BACKOFF_SEC = 3.0
 HKO_REALTIME_MIN_READINGS = 18
 HKO_DAILY_EXTRACT_CATCHUP_DAYS = 7
 
-HkoDailyExtractMonth = (
-    tuple[dict[tuple[int, int, int], tuple[float, float]], str, str]
-    | tuple[dict[tuple[int, int, int], tuple[float, float]], str, str, dict]
-)
-
 
 def _fetch_hko_daily_extract_month(
     year: int,
     month: int,
-) -> HkoDailyExtractMonth:
+) -> tuple[dict[tuple[int, int, int], tuple[float, float]], str, str]:
     """Fetch current-month official HKO Daily Extract high/low rows."""
 
-    import base64
     import hashlib
-    # The generic entity helper imports this module for the WU client. Keep
-    # this transport-only reuse lazy; it grants no WU or issued-time authority.
-    from src.data.wu_hourly_client import capture_entity
 
     url = HKO_DAILY_EXTRACT_URL.format(year=year, month=month)
-    started = datetime.now(timezone.utc)
     response = httpx.get(url, timeout=30.0)
-    received = datetime.now(timezone.utc)
     response.raise_for_status()
-    capture = capture_entity(response, started_at=started, finished_at=received,
-        request_url=url, request_params={}, native_unit="C")
     payload_hash = "sha256:" + hashlib.sha256(response.content).hexdigest()
-    entity = capture.entity
-    source_entity = {
-        "status": "OBSERVED" if entity is not None else "UNKNOWN",
-        "reason": capture.unavailable_reason,
-        "entity_bytes_b64": base64.b64encode(entity).decode("ascii") if entity is not None else None,
-        "entity_sha256": hashlib.sha256(entity).hexdigest() if entity is not None else None,
-        "entity_byte_count": len(entity) if entity is not None else None,
-        "capture_started_at_utc": capture.started_at,
-        "capture_received_at_utc": capture.finished_at,
-        "source_issued_at_utc": None,
-        "request_url": capture.request_url,
-        "request_params": capture.request_params,
-        "native_unit": capture.native_unit,
-        "headers": capture.headers,
-        "expected_month_start": date(year, month, 1).isoformat(),
-        "expected_month_end_exclusive": date(year + (month == 12), month % 12 + 1, 1).isoformat(),
-    }
     body = response.json()
     rows: dict[tuple[int, int, int], tuple[float, float]] = {}
     for block in (body.get("stn") or {}).get("data") or []:
@@ -413,7 +383,7 @@ def _fetch_hko_daily_extract_month(
                 rows[(year, month, day)] = (float(row[2]), float(row[4]))
             except (IndexError, TypeError, ValueError):
                 continue
-    return rows, url, payload_hash, source_entity
+    return rows, url, payload_hash
 
 
 def hko_daily_extract_target_date(*, now_utc: datetime) -> date:
@@ -566,7 +536,9 @@ def append_hko_daily_extract_date(
     target_date: date,
     now_utc: datetime,
     rebuild_run_id: str,
-    prefetched: HkoDailyExtractMonth | None = None,
+    prefetched: (
+        tuple[dict[tuple[int, int, int], tuple[float, float]], str, str] | None
+    ) = None,
 ) -> dict[str, int]:
     """Materialize one completed HKO Daily Extract row when published."""
 
@@ -578,7 +550,7 @@ def append_hko_daily_extract_date(
         return stats
 
     try:
-        fetched = (
+        rows, url, payload_hash = (
             prefetched
             if prefetched is not None
             else _fetch_hko_daily_extract_month(
@@ -586,14 +558,6 @@ def append_hko_daily_extract_date(
                 target_d.month,
             )
         )
-        rows, url, payload_hash = fetched[:3]
-        if len(fetched) == 4:
-            source_entity = fetched[3]
-            fetch_utc = datetime.fromisoformat(source_entity["capture_received_at_utc"])
-        else:
-            source_entity = {"status": "UNKNOWN",
-                "reason": "LEGACY_PREFETCH_WITHOUT_ENTITY", "source_issued_at_utc": None}
-            fetch_utc = now_utc
     except Exception as exc:  # noqa: BLE001 - source failure is durable telemetry
         stats["fetch_errors"] = 1
         logger.warning("HKO Daily Extract fetch failed for %s: %s", target_d, exc)
@@ -644,9 +608,8 @@ def append_hko_daily_extract_date(
                 "station": HKO_STATION,
                 "target_date": target_d.isoformat(),
                 "payload_hash": payload_hash,
-                "source_entity": source_entity,
             },
-            fetch_utc=fetch_utc,
+            fetch_utc=now_utc,
         )
     except IngestionRejected as exc:
         stats["guard_rejected"] = 1
@@ -686,7 +649,9 @@ def append_hko_daily_extract_yesterday(
     *,
     now_utc: datetime,
     rebuild_run_id: str,
-    prefetched: HkoDailyExtractMonth | None = None,
+    prefetched: (
+        tuple[dict[tuple[int, int, int], tuple[float, float]], str, str] | None
+    ) = None,
 ) -> dict[str, int]:
     """Poll yesterday's final HKO row for the legacy daily batch."""
 
@@ -705,7 +670,17 @@ def append_hko_daily_extract_recent(
     now_utc: datetime,
     rebuild_run_id: str,
     lookback_days: int = HKO_DAILY_EXTRACT_CATCHUP_DAYS,
-    prefetched_by_month: dict[tuple[int, int], HkoDailyExtractMonth] | None = None,
+    prefetched_by_month: (
+        dict[
+            tuple[int, int],
+            tuple[
+                dict[tuple[int, int, int], tuple[float, float]],
+                str,
+                str,
+            ],
+        ]
+        | None
+    ) = None,
     prefetch_failures_by_month: dict[tuple[int, int], str] | None = None,
 ) -> dict[str, int]:
     """Catch up all missing final HKO rows in the bounded recent window.

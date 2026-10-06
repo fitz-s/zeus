@@ -18516,3 +18516,30 @@ All123 untracked raw originals/recovery refs remain preserved and unstaged.
 This new fair-turn candidate is not yet pushed/loaded; separate ROOT new-tip
 authorization is mandatory. Current live d6's successful registered reload
 does not prove the new ledger policy or HK12 acquisition/currentv7-v35 DRAIN.
+
+## 2026-10-06 runtime restore to 8069ecb46 (native-role series broke live materialization)
+
+The 07:34:44Z restart (loaded 127c15b88) deployed the native-role series
+03667526c..c16abb587 (6753d5e47, 9d3e62b01, fc40f7b67, 061b67a8c, 8eab3e453,
+6242c7ce1, 1a855988e, 500d847a1, 016d76a17, e54094e61, 7ed21f66f, c16abb587).
+Live effect: the forecast-live restart at 07:22:05Z carried
+6753d5e47/9d3e62b01. From 07:22:16Z every materialization BLOCKED
+FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE (0 per 10 min before; 1,031 since).
+The new full-Y current-evidence shape reader requires
+`read_native_measurement_role(role="full_Y")` to name the same snapshot, plus
+point equality, and returns None for every current ENS snapshot. No
+forecast_posteriors row was committed after 07:22:00Z (last posterior_id 752707).
+Panama City/Qingdao, unblocked by 8069ecb46 at 06:36Z, also never materialized.
+
+Restore: every src/ and scripts/ file touched by that series returns to its
+8069ecb46 bytes. The peer tests written against it return too. 127c15b88's
+queue perf change and its test are kept. The PLAN/registry text above stays as
+the record of what was attempted.
+
+Re-land requirements:
+- the full-Y role reader must admit the current ENS snapshots the live queue
+  actually holds;
+- a replay over the live request dir must show that committed posteriors do
+  not fall below the pre-change rate;
+- a native role that is absent leaves the existing shape path serving, never
+  CURRENT_SHAPE_ENS_UNAVAILABLE (data never blocks serving).

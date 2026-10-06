@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-10-06 (exact original-message retention replay)
+# Last reused or audited: 2026-10-02 (rolling capture aged at window close; CURRENT_REUSABLE)
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector option from the day0 first-principles
 #   review §6.1/§6.3). INV-37: all writes go to zeus-forecasts.db under
@@ -1303,309 +1303,6 @@ def _day0_sample_truncated_normal(
     return mu + sigma * z
 
 
-def read_native_measurement_role(
-    *, conn: Any, city: Any, target_date: str, decision_time: datetime,
-    metric: str, role: str, scope_start: datetime, _paths: Any = None,
-    snapshot_id: int | None = None,
-    paired_snapshot_ids: Sequence[int] | None = None,
-) -> dict[str, object]:
-    """Read one original model point/ambiguity entity on its own lawful frontier.
-
-    No collection, publication inference or settlement-station equivalence.
-    SCOPE is city/metric/role/window. DRAIN is normal native and extrema capture;
-    RESET replays their exact originals, never a midpoint or old width fallback.
-    """
-    from src.data.ecmwf_open_data import (
-        _resolve_opendata_paths, _download_output_path, _read_role_message_bytes,
-        read_native_temperature_scope,
-    )
-    from src.data.forecast_target_contract import compute_target_local_day_window_utc
-    import eccodes as ec
-    from scripts import extract_open_ens_localday as decoder
-
-    day = compute_target_local_day_window_utc(
-        city_timezone=str(city.timezone), target_local_date=date.fromisoformat(target_date))
-    if (metric not in {"high", "low"} or role not in {"remaining_X", "full_Y"}
-            or decision_time.tzinfo is None or scope_start.tzinfo is None
-            or not day.start_utc <= scope_start < day.end_utc
-            or (role == "full_Y" and scope_start != day.start_utc)):
-        raise ValueError("MEASUREMENT_ROLE_DOMAIN_INVALID")
-    paths = _paths or _resolve_opendata_paths()
-    cities = [{"city": str(city.name), "lat": float(city.lat), "lon": float(city.lon),
-               "unit": str(city.settlement_unit).upper()}]
-    rows = conn.execute("""SELECT source_run_id, source_cycle_time FROM source_run
-        WHERE source_id='ecmwf_open_data' AND track='2t_instant_native_knots'
-          AND ingest_mode='SCHEDULED_LIVE' AND origin_mode='SCHEDULED_LIVE'
-          AND julianday(source_cycle_time)<=julianday(?)
-        ORDER BY source_cycle_time DESC, source_run_id LIMIT 16""", (scope_start.isoformat(),)).fetchall()
-    last_reason = "NO_LAWFUL_ROLE_RUN"
-    for row in rows:
-        run_id, cycle = str(row[0]), datetime.fromisoformat(str(row[1]))
-        manifest = paths.raw_root / "raw/ecmwf_open_ens/native_2t_scheduled" / f"{cycle:%Y%m%dT%HZ}" / "source-manifest.json"
-        try:
-            product = json.loads(manifest.read_bytes())
-            steps = sorted(int(s) for s in product["product_steps"])
-            left = max(s for s in steps if cycle + timedelta(hours=s) <= scope_start)
-            right = min(s for s in steps if cycle + timedelta(hours=s) >= day.end_utc)
-            scope = read_native_temperature_scope(conn, source_run_id=run_id,
-                manifest_path=manifest, required_steps=[s for s in steps if left <= s <= right],
-                qualified_prefix_cut_utc=scope_start, local_day_start_utc=day.start_utc,
-                local_day_end_utc=day.end_utc, explicit_manifest=cities, decision_at_utc=decision_time,
-                metric=metric, role=role, _paths=paths)
-            if (scope.pit_status != "AVAILABLE" or not isinstance(scope.physical_witness, Mapping)
-                    or scope.physical_witness.get("origin_mode") != "SCHEDULED_LIVE"):
-                last_reason = scope.reason or scope.pit_status
-                continue
-            snapshot = conn.execute("""SELECT snapshot_id, provenance_json,
-                    COALESCE(source_available_at,available_at), recorded_at
-                FROM ensemble_snapshots WHERE city=? AND target_date=?
-                  AND temperature_metric=? AND source_cycle_time=?
-                  AND (? IS NULL OR snapshot_id=?)
-                ORDER BY snapshot_id DESC LIMIT 1""",
-                (str(city.name), target_date, metric, cycle.isoformat(), snapshot_id, snapshot_id)).fetchone()
-            if snapshot is None:
-                continue
-            provenance = json.loads(snapshot[1])
-            capture = provenance["native_capture_receipt"]
-            if (capture["capture_status"] != "OBSERVED" or any(
-                    datetime.fromisoformat(str(clock)) > decision_time for clock in snapshot[2:])):
-                continue
-            selected = scope.physical_witness["selected_cities"][str(city.name)]
-            point = capture["selected_point"]
-            if (int(point["flat_index"]) != int(selected["selected_flat_index"])
-                    or float(point["lat"]) != float(selected["selected_lat"])
-                    or float(point["lon"]) != float(selected["selected_lon"])):
-                continue
-            def read_intervals(track, messages):
-                retained = {str(m["raw_message_sha256"]): m for m in messages}
-                by_member = {m: [] for m in range(51)}
-                part_ids = {}
-                source = _download_output_path(run_date=cycle.date(), run_hour=cycle.hour,
-                    param=track.open_data_param, raw_root=paths.raw_root)
-                identities = []
-                def original_messages():
-                    if source.exists() or source.is_symlink():
-                        if source.is_symlink():
-                            raise ValueError("MEASUREMENT_NATIVE_ORIGINAL_SYMLINK")
-                        with source.open("rb") as stream:
-                            while (gid := ec.codes_grib_new_from_file(stream)) is not None:
-                                yield gid
-                    else:
-                        # Retention replicas preserve the exact captured body.
-                        # The canonical receipt/clock and all checks below are
-                        # unchanged; a CAS file's mtime conveys no availability.
-                        for saved in messages:
-                            yield ec.codes_new_from_message(_read_role_message_bytes(paths.raw_root, saved))
-                for gid in original_messages():
-                    try:
-                        if ec.codes_get(gid, "paramId") != track.paramId:
-                            continue
-                        original = decoder._native_message_capture(gid)
-                        saved = retained.get(str(original.get("raw_message_sha256")))
-                        if saved != original:
-                            continue
-                        h = original["observed_headers"]
-                        member = int(h.get("perturbationNumber", h.get("number", 0)))
-                        start = cycle + timedelta(hours=int(h["startStep"]))
-                        end = cycle + timedelta(hours=int(h["endStep"]))
-                        if not (start < day.end_utc and end > scope_start):
-                            continue
-                        if (int(h["dataDate"]) != int(cycle.strftime("%Y%m%d"))
-                                or int(h["dataTime"]) != cycle.hour * 100
-                                or h["stepType"] != track.step_type or h["units"] != "K"
-                                or ec.codes_get(gid, "generatingProcessIdentifier") != 161
-                                or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
-                                or hashlib.sha256(base64.b64decode(next(s["bytes_base64"]
-                                    for s in original["metadata_sections"] if s["section_number"] == 3))).hexdigest()
-                                != scope.physical_witness["grid_sha256"]):
-                            raise ValueError("MEASUREMENT_NATIVE_INTERVAL_IDENTITY_INVALID")
-                        value = float(ec.codes_get_elements(gid, "values", [int(point["flat_index"])])[0]) - 273.15
-                        if cities[0]["unit"] == "F":
-                            value = value * 1.8 + 32.0
-                        by_member[member].append((start, end, value))
-                        identities.append(original["raw_message_sha256"])
-                        part_ids[(member, start, end)] = original["raw_message_sha256"]
-                    finally:
-                        ec.codes_release(gid)
-                return by_member, identities, part_ids
-            track = decoder.TRACKS["mx2t6_high" if metric == "high" else "mn2t6_low"]
-            by_member, identities, primary_part_ids = read_intervals(track, capture["messages"])
-            required_pairs = {(member, start, end) for member, windows in by_member.items()
-                for start, end, _ in windows if not (scope_start <= start and end <= day.end_utc)}
-            paired_values, paired_proofs = {}, {}
-            if required_pairs:
-                other_track = decoder.TRACKS["mn2t6_low" if metric == "high" else "mx2t6_high"]
-                selected_pair_ids = tuple(int(value) for value in paired_snapshot_ids or ())
-                if len(selected_pair_ids) > 32:
-                    raise ValueError("MEASUREMENT_NATIVE_PAIRED_SCOPE_INVALID")
-                id_filter = (" AND snapshot_id IN (" + ",".join("?" for _ in selected_pair_ids) + ")"
-                             if selected_pair_ids else "")
-                pair_rows = conn.execute("""SELECT snapshot_id,provenance_json,
-                        COALESCE(source_available_at,available_at),recorded_at
-                    FROM ensemble_snapshots WHERE city=? AND target_date=?
-                      AND temperature_metric=? AND source_cycle_time=?""" + id_filter +
-                    " ORDER BY snapshot_id ASC LIMIT 32", (str(city.name), target_date,
-                        "low" if metric == "high" else "high", cycle.isoformat(), *selected_pair_ids)).fetchall()
-                for pair_row in pair_rows:
-                    if any(datetime.fromisoformat(str(clock)) > decision_time for clock in pair_row[2:]):
-                        continue
-                    paired_capture = json.loads(pair_row[1]).get("native_capture_receipt")
-                    if (not isinstance(paired_capture, Mapping)
-                            or paired_capture.get("capture_status") != "OBSERVED"
-                            or paired_capture.get("selected_point") != point):
-                        continue
-                    opposite, _, opposite_ids = read_intervals(other_track, paired_capture["messages"])
-                    for member, windows in opposite.items():
-                        for start, end, value in windows:
-                            key = (member, start, end)
-                            if key in required_pairs and key not in paired_values:
-                                paired_values[key] = value
-                                paired_proofs[key] = {"snapshot_id": int(pair_row[0]),
-                                    "member": member, "window_start_utc": start.isoformat(), "window_end_utc": end.isoformat(),
-                                    "raw_message_sha256": opposite_ids[key],
-                                    "available_at": str(pair_row[2]), "written_at": str(pair_row[3])}
-                    if required_pairs <= paired_values.keys():
-                        break
-                if not required_pairs <= paired_values.keys():
-                    raise ValueError("MEASUREMENT_NATIVE_PAIRED_INTERVAL_UNAVAILABLE")
-            knots = {m: [] for m in range(51)}
-            for knot in scope.native_knots:
-                value = float(knot["value_k"]) - 273.15
-                if cities[0]["unit"] == "F":
-                    value = value * 1.8 + 32.0
-                knots[int(knot["member"])].append((datetime.fromisoformat(knot["valid_time_utc"]), value))
-            points, bounds = [], []
-            for member in range(51):
-                series = sorted(knots[member])
-                def interpolate(at):
-                    before = max(pair for pair in series if pair[0] <= at)
-                    after = min(pair for pair in series if pair[0] >= at)
-                    if before[0] == after[0]:
-                        return before[1]
-                    fraction = (at - before[0]).total_seconds() / (after[0] - before[0]).total_seconds()
-                    return before[1] + fraction * (after[1] - before[1])
-                windows = sorted(by_member[member])
-                cursor, member_points, member_bounds = scope_start, [], []
-                for start, end, value in windows:
-                    if start > cursor:
-                        raise ValueError("MEASUREMENT_NATIVE_INTERVAL_GAP")
-                    cursor = max(cursor, end)
-                    if scope_start <= start and end <= day.end_utc:
-                        chosen, ambiguity = value, (value, value)
-                    else:
-                        a, b = max(start, scope_start), min(end, day.end_utc)
-                        partial = [interpolate(a), interpolate(b)] + [v for t, v in series if a < t < b]
-                        chosen = max(partial) if metric == "high" else min(partial)
-                        paired_value = paired_values[(member, start, end)]
-                        actual_inside = [v for t, v in series if a <= t < b]
-                        # PL boundary support is not a physical extremum bound.
-                        ambiguity = ((max([paired_value, *actual_inside]), value) if metric == "high"
-                                     else (value, min([paired_value, *actual_inside])))
-                    if not ambiguity[0] <= chosen <= ambiguity[1]:
-                        raise ValueError("MEASUREMENT_NATIVE_POINT_OUTSIDE_INTERVAL")
-                    member_points.append(chosen)
-                    member_bounds.append(ambiguity)
-                if cursor < day.end_utc or not member_points:
-                    raise ValueError("MEASUREMENT_NATIVE_INTERVAL_GAP")
-                aggregate = max if metric == "high" else min
-                points.append(aggregate(member_points))
-                bounds.append([aggregate(b[0] for b in member_bounds), aggregate(b[1] for b in member_bounds)])
-            return {"role": role, "unit": str(city.settlement_unit).upper(),
-                "member_points_native": points, "member_interval_bounds_native": bounds,
-                "point_model": "contained_native_extrema_straddling_2t_PL_v1",
-                "ENS_current_state_transform": "NONE_RAW_NATIVE_ROLE",
-                "city": str(city.name), "target_date": target_date, "temperature_metric": metric,
-                "scope_start_utc": scope_start.isoformat(), "scope_end_utc": day.end_utc.isoformat(),
-                "native_snapshot_id": int(snapshot[0]), "native_interval_original_sha256": sorted(identities),
-                "paired_snapshot_ids": sorted({p["snapshot_id"] for p in paired_proofs.values()}),
-                "paired_interval_originals": [paired_proofs[key] for key in sorted(paired_proofs)],
-                "native_scope": scope.physical_witness,
-                "temperature_scope_first_possession_at": scope.temperature_scope_first_possession_at,
-                "interval_snapshot_available_at": str(snapshot[2]),
-                "interval_snapshot_written_at": str(snapshot[3]),
-                "physical_dependency_available_at": max(
-                    str(scope.physical_dependency_available_at), str(snapshot[2]), str(snapshot[3]),
-                    *(p[clock] for p in paired_proofs.values() for clock in ("available_at", "written_at")),
-                    key=lambda clock: datetime.fromisoformat(clock))}
-        except (OSError, ValueError, KeyError, TypeError, StopIteration) as exc:
-            last_reason = str(exc) or type(exc).__name__
-            continue
-    raise ValueError(f"MEASUREMENT_ROLE_NATIVE_POINT_UNAVAILABLE:{last_reason}")
-
-
-def _day0_role_noise(shape: Mapping[str, object], *, role: str,
-                     centers: np.ndarray) -> tuple[float, tuple[float, float]]:
-    """Point approximation and independent identification envelope, not a floor."""
-    try:
-        points = np.asarray(shape["member_points_native"], dtype=float)
-        intervals = np.asarray(shape["member_interval_bounds_native"], dtype=float)
-        served = np.asarray(shape["provider_centers_native"], dtype=float)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("DAY0_DOMAIN_ROLE_SHAPE_INVALID") from exc
-    if (shape.get("role") != role or points.shape != (51,) or intervals.shape != (51, 2)
-            or not np.isfinite(points).all() or not np.isfinite(intervals).all()
-            or not np.array_equal(np.sort(served), centers)
-            or np.any(intervals[:, 0] > points) or np.any(points > intervals[:, 1])):
-        raise ValueError("DAY0_DOMAIN_ROLE_SHAPE_INVALID")
-    mu = float(np.mean(centers))
-    point_variance = float(np.mean((points - mu) ** 2))
-    near = np.maximum(intervals[:, 0] - mu, np.maximum(mu - intervals[:, 1], 0.0))
-    far = np.maximum((intervals[:, 0] - mu) ** 2, (intervals[:, 1] - mu) ** 2)
-    return math.sqrt(point_variance), (math.sqrt(float(np.mean(near ** 2))),
-                                      math.sqrt(float(np.mean(far))))
-
-
-def replay_native_measurement_role_identity(
-    conn: Any, model: Mapping[str, object], *, city: Any, target_date: str,
-    metric: str, decision_time: datetime,
-) -> bool:
-    """Reproduce the pinned scope, without letting a later partial row steal Y."""
-    try:
-        if (model["city"] != str(city.name) or model["target_date"] != target_date
-                or model["temperature_metric"] != metric
-                or model["ENS_current_state_transform"] != "NONE_RAW_NATIVE_ROLE"):
-            return False
-        replay = read_native_measurement_role(conn=conn, city=city, target_date=target_date,
-            metric=metric, decision_time=decision_time, role=str(model["role"]),
-            scope_start=_day0_parse_aware_clock(str(model["scope_start_utc"]), field_name="role_scope_start"),
-            snapshot_id=int(model["native_snapshot_id"]), paired_snapshot_ids=model.get("paired_snapshot_ids"))
-        return all(model.get(key) == value for key, value in replay.items())
-    except (ValueError, TypeError, KeyError, OSError):
-        return False
-
-
-def _day0_normal_sigma_envelope(mu: float, lower: float, upper: float,
-                                sigma_bounds: tuple[float, float], *,
-                                lower_inclusive: bool = True,
-                                upper_inclusive: bool = False) -> tuple[float, float]:
-    """Gaussian mass envelope including the interior spread stationary point."""
-    if lower > upper:
-        return 0.0, 0.0
-    lo, hi = sigma_bounds
-    if lower == upper:
-        atom = float(lo == 0.0 and mu == lower and lower_inclusive and upper_inclusive)
-        return (atom if hi == 0.0 else 0.0), atom
-    candidates = [lo, hi]
-    a, b = lower - mu, upper - mu
-    if math.isfinite(a) and math.isfinite(b) and a * b > 0.0 and abs(a) != abs(b):
-        stationary2 = (b * b - a * a) / (2.0 * math.log(abs(b / a)))
-        if stationary2 > 0.0 and lo < math.sqrt(stationary2) < hi:
-            candidates.append(math.sqrt(stationary2))
-    masses = []
-    if lo == 0.0 and hi > 0.0:
-        # A degenerate normal follows the discrete rounding contract, while
-        # sigma -> 0+ divides mass at an exact preimage boundary.
-        masses.append(0.5 if mu in (lower, upper) else float(lower < mu < upper))
-    for sigma_value in candidates:
-        if sigma_value == 0.0:
-            masses.append(float((mu > lower or lower_inclusive and mu == lower)
-                                and (mu < upper or upper_inclusive and mu == upper)))
-        else:
-            masses.append(math.exp(_day0_log_normal_interval_probability(
-                mu, sigma_value, lower, upper)))
-    return min(masses), max(masses)
-
-
 def _build_day0_remaining_probability_carrier_v3(
     *, values: np.ndarray, final_centers: np.ndarray,
     scenarios: tuple[tuple[float | None, float], ...], metric: str,
@@ -1623,44 +1320,7 @@ def _build_day0_remaining_probability_carrier_v3(
     shape-level guard against accidentally turning a final center into a
     boundary atom.
     """
-    domain_shapes = economic_identity_inputs.get("domain_role_shapes")
-    sigma_x = sigma_y = sigma
-    sigma_ranges: dict[str, tuple[float, float]] = {}
-    if domain_shapes is not None:
-        if (not isinstance(domain_shapes, Mapping)
-                or domain_shapes.get("schema") != "day0_measurement_domain_shapes_v1"
-                or domain_shapes.get("unit") != settlement_semantics.measurement_unit):
-            raise ValueError("DAY0_DOMAIN_ROLE_SHAPES_INVALID")
-        families = []
-        for name, role, centers in (("X", "remaining_X", values), ("Y", "full_Y", final_centers)):
-            if not centers.size:
-                continue
-            shape = domain_shapes.get(name)
-            if not isinstance(shape, Mapping):
-                raise ValueError("DAY0_DOMAIN_ROLE_SHAPE_MISSING")
-            if name == "Y" and any(boundary is not None and weight > 0.0 for boundary, weight in scenarios):
-                if (shape.get("prefix_information_kind") not in {"REPORTED_PRODUCT_PROXY", "INCOMPLETE_SAME_QUANTITY_BOUND"}
-                        or shape.get("conditioning_likelihood_scope") != "COARSENED_BOUND_ONLY"):
-                    # A complete same-quantity prefix requires a joint-prefix
-                    # likelihood, not the continuous prior's Y <=/>= m event.
-                    # SCOPE this Y role; producer can retain qualified X experts
-                    # and normally RESET after a lawful joint certificate exists.
-                    raise ValueError("Y_PREFIX_LIKELIHOOD_UNIDENTIFIED")
-            role_families = shape.get("provider_families")
-            if (not isinstance(role_families, list) or len(role_families) != centers.size
-                    or any(not isinstance(f, str) or not f for f in role_families)):
-                raise ValueError("DAY0_DOMAIN_PROVIDER_FAMILIES_INVALID")
-            if len(set(role_families)) != len(role_families):
-                raise ValueError("DAY0_DOMAIN_PROVIDER_FAMILIES_DUPLICATED_WITHIN_ROLE")
-            families.extend(role_families)
-            noise, sigma_ranges[name] = _day0_role_noise(shape, role=role, centers=centers)
-            if name == "X":
-                sigma_x = noise
-            else:
-                sigma_y = noise
-        if len(set(families)) < 2:
-            raise ValueError("DAY0_DOMAIN_PROVIDER_FAMILIES_INCOMPLETE")
-    if sigma_y == 0.0:
+    if sigma == 0.0:
         for boundary, weight in scenarios:
             if boundary is None or weight <= 0.0:
                 continue
@@ -1678,7 +1338,7 @@ def _build_day0_remaining_probability_carrier_v3(
         half_step=settlement_semantics.precision / 2.0,
     )
 
-    def bin_probability_vector(mu: float, boundary: float | None, sigma: float = sigma_x) -> np.ndarray:
+    def bin_probability_vector(mu: float, boundary: float | None) -> np.ndarray:
         out = np.zeros(len(bounds), dtype=float)
         if sigma == 0.0:
             final = mu
@@ -1737,10 +1397,10 @@ def _build_day0_remaining_probability_carrier_v3(
         return out / total
 
     def final_center_probability_vector(
-        mu: float, boundary: float | None, sigma: float = sigma_y,
+        mu: float, boundary: float | None,
     ) -> np.ndarray:
         if sigma == 0.0:
-            return bin_probability_vector(mu, boundary, sigma)
+            return bin_probability_vector(mu, boundary)
         out = np.zeros(len(bounds), dtype=float)
         for index, (low, high) in enumerate(bounds):
             lower = -math.inf if low is None else low + low_offset
@@ -1782,54 +1442,6 @@ def _build_day0_remaining_probability_carrier_v3(
         raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
     point /= point_total
 
-    identification_bounds = None
-    if domain_shapes is not None:
-        envelope = np.zeros((len(bounds), 2), dtype=float)
-        for boundary, weight in scenarios:
-            for role, centers in (("X", values), ("Y", final_centers)):
-                for center in centers:
-                    mu = float(center)
-                    spread = sigma_ranges[role]
-                    for index, (low, high) in enumerate(bounds):
-                        lower = -math.inf if low is None else low + low_offset
-                        upper = math.inf if high is None else high + high_offset
-                        if boundary is None:
-                            mass = _day0_normal_sigma_envelope(mu, lower, upper, spread,
-                                lower_inclusive=settlement_semantics.rounding_rule != "ceil",
-                                upper_inclusive=settlement_semantics.rounding_rule == "ceil")
-                        elif role == "X":
-                            rounded = float(settlement_semantics.round_values([boundary])[0])
-                            contains = ((low is None or rounded >= low)
-                                        and (high is None or rounded <= high))
-                            if metric == "high":
-                                lower = -math.inf if contains else max(lower, boundary)
-                            else:
-                                upper = math.inf if contains else min(upper, boundary)
-                            mass = _day0_normal_sigma_envelope(mu, lower, upper, spread,
-                                lower_inclusive=settlement_semantics.rounding_rule != "ceil" or lower == boundary,
-                                upper_inclusive=settlement_semantics.rounding_rule == "ceil" or upper == boundary)
-                        else:
-                            support_lo = boundary if metric == "high" else -math.inf
-                            support_hi = math.inf if metric == "high" else boundary
-                            numerator = _day0_normal_sigma_envelope(
-                                mu, max(lower, support_lo), min(upper, support_hi), spread,
-                                lower_inclusive=(support_lo > lower or settlement_semantics.rounding_rule != "ceil"),
-                                upper_inclusive=(support_hi < upper or settlement_semantics.rounding_rule == "ceil"))
-                            denominator = _day0_normal_sigma_envelope(
-                                mu, support_lo, support_hi, spread,
-                                lower_inclusive=True, upper_inclusive=True)
-                            # Conservative ratio enclosure, not an exact supremum.
-                            mass = ((0.0, 1.0) if denominator[0] == 0.0 else
-                                    (numerator[0] / denominator[1],
-                                     min(1.0, numerator[1] / denominator[0])))
-                        envelope[index] += float(weight) * np.asarray(mass) / component_count
-        identification_bounds = {
-            "schema": "role_interval_gaussian_preimage_enclosure_v1",
-            "lower": [min(float(v), float(q)) for v, q in zip(envelope[:, 0], point)],
-            "upper": [max(float(v), float(q)) for v, q in zip(envelope[:, 1], point)],
-            "Y_ratio": "conservative_envelope_not_exact_supremum",
-        }
-
     v3_content = {
         "v": 5,
         "operator": DAY0_REMAINING_CARRIER_OPERATOR_V3,
@@ -1846,10 +1458,6 @@ def _build_day0_remaining_probability_carrier_v3(
             "instrument_sigma": instrument_sigma,
             "combined_sigma": sigma,
             "confidence_draw_identity": legacy_identity,
-            **({"X_point_sigma": sigma_x, "Y_point_sigma": sigma_y,
-                "role_sigma_intervals": sigma_ranges,
-                "basis": "role_member_point_disagreement_without_double_between_v1"}
-               if domain_shapes is not None else {}),
         },
         "bins": bounds,
         "settlement_semantics": {
@@ -1865,7 +1473,7 @@ def _build_day0_remaining_probability_carrier_v3(
 
     def draw_v3(rows: int, seed: int) -> np.ndarray:
         rng = np.random.default_rng(seed)
-        future = values + rng.normal(0.0, sigma_x, (rows, values.size))
+        future = values + rng.normal(0.0, sigma, (rows, values.size))
         scenario_i = rng.choice(len(scenarios), size=rows, p=[w for _, w in scenarios])
         boundary_values = np.asarray(
             [0.0 if scenarios[i][0] is None else scenarios[i][0] for i in scenario_i],
@@ -1883,19 +1491,19 @@ def _build_day0_remaining_probability_carrier_v3(
         if final_centers.size:
             center_means = np.broadcast_to(final_centers, (rows, final_centers.size))
             center_final = np.empty_like(center_means, dtype=float)
-            if sigma_y == 0.0:
+            if sigma == 0.0:
                 center_final = center_means.copy()
             else:
                 unbounded = ~has_boundary
                 if np.any(unbounded):
                     center_final[unbounded] = center_means[unbounded] + rng.normal(
-                        0.0, sigma_y, (int(unbounded.sum()), final_centers.size)
+                        0.0, sigma, (int(unbounded.sum()), final_centers.size)
                     )
                 if np.any(has_boundary):
                     conditional = _day0_sample_truncated_normal(
                         rng,
                         mu=center_means[has_boundary],
-                        sigma=sigma_y,
+                        sigma=sigma,
                         boundary=np.broadcast_to(
                             boundary_values[has_boundary, None],
                             (int(has_boundary.sum()), final_centers.size),
@@ -1927,13 +1535,6 @@ def _build_day0_remaining_probability_carrier_v3(
         "content_identity": identity,
         "operator": DAY0_REMAINING_CARRIER_OPERATOR_V3,
         "sample_count": n_samples,
-        **({"measurement_domain_replay_inputs": {
-            "identity_inputs": {key: value for key, value in economic_identity_inputs.items()
-                                if key != "domain_role_shapes"},
-            "boundary_scenarios": scenarios, "n_point": n_point,
-        }} if domain_shapes is not None else {}),
-        **({"identification_bounds": identification_bounds}
-           if identification_bounds is not None else {}),
     }
 
 
@@ -2155,7 +1756,7 @@ def build_day0_remaining_probability_carrier(
         raise ValueError("DAY0_REMAINING_CARRIER_INPUT_INVALID")
     selected_operator = (
         DAY0_REMAINING_CARRIER_OPERATOR_V3
-        if operator is None and (final_centers.size or identity_inputs.get("domain_role_shapes"))
+        if operator is None and final_centers.size
         else DAY0_REMAINING_CARRIER_OPERATOR
         if operator is None
         else operator
@@ -2167,8 +1768,7 @@ def build_day0_remaining_probability_carrier(
         raise ValueError(
             "DAY0_REMAINING_CARRIER_LEGACY_OPERATOR_FINAL_CENTERS_INVALID"
         )
-    if (selected_operator == DAY0_REMAINING_CARRIER_OPERATOR_V3 and not final_centers.size
-            and not identity_inputs.get("domain_role_shapes")):
+    if selected_operator == DAY0_REMAINING_CARRIER_OPERATOR_V3 and not final_centers.size:
         raise ValueError("DAY0_REMAINING_CARRIER_V3_FINAL_CENTERS_REQUIRED")
     if selected_operator not in {
         DAY0_REMAINING_CARRIER_OPERATOR_V1,
@@ -5093,7 +4693,6 @@ def remaining_day_extremes_c_with_current_state(
     current_state: Day0CurrentTemperatureState | None,
     settlement_unit: str,
     fallback_window_start: datetime,
-    unresolved_window_start: datetime | None = None,
 ) -> tuple[list[float], dict[str, float]]:
     """Apply the sole Day0 current-state transform, or the shared no-state path."""
 
@@ -5117,7 +4716,7 @@ def remaining_day_extremes_c_with_current_state(
     if observed_utc > decision_time.astimezone(UTC):
         return [], {}
     aligned = align_day0_hourly_vectors_on_common_causal_grid(
-        vectors, target_date=target_date, window_start=(unresolved_window_start or observed_utc)
+        vectors, target_date=target_date, window_start=observed_utc
     )
     if aligned is None:
         return [], {}
@@ -5159,14 +4758,6 @@ def remaining_day_extremes_c_with_current_state(
             return [], {}
         remaining_indices = [0]
     remaining = conditioned_members[:, remaining_indices]
-    if unresolved_window_start is not None:
-        # A spot update does not supply cumulative coverage of the gap before
-        # it. Keep the issued forecast approximation there, without applying
-        # a future innovation backwards or replacing a past knot by the spot.
-        past_indices = [i for i, at in enumerate(causal_grid)
-                        if unresolved_window_start <= at <= observed_utc]
-        if past_indices:
-            remaining = np.concatenate((np.asarray(aligned_rows)[:, past_indices], remaining), axis=1)
     values = remaining.min(axis=1) if metric == "low" else remaining.max(axis=1)
     return (
         [float(value) for value in values.tolist()],

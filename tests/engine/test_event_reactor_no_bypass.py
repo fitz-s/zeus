@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-10-06
+# Last reused/audited: 2026-08-18
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 #   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
 #   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
@@ -22,120 +22,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-@pytest.mark.parametrize("unit", ("C", "F"))
-def test_day0_domain_shape_conditioning_and_written_replay_identity_are_lossless(metric, unit):
-    import copy
-    import src.engine.event_reactor_adapter as adapter
-    shape = {"schema": "day0_measurement_domain_shapes_v1", "unit": unit,
-        "X": {"role": "remaining_X", "provider_centers_native": [20., 21.],
-            "provider_families": ["ifs", "gfs"], "member_points_native": [20.] * 51,
-            "member_interval_bounds_native": [[19., 22.]] * 51},
-        "Y": {"role": "full_Y", "provider_centers_native": [22., 23.],
-            "provider_families": ["ifs", "gfs"], "member_points_native": [22.] * 51,
-            "member_interval_bounds_native": [[21., 24.]] * 51}}
-    enclosure = {"schema": "role_interval_gaussian_preimage_enclosure_v1",
-        "lower": [0.01, 0.1], "upper": [0.8, 0.99],
-        "Y_ratio": "conservative_envelope_not_exact_supremum"}
-    conditioning = adapter._day0_replacement_conditioning(SimpleNamespace(provenance_json={
-        "day0_provisional_observation": {"active": True, "metric": metric, "unit": unit},
-        "day0_measurement_domain_shapes": shape,
-        "day0_measurement_domain_identification_bounds": enclosure}),
-        provisional=True, metric=metric, unit=unit,
-        decision_time=datetime(2026, 10, 6, tzinfo=timezone.utc), entry_authority=False)
-    assert conditioning["day0_measurement_domain_shapes"] == shape
-    assert conditioning["day0_measurement_domain_identification_bounds"] == enclosure
-    payload = {"_edli_day0_measurement_domain_shapes": copy.deepcopy(shape),
-        "_edli_day0_measurement_domain_identification_bounds": copy.deepcopy(enclosure)}
-    adapter._bind_day0_carrier_written_inputs(payload)
-    adapter._snapshot_day0_source_clock_carrier_provenance(payload)
-    payload["_edli_day0_measurement_domain_shapes"]["X"]["member_points_native"][0] = 100.
-    assert adapter._day0_carrier_written_inputs(payload)["domain_role_shapes"] == shape
-    original = payload["_edli_day0_source_clock_carrier_provenance"]
-    assert original["measurement_domain_shapes"] == shape
-    assert original["measurement_domain_identification_bounds"] == enclosure
-
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-def test_day0_domain_enclosure_cannot_be_narrowed_by_adapter_sample_caps(metric):
-    import src.engine.event_reactor_adapter as adapter
-    from src.types.market import Bin
-    family = SimpleNamespace(family_id="family", city="London", metric=metric,
-        candidates=(SimpleNamespace(condition_id="c1", bin=Bin(None, 20., "C", "source-left")),
-                    SimpleNamespace(condition_id="c2", bin=Bin(21., None, "C", "source-right"))))
-    bindings = (SimpleNamespace(condition_id="c1", bin_id="b1"), SimpleNamespace(condition_id="c2", bin_id="b2"))
-    payload = {"rounded_value": 20., "metric": metric, "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
-        "_edli_q_source": "day0_remaining_day",
-        "_edli_day0_measurement_domain_shapes": {"schema": "day0_measurement_domain_shapes_v1"},
-        # Reversed carrier topology proves this is bin identity, not array index.
-        "_edli_day0_carrier_bin_topology": [
-            {"bin_id": "source-right", "lower_c": 21., "upper_c": None},
-            {"bin_id": "source-left", "lower_c": None, "upper_c": 20.}],
-        "_edli_day0_measurement_domain_identification_bounds": {
-            "schema": "role_interval_gaussian_preimage_enclosure_v1",
-            "lower": [.01, .1], "upper": [.99, .9]}}
-    caps = adapter._day0_global_candidate_payoff_q_lcb_caps(payload=payload, family=family,
-        bindings=bindings, samples=np.full((500, 2), .5), point_q=np.array([.5, .5]),
-        band_alpha=.05, decision_time=datetime(2026, 10, 6, tzinfo=timezone.utc))
-    indexed = {(row[2], row[3]): row[4] for row in caps}
-    assert indexed[("b1", "YES")] == pytest.approx(.1) and indexed[("b1", "NO")] == pytest.approx(.1)
-    assert indexed[("b2", "YES")] == pytest.approx(.01) and indexed[("b2", "NO")] == pytest.approx(.01)
-    payload["_edli_day0_measurement_domain_identification_bounds"]["lower"] = [float("nan"), .1]
-    with pytest.raises(ValueError, match="DAY0_MEASUREMENT_DOMAIN_BOUNDS_INVALID"):
-        adapter._day0_global_candidate_payoff_q_lcb_caps(payload=payload, family=family,
-            bindings=bindings, samples=np.full((500, 2), .5), point_q=np.array([.5, .5]),
-            band_alpha=.05, decision_time=datetime(2026, 10, 6, tzinfo=timezone.utc))
-
-
-@pytest.mark.parametrize("use", ("ENTRY", "HELD_MONITOR"))
-def test_day0_old_revision_cache_is_rejected_without_relabel_or_held_mutation(monkeypatch, use):
-    import src.engine.event_reactor_adapter as adapter
-    probability_use = getattr(adapter._CurrentProbabilityUse, use)
-    namespace = "private-domain-cache"
-    key = adapter._global_probability_family_cache_key("family", probability_use)
-    witness = SimpleNamespace(q_version="day0-semrev:older-law:original-content")
-    prepared = SimpleNamespace(probability_witness=witness)
-    monkeypatch.setattr(adapter, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", namespace)
-    monkeypatch.setattr(adapter, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {key: ("event", "binding", prepared)})
-    assert adapter._probe_global_probability_family_cache(namespace, family_key="family",
-        event_id="event", causal_snapshot_id="snapshot", captured_at_utc=datetime(2026, 10, 6, tzinfo=timezone.utc),
-        probability_use=probability_use) is None
-    assert key not in adapter._GLOBAL_PROBABILITY_FAMILY_CACHE
-    assert witness.q_version == "day0-semrev:older-law:original-content"
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-def test_global_Y_certified_enclosure_survives_sample_caps_without_changing_point(metric):
-    import src.engine.event_reactor_adapter as adapter
-    from src.types.market import Bin
-    family = SimpleNamespace(family_id="family", metric=metric,
-        candidates=(SimpleNamespace(condition_id="c1", bin=Bin(None, 20., "C", "market-left")),
-                    SimpleNamespace(condition_id="c2", bin=Bin(21., None, "C", "market-right"))))
-    bindings = (SimpleNamespace(condition_id="c1", bin_id="b1"), SimpleNamespace(condition_id="c2", bin_id="b2"))
-    bundle = SimpleNamespace(q={"source-left": .5, "source-right": .5}, q_lcb={"source-left": .1, "source-right": .01},
-        q_ucb={"source-left": .9, "source-right": .99}, provenance_json={"bin_topology": [
-            {"bin_id": "source-left", "lower_c": None, "upper_c": 20.},
-            {"bin_id": "source-right", "lower_c": 21., "upper_c": None}], "bayes_precision_fusion": {
-            "current_evidence_shape": {"predictive_sigma_interval_c": [1., 20.],
-                                       "native_point_model": {"role": "full_Y"}}}})
-    points = np.array([.5, .5])
-    samples = np.full((500, 2), .5)
-    caps = adapter._replacement_global_candidate_payoff_q_lcb_caps(
-        replacement_bundle=bundle, family=family, bindings=bindings,
-        samples=samples, point_q=points, band_alpha=.05)
-    indexed = {(row[2], row[3]): row[4] for row in caps}
-    assert indexed[("b1", "YES")] == pytest.approx(.1)
-    assert indexed[("b1", "NO")] == pytest.approx(.1)
-    assert indexed[("b2", "YES")] == pytest.approx(.01)
-    assert indexed[("b2", "NO")] == pytest.approx(.01)
-    assert points.tolist() == [.5, .5] and np.all(samples == .5)
-    bundle.q_ucb["source-right"] = float("nan")
-    with pytest.raises(ValueError, match="GLOBAL_Y_IDENTIFICATION_BOUNDS_INVALID"):
-        adapter._replacement_global_candidate_payoff_q_lcb_caps(
-            replacement_bundle=bundle, family=family, bindings=bindings,
-            samples=samples, point_q=points, band_alpha=.05)
-
 
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
