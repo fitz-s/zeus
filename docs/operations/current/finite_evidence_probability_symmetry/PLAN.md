@@ -19558,16 +19558,19 @@ separate fixture tests and only supplies the shared normal-original helper.
 
 ### Full-Y Fahrenheit original replay equivalence — BEFORE EDIT
 
-ROOT authorized the native leaf's isolated child to change only
-src/data/replacement_forecast_materializer.py at the full-Y original point
-comparison, with its existing tests/integration/test_w3_solve_seam_g3.py
+ROOT authorized the native leaf's isolated child to change only the two
+C-to-F conversions in src/data/day0_hourly_vectors.py and the two F-to-C
+conversions in src/data/replacement_forecast_materializer.py, with its
+existing tests/integration/test_w3_solve_seam_g3.py
 fixture/antibody. q retains tests/test_replacement_forecast_materializer.py
 and its five fixture paths; these scopes do not overlap. Actual KORD normal
 originals, 51 members and strict PIT pass the owning reader, but equivalent
 Fahrenheit conversion paths differ by machine ULPs and the strict tuple gate
-returns CURRENT_SHAPE_ENS_UNAVAILABLE. Compare finite same-native-unit points
-only under the independently reviewed machine-roundoff bound, then use one
-Celsius conversion. Exact original body/index/SHA, member/grid/run/role,
+returns CURRENT_SHAPE_ENS_UNAVAILABLE. Independent review refuted a fixed-ULP
+comparison near zero Fahrenheit because of cancellation. Unify these paths
+with the existing canonical conversion expressions/functions and retain
+strict equality; no approximate comparison or ULP allowance. Exact original
+body/index/SHA, member/grid/run/role,
 clock/PIT and current source admission remain mandatory; no tolerance for
 missing or different physical originals, no parameter/noise floor and no
 semantics revision change. SCOPE: that original-replay numerical equivalence;
