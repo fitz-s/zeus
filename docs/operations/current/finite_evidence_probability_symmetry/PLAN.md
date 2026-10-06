@@ -18443,3 +18443,42 @@ existing-ledger fairness proposal; no source edits until separate concrete
 authorization. A simple continue cannot fix exhausted-budget starvation.
 Consumer restoration remains OPEN; no extra restart, HTTP, mirror switch,
 source clock renewal, forced seed/wake/cycle or live SQL mutation occurred.
+
+### BEFOREEDIT: native exact-scope fair-turn ledger RESET
+
+ROOT accepted the native owner's actual original fair-turn function plus
+isolated actual write_job_run reproduction. Two ordinary mandatory terminal
+attempts select first18Z: start100->159 and next219->278, each consuming the
+unchanged59-second absolute poll cut after HTTP503. Eligible12Z never starts;
+the same18Z FAILED scope journal is overwritten on the second turn. This
+verifies INV-47 cross-cohort starvation in the existing turn selector, beyond
+the independently real external failure. The private fake-HTTP/ledger
+counterexample is not a new production fetch or proof of physical eligibility.
+
+ROOT authorizes exactly three owned paths for this bounded slice: integrator
+owns this existing PLAN; native owner alone edits
+src/ingest/forecast_live_daemon.py and tests/test_forecast_live_daemon.py.
+Rank exact logical native scope/job_name by never-attempted first and existing
+job_run started_at/rowid least-recent turn, not status-only failed priority,
+global newest cycle, a permanent latch or a new TTL/schema. All attempted
+statuses consume that turn; actual AVAILABLE cache does not need a new HTTP
+attempt. Maintain one transport attempt per ordinary tranche and its original
+absolute cut, so exhausted18Z cannot simply continue to12Z on borrowed time.
+The next normal tranche instead selects12Z using durable ledger evidence.
+No old18Z row is deleted; source-issued/available/PIT/original body clocks,
+mandatory priority and all original quantity/coordinate/step qualifications
+remain unchanged. Source mirror changes and forced collection are out of scope.
+
+True RED->GREEN must use actual dispatcher H/L and existing private canonical
+journal writers, show18failure then12normal DRAIN across distinct tranches,
+and prove persisted-journal restart RESET without an in-memory turn flag.
+Negative qualification/deadline/unchanged mandatory-attempt controls remain;
+one exhausted callback never starts a second HTTP attempt. SCOPE is each
+exact native run/target-role/cohort/job_name; DRAIN is the existing scheduler's
+next ordinary eligible tranche; RESET is ledger turn progress, completed
+original subset, expiry or legitimate scope change, not raw clock renewal.
+Only frozen/independently reviewed source delta may be integrated and proposed
+for ROOT's separate normal FF/registered-reload authorization. After loading,
+an actual HK-source attempt is necessary but not sufficient: qualified source
+proof, normal newv7/v35 materialization and current consumer receipts remain
+required. No new probability/operator/daemon or live mutation is authorized.
