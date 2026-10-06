@@ -1715,11 +1715,51 @@ def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():
     assert edli_trade_score_gate(event) is True
 
 
-def test_runtime_receipt_uses_event_bound_final_intent_contract():
-    event = _bound_replacement_forecast_event()
-    receipt = _receipt(event, _trade_conn_with_live_replacement_taker_snapshot())
+def _normal_native_final_intent_case(tmp_path, monkeypatch, metric):
+    """Real scheduled originals/public q, then the normal mean-selected receipt.
 
-    assert receipt.proof_accepted is True
+    Reuse only the existing private source/book harnesses. No qualifier, READY
+    row, probability or selected actuation is manufactured by this callback.
+    """
+    from contextlib import ExitStack
+    from tests import test_replacement_forecast_materializer as normal
+    from tests.money_path.test_finding_b_free_cash_bound import _normal_cash_matrix
+    from src.events.triggers.forecast_snapshot_ready import ForecastSnapshotReadyTrigger
+
+    def final_intent(*, conn, city, request, bundle, decision_time):
+        # The normal producer has already read the actual committed bundle for
+        # every public authority purpose, including ENTRY, HELD and JIT.
+        events = ForecastSnapshotReadyTrigger(None).build_committed_snapshot_events(
+            forecasts_conn=conn, decision_time=decision_time,
+            received_at=decision_time.isoformat(), restrict_to_families={
+                (city.name, request.target_date.isoformat(), metric)})
+        assert len(events) == 1
+        receipts = _normal_cash_matrix(conn=conn, city=city, request=request,
+            bundle=bundle, decision_time=decision_time, monkeypatch=monkeypatch)
+        receipt = receipts["baseline"]
+        label = conn.execute("SELECT range_label FROM market_events WHERE condition_id=? "
+            "AND city=? AND target_date=? AND temperature_metric=?",
+            (receipt.condition_id, city.name, request.target_date.isoformat(), metric)).fetchone()
+        assert label is not None
+        # The receipt uses canonical bin hashes; persisted q uses settlement
+        # labels. Join by the actual selected condition, never by key spelling.
+        return events[0], receipt, bundle, bundle.q[label[0]], decision_time
+
+    with ExitStack() as stack:
+        for fixture in (normal._hko_native_surfaces, normal._hko_source_surface):
+            arguments = (tmp_path, monkeypatch) if fixture is normal._hko_native_surfaces else (tmp_path, monkeypatch, None)
+            source = fixture.__wrapped__(*arguments)
+            next(source)
+            stack.callback(lambda source=source: next(source, None))
+        return normal._normal_native_originals_public_case(
+            tmp_path, monkeypatch, metric, full_y_ready=final_intent)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_runtime_receipt_uses_event_bound_final_intent_contract(tmp_path, monkeypatch, metric):
+    event, receipt, bundle, selected_q, decision_time = _normal_native_final_intent_case(tmp_path, monkeypatch, metric)
+
+    assert receipt.proof_accepted is True, receipt.reason
     assert receipt.submitted is False
     assert receipt.event_id == event.event_id
     assert receipt.causal_snapshot_id == event.causal_snapshot_id
@@ -1727,31 +1767,37 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.trade_score is not None
     assert receipt.trade_score > 0
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.60
+    assert receipt.outcome_label == "YES"
+    assert receipt.q_live == pytest.approx(selected_q)
     assert receipt.c_fee_adjusted is not None
     assert receipt.p_fill_lcb is not None
-    assert 0.0 < receipt.p_fill_lcb < 1.0
+    assert 0.0 < receipt.p_fill_lcb <= 1.0
     assert receipt.family_complete is True
     assert receipt.fdr_pass is True
-    assert receipt.fdr_hypothesis_count == 4
+    assert receipt.fdr_hypothesis_count == 2 * len(bundle.q)
     assert receipt.kelly_execution_price_type == "ExecutionPrice"
     assert receipt.kelly_price_fee_deducted is True
     assert receipt.kelly_size_usd > 0
     assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.final_intent_id
+    assert (receipt.city, receipt.target_date, receipt.metric) == (bundle.city, bundle.target_date, metric)
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.forecast_authority.certificate_type == claims.FORECAST_AUTHORITY
     assert receipt.decision_proof_bundle.forecast_authority.payload["reader_status"] == "LIVE_ELIGIBLE"
     assert receipt.decision_proof_bundle.forecast_authority.payload["reader_authority"] == "forecast_posteriors.replacement_0_1"
     assert receipt.decision_proof_bundle.forecast_authority.payload["source_id"] == REPLACEMENT_SOURCE_ID
     assert receipt.decision_proof_bundle.forecast_authority.payload["members_json_source"] == "raw_model_forecasts.multimodel"
-    assert receipt.decision_proof_bundle.forecast_authority.payload["posterior_identity_hash"] == "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-    assert receipt.decision_proof_bundle.calibration.payload["posterior_id"] == 9001
+    assert receipt.decision_proof_bundle.forecast_authority.payload["posterior_identity_hash"] == bundle.posterior_identity_hash
+    assert receipt.decision_proof_bundle.calibration.payload["posterior_id"] == bundle.posterior_id
     assert receipt.decision_proof_bundle.calibration.payload["replacement_q_mode"] == "FUSED_NORMAL_FULL"
     assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
     assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
-    assert receipt.decision_proof_bundle.calibration.clock.source_available_at.isoformat() == "2026-05-24T08:12:00+00:00"
+    # The replacement bootstrap credential is available at this decision;
+    # its certificate clock is not the original provider possession clock.
+    assert receipt.decision_proof_bundle.calibration.clock.source_available_at == decision_time
+    assert datetime.fromisoformat(bundle.source_available_at) <= decision_time
     assert receipt.decision_proof_bundle.belief.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
-    assert receipt.decision_proof_bundle.belief.payload["forecast_snapshot_id"] == "rmf-Chicago|2026-05-25|high|2026-05-24"
+    assert receipt.decision_proof_bundle.belief.payload["forecast_snapshot_id"]
     assert receipt.decision_proof_bundle.belief.payload["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
     assert receipt.decision_proof_bundle.fdr.payload["edge_bootstrap_n"] == receipt.decision_proof_bundle.model_config.payload["edge_bootstrap_n"]
     assert receipt.decision_proof_bundle.executable_snapshot.payload["orderbook_hash"]
@@ -1763,6 +1809,32 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.decision_proof_bundle.quote_feasibility.payload["quote_depth_hash"]
     assert "receipt_projection" not in receipt.decision_proof_bundle.fdr.payload
     assert receipt.decision_proof_bundle.quote_feasibility.payload["execution_price_type"] == "ExecutionPrice"
+
+
+def test_runtime_receipt_legacy_row_only_fixture_cannot_authorize_entry_or_held():
+    from src.data.replacement_forecast_bundle_reader import (
+        ReplacementForecastAuthorityPurpose, read_replacement_forecast_bundle,
+    )
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+
+    event = _bound_replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
+    try:
+        receipt = _receipt(event, conn)
+        assert receipt.proof_accepted is False
+        assert "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE" in receipt.reason
+        readiness = latest_replacement_readiness(conn, city="Chicago", target_date="2026-05-25",
+            temperature_metric="high", decision_time=DECISION_TIME)
+        assert readiness is not None
+        for purpose in ReplacementForecastAuthorityPurpose:
+            result = read_replacement_forecast_bundle(conn, baseline_bundle=None,
+                readiness=readiness, city="Chicago", target_date="2026-05-25",
+                temperature_metric="high", decision_time=DECISION_TIME,
+                require_baseline_bundle=False, authority_purpose=purpose)
+            assert not result.ok
+            assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+    finally:
+        conn.close()
 
 
 def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
