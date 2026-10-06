@@ -595,7 +595,12 @@ files:
       a concurrently published witness cannot be deleted. V4 reservation,
       persistence, and completion perform bounded per-debt reads rather than
       scanning unrelated wake backlog; missing, malformed, or unreadable
-      lineage/slot state fails closed. When the pytest state marker is present,
+      lineage/slot state fails closed. The hint folder is a queue, not truth:
+      a forecast, substrate, Day0 or current-print hint is acknowledged
+      through the single ack path once every family it names is unreachable
+      under the one family-reachability law (event-id to family resolution
+      shared with src/main.py), and an unresolvable event or unreadable
+      world/trade DB retires nothing; age alone never retires a hint. When the pytest state marker is present,
       every default or explicit wake path is rejected unless its resolved target
       stays in a temporary namespace and outside repo/live state.
     downstream:
