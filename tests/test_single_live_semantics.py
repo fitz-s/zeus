@@ -1,5 +1,5 @@
 # Created: 2026-07-22
-# Last reused/audited: 2026-07-31
+# Last reused/audited: 2026-10-06
 # Authority basis: operator-directed single-live-semantics extinction pass.
 """Relapse antibodies for dormant alternate-runtime concepts."""
 
@@ -7,8 +7,130 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import ast
+import pytest
+import yaml
+
 from scripts.check_single_live_semantics import violations
 from src.config import entry_forecast_config
+
+
+def _reviewed_counterfactual_fixture(tmp_path, monkeypatch, source):
+    from scripts import check_single_live_semantics as gate
+    path = tmp_path / "src/engine/global_batch_runtime.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source)
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    uses = {}
+    for node in ast.walk(tree):
+        name = (node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                else node.arg if isinstance(node, ast.arg) else node.id if isinstance(node, ast.Name)
+                else node.attr if isinstance(node, ast.Attribute) else None)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("LIVE_SHADOW"):
+            name = "literal:" + node.value
+        if name is not None and (name.startswith("literal:") or gate._concept_name(name)):
+            uses.setdefault(name, []).append(gate._evidence_use_hash(node, parents))
+    registry = tmp_path / "architecture/money_path_objects.yaml"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(yaml.safe_dump({"single_live_evidence_contexts": {
+        "src/engine/global_batch_runtime.py": {
+            "role": "venue_inert_same_current_q_counterfactual", "reviewed_ast_uses": uses
+        }}}))
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    return path
+
+
+def test_gate_typed_same_q_budget_evidence_is_not_second_runtime(tmp_path, monkeypatch):
+    path = _reviewed_counterfactual_fixture(tmp_path, monkeypatch,
+        "diagnostic_bytes = 128\nreport = {'trace_bytes': diagnostic_bytes}\n")
+    assert violations(tmp_path) == []
+    # The declaration covers only the exact reviewed use, never the whole file.
+    path.write_text(path.read_text() + "opaque(diagnostic_bytes)\n")
+    assert any("UNKNOWN evidence use" in item for item in violations(tmp_path))
+
+
+@pytest.mark.parametrize("source", [
+    "diagnostic = 'LIVE_SHADOW'\nruntime = diagnostic\n",
+    "label = 'LIVE_SHADOW'\ndef relay(p):\n    return p\nmode = relay(label)\n",
+    "label = 'LIVE_SHADOW'\nif runtime == label:\n    pass\n",
+    "label = 'LIVE_SHADOW'\nparser.add_argument('--mode', choices=[label])\n",
+    "from enum import Enum\nclass Choices(Enum):\n    VALUE = 'LIVE_SHADOW'\n",
+    "diagnostic = 'LIVE_SHADOW'\nrecord = {'probability_authority': diagnostic}\n",
+    "diagnostic = 'LIVE_SHADOW'\ncommand_status = diagnostic\n",
+    "diagnostic = 'LIVE_SHADOW'\nrecord = {'state': diagnostic}\n",
+    "diagnostic = 'LIVE_SHADOW'\nrecord = {'side': diagnostic}\n",
+])
+def test_gate_reviewed_owner_never_exempts_actual_selector(tmp_path, monkeypatch, source):
+    _reviewed_counterfactual_fixture(tmp_path, monkeypatch, source)
+    assert violations(tmp_path)
+
+
+def test_gate_prose_is_not_control_but_executable_fence_is(tmp_path):
+    path = tmp_path / "docs/operations/current/PLAN.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("Historical shadow semantics and diagnostic lanes are evidence.\n"
+                    "The retired trade_authority_status column is absent.\n")
+    assert violations(tmp_path) == []
+    path.write_text(path.read_text() + "```python\nmode = 'shadow_veto_only'\n```\n")
+    assert violations(tmp_path)
+
+
+@pytest.mark.parametrize("source", [
+    "record={'mode':'live','report':'diagnostic'}\nmode=record['mode']\n",
+    "row=('live',{'report':'diagnostic'})\nmode=row[0]\n",
+    "def pick(evidence,value):\n return value\nmode=pick('diagnostic','live')\n",
+    "def pick():\n def unused():\n  return 'diagnostic'\n return 'live'\nmode=pick()\n",
+    "def label(value):\n return {'report':value}\ndef separate(value):\n mode=value\nlabel('diagnostic')\nseparate('live')\n",
+])
+def test_projected_evidence_does_not_taint_clean_selected_value(source):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(source) == []
+
+
+@pytest.mark.parametrize("source", [
+    "record={'mode':'diagnostic','report':'live'}\nmode=record['mode']\n",
+    "label='diagnostic'\ndef pick():\n return label\nruntime=pick()\n",
+    "def outer():\n label='diagnostic'\n def inner():\n  return label\n return inner()\nruntime=outer()\n",
+    "record={'mode':'live','report':'diagnostic'}\nmode=record[key]\n",
+    "record={'report':'diagnostic'}\nopaque(record)\n",
+    "bag={}\nbag['value']='diagnostic'\nmode=bag['value']\n",
+    "bag={'value':'live'}\nalias=bag\nalias['value']='diagnostic'\nruntime=bag['value']\n",
+    "def pick(evidence,value):\n global runtime\n runtime=evidence\n return value\nmode=pick('diagnostic','live')\n",
+    "def mutate(bag):\n bag['value']='diagnostic'\nbag={}\nmutate(bag)\nruntime=bag['value']\n",
+    "def pick(label='diagnostic'):\n return label\nruntime=pick()\n",
+    "def outer():\n label='live'\n def mutate():\n  nonlocal label\n  label='diagnostic'\n mutate()\n return label\nruntime=outer()\n",
+    "bag={'mode':'diagnostic'}\nruntime=bag.get('mode')\n",
+    "def pick():\n return 'diagnostic'\npointer=pick\nruntime=pointer()\n",
+])
+def test_projected_evidence_preserves_bad_field_alias_closure_and_side_effect(source):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(source)
+
+
+def test_registered_data_effect_never_exempts_new_control_or_opaque_use(tmp_path, monkeypatch):
+    from scripts import check_single_live_semantics as gate
+    legal = "payload={}\npayload.update({'report':'diagnostic'})\n"
+    path = _reviewed_counterfactual_fixture(tmp_path, monkeypatch, legal)
+    registry = tmp_path / 'architecture/money_path_objects.yaml'
+    entries = yaml.safe_load(registry.read_text())
+    declaration = entries['single_live_evidence_contexts']['src/engine/global_batch_runtime.py']
+    declaration['proof'] = 'bounded reviewed venue-inert report effect'
+    effect = ast.parse(legal).body[1]
+    declaration['reviewed_evidence_effects'] = {
+        gate._evidence_use_hash(effect, {}): 'structured_same_q_report_update'}
+    registry.write_text(yaml.safe_dump(entries))
+    assert violations(tmp_path) == []
+    for source in (
+        legal + "runtime=payload['report']\n",
+        legal + "mode='LIVE_SHADOW'\n",
+        legal + "lane='diagnostic'\n",
+        legal + "q_authority=payload['report']\n",
+        legal.replace("{'report':'diagnostic'}", "{'mode':'shadow'}"),
+        legal + "opaque('diagnostic')\n",
+    ):
+        path.write_text(source)
+        assert violations(tmp_path), source
 
 
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:

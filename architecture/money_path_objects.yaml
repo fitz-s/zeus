@@ -1268,6 +1268,357 @@ source_protocol_objects:
       - tests/test_ecmwf_open_data_collect_cycle.py
       - tests/test_money_path_semantic_ci.py
 
+single_live_evidence_contexts:
+  {
+    "src/engine/global_batch_runtime.py": {
+      "role": "venue_inert_same_current_q_counterfactual",
+      "reviewed_evidence_effects": {
+        "e3d850be6f7e4c00955ed1bdf617e14c8eb41ccbfb4a29eec30662ef22e6cfd0": "append_same_prepared_q_rejected_buy_frontier_not_venue_action"
+      },
+      "proof": "source_rationale:2230;db_table_ownership:1387-1391;money_path_objects:1311-1319;PLAN:single-live-56-disposition",
+      "reviewed_ast_uses": {
+        "_ALPHA_SHADOW_ENTRY_EVENT_PREFIXES": [
+          "1d843cf6d75494bbfd52ef6b2f129303da1fda84d79e4ec2ad7cf16902c52f62",
+          "26174b8d5e90f00edef976a6c7bd306d46aaee3bd3521a0658fe3b21761984a5"
+        ],
+        "_ALPHA_SHADOW_ENTRY_EVENT_VERSION": [
+          "26174b8d5e90f00edef976a6c7bd306d46aaee3bd3521a0658fe3b21761984a5",
+          "a4f6e87a02bbbe8bc77f3b6c45d02701ed86d8986164b7afb8323332e9234f80",
+          "f02ef42478389006b154686b90d38bd3783e2e57132209834a3686f906c490bb"
+        ],
+        "_ALPHA_SHADOW_EXIT_DECISION_LAW": [
+          "2dc20854c9f28f8663c167400e8006d97ac6bc68271b31dc419da0d9fa2f5504",
+          "76ec0bd644fcf2cb0eb447b445079ccfb5d163769cebd6ee990c20f47edb4d36"
+        ],
+        "_ALPHA_SHADOW_EXIT_EVENT_VERSION": [
+          "0e3fabf9c744aecc43ab18eb144dfa5d075175809d0c533bc0342f3b3a7dd104",
+          "de2e4f572816d8a9c4ef5a3c7a38ab9161aae6fe5129cf0c66f874ded1fcd304"
+        ],
+        "_ALPHA_SHADOW_SELECTION_RULE": [
+          "192ebc940bb97eada598a85e9b02fc1812bbbdb12c54bbe260c9b2e9a3f80b38",
+          "1c7c6acd130d97d730cb389a75eea348cbb3dbbfb1294c91819005381d46083e",
+          "5d5ad307787916fee7917c892e04b6c47f05e4ff6cf7f6cc7e308ce901e492e6",
+          "9f83dbd7a246cce86d66758380328e676cf2e0ea2f386e5989d542347dc65651"
+        ],
+        "_DAY0_ALPHA_SHADOW_DECISION_LAW": [
+          "852106753d544a4f05daac282ac1f7edd311db10bcffbabcb4bc37a9ac64b7aa",
+          "d55838ad4571dc2adcec2db86fe1e82aaa3917f1d229cc273b73358bc2a1e6a7"
+        ],
+        "_DAY0_ALPHA_SHADOW_REASON": [
+          "028bb42106819218ccd0166a5ac8d4d33667896c25214d284753d903f10eb209",
+          "1d843cf6d75494bbfd52ef6b2f129303da1fda84d79e4ec2ad7cf16902c52f62",
+          "94006663cec23840e6471d777d97050f17a678921f43df0d22cca0089530f334"
+        ],
+        "_DAY0_ALPHA_SHADOW_SELECTION_RULE": [
+          "1c7c6acd130d97d730cb389a75eea348cbb3dbbfb1294c91819005381d46083e",
+          "449d8ec939b5b64ef05a3ff3dc5ac0cb2967bd83c95f4c2f2c7184e2b6980b20"
+        ],
+        "_QKERNEL_ALPHA_SHADOW_DECISION_LAW": [
+          "09f4d78e00769fa1d95547823e2469f383784d4e207f3875f9c76fc1a7157313",
+          "3c1f1c4b3209beb2cceca3649f3e7af89c5944fe137eadc122ebffd2cfe9e916"
+        ],
+        "_QKERNEL_ALPHA_SHADOW_REASON": [
+          "004bf529904f28e696139902a0a07d94eedc163898ca65f20f91b161c7c8766c",
+          "1d843cf6d75494bbfd52ef6b2f129303da1fda84d79e4ec2ad7cf16902c52f62",
+          "d821d2f5f610e363f906c9132d79e0cbd582312fad37ef9d86dbd8393f26f94b"
+        ],
+        "_QKERNEL_ALPHA_SHADOW_SELECTION_RULE": [
+          "570559d7a89d193c62292d0d65ba67f1a7780cfa62b1610a3ec90578a3956692",
+          "9f83dbd7a246cce86d66758380328e676cf2e0ea2f386e5989d542347dc65651"
+        ],
+        "_day0_market_relative_alpha_shadow_events": [
+          "b20a08343d36620d0d79e42ea64c29ae988491cb2b84112ea461485f4c78eaf8"
+        ],
+        "_market_relative_alpha_shadow_events": [
+          "41d64f6bd04110bf2595167bdb0df131d7195f034af454537eb6d29dab61d9bf",
+          "7ce8537bba3d3d58fc04913afde90c36aecde0ea85719b8b7f69db5b320fbeb4",
+          "f32b53f13f7d65f756d5f6dcd04f904c7974c938b8a4a7de4b6dd0f2f8d40db4"
+        ],
+        "_market_relative_alpha_shadow_exit_events": [
+          "35848379977b1d1f0a19a1aef3783e701360d6f4bcb8b863a20a81ef2315b68c",
+          "a588c7dacafc107c28529f3870444d86894519d9ed0c5640d92d6d4e8aa504d6"
+        ],
+        "_qkernel_shadow_current_semantics_by_posterior": [
+          "781d34dd9b37b01f6d1051db9b85b0b09e19ae6272a02fad5caf9dc14c406235",
+          "edcc1770f2ca79a055a84ea8f2f58a05264a38b24d892dd845c357b26ea022fe"
+        ],
+        "_record_day0_market_relative_alpha_shadows": [
+          "a743aa6100cae8bcf4e96cbcfb1ff2754e52f64da85eca3a96d330a06c433796"
+        ],
+        "_record_market_relative_alpha_shadows": [
+          "3a7b8435e1d0e7613f61a6a1dcfc2267be1425b8d42aff133aaa11bbb9d95bdb",
+          "7c72331ceadfdff3468ae813cb6be52802a72f95f37774706642f10b3e555d79",
+          "a0ab4fdbc4f36be7096acceadd589b7c47c605a47ff0ba200f874a33dfb494a0",
+          "e4ac0bb9002a275f9d8e1f8688c244603bc31c4f8a3d2feb3a0832942daf38bf"
+        ],
+        "alpha_shadow_events": [
+          "41d64f6bd04110bf2595167bdb0df131d7195f034af454537eb6d29dab61d9bf",
+          "5902113810411c4a5164bf7316afa5578621216093dfed3422d857c27ea16f8b",
+          "764b1fbb1c6441d8e739f60d65b55ac7957093aa1b90de504837cf999b4329b9",
+          "7c72331ceadfdff3468ae813cb6be52802a72f95f37774706642f10b3e555d79",
+          "a5fd002a77132d59a832dd121b56049f6352dbd71baf01a633be3574974da99d",
+          "eba0ca4bff14c95f0e10eb5c79f91535b8a02563b2d1111f3080549115b46fb6"
+        ],
+        "alpha_shadow_exit_events": [
+          "2e4af3f159411c63e721ed1a0621d08010878b127b6857913ba1d95461097abf",
+          "35848379977b1d1f0a19a1aef3783e701360d6f4bcb8b863a20a81ef2315b68c",
+          "9bc6052c78498f8c055f8819e7e6d0c7ecf1c9a52c54f2713ba61cedd359309a",
+          "d9572ad0d388fd0acb25fe560c194306907a4aa07c40a82501665261049078ad",
+          "e4ac0bb9002a275f9d8e1f8688c244603bc31c4f8a3d2feb3a0832942daf38bf",
+          "fa16f5d9cec9dbc5d3e07e9a74866372006de55549dd7045074a833dc587d949"
+        ],
+        "amplification_diagnostic": [
+          "170da130cb1ce6f5ef4ede413ac77513e3d9edff5a15c4f69258a5ec3615a694",
+          "99c5b0dbe6e948c9db0ecfa7f1296b3dc0c1e5a6c7fea0a399505bdb121f2635",
+          "9f1fcd044371d7470eb4b7876cc318320aee0d94286fba107248f5c083daa070"
+        ],
+        "confidence_cost_diagnostic": [
+          "170da130cb1ce6f5ef4ede413ac77513e3d9edff5a15c4f69258a5ec3615a694",
+          "8ed27494ece5a70dbc2d309491bcfa18b9ff35b2abb0ed71841dfbb03393b950",
+          "e62f42bf930ed293365a7dbb1b8fa8a56d322788a1b9e7f694bafa2058be91cd"
+        ],
+        "diagnostic": [
+          "83feefa80908e62a1c5ebc0ff90edc819e053857879930b05d386706207969f6",
+          "a04555daae3b39184742b7025cbabe713a47d8614f923126f65e9c927f1a6693",
+          "d9f2c90b73c126914873b38ebaba2e4e70d02fdd0183f1b53af70ace7e1b49c0",
+          "e7e9803e56906f65862c67a397cc6e91f92cacdce337ffcac51a67450e7f347d"
+        ],
+        "literal:DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY": [
+          "99c5b0dbe6e948c9db0ecfa7f1296b3dc0c1e5a6c7fea0a399505bdb121f2635",
+          "d9f2c90b73c126914873b38ebaba2e4e70d02fdd0183f1b53af70ace7e1b49c0"
+        ],
+        "literal:shadow_exit_current_probability": [
+          "405543e604f16cd8810f46d1aed2f799ea18d1bf1a9915f21eee0e5d3514f757"
+        ],
+        "pending_alpha_shadow_events": [
+          "4cee293c46e89f7166289940ee9c0daf2ca9ed0dae8759269d40857bf03980d1",
+          "a5fd002a77132d59a832dd121b56049f6352dbd71baf01a633be3574974da99d",
+          "aec8f88e25db4e3cfa21392dc7dba300432e6a58b8201d26526ee8679794b8ac"
+        ],
+        "pending_alpha_shadow_exit_events": [
+          "599a81b3daf417f31643fb53dceb1e658fc6613b9c61ad4e821f2d5ec2d6d74f",
+          "9bc6052c78498f8c055f8819e7e6d0c7ecf1c9a52c54f2713ba61cedd359309a",
+          "a3afeda5975ece6c890ad5602115e714bd955c8bb519ea0a6bc4595caaaf2c7d"
+        ],
+        "recorded_alpha_shadow_exit_ids": [
+          "2e4af3f159411c63e721ed1a0621d08010878b127b6857913ba1d95461097abf",
+          "e4ac0bb9002a275f9d8e1f8688c244603bc31c4f8a3d2feb3a0832942daf38bf"
+        ],
+        "recorded_alpha_shadow_ids": [
+          "764b1fbb1c6441d8e739f60d65b55ac7957093aa1b90de504837cf999b4329b9",
+          "7c72331ceadfdff3468ae813cb6be52802a72f95f37774706642f10b3e555d79"
+        ],
+        "shadow_event": [
+          "5902113810411c4a5164bf7316afa5578621216093dfed3422d857c27ea16f8b",
+          "aec8f88e25db4e3cfa21392dc7dba300432e6a58b8201d26526ee8679794b8ac"
+        ],
+        "shadow_holding": [
+          "280976c99613089a7694d275b22ac284812fe7dc9ea5c1fa2a4fd3e2066b2768",
+          "405543e604f16cd8810f46d1aed2f799ea18d1bf1a9915f21eee0e5d3514f757",
+          "9914b569669d479690cdeb7e6f3678fbecfc656eb1d165229f6ff26b90652f61"
+        ],
+        "shadow_reason": [
+          "028bb42106819218ccd0166a5ac8d4d33667896c25214d284753d903f10eb209",
+          "402ea407efd954f61a42a798685c647b02b8043bbc12f990502b4c532a97a204",
+          "d821d2f5f610e363f906c9132d79e0cbd582312fad37ef9d86dbd8393f26f94b"
+        ]
+      }
+    },
+    "src/riskguard/riskguard.py": {
+      "role": "prospective_settled_evidence_not_bankroll",
+      "reviewed_evidence_effects": {
+        "ac561084c3d8920e9d5b5ff5fab8d48ee5ebe8f59f56f605cee98386a12ef03e": "append_immutable_same_q_counterfactual_settled_evidence_not_actual_wealth"
+      },
+      "reviewed_report_status_uses": [
+        "d11dac715049b94a9c01997eb7b709d96996c7f0b7ffe90079369388ba23fa7b",
+        "b34290d5c347c201fef969e6c6b86f160ba582559357bb77b39484b21df66665",
+        "8076394c800470baa7c4128d9204f88dbdb2f149e72c440ee7e3f80e5be3a839",
+        "008f92f189866775e6bae5fbf3487dcdff861be04675b71c9c500f48eaf49726"
+      ],
+      "proof": "source_rationale:2230;db_table_ownership:1387-1391;money_path_objects:1311-1319;PLAN:single-live-56-disposition",
+      "reviewed_ast_uses": {
+        "_acknowledge_pending_alpha_shadow_feedback": [
+          "33eb827211a5d6ab91cc75549b65c9cfe77bf9ddd87c6e2d1c8aa86d424fb5fa",
+          "4c8d938249ca5bd140b31a4ad60f877c1160678e0417c90a8f8a1ba59c4198e6"
+        ],
+        "_causal_alpha_shadow_rows": [
+          "8d8386e63dee2566017a4773a8cb88bb2339ba3a96e8db923b0e433213f6a5b2",
+          "b49a76cc502f6aa596845d8ec243085258c81fc785ce12b93f499ca8230df944"
+        ],
+        "_legacy_settled_market_relative_alpha_shadow_rows": [
+          "38a148f22c0cddef00f90b67387faa94a7c4bcdb11d2f74bdf51cc9d49c5fd8c",
+          "bc6c0733e1752d6d79dd1f952a4e059a5d936a5508770aebf4e93bd77f04aeab"
+        ],
+        "_settled_day0_market_relative_alpha_shadow_rows": [
+          "39cdd8b744e437719be980f3c9f7c38cb0a5b8ee6238451a2dbec1231dc45414",
+          "4b7af6fccbf81ef869e30f93dca9e2c15d1974cf24dea2ff0ff11c4d701c6f5e"
+        ],
+        "_settled_market_relative_alpha_shadow_rows": [
+          "2105947122c299a2cd3435befcbf09c35860ec04088aaa9e129a0ab7b3bd1951",
+          "8f0c1177962cfb0a3ccf75c8ae54f50e972b69cf3ff477bba55d8ec7e153d265",
+          "f28840759fd8c42505ca33362789071d6c68c7b115e39c49e09d1a4ad5fdc98f"
+        ],
+        "_settled_qkernel_market_relative_alpha_shadow_rows": [
+          "25fcc9301d73e763243df087b0f811ecb03ce4e3bd8cb4d05fcc38b83030a626",
+          "fa677d26cc369339f5ee430eaeeb814a72521c2ab4ec1e3ae574c6b74b72e9f6"
+        ],
+        "day0_market_relative_alpha_shadow_rows": [
+          "4b7af6fccbf81ef869e30f93dca9e2c15d1974cf24dea2ff0ff11c4d701c6f5e",
+          "4c8d938249ca5bd140b31a4ad60f877c1160678e0417c90a8f8a1ba59c4198e6",
+          "9c09458ecfe821500c618283d5432c204afcabddf18e3e6f303fcf2b814d9993"
+        ],
+        "day0_market_relative_alpha_shadow_status": [
+          "4b7af6fccbf81ef869e30f93dca9e2c15d1974cf24dea2ff0ff11c4d701c6f5e",
+          "f3dab8a3ff5e7560d43a219cea765e129696ce5cb8f72e2931a5dd4aa938624a"
+        ],
+        "literal:shadow_candidate_count": [
+          "0e13847a7b7fec11e3cc520e4cda26e667e65b39706a939e559c84d2412826db",
+          "8076394c800470baa7c4128d9204f88dbdb2f149e72c440ee7e3f80e5be3a839",
+          "d11dac715049b94a9c01997eb7b709d96996c7f0b7ffe90079369388ba23fa7b"
+        ],
+        "literal:shadow_table_unavailable": [
+          "b34290d5c347c201fef969e6c6b86f160ba582559357bb77b39484b21df66665"
+        ],
+        "qkernel_market_relative_alpha_shadow_rows": [
+          "0feeb51277be0055e9776fc987b106aaa12852b8897a145b4d37cda7766c60f1",
+          "25fcc9301d73e763243df087b0f811ecb03ce4e3bd8cb4d05fcc38b83030a626",
+          "4c8d938249ca5bd140b31a4ad60f877c1160678e0417c90a8f8a1ba59c4198e6",
+          "860311bb0e88db74908e244cb9b813fbdcecdfc5225dae00246c9436d5ea1ce9"
+        ],
+        "qkernel_market_relative_alpha_shadow_status": [
+          "25fcc9301d73e763243df087b0f811ecb03ce4e3bd8cb4d05fcc38b83030a626",
+          "f3dab8a3ff5e7560d43a219cea765e129696ce5cb8f72e2931a5dd4aa938624a"
+        ],
+        "shadow_sql": [
+          "71b2a32ba9ec5921cefa5b04844fb5450b300a88d6676a69caad1aa1476fda8e",
+          "9bbe7f3ccaf2d7863252b7bda06cfcb08b5aa8b63b200e23427c66e99418a87c"
+        ]
+      }
+    },
+    "scripts/deploy_live.py": {
+      "role": "loader_stderr_report_not_runtime_selector",
+      "proof": "source_rationale:2230;db_table_ownership:1387-1391;money_path_objects:1311-1319;PLAN:single-live-56-disposition",
+      "reviewed_ast_uses": {
+        "diagnostic": [
+          "35e3615c48e1c0f0a1f1eba5292528eb4d85217ec5c405674b68929f80c4f5c0",
+          "45f15840ae79894b6fbfdf086dc6f8b9d7889035a681ce845c956d6c0380ed49"
+        ]
+      }
+    },
+    "scripts/evaluate_current_regime_capital_advantage.py": {
+      "role": "same_current_certificate_readonly_report",
+      "proof": "source_rationale:2230;db_table_ownership:1387-1391;money_path_objects:1311-1319;PLAN:single-live-56-disposition",
+      "reviewed_ast_uses": {
+        "shadows": [
+          "0c8b62f1acc6c040d8072014cc922b8de85c97a6385e2a518f9a7c877733f9d8",
+          "3839ad79b343cadb2e3cafcf68f59418adc997510a718015a6c2383e4f3f38b3",
+          "4630d5e4da8fe772ab2c68ebf05f878607cdf8b939415beb761d4b6705ab800d",
+          "657c143aca7c83b3ed7f1e987668f21cb3498f7cec5b3cb7731cb9ec19c6fbfc",
+          "73a019d7c27df13d56bf7f5bd2a10a12f65dd1d849eaba6dc997e4fc578b1a5c",
+          "b2193879b51201aaaaee73b4f1ef2ae14d7935e03de41ddabe871c8d04d81818",
+          "dff93a736cd4f6654c725504233df46143afa4343847bf227e3d927668103e0b",
+          "e70d8c009c9e8934b9c25f095f80d18b51d413ce827bd64c609773bc0c8fa8b2",
+          "f00491ab70a872226df320541e49e0b969c4d9c814b6103b947c590b6ae55b1d"
+        ]
+      }
+    },
+    "scripts/fit_candidate_calibration.py": {
+      "role": "offline_no_promotion_fit_evidence",
+      "reviewed_evidence_effects": {
+        "2c25548d4af0657bb695fa25212de086dc304aad243fe68631cadef3e41c9426": "write_content_addressed_offline_bytes_outside_state_no_promotion",
+        "61e8b800df373a763599f3aadcafb5aaedb78b4bd305c9443208af0a494f8d4d": "rename_content_addressed_offline_artifact_outside_state_no_promotion"
+      },
+      "proof": "source_rationale:2230;db_table_ownership:1387-1391;money_path_objects:1311-1319;PLAN:single-live-56-disposition",
+      "reviewed_ast_uses": {
+        "PRICE_ONLY_DIAGNOSTIC": [
+          "444ee013d2394cea3c12cbd296bc934a9526e9622fa0d782287e50cde4799219",
+          "ca602711a8055f1bc6ff4e352d313b1cf2c5568a17c16e4f6a6acef19c6d56ec"
+        ],
+        "PROXY_Q_DIAGNOSTIC": [
+          "11ab4cf6ab4d3dfd6292d4ce255248e4bc4e5c3e0a6538d16de7ef1c15add0ff",
+          "5c7a3623b66e4c2ab843b9ca5b1a9c4058356ee76cc6bfeea234159edcb82be3",
+          "ca602711a8055f1bc6ff4e352d313b1cf2c5568a17c16e4f6a6acef19c6d56ec"
+        ],
+        "diagnostic": [
+          "5c7a3623b66e4c2ab843b9ca5b1a9c4058356ee76cc6bfeea234159edcb82be3",
+          "67b4f160fed675497b9913e28ac0ebb28a9e81bafc6eb56f16aab548abbb6fe0"
+        ],
+        "literal:diagnostic": [
+          "a45ade49d3e292082bd3ceb73a72226121db065affe7eb6302870a7de85e4404"
+        ]
+      }
+    },
+    "src/engine/tier0_auction_corpus.py": {
+      "role": "same_prepared_witness_optional_trace_budget",
+      "proof": "source_rationale:2230;db_table_ownership:1387-1391;money_path_objects:1311-1319;PLAN:single-live-56-disposition",
+      "reviewed_ast_uses": {
+        "_diagnostic_charge": [
+          "6c9105d4c475fe2a579fac073e9ba9e985ade2073290015e9c2c8c9cb30eceba",
+          "9b290b6d3304c38a317ea7126372d20e58b4ef6a0638acd484a5cf9041cdbae1",
+          "a155212da3320b0bed0457b50dbf0630bf885e88f784fe89b5686434d1213366",
+          "b4dcf565c2feaba0c6444756aa94a7e114d26c05a3fc669f6a13ba37c5fb6e39",
+          "c48bd589837d58ee103aeb1322bdc98db8b35b74934b0851f7d1bded35630bb1",
+          "c86368d7ae5bf7652682512da7b67916e7876e979b4bd57dd0dfa69eeec93f80",
+          "dd124c98e78bb29bf2fd18c0a3aaf438c6cfc0cba2e3a16e779a8e3bd18e60c9"
+        ],
+        "diagnostic_bytes": [
+          "35d8d26fd55fa583a16bf899cb9bc2ce3e61ce2e7d6f5895e473a090c5cb5600",
+          "8e01668845f37c131e7dceee16641be4dd14c6430fc3a0c1e19047daf93b85d7",
+          "9c301ec60ca0ff55c8cddb63ef3b26f592da26ae1f5e08a2b501814f4dcb334b",
+          "e221d59c648f252253a5b132f6a738d6d36fc329bbbd04902c33d08ca5d9d8fc"
+        ],
+        "literal:DIAGNOSTIC_QUEUE_BUDGET": [
+          "00ce821ff5fcca42550916772532673cec6b2a8fadb3dd75a1f112db7506db04"
+        ]
+      }
+    },
+    "src/ingest_main.py": {
+      "role": "single_scheduler_progress_report",
+      "proof": "source_rationale:2230;db_table_ownership:1387-1391;money_path_objects:1311-1319;PLAN:single-live-56-disposition",
+      "reviewed_ast_uses": {
+        "diagnostic_keys": [
+          "a6a643d02e5a0a8a52fd0489cf076258d70c259e01b2131ded8474655db3edfe",
+          "bdada008195707d5dcef6e340b215157726036a53eed09006c2efbcf0e5e8666"
+        ],
+        "diagnostics": [
+          "4fa4d989c1a620c16f4bb6c6e69a82233aacc4e0164e3b32b4011574a5f39da7",
+          "8a6c50dd7c54eb8bd66a15fd175e951538f77786fd499144c8049589c3d9f905",
+          "bdada008195707d5dcef6e340b215157726036a53eed09006c2efbcf0e5e8666",
+          "c0caa8ebcb2584c76d054947fdfc81054e477e7f458212e8262ff25ae9cd4cda"
+        ],
+        "scan_diagnostics": [
+          "1ffcbae88f9b7414d523520625188fcd6032df94b8ab3cb59546e56674307d37",
+          "a5159e97d56e085ad9e5973e3f292dd083b59dee4e2af771b662c47d7129377d",
+          "c0caa8ebcb2584c76d054947fdfc81054e477e7f458212e8262ff25ae9cd4cda",
+          "e3c308660659ea07e3cf7853991e74125e0339ee14d2d05fb5217aeb454416dc"
+        ]
+      }
+    },
+    "scripts/audit_trade_db_growth.py": {
+      "role": "readonly_canonical_storage_report",
+      "proof": "PLAN:single-live-required-opaque-disposition;read-only JSON stdout, no authority write",
+      "reviewed_evidence_effects": {
+        "b0a531a63558d65529b6c18c4b2f771b82d52b22684465d4897d393822c0c38a": "print_readonly_canonical_storage_growth_JSON"
+      }
+    },
+    "src/data/replacement_forecast_materializer.py": {
+      "role": "owning_current_q_factory_evidence_transport",
+      "proof": "replacement_final_form;single-q regime;PLAN:approved source f1f and single-live effect disposition",
+      "reviewed_evidence_effects": {
+        "e5f8c779eff83606f49766c7f5a7c4465781db937670c21e3c2ad0ae99d03eb3": "update_own_current_shape_evidence_not_runtime_mode",
+        "4ab4fd6aad44a8e1afe615ea99681b5f2541611903be5077680c31fc09b9e132": "update_own_current_provider_cohort_shape_evidence",
+        "65c0138b55f347a82196c1fbdc62dbb5fc3b68ee6cccb41b4337220cba3be023": "append_normalized_probability_sample_numeric_scalar",
+        "2c28f2eb48128d003fe8bbd5e070649e6dd558e6f784e694db302f854cd97409": "serialize_own_current_probability_method_configuration",
+        "5699968aca4163bc4fb9c7437781318295f5b23b6d24ed4bb8ef1dcbe1a4d879": "insert_own_current_posterior_in_canonical_FORECAST_namespace",
+        "53b116a1caceeb5f23dbc5d9cdbf5a012bfefbe4b41caa2b03c18972d2995a07": "emit_normal_materialization_latency_receipt",
+        "2d54c6088c55a3a4f0242f0994188fc00beeb6ac64393d3877c4dd0cd9ccf724": "append_actual_current_provider_dependency_evidence",
+        "c708c4ca2d48eaf954597c258939dd9e3bd02b9a0ad68e376a4d01b232bf9e78": "record_superseded_certificate_diagnostic_not_regime_change",
+        "3db4d4ec1622c586d3bd025cfc7a02694310b66bc129d2f4b4232ce6e39b2ae8": "log_refused_stale_certificate_regression",
+        "67af01f6a1b44707175ce712378a83690dd513ccb56e6c50f43e8091ec80af73": "write_normal_readiness_state_for_own_current_posterior"
+      }
+    }
+  }
+
 schema_objects:
   authority_fabricating_defaults:
     - VERIFIED

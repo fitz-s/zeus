@@ -19025,3 +19025,39 @@ content, credential rotation, live config change or whole-history rerun.
 Full-history proof SHA256
 f620e1734f6a3cbffbe797459cca8b914962a4d3767328f43ab1a47e89c40b1d
 is a failed gate until the narrowly reviewed correction is actually tested.
+
+Single-live required gate FINAL LOCAL EPOCH (not live qualification): the
+projected scalar/container checker preserves literal-field/index projection,
+own lexical returns, global/closure/helper side effects, alias field mutations
+and per-occurrence true-control priority. Ordinary numeric/serialization/hash
+operations are not themselves alternate-runtime authority. Fifteen individually
+reviewed original AST statements have exact-owner typed data-effect proofs;
+four exact risk-report status returns are metadata, never money states.
+Neither declaration exempts an actual mode/lane/probability-authority use.
+The nearby/new-mode, changed update statement, alias/helper/global/closure and
+new unregistered bare opaque-tag negatives remain enforced. No source, q,
+wealth, execution or runtime law changed.
+Final focused XML /tmp/zeus-single-live-projected-effects-final.xml is82P,
+0 failures/errors/skips,4.183s, SHA256
+6029c1c01fac9da85c0dbca67a1ea87b5b9eb94c1420ba16c24f40e50b7b22d6.
+The actual registered CLI completed rc0 with stdout
+`single-live semantics: OK`; exact total elapsed was not retained and is
+UNKNOWN. Earlier rc1/14, rc130 interrupted performance run, and rc1/22 then
+rc1/15 are failed intermediate epochs, not passing evidence. The final source
+SHA256 is432e31084eb725bf2a8a2791795cd5be42d87d3c2c9a75370930f224375004cc,
+test f40daaab39741e8c9b96b7c70cac5f646fb4d055aef4d401c5de9fc89d76db5f,
+registry b2137c99f6b183c84e6edf6dd0bcfa001767b7565df086dd8d56a2aecdfa7fd1.
+AST/YAML parse and diff-check pass. Independent exact-hash review is pending;
+current money-path cash fixture, final fresh-base gates and actual source/q
+qualification remain open. This static result authorizes no push or load.
+
+ROOT-approved cash integration BEFOREEDIT extension: held temporarily owns
+only tests/test_replacement_forecast_materializer.py::_normal_native_originals_public_case
+for an optional first-fullY-ready callback/stop, alongside the previously
+authorized test_finding_b_free_cash_bound.py. Default helper behavior remains
+strict and unchanged. The cash fixture must use the real normal original
+capture and public READY q with matching London/date/metric/units/condition
+and causal source cut; no mock READY, AST rewrite, production source edit or
+fabricated clock/anchor may stand in for qualification. SCOPE this private
+cash integration; DRAIN actual normal producer; RESET four cash relationships
+and identity/clock negatives under the same valid public certificate.

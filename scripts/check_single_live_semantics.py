@@ -1,5 +1,5 @@
 # Created: 2026-07-22
-# Last reused/audited: 2026-07-31
+# Last reused/audited: 2026-10-06
 # Authority basis: operator-directed single-live-semantics extinction pass.
 """Reject resurrection of dormant alternate-runtime concepts."""
 
@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
+import hashlib
 import plistlib
 import re
 from pathlib import Path
 from xml.parsers.expat import ExpatError
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,8 +128,13 @@ def violations(
     root: Path = ROOT, *, include_external_symlinks: bool = True
 ) -> list[str]:
     out: list[str] = []
+    registry_path = ROOT / "architecture/money_path_objects.yaml"
+    evidence_contexts = (yaml.safe_load(registry_path.read_text()) or {}).get(
+        "single_live_evidence_contexts", {}
+    )
+    parsed = {}
     paths = _scan_paths(root)
-    paths.update(_live_reachable_excluded_python_paths(root, paths))
+    paths.update(_live_reachable_excluded_python_paths(root, paths, parsed=parsed))
     for path in paths:
         if not path.is_file():
             continue
@@ -147,21 +156,31 @@ def violations(
             )
         if path.suffix.lower() not in TEXT_SUFFIXES:
             continue
-        source = path.read_text(encoding="utf-8", errors="replace")
-        scan_value = source.lower()
+        if path.suffix.lower() == '.py':
+            source, tree = _read_python(path, parsed)
+        else:
+            source = path.read_text(encoding="utf-8", errors="replace")
+            tree = None
+        scan_value = _binding_text(source, path.suffix.lower()).lower()
         if rel.parts and rel.parts[0] in _LIVE_REFERENCE_ROOTS:
             out.extend(
                 f"{rel}: {item}"
-                for item in _excluded_reference_violations(rel, source)
+                for item in (_python_excluded_reference_violations(source, _tree=tree)
+                             if path.suffix.lower() == '.py' else _excluded_reference_violations(rel, source))
             )
         if path.suffix.lower() == ".py":
             out.extend(
                 f"{rel}: {item}"
-                for item in _identifier_concept_violations(source)
+                for item in _identifier_concept_violations(
+                    source, evidence_contexts.get(rel.as_posix(), {}), _tree=tree
+                )
             )
+            out.extend(f"{rel}: {item}" for item in _alternate_control_violations(
+                source, evidence_contexts.get(rel.as_posix(), {}), _tree=tree))
             scan_value += "\n" + "\n".join(
                 _static_python_strings(
                     source,
+                    _tree=tree,
                     allowed_retired_assignments=(
                         CUTOVER_RETIRED_ASSIGNMENTS
                         if rel == CUTOVER_SCRIPT
@@ -174,7 +193,7 @@ def violations(
                     f"{rel}: {item}"
                     for item in _retired_assignment_control_violations(source)
                 )
-        for token in _CONCEPT_TOKENS:
+        for token in (() if path.suffix.lower() == ".py" else _CONCEPT_TOKENS):
             if _contains_live_alternate_concept(token, scan_value):
                 out.append(f"{rel}: forbidden alternate-runtime concept {token!r}")
         for token in _FORBIDDEN:
@@ -195,29 +214,425 @@ def violations(
     return sorted(set(out))
 
 
-def _identifier_concept_violations(source: str) -> list[str]:
+def _concept_name(value: str) -> bool:
+    return any(re.search(rf"(?:^|_){token}(?:s)?(?:_|$)", value.lower())
+               for token in _CONCEPT_TOKENS)
+
+
+def _evidence_use_hash(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
+    while not isinstance(node, ast.stmt) and node in parents:
+        node = parents[node]
+    return hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest()
+
+
+def _identifier_concept_violations(source: str, declaration: dict | None = None, *, _tree=None) -> list[str]:
     try:
-        tree = ast.parse(source)
+        tree = _tree if _tree is not None else ast.parse(source)
     except SyntaxError:
         return []
-    identifiers: set[str] = set()
+    declaration = declaration or {}
+    reviewed = declaration.get("reviewed_ast_uses", {}) if declaration.get("role") else {}
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    statement_hashes = {}
+    out: set[str] = set()
     for node in ast.walk(tree):
+        identifier = None
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            identifiers.add(node.name)
+            identifier = node.name
         elif isinstance(node, ast.arg):
-            identifiers.add(node.arg)
+            identifier = node.arg
         elif isinstance(node, ast.Name):
-            identifiers.add(node.id)
+            identifier = node.id
         elif isinstance(node, ast.Attribute):
-            identifiers.add(node.attr)
-    return [
-        f"forbidden alternate-runtime identifier {identifier!r}"
-        for identifier in sorted(identifiers)
-        if any(
-            re.search(rf"(?:^|_){re.escape(token)}(?:s)?(?:_|$)", identifier.lower())
-            for token in _CONCEPT_TOKENS
-        )
-    ]
+            identifier = node.attr
+        if identifier is None or not (identifier.startswith("literal:") or _concept_name(identifier)):
+            continue
+        statement = node
+        while not isinstance(statement, ast.stmt) and statement in parents:
+            statement = parents[statement]
+        if statement not in statement_hashes:
+            statement_hashes[statement] = _evidence_use_hash(statement, parents)
+        if statement_hashes[statement] not in reviewed.get(identifier, ()):
+            out.add(f"forbidden alternate-runtime identifier {identifier!r}: UNKNOWN evidence use")
+    return sorted(out)
+
+
+def _binding_text(source: str, suffix: str) -> str:
+    """Prose is not a live binding; executable fences and assignments still are."""
+    if suffix in {".md", ".txt"}:
+        fences = re.findall(r"```[^\n]*\n(.*?)```", source, re.S)
+        bindings = [line for line in source.splitlines() if re.match(
+            r"\s*(?:export\s+)?[\w.\[\]'\"]*(?:mode|category|lane|runtime|semantics)\s*[:=]", line, re.I)]
+        return "\n".join([*fences, *bindings])
+    if suffix in {".yaml", ".yml", ".json"}:
+        try:
+            value = yaml.safe_load(source)
+        except yaml.YAMLError:
+            return source
+        def fields(value):
+            if isinstance(value, dict):
+                return {key: (_binding_text(str(item), ".md") if key in {"why", "description", "notes"}
+                              else list(item.values()) if key == "reviewed_ast_uses"
+                              and isinstance(item, dict) and all(
+                                  isinstance(hashes, list) and all(isinstance(digest, str)
+                                  and re.fullmatch(r"[0-9a-f]{64}", digest) for digest in hashes)
+                                  for hashes in item.values())
+                              else fields(item)) for key, item in value.items()}
+            if isinstance(value, list):
+                return [fields(item) for item in value]
+            return value
+        return repr(fields(value))
+    return source
+
+
+def _alternate_control_violations(source: str, declaration=None, *, _tree=None) -> list[str]:
+    try:
+        tree = _tree if _tree is not None else ast.parse(source)
+    except SyntaxError:
+        return ["alternate-runtime control AST unavailable"]
+    seeded = any(isinstance(node, ast.Constant) and isinstance(node.value, str)
+                 and re.fullmatch(r"[\w-]+", node.value) and _concept_name(node.value) for node in ast.walk(tree))
+    declaration = declaration or {}
+    approved = set().union(*[set(items) for items in declaration.get('reviewed_ast_uses', {}).values()]) if (
+        declaration.get('role') and declaration.get('proof')) else set()
+    if declaration.get('role') and declaration.get('proof'):
+        approved.update(declaration.get('reviewed_evidence_effects', {}))
+    report_status = set(declaration.get('reviewed_report_status_uses', ())) if (
+        declaration.get('role') and declaration.get('proof')) else set()
+    analysis_tree = copy.deepcopy(tree) if seeded else None
+    if analysis_tree is not None:
+        for node in ast.walk(analysis_tree):
+            if isinstance(node, ast.stmt) and not isinstance(node, (
+                    ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.If, ast.For,
+                    ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith, ast.Match)):
+                node._source_use_hash = hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest()
+    out = _projected_control_violations(_lexical_flow_tree(analysis_tree), approved, report_status) if seeded else []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and any(
+            ast.unparse(base).split(".")[-1] in {"Enum", "StrEnum", "IntEnum"} for base in node.bases
+        ) and any(isinstance(child, ast.Constant) and isinstance(child.value, str)
+                  and _concept_name(child.value) for child in ast.walk(node)):
+            out.append("alternate-runtime choice in Enum")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+            options = [arg.value for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
+            if any(option.lstrip("-").replace("-", "_") in _LIVE_CONTROL_TARGETS for option in options):
+                # The projected pass follows aliased choices/default values.
+                pass
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Attribute)
+             and target.attr == "help" for target in node.targets):
+            text = _literal_string(node.value)
+            if text and any(_contains_live_alternate_concept(token, text.lower()) for token in _CONCEPT_TOKENS):
+                out.append("alternate-runtime CLI modifier")
+    return sorted(set(out))
+
+
+def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_status=frozenset()) -> list[str]:
+    """Paths describe alternate values, not the whole object holding them.
+
+    () is a scalar; ('mode',) and (0,) are selected container fields. Unknown
+    projection is conservative. Function returns are evaluated with actual
+    arguments and only their own lexical returns, never nested unused returns.
+    """
+    nodes = tuple(ast.walk(tree))
+    parents = {child: node for node in nodes for child in ast.iter_child_nodes(node)}
+    functions = {node.name: node for node in nodes
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    classes = {node.name for node in nodes if isinstance(node, ast.ClassDef)}
+    assignments = {}
+    writes = {}
+    aliases = {}
+    out = set()
+    controls = _LIVE_CONTROL_TARGETS | {"probability_authority", "q_authority", "trade_authority",
+                                      "state", "status", "side", "action"}
+
+    def root(name):
+        while name in aliases:
+            name = aliases[name]
+        return name
+
+    def location(node):
+        path = []
+        while isinstance(node, (ast.Subscript, ast.Attribute)):
+            key = (node.attr if isinstance(node, ast.Attribute) else
+                   node.slice.value if isinstance(node.slice, ast.Constant) else '*')
+            path.insert(0, key)
+            node = node.value
+        return (node.id, tuple(path)) if isinstance(node, ast.Name) else (None, ())
+
+    def own_nodes(node):
+        pending = list(node.body)
+        while pending:
+            child = pending.pop()
+            yield child
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                pending.extend(ast.iter_child_nodes(child))
+
+    returns = {name: tuple(child.value for child in own_nodes(fn)
+                          if isinstance(child, ast.Return) and child.value is not None)
+               for name, fn in functions.items()}
+    function_refs = {name: {root(child.id) for child in ast.walk(fn) if isinstance(child, ast.Name)}
+                     for name, fn in functions.items()}
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and isinstance(node.value, ast.Name):
+                    a, b = root(target.id), root(node.value.id)
+                    if a != b:
+                        aliases[a] = b
+    for node in nodes:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(
+            node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) else []
+        value = getattr(node, 'value', None)
+        if value is None:
+            continue
+        for target in targets:
+            name, path = location(target)
+            if name:
+                (writes if path else assignments).setdefault(root(name), []).append((path, value))
+
+    def join(values):
+        return set().union(*values) if values else set()
+
+    def project(paths, key, node):
+        if key == '*':
+            if paths:
+                return {('*',)}
+            return set()
+        return {path[1:] for path in paths if path and path[0] == key} | {
+            ('*',) for path in paths if not path or path[0] == '*'}
+
+    memo = {}
+    call_mutations = {}
+    active = set()
+    call_active = set()
+    opaque_calls = set()
+
+    def value(node, bindings):
+        if node is None:
+            return set()
+        context = tuple(sorted((name, tuple(sorted(paths, key=repr))) for name, paths in bindings.items()))
+        cache_key = (node, context)
+        if cache_key in memo:
+            return memo[cache_key]
+        if cache_key in active:
+            return set()
+        active.add(cache_key)
+        result = set()
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, str) and re.fullmatch(r"[\w-]+", node.value) and _concept_name(node.value):
+                result = {()}
+        elif isinstance(node, ast.Name):
+            name = root(node.id)
+            result = set(bindings.get(name, ()))
+            result |= join([value(expr, bindings) for _, expr in assignments.get(name, ())])
+            result |= join([{path + item for item in value(expr, bindings)}
+                            for path, expr in writes.get(name, ())])
+            result |= call_mutations.get(name, set())
+        elif isinstance(node, ast.Dict):
+            for key, expr in zip(node.keys, node.values, strict=True):
+                path = key.value if isinstance(key, ast.Constant) else '*'
+                result |= {(path,) + item for item in value(expr, bindings)}
+        elif isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            result = join([{(index,) + item for item in value(expr, bindings)}
+                           for index, expr in enumerate(node.elts)])
+        elif isinstance(node, ast.Subscript):
+            key = node.slice.value if isinstance(node.slice, ast.Constant) else '*'
+            result = project(value(node.value, bindings), key, node)
+        elif isinstance(node, ast.Attribute):
+            result = project(value(node.value, bindings), node.attr, node)
+        elif isinstance(node, ast.Call):
+            name = root(_call_name(node.func))
+            arguments = [value(arg, bindings) for arg in node.args]
+            keywords = {arg.arg: value(arg.value, bindings) for arg in node.keywords}
+            fn = functions.get(name)
+            if fn is not None and fn not in call_active:
+                call_active.add(fn)
+                supplied = dict(bindings)
+                params = [*fn.args.posonlyargs, *fn.args.args]
+                defaults = dict(zip([param.arg for param in params[len(params) - len(fn.args.defaults):]],
+                                    fn.args.defaults, strict=True)) if fn.args.defaults else {}
+                for index, param in enumerate(params):
+                    original = getattr(param, '_parameter_name', param.arg)
+                    supplied[root(param.arg)] = (arguments[index] if index < len(arguments)
+                        else keywords[original] if original in keywords else
+                        project(keywords[None], original, node) if None in keywords else
+                        value(defaults.get(param.arg), bindings))
+                for param, default in zip(fn.args.kwonlyargs, fn.args.kw_defaults, strict=True):
+                    original = getattr(param, '_parameter_name', param.arg)
+                    supplied[root(param.arg)] = (keywords[original] if original in keywords else
+                        project(keywords[None], original, node) if None in keywords else value(default, bindings))
+                if fn.args.vararg:
+                    supplied[root(fn.args.vararg.arg)] = join([{(i,) + path for path in arg}
+                        for i, arg in enumerate(arguments[len(params):])])
+                if fn.args.kwarg:
+                    supplied[root(fn.args.kwarg.arg)] = join([{(key,) + path for path in arg}
+                        for key, arg in keywords.items() if key is not None])
+                if None in keywords and any(not path or path[0] == '*' for path in keywords[None]):
+                    result |= {('*',)}
+                supplied = {key: paths for key, paths in supplied.items() if key in function_refs[name]}
+                for index, param in enumerate(params):
+                    if index < len(node.args) and isinstance(node.args[index], ast.Name):
+                        destination = root(node.args[index].id)
+                        for path, expr in writes.get(root(param.arg), ()):
+                            # A call-side write must be visible through all aliases.
+                            paths = {path + item for item in value(expr, supplied)}
+                            if not paths.issubset(call_mutations.get(destination, set())):
+                                call_mutations.setdefault(destination, set()).update(paths)
+                                memo.clear()
+                for child in own_nodes(fn):
+                    check(child, supplied)
+                result = join([value(expr, supplied) for expr in returns[name]])
+                call_active.remove(fn)
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == 'get':
+                key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else '*'
+                result = project(value(node.func.value, bindings), key, node)
+                result |= arguments[1] if len(arguments) > 1 else set()
+            elif name == 'getattr' and len(node.args) >= 2:
+                key = node.args[1].value if isinstance(node.args[1], ast.Constant) else '*'
+                result = project(arguments[0], key, node) | (arguments[2] if len(arguments) > 2 else set())
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == 'update' and isinstance(node.func.value, ast.Name):
+                destination = root(node.func.value.id)
+                additions = join(arguments) | join([{(key,) + path for path in arg}
+                    for key, arg in keywords.items() if key is not None])
+                if not additions.issubset(call_mutations.get(destination, set())):
+                    call_mutations.setdefault(destination, set()).update(additions)
+                    memo.clear()
+                # Updating a proved dictionary is a structured mutation, not
+                # an opaque selector. The written fields remain tainted.
+                if additions:
+                    opaque_calls.add(node)
+            elif name in classes or name in {'dict', 'replace'}:
+                result = arguments[0].copy() if name == 'replace' and arguments else set()
+                result |= join([{(key,) + path for path in arg} if key is not None else arg
+                                for key, arg in keywords.items()])
+            elif name in {'str', 'float', 'int', 'bool', 'bytes', 'len', 'repr', 'list', 'tuple'}:
+                result = join(arguments)
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in {'upper', 'lower', 'strip', 'copy'}:
+                result = value(node.func.value, bindings)
+            else:
+                inputs = join([*arguments, *keywords.values(), value(node.func, bindings)])
+                if inputs:
+                    result = {('*',)}
+                    if name not in {'json.dumps', 'json.loads'}:
+                        opaque_calls.add(node)
+        else:
+            result = join([value(child, bindings) for child in ast.iter_child_nodes(node)])
+        active.remove(cache_key)
+        memo[cache_key] = result
+        return result
+
+    def is_control(name):
+        return name.lower() in controls or bool(re.search(r'(?:^|_)(?:state|status)$', name.lower()))
+
+    def reject(name, expr, bindings, node):
+        paths = value(expr, bindings) if is_control(name) else set()
+        statement = node
+        while not isinstance(statement, ast.stmt) and statement in parents:
+            statement = parents[statement]
+        # A whole report dictionary is not a scalar state; its field writes
+        # stay separately checked, and copying a field into runtime still fails.
+        if name in {'status', 'state'} and paths and all(path and path[0] != '*' for path in paths):
+            return
+        if name == 'status' and getattr(statement, '_source_use_hash', None) in report_status:
+            return
+        if paths:
+            out.add(f"alternate-runtime value flows into {name!r} at line {node.lineno}")
+
+    def check(node, bindings):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                name = getattr(target, '_control_field', target.id) if isinstance(target, ast.Name) else (
+                    target.attr if isinstance(target, ast.Attribute) else target.slice.value
+                    if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) else '')
+                reject(str(name), node.value, bindings, node)
+        elif isinstance(node, ast.Dict):
+            for key, expr in zip(node.keys, node.values, strict=True):
+                if isinstance(key, ast.Constant):
+                    reject(str(key.value), expr, bindings, node)
+        elif isinstance(node, ast.Compare):
+            expressions = [node.left, *node.comparators]
+            for i, expr in enumerate(expressions):
+                name = _control_target(expr, {}, controls=controls)
+                if name:
+                    for other in expressions[:i] + expressions[i + 1:]:
+                        reject(name, other, bindings, node)
+        elif isinstance(node, ast.Call):
+            for kw in node.keywords:
+                reject(kw.arg or '', kw.value, bindings, node)
+            if isinstance(node.func, ast.Attribute) and node.func.attr == 'add_argument':
+                options = [arg.value for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
+                if any(option.lstrip('-').replace('-', '_') in controls for option in options):
+                    for kw in node.keywords:
+                        if kw.arg in {'default', 'const', 'choices'}:
+                            reject('mode', kw.value, bindings, node)
+            value(node, bindings)
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            value(node.value, bindings)
+            if node.value in opaque_calls and getattr(node, '_source_use_hash', None) not in approved:
+                out.add(f"alternate-runtime UNKNOWN opaque side effect at line {node.lineno}")
+    # Resolve call-side mutations before reading sink expressions; statement
+    # traversal order must not make a previously cached alias look clean.
+    for node in nodes:
+        if isinstance(node, ast.Call):
+            value(node, {})
+    for node in nodes:
+        check(node, {})
+    return sorted(out)
+
+
+def _lexical_flow_tree(tree: ast.AST) -> ast.AST:
+    """Keep equal local spellings in different functions out of one flow set."""
+    class Bindings(ast.NodeTransformer):
+        def __init__(self):
+            self.scopes = []
+            self.sequence = 0
+
+        def bound(self, name):
+            return next((scope[name] for scope in reversed(self.scopes) if name in scope), name)
+
+        def visit_Name(self, node):
+            node._control_field = node.id
+            node.id = self.bound(node.id)
+            return node
+
+        def visit_FunctionDef(self, node):
+            node.name = self.bound(node.name)
+            node.decorator_list = [self.visit(item) for item in node.decorator_list]
+            node.args.defaults = [self.visit(item) for item in node.args.defaults]
+            node.args.kw_defaults = [self.visit(item) if item is not None else None
+                                     for item in node.args.kw_defaults]
+            arguments = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs,
+                         *([node.args.vararg] if node.args.vararg else []),
+                         *([node.args.kwarg] if node.args.kwarg else [])]
+            local = {arg.arg for arg in arguments}
+            global_names = set()
+            pending = list(node.body)
+            while pending:
+                child = pending.pop()
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    local.add(child.name)
+                    continue
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                    local.add(child.id)
+                elif isinstance(child, (ast.Global, ast.Nonlocal)):
+                    global_names.update(child.names)
+                elif isinstance(child, ast.ExceptHandler) and child.name:
+                    local.add(child.name)
+                elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                    local.update(alias.asname or alias.name.split('.')[0] for alias in child.names)
+                pending.extend(ast.iter_child_nodes(child))
+            self.sequence += 1
+            self.scopes.append({name: f"__scope_{self.sequence}_{name}"
+                                for name in local - global_names})
+            for arg in arguments:
+                arg._parameter_name = arg.arg
+                arg.arg = self.bound(arg.arg)
+            node.body = [self.visit(item) for item in node.body]
+            self.scopes.pop()
+            return node
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+    return Bindings().visit(tree)
 
 
 def _scan_paths(root: Path) -> set[Path]:
@@ -320,9 +735,9 @@ def _excluded_reference_violations(path: Path, source: str) -> list[str]:
     return []
 
 
-def _python_excluded_reference_violations(source: str) -> list[str]:
+def _python_excluded_reference_violations(source: str, *, _tree=None) -> list[str]:
     try:
-        tree = ast.parse(source)
+        tree = _tree if _tree is not None else ast.parse(source)
     except SyntaxError:
         return []
     bindings = _literal_bindings(tree, excluded=frozenset())
@@ -367,14 +782,25 @@ def _call_name(node: ast.AST) -> str:
     return ""
 
 
-def _live_reachable_excluded_python_paths(root: Path, paths: set[Path]) -> set[Path]:
+def _read_python(path, parsed):
+    if path not in parsed:
+        source = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            tree = ast.Module(body=[], type_ignores=[])
+        parsed[path] = source, tree
+    return parsed[path]
+
+
+def _live_reachable_excluded_python_paths(root: Path, paths: set[Path], *, parsed=None) -> set[Path]:
     modules = _python_modules(root)
     pending = [path for path in paths if path.suffix == ".py"]
     seen = set(pending)
     reachable: set[Path] = set()
     while pending:
         path = pending.pop()
-        for imported in _imported_modules(path, root):
+        for imported in _imported_modules(path, root, parsed=parsed):
             candidate = modules.get(imported)
             if candidate is None or candidate in seen:
                 continue
@@ -398,9 +824,9 @@ def _python_modules(root: Path) -> dict[str, Path]:
     return modules
 
 
-def _imported_modules(path: Path, root: Path) -> set[str]:
+def _imported_modules(path: Path, root: Path, *, parsed=None) -> set[str]:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        _, tree = _read_python(path, {} if parsed is None else parsed)
     except SyntaxError:
         return set()
     imported: set[str] = set()
@@ -423,12 +849,12 @@ def _imported_modules(path: Path, root: Path) -> set[str]:
 
 
 def _static_python_strings(
-    source: str, *, allowed_retired_assignments: frozenset[str] = frozenset()
+    source: str, *, allowed_retired_assignments: frozenset[str] = frozenset(), _tree=None
 ) -> set[str]:
     """Return strings Python can construct entirely from literals in the AST."""
 
     try:
-        tree = ast.parse(source)
+        tree = _tree if _tree is not None else ast.parse(source)
     except SyntaxError:
         return set()
     bindings = _literal_bindings(tree, excluded=allowed_retired_assignments)
@@ -533,11 +959,13 @@ def _path_import_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
-def _retired_assignment_control_violations(source: str) -> list[str]:
+def _retired_assignment_control_violations(
+    source: str, *, _tree=None, _seeds=None, _label="retired deletion constant", _controls=None
+) -> list[str]:
     """Reject use of cutover deletion constants as live control semantics."""
 
     try:
-        tree = ast.parse(source)
+        tree = _tree if _tree is not None else ast.parse(source)
     except SyntaxError:
         return []
 
@@ -552,7 +980,8 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             functions[node.name] = node
 
-    tainted = set(CUTOVER_RETIRED_ASSIGNMENTS)
+    tainted = set(CUTOVER_RETIRED_ASSIGNMENTS if _seeds is None else _seeds)
+    control_fields = _LIVE_CONTROL_TARGETS if _controls is None else _controls
     tainted_returns: set[str] = set()
     changed = True
     while changed:
@@ -635,7 +1064,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                     tainted.add(parameter.arg)
                     changed = True
             parameters = {
-                parameter.arg: parameter
+                getattr(parameter, "_parameter_name", parameter.arg): parameter
                 for parameter in [*positional, *function.args.kwonlyargs]
             }
             for keyword in node.keywords:
@@ -701,11 +1130,18 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
         if not _expr_is_tainted(value, tainted, tainted_returns):
             continue
         for target in targets:
-            control = _control_target(target, literal_bindings)
+            control = _control_target(target, literal_bindings, controls=control_fields)
             if control is not None:
                 out.append(f"retired deletion constant flows into {control!r}")
     for node in ast.walk(tree):
-        if isinstance(node, ast.keyword) and node.arg in _LIVE_CONTROL_TARGETS:
+        if isinstance(node, ast.Compare):
+            values = [node.left, *node.comparators]
+            for index, value in enumerate(values):
+                control = _control_target(value, literal_bindings, controls=control_fields)
+                if control and any(_expr_is_tainted(other, tainted, tainted_returns)
+                                   for other in values[:index] + values[index + 1:]):
+                    out.append(f"retired deletion constant compared with {control!r}")
+        if isinstance(node, ast.keyword) and node.arg in control_fields:
             if _expr_is_tainted(node.value, tainted, tainted_returns):
                 out.append(f"retired deletion constant flows into keyword {node.arg!r}")
         elif (
@@ -714,7 +1150,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
             and node.func.id == "setattr"
             and len(node.args) >= 3
             and (_literal_string(node.args[1], literal_bindings) or "").lower()
-            in _LIVE_CONTROL_TARGETS
+            in control_fields
             and _expr_is_tainted(node.args[2], tainted, tainted_returns)
         ):
             control = (_literal_string(node.args[1], literal_bindings) or "").lower()
@@ -730,7 +1166,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                     else ""
                 )
                 if (
-                    control in _LIVE_CONTROL_TARGETS
+                    control in control_fields
                     and _expr_is_tainted(value, tainted, tainted_returns)
                 ):
                     out.append(
@@ -758,7 +1194,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                 {
                     control
                     for branch in branches
-                    for control in _mutated_controls(branch, literal_bindings)
+                    for control in _mutated_controls(branch, literal_bindings, controls=control_fields)
                 }
             )
             for control in controls:
@@ -766,7 +1202,7 @@ def _retired_assignment_control_violations(source: str) -> list[str]:
                     "retired deletion constant controls mutation of "
                     f"{control!r}"
                 )
-    return sorted(set(out))
+    return sorted({item.replace("retired deletion constant", _label) for item in out})
 
 
 def _expr_uses_names(node: ast.AST, names: set[str] | frozenset[str]) -> bool:
@@ -801,21 +1237,23 @@ def _assigned_names(node: ast.AST) -> set[str]:
     }
 
 
-def _control_target(node: ast.AST, bindings: dict[str, str]) -> str | None:
-    if isinstance(node, ast.Name) and node.id.lower() in _LIVE_CONTROL_TARGETS:
-        return node.id.lower()
-    if isinstance(node, ast.Attribute) and node.attr.lower() in _LIVE_CONTROL_TARGETS:
+def _control_target(node: ast.AST, bindings: dict[str, str], *, controls=None) -> str | None:
+    controls = _LIVE_CONTROL_TARGETS if controls is None else controls
+    if isinstance(node, ast.Name) and getattr(node, "_control_field", node.id).lower() in controls:
+        return getattr(node, "_control_field", node.id).lower()
+    if isinstance(node, ast.Attribute) and node.attr.lower() in controls:
         return node.attr.lower()
     if (
         isinstance(node, ast.Subscript)
         and (_literal_string(node.slice, bindings) or "").lower()
-        in _LIVE_CONTROL_TARGETS
+        in controls
     ):
         return (_literal_string(node.slice, bindings) or "").lower()
     return None
 
 
-def _mutated_controls(node: ast.AST, bindings: dict[str, str]) -> set[str]:
+def _mutated_controls(node: ast.AST, bindings: dict[str, str], *, controls=None) -> set[str]:
+    control_fields = _LIVE_CONTROL_TARGETS if controls is None else controls
     controls: set[str] = set()
     for child in ast.walk(node):
         targets: list[ast.AST] = []
@@ -824,7 +1262,7 @@ def _mutated_controls(node: ast.AST, bindings: dict[str, str]) -> set[str]:
         elif isinstance(child, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
             targets = [child.target]
         for target in targets:
-            control = _control_target(target, bindings)
+            control = _control_target(target, bindings, controls=control_fields)
             if control is not None:
                 controls.add(control)
         if (
@@ -834,14 +1272,14 @@ def _mutated_controls(node: ast.AST, bindings: dict[str, str]) -> set[str]:
             and len(child.args) >= 2
         ):
             control = (_literal_string(child.args[1], bindings) or "").lower()
-            if control in _LIVE_CONTROL_TARGETS:
+            if control in control_fields:
                 controls.add(control)
         elif isinstance(child, ast.Dict):
             for key in child.keys:
                 if key is None:
                     continue
                 control = (_literal_string(key, bindings) or "").lower()
-                if control in _LIVE_CONTROL_TARGETS:
+                if control in control_fields:
                     controls.add(control)
     return controls
 
