@@ -16200,7 +16200,8 @@ def test_ordinary_wrh_amber_current_kernel_ignores_age_fit(tmp_path, monkeypatch
         '(("56F or below", None, 56), ("57-58F", 57, 58), ("59F or above", 59, None))',
         '(("64F or below", None, 64), ("65-66F", 65, 66), ("67F or above", 67, None))')
     observation_source = inspect.getsource(normal._kord_causal_fast_inputs).replace(
-        "hours=8,minutes=20", "hours=20,minutes=20").replace("57.2", "66.2").replace(
+        "hours=8,minutes=20", "hours=20,minutes=20").replace(
+        "(57.2,14.4,13.9)", "(66.2,19.0,19.0)").replace("57.2", "66.2").replace(
         "14/14 A3005 RMK AO2 T01440139", "19/18 A3005 RMK AO2 T01900180").replace(
         '"temp":14.4', '"temp":19.0').replace('"temp":13.9', '"temp":19.0').replace(
         "14/14 A3005 RMK AO2 T01390139", "19/19 A3005 RMK AO2 T01900190")
