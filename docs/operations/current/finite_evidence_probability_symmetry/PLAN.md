@@ -17530,3 +17530,24 @@ Native quantity/readback inventory may be complete while source-issued,
 source-available, static/model qualification remains UNKNOWN: no native q/math
 or action authority upgrade. This checkpoint is local-only preparation pending
 ROOT delivery acceptance, not a landing, load or whole-goal completion.
+
+## 2026-10-06 revert of be68d2f58 (native inventory + mandatory-collector cycle deadline)
+
+be68d2f58 was deployed by a peer restart (loaded_sha 7f67ffa55 at 00:16:49Z). It passed
+the safe-poll deadline (60 s poll minus 1 s handoff) into the mandatory HIGH/LOW ENS
+collector (`run_opendata_track` -> `collect_open_ens_cycle(cycle_deadline_monotonic=...)`),
+which caps extraction at the remaining budget and refuses ingest after it. Real
+collections take 57-107 s (job_run SUCCESS rows 10-04 20:23Z..10-05 20:27Z; 803-813 s
+for the 00Z backlog). Live effect: the first post-deploy 18Z attempt (00:26:00Z) ended
+`FAILED CYCLE_DEADLINE_EXCEEDED rows_written=0` on both mx2t6_high and mn2t6_low, so no
+18Z ENS baseline could ever ingest. An independent deploy-risk review (gpt-sol) had
+returned NO-GO on the same path, plus two Important findings: unbounded
+`native_2t_scheduled/<run>` cache growth with no retention, and undeadlined post-HTTP
+persistence/fsync holding the track in_flight. Reverted as a broken deploy; the PLAN text
+above stays as the record of what was attempted.
+
+Re-land requirements: the mandatory collector keeps its own extraction budget (the poll
+deadline may bound only optional native work and the availability probe); native cache
+has a retention owner before it is written; optional persistence runs under its own
+deadline or off the track's in_flight slot; custody admission is reviewed as the new
+row-admission gate it is.

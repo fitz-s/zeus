@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-10-05
+# Last reused/audited: 2026-09-14
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md (ECMWF 00z ingest schedule fix).
 """Dedicated OpenData live forecast producer daemon.
 
@@ -1096,17 +1096,6 @@ def _latest_job_run_current_for_identity(conn, identity: dict[str, object]) -> t
     return True, metadata
 
 
-def _opendata_expired_cycle_result(track: str, deadline_monotonic: float | None) -> dict | None:
-    if deadline_monotonic is None or time.monotonic() < deadline_monotonic:
-        return None
-    from src.data.ecmwf_open_data import SOURCE_ID
-
-    # A spent poll is a spectator: preserve the prior attempt and partial files.
-    # The next scheduled poll obtains its own budget; no persistent gate is set.
-    return {"status": "download_failed", "reason": "CYCLE_DEADLINE_EXCEEDED",
-            "source": SOURCE_ID, "track": track, "snapshots_inserted": 0}
-
-
 def run_opendata_track(
     track: str,
     *,
@@ -1135,9 +1124,6 @@ def run_opendata_track(
     identity = _identity or _forecast_work_identity(track, now_utc=now)
     if identity.get("track") != track:
         raise ValueError("forecast-live identity track mismatch")
-    expired = _opendata_expired_cycle_result(track, _cycle_deadline_monotonic)
-    if expired is not None:
-        return expired
     track_lock_key = opendata_track_lock_key(track)
     decision = identity["decision"]
     if _job_conn is not None and decision is not FetchDecision.FETCH_ALLOWED:
@@ -1174,9 +1160,6 @@ def run_opendata_track(
             # the active RUNNING or completed FAILED/PARTIAL clock and prevent
             # fair held-cycle migration. The existing journal remains intact.
             return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
-        expired = _opendata_expired_cycle_result(track, _cycle_deadline_monotonic)
-        if expired is not None:
-            return expired
         collector = _collector or collect_open_ens_cycle
         lock_acquired_at = _utcnow()
         if _job_conn is not None:
@@ -1273,9 +1256,6 @@ def _run_opendata_track_if_due(
         else time.monotonic()
         + max(0, FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS - FORECAST_LIVE_SAFE_CYCLE_HANDOFF_SECONDS)
     )
-    expired = _opendata_expired_cycle_result(track, poll_deadline_monotonic)
-    if expired is not None:
-        return expired
     identity = _forecast_work_identity(track, now_utc=now)
     source_paused = _source_paused or _is_source_paused
 
@@ -1325,7 +1305,6 @@ def _run_opendata_track_if_due(
             track, _locks_dir_override=_locks_dir_override,
             _collector=_collector, _source_paused=_source_paused,
             _job_conn=_job_conn, _now_utc=now, _identity=migration_identity,
-            _cycle_deadline_monotonic=poll_deadline_monotonic,
         )
         return {**result, "revision_migration_debt": migration_debt}
 
@@ -1390,7 +1369,6 @@ def _run_opendata_track_if_due(
             _source_paused=_source_paused,
             _job_conn=_job_conn,
             _now_utc=now,
-            _cycle_deadline_monotonic=poll_deadline_monotonic,
         )
 
     if _use_availability_probe:
@@ -1407,7 +1385,6 @@ def _run_opendata_track_if_due(
                 _source_paused=_source_paused,
                 _job_conn=_job_conn,
                 _now_utc=now,
-                _cycle_deadline_monotonic=poll_deadline_monotonic,
             )
         if availability_status != "not_released":
             logger.warning(
@@ -1422,7 +1399,6 @@ def _run_opendata_track_if_due(
                 _source_paused=_source_paused,
                 _job_conn=_job_conn,
                 _now_utc=now,
-                _cycle_deadline_monotonic=poll_deadline_monotonic,
             )
             return {**newest_result, "availability_probe": availability}
         newest_result = {
@@ -1440,7 +1416,6 @@ def _run_opendata_track_if_due(
             _source_paused=_source_paused,
             _job_conn=_job_conn,
             _now_utc=now,
-            _cycle_deadline_monotonic=poll_deadline_monotonic,
         )
         if str(newest_result.get("status") or "").lower() != "skipped_not_released":
             return newest_result
@@ -1466,7 +1441,6 @@ def _run_opendata_track_if_due(
         _job_conn=_job_conn,
         _now_utc=retry_now,
         _identity=retry_identity,
-        _cycle_deadline_monotonic=poll_deadline_monotonic,
     )
     return {
         **retry_result,
@@ -1785,111 +1759,6 @@ def _run_journaled_opendata_track(track: str) -> dict:
         conn.close()
 
 
-def _drain_native_temperature_source(conn, *, now_utc: datetime, deadline_monotonic: float) -> dict:
-    """Optional native transport after H/L collection; no X/Y qualification.
-
-    SCOPE: same run's current local-day market targets. DRAIN: ordinary safe
-    polls, including already-journaled polls, resume proven missing parts.
-    RESET: current raw/journal priority and remaining poll budget are rechecked
-    before every request; native refusal never blocks the mandatory lanes.
-    """
-    from src.data.ecmwf_open_data import (
-        _forecast_track_for_profile, _native_temperature_steps, collect_native_temperature_source,
-    )
-    from src.data.forecast_target_contract import (
-        compute_target_local_day_window_utc, required_period_end_steps,
-    )
-    from src.data.release_calendar import FetchDecision
-    from src.state.source_run_repo import get_source_run
-
-    deferred = {"status": "DEFERRED", "qualification_status": "UNKNOWN"}
-    if time.monotonic() >= deadline_monotonic:
-        return {**deferred, "reason": "CYCLE_DEADLINE_EXCEEDED"}
-    identities = [_forecast_work_identity(track, now_utc=now_utc)
-        for track in ("mx2t6_high", "mn2t6_low")]
-    run = identities[0].get("scheduled_for")
-    if (not isinstance(run, datetime) or any(identity.get("scheduled_for") != run
-            or identity.get("decision") is not FetchDecision.FETCH_ALLOWED for identity in identities)):
-        return {**deferred, "reason": "NATIVE_2T_RUN_PLAN_UNKNOWN"}
-
-    def mandatory_complete():
-        if _is_source_paused("ecmwf_open_data"):
-            return False
-        for identity in identities:
-            job = conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (_job_run_id(identity),)).fetchone()
-            source_id = _expected_source_run_id(identity)
-            row = get_source_run(conn, source_id)
-            expected_track = _forecast_track_for_profile(ingest_track=str(identity["track"]),
-                horizon_profile=str(identity["release_calendar_key"]).rsplit(":", 1)[-1])
-            if (not job or job["status"] not in {"SUCCESS", "PARTIAL"}
-                    or job["source_run_id"] != source_id or job["finished_at"] is None
-                    or job["scheduled_for"] != run.isoformat()
-                    or job["release_calendar_key"] != identity["release_calendar_key"]
-                    or not row or row["status"] not in {"SUCCESS", "PARTIAL"}
-                    or row["source_cycle_time"] != run.isoformat()
-                    or row["source_id"] != "ecmwf_open_data" or row["track"] != expected_track
-                    or row["release_calendar_key"] != identity["release_calendar_key"]
-                    or row["ingest_mode"] not in {"SCHEDULED_LIVE", "BOOT_CATCHUP"}
-                    or row["dataset_id"] != identity["data_version"]):
-                return False
-            try:
-                expected = json.loads(row["expected_steps_json"])
-                observed = json.loads(row["observed_steps_json"])
-                if not expected or not set(expected).issubset(observed):
-                    return False
-            except (ValueError, TypeError):
-                return False
-        return True
-
-    if not mandatory_complete():
-        return {**deferred, "reason": "NATIVE_2T_MANDATORY_PRIORITY"}
-    ids = tuple(_expected_source_run_id(identity) for identity in identities)
-    # Coverage is a transport plan. A blocked/censored full-Y row does not
-    # forbid acquiring its native future knots, nor grant those knots authority.
-    rows = conn.execute("""
-        SELECT coverage.* FROM source_run_coverage coverage
-         WHERE coverage.source_run_id IN (?,?) AND coverage.source_id='ecmwf_open_data'
-           AND EXISTS (SELECT 1 FROM market_events market
-             WHERE market.city=coverage.city AND market.target_date=coverage.target_local_date
-               AND market.temperature_metric=coverage.temperature_metric
-               AND market.token_id IS NOT NULL AND market.range_label IS NOT NULL)
-         ORDER BY coverage.target_local_date, coverage.city, coverage.temperature_metric
-    """, ids).fetchall()
-    wanted = set()
-    for row in rows:
-        try:
-            window = compute_target_local_day_window_utc(city_timezone=row["city_timezone"],
-                target_local_date=datetime.fromisoformat(row["target_local_date"]).date())
-            if not window.start_utc <= now_utc < window.end_utc:
-                continue
-            if (row["target_window_start_utc"] != window.start_utc.isoformat()
-                    or row["target_window_end_utc"] != window.end_utc.isoformat()):
-                continue
-            ends = json.loads(row["expected_steps_json"])
-            if ends != list(required_period_end_steps(source_cycle_time=run,
-                    target_window_start_utc=window.start_utc, target_window_end_utc=window.end_utc,
-                    period_hours=3)):
-                continue
-            endpoints = _native_temperature_steps(run, ends)
-            # At the 144h boundary, dissemination becomes 6h; step0 remains
-            # only a native forecast endpoint, never a qualified observation.
-            first = endpoints[0] - (3 if endpoints[0] <= 144 else 6)
-            knots = _native_temperature_steps(run, [first, *endpoints])
-            # A run begun inside this day cannot supply its earlier prefix.
-            # Acquire its future inventory anyway; no qualified prefix/asof is
-            # manufactured from this transport boundary, run-init or now.
-            if (run + timedelta(hours=knots[0]) > max(window.start_utc, run)
-                    or run + timedelta(hours=knots[-1]) < window.end_utc):
-                continue
-            wanted.update(knots)
-        except (ValueError, TypeError, KeyError):
-            continue
-    if not wanted:
-        return {**deferred, "reason": "NATIVE_2T_TARGET_STEP_PLAN_UNKNOWN"}
-    return collect_native_temperature_source(conn=conn, run_utc=run, required_steps=sorted(wanted),
-        cycle_deadline_monotonic=deadline_monotonic, _priority=mandatory_complete)
-
-
 def _run_journaled_opendata_track_if_due(
     track: str,
     *,
@@ -1919,12 +1788,6 @@ def _run_journaled_opendata_track_if_due(
             _use_availability_probe=_use_availability_probe,
         )
         committed = _commit_opendata_result_and_wake(conn, result)
-        try:
-            native = _drain_native_temperature_source(conn, now_utc=_utcnow(), deadline_monotonic=poll_deadline)
-        except Exception as exc:  # optional source inventory cannot undo mandatory commits
-            native = {"status": "DEFERRED", "qualification_status": "UNKNOWN",
-                "reason": f"NATIVE_2T_SOURCE_UNKNOWN:{type(exc).__name__}:{exc}"}
-        committed = {**committed, "native_temperature_source": native}
         return {**committed, "committed_held_wake": replay} if replay is not None else committed
     except Exception:
         conn.commit()
